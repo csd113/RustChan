@@ -26,6 +26,9 @@ const ALLOWED_MIME_TYPES: &[(&str, &[u8])] = &[
     ("image/png", b"\x89PNG"),
     ("image/gif", b"GIF8"),
     ("image/webp", b"RIFF"),  // RIFF....WEBP
+    // Video formats
+    ("video/mp4",  b"\x00\x00\x00"),   // checked further below (ftyp box)
+    ("video/webm", b"\x1a\x45\xdf\xa3"),
 ];
 
 /// Maximum number of bytes to read for magic byte detection
@@ -49,7 +52,13 @@ pub struct UploadedFile {
 pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     let header = &data[..data.len().min(MAGIC_BYTES_LEN)];
 
+    // MP4: variable-length box; bytes 4..8 must be b"ftyp"
+    if data.len() >= 8 && &data[4..8] == b"ftyp" {
+        return Ok("video/mp4");
+    }
+
     for (mime, magic) in ALLOWED_MIME_TYPES {
+        if *mime == "video/mp4" { continue; } // handled above
         if header.starts_with(magic) {
             // Extra check for WebP: bytes 8..12 must be "WEBP"
             if *mime == "image/webp" {
@@ -61,7 +70,7 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
         }
     }
     Err(anyhow::anyhow!(
-        "File type not allowed. Accepted: JPEG, PNG, GIF, WebP"
+        "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, MP4, WebM"
     ))
 }
 
@@ -91,13 +100,19 @@ pub fn save_upload(
     // 3. Generate safe filesystem names
     let file_id = Uuid::new_v4().to_string().replace('-', "");
     let ext = mime_to_ext(mime_type);
+    let is_video = mime_type.starts_with("video/");
     // Thumbnails are saved as JPEG for space efficiency (except formats that
     // need their native format: PNG keeps transparency, GIF/WebP keep their encoder).
-    let thumb_ext = match mime_type {
-        "image/png"  => "png",
-        "image/gif"  => "gif",
-        "image/webp" => "webp",
-        _            => "jpg",
+    // Video files get a static SVG placeholder thumbnail.
+    let thumb_ext = if is_video {
+        "svg"
+    } else {
+        match mime_type {
+            "image/png"  => "png",
+            "image/gif"  => "gif",
+            "image/webp" => "webp",
+            _            => "jpg",
+        }
     };
     let filename = format!("{}.{}", file_id, ext);
     let thumb_filename = format!("thumbs/{}.{}", file_id, thumb_ext);
@@ -114,8 +129,13 @@ pub fn save_upload(
 
     // 6. Generate thumbnail
     let thumb_path = PathBuf::from(upload_dir).join(&thumb_filename);
-    generate_thumbnail(data, mime_type, &thumb_path, thumb_size)
-        .context("Failed to generate thumbnail")?;
+    if is_video {
+        generate_video_placeholder(&thumb_path)
+            .context("Failed to write video placeholder thumbnail")?;
+    } else {
+        generate_thumbnail(data, mime_type, &thumb_path, thumb_size)
+            .context("Failed to generate thumbnail")?;
+    }
 
     Ok(UploadedFile {
         file_path: filename,
@@ -186,8 +206,22 @@ fn mime_to_ext(mime: &str) -> &'static str {
         "image/png" => "png",
         "image/gif" => "gif",
         "image/webp" => "webp",
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
         _ => "bin",
     }
+}
+
+/// Write a minimal SVG play-button placeholder as the video thumbnail.
+fn generate_video_placeholder(output_path: &PathBuf) -> Result<()> {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="250" height="250" viewBox="0 0 250 250">
+  <rect width="250" height="250" fill="#1a1a2e"/>
+  <circle cx="125" cy="125" r="60" fill="#16213e" stroke="#e94560" stroke-width="3"/>
+  <polygon points="108,95 108,155 165,125" fill="#e94560"/>
+  <text x="125" y="215" text-anchor="middle" fill="#888" font-family="Arial" font-size="13">VIDEO</text>
+</svg>"##;
+    std::fs::write(output_path, svg)?;
+    Ok(())
 }
 
 /// Delete a file from the filesystem, ignoring not-found errors.

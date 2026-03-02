@@ -435,3 +435,116 @@ hr.thread-sep {
 
 /* ── Utility ─────────────────────────────────────────────────────────────── */
 .reply-form-container { margin-top: 20px; }
+
+/* ── Video player ─────────────────────────────────────────────────────────── */
+.video-player {
+  display: block;
+  max-width: 400px;
+  max-height: 300px;
+  border: 1px solid var(--border);
+  background: #000;
+}
+@media (max-width: 600px) {
+  .video-player { max-width: 100%; }
+}
+
+/* ── Index / Home page redesign ───────────────────────────────────────────── */
+.index-hero {
+  text-align: center;
+  padding: 32px 16px 20px;
+}
+.index-title {
+  font-size: 2rem;
+  color: var(--bg-header);
+  margin-bottom: 6px;
+  letter-spacing: 1px;
+}
+.index-subtitle {
+  color: var(--text-dim);
+  font-size: 0.95rem;
+}
+@media (prefers-color-scheme: dark) {
+  .index-title { color: #ff8888; }
+}
+
+.index-section {
+  margin: 0 0 24px;
+}
+.index-section-title {
+  font-size: 0.8rem;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.board-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+.board-card {
+  display: block;
+  background: var(--bg-post);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 12px 14px;
+  text-decoration: none;
+  color: var(--text);
+  transition: border-color 0.15s, background 0.15s;
+}
+.board-card:hover {
+  border-color: var(--bg-header);
+  background: var(--bg-op);
+  text-decoration: none;
+}
+.board-card-short {
+  font-size: 1.15rem;
+  font-weight: bold;
+  color: var(--bg-header);
+  margin-bottom: 3px;
+}
+@media (prefers-color-scheme: dark) {
+  .board-card-short { color: #ff8888; }
+}
+.board-card-name {
+  font-size: 0.85rem;
+  font-weight: bold;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+}
+.board-card-desc {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.nsfw-badge {
+  background: #900;
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: bold;
+  padding: 1px 4px;
+  border-radius: 2px;
+  letter-spacing: 0.5px;
+}
+.index-empty {
+  text-align: center;
+  color: var(--text-dim);
+  padding: 32px;
+}
+@media (max-width: 600px) {
+  .board-cards { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  .index-title { font-size: 1.5rem; }
+}

@@ -67,7 +67,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Start the web server (default when no subcommand given)
-    Serve,
+    Serve {
+        /// Override the port to listen on (e.g. --port 3000). Falls back to
+        /// CHAN_BIND env var, then default 8080.
+        #[arg(long, short = 'p')]
+        port: Option<u16>,
+    },
 
     /// Administration commands
     Admin {
@@ -134,14 +139,15 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        None | Some(Command::Serve) => run_server().await,
+        None | Some(Command::Serve { port: None }) => run_server(None).await,
+        Some(Command::Serve { port }) => run_server(port).await,
         Some(Command::Admin { action }) => run_admin(action),
     }
 }
 
 // ─── Server mode ─────────────────────────────────────────────────────────────
 
-async fn run_server() -> anyhow::Result<()> {
+async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // Ensure all data directories exist
     let data_dir = std::path::Path::new(&CONFIG.database_path)
         .parent()
@@ -152,6 +158,15 @@ async fn run_server() -> anyhow::Result<()> {
     std::fs::create_dir_all(format!("{}/thumbs", CONFIG.upload_dir))?;
 
     print_banner();
+
+    // Resolve the effective bind address — CLI --port wins over CHAN_BIND
+    let bind_addr: String = if let Some(p) = port_override {
+        // Replace just the port component while keeping the host
+        let host = CONFIG.bind_addr.split(':').next().unwrap_or("0.0.0.0");
+        format!("{}:{}", host, p)
+    } else {
+        CONFIG.bind_addr.clone()
+    };
 
     let pool = db::init_pool()?;
     first_run_check(&pool)?;
@@ -191,9 +206,9 @@ async fn run_server() -> anyhow::Result<()> {
     }
 
     let app = build_router(state);
-    let listener = tokio::net::TcpListener::bind(&CONFIG.bind_addr).await?;
-    info!("Listening on  http://{}", CONFIG.bind_addr);
-    info!("Admin panel   http://{}/admin", CONFIG.bind_addr);
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    info!("Listening on  http://{}", bind_addr);
+    info!("Admin panel   http://{}/admin", bind_addr);
     info!("Data dir      {}", data_dir.display());
     println!(); // breathing room after startup block
 

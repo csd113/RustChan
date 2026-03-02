@@ -94,31 +94,52 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 // ─── Index (board list) ───────────────────────────────────────────────────────
 
 pub fn index_page(boards: &[Board], csrf_token: &str) -> String {
-    let mut body = String::from(
-        r#"<div class="page-box">
-<h1 class="page-title">Boards</h1>
-<table class="board-table">
-<thead><tr><th>Board</th><th>Name</th><th>Description</th></tr></thead>
-<tbody>"#,
-    );
+    let sfw_boards: Vec<&Board> = boards.iter().filter(|b| !b.nsfw).collect();
+    let nsfw_boards: Vec<&Board> = boards.iter().filter(|b| b.nsfw).collect();
 
-    for b in boards {
-        let nsfw_tag = if b.nsfw { " <span class=\"nsfw-tag\">NSFW</span>" } else { "" };
-        body.push_str(&format!(
-            r#"<tr>
-<td><a href="/{short}/">/{short}/</a></td>
-<td>{name}{nsfw}</td>
-<td>{desc}</td>
-</tr>"#,
-            short = escape_html(&b.short_name),
-            name = escape_html(&b.name),
-            nsfw = nsfw_tag,
-            desc = escape_html(&b.description),
-        ));
+    fn board_cards(list: &[&Board]) -> String {
+        list.iter().map(|b| {
+            let nsfw_badge = if b.nsfw { r#"<span class="nsfw-badge">NSFW</span>"# } else { "" };
+            format!(
+                r#"<a class="board-card" href="/{short}/">
+  <div class="board-card-short">/{short}/</div>
+  <div class="board-card-name">{name}{nsfw}</div>
+  <div class="board-card-desc">{desc}</div>
+</a>"#,
+                short = escape_html(&b.short_name),
+                name  = escape_html(&b.name),
+                nsfw  = nsfw_badge,
+                desc  = escape_html(&b.description),
+            )
+        }).collect()
     }
 
-    body.push_str("</tbody></table></div>");
-    base_layout("Imageboard", None, &body, csrf_token, boards)
+    let sfw_section = if !sfw_boards.is_empty() {
+        format!(
+            "<div class=\"index-section\">\n  <h2 class=\"index-section-title\">Boards</h2>\n  <div class=\"board-cards\">{}</div>\n</div>",
+            board_cards(&sfw_boards)
+        )
+    } else { String::new() };
+
+    let nsfw_section = if !nsfw_boards.is_empty() {
+        format!(
+            "<div class=\"index-section\">\n  <h2 class=\"index-section-title\">Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2>\n  <div class=\"board-cards\">{}</div>\n</div>",
+            board_cards(&nsfw_boards)
+        )
+    } else { String::new() };
+
+    let empty_msg = if boards.is_empty() {
+        "<p class=\"index-empty\">No boards yet. An admin must create boards first.</p>".to_string()
+    } else { String::new() };
+
+    let body = format!(
+        "<div class=\"index-hero\">\n  <h1 class=\"index-title\">Welcome</h1>\n  <p class=\"index-subtitle\">Select a board below to start browsing.</p>\n</div>\n{sfw}{nsfw}{empty}",
+        sfw   = sfw_section,
+        nsfw  = nsfw_section,
+        empty = empty_msg,
+    );
+
+    base_layout("Imageboard — Home", None, &body, csrf_token, boards)
 }
 
 // ─── Board index (thread list) ────────────────────────────────────────────────
@@ -175,7 +196,7 @@ fn new_thread_form(board_short: &str, csrf_token: &str) -> String {
     <tr><td><label>Body</label></td>
         <td><textarea name="body" rows="5" maxlength="4096" required></textarea></td></tr>
     <tr><td><label>File</label></td>
-        <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp"></td></tr>
+        <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm"></td></tr>
     <tr><td><label>Deletion token</label></td>
         <td><input type="text" name="deletion_token" placeholder="Password to delete post" maxlength="64"></td></tr>
   </table>
@@ -365,23 +386,41 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
         ));
     }
 
-    // Image
+    // Image / Video
     if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
         let size_str = post.file_size.map(format_file_size).unwrap_or_default();
         let name_str = post.file_name.as_deref().unwrap_or("file");
-        html.push_str(&format!(
-            r#"<div class="file-container">
+        let is_video = post.mime_type.as_deref().map(|m| m.starts_with("video/")).unwrap_or(false);
+        let mime = post.mime_type.as_deref().unwrap_or("video/mp4");
+
+        if is_video {
+            html.push_str(&format!(
+                r#"<div class="file-container">
+<div class="file-info"><a href="/uploads/{file}">{orig_name}</a> ({size})</div>
+<video class="media-thumb video-player" src="/uploads/{file}" controls preload="metadata"
+       poster="/uploads/{thumb}" type="{mime}"></video>
+</div>"#,
+                file = escape_html(file),
+                thumb = escape_html(thumb),
+                orig_name = escape_html(name_str),
+                size = escape_html(&size_str),
+                mime = escape_html(mime),
+            ));
+        } else {
+            html.push_str(&format!(
+                r#"<div class="file-container">
 <div class="file-info"><a href="/uploads/{file}">{orig_name}</a> ({size})</div>
 <a href="/uploads/{file}" target="_blank">
 <img class="thumb" src="/uploads/{thumb}" loading="lazy" alt="image"
      onclick="expandImage(this, '/uploads/{file}')">
 </a>
 </div>"#,
-            file = escape_html(file),
-            thumb = escape_html(thumb),
-            orig_name = escape_html(name_str),
-            size = escape_html(&size_str),
-        ));
+                file = escape_html(file),
+                thumb = escape_html(thumb),
+                orig_name = escape_html(name_str),
+                size = escape_html(&size_str),
+            ));
+        }
     }
 
     // Post body (pre-rendered HTML — already sanitised)
@@ -427,7 +466,7 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str) -> String {
         <td><textarea id="reply-body" name="body" rows="4" maxlength="4096" required></textarea>
             <button type="submit">Post Reply</button></td></tr>
     <tr><td><label>File</label></td>
-        <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp"></td></tr>
+        <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm"></td></tr>
     <tr><td><label>Deletion token</label></td>
         <td><input type="text" name="deletion_token" placeholder="Password to delete" maxlength="64"></td></tr>
   </table>
