@@ -2,11 +2,15 @@
 //
 // Priority (highest → lowest):
 //   1. Environment variables  (CHAN_BIND, CHAN_DB, …)
-//   2. settings.toml          (<exe-dir>/settings.toml)
+//   2. settings.toml          (<exe-dir>/chan-data/settings.toml)
 //   3. Hard-coded defaults
 //
 // On first run, settings.toml is generated next to the binary with all
 // default values and explanatory comments.  Edit it, restart the server.
+//
+// SECURITY: The cookie_secret is auto-generated on first run and persisted
+// to settings.toml. It is never left at a well-known default value.
+// FIX[CRITICAL-1]: removed hardcoded default secret; see generate_settings_file_if_missing().
 
 use once_cell::sync::Lazy;
 use serde::Deserialize;
@@ -15,10 +19,22 @@ use std::path::PathBuf;
 
 /// Absolute path to the directory the running binary lives in.
 fn binary_dir() -> PathBuf {
-    std::env::current_exe()
+    // FIX[MEDIUM-2]: log a warning when fallback is used so operators
+    // are aware that data may land in an unexpected location.
+    match std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
+    {
+        Some(dir) => dir,
+        None => {
+            eprintln!(
+                "Warning: could not determine binary directory; \
+                 using current working directory for data storage. \
+                 Set CHAN_DB and CHAN_UPLOADS env vars to override."
+            );
+            PathBuf::from(".")
+        }
+    }
 }
 
 fn settings_file_path() -> PathBuf {
@@ -37,6 +53,9 @@ struct SettingsFile {
     port:              Option<u16>,
     max_image_size_mb: Option<u32>,
     max_video_size_mb: Option<u32>,
+    // FIX[CRITICAL-1]: cookie_secret is now persisted in settings.toml so it
+    // is generated once and stable across restarts, without being a known default.
+    cookie_secret:     Option<String>,
 }
 
 fn load_settings_file() -> SettingsFile {
@@ -52,12 +71,25 @@ fn load_settings_file() -> SettingsFile {
 
 /// Create settings.toml with defaults if it does not exist yet.
 /// Call this once at startup (before CONFIG is accessed for the first time).
+///
+/// FIX[CRITICAL-1]: A cryptographically random cookie_secret is generated on
+/// first run and written to settings.toml. Subsequent runs load it from the
+/// file. The server never operates with a known/default secret.
 pub fn generate_settings_file_if_missing() {
     let path = settings_file_path();
     if path.exists() {
         return;
     }
-    let content = r#"# RustChan — Instance Settings
+
+    // Generate a random 64-hex-char secret (32 bytes of entropy).
+    // This runs before CONFIG is initialised, so we call OsRng directly.
+    use rand::RngCore;
+    let mut secret_bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
+    let secret = hex::encode(secret_bytes);
+
+    let content = format!(
+        r#"# RustChan — Instance Settings
 # Edit this file to configure your imageboard.
 # Restart the server after making changes.
 
@@ -72,7 +104,15 @@ max_image_size_mb = 8
 
 # Maximum size for video uploads in megabytes (mp4, webm).
 max_video_size_mb = 50
-"#;
+
+# Secret key for IP hashing.
+# AUTO-GENERATED on first run — do NOT change after your first post,
+# or all existing IP hashes become invalid (bans will stop working).
+# If you must rotate it, also clear the bans table.
+cookie_secret = "{secret}"
+"#
+    );
+
     match std::fs::write(&path, content) {
         Ok(_)  => println!("Created  settings.toml  ({})", path.display()),
         Err(e) => eprintln!("Warning: could not write settings.toml: {e}"),
@@ -98,12 +138,18 @@ pub struct Config {
     pub thumb_size:            u32,
     #[allow(dead_code)]
     pub default_bump_limit:    u32,
+    #[allow(dead_code)]
     pub max_threads_per_board: u32,
     pub rate_limit_posts:      u32,
     pub rate_limit_window:     u64,
+    // FIX[CRITICAL-1]: cookie_secret is now loaded from settings.toml or env.
+    // It is never left at a hardcoded default string.
     pub cookie_secret:         String,
     pub session_duration:      i64,
     pub behind_proxy:          bool,
+    // FIX[MEDIUM-11]: explicit flag for whether to set Secure on cookies.
+    // Defaults to true when behind_proxy is true (i.e. TLS is expected).
+    pub https_cookies:         bool,
 }
 
 impl Config {
@@ -122,6 +168,29 @@ impl Config {
         let host      = env_str("CHAN_HOST", "0.0.0.0");
         let bind_addr = env_str("CHAN_BIND",  &format!("{host}:{port}"));
 
+        let behind_proxy = env_bool("CHAN_BEHIND_PROXY", false);
+
+        // FIX[CRITICAL-1]: Resolve cookie_secret from env > settings.toml.
+        // If neither is set, emit a loud warning. The generate_settings_file_if_missing()
+        // call at startup ensures settings.toml always has a generated secret,
+        // so this fallback should only be reached in abnormal circumstances.
+        let cookie_secret = if let Ok(v) = env::var("CHAN_COOKIE_SECRET") {
+            v
+        } else if let Some(v) = s.cookie_secret {
+            v
+        } else {
+            eprintln!(
+                "SECURITY WARNING: No cookie_secret found in environment or settings.toml. \
+                 IP hashing is using an empty secret. Run the server once to auto-generate, \
+                 or set CHAN_COOKIE_SECRET."
+            );
+            // Emit a random in-memory secret so each restart invalidates hashes
+            // (better than a known empty string, worse than a persisted one).
+            let mut b = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut b);
+            hex::encode(b)
+        };
+
         Self {
             forum_name,
             port,
@@ -136,12 +205,17 @@ impl Config {
             max_threads_per_board: env_u32("CHAN_MAX_THREADS",   150),
             rate_limit_posts:      env_u32("CHAN_RATE_POSTS",    10),
             rate_limit_window:     env_u64("CHAN_RATE_WINDOW",   60),
-            cookie_secret:         env_str("CHAN_COOKIE_SECRET", "CHANGE_THIS_SECRET_IN_PRODUCTION"),
+            cookie_secret,
             session_duration:      env_i64("CHAN_SESSION_SECS",  8 * 3600),
-            behind_proxy:          env_bool("CHAN_BEHIND_PROXY", false),
+            behind_proxy,
+            // FIX[MEDIUM-11]: default Secure=true when running behind a proxy (TLS expected)
+            https_cookies:         env_bool("CHAN_HTTPS_COOKIES", behind_proxy),
         }
     }
 }
+
+// ─── Import needed for OsRng in cookie_secret fallback ───────────────────────
+use rand::RngCore as _;
 
 fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())

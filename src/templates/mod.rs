@@ -373,19 +373,41 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
         word  = if t.reply_count == 1 { "reply" } else { "replies" },
     ));
 
-    // Admin: delete thread button on board index (thread page uses the toolbar instead)
+    // Admin: sticky/lock/delete controls on board index
     if is_admin {
+        let sticky_act = if t.sticky { "unsticky" } else { "sticky" };
+        let sticky_lbl = if t.sticky { "&#128204; unsticky" } else { "&#128204; sticky" };
+        let lock_act   = if t.locked  { "unlock"   } else { "lock"   };
+        let lock_lbl   = if t.locked  { "&#128275; unlock" } else { "&#128274; lock" };
         html.push_str(&format!(
-            r#" <form method="POST" action="/admin/thread/delete" style="display:inline">
+            r#" <form method="POST" action="/admin/thread/action" style="display:inline">
+<input type="hidden" name="_csrf"      value="{csrf}">
+<input type="hidden" name="thread_id"  value="{tid}">
+<input type="hidden" name="board"      value="{board}">
+<input type="hidden" name="action"     value="{sticky_act}">
+<button type="submit" class="admin-del-btn">{sticky_lbl}</button>
+</form>
+<form method="POST" action="/admin/thread/action" style="display:inline">
+<input type="hidden" name="_csrf"      value="{csrf}">
+<input type="hidden" name="thread_id"  value="{tid}">
+<input type="hidden" name="board"      value="{board}">
+<input type="hidden" name="action"     value="{lock_act}">
+<button type="submit" class="admin-del-btn">{lock_lbl}</button>
+</form>
+<form method="POST" action="/admin/thread/delete" style="display:inline">
 <input type="hidden" name="_csrf"      value="{csrf}">
 <input type="hidden" name="thread_id"  value="{tid}">
 <input type="hidden" name="board"      value="{board}">
 <button type="submit" class="admin-del-btn"
-        onclick="return confirm('Delete thread No.{tid} and all its posts?')">&#x2715; del thread</button>
+        onclick="return confirm('Delete thread No.{tid} and all its posts?')">&#x2715; del</button>
 </form>"#,
-            csrf  = escape_html(csrf_token),
-            tid   = t.id,
-            board = escape_html(board_short),
+            csrf       = escape_html(csrf_token),
+            tid        = t.id,
+            board      = escape_html(board_short),
+            sticky_act = sticky_act,
+            sticky_lbl = sticky_lbl,
+            lock_act   = lock_act,
+            lock_lbl   = lock_lbl,
         ));
     }
 
@@ -422,10 +444,26 @@ pub fn thread_page(
 
     // Visible admin toolbar
     if is_admin {
+        let sticky_action = if thread.sticky { ("unsticky", "&#128204; Unsticky") } else { ("sticky", "&#128204; Sticky") };
+        let lock_action   = if thread.locked  { ("unlock",   "&#128275; Unlock")   } else { ("lock",   "&#128274; Lock")   };
         body.push_str(&format!(
             r#"<div class="admin-toolbar">
 <span class="admin-toolbar-label">&#9632; ADMIN</span>
 <a href="/admin/panel">panel</a>
+<form method="POST" action="/admin/thread/action" style="display:inline">
+<input type="hidden" name="_csrf" value="{csrf}">
+<input type="hidden" name="thread_id" value="{tid}">
+<input type="hidden" name="action" value="{sticky_act}">
+<input type="hidden" name="board" value="{board}">
+<button type="submit" class="admin-toolbar-btn">{sticky_lbl}</button>
+</form>
+<form method="POST" action="/admin/thread/action" style="display:inline">
+<input type="hidden" name="_csrf" value="{csrf}">
+<input type="hidden" name="thread_id" value="{tid}">
+<input type="hidden" name="action" value="{lock_act}">
+<input type="hidden" name="board" value="{board}">
+<button type="submit" class="admin-toolbar-btn">{lock_lbl}</button>
+</form>
 <form method="POST" action="/admin/thread/delete" style="display:inline">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="hidden" name="thread_id" value="{tid}">
@@ -438,9 +476,13 @@ pub fn thread_page(
 <button type="submit" class="admin-toolbar-btn">logout</button>
 </form>
 </div>"#,
-            csrf  = escape_html(csrf_token),
-            tid   = thread.id,
-            board = escape_html(&board.short_name),
+            csrf       = escape_html(csrf_token),
+            tid        = thread.id,
+            board      = escape_html(&board.short_name),
+            sticky_act = sticky_action.0,
+            sticky_lbl = sticky_action.1,
+            lock_act   = lock_action.0,
+            lock_lbl   = lock_action.1,
         ));
     }
 
@@ -771,25 +813,52 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
 }
 
 pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], csrf_token: &str) -> String {
-    let mut board_rows = String::new();
+    let mut board_cards = String::new();
     for b in boards {
-        board_rows.push_str(&format!(
-            r#"<tr>
-<td>/{}/</td><td>{}</td><td>{}</td>
-<td>
-<form method="POST" action="/admin/board/delete" style="display:inline">
-<input type="hidden" name="_csrf" value="{csrf}">
-<input type="hidden" name="board_id" value="{id}">
-<button type="submit" class="btn-danger" onclick="return confirm('delete /{short}/ and all content?')">delete</button>
+        let checked = |v: bool| if v { " checked" } else { "" };
+        board_cards.push_str(&format!(
+            r#"<details class="board-settings-card">
+<summary>/{short}/ — {name} {nsfw_tag}</summary>
+<form method="POST" action="/admin/board/settings" class="board-settings-form">
+<input type="hidden" name="_csrf"     value="{csrf}">
+<input type="hidden" name="board_id"  value="{id}">
+<div class="board-settings-grid">
+  <label>Name<input type="text" name="name" value="{name_raw}" maxlength="64" required></label>
+  <label>Description<input type="text" name="description" value="{desc_raw}" maxlength="256"></label>
+  <label>Bump limit<input type="number" name="bump_limit" value="{bump}" min="1" max="10000"></label>
+  <label>Max threads<input type="number" name="max_threads" value="{maxt}" min="1" max="1000"></label>
+</div>
+<div class="board-settings-checks">
+  <label><input type="checkbox" name="nsfw"            value="1"{nsfw_ck}> NSFW</label>
+  <label><input type="checkbox" name="allow_video"     value="1"{vid_ck}>  Allow video</label>
+  <label><input type="checkbox" name="allow_tripcodes" value="1"{trip_ck}> Allow tripcodes</label>
+</div>
+<div class="board-settings-actions">
+  <button type="submit">save settings</button>
+</div>
 </form>
-</td>
-</tr>"#,
-            escape_html(&b.short_name),
-            escape_html(&b.name),
-            escape_html(&b.description),
-            csrf  = escape_html(csrf_token),
-            id    = b.id,
-            short = escape_html(&b.short_name),
+<!-- FIX[LOW-10]: Delete form is now OUTSIDE the settings form.
+     Nested <form> elements are invalid HTML per spec; browsers discard
+     the inner form's association unpredictably. -->
+<form method="POST" action="/admin/board/delete" style="display:inline;margin-top:4px">
+  <input type="hidden" name="_csrf"     value="{csrf}">
+  <input type="hidden" name="board_id"  value="{id}">
+  <button type="submit" class="btn-danger"
+          onclick="return confirm('Delete /{short}/ and ALL its content?')">delete board</button>
+</form>
+</details>"#,
+            short    = escape_html(&b.short_name),
+            name     = escape_html(&b.name),
+            nsfw_tag = if b.nsfw { r#"<span class="tag nsfw-tag">NSFW</span>"# } else { "" },
+            csrf     = escape_html(csrf_token),
+            id       = b.id,
+            name_raw = escape_html(&b.name),
+            desc_raw = escape_html(&b.description),
+            bump     = b.bump_limit,
+            maxt     = b.max_threads,
+            nsfw_ck  = checked(b.nsfw),
+            vid_ck   = checked(b.allow_video),
+            trip_ck  = checked(b.allow_tripcodes),
         ));
     }
 
@@ -807,7 +876,9 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
 </form>
 </td>
 </tr>"#,
-            escape_html(&ban.ip_hash[..16]),
+            // FIX[MEDIUM-13]: Use .get(..16) instead of [..16] to avoid a panic
+            // if ip_hash is somehow shorter than 16 chars (e.g. from a migrated DB).
+            escape_html(ban.ip_hash.get(..16).unwrap_or(&ban.ip_hash)),
             escape_html(ban.reason.as_deref().unwrap_or("")),
             escape_html(&expires),
             csrf = escape_html(csrf_token),
@@ -845,10 +916,7 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
 
 <section class="admin-section">
 <h2>// boards</h2>
-<table class="admin-table">
-<thead><tr><th>board</th><th>name</th><th>description</th><th>action</th></tr></thead>
-<tbody>{board_rows}</tbody>
-</table>
+<div class="board-cards">{board_cards}</div>
 <h3>create board</h3>
 <form method="POST" action="/admin/board/create">
 <input type="hidden" name="_csrf" value="{csrf}">
@@ -892,7 +960,7 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
 </section>
 </div>"#,
         csrf        = escape_html(csrf_token),
-        board_rows  = board_rows,
+        board_cards = board_cards,
         ban_rows    = ban_rows,
         filter_rows = filter_rows,
     );
@@ -944,12 +1012,19 @@ fn render_pagination(p: &Pagination, base_url: &str) -> String {
     html
 }
 
+// FIX[LOW-9]: Encode each UTF-8 *byte*, not each Unicode codepoint.
+// RFC 3986 percent-encoding operates on bytes. The original implementation
+// encoded e.g. 'é' (U+00E9) as %E9 instead of the correct %C3%A9
+// (two UTF-8 bytes: 0xC3, 0xA9), producing malformed URLs for non-ASCII input.
 fn urlencoding_simple(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            ' '  => "+".to_string(),
-            _    => format!("%{:02X}", c as u32),
-        })
-        .collect()
+    let mut out = String::with_capacity(s.len() * 3);
+    for &byte in s.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            b' ' => out.push('+'),
+            b    => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }

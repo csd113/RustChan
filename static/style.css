@@ -933,6 +933,112 @@ body:has(.catalog-bar) main {
 
 .ip-hash { font-size: 0.72rem; color: var(--text-dim); }
 
+/* ── Board settings cards (admin panel) ───────────────────────────────────── */
+
+.board-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.board-settings-card {
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  border-radius: 0;
+}
+
+.board-settings-card > summary {
+  padding: 7px 12px;
+  cursor: pointer;
+  color: var(--green-pale);
+  font-size: 0.88rem;
+  letter-spacing: 0.04em;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+
+.board-settings-card > summary::-webkit-details-marker { display: none; }
+.board-settings-card > summary::before {
+  content: '▶';
+  font-size: 0.65rem;
+  color: var(--green-dim);
+  transition: transform 0.15s;
+}
+.board-settings-card[open] > summary::before { transform: rotate(90deg); }
+.board-settings-card > summary:hover { color: var(--green-bright); }
+
+.board-settings-form {
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.board-settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.board-settings-grid label,
+.board-settings-checks label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.board-settings-grid input[type="text"],
+.board-settings-grid input[type="number"] {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--green-pale);
+  padding: 4px 7px;
+  font-family: var(--font);
+  font-size: 0.82rem;
+  outline: none;
+  transition: border-color 0.2s;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.board-settings-grid input:focus { border-color: var(--border-glow); }
+
+.board-settings-checks {
+  display: flex;
+  gap: 18px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.board-settings-checks label {
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.82rem;
+  color: var(--green-pale);
+  cursor: pointer;
+}
+
+.board-settings-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.nsfw-tag {
+  font-size: 0.7rem;
+  border: 1px solid var(--red);
+  color: var(--red);
+  padding: 1px 4px;
+  letter-spacing: 0.06em;
+}
+
 /* ── Admin login ──────────────────────────────────────────────────────────── */
 
 .admin-login {

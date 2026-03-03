@@ -13,6 +13,8 @@ pub struct Board {
     pub nsfw: bool,
     pub max_threads: i64,
     pub bump_limit: i64,
+    pub allow_video: bool,
+    pub allow_tripcodes: bool,
     pub created_at: i64,     // Unix timestamp
 }
 

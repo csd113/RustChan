@@ -6,15 +6,24 @@
 //   • Uses DashMap (lock-free concurrent HashMap) to track (count, window_start).
 //   • On each POST request, we check if IP has exceeded CONFIG.rate_limit_posts
 //     within the last CONFIG.rate_limit_window seconds.
-//   • Memory: ~200 bytes per IP entry. 10,000 concurrent IPs = ~2 MiB. Fine for Pi.
-//   • Resets on restart (acceptable for LAN; no persistent attack state).
+//   • Memory: ~200 bytes per IP entry. 10,000 concurrent IPs = ~2 MiB.
+//   • Resets on restart (acceptable; no persistent attack state needed).
+//   • FIX[MEDIUM-4]: cleanup now also runs on a time-based cadence to prevent
+//     unbounded growth under sustained attacks with rotating IPs.
 //
 // CSRF Protection — Double-submit cookie pattern.
 //   • On every page load (GET), we set a "csrf_token" cookie if absent.
 //   • Every POST form includes a hidden "_csrf" field with the same token value.
 //   • On POST, middleware verifies hidden field == cookie value.
 //   • Since cookies are same-site, a cross-origin request can't read the cookie.
-//   • Cookie is SameSite=Strict + Secure (when behind HTTPS proxy).
+//   • Cookie is SameSite=Strict.
+//
+// IP Extraction — FIX[HIGH-1]:
+//   When CHAN_BEHIND_PROXY=true, we read X-Real-IP (set by nginx to
+//   $remote_addr, which cannot be forged by the client). We do NOT trust
+//   X-Forwarded-For's leftmost entry, which is client-controlled and trivially
+//   forgeable. Trusting the leftmost XFF entry allows an attacker to bypass
+//   rate limiting and IP bans by cycling through spoofed IPs.
 
 use crate::config::CONFIG;
 use axum::{
@@ -24,12 +33,16 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use dashmap::DashMap;
-use hex;
 use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Global rate limit table: ip_hash → (request_count, window_start_secs)
+/// Global rate limit table: ip_key → (request_count, window_start_secs)
 static RATE_TABLE: Lazy<DashMap<String, (u32, u64)>> = Lazy::new(DashMap::new);
+
+/// FIX[MEDIUM-4]: Track the last time we ran a full cleanup so we can also
+/// clean on a time basis, not just when the table exceeds a size threshold.
+static LAST_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
 
 /// Shared state for extracting the DB pool in middleware
 #[derive(Clone)]
@@ -45,19 +58,19 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Rate limit middleware — applied to POST routes.
+/// Rate limit middleware — applied to ALL POST routes.
 /// Blocks requests from IPs that exceed the configured threshold.
 pub async fn rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    // Only rate-limit POST requests (thread/reply creation)
+    // Only rate-limit POST requests (thread/reply creation, etc.)
     if req.method() != axum::http::Method::POST {
         return next.run(req).await;
     }
 
     let ip = extract_ip(&req);
-    // Hash the IP so raw addresses are never kept in process memory
+    // Hash the IP so raw addresses are never kept in process memory.
     let ip_key = {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
@@ -73,7 +86,7 @@ pub async fn rate_limit_middleware(
         let mut entry = RATE_TABLE.entry(ip_key.clone()).or_insert((0, now));
         let (count, window_start) = entry.value_mut();
 
-        if now - *window_start > window {
+        if now.saturating_sub(*window_start) > window {
             // Window has expired, reset
             *count = 1;
             *window_start = now;
@@ -96,28 +109,64 @@ pub async fn rate_limit_middleware(
             .into_response();
     }
 
-    // Periodically clean old entries to prevent unbounded memory growth.
-    // Simple heuristic: clean when table gets large.
-    if RATE_TABLE.len() > 5000 {
-        RATE_TABLE.retain(|_, (_, window_start)| now - *window_start <= window * 2);
+    // FIX[MEDIUM-4]: Clean old entries when the table grows large OR at least
+    // once every 10 minutes (600 seconds), whichever comes first.
+    let last_cleanup = LAST_CLEANUP_SECS.load(Ordering::Relaxed);
+    let should_clean = RATE_TABLE.len() > 5000
+        || now.saturating_sub(last_cleanup) > 600;
+
+    if should_clean {
+        // Use compare_exchange to avoid concurrent threads all cleaning simultaneously
+        if LAST_CLEANUP_SECS
+            .compare_exchange(last_cleanup, now, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            RATE_TABLE.retain(|_, (_, window_start)| {
+                now.saturating_sub(*window_start) <= window * 2
+            });
+        }
     }
 
     next.run(req).await
 }
 
-/// Extract client IP, respecting X-Forwarded-For when behind proxy.
+/// Extract client IP, respecting proxy headers when configured.
+///
+/// FIX[HIGH-1]: When behind_proxy=true, we now prefer X-Real-IP (set by nginx
+/// to $remote_addr — the actual TCP peer — and not modifiable by the client).
+/// We explicitly do NOT use the leftmost X-Forwarded-For entry because it is
+/// client-supplied and trivially forgeable, enabling rate-limit and ban bypass.
+///
+/// If X-Real-IP is absent but X-Forwarded-For is present, we take the
+/// rightmost entry (the last proxy in the chain), which is also not
+/// client-controlled when the chain passes through a trusted proxy.
 pub fn extract_ip(req: &Request) -> String {
     if CONFIG.behind_proxy {
+        // Prefer X-Real-IP (set by nginx to $remote_addr; unforgeable)
+        if let Some(real_ip) = req.headers().get("x-real-ip") {
+            if let Ok(val) = real_ip.to_str() {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+
+        // Fall back to the RIGHTMOST X-Forwarded-For entry (added by the
+        // trusted proxy, not by the client).
         if let Some(fwd) = req.headers().get("x-forwarded-for") {
             if let Ok(val) = fwd.to_str() {
-                // X-Forwarded-For may be a comma-separated list; take leftmost
-                if let Some(ip) = val.split(',').next() {
-                    return ip.trim().to_string();
+                if let Some(ip) = val.split(',').next_back() {
+                    let trimmed = ip.trim();
+                    if !trimmed.is_empty() {
+                        return trimmed.to_string();
+                    }
                 }
             }
         }
     }
-    // Fall back to connection IP (from extensions set by axum)
+
+    // Direct connection IP (not behind proxy, or proxy headers absent)
     req.extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0.ip().to_string())

@@ -8,11 +8,13 @@ use crate::{
     config::CONFIG,
     db::{self, NewPost},
     error::{AppError, Result},
-    handlers::{parse_post_multipart, admin::is_admin_session, board::ensure_csrf},
+    handlers::{parse_post_multipart, board::ensure_csrf},
     middleware::AppState,
     utils::{
-        crypto::{hash_ip, new_deletion_token},
+        // FIX[LOW-8]: sha256_hex now comes from utils::crypto (deduplicated)
+        crypto::{hash_ip, new_deletion_token, sha256_hex},
         files::save_upload,
+        // FIX[MEDIUM-8]: apply_word_filters runs before escape_html
         sanitize::{apply_word_filters, escape_html, render_post_body, validate_body, validate_name},
         tripcode::parse_name_tripcode,
     },
@@ -33,13 +35,21 @@ pub async fn view_thread(
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
     let (jar, csrf) = ensure_csrf(jar);
-    let is_admin = is_admin_session(&jar, &state.db);
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
+        // FIX[HIGH-2]: Move admin session check inside spawn_blocking to avoid
+        // blocking DB calls on the Tokio worker thread.
+        let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
         move || -> Result<String> {
             let conn = pool.get()?;
+
+            // Resolve admin status inside the blocking task
+            let is_admin = jar_session
+                .as_deref()
+                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
+                .unwrap_or(false);
 
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
@@ -127,13 +137,38 @@ pub async fn post_reply(
                 .collect();
 
             let (name, tripcode) = parse_name_tripcode(&validate_name(&name_val));
-            let escaped_body     = escape_html(&body_text);
-            let filtered_body    = apply_word_filters(&escaped_body, &filters);
-            let body_html        = render_post_body(&filtered_body);
+            // Respect per-board tripcode setting
+            let tripcode = if board.allow_tripcodes { tripcode } else { None };
+
+            // FIX[MEDIUM-8]: Apply word filters BEFORE HTML escaping.
+            let filtered_body    = apply_word_filters(&body_text, &filters);
+            let escaped_body     = escape_html(&filtered_body);
+            let body_html        = render_post_body(&escaped_body);
 
             let uploaded = if let Some((data, fname)) = file_data {
-                Some(save_upload(&data, &fname, &upload_dir, thumb_size, max_image_size, max_video_size)
-                    .map_err(|e| AppError::BadRequest(e.to_string()))?)
+                // Reject video if board has it disabled
+                let is_video = data.get(4..8) == Some(b"ftyp")
+                    || data.starts_with(b"\x1a\x45\xdf\xa3");
+                if is_video && !board.allow_video {
+                    return Err(AppError::BadRequest("This board does not allow video uploads.".into()));
+                }
+
+                // SHA-256 deduplication — FIX[LOW-8]: use sha256_hex from crypto module
+                let hash = sha256_hex(&data);
+                if let Some(cached) = db::find_file_by_hash(&conn, &hash)? {
+                    Some(crate::utils::files::UploadedFile {
+                        file_path:     cached.file_path,
+                        thumb_path:    cached.thumb_path,
+                        original_name: crate::utils::sanitize::sanitize_filename(&fname),
+                        mime_type:     cached.mime_type,
+                        file_size:     data.len() as i64,
+                    })
+                } else {
+                    let f = save_upload(&data, &fname, &upload_dir, thumb_size, max_image_size, max_video_size)
+                        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                    db::record_file_hash(&conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
+                    Some(f)
+                }
             } else {
                 None
             };

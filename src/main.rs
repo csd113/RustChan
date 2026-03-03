@@ -260,6 +260,7 @@ fn build_router(state: AppState) -> Router {
         .route("/admin/panel",           get(handlers::admin::admin_panel))
         .route("/admin/board/create",    post(handlers::admin::create_board))
         .route("/admin/board/delete",    post(handlers::admin::delete_board))
+        .route("/admin/board/settings",  post(handlers::admin::update_board_settings))
         .route("/admin/thread/action",   post(handlers::admin::thread_action))
         .route("/admin/thread/delete",   post(handlers::admin::admin_delete_thread))
         .route("/admin/post/delete",     post(handlers::admin::admin_delete_post))
@@ -387,13 +388,24 @@ fn print_banner() {
 
 async fn shutdown_signal() {
     use tokio::signal;
-    let ctrl_c = async { signal::ctrl_c().await.expect("Ctrl+C handler failed") };
+    // FIX[MEDIUM-5]: Replaced .expect() with graceful error handling.
+    // A panic in the shutdown handler would crash the server without
+    // completing in-flight requests. We log the error and continue instead.
+    let ctrl_c = async {
+        if let Err(e) = signal::ctrl_c().await {
+            tracing::error!("Failed to listen for Ctrl+C: {}", e);
+        }
+    };
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("SIGTERM handler failed")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => { sig.recv().await; }
+            Err(e) => {
+                tracing::error!("Failed to register SIGTERM handler: {}", e);
+                // If we can't register SIGTERM, wait forever (Ctrl+C still works)
+                std::future::pending::<()>().await;
+            }
+        }
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();

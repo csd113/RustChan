@@ -9,15 +9,22 @@
 //   • URLs become hyperlinks (restricted to http/https)
 //   • **bold** → <strong>bold</strong>
 //
-// Word filters: Applied after escaping, before markup rendering.
-// Patterns are plain-text substring matches (not regex) for simplicity.
+// Word filters:
+//   FIX[MEDIUM-8]: Word filters are now applied to the RAW text BEFORE HTML
+//   escaping. This means filter patterns are written as plain text (e.g. "bad"
+//   not "&amp;bad"). Applying filters after escaping caused patterns containing
+//   &, <, >, ', " to never match, which was confusing and incorrect.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
 
 static RE_REPLY: Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;(\d+)").unwrap());
-static RE_URL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").unwrap());
-static RE_BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
+// FIX[LOW-6]: Strip common trailing punctuation from matched URLs.
+// Previously the regex matched trailing ) . , ; which broke links in prose.
+static RE_URL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(https?://[^\s&<>]{3,300})").unwrap()
+});
+static RE_BOLD:   Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
 static RE_ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"__([^_]+)__").unwrap());
 
 /// Escape HTML special characters to prevent XSS.
@@ -30,8 +37,13 @@ pub fn escape_html(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
-/// Apply word filters to escaped text.
-/// Filters operate on the escaped text (before markup rendering).
+/// Apply word filters to raw (unescaped) text.
+///
+/// FIX[MEDIUM-8]: Filters now run on the raw body text BEFORE HTML escaping,
+/// so patterns are plain text strings (not HTML-entity-encoded). Call order:
+///   1. apply_word_filters(raw_body)
+///   2. escape_html(filtered_body)
+///   3. render_post_body(escaped_body)
 pub fn apply_word_filters(text: &str, filters: &[(String, String)]) -> String {
     let mut result = text.to_string();
     for (pattern, replacement) in filters {
@@ -78,7 +90,6 @@ fn render_inline(text: &str) -> String {
     // 3. **text** → bold
     // 4. __text__ → italic (spoiler-style)
 
-    // Using pre-compiled static regexes for performance.
     let mut result = text.to_string();
 
     // >>N reply links (escaped form is &gt;&gt;N)
@@ -87,8 +98,19 @@ fn render_inline(text: &str) -> String {
         .into_owned();
 
     // URLs (http/https only — no javascript: or other schemes)
+    // FIX[LOW-6]: Strip trailing punctuation characters that are not part of
+    // the URL itself but commonly appear after URLs in prose sentences.
     result = RE_URL
-        .replace_all(&result, r#"<a href="$1" rel="nofollow noopener" target="_blank">$1</a>"#)
+        .replace_all(&result, |caps: &regex::Captures| {
+            let url = &caps[1];
+            // Strip trailing punctuation that is not URL-structural
+            let clean_url = url.trim_end_matches(|c| matches!(c, '.' | ',' | ')' | ';' | '\''));
+            let trailing = &url[clean_url.len()..];
+            format!(
+                r#"<a href="{}" rel="nofollow noopener" target="_blank">{}</a>{}"#,
+                clean_url, clean_url, trailing
+            )
+        })
         .into_owned();
 
     // **bold**
@@ -106,15 +128,15 @@ fn render_inline(text: &str) -> String {
 
 /// Sanitize a file name: keep only safe characters.
 /// Strips path separators and anything non-ASCII-safe.
+///
+/// FIX[MEDIUM-7]: The original used `name[..100]` which is a byte-index slice
+/// and panics when byte 100 falls inside a multi-byte UTF-8 sequence (e.g. CJK
+/// or emoji in filenames). This now uses char iteration which is always safe.
 pub fn sanitize_filename(name: &str) -> String {
     let name = name
         .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'], "_");
-    // Limit to 100 chars
-    if name.len() > 100 {
-        name[..100].to_string()
-    } else {
-        name
-    }
+    // Limit to 100 Unicode scalar values (not bytes), safe for all inputs.
+    name.chars().take(100).collect()
 }
 
 /// Validate and truncate post body.
@@ -172,5 +194,38 @@ mod tests {
         let html = render_post_body(&escaped);
         assert!(html.contains("class=\"quotelink\""));
         assert!(html.contains("#p12345"));
+    }
+
+    // FIX[MEDIUM-7]: Verify sanitize_filename never panics on multi-byte chars
+    #[test]
+    fn test_sanitize_filename_multibyte() {
+        // 50 CJK chars = 150 UTF-8 bytes — would panic the old byte-slice version
+        let cjk: String = std::iter::repeat('日').take(50).collect();
+        let long_name = format!("{}.jpg", cjk);
+        let result = sanitize_filename(&long_name);
+        // Should not panic, and must be at most 100 chars
+        assert!(result.chars().count() <= 100);
+    }
+
+    // FIX[MEDIUM-8]: Verify word filters match raw text, not escaped text
+    #[test]
+    fn test_word_filter_before_escape() {
+        let raw = "this is bad&word";
+        let filters = vec![("bad&word".to_string(), "filtered".to_string())];
+        let filtered = apply_word_filters(raw, &filters);
+        assert_eq!(filtered, "this is filtered");
+        // Escaping afterward should not affect the substitution result
+        let escaped = escape_html(&filtered);
+        assert!(escaped.contains("filtered"));
+    }
+
+    // FIX[LOW-6]: URL should not include trailing punctuation
+    #[test]
+    fn test_url_trailing_punct() {
+        let escaped = escape_html("see https://example.com/foo. and https://example.com/bar,");
+        let html = render_post_body(&escaped);
+        // The href should not end with '.' or ','
+        assert!(!html.contains("href=\"https://example.com/foo.\""));
+        assert!(!html.contains("href=\"https://example.com/bar,\""));
     }
 }

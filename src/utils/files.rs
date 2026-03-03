@@ -9,6 +9,7 @@
 //   6. Generate thumbnail
 //      • Images  → scaled with the `image` crate
 //      • Videos  → first-frame JPEG via ffmpeg (falls back to SVG if unavailable)
+//        NOTE: GIF thumbnails are single-frame (first frame only).
 //   7. Write thumbnail to thumbs/ subdirectory
 //
 // Security notes:
@@ -102,6 +103,11 @@ pub fn save_upload(
         ));
     }
 
+    // FIX[MEDIUM-6]: Use checked conversion to avoid silent truncation on
+    // platforms where usize > i64 range (theoretical, but defensive).
+    let file_size = i64::try_from(data.len())
+        .context("File size overflows i64 — this should not be possible given upload limits")?;
+
     let file_id  = Uuid::new_v4().to_string().replace('-', "");
     let ext      = mime_to_ext(mime_type);
     let filename = format!("{}.{}", file_id, ext);
@@ -138,7 +144,7 @@ pub fn save_upload(
         thumb_path:    thumb_filename,
         original_name: crate::utils::sanitize::sanitize_filename(original_filename),
         mime_type:     mime_type.to_string(),
-        file_size:     data.len() as i64,
+        file_size,
     })
 }
 
@@ -195,22 +201,29 @@ fn ffmpeg_first_frame(
     std::fs::write(&temp_in, video_data)
         .context("Failed to write temp video for ffmpeg")?;
 
+    // FIX[MEDIUM-5]: Use context() to propagate errors if the temp path is
+    // non-UTF-8, instead of silently passing "" as the ffmpeg -i argument.
+    let temp_in_str = temp_in.to_str()
+        .context("Temp video path contains non-UTF-8 characters")?;
+    let temp_out_str = temp_out.to_str()
+        .context("Temp output path contains non-UTF-8 characters")?;
+
     // scale=W:-2 : scale width to thumb_size, height to nearest even number
     let vf = format!("scale={}:-2", thumb_size);
 
     let output = Command::new("ffmpeg")
         .args([
             "-loglevel", "error",
-            "-i",        temp_in.to_str().unwrap_or(""),
+            "-i",        temp_in_str,
             "-vframes",  "1",
             "-ss",       "0",
             "-vf",       &vf,
             "-y",
-            temp_out.to_str().unwrap_or(""),
+            temp_out_str,
         ])
         .output();
 
-    // Always remove the temp input
+    // Always remove the temp input regardless of ffmpeg result
     let _ = std::fs::remove_file(&temp_in);
 
     let out = output.context("ffmpeg not found or failed to spawn")?;
@@ -252,7 +265,7 @@ fn generate_image_thumb(
     let format = match mime_type {
         "image/jpeg" => ImageFormat::Jpeg,
         "image/png"  => ImageFormat::Png,
-        "image/gif"  => ImageFormat::Gif,
+        "image/gif"  => ImageFormat::Gif,   // NOTE: first frame only for animated GIFs
         "image/webp" => ImageFormat::WebP,
         _            => return Err(anyhow::anyhow!("Unsupported image format")),
     };

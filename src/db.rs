@@ -1,7 +1,7 @@
 // db.rs — Database layer.
 //
 // All SQL lives here. Handlers call these functions via spawn_blocking.
-// Schema is created on first run. WAL mode + NORMAL sync reduces SD card writes.
+// Schema is created on first run. WAL mode + NORMAL sync reduces disk writes.
 //
 // Design: one function per logical operation. No macros, no ORM, plain rusqlite.
 
@@ -29,7 +29,7 @@ pub fn init_pool() -> Result<DbPool> {
     let manager = SqliteConnectionManager::file(db_path).with_init(|conn| {
         // These pragmas apply to every new connection in the pool.
         // WAL: readers don't block writers; good for concurrent requests.
-        // synchronous=NORMAL: safe with WAL, reduces fsync calls → less SD wear.
+        // synchronous=NORMAL: safe with WAL, reduces fsync calls.
         // foreign_keys: enforce relational integrity.
         // journal_mode WAL must be set before anything else.
         conn.execute_batch(
@@ -43,7 +43,10 @@ pub fn init_pool() -> Result<DbPool> {
     });
 
     let pool = Pool::builder()
-        .max_size(8) // 8 connections; Pi has 4 cores, headroom for bursts
+        // FIX[LOW-4]: Removed hardware-specific comment. Pool size of 8 gives
+        // enough headroom for concurrent requests without exhausting SQLite's
+        // WAL-mode write serialisation.
+        .max_size(8)
         .build(manager)
         .context("Failed to build database pool")?;
 
@@ -60,14 +63,16 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         "
         -- Boards table
         CREATE TABLE IF NOT EXISTS boards (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            short_name  TEXT NOT NULL UNIQUE,
-            name        TEXT NOT NULL,
-            description TEXT NOT NULL DEFAULT '',
-            nsfw        INTEGER NOT NULL DEFAULT 0,
-            max_threads INTEGER NOT NULL DEFAULT 150,
-            bump_limit  INTEGER NOT NULL DEFAULT 500,
-            created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            short_name    TEXT NOT NULL UNIQUE,
+            name          TEXT NOT NULL,
+            description   TEXT NOT NULL DEFAULT '',
+            nsfw          INTEGER NOT NULL DEFAULT 0,
+            max_threads   INTEGER NOT NULL DEFAULT 150,
+            bump_limit    INTEGER NOT NULL DEFAULT 500,
+            allow_video   INTEGER NOT NULL DEFAULT 1,
+            allow_tripcodes INTEGER NOT NULL DEFAULT 1,
+            created_at    INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
         -- Threads table (metadata only; OP content is in posts)
@@ -101,6 +106,15 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
             deletion_token TEXT NOT NULL,
             is_op          INTEGER NOT NULL DEFAULT 0
+        );
+
+        -- File deduplication table (SHA-256 hash → existing file paths)
+        CREATE TABLE IF NOT EXISTS file_hashes (
+            sha256     TEXT PRIMARY KEY,
+            file_path  TEXT NOT NULL,
+            thumb_path TEXT NOT NULL,
+            mime_type  TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
         -- Admin users
@@ -146,9 +160,22 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             ON bans(ip_hash);
         CREATE INDEX IF NOT EXISTS idx_sessions_expires
             ON admin_sessions(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_file_hashes
+            ON file_hashes(sha256);
         ",
     )
     .context("Schema creation failed")?;
+
+    // Additive migrations for existing databases that pre-date new columns.
+    // SQLite returns an error on duplicate column — we just ignore it.
+    let migrations = [
+        "ALTER TABLE boards ADD COLUMN allow_video   INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE boards ADD COLUMN allow_tripcodes INTEGER NOT NULL DEFAULT 1",
+    ];
+    for sql in &migrations {
+        let _ = conn.execute(sql, []);   // ignore "duplicate column" errors
+    }
+
     Ok(())
 }
 
@@ -156,7 +183,8 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 
 pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit, created_at
+        "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
+                allow_video, allow_tripcodes, created_at
          FROM boards ORDER BY id ASC",
     )?;
     let boards = stmt
@@ -182,7 +210,8 @@ pub fn get_all_boards_with_stats(conn: &rusqlite::Connection) -> Result<Vec<crat
 
 pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Option<Board>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit, created_at
+        "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
+                allow_video, allow_tripcodes, created_at
          FROM boards WHERE short_name = ?1",
     )?;
     Ok(stmt.query_row(params![short], map_board).optional()?)
@@ -213,6 +242,32 @@ pub fn update_board(
     conn.execute(
         "UPDATE boards SET name=?1, description=?2, nsfw=?3 WHERE id=?4",
         params![name, description, nsfw as i32, id],
+    )?;
+    Ok(())
+}
+
+/// Update all per-board settings from the admin panel.
+pub fn update_board_settings(
+    conn: &rusqlite::Connection,
+    id: i64,
+    name: &str,
+    description: &str,
+    nsfw: bool,
+    bump_limit: i64,
+    max_threads: i64,
+    allow_video: bool,
+    allow_tripcodes: bool,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE boards SET name=?1, description=?2, nsfw=?3,
+         bump_limit=?4, max_threads=?5, allow_video=?6, allow_tripcodes=?7
+         WHERE id=?8",
+        params![
+            name, description, nsfw as i32,
+            bump_limit, max_threads,
+            allow_video as i32, allow_tripcodes as i32,
+            id,
+        ],
     )?;
     Ok(())
 }
@@ -305,17 +360,55 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
         .optional()?)
 }
 
-/// Create a thread record, returns new thread_id
-pub fn create_thread(
+/// Create a thread AND its OP post atomically in a single transaction.
+///
+/// FIX[MEDIUM-3]: The previous design had two separate DB calls — create_thread
+/// followed by create_post — with no transaction. A crash between the two calls
+/// left an orphaned thread with no OP post, causing all board-listing queries
+/// (which JOIN on is_op=1) to silently skip the thread forever.
+///
+/// This function is the single entry point for thread creation and wraps both
+/// operations in a transaction, guaranteeing the invariant that every thread
+/// row has exactly one corresponding post with is_op=1.
+///
+/// Returns (thread_id, post_id).
+pub fn create_thread_with_op(
     conn: &rusqlite::Connection,
     board_id: i64,
     subject: Option<&str>,
-) -> Result<i64> {
-    conn.execute(
-        "INSERT INTO threads (board_id, subject) VALUES (?1, ?2)",
-        params![board_id, subject],
-    )?;
-    Ok(conn.last_insert_rowid())
+    post: &NewPost,
+) -> Result<(i64, i64)> {
+    // Begin an exclusive transaction so no other write can interleave.
+    conn.execute("BEGIN IMMEDIATE", [])?;
+
+    let result = (|| -> Result<(i64, i64)> {
+        conn.execute(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, ?2)",
+            params![board_id, subject],
+        )?;
+        let thread_id = conn.last_insert_rowid();
+
+        // Bind the OP post to the newly-created thread
+        let post_with_thread = NewPost {
+            thread_id,
+            is_op: true,
+            ..post.clone()
+        };
+        let post_id = create_post_inner(conn, &post_with_thread)?;
+
+        Ok((thread_id, post_id))
+    })();
+
+    match result {
+        Ok(ids) => {
+            conn.execute("COMMIT", [])?;
+            Ok(ids)
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
+    }
 }
 
 pub fn bump_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<()> {
@@ -420,7 +513,8 @@ pub fn get_preview_posts(
     Ok(posts)
 }
 
-pub fn create_post(conn: &rusqlite::Connection, p: &NewPost) -> Result<i64> {
+/// Internal post insertion — used by create_thread_with_op and create_reply.
+fn create_post_inner(conn: &rusqlite::Connection, p: &NewPost) -> Result<i64> {
     conn.execute(
         "INSERT INTO posts
          (thread_id, board_id, name, tripcode, subject, body, body_html,
@@ -448,6 +542,10 @@ pub fn create_post(conn: &rusqlite::Connection, p: &NewPost) -> Result<i64> {
     Ok(conn.last_insert_rowid())
 }
 
+pub fn create_post(conn: &rusqlite::Connection, p: &NewPost) -> Result<i64> {
+    create_post_inner(conn, p)
+}
+
 pub fn get_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<Post>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
@@ -469,6 +567,9 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
     Ok(paths)
 }
 
+/// FIX[LOW-3]: Use constant-time byte comparison to prevent timing attacks on
+/// deletion token verification. Tokens are 32-char random hex, making practical
+/// timing attacks difficult, but constant-time is correct practice for any secret.
 pub fn verify_deletion_token(
     conn: &rusqlite::Connection,
     post_id: i64,
@@ -481,7 +582,18 @@ pub fn verify_deletion_token(
             |r| r.get(0),
         )
         .optional()?;
-    Ok(stored.map(|s| s == token).unwrap_or(false))
+
+    Ok(stored.map(|s| constant_time_eq(s.as_bytes(), token.as_bytes())).unwrap_or(false))
+}
+
+/// Constant-time byte slice comparison to prevent timing side-channel attacks.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    // XOR all bytes; any difference leaves a non-zero accumulator.
+    let diff = a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    diff == 0
 }
 
 /// Full-text search across post bodies
@@ -697,6 +809,46 @@ pub fn remove_word_filter(conn: &rusqlite::Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+// ─── File deduplication ───────────────────────────────────────────────────────
+
+pub struct CachedFile {
+    pub file_path:  String,
+    pub thumb_path: String,
+    pub mime_type:  String,
+}
+
+/// Look up an existing upload by its SHA-256 hash.
+pub fn find_file_by_hash(conn: &rusqlite::Connection, sha256: &str) -> Result<Option<CachedFile>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT file_path, thumb_path, mime_type FROM file_hashes WHERE sha256 = ?1",
+    )?;
+    Ok(stmt
+        .query_row(params![sha256], |r| {
+            Ok(CachedFile {
+                file_path:  r.get(0)?,
+                thumb_path: r.get(1)?,
+                mime_type:  r.get(2)?,
+            })
+        })
+        .optional()?)
+}
+
+/// Record a newly saved upload in the deduplication table.
+pub fn record_file_hash(
+    conn: &rusqlite::Connection,
+    sha256: &str,
+    file_path: &str,
+    thumb_path: &str,
+    mime_type: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO file_hashes (sha256, file_path, thumb_path, mime_type)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![sha256, file_path, thumb_path, mime_type],
+    )?;
+    Ok(())
+}
+
 // ─── Row mapping helpers ──────────────────────────────────────────────────────
 
 fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
@@ -708,7 +860,9 @@ fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         nsfw: row.get::<_, i32>(4)? != 0,
         max_threads: row.get(5)?,
         bump_limit: row.get(6)?,
-        created_at: row.get(7)?,
+        allow_video: row.get::<_, i32>(7)? != 0,
+        allow_tripcodes: row.get::<_, i32>(8)? != 0,
+        created_at: row.get(9)?,
     })
 }
 
@@ -734,7 +888,9 @@ fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
     })
 }
 
-/// Data needed to insert a new post
+/// Data needed to insert a new post.
+/// FIX[MEDIUM-3]: Derives Clone so create_thread_with_op can rebind fields.
+#[derive(Clone)]
 pub struct NewPost {
     pub thread_id: i64,
     pub board_id: i64,

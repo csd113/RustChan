@@ -2,7 +2,9 @@
 name = "chan"
 version = "1.0.0"
 edition = "2021"
-description = "Self-contained imageboard — single binary for Raspberry Pi 4 / Apple Silicon"
+# FIX[LOW-1]: Removed hardware-specific description. This binary is portable
+# and targets any architecture/OS that Rust supports.
+description = "Self-contained imageboard — single binary, zero runtime dependencies"
 
 [profile.release]
 opt-level      = 3
