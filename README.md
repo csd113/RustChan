@@ -47,14 +47,14 @@ RustChan is a fully-featured imageboard compiled into a single Rust binary. Drop
 cargo build --release
 
 # 2. Create your first admin account
-./target/release/chan admin create-admin admin "YourPassword123!"
+./chan admin create-admin admin "YourPassword123!"
 
 # 3. Create some boards
-./target/release/chan admin create-board b    "Random"     "General discussion"
-./target/release/chan admin create-board tech "Technology" "Programming and hardware"
+./chan admin create-board b    "Random"     "General discussion"
+./chan admin create-board tech "Technology" "Programming and hardware"
 
 # 4. Run
-./target/release/chan
+./chan
 ```
 
 Open **http://localhost:8080** in your browser. The admin panel is at **/admin**.
