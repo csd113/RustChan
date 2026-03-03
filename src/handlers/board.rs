@@ -12,6 +12,7 @@ use crate::{
     config::CONFIG,
     db::{self, NewPost},
     error::{AppError, Result},
+    handlers::{parse_post_multipart, admin::is_admin_session},
     middleware::{validate_csrf, AppState},
     models::*,
     templates,
@@ -74,6 +75,8 @@ pub async fn board_index(
         .unwrap_or(1)
         .max(1);
 
+    let is_admin = is_admin_session(&jar, &state.db);
+
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
@@ -110,6 +113,7 @@ pub async fn board_index(
                 &pagination,
                 &csrf_clone,
                 &all_boards,
+                is_admin,
             ))
         }
     })
@@ -126,63 +130,29 @@ pub async fn create_thread(
     Path(board_short): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<Response> {
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    let mut csrf_verified = false;
+    let form = parse_post_multipart(multipart, csrf_cookie.as_deref()).await?;
 
-    let mut name_val = String::new();
-    let mut subject_val = String::new();
-    let mut body_val = String::new();
-    let mut del_token_val = String::new();
-    let mut file_data: Option<(Vec<u8>, String)> = None;
-
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::BadRequest(e.to_string()))?
-    {
-        match field.name() {
-            Some("_csrf") => {
-                let v = field.text().await.unwrap_or_default();
-                if validate_csrf(csrf_cookie.as_deref(), &v) {
-                    csrf_verified = true;
-                }
-            }
-            Some("name") => name_val = field.text().await.unwrap_or_default(),
-            Some("subject") => subject_val = field.text().await.unwrap_or_default(),
-            Some("body") => body_val = field.text().await.unwrap_or_default(),
-            Some("deletion_token") => del_token_val = field.text().await.unwrap_or_default(),
-            Some("file") => {
-                let fname = field.file_name().unwrap_or("upload").to_string();
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| AppError::BadRequest(format!("File read error: {e}")))?;
-                if !bytes.is_empty() {
-                    file_data = Some((bytes.to_vec(), fname));
-                }
-            }
-            _ => {
-                let _ = field.bytes().await;
-            }
-        }
-    }
-
-    if !csrf_verified {
+    if !form.csrf_verified {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let body_text = validate_body(&body_val)
+    let body_text = validate_body(&form.body)
         .map_err(AppError::BadRequest)?
         .to_string();
 
-    let client_ip = addr.ip().to_string();
-    let upload_dir = CONFIG.upload_dir.clone();
-    let thumb_size = CONFIG.thumb_size;
-    let max_size = CONFIG.max_file_size;
+    let client_ip   = addr.ip().to_string();
+    let upload_dir  = CONFIG.upload_dir.clone();
+    let thumb_size  = CONFIG.thumb_size;
+    let max_size    = CONFIG.max_file_size;
     let cookie_secret = CONFIG.cookie_secret.clone();
     let max_threads = CONFIG.max_threads_per_board as i64;
+    let file_data   = form.file;
+    let name_val    = form.name;
+    let subject_val = form.subject;
+    let del_token_val = form.deletion_token;
 
     let redirect_url = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -191,7 +161,6 @@ pub async fn create_thread(
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
 
-            // Check ban
             let ip_hash = hash_ip(&client_ip, &cookie_secret);
             if let Some(reason) = db::is_banned(&conn, &ip_hash)? {
                 return Err(AppError::Forbidden(format!(
@@ -200,20 +169,17 @@ pub async fn create_thread(
                 )));
             }
 
-            // Apply word filters
             let filters: Vec<(String, String)> = db::get_word_filters(&conn)?
                 .into_iter()
                 .map(|f| (f.pattern, f.replacement))
                 .collect();
 
             let (name, tripcode) = parse_name_tripcode(&validate_name(&name_val));
-            let subject = validate_subject(&subject_val);
+            let subject          = validate_subject(&subject_val);
+            let escaped_body     = escape_html(&body_text);
+            let filtered_body    = apply_word_filters(&escaped_body, &filters);
+            let body_html        = render_post_body(&filtered_body);
 
-            let escaped_body = escape_html(&body_text);
-            let filtered_body = apply_word_filters(&escaped_body, &filters);
-            let body_html = render_post_body(&filtered_body);
-
-            // Handle optional file upload
             let uploaded = if let Some((data, fname)) = file_data {
                 Some(
                     save_upload(&data, &fname, &upload_dir, thumb_size, max_size)
@@ -240,17 +206,16 @@ pub async fn create_thread(
                 body: body_text.clone(),
                 body_html,
                 ip_hash,
-                file_path: uploaded.as_ref().map(|u| u.file_path.clone()),
-                file_name: uploaded.as_ref().map(|u| u.original_name.clone()),
-                file_size: uploaded.as_ref().map(|u| u.file_size),
+                file_path:  uploaded.as_ref().map(|u| u.file_path.clone()),
+                file_name:  uploaded.as_ref().map(|u| u.original_name.clone()),
+                file_size:  uploaded.as_ref().map(|u| u.file_size),
                 thumb_path: uploaded.as_ref().map(|u| u.thumb_path.clone()),
-                mime_type: uploaded.as_ref().map(|u| u.mime_type.clone()),
+                mime_type:  uploaded.as_ref().map(|u| u.mime_type.clone()),
                 deletion_token,
                 is_op: true,
             };
             db::create_post(&conn, &new_post)?;
 
-            // Prune old threads
             let paths = db::prune_old_threads(&conn, board.id, max_threads)?;
             for path in paths {
                 crate::utils::files::delete_file(&upload_dir, &path);

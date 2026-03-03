@@ -16,6 +16,7 @@
 // Static CSS is compiled into the binary — no external files needed.
 
 use axum::{
+    extract::DefaultBodyLimit,
     http::{header, StatusCode},
     middleware as axum_middleware,
     response::IntoResponse,
@@ -249,6 +250,7 @@ fn build_router(state: AppState) -> Router {
         .route("/admin/board/create",    post(handlers::admin::create_board))
         .route("/admin/board/delete",    post(handlers::admin::delete_board))
         .route("/admin/thread/action",   post(handlers::admin::thread_action))
+        .route("/admin/thread/delete",   post(handlers::admin::admin_delete_thread))
         .route("/admin/post/delete",     post(handlers::admin::admin_delete_post))
         .route("/admin/ban/add",         post(handlers::admin::add_ban))
         .route("/admin/ban/remove",      post(handlers::admin::remove_ban))
@@ -256,6 +258,8 @@ fn build_router(state: AppState) -> Router {
         .route("/admin/filter/remove",   post(handlers::admin::remove_filter))
         // ── Rate limiting ──
         .layer(axum_middleware::from_fn(middleware::rate_limit_middleware))
+        // ── Body size limit (50 MiB — allows video uploads) ──
+        .layer(DefaultBodyLimit::max(52_428_800))
         // ── Request counter ──
         .layer(axum_middleware::from_fn(count_requests))
         .with_state(state)

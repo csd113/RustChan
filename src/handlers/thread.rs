@@ -8,8 +8,8 @@ use crate::{
     config::CONFIG,
     db::{self, NewPost},
     error::{AppError, Result},
-    handlers::board::ensure_csrf,
-    middleware::{validate_csrf, AppState},
+    handlers::{parse_post_multipart, admin::is_admin_session, board::ensure_csrf},
+    middleware::AppState,
     utils::{
         crypto::{hash_ip, new_deletion_token},
         files::save_upload,
@@ -33,6 +33,7 @@ pub async fn view_thread(
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
     let (jar, csrf) = ensure_csrf(jar);
+    let is_admin = is_admin_session(&jar, &state.db);
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -53,7 +54,9 @@ pub async fn view_thread(
             let posts = db::get_posts_for_thread(&conn, thread_id)?;
             let all_boards = db::get_all_boards(&conn)?;
 
-            Ok(crate::templates::thread_page(&board, &thread, &posts, &csrf_clone, &all_boards))
+            Ok(crate::templates::thread_page(
+                &board, &thread, &posts, &csrf_clone, &all_boards, is_admin,
+            ))
         }
     })
     .await
@@ -69,56 +72,27 @@ pub async fn post_reply(
     Path((board_short, thread_id)): Path<(String, i64)>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<Response> {
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    let mut csrf_verified = false;
+    let form = parse_post_multipart(multipart, csrf_cookie.as_deref()).await?;
 
-    let mut name_val = String::new();
-    let mut body_val = String::new();
-    let mut del_token_val = String::new();
-    let mut file_data: Option<(Vec<u8>, String)> = None;
-
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::BadRequest(e.to_string()))?
-    {
-        match field.name() {
-            Some("_csrf") => {
-                let v = field.text().await.unwrap_or_default();
-                if validate_csrf(csrf_cookie.as_deref(), &v) {
-                    csrf_verified = true;
-                }
-            }
-            Some("name")  => name_val      = field.text().await.unwrap_or_default(),
-            Some("body")  => body_val      = field.text().await.unwrap_or_default(),
-            Some("deletion_token") => del_token_val = field.text().await.unwrap_or_default(),
-            Some("file")  => {
-                let fname = field.file_name().unwrap_or("upload").to_string();
-                let bytes = field.bytes().await
-                    .map_err(|e| AppError::BadRequest(format!("File read error: {e}")))?;
-                if !bytes.is_empty() {
-                    file_data = Some((bytes.to_vec(), fname));
-                }
-            }
-            _ => { let _ = field.bytes().await; }
-        }
-    }
-
-    if !csrf_verified {
+    if !form.csrf_verified {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let body_text = validate_body(&body_val)
+    let body_text = validate_body(&form.body)
         .map_err(AppError::BadRequest)?
         .to_string();
 
-    let client_ip   = addr.ip().to_string();
-    let upload_dir  = CONFIG.upload_dir.clone();
-    let thumb_size  = CONFIG.thumb_size;
-    let max_size    = CONFIG.max_file_size;
+    let client_ip     = addr.ip().to_string();
+    let upload_dir    = CONFIG.upload_dir.clone();
+    let thumb_size    = CONFIG.thumb_size;
+    let max_size      = CONFIG.max_file_size;
     let cookie_secret = CONFIG.cookie_secret.clone();
+    let file_data     = form.file;
+    let name_val      = form.name;
+    let del_token_val = form.deletion_token;
 
     let redirect_url = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -134,12 +108,10 @@ pub async fn post_reply(
             if thread.board_id != board.id {
                 return Err(AppError::NotFound("Thread not found in this board.".into()));
             }
-
             if thread.locked {
                 return Err(AppError::Forbidden("This thread is locked.".into()));
             }
 
-            // Check ban
             let ip_hash = hash_ip(&client_ip, &cookie_secret);
             if let Some(reason) = db::is_banned(&conn, &ip_hash)? {
                 return Err(AppError::Forbidden(format!(
@@ -148,7 +120,6 @@ pub async fn post_reply(
                 )));
             }
 
-            // Apply word filters
             let filters: Vec<(String, String)> = db::get_word_filters(&conn)?
                 .into_iter()
                 .map(|f| (f.pattern, f.replacement))
@@ -159,7 +130,6 @@ pub async fn post_reply(
             let filtered_body    = apply_word_filters(&escaped_body, &filters);
             let body_html        = render_post_body(&filtered_body);
 
-            // Optional file upload
             let uploaded = if let Some((data, fname)) = file_data {
                 Some(save_upload(&data, &fname, &upload_dir, thumb_size, max_size)
                     .map_err(|e| AppError::BadRequest(e.to_string()))?)
@@ -173,7 +143,6 @@ pub async fn post_reply(
                 del_token_val.trim().to_string()
             };
 
-            // Only bump if below bump limit
             let should_bump = thread.reply_count < board.bump_limit;
 
             let new_post = NewPost {
@@ -198,7 +167,6 @@ pub async fn post_reply(
             if should_bump {
                 db::bump_thread(&conn, thread_id)?;
             } else {
-                // Increment reply count without updating bumped_at
                 conn.execute(
                     "UPDATE threads SET reply_count = reply_count + 1 WHERE id = ?1",
                     rusqlite::params![thread_id],

@@ -50,7 +50,12 @@ fn require_admin(jar: &CookieJar, pool: &DbPool) -> Result<i64> {
     Ok(session.admin_id)
 }
 
-// ─── GET /admin — login page or redirect ─────────────────────────────────────
+/// Public helper — returns true if the jar contains a valid admin session.
+/// Used by other handlers to conditionally show admin controls.
+pub fn is_admin_session(jar: &CookieJar, pool: &DbPool) -> bool {
+    require_admin(jar, pool).is_ok()
+}
+
 
 pub async fn admin_index(
     State(state): State<AppState>,
@@ -351,7 +356,37 @@ pub async fn admin_delete_post(
     Ok(Redirect::to(&format!("/{}/", form.board)).into_response())
 }
 
-// ─── POST /admin/ban/add ──────────────────────────────────────────────────────
+// ─── POST /admin/thread/delete ────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct AdminDeleteThreadForm {
+    thread_id: i64,
+    board: String,
+    _csrf: Option<String>,
+}
+
+pub async fn admin_delete_thread(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<AdminDeleteThreadForm>,
+) -> Result<Response> {
+    require_admin(&jar, &state.db)
+        .map_err(|_| AppError::Forbidden("Not logged in.".into()))?;
+    check_csrf(&jar, form._csrf.as_deref())?;
+
+    let upload_dir = CONFIG.upload_dir.clone();
+    let conn = state.db.get()?;
+
+    let paths = db::delete_thread(&conn, form.thread_id)?;
+    for p in paths {
+        crate::utils::files::delete_file(&upload_dir, &p);
+    }
+
+    info!("Admin deleted thread {}", form.thread_id);
+    Ok(Redirect::to(&format!("/{}/", form.board)).into_response())
+}
+
+
 
 #[derive(Deserialize)]
 pub struct AddBanForm {

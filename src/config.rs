@@ -45,7 +45,7 @@ impl Config {
             bind_addr:             env_str("CHAN_BIND",          "0.0.0.0:8080"),
             database_path:         env_str("CHAN_DB",            &default_db),
             upload_dir:            env_str("CHAN_UPLOADS",       &default_uploads),
-            max_file_size:         env_usize("CHAN_MAX_FILE_SIZE", 8 * 1024 * 1024),
+            max_file_size:         env_usize("CHAN_MAX_FILE_SIZE", 50 * 1024 * 1024),
             thumb_size:            env_u32("CHAN_THUMB_SIZE",    250),
             default_bump_limit:    env_u32("CHAN_BUMP_LIMIT",    500),
             max_threads_per_board: env_u32("CHAN_MAX_THREADS",   150),
