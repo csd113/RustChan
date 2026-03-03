@@ -124,6 +124,7 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 <meta name="referrer" content="no-referrer">
 <title>{title}</title>
 <link rel="stylesheet" href="/static/style.css">
+<script>try{{var _t=localStorage.getItem('rustchan_theme');if(_t&&_t!=='terminal')document.documentElement.setAttribute('data-theme',_t);}}catch(e){{}}</script>
 </head>
 <body>
 <header class="site-header">
@@ -141,6 +142,79 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 <footer class="site-footer">
   <p>{forum_name} &mdash; <a href="/">home</a></p>
 </footer>
+
+<!-- Theme Picker -->
+<button id="theme-picker-btn" onclick="toggleThemePicker()" title="Select Theme">&#9681; Theme</button>
+<div id="theme-picker-panel">
+  <div class="tp-title">// SELECT THEME</div>
+  <button class="tp-option" onclick="setTheme('terminal')">
+    <span class="tp-swatch" style="background:#050505;border-color:#00c840;"></span>Terminal
+  </button>
+  <button class="tp-option" onclick="setTheme('aero')">
+    <span class="tp-swatch" style="background:linear-gradient(135deg,#b8e0f8,#dff4ff);border-color:#38b6ff;"></span>Frutiger Aero
+  </button>
+  <button class="tp-option" onclick="setTheme('dorfic')">
+    <span class="tp-swatch" style="background:#FFD700;border-color:#FF4500;"></span>DORFic
+  </button>
+  <button class="tp-option" onclick="setTheme('fluorogrid')">
+    <span class="tp-swatch" style="background:#D0FFE0;border-color:#00FFFF;"></span>FluoroGrid
+  </button>
+  <button class="tp-option" onclick="setTheme('neoncubicle')">
+    <span class="tp-swatch" style="background:#F0F4F8;border-color:#0FF0FF;"></span>NeonCubicle
+  </button>
+</div>
+
+<script>
+(function() {{
+  var THEMES = ['terminal','aero','dorfic','fluorogrid','neoncubicle'];
+
+  function applyTheme(t) {{
+    if (t === 'terminal') {{
+      document.documentElement.removeAttribute('data-theme');
+    }} else {{
+      document.documentElement.setAttribute('data-theme', t);
+    }}
+    document.querySelectorAll('.tp-option').forEach(function(el, i) {{
+      el.classList.toggle('active', THEMES[i] === t);
+    }});
+  }}
+
+  function setTheme(t) {{
+    try {{ localStorage.setItem('rustchan_theme', t); }} catch(e) {{}}
+    applyTheme(t);
+    closeThemePicker();
+  }}
+
+  function toggleThemePicker() {{
+    var p = document.getElementById('theme-picker-panel');
+    p.classList.toggle('open');
+  }}
+
+  function closeThemePicker() {{
+    document.getElementById('theme-picker-panel').classList.remove('open');
+  }}
+
+  // Close panel on outside click
+  document.addEventListener('click', function(e) {{
+    var btn   = document.getElementById('theme-picker-btn');
+    var panel = document.getElementById('theme-picker-panel');
+    if (!btn.contains(e.target) && !panel.contains(e.target)) {{
+      closeThemePicker();
+    }}
+  }});
+
+  // Expose for inline onclick
+  window.setTheme = setTheme;
+  window.toggleThemePicker = toggleThemePicker;
+
+  // Apply saved theme on load (avoids flash)
+  try {{
+    var saved = localStorage.getItem('rustchan_theme');
+    if (saved && THEMES.indexOf(saved) !== -1) {{ applyTheme(saved); }}
+  }} catch(e) {{}}
+}})();
+</script>
+
 <input type="hidden" id="csrf_global" value="{csrf_token}">
 </body>
 </html>"#,

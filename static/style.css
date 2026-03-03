@@ -1126,3 +1126,320 @@ body:has(.catalog-bar) main {
   .thumb { max-width: 120px; max-height: 120px; }
   .post-form td:first-child { display: none; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   THEMES
+   Applied via data-theme="..." on <html>. Terminal is the default (no attr).
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Frutiger Aero ────────────────────────────────────────────────────────── */
+[data-theme="aero"] {
+  color-scheme: light;
+  --bg:           #deeef7;
+  --bg-panel:     rgba(255,255,255,0.62);
+  --bg-post:      rgba(255,255,255,0.50);
+  --bg-op:        rgba(255,255,255,0.68);
+  --bg-input:     rgba(255,255,255,0.78);
+  --border:       rgba(90,155,200,0.30);
+  --border-glow:  #6aaed6;
+  --green:        #1a6fa8;
+  --green-dim:    #5a9ec0;
+  --green-bright: #0d5a8a;
+  --green-pale:   #2882b8;
+  --amber:        #c96f00;
+  --red:          #b82840;
+  --gray:         #b8cedd;
+  --gray-light:   #daeaf4;
+  --text:         #1a2836;
+  --text-dim:     #486070;
+  --font:         'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+}
+[data-theme="aero"] body {
+  background: #deeef7;
+  background-image: linear-gradient(160deg, #d0e8f4 0%, #eef6fb 45%, #d8eef6 100%);
+  background-attachment: fixed;
+}
+[data-theme="aero"] .op,
+[data-theme="aero"] .reply,
+[data-theme="aero"] .page-box,
+[data-theme="aero"] .post-form-container,
+[data-theme="aero"] .admin-section {
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-radius: 10px;
+  box-shadow: 0 2px 12px rgba(80,150,210,0.12), inset 0 1px 0 rgba(255,255,255,0.75);
+}
+[data-theme="aero"] .site-header {
+  background: rgba(210,232,246,0.82);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(90,155,200,0.30);
+  box-shadow: 0 2px 14px rgba(40,130,190,0.10);
+}
+[data-theme="aero"] .site-header::before { display: none; }
+[data-theme="aero"] a { color: #1a6fa8; }
+[data-theme="aero"] a:hover { color: #0d5a8a; text-shadow: none; }
+[data-theme="aero"] button,
+[data-theme="aero"] .btn,
+[data-theme="aero"] input[type="submit"] {
+  border-color: rgba(90,155,200,0.45); color: #1a6fa8;
+}
+[data-theme="aero"] button:hover {
+  border-color: #6aaed6; color: #0d5a8a;
+  background: rgba(106,174,214,0.10);
+  box-shadow: none;
+}
+[data-theme="aero"] .board-card { border-radius: 8px; }
+[data-theme="aero"] .catalog-item { border-radius: 8px; }
+
+/* ── DORFic Aero ──────────────────────────────────────────────────────────── */
+/* Torchlit underground fortress through Vista-era amber glass.               */
+[data-theme="dorfic"] {
+  color-scheme: dark;
+  --bg:           #1c1610;
+  --bg-panel:     rgba(72,44,14,0.72);
+  --bg-post:      rgba(58,36,10,0.65);
+  --bg-op:        rgba(80,50,16,0.75);
+  --bg-input:     rgba(30,22,8,0.80);
+  --border:       #7a4e18;
+  --border-glow:  #c8820a;
+  --green:        #d4a040;
+  --green-dim:    #8a6020;
+  --green-bright: #ffcc66;
+  --green-pale:   #c49030;
+  --amber:        #e8a020;
+  --red:          #cc4422;
+  --gray:         #4a3820;
+  --gray-light:   #6a5430;
+  --text:         #e8d5a0;
+  --text-dim:     #907850;
+  --font:         'Courier New', Consolas, 'Lucida Console', monospace;
+}
+[data-theme="dorfic"] body {
+  background: #1c1610;
+  background-image:
+    radial-gradient(ellipse at 30% 20%, rgba(180,100,10,0.10) 0%, transparent 55%),
+    radial-gradient(ellipse at 75% 80%, rgba(140,70,5,0.08) 0%, transparent 50%),
+    repeating-linear-gradient(
+      0deg, transparent, transparent 3px,
+      rgba(0,0,0,0.18) 3px, rgba(0,0,0,0.18) 4px
+    );
+  background-attachment: fixed;
+}
+[data-theme="dorfic"] .op,
+[data-theme="dorfic"] .reply,
+[data-theme="dorfic"] .page-box,
+[data-theme="dorfic"] .post-form-container,
+[data-theme="dorfic"] .admin-section {
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow: 0 2px 14px rgba(0,0,0,0.5), inset 0 1px 0 rgba(210,160,60,0.10);
+}
+[data-theme="dorfic"] .site-header {
+  background: rgba(36,24,8,0.90);
+  border-bottom: 1px solid #c8820a;
+  box-shadow: 0 2px 16px rgba(180,100,0,0.25);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+[data-theme="dorfic"] .site-header::before { color: #ffcc66; }
+[data-theme="dorfic"] a { color: #d4a040; }
+[data-theme="dorfic"] a:hover { color: #ffcc66; text-shadow: 0 0 8px rgba(255,200,80,0.5); }
+[data-theme="dorfic"] button,
+[data-theme="dorfic"] .btn,
+[data-theme="dorfic"] input[type="submit"] {
+  border-color: #7a4e18; color: #c49030;
+}
+[data-theme="dorfic"] button:hover {
+  border-color: #c8820a; color: #ffcc66;
+  background: rgba(200,130,10,0.12);
+  box-shadow: 0 0 10px rgba(200,130,10,0.3);
+}
+[data-theme="dorfic"] .name { color: #ffcc66; }
+[data-theme="dorfic"] .board-card { box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
+
+/* ── FluoroGrid ───────────────────────────────────────────────────────────── */
+/* Softened: muted teal borders, dusty lavender panels, plum accents.        */
+[data-theme="fluorogrid"] {
+  color-scheme: light;
+  --bg:           #e8f8ef;
+  --bg-panel:     #ede8ff;
+  --bg-post:      #f3f0ff;
+  --bg-op:        #e6e0ff;
+  --bg-input:     #f4fbf6;
+  --border:       #7ecece;
+  --border-glow:  #4ab8b8;
+  --green:        #8833aa;
+  --green-dim:    #662288;
+  --green-bright: #aa44cc;
+  --green-pale:   #9933bb;
+  --amber:        #c07800;
+  --red:          #cc2255;
+  --gray:         #aacccc;
+  --gray-light:   #d4eee8;
+  --text:         #1a1a2e;
+  --text-dim:     #4a4468;
+  --font:         'Courier New', 'Lucida Console', monospace;
+}
+[data-theme="fluorogrid"] body {
+  background: #e8f8ef;
+  background-image: linear-gradient(rgba(78,180,180,0.09) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(78,180,180,0.09) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+[data-theme="fluorogrid"] .site-header {
+  background: #ede8ff;
+  border-bottom: 2px solid #7ecece;
+  box-shadow: 0 2px 10px rgba(78,180,180,0.18);
+}
+[data-theme="fluorogrid"] .site-header::before { color: #aa44cc; }
+[data-theme="fluorogrid"] a { color: #7722aa; }
+[data-theme="fluorogrid"] a:hover { color: #aa44cc; text-shadow: none; }
+[data-theme="fluorogrid"] button,
+[data-theme="fluorogrid"] .btn,
+[data-theme="fluorogrid"] input[type="submit"] {
+  border-color: #7ecece; color: #7722aa;
+}
+[data-theme="fluorogrid"] button:hover {
+  background: rgba(78,180,180,0.10);
+  border-color: #aa44cc; color: #aa44cc;
+  box-shadow: 0 0 7px rgba(170,68,204,0.20);
+}
+
+/* ── NeonCubicle ──────────────────────────────────────────────────────────── */
+[data-theme="neoncubicle"] {
+  color-scheme: light;
+  --bg:           #f0f2f6;
+  --bg-panel:     #e0d6f4;
+  --bg-post:      #ebe5f8;
+  --bg-op:        #d8cef0;
+  --bg-input:     #f6f4fc;
+  --border:       #82cece;
+  --border-glow:  #4ab8c8;
+  --green:        #b03888;
+  --green-dim:    #8a2a6a;
+  --green-bright: #c84898;
+  --green-pale:   #b83890;
+  --amber:        #b86000;
+  --red:          #c02848;
+  --gray:         #b8aed4;
+  --gray-light:   #ddd8f0;
+  --text:         #1a1428;
+  --text-dim:     #504468;
+  --font:         'Segoe UI', Arial, sans-serif;
+}
+[data-theme="neoncubicle"] body {
+  background: #f0f2f6;
+  background-image: repeating-linear-gradient(
+    0deg, transparent, transparent 23px,
+    rgba(74,184,200,0.07) 23px, rgba(74,184,200,0.07) 24px
+  );
+}
+[data-theme="neoncubicle"] .site-header {
+  background: #e0d6f4;
+  border-bottom: 1px solid #82cece;
+  box-shadow: 0 2px 10px rgba(74,184,200,0.12);
+}
+[data-theme="neoncubicle"] .site-header::before { color: #c84898; }
+[data-theme="neoncubicle"] a { color: #8a2a6a; }
+[data-theme="neoncubicle"] a:hover { color: #c84898; text-shadow: none; }
+[data-theme="neoncubicle"] button,
+[data-theme="neoncubicle"] .btn,
+[data-theme="neoncubicle"] input[type="submit"] {
+  border-color: #82cece; color: #8a2a6a;
+}
+[data-theme="neoncubicle"] button:hover {
+  background: rgba(74,184,200,0.09);
+  border-color: #4ab8c8; color: #c84898;
+  box-shadow: 0 0 7px rgba(200,72,152,0.18);
+}
+[data-theme="neoncubicle"] .op,
+[data-theme="neoncubicle"] .reply { border-radius: 6px; }
+
+/* ── Theme Picker Widget ──────────────────────────────────────────────────── */
+
+#theme-picker-btn {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 9999;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-glow);
+  color: var(--green);
+  font-family: var(--font);
+  font-size: 0.78rem;
+  padding: 5px 11px;
+  cursor: pointer;
+  letter-spacing: 0.06em;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.35);
+  transition: all 0.15s;
+  appearance: none;
+  -webkit-appearance: none;
+}
+#theme-picker-btn:hover {
+  border-color: var(--green-bright);
+  color: var(--green-bright);
+  background: var(--bg-panel);
+  box-shadow: 0 0 12px rgba(0,200,64,0.25);
+}
+
+#theme-picker-panel {
+  position: fixed;
+  bottom: 52px;
+  right: 18px;
+  z-index: 9999;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-glow);
+  padding: 10px 12px;
+  min-width: 190px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  display: none;
+  flex-direction: column;
+  gap: 3px;
+}
+#theme-picker-panel.open { display: flex; }
+
+#theme-picker-panel .tp-title {
+  font-family: var(--font);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  letter-spacing: 0.1em;
+  margin-bottom: 5px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tp-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font);
+  font-size: 0.8rem;
+  color: var(--text);
+  padding: 4px 6px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.12s;
+  background: transparent;
+  text-align: left;
+  width: 100%;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.tp-option:hover {
+  border-color: var(--border-glow);
+  color: var(--green-bright);
+  background: rgba(128,128,128,0.08);
+  box-shadow: none;
+}
+.tp-option.active {
+  border-color: var(--border-glow);
+  color: var(--green-bright);
+}
+.tp-swatch {
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(128,128,128,0.4);
+  flex-shrink: 0;
+  display: inline-block;
+}
