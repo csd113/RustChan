@@ -148,7 +148,7 @@ pub async fn admin_login(
             let mut cookie = Cookie::new(SESSION_COOKIE, session_id);
             cookie.set_http_only(true);
             cookie.set_same_site(SameSite::Strict);
-            cookie.set_path("/admin");
+            cookie.set_path("/");
             cookie.set_secure(false); // true in production with HTTPS
             // Session expires via DB expiry check; cookie lives for browser session
 

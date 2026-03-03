@@ -388,17 +388,24 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
 
     // Image / Video
     if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
-        let size_str  = post.file_size.map(format_file_size).unwrap_or_default();
-        let name_str  = post.file_name.as_deref().unwrap_or("file");
-        let is_video  = post.mime_type.as_deref().map(|m| m.starts_with("video/")).unwrap_or(false);
-        let mime      = post.mime_type.as_deref().unwrap_or("video/mp4");
+        let size_str = post.file_size.map(format_file_size).unwrap_or_default();
+        let name_str = post.file_name.as_deref().unwrap_or("file");
+        let is_video = post.mime_type.as_deref().map(|m| m.starts_with("video/")).unwrap_or(false);
+        let mime     = post.mime_type.as_deref().unwrap_or("video/mp4");
 
         if is_video {
             html.push_str(&format!(
                 r#"<div class="file-container">
-<div class="file-info"><a href="/uploads/{f}">{orig}</a> ({sz})</div>
-<video class="media-thumb video-player" src="/uploads/{f}" controls preload="metadata"
-       poster="/uploads/{th}" type="{mime}"></video>
+<div class="file-info">
+  <a href="/uploads/{f}">{orig}</a> ({sz})
+  <button class="media-close-btn" onclick="collapseMedia(this)" style="display:none">&#x2715; close</button>
+</div>
+<div class="media-preview" onclick="expandMedia(this)" title="click to play">
+  <img class="thumb" src="/uploads/{th}" loading="lazy" alt="video thumbnail">
+  <div class="media-expand-overlay">&#9654;</div>
+</div>
+<video class="media-expanded" src="/uploads/{f}" controls preload="none"
+       type="{mime}" style="display:none"></video>
 </div>"#,
                 f    = escape_html(file),
                 th   = escape_html(thumb),
@@ -409,11 +416,16 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
         } else {
             html.push_str(&format!(
                 r#"<div class="file-container">
-<div class="file-info"><a href="/uploads/{f}">{orig}</a> ({sz})</div>
-<a href="/uploads/{f}" target="_blank">
-<img class="thumb" src="/uploads/{th}" loading="lazy" alt="image"
-     onclick="expandImage(this, '/uploads/{f}')">
-</a>
+<div class="file-info">
+  <a href="/uploads/{f}">{orig}</a> ({sz})
+  <button class="media-close-btn" onclick="collapseMedia(this)" style="display:none">&#x2715; close</button>
+</div>
+<div class="media-preview" onclick="expandMedia(this)" title="click to expand">
+  <img class="thumb" src="/uploads/{th}" loading="lazy" alt="image">
+  <div class="media-expand-overlay">&#x2922;</div>
+</div>
+<img class="media-expanded" src="" data-src="/uploads/{f}" style="display:none"
+     alt="image">
 </div>"#,
                 f    = escape_html(file),
                 th   = escape_html(thumb),
@@ -494,18 +506,31 @@ function appendReply(id) {{
   if (ta) {{ ta.value += '>>' + id + '\n'; ta.focus(); }}
   return false;
 }}
-function expandImage(img, full) {{
-  if (img.dataset.expanded === 'true') {{
-    img.src = img.dataset.thumb;
-    img.dataset.expanded = 'false';
-    img.style.maxWidth = '';
-  }} else {{
-    img.dataset.thumb = img.src;
-    img.src = full;
-    img.dataset.expanded = 'true';
-    img.style.maxWidth = '100%';
+function expandMedia(preview) {{
+  var container = preview.closest('.file-container');
+  var expanded  = container.querySelector('.media-expanded');
+  var closeBtn  = container.querySelector('.media-close-btn');
+  if (expanded.tagName === 'IMG' && expanded.dataset.src) {{
+    expanded.src = expanded.dataset.src;
   }}
-  return false;
+  preview.style.display  = 'none';
+  expanded.style.display = 'block';
+  closeBtn.style.display = 'inline-flex';
+  if (expanded.tagName === 'VIDEO') {{
+    expanded.play().catch(function(){{}});
+  }}
+}}
+function collapseMedia(btn) {{
+  var container = btn.closest('.file-container');
+  var expanded  = container.querySelector('.media-expanded');
+  var preview   = container.querySelector('.media-preview');
+  if (expanded.tagName === 'VIDEO') {{
+    expanded.pause();
+    expanded.currentTime = 0;
+  }}
+  expanded.style.display = 'none';
+  preview.style.display  = 'block';
+  btn.style.display      = 'none';
 }}
 </script>"#,
         board = escape_html(board_short),

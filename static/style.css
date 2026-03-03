@@ -373,17 +373,67 @@ main {
   box-shadow: 0 0 10px rgba(0,200,64,0.3);
 }
 
-.video-player {
-  display: block;
-  max-width: 280px;
-  max-height: 200px;
-  border: 1px solid var(--border);
-  background: #000;
+.media-preview {
+  position: relative;
+  display: inline-block;
+  cursor: pointer;
 }
 
-.video-player:hover { border-color: var(--border-glow); }
+.media-preview .thumb {
+  display: block;
+}
 
-.media-thumb { max-width: 200px; max-height: 200px; }
+.media-expand-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.8rem;
+  color: var(--green-bright);
+  text-shadow: 0 0 12px rgba(0,255,65,0.8);
+  background: rgba(0,0,0,0.3);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+
+.media-preview:hover .media-expand-overlay {
+  opacity: 1;
+}
+
+.media-expanded {
+  display: block;
+  max-width: min(100%, 560px);
+  max-height: 560px;
+  border: 1px solid var(--border-glow);
+  background: #000;
+  box-shadow: 0 0 14px rgba(0,200,64,0.2);
+  object-fit: contain;
+}
+
+.media-close-btn {
+  display: none; /* shown via JS as inline-flex */
+  align-items: center;
+  gap: 5px;
+  margin-left: 8px;
+  padding: 2px 9px;
+  background: rgba(255,34,68,0.12);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font-family: var(--font);
+  font-size: 0.75rem;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  transition: background 0.15s, box-shadow 0.15s;
+  vertical-align: middle;
+}
+
+.media-close-btn:hover {
+  background: rgba(255,34,68,0.25);
+  box-shadow: 0 0 7px rgba(255,34,68,0.45);
+  color: #ff6680;
+}
 
 /* ── Thread footer / reply count ──────────────────────────────────────────── */
 
