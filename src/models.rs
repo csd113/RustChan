@@ -94,6 +94,13 @@ pub struct WordFilter {
     pub replacement: String,
 }
 
+/// Board with live thread count, used on the home page
+#[derive(Debug, Clone)]
+pub struct BoardStats {
+    pub board: Board,
+    pub thread_count: i64,
+}
+
 /// Summary used on board index: thread + its last few reply counts
 #[derive(Debug, Clone)]
 pub struct ThreadSummary {

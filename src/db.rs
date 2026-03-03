@@ -165,6 +165,21 @@ pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     Ok(boards)
 }
 
+/// Like get_all_boards but also returns live thread count for each board.
+pub fn get_all_boards_with_stats(conn: &rusqlite::Connection) -> Result<Vec<crate::models::BoardStats>> {
+    let boards = get_all_boards(conn)?;
+    let mut out = Vec::with_capacity(boards.len());
+    for board in boards {
+        let thread_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM threads WHERE board_id = ?1",
+            params![board.id],
+            |r| r.get(0),
+        )?;
+        out.push(crate::models::BoardStats { board, thread_count });
+    }
+    Ok(out)
+}
+
 pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Option<Board>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit, created_at

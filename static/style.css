@@ -666,7 +666,75 @@ main {
 
 .index-empty { color: var(--text-dim); font-style: italic; }
 
-/* ── Admin panel ──────────────────────────────────────────────────────────── */
+/* ── Admin toolbar (visible bar when logged in as admin) ──────────────────── */
+
+.admin-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255,34,68,0.07);
+  border: 1px solid rgba(255,34,68,0.35);
+  border-left: 3px solid var(--red);
+  padding: 5px 12px;
+  margin-bottom: 10px;
+  font-size: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.admin-toolbar-label {
+  color: var(--red);
+  font-weight: bold;
+  letter-spacing: 0.1em;
+  font-size: 0.75rem;
+  margin-right: 4px;
+}
+
+.admin-toolbar a {
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+}
+
+.admin-toolbar a:hover {
+  color: var(--green-pale);
+  border-color: var(--border-glow);
+}
+
+.admin-toolbar-btn {
+  padding: 2px 8px;
+  font-size: 0.78rem;
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+
+.admin-toolbar-danger {
+  border-color: rgba(255,34,68,0.5) !important;
+  color: var(--red) !important;
+}
+
+.admin-toolbar-danger:hover {
+  background: rgba(255,34,68,0.15) !important;
+  border-color: var(--red) !important;
+  box-shadow: 0 0 8px rgba(255,34,68,0.3) !important;
+}
+
+/* ── Board card stats ─────────────────────────────────────────────────────── */
+
+.board-card-stats {
+  font-size: 0.72rem;
+  color: var(--green-dim);
+  margin-top: 4px;
+  font-weight: bold;
+  letter-spacing: 0.03em;
+}
+
+/* ── Admin post controls ──────────────────────────────────────────────────── */
+
+.admin-post-controls {
+  margin-top: 3px;
+}
+
+
 
 .admin-panel {
   max-width: 900px;

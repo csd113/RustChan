@@ -46,17 +46,17 @@ pub async fn index(
 ) -> Result<(CookieJar, Html<String>)> {
     let (jar, csrf) = ensure_csrf(jar);
 
-    let boards = tokio::task::spawn_blocking({
+    let board_stats = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<Vec<Board>> {
+        move || -> Result<Vec<crate::models::BoardStats>> {
             let conn = pool.get()?;
-            Ok(db::get_all_boards(&conn)?)
+            Ok(db::get_all_boards_with_stats(&conn)?)
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(templates::index_page(&boards, &csrf))))
+    Ok((jar, Html(templates::index_page(&board_stats, &csrf))))
 }
 
 // ─── GET /:board/ — board index ───────────────────────────────────────────────

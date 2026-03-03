@@ -87,23 +87,31 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 
 // ─── Index (board list) ───────────────────────────────────────────────────────
 
-pub fn index_page(boards: &[Board], csrf_token: &str) -> String {
-    let sfw:  Vec<&Board> = boards.iter().filter(|b| !b.nsfw).collect();
-    let nsfw: Vec<&Board> = boards.iter().filter(|b|  b.nsfw).collect();
+pub fn index_page(board_stats: &[crate::models::BoardStats], csrf_token: &str) -> String {
+    // Build a plain boards list for the nav bar
+    let all_boards: Vec<Board> = board_stats.iter().map(|s| s.board.clone()).collect();
 
-    fn board_cards(list: &[&Board]) -> String {
-        list.iter().map(|b| {
+    let sfw:  Vec<&crate::models::BoardStats> = board_stats.iter().filter(|s| !s.board.nsfw).collect();
+    let nsfw: Vec<&crate::models::BoardStats> = board_stats.iter().filter(|s|  s.board.nsfw).collect();
+
+    fn board_cards(list: &[&crate::models::BoardStats]) -> String {
+        list.iter().map(|s| {
+            let b = &s.board;
             let nsfw_badge = if b.nsfw { r#"<span class="nsfw-badge">NSFW</span>"# } else { "" };
+            let thread_word = if s.thread_count == 1 { "thread" } else { "threads" };
             format!(
-                r#"<a class="board-card" href="/{s}/">
-  <div class="board-card-short">/{s}/</div>
+                r#"<a class="board-card" href="/{sh}/catalog">
+  <div class="board-card-short">/{sh}/</div>
   <div class="board-card-name">{n}{nsfw}</div>
   <div class="board-card-desc">{d}</div>
+  <div class="board-card-stats">{tc} {tw}</div>
 </a>"#,
-                s    = escape_html(&b.short_name),
+                sh   = escape_html(&b.short_name),
                 n    = escape_html(&b.name),
                 nsfw = nsfw_badge,
                 d    = escape_html(&b.description),
+                tc   = s.thread_count,
+                tw   = thread_word,
             )
         }).collect()
     }
@@ -116,7 +124,7 @@ pub fn index_page(boards: &[Board], csrf_token: &str) -> String {
         format!("<div class=\"index-section\"><h2 class=\"index-section-title\">// Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2><div class=\"board-cards\">{}</div></div>", board_cards(&nsfw))
     } else { String::new() };
 
-    let empty = if boards.is_empty() {
+    let empty = if board_stats.is_empty() {
         "<p class=\"index-empty\">no boards yet — admin must create boards first.</p>"
     } else { "" };
 
@@ -129,7 +137,7 @@ pub fn index_page(boards: &[Board], csrf_token: &str) -> String {
         sfw = sfw_sec, nsfw = nsfw_sec, empty = empty,
     );
 
-    base_layout("Imageboard", None, &body, csrf_token, boards)
+    base_layout("Imageboard", None, &body, csrf_token, &all_boards)
 }
 
 // ─── Board index ──────────────────────────────────────────────────────────────
@@ -143,6 +151,21 @@ pub fn board_page(
     is_admin: bool,
 ) -> String {
     let mut body = String::new();
+
+    // Visible admin toolbar — appears whenever an admin is logged in
+    if is_admin {
+        body.push_str(&format!(
+            r#"<div class="admin-toolbar">
+<span class="admin-toolbar-label">&#9632; ADMIN</span>
+<a href="/admin/panel">panel</a>
+<form method="POST" action="/admin/logout" style="display:inline">
+<input type="hidden" name="_csrf" value="{csrf}">
+<button type="submit" class="admin-toolbar-btn">logout</button>
+</form>
+</div>"#,
+            csrf = escape_html(csrf_token),
+        ));
+    }
 
     body.push_str(&new_thread_form(&board.short_name, csrf_token));
 
@@ -267,14 +290,15 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
         word  = if t.reply_count == 1 { "reply" } else { "replies" },
     ));
 
-    // Admin: delete thread button in thread footer
+    // Admin: delete thread button on board index (thread page uses the toolbar instead)
     if is_admin {
         html.push_str(&format!(
-            r#" <form class="admin-action-form" method="POST" action="/admin/thread/delete" style="display:inline">
-<input type="hidden" name="_csrf" value="{csrf}">
-<input type="hidden" name="thread_id" value="{tid}">
-<input type="hidden" name="board" value="{board}">
-<button type="submit" class="admin-thread-del-btn" onclick="return confirm('Delete entire thread {tid}?')">[ ⌫ delete thread ]</button>
+            r#" <form method="POST" action="/admin/thread/delete" style="display:inline">
+<input type="hidden" name="_csrf"      value="{csrf}">
+<input type="hidden" name="thread_id"  value="{tid}">
+<input type="hidden" name="board"      value="{board}">
+<button type="submit" class="admin-del-btn"
+        onclick="return confirm('Delete thread No.{tid} and all its posts?')">&#x2715; del thread</button>
 </form>"#,
             csrf  = escape_html(csrf_token),
             tid   = t.id,
@@ -313,32 +337,41 @@ pub fn thread_page(
 ) -> String {
     let mut body = String::new();
 
-    let locked_notice = if thread.locked {
-        r#"<div class="notice locked-notice">this thread is locked — no new replies allowed</div>"#
-    } else { "" };
-
-    body.push_str(&format!(
-        r#"<div class="board-header">
-<a href="/{s}/">[ return ]</a> | <a href="/{s}/catalog">[ catalog ]</a>"#,
-        s = escape_html(&board.short_name),
-    ));
-
-    // Admin: delete whole thread button in thread header
+    // Visible admin toolbar
     if is_admin {
         body.push_str(&format!(
-            r#" | <form class="admin-action-form" method="POST" action="/admin/thread/delete" style="display:inline">
+            r#"<div class="admin-toolbar">
+<span class="admin-toolbar-label">&#9632; ADMIN</span>
+<a href="/admin/panel">panel</a>
+<form method="POST" action="/admin/thread/delete" style="display:inline">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="hidden" name="thread_id" value="{tid}">
 <input type="hidden" name="board" value="{board}">
-<button type="submit" class="admin-thread-del-btn" onclick="return confirm('Delete entire thread?')">[ ⌫ delete thread ]</button>
-</form>"#,
+<button type="submit" class="admin-toolbar-btn admin-toolbar-danger"
+        onclick="return confirm('Delete this entire thread and all its posts?')">&#x2715; delete thread</button>
+</form>
+<form method="POST" action="/admin/logout" style="display:inline">
+<input type="hidden" name="_csrf" value="{csrf}">
+<button type="submit" class="admin-toolbar-btn">logout</button>
+</form>
+</div>"#,
             csrf  = escape_html(csrf_token),
             tid   = thread.id,
             board = escape_html(&board.short_name),
         ));
     }
 
-    body.push_str("</div>\n");
+    let locked_notice = if thread.locked {
+        r#"<div class="notice locked-notice">this thread is locked — no new replies allowed</div>"#
+    } else { "" };
+
+    body.push_str(&format!(
+        r#"<div class="board-header">
+<a href="/{s}/">[ return ]</a> | <a href="/{s}/catalog">[ catalog ]</a>
+</div>
+"#,
+        s = escape_html(&board.short_name),
+    ));
     body.push_str(locked_notice);
 
     for post in posts {
@@ -438,40 +471,40 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
     // Post body (pre-rendered, sanitised HTML)
     html.push_str(&format!(r#"<div class="post-body">{}</div>"#, post.body_html));
 
-    // User delete form + admin delete button
+    // User delete form (only on thread pages where show_delete=true)
     if show_delete {
-        html.push_str(r#"<div class="post-controls">"#);
-
-        // User deletion (requires token)
         html.push_str(&format!(
-            r#"<form class="delete-form" method="POST" action="/delete">
+            r#"<div class="post-controls">
+<form class="delete-form" method="POST" action="/delete">
 <input type="hidden" name="_csrf"    value="{csrf}">
 <input type="hidden" name="post_id"  value="{pid}">
 <input type="hidden" name="board"    value="{board}">
 <input type="text"   name="deletion_token" placeholder="del token" maxlength="64" size="12">
 <button type="submit" class="del-btn">del</button>
-</form>"#,
+</form>
+</div>"#,
             csrf  = escape_html(csrf_token),
             pid   = post.id,
             board = escape_html(board_short),
         ));
+    }
 
-        // Admin delete (no token needed)
-        if is_admin {
-            html.push_str(&format!(
-                r#" <form class="admin-action-form" method="POST" action="/admin/post/delete">
+    // Admin delete button — shown whenever admin is logged in, regardless of page
+    if is_admin {
+        html.push_str(&format!(
+            r#"<div class="post-controls admin-post-controls">
+<form method="POST" action="/admin/post/delete">
 <input type="hidden" name="_csrf"   value="{csrf}">
 <input type="hidden" name="post_id" value="{pid}">
 <input type="hidden" name="board"   value="{board}">
-<button type="submit" class="admin-del-btn" onclick="return confirm('Admin-delete post {pid}?')">[ admin del ]</button>
-</form>"#,
-                csrf  = escape_html(csrf_token),
-                pid   = post.id,
-                board = escape_html(board_short),
-            ));
-        }
-
-        html.push_str("</div>");
+<button type="submit" class="admin-del-btn"
+        onclick="return confirm('Admin delete post No.{pid}?')">&#x2715; admin del</button>
+</form>
+</div>"#,
+            csrf  = escape_html(csrf_token),
+            pid   = post.id,
+            board = escape_html(board_short),
+        ));
     }
 
     html.push_str("</div>\n");
