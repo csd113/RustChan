@@ -70,7 +70,7 @@ cd rustchan
 cargo build --release
 ```
 
-The binary is at `target/release/chan`. It is fully self-contained — copy it anywhere.
+The binary is at `target/release/rustchan`. It is fully self-contained — copy it anywhere.
 
 ### Cross-compile from x86-64 to ARM64 (Raspberry Pi)
 
@@ -90,13 +90,13 @@ sudo apt install gcc-aarch64-linux-gnu
 cargo build --release --target aarch64-unknown-linux-gnu
 
 # Binary at:
-target/aarch64-unknown-linux-gnu/release/chan
+target/aarch64-unknown-linux-gnu/release/rustchan
 ```
 
 Transfer the binary to your server:
 
 ```bash
-scp target/aarch64-unknown-linux-gnu/release/chan pi@raspberrypi.local:~/chan
+scp target/aarch64-unknown-linux-gnu/release/rustchan pi@raspberrypi.local:~/rustchan
 ```
 
 ---
@@ -114,10 +114,10 @@ sudo mkdir -p /var/lib/chan/chan-data/uploads/thumbs
 sudo chown -R chan:chan /var/lib/chan
 
 # Install the binary
-sudo install -o root -g root -m 0755 target/release/chan /usr/local/bin/chan
+sudo install -o root -g root -m 0755 target/release/rustchan /usr/local/bin/rustchan
 
 # Verify
-/usr/local/bin/chan --version
+/usr/local/bin/rustchan --version
 ```
 
 ### Static Assets
@@ -148,13 +148,13 @@ openssl rand -hex 32
 Copy the provided unit file and configure your secret:
 
 ```bash
-sudo cp deploy/chan.service /etc/systemd/system/chan.service
+sudo cp deploy/rustchan.service /etc/systemd/system/rustchan.service
 ```
 
 Create a drop-in override to supply the secret without editing the base unit file:
 
 ```bash
-sudo systemctl edit chan
+sudo systemctl edit rustchan
 ```
 
 Add the following (replace `<your-secret>` with the output of the `openssl` command above):
@@ -171,18 +171,18 @@ Reload and enable:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable chan
-sudo systemctl start chan
-sudo systemctl status chan
+sudo systemctl enable rustchan
+sudo systemctl start rustchan
+sudo systemctl status rustchan
 ```
 
 Follow logs:
 
 ```bash
-sudo journalctl -u chan -f
+sudo journalctl -u rustchan -f
 ```
 
-### Provided systemd Unit (deploy/chan.service)
+### Provided systemd Unit (deploy/rustchan.service)
 
 The included unit file sets:
 
@@ -214,7 +214,7 @@ max_video_size_mb = 50       # Raise for longer video uploads
 Restart after editing:
 
 ```bash
-sudo systemctl restart chan
+sudo systemctl restart rustchan
 ```
 
 ### Create the First Admin Account
@@ -222,7 +222,7 @@ sudo systemctl restart chan
 ```bash
 sudo -u chan \
     CHAN_DB=/var/lib/chan/chan-data/chan.db \
-    /usr/local/bin/chan admin create-admin admin "YourSecurePassword123!"
+    /usr/local/bin/rustchan admin create-admin admin "YourSecurePassword123!"
 ```
 
 Use a strong password. You can change it at any time:
@@ -230,7 +230,7 @@ Use a strong password. You can change it at any time:
 ```bash
 sudo -u chan \
     CHAN_DB=/var/lib/chan/chan-data/chan.db \
-    /usr/local/bin/chan admin reset-password admin "NewPassword456!"
+    /usr/local/bin/rustchan admin reset-password admin "NewPassword456!"
 ```
 
 ### Create Boards
@@ -238,17 +238,17 @@ sudo -u chan \
 ```bash
 # SFW boards
 sudo -u chan CHAN_DB=/var/lib/chan/chan-data/chan.db \
-    /usr/local/bin/chan admin create-board b    "Random"     "General discussion"
+    /usr/local/bin/rustchan admin create-board b    "Random"     "General discussion"
 
 sudo -u chan CHAN_DB=/var/lib/chan/chan-data/chan.db \
-    /usr/local/bin/chan admin create-board tech "Technology" "Programming and hardware"
+    /usr/local/bin/rustchan admin create-board tech "Technology" "Programming and hardware"
 
 sudo -u chan CHAN_DB=/var/lib/chan/chan-data/chan.db \
-    /usr/local/bin/chan admin create-board meta "Meta"       "About this site"
+    /usr/local/bin/rustchan admin create-board meta "Meta"       "About this site"
 
 # NSFW board (shown separately on the home page)
 sudo -u chan CHAN_DB=/var/lib/chan/chan-data/chan.db \
-    /usr/local/bin/chan admin create-board nsfw "NSFW"       "Adult content" --nsfw
+    /usr/local/bin/rustchan admin create-board nsfw "NSFW"       "Adult content" --nsfw
 ```
 
 Boards can also be created and managed in the web-based admin panel at `/admin/panel`.
@@ -262,9 +262,9 @@ For internet-facing deployments, put RustChan behind nginx with a TLS certificat
 ### Install nginx Config
 
 ```bash
-sudo cp deploy/nginx.conf /etc/nginx/sites-available/chan
-sudo nano /etc/nginx/sites-available/chan   # set your domain name
-sudo ln -sf /etc/nginx/sites-available/chan /etc/nginx/sites-enabled/chan
+sudo cp deploy/nginx.conf /etc/nginx/sites-available/rustchan
+sudo nano /etc/nginx/sites-available/rustchan   # set your domain name
+sudo ln -sf /etc/nginx/sites-available/rustchan /etc/nginx/sites-enabled/rustchan
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
@@ -304,7 +304,7 @@ sudo certbot renew --dry-run
 Tell RustChan to trust the `X-Forwarded-For` header from nginx:
 
 ```bash
-sudo systemctl edit chan
+sudo systemctl edit rustchan
 ```
 
 Add:
@@ -319,7 +319,7 @@ With `CHAN_BEHIND_PROXY=true`, RustChan also automatically sets `Secure=true` on
 Restart:
 
 ```bash
-sudo systemctl restart chan
+sudo systemctl restart rustchan
 ```
 
 ### Firewall
@@ -337,7 +337,7 @@ sudo ufw enable
 
 ## Configuration Reference
 
-All settings available as environment variables. Set them in the systemd override file (`sudo systemctl edit chan`) to avoid editing the base unit file.
+All settings available as environment variables. Set them in the systemd override file (`sudo systemctl edit rustchan`) to avoid editing the base unit file.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -357,7 +357,7 @@ All settings available as environment variables. Set them in the systemd overrid
 | `CHAN_SESSION_SECS` | `28800` | Admin session duration (default: 8 hours) |
 | `CHAN_BEHIND_PROXY` | `false` | Trust `X-Forwarded-For`; enables `Secure` cookies |
 | `CHAN_HTTPS_COOKIES` | *(same as `CHAN_BEHIND_PROXY`)* | Force `Secure` flag on cookies independently |
-| `RUST_LOG` | `chan=info` | Tracing log level. Use `chan=debug` for verbose output. |
+| `RUST_LOG` | `rustchan=info` | Tracing log level. Use `rustchan=debug` for verbose output. |
 
 ---
 
@@ -392,19 +392,19 @@ Then apply the ban via CLI or the admin panel Ban Management section:
 ```bash
 # Temporary ban (hours)
 sudo -u chan CHAN_DB=/var/lib/chan/chan-data/chan.db \
-    /usr/local/bin/chan admin ban <ip_hash> "Spam" 24
+    /usr/local/bin/rustchan admin ban <ip_hash> "Spam" 24
 
 # Permanent ban
 sudo -u chan CHAN_DB=/var/lib/chan/chan-data/chan.db \
-    /usr/local/bin/chan admin ban <ip_hash> "Repeated violations"
+    /usr/local/bin/rustchan admin ban <ip_hash> "Repeated violations"
 
 # List active bans
 sudo -u chan CHAN_DB=/var/lib/chan/chan-data/chan.db \
-    /usr/local/bin/chan admin list-bans
+    /usr/local/bin/rustchan admin list-bans
 
 # Remove a ban by ID
 sudo -u chan CHAN_DB=/var/lib/chan/chan-data/chan.db \
-    /usr/local/bin/chan admin unban <ban_id>
+    /usr/local/bin/rustchan admin unban <ban_id>
 ```
 
 ### Word Filters
@@ -421,11 +421,11 @@ The included `deploy/backup.sh` script performs a live SQLite hot backup using t
 
 ```bash
 # Install the script
-sudo cp deploy/backup.sh /usr/local/bin/chan-backup
-sudo chmod +x /usr/local/bin/chan-backup
+sudo cp deploy/backup.sh /usr/local/bin/rustchan-backup
+sudo chmod +x /usr/local/bin/rustchan-backup
 
 # Test it
-sudo -u chan /usr/local/bin/chan-backup
+sudo -u chan /usr/local/bin/rustchan-backup
 
 # Schedule daily at 03:00
 sudo crontab -e
@@ -434,7 +434,7 @@ sudo crontab -e
 Add the following line:
 
 ```
-0 3 * * * /usr/local/bin/chan-backup >> /var/log/chan-backup.log 2>&1
+0 3 * * * /usr/local/bin/rustchan-backup >> /var/log/rustchan-backup.log 2>&1
 ```
 
 By default the script writes backups to `/var/backup/chan/` and retains the last 7 daily backups. Edit the script to change the destination or retention period.
@@ -442,10 +442,10 @@ By default the script writes backups to `/var/backup/chan/` and retains the last
 ### Manual Backup
 
 ```bash
-sudo systemctl stop chan
+sudo systemctl stop rustchan
 sudo -u chan sqlite3 /var/lib/chan/chan-data/chan.db \
     ".backup /var/backup/chan/chan-manual.db"
-sudo systemctl start chan
+sudo systemctl start rustchan
 
 # Also back up uploads
 sudo tar czf /var/backup/chan/uploads-$(date +%F).tar.gz \
@@ -455,12 +455,12 @@ sudo tar czf /var/backup/chan/uploads-$(date +%F).tar.gz \
 ### Restore from Backup
 
 ```bash
-sudo systemctl stop chan
+sudo systemctl stop rustchan
 sudo cp /var/backup/chan/chan_YYYY-MM-DD.db \
         /var/lib/chan/chan-data/chan.db
 sudo chown chan:chan /var/lib/chan/chan-data/chan.db
-sudo systemctl start chan
-sudo journalctl -u chan -n 20   # verify clean startup
+sudo systemctl start rustchan
+sudo journalctl -u rustchan -n 20   # verify clean startup
 ```
 
 ---
@@ -484,9 +484,9 @@ sudo mkdir -p /mnt/chan-data/uploads/thumbs
 sudo chown -R chan:chan /mnt/chan-data
 
 # Copy existing data
-sudo systemctl stop chan
+sudo systemctl stop rustchan
 sudo rsync -av /var/lib/chan/chan-data/ /mnt/chan-data/
-sudo systemctl start chan   # verify with new paths first
+sudo systemctl start rustchan   # verify with new paths first
 
 # Persist the mount across reboots
 echo "UUID=$(blkid -s UUID -o value /dev/sda1) /mnt/chan-data ext4 defaults,noatime 0 2" \
@@ -496,7 +496,7 @@ echo "UUID=$(blkid -s UUID -o value /dev/sda1) /mnt/chan-data ext4 defaults,noat
 Update the systemd override to use the new paths:
 
 ```bash
-sudo systemctl edit chan
+sudo systemctl edit rustchan
 ```
 
 ```ini
@@ -518,7 +518,7 @@ Storage=volatile
 RuntimeMaxUse=50M
 ```
 
-This keeps journal logs in RAM (`/run/log/journal`) and discards them on reboot. Application logs from `chan` are still available with `journalctl -u chan` while the system is running. Restart journald:
+This keeps journal logs in RAM (`/run/log/journal`) and discards them on reboot. Application logs from `rustchan` are still available with `journalctl -u rustchan` while the system is running. Restart journald:
 
 ```bash
 sudo systemctl restart systemd-journald
@@ -549,7 +549,7 @@ Work through this list before exposing your instance to the internet.
 - [ ] Automated daily backups are scheduled and the restore procedure has been tested
 - [ ] Database is on USB storage (for Raspberry Pi deployments)
 - [ ] systemd unit hardening directives are active (`NoNewPrivileges`, `PrivateTmp`)
-- [ ] Log monitoring is in place: `sudo journalctl -u chan --since "1 hour ago"`
+- [ ] Log monitoring is in place: `sudo journalctl -u rustchan --since "1 hour ago"`
 
 ---
 
@@ -558,7 +558,7 @@ Work through this list before exposing your instance to the internet.
 ### Service fails to start
 
 ```bash
-sudo journalctl -u chan -n 50 --no-pager
+sudo journalctl -u rustchan -n 50 --no-pager
 ```
 
 Common causes:
@@ -576,7 +576,7 @@ ls -la /var/lib/chan/chan-data/uploads/
 
 sudo chown -R chan:chan /var/lib/chan/chan-data/uploads/
 
-# Check nginx client_max_body_size if uploads are rejected before reaching chan
+# Check nginx client_max_body_size if uploads are rejected before reaching rustchan
 sudo nginx -T | grep client_max_body_size
 ```
 
@@ -586,7 +586,7 @@ sudo nginx -T | grep client_max_body_size
 # Reset the password
 sudo -u chan \
     CHAN_DB=/var/lib/chan/chan-data/chan.db \
-    /usr/local/bin/chan admin reset-password admin "NewPassword123!"
+    /usr/local/bin/rustchan admin reset-password admin "NewPassword123!"
 ```
 
 ### Database integrity check
@@ -596,10 +596,10 @@ sqlite3 /var/lib/chan/chan-data/chan.db "PRAGMA integrity_check;"
 # Expected: "ok"
 
 # If corruption is suspected, restore from backup:
-sudo systemctl stop chan
+sudo systemctl stop rustchan
 cp /var/backup/chan/chan_LATEST.db /var/lib/chan/chan-data/chan.db
 sudo chown chan:chan /var/lib/chan/chan-data/chan.db
-sudo systemctl start chan
+sudo systemctl start rustchan
 ```
 
 ### High memory usage
@@ -635,18 +635,18 @@ git pull
 cargo build --release
 
 # 2. Stop the service
-sudo systemctl stop chan
+sudo systemctl stop rustchan
 
 # 3. Take a backup before upgrading
 sudo -u chan sqlite3 /var/lib/chan/chan-data/chan.db \
     ".backup /var/backup/chan/pre-upgrade-$(date +%F).db"
 
 # 4. Install the new binary
-sudo install -o root -g root -m 0755 target/release/chan /usr/local/bin/chan
+sudo install -o root -g root -m 0755 target/release/rustchan /usr/local/bin/rustchan
 
 # 5. Restart
-sudo systemctl start chan
-sudo journalctl -u chan -n 30   # verify clean startup
+sudo systemctl start rustchan
+sudo journalctl -u rustchan -n 30   # verify clean startup
 ```
 
 If the update includes static asset changes, also copy the new CSS:

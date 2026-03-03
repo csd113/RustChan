@@ -1,16 +1,16 @@
 // main.rs — Single-binary entry point.
 //
 // Run modes (via subcommands):
-//   chan                             → start the web server (default)
-//   chan admin create-admin  <u> <p> → create an admin user
-//   chan admin reset-password <u> <p>→ reset admin password
-//   chan admin list-admins           → list admins
-//   chan admin create-board  <s> <n> [desc] [--nsfw]
-//   chan admin delete-board  <short>
-//   chan admin list-boards
-//   chan admin ban    <ip_hash> <reason> [hours]
-//   chan admin unban  <ban_id>
-//   chan admin list-bans
+//   rustchan                             → start the web server (default)
+//   rustchan admin create-admin  <u> <p> → create an admin user
+//   rustchan admin reset-password <u> <p>→ reset admin password
+//   rustchan admin list-admins           → list admins
+//   rustchan admin create-board  <s> <n> [desc] [--nsfw]
+//   rustchan admin delete-board  <short>
+//   rustchan admin list-boards
+//   rustchan admin ban    <ip_hash> <reason> [hours]
+//   rustchan admin unban  <ban_id>
+//   rustchan admin list-bans
 //
 // Data lives in  <exe-dir>/chan-data/   (override with CHAN_DB / CHAN_UPLOADS)
 // Static CSS is compiled into the binary — no external files needed.
@@ -53,7 +53,7 @@ pub static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Parser)]
 #[command(
-    name  = "chan",
+    name  = "rustchan",
     about = "Self-contained imageboard server",
     long_about = "Chan Imageboard — single binary, zero dependencies.\n\
                   Data is stored in ./chan-data/ next to the binary.\n\
@@ -130,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
     fmt::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("chan=info,tower_http=warn")),
+                .unwrap_or_else(|_| EnvFilter::new("rustchan=info,tower_http=warn")),
         )
         .with_target(false)
         .compact()
@@ -316,9 +316,9 @@ fn first_run_check(pool: &db::DbPool) -> anyhow::Result<()> {
         println!("║  No boards or admin accounts found.              ║");
         println!("║  Create your first admin and boards:             ║");
         println!("║                                                  ║");
-        println!("║  chan admin create-admin admin mypassword        ║");
-        println!("║  chan admin create-board b Random \"Anything\"     ║");
-        println!("║  chan admin create-board tech Technology \"Dev\"   ║");
+        println!("║  rustchan admin create-admin admin mypassword    ║");
+        println!("║  rustchan admin create-board b Random \"Anything\" ║");
+        println!("║  rustchan admin create-board tech Technology \"Dev\"║");
         println!("╚══════════════════════════════════════════════════╝");
         println!();
     }
@@ -453,7 +453,7 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
         AdminAction::ListAdmins => {
             let rows = db::list_admins(&conn)?;
             if rows.is_empty() {
-                println!("No admins. Run: chan admin create-admin <user> <pass>");
+                println!("No admins. Run: rustchan admin create-admin <user> <pass>");
             } else {
                 println!("{:<6} {:<24} Created", "ID", "Username");
                 println!("{}", "-".repeat(45));
@@ -499,7 +499,7 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
         AdminAction::ListBoards => {
             let boards = db::get_all_boards(&conn)?;
             if boards.is_empty() {
-                println!("No boards. Run: chan admin create-board <short> <name>");
+                println!("No boards. Run: rustchan admin create-board <short> <name>");
             } else {
                 println!("{:<5} {:<12} {:<22} NSFW", "ID", "Short", "Name");
                 println!("{}", "-".repeat(50));

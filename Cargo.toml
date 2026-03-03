@@ -14,7 +14,7 @@ strip          = true
 panic          = "abort"
 
 [[bin]]
-name = "chan"
+name = "rustchan"
 path = "src/main.rs"
 
 [lib]

@@ -47,14 +47,14 @@ RustChan is a fully-featured imageboard compiled into a single Rust binary. Drop
 cargo build --release
 
 # 2. Create your first admin account
-./chan admin create-admin admin "YourPassword123!"
+./target/release/rustchan admin create-admin admin "YourPassword123!"
 
 # 3. Create some boards
-./chan admin create-board b    "Random"     "General discussion"
-./chan admin create-board tech "Technology" "Programming and hardware"
+./target/release/rustchan admin create-board b    "Random"     "General discussion"
+./target/release/rustchan admin create-board tech "Technology" "Programming and hardware"
 
 # 4. Run
-./chan
+./target/release/rustchan
 ```
 
 Open **http://localhost:8080** in your browser. The admin panel is at **/admin**.
@@ -68,7 +68,7 @@ On first launch, `chan-data/settings.toml` is generated next to the binary with 
 All persistent data is stored in `chan-data/` alongside the binary. No files are written elsewhere unless you override the paths via environment variables.
 
 ```
-chan                          ← single self-contained binary
+rustchan                       ← single self-contained binary
 chan-data/
 ├── settings.toml             ← instance configuration (auto-generated on first run)
 ├── chan.db                   ← SQLite database (WAL mode)
@@ -129,7 +129,7 @@ All settings can be overridden with environment variables. Environment variables
 | `CHAN_SESSION_SECS` | `28800` | Admin session duration in seconds (default: 8 hours) |
 | `CHAN_BEHIND_PROXY` | `false` | Set `true` when running behind nginx or Caddy to trust `X-Forwarded-For` |
 | `CHAN_HTTPS_COOKIES` | *(same as `CHAN_BEHIND_PROXY`)* | Set `true` to add `Secure` flag to cookies |
-| `RUST_LOG` | `chan=info` | Log verbosity (`chan=debug` for verbose output) |
+| `RUST_LOG` | `rustchan=info` | Log verbosity (`rustchan=debug` for verbose output) |
 
 ---
 
@@ -139,19 +139,19 @@ Board and account management is performed through the built-in CLI subcommand. N
 
 ```bash
 # Account management
-chan admin create-admin   <username> <password>
-chan admin reset-password <username> <new-password>
-chan admin list-admins
+rustchan admin create-admin   <username> <password>
+rustchan admin reset-password <username> <new-password>
+rustchan admin list-admins
 
 # Board management
-chan admin create-board <short> <name> [description] [--nsfw]
-chan admin delete-board <short>
-chan admin list-boards
+rustchan admin create-board <short> <name> [description] [--nsfw]
+rustchan admin delete-board <short>
+rustchan admin list-boards
 
 # Ban management
-chan admin ban       <ip_hash> "<reason>" [duration_hours]  # omit hours = permanent
-chan admin unban     <ban_id>
-chan admin list-bans
+rustchan admin ban       <ip_hash> "<reason>" [duration_hours]  # omit hours = permanent
+rustchan admin unban     <ban_id>
+rustchan admin list-bans
 ```
 
 `<short>` is the board slug used in URLs (e.g. `tech` → `/tech/`). Keep it lowercase, 1–8 characters.
@@ -227,7 +227,7 @@ src/
     └── tripcode.rs    — SHA-256 tripcode system
 
 deploy/
-├── chan.service       — systemd unit file
+├── rustchan.service   — systemd unit file
 ├── nginx.conf         — reverse proxy configuration
 └── backup.sh          — SQLite hot-backup script
 
@@ -243,7 +243,7 @@ static/
 
 ```bash
 cargo build --release
-# Binary: target/release/chan
+# Binary: target/release/rustchan
 ```
 
 ### Cross-compilation to ARM64 (Raspberry Pi 4/5)
@@ -252,7 +252,7 @@ cargo build --release
 rustup target add aarch64-unknown-linux-gnu
 cargo install cross   # uses Docker; handles the cross-linker automatically
 cross build --release --target aarch64-unknown-linux-gnu
-# Binary: target/aarch64-unknown-linux-gnu/release/chan
+# Binary: target/aarch64-unknown-linux-gnu/release/rustchan
 ```
 
 ### Strip and size
