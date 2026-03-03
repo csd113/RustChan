@@ -60,6 +60,7 @@ pub struct Post {
 
 /// Admin user record
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AdminUser {
     pub id: i64,
     pub username: String,
@@ -69,6 +70,7 @@ pub struct AdminUser {
 
 /// Active admin session
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AdminSession {
     pub id: String,
     pub admin_id: i64,
@@ -83,6 +85,7 @@ pub struct Ban {
     pub ip_hash: String,
     pub reason: Option<String>,
     pub expires_at: Option<i64>,
+    #[allow(dead_code)]
     pub created_at: i64,
 }
 
@@ -113,6 +116,7 @@ pub struct ThreadSummary {
 
 /// Form data for posting a new thread or reply (parsed from multipart)
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct PostForm {
     pub name: String,
     pub subject: String,
@@ -123,6 +127,7 @@ pub struct PostForm {
 
 /// Form data for deleting a post
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct DeleteForm {
     pub post_id: i64,
     pub deletion_token: String,
@@ -131,6 +136,7 @@ pub struct DeleteForm {
 
 /// Admin ban form
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct BanForm {
     pub ip_hash: String,
     pub reason: String,
@@ -139,6 +145,7 @@ pub struct BanForm {
 
 /// Admin login form
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct LoginForm {
     pub username: String,
     pub password: String,

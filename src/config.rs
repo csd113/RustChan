@@ -26,6 +26,7 @@ pub struct Config {
     pub upload_dir:            String,
     pub max_file_size:         usize,
     pub thumb_size:            u32,
+    #[allow(dead_code)]
     pub default_bump_limit:    u32,
     pub max_threads_per_board: u32,
     pub rate_limit_posts:      u32,

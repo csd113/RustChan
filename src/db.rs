@@ -202,6 +202,7 @@ pub fn create_board(
     Ok(conn.last_insert_rowid())
 }
 
+#[allow(dead_code)]
 pub fn update_board(
     conn: &rusqlite::Connection,
     id: i64,

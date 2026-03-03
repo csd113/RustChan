@@ -95,6 +95,75 @@ hr { border: none; border-top: 1px solid var(--border); margin: 0.6rem 0; }
   background: rgba(0,255,65,0.08);
 }
 
+/* ── Home button ──────────────────────────────────────────────────────────── */
+
+.home-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--green-bright) !important;
+  font-size: 1rem;
+  font-weight: bold;
+  font-family: var(--font);
+  letter-spacing: 0.06em;
+  padding: 3px 10px;
+  border: 1px solid var(--green-dim);
+  white-space: nowrap;
+  text-decoration: none;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.home-btn:hover {
+  border-color: var(--green-bright);
+  background: rgba(0,255,65,0.1);
+  box-shadow: 0 0 10px rgba(0,255,65,0.3);
+  color: var(--green-bright) !important;
+}
+
+/* ── Catalog bar (sticky, per-board) ─────────────────────────────────────── */
+
+.catalog-bar {
+  position: sticky;
+  top: 41px; /* height of site-header */
+  z-index: 90;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85rem;
+  font-family: var(--font);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+
+.catalog-bar-home {
+  color: var(--green-bright) !important;
+  font-weight: bold;
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+
+.catalog-bar-home:hover {
+  text-shadow: 0 0 8px var(--green-bright);
+}
+
+.catalog-bar-sep {
+  color: var(--text-dim);
+}
+
+.catalog-bar-link {
+  color: var(--green-pale);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+
+.catalog-bar-link:hover {
+  color: var(--green-bright);
+  text-shadow: 0 0 6px var(--green-bright);
+}
+
 /* ── Search form ──────────────────────────────────────────────────────────── */
 
 .search-form,

@@ -17,6 +17,7 @@ pub enum AppError {
     /// 403 — forbidden (banned, CSRF failure, etc.)
     Forbidden(String),
     /// 429 — rate limited
+    #[allow(dead_code)]
     RateLimited,
     /// 500 — internal error (database failure, IO error, etc.)
     Internal(anyhow::Error),

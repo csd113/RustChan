@@ -26,7 +26,6 @@ use axum::{
 use dashmap::DashMap;
 use hex;
 use once_cell::sync::Lazy;
-use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Global rate limit table: ip_hash → (request_count, window_start_secs)

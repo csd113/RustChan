@@ -26,7 +26,6 @@ use axum::{
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::info;
 use tracing_subscriber::{fmt, filter::EnvFilter};

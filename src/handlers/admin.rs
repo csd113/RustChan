@@ -20,7 +20,7 @@ use crate::{
     handlers::board::ensure_csrf,
     middleware::AppState,
     templates,
-    utils::crypto::{hash_ip, new_session_id, verify_password},
+    utils::crypto::{new_session_id, verify_password},
 };
 use axum::{
     extract::{Form, State},

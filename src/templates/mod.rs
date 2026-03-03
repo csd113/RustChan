@@ -32,7 +32,7 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
     let board_links: String = boards
         .iter()
         .map(|b| format!(
-            r#"[<a href="/{s}/">{s}</a>]"#,
+            r#"[<a href="/{s}/catalog">{s}</a>]"#,
             s = escape_html(&b.short_name)
         ))
         .collect::<Vec<_>>()
@@ -44,6 +44,21 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 <input type="text" name="q" placeholder="search /{b}/…" maxlength="64">
 <button type="submit">go</button>
 </form>"#,
+            b = escape_html(b)
+        )
+    } else {
+        String::new()
+    };
+
+    // Sticky catalog bar shown when browsing a specific board
+    let catalog_bar = if let Some(b) = board_short {
+        format!(
+            r#"<div class="catalog-bar">
+  <a class="catalog-bar-home" href="/">&#8962; Home</a>
+  <span class="catalog-bar-sep">|</span>
+  <a class="catalog-bar-link" href="/{b}/catalog">[ /{b}/ catalog ]</a>
+  <a class="catalog-bar-link" href="/{b}/">[ /{b}/ index ]</a>
+</div>"#,
             b = escape_html(b)
         )
     } else {
@@ -62,12 +77,14 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 </head>
 <body>
 <header class="site-header">
+  <a class="home-btn" href="/">&#8962; Home</a>
   <nav class="board-list">
     {board_links}
     [<a href="/admin">Admin</a>]
   </nav>
   <div class="header-search">{search_bar}</div>
 </header>
+{catalog_bar}
 <main>
 {body}
 </main>
@@ -77,11 +94,12 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 <input type="hidden" id="csrf_global" value="{csrf_token}">
 </body>
 </html>"#,
-        title      = escape_html(title),
+        title       = escape_html(title),
         board_links = board_links,
-        search_bar = search_bar,
-        body       = body,
-        csrf_token = escape_html(csrf_token),
+        search_bar  = search_bar,
+        catalog_bar = catalog_bar,
+        body        = body,
+        csrf_token  = escape_html(csrf_token),
     )
 }
 
@@ -234,11 +252,12 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
         op_id = t.op_id.unwrap_or(0),
     ));
 
-    if let (Some(file), Some(thumb)) = (&t.op_file, &t.op_thumb) {
+    if let (Some(_file), Some(thumb)) = (&t.op_file, &t.op_thumb) {
         html.push_str(&format!(
-            r#"<div class="file-container"><a href="/uploads/{f}" target="_blank"><img class="thumb" src="/uploads/{th}" loading="lazy" alt="image"></a></div>"#,
-            f  = escape_html(file),
-            th = escape_html(thumb),
+            r#"<div class="file-container"><a href="/{board}/thread/{tid}"><img class="thumb" src="/uploads/{th}" loading="lazy" alt="image"></a></div>"#,
+            board = escape_html(board_short),
+            tid   = t.id,
+            th    = escape_html(thumb),
         ));
     }
 
