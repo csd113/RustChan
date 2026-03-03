@@ -47,14 +47,14 @@ RustChan is a fully-featured imageboard compiled into a single Rust binary. Drop
 cargo build --release
 
 # 2. Create your first admin account
-./target/release/rustchan admin create-admin admin "YourPassword123!"
+./rustchan admin create-admin admin "YourPassword123!"
 
 # 3. Create some boards
-./target/release/rustchan admin create-board b    "Random"     "General discussion"
-./target/release/rustchan admin create-board tech "Technology" "Programming and hardware"
+./rustchan admin create-board b    "Random"     "General discussion"
+./rustchan admin create-board tech "Technology" "Programming and hardware"
 
 # 4. Run
-./target/release/rustchan
+./rustchan
 ```
 
 Open **http://localhost:8080** in your browser. The admin panel is at **/admin**.
@@ -139,19 +139,19 @@ Board and account management is performed through the built-in CLI subcommand. N
 
 ```bash
 # Account management
-rustchan admin create-admin   <username> <password>
-rustchan admin reset-password <username> <new-password>
-rustchan admin list-admins
+./rustchan admin create-admin   <username> <password>
+./rustchan admin reset-password <username> <new-password>
+./rustchan admin list-admins
 
 # Board management
-rustchan admin create-board <short> <name> [description] [--nsfw]
-rustchan admin delete-board <short>
-rustchan admin list-boards
+./rustchan admin create-board <short> <name> [description] [--nsfw]
+./rustchan admin delete-board <short>
+./rustchan admin list-boards
 
 # Ban management
-rustchan admin ban       <ip_hash> "<reason>" [duration_hours]  # omit hours = permanent
-rustchan admin unban     <ban_id>
-rustchan admin list-bans
+./rustchan admin ban       <ip_hash> "<reason>" [duration_hours]  # omit hours = permanent
+./rustchan admin unban     <ban_id>
+./rustchan admin list-bans
 ```
 
 `<short>` is the board slug used in URLs (e.g. `tech` → `/tech/`). Keep it lowercase, 1–8 characters.
