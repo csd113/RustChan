@@ -6,8 +6,59 @@
 // Security: every user-supplied string passes through escape_html() before
 // insertion.  Template literals are trusted Rust strings only.
 
+use crate::config::CONFIG;
 use crate::models::*;
 use crate::utils::{files::format_file_size, sanitize::escape_html};
+
+// ─── Shared JS injected once per page ────────────────────────────────────────
+
+const TOGGLE_SCRIPT: &str = r#"<script>
+function togglePostForm() {
+  var wrap = document.getElementById('post-form-wrap');
+  var btn  = document.querySelector('.post-toggle-btn');
+  if (!wrap) return;
+  var opening = wrap.style.display === 'none';
+  wrap.style.display = opening ? 'block' : 'none';
+  if (btn) btn.classList.toggle('active', opening);
+  if (opening) {
+    var first = wrap.querySelector('input[type="text"], textarea');
+    if (first) first.focus();
+  }
+}
+function appendReply(id) {
+  var wrap = document.getElementById('post-form-wrap');
+  if (wrap && wrap.style.display === 'none') togglePostForm();
+  var ta = document.getElementById('reply-body');
+  if (ta) { ta.value += '>>' + id + '\n'; ta.focus(); }
+  return false;
+}
+function expandMedia(preview) {
+  var container = preview.closest('.file-container');
+  var expanded  = container.querySelector('.media-expanded');
+  var closeBtn  = container.querySelector('.media-close-btn');
+  if (expanded.tagName === 'IMG' && expanded.dataset.src) {
+    expanded.src = expanded.dataset.src;
+  }
+  preview.style.display  = 'none';
+  expanded.style.display = 'block';
+  closeBtn.style.display = 'inline-flex';
+  if (expanded.tagName === 'VIDEO') {
+    expanded.play().catch(function(){});
+  }
+}
+function collapseMedia(btn) {
+  var container = btn.closest('.file-container');
+  var expanded  = container.querySelector('.media-expanded');
+  var preview   = container.querySelector('.media-preview');
+  if (expanded.tagName === 'VIDEO') {
+    expanded.pause();
+    expanded.currentTime = 0;
+  }
+  expanded.style.display = 'none';
+  preview.style.display  = 'block';
+  btn.style.display      = 'none';
+}
+</script>"#;
 use chrono::{TimeZone, Utc};
 
 // ─── Timestamp helpers ────────────────────────────────────────────────────────
@@ -54,9 +105,8 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
     let catalog_bar = if let Some(b) = board_short {
         format!(
             r#"<div class="catalog-bar">
-  <a class="catalog-bar-home" href="/">&#8962; Home</a>
-  <span class="catalog-bar-sep">|</span>
   <a class="catalog-bar-link" href="/{b}/catalog">[ /{b}/ catalog ]</a>
+  <span class="catalog-bar-sep">|</span>
   <a class="catalog-bar-link" href="/{b}/">[ /{b}/ index ]</a>
 </div>"#,
             b = escape_html(b)
@@ -89,7 +139,7 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 {body}
 </main>
 <footer class="site-footer">
-  <p>private imageboard &mdash; <a href="/">home</a></p>
+  <p>{forum_name} &mdash; <a href="/">home</a></p>
 </footer>
 <input type="hidden" id="csrf_global" value="{csrf_token}">
 </body>
@@ -98,6 +148,7 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
         board_links = board_links,
         search_bar  = search_bar,
         catalog_bar = catalog_bar,
+        forum_name  = escape_html(&CONFIG.forum_name),
         body        = body,
         csrf_token  = escape_html(csrf_token),
     )
@@ -148,14 +199,15 @@ pub fn index_page(board_stats: &[crate::models::BoardStats], csrf_token: &str) -
 
     let body = format!(
         r#"<div class="index-hero">
-<h1 class="index-title">[ IMAGEBOARD ]</h1>
+<h1 class="index-title">[ {name} ]</h1>
 <p class="index-subtitle">select board to proceed</p>
 </div>
 {sfw}{nsfw}{empty}"#,
+        name = escape_html(&CONFIG.forum_name),
         sfw = sfw_sec, nsfw = nsfw_sec, empty = empty,
     );
 
-    base_layout("Imageboard", None, &body, csrf_token, &all_boards)
+    base_layout(&CONFIG.forum_name, None, &body, csrf_token, &all_boards)
 }
 
 // ─── Board index ──────────────────────────────────────────────────────────────
@@ -185,8 +237,6 @@ pub fn board_page(
         ));
     }
 
-    body.push_str(&new_thread_form(&board.short_name, csrf_token));
-
     body.push_str(&format!(
         r#"<div class="board-header"><h1>/{short}/  — {name}</h1><p class="board-desc">{desc}</p></div>"#,
         short = escape_html(&board.short_name),
@@ -194,11 +244,23 @@ pub fn board_page(
         desc  = escape_html(&board.description),
     ));
 
+    body.push_str(&format!(
+        r#"<div class="post-toggle-bar centered">
+  <button class="post-toggle-btn" onclick="togglePostForm()">[ Start a New Thread ]</button>
+</div>
+<div class="post-form-wrap" id="post-form-wrap" style="display:none">
+  {}
+</div>"#,
+        new_thread_form(&board.short_name, csrf_token),
+    ));
+
     for summary in summaries {
         body.push_str(&render_thread_summary(summary, &board.short_name, csrf_token, is_admin));
     }
 
     body.push_str(&render_pagination(pagination, &format!("/{}/", board.short_name)));
+
+    body.push_str(TOGGLE_SCRIPT);
 
     base_layout(
         &format!("/{}/", board.short_name),
@@ -210,10 +272,11 @@ pub fn board_page(
 }
 
 fn new_thread_form(board_short: &str, csrf_token: &str) -> String {
+    let image_mb = crate::config::CONFIG.max_image_size / 1024 / 1024;
+    let video_mb = crate::config::CONFIG.max_video_size / 1024 / 1024;
     format!(
         r#"<div class="post-form-container">
-<details open>
-<summary>[ new thread ]</summary>
+<div class="post-form-title">[ new thread ]</div>
 <form class="post-form" method="POST" action="/{board}/" enctype="multipart/form-data">
   <input type="hidden" name="_csrf" value="{csrf}">
   <table>
@@ -226,15 +289,16 @@ fn new_thread_form(board_short: &str, csrf_token: &str) -> String {
         <td><textarea name="body" rows="5" maxlength="4096" required></textarea></td></tr>
     <tr><td>file</td>
         <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm">
-            <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp/mp4/webm · max 50 MiB</span></td></tr>
+            <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB</span></td></tr>
     <tr><td>del token</td>
         <td><input type="text" name="deletion_token" placeholder="password to delete" maxlength="64"></td></tr>
   </table>
 </form>
-</details>
 </div>"#,
-        board = escape_html(board_short),
-        csrf  = escape_html(csrf_token),
+        board     = escape_html(board_short),
+        csrf      = escape_html(csrf_token),
+        image_mb  = image_mb,
+        video_mb  = video_mb,
     )
 }
 
@@ -398,8 +462,18 @@ pub fn thread_page(
     }
 
     if !thread.locked {
-        body.push_str(&reply_form(&board.short_name, thread.id, csrf_token));
+        body.push_str(&format!(
+            r#"<div class="post-toggle-bar reply">
+  <button class="post-toggle-btn" onclick="togglePostForm()">[ Reply ]</button>
+</div>
+<div class="post-form-wrap" id="post-form-wrap" style="display:none">
+  {}
+</div>"#,
+            reply_form(&board.short_name, thread.id, csrf_token),
+        ));
     }
+
+    body.push_str(TOGGLE_SCRIPT);
 
     base_layout(
         &format!("/{}/  {}", board.short_name, thread.subject.as_deref().unwrap_or("thread")),
@@ -531,10 +605,11 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
 }
 
 fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str) -> String {
+    let image_mb = crate::config::CONFIG.max_image_size / 1024 / 1024;
+    let video_mb = crate::config::CONFIG.max_video_size / 1024 / 1024;
     format!(
         r#"<div class="post-form-container reply-form-container">
-<details open>
-<summary>[ reply to thread ]</summary>
+<div class="post-form-title">[ reply to thread ]</div>
 <form class="post-form" method="POST" action="/{board}/thread/{tid}" enctype="multipart/form-data">
   <input type="hidden" name="_csrf" value="{csrf}">
   <table>
@@ -545,49 +620,17 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str) -> String {
             <button type="submit">post reply</button></td></tr>
     <tr><td>file</td>
         <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm">
-            <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp/mp4/webm · max 50 MiB</span></td></tr>
+            <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB</span></td></tr>
     <tr><td>del token</td>
         <td><input type="text" name="deletion_token" placeholder="password to delete" maxlength="64"></td></tr>
   </table>
 </form>
-</details>
-</div>
-<script>
-function appendReply(id) {{
-  var ta = document.getElementById('reply-body');
-  if (ta) {{ ta.value += '>>' + id + '\n'; ta.focus(); }}
-  return false;
-}}
-function expandMedia(preview) {{
-  var container = preview.closest('.file-container');
-  var expanded  = container.querySelector('.media-expanded');
-  var closeBtn  = container.querySelector('.media-close-btn');
-  if (expanded.tagName === 'IMG' && expanded.dataset.src) {{
-    expanded.src = expanded.dataset.src;
-  }}
-  preview.style.display  = 'none';
-  expanded.style.display = 'block';
-  closeBtn.style.display = 'inline-flex';
-  if (expanded.tagName === 'VIDEO') {{
-    expanded.play().catch(function(){{}});
-  }}
-}}
-function collapseMedia(btn) {{
-  var container = btn.closest('.file-container');
-  var expanded  = container.querySelector('.media-expanded');
-  var preview   = container.querySelector('.media-preview');
-  if (expanded.tagName === 'VIDEO') {{
-    expanded.pause();
-    expanded.currentTime = 0;
-  }}
-  expanded.style.display = 'none';
-  preview.style.display  = 'block';
-  btn.style.display      = 'none';
-}}
-</script>"#,
-        board = escape_html(board_short),
-        tid   = thread_id,
-        csrf  = escape_html(csrf_token),
+</div>"#,
+        board    = escape_html(board_short),
+        tid      = thread_id,
+        csrf     = escape_html(csrf_token),
+        image_mb = image_mb,
+        video_mb = video_mb,
     )
 }
 
@@ -598,9 +641,21 @@ pub fn catalog_page(board: &Board, threads: &[Thread], csrf_token: &str, boards:
     let bn = escape_html(&board.name);
 
     let mut body = format!(
-        r#"<div class="board-header"><h1>/{bs}/  — {bn} — catalog</h1><a href="/{bs}/">[ return ]</a></div>
+        r#"<div class="board-header">
+  <h1>/{bs}/  — {bn} — catalog</h1>
+  <p class="board-desc">{desc}</p>
+</div>
+<div class="post-toggle-bar centered">
+  <button class="post-toggle-btn" onclick="togglePostForm()">[ Start a New Thread ]</button>
+</div>
+<div class="post-form-wrap" id="post-form-wrap" style="display:none">
+  {form}
+</div>
 <div class="catalog-grid">"#,
-        bs = bs, bn = bn,
+        bs   = bs,
+        bn   = bn,
+        desc = escape_html(&board.description),
+        form = new_thread_form(&board.short_name, csrf_token),
     );
 
     for t in threads {
@@ -633,6 +688,7 @@ pub fn catalog_page(board: &Board, threads: &[Thread], csrf_token: &str, boards:
     }
 
     body.push_str("</div>");
+    body.push_str(TOGGLE_SCRIPT);
     base_layout(
         &format!("/{}/  catalog", board.short_name),
         Some(&board.short_name),

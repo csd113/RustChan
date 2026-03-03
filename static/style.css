@@ -138,17 +138,6 @@ hr { border: none; border-top: 1px solid var(--border); margin: 0.6rem 0; }
   box-shadow: 0 2px 8px rgba(0,0,0,0.4);
 }
 
-.catalog-bar-home {
-  color: var(--green-bright) !important;
-  font-weight: bold;
-  font-size: 0.9rem;
-  text-decoration: none;
-}
-
-.catalog-bar-home:hover {
-  text-shadow: 0 0 8px var(--green-bright);
-}
-
 .catalog-bar-sep {
   color: var(--text-dim);
 }
@@ -222,7 +211,13 @@ button:hover,
 main {
   max-width: 960px;
   margin: 0 auto;
-  padding: 12px 10px;
+  padding: 16px 10px 12px;
+}
+
+/* When a catalog bar is present, push main content below both sticky bars */
+.catalog-bar + main,
+body:has(.catalog-bar) main {
+  padding-top: 16px;
 }
 
 .page-box {
@@ -251,6 +246,58 @@ main {
 
 .board-desc { color: var(--text-dim); font-size: 0.8rem; margin-top: 2px; }
 
+/* ── Post toggle button ───────────────────────────────────────────────────── */
+
+.post-toggle-bar {
+  margin-bottom: 12px;
+}
+
+.post-toggle-bar.centered {
+  text-align: center;
+  margin: 18px 0;
+}
+
+.post-toggle-btn {
+  background: transparent;
+  border: none;
+  color: #5b9bd5;
+  font-family: var(--font);
+  font-size: 1rem;
+  font-weight: bold;
+  letter-spacing: 0.04em;
+  padding: 4px 0;
+  cursor: pointer;
+  text-decoration: none;
+  transition: text-decoration 0.1s, color 0.15s;
+  box-shadow: none;
+  outline: none;
+}
+
+.post-toggle-bar.centered .post-toggle-btn {
+  font-size: 2rem;
+  letter-spacing: 0.06em;
+  padding: 8px 0;
+}
+
+.post-toggle-bar.reply .post-toggle-btn {
+  font-size: 2rem;
+  letter-spacing: 0.06em;
+  padding: 8px 0;
+}
+
+.post-toggle-btn:hover,
+.post-toggle-btn.active {
+  color: #7bb8f0;
+  text-decoration: underline;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.post-form-wrap {
+  margin-bottom: 14px;
+}
+
 /* ── Post form ────────────────────────────────────────────────────────────── */
 
 .post-form-container {
@@ -261,12 +308,11 @@ main {
   border-left: 3px solid var(--green-dim);
 }
 
-.post-form-container summary {
+.post-form-title {
   color: var(--green);
-  cursor: pointer;
   font-size: 0.88rem;
   letter-spacing: 0.06em;
-  padding: 2px 0;
+  padding: 2px 0 6px;
   user-select: none;
 }
 

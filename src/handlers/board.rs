@@ -146,7 +146,8 @@ pub async fn create_thread(
     let client_ip   = addr.ip().to_string();
     let upload_dir  = CONFIG.upload_dir.clone();
     let thumb_size  = CONFIG.thumb_size;
-    let max_size    = CONFIG.max_file_size;
+    let max_image_size = CONFIG.max_image_size;
+    let max_video_size = CONFIG.max_video_size;
     let cookie_secret = CONFIG.cookie_secret.clone();
     let max_threads = CONFIG.max_threads_per_board as i64;
     let file_data   = form.file;
@@ -182,7 +183,7 @@ pub async fn create_thread(
 
             let uploaded = if let Some((data, fname)) = file_data {
                 Some(
-                    save_upload(&data, &fname, &upload_dir, thumb_size, max_size)
+                    save_upload(&data, &fname, &upload_dir, thumb_size, max_image_size, max_video_size)
                         .map_err(|e| AppError::BadRequest(e.to_string()))?,
                 )
             } else {

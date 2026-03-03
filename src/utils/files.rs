@@ -82,23 +82,28 @@ pub fn save_upload(
     original_filename: &str,
     upload_dir:        &str,
     thumb_size:        u32,
-    max_size:          usize,
+    max_image_size:    usize,
+    max_video_size:    usize,
 ) -> Result<UploadedFile> {
-    if data.len() > max_size {
-        return Err(anyhow::anyhow!(
-            "File too large. Maximum size is {} MiB.",
-            max_size / 1024 / 1024
-        ));
-    }
     if data.is_empty() {
         return Err(anyhow::anyhow!("File is empty."));
     }
 
+    // Detect type first so we can apply the right limit.
     let mime_type = detect_mime_type(data)?;
+    let is_video  = mime_type.starts_with("video/");
+    let max_size  = if is_video { max_video_size } else { max_image_size };
+
+    if data.len() > max_size {
+        return Err(anyhow::anyhow!(
+            "File too large. Maximum {} size is {} MiB.",
+            if is_video { "video" } else { "image" },
+            max_size / 1024 / 1024
+        ));
+    }
 
     let file_id  = Uuid::new_v4().to_string().replace('-', "");
     let ext      = mime_to_ext(mime_type);
-    let is_video = mime_type.starts_with("video/");
     let filename = format!("{}.{}", file_id, ext);
 
     // Ensure directories exist

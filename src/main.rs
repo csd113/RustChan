@@ -39,7 +39,7 @@ mod models;
 mod templates;
 mod utils;
 
-use config::CONFIG;
+use config::{CONFIG, generate_settings_file_if_missing};
 use middleware::AppState;
 
 // ─── Embedded static assets ───────────────────────────────────────────────────
@@ -148,6 +148,18 @@ async fn main() -> anyhow::Result<()> {
 // ─── Server mode ─────────────────────────────────────────────────────────────
 
 async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
+    // Create chan-data/ first — settings.toml lives there
+    let early_data_dir = {
+        let exe = std::env::current_exe().ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        exe.join("chan-data")
+    };
+    std::fs::create_dir_all(&early_data_dir)?;
+
+    // Generate settings.toml on first run (must happen before CONFIG is accessed)
+    generate_settings_file_if_missing();
+
     // Ensure all data directories exist
     let data_dir = std::path::Path::new(&CONFIG.database_path)
         .parent()
@@ -257,8 +269,8 @@ fn build_router(state: AppState) -> Router {
         .route("/admin/filter/remove",   post(handlers::admin::remove_filter))
         // ── Rate limiting ──
         .layer(axum_middleware::from_fn(middleware::rate_limit_middleware))
-        // ── Body size limit (50 MiB — allows video uploads) ──
-        .layer(DefaultBodyLimit::max(52_428_800))
+        // ── Body size limit — set to max video size ──
+        .layer(DefaultBodyLimit::max(CONFIG.max_video_size))
         // ── Request counter ──
         .layer(axum_middleware::from_fn(count_requests))
         .with_state(state)
@@ -360,11 +372,14 @@ fn walkdir_size(path: &std::path::Path) -> u64 {
 
 fn print_banner() {
     println!("┌─────────────────────────────────────────────────────┐");
-    println!("│           Chan Imageboard  v{}                    │", env!("CARGO_PKG_VERSION"));
+    println!("│           {} v{}                    │", CONFIG.forum_name, env!("CARGO_PKG_VERSION"));
     println!("├─────────────────────────────────────────────────────┤");
     println!("│  Bind    {}                              │", &CONFIG.bind_addr);
     println!("│  DB      {}  │", &CONFIG.database_path);
     println!("│  Uploads {}  │", &CONFIG.upload_dir);
+    println!("│  Images  {} MiB max  │  Videos  {} MiB max  │",
+        CONFIG.max_image_size / 1024 / 1024,
+        CONFIG.max_video_size / 1024 / 1024);
     println!("└─────────────────────────────────────────────────────┘");
 }
 
