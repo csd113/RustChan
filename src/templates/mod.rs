@@ -423,7 +423,7 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
     }
 
     for post in &summary.preview_posts {
-        html.push_str(&render_post(post, board_short, csrf_token, false, is_admin));
+        html.push_str(&render_post(post, board_short, csrf_token, false, is_admin, false));
     }
 
     html.push_str("<hr class=\"thread-sep\">");
@@ -500,7 +500,7 @@ pub fn thread_page(
     body.push_str(locked_notice);
 
     for post in posts {
-        body.push_str(&render_post(post, &board.short_name, csrf_token, true, is_admin));
+        body.push_str(&render_post(post, &board.short_name, csrf_token, true, is_admin, true));
     }
 
     if !thread.locked {
@@ -526,7 +526,7 @@ pub fn thread_page(
     )
 }
 
-pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete: bool, is_admin: bool) -> String {
+pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete: bool, is_admin: bool, show_media: bool) -> String {
     let tripcode_html = post.tripcode.as_ref()
         .map(|t| format!(r#"<span class="tripcode">!{}</span>"#, escape_html(t)))
         .unwrap_or_default();
@@ -555,6 +555,7 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
     }
 
     // Image / Video
+    if show_media {
     if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
         let size_str = post.file_size.map(format_file_size).unwrap_or_default();
         let name_str = post.file_name.as_deref().unwrap_or("file");
@@ -602,6 +603,7 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
             ));
         }
     }
+    } // end show_media
 
     // Post body (pre-rendered, sanitised HTML)
     html.push_str(&format!(r#"<div class="post-body">{}</div>"#, post.body_html));
@@ -768,7 +770,7 @@ pub fn search_page(
     } else {
         body.push_str(&format!(r#"<p style="color:var(--text-dim);font-size:0.8rem;margin-top:6px">{} result(s)</p>"#, pagination.total));
         for post in posts {
-            body.push_str(&render_post(post, &board.short_name, csrf_token, false, false));
+            body.push_str(&render_post(post, &board.short_name, csrf_token, false, false, true));
         }
         body.push_str(&render_pagination(
             pagination,
@@ -916,7 +918,7 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
 
 <section class="admin-section">
 <h2>// boards</h2>
-<div class="board-cards">{board_cards}</div>
+<div class="admin-board-cards">{board_cards}</div>
 <h3>create board</h3>
 <form method="POST" action="/admin/board/create">
 <input type="hidden" name="_csrf" value="{csrf}">

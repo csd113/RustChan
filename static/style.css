@@ -4,6 +4,7 @@
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 :root {
+  color-scheme: dark;
   --bg:          #050505;
   --bg-panel:    #0d0d0d;
   --bg-post:     #0a0f0a;
@@ -160,6 +161,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: 0.6rem 0; }
 
 .search-form input,
 .header-search input {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
   background: var(--bg-input);
   border: 1px solid var(--border);
   color: var(--green);
@@ -179,6 +183,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: 0.6rem 0; }
 button,
 .btn,
 input[type="submit"] {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
   background: transparent;
   border: 1px solid var(--green-dim);
   color: var(--green);
@@ -280,9 +287,9 @@ body:has(.catalog-bar) main {
 }
 
 .post-toggle-bar.reply .post-toggle-btn {
-  font-size: 2rem;
-  letter-spacing: 0.06em;
-  padding: 8px 0;
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  padding: 3px 10px;
 }
 
 .post-toggle-btn:hover,
@@ -317,7 +324,7 @@ body:has(.catalog-bar) main {
 }
 
 .post-form-container summary::marker,
-.post-form-container summary::-webkit-details-marker { color: var(--green-dim); }
+.post-form-container summary::-webkit-details-marker { color: var(--green-dim); display: none; }
 
 .post-form table { border-collapse: collapse; width: 100%; }
 .post-form td { padding: 3px 6px; vertical-align: top; }
@@ -332,6 +339,9 @@ body:has(.catalog-bar) main {
 .post-form input[type="text"],
 .post-form textarea,
 .post-form input[type="file"] {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
   background: var(--bg-input);
   border: 1px solid var(--border);
   color: var(--green-pale);
@@ -375,6 +385,7 @@ body:has(.catalog-bar) main {
   border: 1px solid var(--border);
   border-left: 3px solid var(--green-dim);
   padding: 8px 10px;
+  display: flow-root; /* contain floated file-container children */
 }
 
 .reply {
@@ -383,6 +394,7 @@ body:has(.catalog-bar) main {
   padding: 6px 10px;
   margin-left: 28px;
   margin-top: 4px;
+  display: flow-root; /* contain floated file-container children */
 }
 
 .reply:hover { border-color: var(--border-glow); }
@@ -935,7 +947,7 @@ body:has(.catalog-bar) main {
 
 /* ── Board settings cards (admin panel) ───────────────────────────────────── */
 
-.board-cards {
+.admin-board-cards {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -962,6 +974,7 @@ body:has(.catalog-bar) main {
 }
 
 .board-settings-card > summary::-webkit-details-marker { display: none; }
+.board-settings-card > summary::marker { display: none; }
 .board-settings-card > summary::before {
   content: '▶';
   font-size: 0.65rem;
