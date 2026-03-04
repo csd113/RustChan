@@ -15,7 +15,7 @@
 [![SQLite](https://img.shields.io/badge/database-SQLite-blue?style=flat-square&logo=sqlite)](https://www.sqlite.org/)
 [![Axum](https://img.shields.io/badge/framework-Axum%200.7-purple?style=flat-square)](https://github.com/tokio-rs/axum)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.3-brightgreen?style=flat-square)](#changelog)
+[![Version](https://img.shields.io/badge/version-1.0.4-brightgreen?style=flat-square)](#changelog)
 
 </div>
 
