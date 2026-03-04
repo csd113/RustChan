@@ -2,6 +2,21 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.0.3] - 2026-03-03
+
+### Changed
+- **Binary renamed** from `rustchan` to `rustchan-cli` to avoid filesystem conflicts with the `RustChan/` source directory on case-insensitive filesystems (macOS).
+
+### Added
+- **Dynamic upload progress bar** — while a file upload is in progress, a live spinner and pulsing bar are shown in the terminal stats output (e.g. `⠹ UPLOAD  [██████░░░░]  2 file(s) uploading`).
+- **Requests per second counter** — the stats line now includes a live req/s figure computed over the interval since the last tick (e.g. `4.5 req/s`).
+- **Board-specific stats** — below the main stats line, per-board thread and post counts are shown (e.g. `/b/  threads:12 posts:89  │  /tech/  threads:5 posts:22`).
+- **New-event highlighting** — when the stats tick detects newly created threads or posts since the last check, those counts are printed in bold yellow with a `(+N)` delta indicator.
+- **Active connections / users online** — the stats output now shows the count of unique client IPs active within the last 5 minutes and lists up to 5 of them (e.g. `users online: 3  │  IPs: 192.168.1.2, 192.168.1.5`).
+- **Keyboard-driven admin console** — an interactive prompt is available while the server is running. Commands: `[s]` show stats, `[l]` list boards, `[c]` create board, `[d]` delete thread, `[u]` clear thumbnail cache, `[h]` help, `[q]` quit hint.
+
+---
+
 ## [1.0.2] - 2026-03-03
 
 ### Changed

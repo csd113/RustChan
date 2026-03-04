@@ -15,7 +15,7 @@
 [![SQLite](https://img.shields.io/badge/database-SQLite-blue?style=flat-square&logo=sqlite)](https://www.sqlite.org/)
 [![Axum](https://img.shields.io/badge/framework-Axum%200.7-purple?style=flat-square)](https://github.com/tokio-rs/axum)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.2-brightgreen?style=flat-square)](#changelog)
+[![Version](https://img.shields.io/badge/version-1.0.3-brightgreen?style=flat-square)](#changelog)
 
 </div>
 
@@ -47,29 +47,29 @@ RustChan is a fully-featured imageboard compiled into a single Rust binary. Drop
 cargo build --release
 
 # 2. Create your first admin account
-./rustchan admin create-admin admin "YourPassword123!"
+./rustchan-cli admin create-admin admin "YourPassword123!"
 
 # 3. Create some boards
-./rustchan admin create-board b    "Random"     "General discussion"
-./rustchan admin create-board tech "Technology" "Programming and hardware"
+./rustchan-cli admin create-board b    "Random"     "General discussion"
+./rustchan-cli admin create-board tech "Technology" "Programming and hardware"
 
 # 4. Run
-./rustchan
+./rustchan-cli
 ```
 
 Open **http://localhost:8080** in your browser. The admin panel is at **/admin**.
 
-On first launch, `chan-data/settings.toml` is generated next to the binary with all configurable values and comments. Edit it and restart to apply changes.
+On first launch, `rustchan-data/settings.toml` is generated next to the binary with all configurable values and comments. Edit it and restart to apply changes.
 
 ---
 
 ## Data Layout
 
-All persistent data is stored in `chan-data/` alongside the binary. No files are written elsewhere unless you override the paths via environment variables.
+All persistent data is stored in `rustchan-data/` alongside the binary. No files are written elsewhere unless you override the paths via environment variables.
 
 ```
-rustchan                       ← single self-contained binary
-chan-data/
+rustchan-cli                       ← single self-contained binary
+rustchan-data/
 ├── settings.toml             ← instance configuration (auto-generated on first run)
 ├── chan.db                   ← SQLite database (WAL mode)
 └── uploads/
@@ -116,8 +116,8 @@ All settings can be overridden with environment variables. Environment variables
 | `CHAN_FORUM_NAME` | `RustChan` | Site display name |
 | `CHAN_PORT` | `8080` | TCP port (used only if `CHAN_BIND` is not set) |
 | `CHAN_BIND` | `0.0.0.0:8080` | Full bind address (overrides `CHAN_PORT`) |
-| `CHAN_DB` | `<exe-dir>/chan-data/chan.db` | Path to the SQLite database file |
-| `CHAN_UPLOADS` | `<exe-dir>/chan-data/uploads` | Path to the uploads directory |
+| `CHAN_DB` | `<exe-dir>/rustchan-data/chan.db` | Path to the SQLite database file |
+| `CHAN_UPLOADS` | `<exe-dir>/rustchan-data/boards` | Path to the uploads directory |
 | `CHAN_COOKIE_SECRET` | *(from settings.toml)* | **Set this in production.** Used for CSRF tokens and IP hashing. |
 | `CHAN_MAX_IMAGE_MB` | `8` | Maximum image upload size in MiB |
 | `CHAN_MAX_VIDEO_MB` | `50` | Maximum video upload size in MiB |
@@ -129,7 +129,7 @@ All settings can be overridden with environment variables. Environment variables
 | `CHAN_SESSION_SECS` | `28800` | Admin session duration in seconds (default: 8 hours) |
 | `CHAN_BEHIND_PROXY` | `false` | Set `true` when running behind nginx or Caddy to trust `X-Forwarded-For` |
 | `CHAN_HTTPS_COOKIES` | *(same as `CHAN_BEHIND_PROXY`)* | Set `true` to add `Secure` flag to cookies |
-| `RUST_LOG` | `rustchan=info` | Log verbosity (`rustchan=debug` for verbose output) |
+| `RUST_LOG` | `rustchan-cli=info` | Log verbosity (`rustchan-cli=debug` for verbose output) |
 
 ---
 
@@ -139,19 +139,19 @@ Board and account management is performed through the built-in CLI subcommand. N
 
 ```bash
 # Account management
-./rustchan admin create-admin   <username> <password>
-./rustchan admin reset-password <username> <new-password>
-./rustchan admin list-admins
+./rustchan-cli admin create-admin   <username> <password>
+./rustchan-cli admin reset-password <username> <new-password>
+./rustchan-cli admin list-admins
 
 # Board management
-./rustchan admin create-board <short> <name> [description] [--nsfw]
-./rustchan admin delete-board <short>
-./rustchan admin list-boards
+./rustchan-cli admin create-board <short> <name> [description] [--nsfw]
+./rustchan-cli admin delete-board <short>
+./rustchan-cli admin list-boards
 
 # Ban management
-./rustchan admin ban       <ip_hash> "<reason>" [duration_hours]  # omit hours = permanent
-./rustchan admin unban     <ban_id>
-./rustchan admin list-bans
+./rustchan-cli admin ban       <ip_hash> "<reason>" [duration_hours]  # omit hours = permanent
+./rustchan-cli admin unban     <ban_id>
+./rustchan-cli admin list-bans
 ```
 
 `<short>` is the board slug used in URLs (e.g. `tech` → `/tech/`). Keep it lowercase, 1–8 characters.
@@ -227,7 +227,7 @@ src/
     └── tripcode.rs    — SHA-256 tripcode system
 
 deploy/
-├── rustchan.service   — systemd unit file
+├── rustchan-cli.service — systemd unit file
 ├── nginx.conf         — reverse proxy configuration
 └── backup.sh          — SQLite hot-backup script
 
@@ -243,7 +243,7 @@ static/
 
 ```bash
 cargo build --release
-# Binary: target/release/rustchan
+# Binary: target/release/rustchan-cli
 ```
 
 ### Cross-compilation to ARM64 (Raspberry Pi 4/5)
@@ -252,7 +252,7 @@ cargo build --release
 rustup target add aarch64-unknown-linux-gnu
 cargo install cross   # uses Docker; handles the cross-linker automatically
 cross build --release --target aarch64-unknown-linux-gnu
-# Binary: target/aarch64-unknown-linux-gnu/release/rustchan
+# Binary: target/aarch64-unknown-linux-gnu/release/rustchan-cli
 ```
 
 ### Strip and size

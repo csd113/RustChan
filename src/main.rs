@@ -1,22 +1,22 @@
 // main.rs — Single-binary entry point.
 //
 // Run modes (via subcommands):
-//   rustchan                             → start the web server (default)
-//   rustchan admin create-admin  <u> <p> → create an admin user
-//   rustchan admin reset-password <u> <p>→ reset admin password
-//   rustchan admin list-admins           → list admins
-//   rustchan admin create-board  <s> <n> [desc] [--nsfw]
-//   rustchan admin delete-board  <short>
-//   rustchan admin list-boards
-//   rustchan admin ban    <ip_hash> <reason> [hours]
-//   rustchan admin unban  <ban_id>
-//   rustchan admin list-bans
+//   rustchan-cli                               → start the web server (default)
+//   rustchan-cli admin create-admin  <u> <p>   → create an admin user
+//   rustchan-cli admin reset-password <u> <p>  → reset admin password
+//   rustchan-cli admin list-admins             → list admins
+//   rustchan-cli admin create-board  <s> <n> [desc] [--nsfw]
+//   rustchan-cli admin delete-board  <short>
+//   rustchan-cli admin list-boards
+//   rustchan-cli admin ban    <ip_hash> <reason> [hours]
+//   rustchan-cli admin unban  <ban_id>
+//   rustchan-cli admin list-bans
 //
-// Data lives in  <exe-dir>/chan-data/   (override with CHAN_DB / CHAN_UPLOADS)
+// Data lives in  <exe-dir>/rustchan-data/   (override with CHAN_DB / CHAN_UPLOADS)
 // Static CSS is compiled into the binary — no external files needed.
 
 use axum::{
-    extract::DefaultBodyLimit,
+    extract::{ConnectInfo, DefaultBodyLimit},
     http::{header, StatusCode},
     middleware as axum_middleware,
     response::IntoResponse,
@@ -24,8 +24,10 @@ use axum::{
     Router,
 };
 use clap::{Parser, Subcommand};
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::info;
 use tracing_subscriber::{fmt, filter::EnvFilter};
@@ -43,20 +45,28 @@ use config::{CONFIG, generate_settings_file_if_missing};
 use middleware::AppState;
 
 // ─── Embedded static assets ───────────────────────────────────────────────────
-// The CSS is compiled into the binary at build time — zero external files.
 static STYLE_CSS: &str = include_str!("../static/style.css");
 
-// ─── Global request counter (for terminal stats) ──────────────────────────────
+// ─── Global terminal state ─────────────────────────────────────────────────────
+/// Total HTTP requests handled since startup.
 pub static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Requests currently being processed (in-flight).
+static IN_FLIGHT: AtomicI64 = AtomicI64::new(0);
+/// Multipart file uploads currently in progress.
+static ACTIVE_UPLOADS: AtomicI64 = AtomicI64::new(0);
+/// Monotonic tick used to animate the upload spinner.
+static SPINNER_TICK: AtomicU64 = AtomicU64::new(0);
+/// Recently active client IPs (last ~5 min); maps IP-string → last-seen Instant.
+static ACTIVE_IPS: Lazy<DashMap<String, Instant>> = Lazy::new(DashMap::new);
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(
-    name  = "rustchan",
+    name  = "rustchan-cli",
     about = "Self-contained imageboard server",
-    long_about = "Chan Imageboard — single binary, zero dependencies.\n\
-                  Data is stored in ./chan-data/ next to the binary.\n\
+    long_about = "RustChan Imageboard — single binary, zero dependencies.\n\
+                  Data is stored in ./rustchan-data/ next to the binary.\n\
                   Run without arguments to start the server."
 )]
 struct Cli {
@@ -66,15 +76,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Start the web server (default when no subcommand given)
     Serve {
-        /// Override the port to listen on (e.g. --port 3000). Falls back to
-        /// CHAN_BIND env var, then default 8080.
         #[arg(long, short = 'p')]
         port: Option<u16>,
     },
-
-    /// Administration commands
     Admin {
         #[command(subcommand)]
         action: AdminAction,
@@ -83,16 +88,9 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AdminAction {
-    /// Create a new admin user
     CreateAdmin { username: String, password: String },
-
-    /// Reset an existing admin's password
     ResetPassword { username: String, new_password: String },
-
-    /// List all admin accounts
     ListAdmins,
-
-    /// Create a board (e.g. tech "Technology" "Programming talk")
     CreateBoard {
         short: String,
         name: String,
@@ -101,24 +99,14 @@ enum AdminAction {
         #[arg(long)]
         nsfw: bool,
     },
-
-    /// Delete a board and all its content (asks for confirmation)
     DeleteBoard { short: String },
-
-    /// List all boards
     ListBoards,
-
-    /// Ban an IP hash (find it in the DB). Omit hours for permanent.
     Ban {
         ip_hash: String,
         reason: String,
         hours: Option<i64>,
     },
-
-    /// Lift a ban by its ID (see list-bans)
     Unban { ban_id: i64 },
-
-    /// Show all active bans
     ListBans,
 }
 
@@ -126,7 +114,6 @@ enum AdminAction {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Logging: compact stdout format; override with RUST_LOG env var
     fmt::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -140,40 +127,34 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         None | Some(Command::Serve { port: None }) => run_server(None).await,
-        Some(Command::Serve { port }) => run_server(port).await,
-        Some(Command::Admin { action }) => run_admin(action),
+        Some(Command::Serve { port })              => run_server(port).await,
+        Some(Command::Admin { action })            => run_admin(action),
     }
 }
 
 // ─── Server mode ─────────────────────────────────────────────────────────────
 
 async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
-    // Create chan-data/ first — settings.toml lives there
     let early_data_dir = {
         let exe = std::env::current_exe().ok()
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        exe.join("chan-data")
+        exe.join("rustchan-data")
     };
     std::fs::create_dir_all(&early_data_dir)?;
 
-    // Generate settings.toml on first run (must happen before CONFIG is accessed)
     generate_settings_file_if_missing();
 
-    // Ensure all data directories exist
     let data_dir = std::path::Path::new(&CONFIG.database_path)
         .parent()
         .unwrap_or(std::path::Path::new("."));
 
     std::fs::create_dir_all(data_dir)?;
     std::fs::create_dir_all(&CONFIG.upload_dir)?;
-    std::fs::create_dir_all(format!("{}/thumbs", CONFIG.upload_dir))?;
 
     print_banner();
 
-    // Resolve the effective bind address — CLI --port wins over CHAN_BIND
     let bind_addr: String = if let Some(p) = port_override {
-        // Replace just the port component while keeping the host
         let host = CONFIG.bind_addr.split(':').next().unwrap_or("0.0.0.0");
         format!("{}:{}", host, p)
     } else {
@@ -204,25 +185,26 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         });
     }
 
-    // Background: print stats to terminal every 60 s
-    {
-        let bg = pool.clone();
-        tokio::spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_secs(60));
-            iv.tick().await; // skip the immediate first tick
-            loop {
-                iv.tick().await;
-                print_stats(&bg, start_time);
-            }
-        });
-    }
+
+
+    // Background: prune stale IPs from ACTIVE_IPS every 5 min
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            iv.tick().await;
+            let cutoff = Instant::now() - Duration::from_secs(300);
+            ACTIVE_IPS.retain(|_, last_seen| *last_seen > cutoff);
+        }
+    });
 
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     info!("Listening on  http://{}", bind_addr);
     info!("Admin panel   http://{}/admin", bind_addr);
     info!("Data dir      {}", data_dir.display());
-    println!(); // breathing room after startup block
+    println!();
+
+    spawn_keyboard_handler(pool, start_time);
 
     axum::serve(
         listener,
@@ -237,23 +219,16 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
 
 fn build_router(state: AppState) -> Router {
     Router::new()
-        // ── Embedded CSS ──
         .route("/static/style.css", get(serve_css))
-        // ── Home ──
         .route("/", get(handlers::board::index))
-        // ── Board ──
         .route("/:board/",        get(handlers::board::board_index))
         .route("/:board/",        post(handlers::board::create_thread))
         .route("/:board/catalog", get(handlers::board::catalog))
         .route("/:board/search",  get(handlers::board::search))
-        // ── Thread ──
         .route("/:board/thread/:id", get(handlers::thread::view_thread))
         .route("/:board/thread/:id", post(handlers::thread::post_reply))
-        // ── User deletion ──
         .route("/delete", post(handlers::board::delete_post))
-        // ── Uploads (served from chan-data/uploads/) ──
-        .nest_service("/uploads", tower_http::services::ServeDir::new(&CONFIG.upload_dir))
-        // ── Admin ──
+        .nest_service("/boards", tower_http::services::ServeDir::new(&CONFIG.upload_dir))
         .route("/admin",                 get(handlers::admin::admin_index))
         .route("/admin/login",           post(handlers::admin::admin_login))
         .route("/admin/logout",          post(handlers::admin::admin_logout))
@@ -268,16 +243,12 @@ fn build_router(state: AppState) -> Router {
         .route("/admin/ban/remove",      post(handlers::admin::remove_ban))
         .route("/admin/filter/add",      post(handlers::admin::add_filter))
         .route("/admin/filter/remove",   post(handlers::admin::remove_filter))
-        // ── Rate limiting ──
         .layer(axum_middleware::from_fn(middleware::rate_limit_middleware))
-        // ── Body size limit — set to max video size ──
         .layer(DefaultBodyLimit::max(CONFIG.max_video_size))
-        // ── Request counter ──
-        .layer(axum_middleware::from_fn(count_requests))
+        .layer(axum_middleware::from_fn(track_requests))
         .with_state(state)
 }
 
-/// Serve the embedded stylesheet — no external file needed.
 async fn serve_css() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -287,13 +258,40 @@ async fn serve_css() -> impl IntoResponse {
     )
 }
 
-/// Increment the global request counter on every request.
-async fn count_requests(
+// ─── Request tracking middleware ──────────────────────────────────────────────
+
+async fn track_requests(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    next.run(req).await
+    IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+
+    // Record the client IP for the "users online" display
+    if let Some(ci) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        ACTIVE_IPS.insert(ci.0.ip().to_string(), Instant::now());
+    }
+
+    // Detect file uploads by Content-Type
+    let is_upload = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("multipart/form-data"))
+        .unwrap_or(false);
+
+    if is_upload {
+        ACTIVE_UPLOADS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let resp = next.run(req).await;
+
+    IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    if is_upload {
+        ACTIVE_UPLOADS.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    resp
 }
 
 // ─── First-run check ─────────────────────────────────────────────────────────
@@ -303,61 +301,157 @@ fn first_run_check(pool: &db::DbPool) -> anyhow::Result<()> {
     let board_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM boards", [], |r| r.get(0)
     ).unwrap_or(0);
-
     let admin_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM admin_users", [], |r| r.get(0)
     ).unwrap_or(0);
 
     if board_count == 0 && admin_count == 0 {
         println!();
-        println!("╔══════════════════════════════════════════════════╗");
-        println!("║           FIRST RUN — SETUP REQUIRED             ║");
-        println!("╠══════════════════════════════════════════════════╣");
-        println!("║  No boards or admin accounts found.              ║");
-        println!("║  Create your first admin and boards:             ║");
-        println!("║                                                  ║");
-        println!("║  rustchan admin create-admin admin mypassword    ║");
-        println!("║  rustchan admin create-board b Random \"Anything\" ║");
-        println!("║  rustchan admin create-board tech Technology \"Dev\"║");
-        println!("╚══════════════════════════════════════════════════╝");
+        println!("╔══════════════════════════════════════════════════════╗");
+        println!("║           FIRST RUN — SETUP REQUIRED                 ║");
+        println!("╠══════════════════════════════════════════════════════╣");
+        println!("║  No boards or admin accounts found.                  ║");
+        println!("║  Create your first admin and boards:                 ║");
+        println!("║                                                      ║");
+        println!("║  rustchan-cli admin create-admin admin mypassword    ║");
+        println!("║  rustchan-cli admin create-board b Random \"Anything\" ║");
+        println!("║  rustchan-cli admin create-board tech Technology     ║");
+        println!("╚══════════════════════════════════════════════════════╝");
         println!();
     }
-
     Ok(())
 }
 
 // ─── Terminal stats ───────────────────────────────────────────────────────────
 
-fn print_stats(pool: &db::DbPool, start: Instant) {
+struct TermStats {
+    prev_req_count:    u64,
+    prev_post_count:   i64,
+    prev_thread_count: i64,
+    last_tick:         Instant,
+}
+
+fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
+    // Uptime
     let uptime = start.elapsed();
     let h = uptime.as_secs() / 3600;
     let m = (uptime.as_secs() % 3600) / 60;
-    let reqs = REQUEST_COUNT.load(Ordering::Relaxed);
 
-    let (boards, threads, posts, db_kb) = if let Ok(conn) = pool.get() {
-        let b: i64  = conn.query_row("SELECT COUNT(*) FROM boards",  [], |r| r.get(0)).unwrap_or(0);
+    // req/s — delta since last tick
+    let now          = Instant::now();
+    let elapsed_secs = now.duration_since(ts.last_tick).as_secs_f64().max(0.001);
+    ts.last_tick     = now;
+    let curr_reqs    = REQUEST_COUNT.load(Ordering::Relaxed);
+    let req_delta    = curr_reqs.saturating_sub(ts.prev_req_count);
+    let rps          = req_delta as f64 / elapsed_secs;
+    ts.prev_req_count = curr_reqs;
+
+    // DB query
+    let (boards, threads, posts, db_kb, board_stats) = if let Ok(conn) = pool.get() {
+        let b:  i64 = conn.query_row("SELECT COUNT(*) FROM boards",  [], |r| r.get(0)).unwrap_or(0);
         let th: i64 = conn.query_row("SELECT COUNT(*) FROM threads", [], |r| r.get(0)).unwrap_or(0);
-        let p: i64  = conn.query_row("SELECT COUNT(*) FROM posts",   [], |r| r.get(0)).unwrap_or(0);
+        let p:  i64 = conn.query_row("SELECT COUNT(*) FROM posts",   [], |r| r.get(0)).unwrap_or(0);
         let kb: i64 = {
-            let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap_or(0);
-            let page_size: i64  = conn.query_row("PRAGMA page_size",  [], |r| r.get(0)).unwrap_or(4096);
-            page_count * page_size / 1024
+            let pc: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap_or(0);
+            let ps: i64 = conn.query_row("PRAGMA page_size",  [], |r| r.get(0)).unwrap_or(4096);
+            pc * ps / 1024
         };
-        (b, th, p, kb)
+        let bs = get_per_board_stats(&conn);
+        (b, th, p, kb, bs)
     } else {
-        (0, 0, 0, 0)
+        (0, 0, 0, 0, vec![])
     };
 
     let upload_mb = dir_size_mb(&CONFIG.upload_dir);
 
+    // New-event flash: bold+yellow when counts increased since last tick
+    let new_threads = (threads - ts.prev_thread_count).max(0);
+    let new_posts   = (posts   - ts.prev_post_count).max(0);
+    let thread_str  = if new_threads > 0 {
+        format!("\x1b[1;33mthreads {} (+{})\x1b[0m", threads, new_threads)
+    } else {
+        format!("threads {}", threads)
+    };
+    let post_str = if new_posts > 0 {
+        format!("\x1b[1;33mposts {} (+{})\x1b[0m", posts, new_posts)
+    } else {
+        format!("posts {}", posts)
+    };
+    ts.prev_thread_count = threads;
+    ts.prev_post_count   = posts;
+
+    // Active connections / users online
+    let in_flight    = IN_FLIGHT.load(Ordering::Relaxed).max(0) as u64;
+    let online_count = ACTIVE_IPS.len();
+    let ip_list: String = {
+        let mut ips: Vec<String> = ACTIVE_IPS.iter().map(|e| e.key().clone()).collect();
+        ips.sort();
+        ips.truncate(5);
+        if ips.is_empty() { "none".into() } else { ips.join(", ") }
+    };
+
+    // Upload progress bar — shown only while uploads are active
+    let active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed).max(0) as u64;
+    if active_uploads > 0 {
+        let tick     = SPINNER_TICK.load(Ordering::Relaxed);
+        let spinners = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+        let spin     = spinners[(tick as usize) % spinners.len()];
+        let fill     = ((tick % 20) as usize).min(10);
+        let bar      = format!("{}{}", "█".repeat(fill), "░".repeat(10 - fill));
+        println!("  \x1b[36m{} UPLOAD  [{}]  {} file(s) uploading\x1b[0m", spin, bar, active_uploads);
+    }
+
+    // Main stats line
     println!(
-        "── STATS  uptime {h}h{m:02}m  │  requests {reqs}  │  boards {boards}  threads {threads}  posts {posts}  │  db {db_kb} KiB  uploads {upload_mb:.1} MiB ──"
+        "── STATS  uptime {h}h{m:02}m  │  requests {}  │  \x1b[32m{:.1} req/s\x1b[0m  │  in-flight {}  │  boards {}  {}  {}  │  db {} KiB  uploads {:.1} MiB ──",
+        curr_reqs, rps, in_flight, boards, thread_str, post_str, db_kb, upload_mb
     );
+
+    // Users online line
+    println!("   users online: {}  │  IPs: {}", online_count, ip_list);
+
+    // Per-board breakdown
+    if !board_stats.is_empty() {
+        let segments: Vec<String> = board_stats.iter()
+            .map(|(short, t, p)| format!("/{}/  threads:{} posts:{}", short, t, p))
+            .collect();
+        let mut line     = String::from("   ");
+        let mut line_len = 0usize;
+        for seg in &segments {
+            if line_len > 0 && line_len + seg.len() + 5 > 110 {
+                println!("{}", line);
+                line     = String::from("   ");
+                line_len = 0;
+            }
+            if line_len > 0 { line.push_str("  │  "); line_len += 5; }
+            line.push_str(seg);
+            line_len += seg.len();
+        }
+        if line_len > 0 { println!("{}", line); }
+    }
+}
+
+fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64)> {
+    let mut stmt = match conn.prepare(
+        "SELECT b.short_name, \
+                (SELECT COUNT(*) FROM threads WHERE board_id = b.id) AS tc, \
+                (SELECT COUNT(*) FROM posts p \
+                   JOIN threads t ON p.thread_id = t.id \
+                  WHERE t.board_id = b.id) AS pc \
+         FROM boards b ORDER BY b.short_name"
+    ) {
+        Ok(s)  => s,
+        Err(_) => return vec![],
+    };
+    stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+    })
+    .map(|rows| rows.flatten().collect())
+    .unwrap_or_default()
 }
 
 fn dir_size_mb(path: &str) -> f64 {
-    let bytes = walkdir_size(std::path::Path::new(path));
-    bytes as f64 / (1024.0 * 1024.0)
+    walkdir_size(std::path::Path::new(path)) as f64 / (1024.0 * 1024.0)
 }
 
 fn walkdir_size(path: &std::path::Path) -> u64 {
@@ -384,13 +478,163 @@ fn print_banner() {
     println!("└─────────────────────────────────────────────────────┘");
 }
 
+// ─── Keyboard-driven admin console ───────────────────────────────────────────
+
+fn spawn_keyboard_handler(pool: db::DbPool, start_time: Instant) {
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+
+        // Small delay so startup messages settle first
+        std::thread::sleep(Duration::from_millis(600));
+        print_keyboard_help();
+
+        let stdin  = std::io::stdin();
+        let handle = stdin.lock();
+        let mut reader = BufReader::new(handle);
+
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0)  => break, // EOF — stdin closed (daemon mode)
+                Ok(_)  => {}
+                Err(_) => break,
+            }
+            let cmd = line.trim().to_lowercase();
+            match cmd.as_str() {
+                "s" => {
+                    // Snapshot stats without advancing the background state
+                    let mut snap = TermStats {
+                        prev_req_count:    0,
+                        prev_post_count:   0,
+                        prev_thread_count: 0,
+                        last_tick:         start_time,
+                    };
+                    print_stats(&pool, start_time, &mut snap);
+                }
+                "l" => kb_list_boards(&pool),
+                "c" => kb_create_board(&pool, &mut reader),
+                "d" => kb_delete_thread(&pool, &mut reader),
+                "h" => print_keyboard_help(),
+                "q" => println!("  \x1b[33m[!]\x1b[0m Use Ctrl+C or SIGTERM to stop the server."),
+                ""  => {}
+                other => println!("  Unknown command '{}'. Press [h] for help.", other),
+            }
+            let _ = std::io::stdout().flush();
+        }
+    });
+}
+
+fn print_keyboard_help() {
+    println!();
+    println!("  \x1b[36m╔══ Admin Console ════════════════════════════════╗\x1b[0m");
+    println!("  \x1b[36m║\x1b[0m  [s] show stats now    [l] list boards          \x1b[36m║\x1b[0m");
+    println!("  \x1b[36m║\x1b[0m  [c] create board      [d] delete thread         \x1b[36m║\x1b[0m");
+    println!("  \x1b[36m║\x1b[0m  [h] help              [q] quit hint             \x1b[36m║\x1b[0m");
+    println!("  \x1b[36m╚═════════════════════════════════════════════════╝\x1b[0m");
+    println!();
+}
+
+fn kb_list_boards(pool: &db::DbPool) {
+    let Ok(conn) = pool.get() else {
+        println!("  \x1b[31m[err]\x1b[0m Could not get DB connection.");
+        return;
+    };
+    let boards = match db::get_all_boards(&conn) {
+        Ok(b)  => b,
+        Err(e) => { println!("  \x1b[31m[err]\x1b[0m {}", e); return; }
+    };
+    if boards.is_empty() {
+        println!("  No boards found.");
+        return;
+    }
+    println!("  {:<5} {:<12} {:<24} NSFW", "ID", "Short", "Name");
+    println!("  {}", "─".repeat(48));
+    for b in &boards {
+        println!("  {:<5} /{:<11} {:<24} {}",
+            b.id, format!("{}/", b.short_name), b.name,
+            if b.nsfw { "yes" } else { "no" });
+    }
+    println!();
+}
+
+fn kb_create_board(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
+    use std::io::Write;
+    let mut prompt = |msg: &str| -> String {
+        print!("  \x1b[36m{}\x1b[0m ", msg);
+        let _ = std::io::stdout().flush();
+        let mut s = String::new();
+        let _ = reader.read_line(&mut s);
+        s.trim().to_string()
+    };
+
+    let short = prompt("Short name (e.g. 'tech'):");
+    if short.is_empty() { println!("  Aborted."); return; }
+    let name  = prompt("Display name:");
+    if name.is_empty()  { println!("  Aborted."); return; }
+    let desc     = prompt("Description (blank = none):");
+    let nsfw_raw = prompt("NSFW board? [y/N]:");
+    let nsfw     = matches!(nsfw_raw.to_lowercase().as_str(), "y" | "yes");
+
+    let short_lc = short.to_lowercase();
+    if !short_lc.chars().all(|c| c.is_ascii_alphanumeric()) || short_lc.is_empty() || short_lc.len() > 8 {
+        println!("  \x1b[31m[err]\x1b[0m Short name must be 1-8 alphanumeric characters.");
+        return;
+    }
+
+    let Ok(conn) = pool.get() else {
+        println!("  \x1b[31m[err]\x1b[0m Could not get DB connection."); return;
+    };
+    match db::create_board(&conn, &short_lc, &name, &desc, nsfw) {
+        Ok(id) => println!("  \x1b[32m✓\x1b[0m Board /{}/  — {}{}  created (id={}).",
+                           short_lc, name, if nsfw { " [NSFW]" } else { "" }, id),
+        Err(e) => println!("  \x1b[31m[err]\x1b[0m {}", e),
+    }
+    println!();
+}
+
+fn kb_delete_thread(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
+    use std::io::Write;
+
+    print!("  \x1b[36mThread ID to delete:\x1b[0m ");
+    let _ = std::io::stdout().flush();
+    let mut s = String::new();
+    let _ = reader.read_line(&mut s);
+    let thread_id: i64 = match s.trim().parse() {
+        Ok(n)  => n,
+        Err(_) => { println!("  \x1b[31m[err]\x1b[0m '{}' is not a valid thread ID.", s.trim()); return; }
+    };
+
+    let Ok(conn) = pool.get() else {
+        println!("  \x1b[31m[err]\x1b[0m Could not get DB connection."); return;
+    };
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM threads WHERE id = ?1", [thread_id], |r| r.get(0)
+    ).unwrap_or(0);
+    if exists == 0 {
+        println!("  \x1b[31m[err]\x1b[0m Thread {} not found.", thread_id);
+        return;
+    }
+
+    print!("  \x1b[33mDelete thread {} and all its posts? [y/N]:\x1b[0m ", thread_id);
+    let _ = std::io::stdout().flush();
+    let mut confirm = String::new();
+    let _ = reader.read_line(&mut confirm);
+    if !matches!(confirm.trim().to_lowercase().as_str(), "y" | "yes") {
+        println!("  Aborted.");
+        return;
+    }
+
+    match conn.execute("DELETE FROM threads WHERE id = ?1", [thread_id]) {
+        Ok(_)  => println!("  \x1b[32m✓\x1b[0m Thread {} deleted.", thread_id),
+        Err(e) => println!("  \x1b[31m[err]\x1b[0m {}", e),
+    }
+    println!();
+}
+
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 
 async fn shutdown_signal() {
     use tokio::signal;
-    // FIX[MEDIUM-5]: Replaced .expect() with graceful error handling.
-    // A panic in the shutdown handler would crash the server without
-    // completing in-flight requests. We log the error and continue instead.
     let ctrl_c = async {
         if let Err(e) = signal::ctrl_c().await {
             tracing::error!("Failed to listen for Ctrl+C: {}", e);
@@ -402,7 +646,6 @@ async fn shutdown_signal() {
             Ok(mut sig) => { sig.recv().await; }
             Err(e) => {
                 tracing::error!("Failed to register SIGTERM handler: {}", e);
-                // If we can't register SIGTERM, wait forever (Ctrl+C still works)
                 std::future::pending::<()>().await;
             }
         }
@@ -421,7 +664,6 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
     use crate::{db, utils::crypto};
     use chrono::TimeZone;
 
-    // Ensure the data directory exists before opening the DB
     let db_path = std::path::Path::new(&CONFIG.database_path);
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -431,15 +673,12 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
     let conn = pool.get()?;
 
     match action {
-        // ── create-admin ───────────────────────────────────────────────────
         AdminAction::CreateAdmin { username, password } => {
             validate_password(&password)?;
             let hash = crypto::hash_password(&password)?;
             let id = db::create_admin(&conn, &username, &hash)?;
             println!("✓ Admin '{}' created (id={}).", username, id);
         }
-
-        // ── reset-password ─────────────────────────────────────────────────
         AdminAction::ResetPassword { username, new_password } => {
             validate_password(&new_password)?;
             db::get_admin_by_username(&conn, &username)?
@@ -448,12 +687,10 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             db::update_admin_password(&conn, &username, &hash)?;
             println!("✓ Password updated for '{}'.", username);
         }
-
-        // ── list-admins ────────────────────────────────────────────────────
         AdminAction::ListAdmins => {
             let rows = db::list_admins(&conn)?;
             if rows.is_empty() {
-                println!("No admins. Run: rustchan admin create-admin <user> <pass>");
+                println!("No admins. Run: rustchan-cli admin create-admin <user> <pass>");
             } else {
                 println!("{:<6} {:<24} Created", "ID", "Username");
                 println!("{}", "-".repeat(45));
@@ -466,8 +703,6 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 }
             }
         }
-
-        // ── create-board ───────────────────────────────────────────────────
         AdminAction::CreateBoard { short, name, description, nsfw } => {
             let short = short.to_lowercase();
             if !short.chars().all(|c| c.is_ascii_alphanumeric()) || short.is_empty() || short.len() > 8 {
@@ -477,8 +712,6 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             let nsfw_str = if nsfw { " [NSFW]" } else { "" };
             println!("✓ Board /{short}/ — {name}{nsfw_str} created (id={id}).");
         }
-
-        // ── delete-board ───────────────────────────────────────────────────
         AdminAction::DeleteBoard { short } => {
             let board = db::get_board_by_short(&conn, &short)?
                 .ok_or_else(|| anyhow::anyhow!("Board /{short}/ not found."))?;
@@ -487,32 +720,24 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             std::io::stdout().flush()?;
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
-            if input.trim() != "yes" {
-                println!("Aborted.");
-                return Ok(());
-            }
+            if input.trim() != "yes" { println!("Aborted."); return Ok(()); }
             db::delete_board(&conn, board.id)?;
             println!("✓ Board /{short}/ deleted.");
         }
-
-        // ── list-boards ────────────────────────────────────────────────────
         AdminAction::ListBoards => {
             let boards = db::get_all_boards(&conn)?;
             if boards.is_empty() {
-                println!("No boards. Run: rustchan admin create-board <short> <name>");
+                println!("No boards. Run: rustchan-cli admin create-board <short> <n>");
             } else {
                 println!("{:<5} {:<12} {:<22} NSFW", "ID", "Short", "Name");
                 println!("{}", "-".repeat(50));
                 for b in &boards {
                     println!("{:<5} /{:<11} {:<22} {}",
                         b.id, format!("{}/", b.short_name), b.name,
-                        if b.nsfw { "yes" } else { "no" }
-                    );
+                        if b.nsfw { "yes" } else { "no" });
                 }
             }
         }
-
-        // ── ban ────────────────────────────────────────────────────────────
         AdminAction::Ban { ip_hash, reason, hours } => {
             let expires = hours.filter(|&h| h > 0)
                 .map(|h| chrono::Utc::now().timestamp() + h * 3600);
@@ -523,14 +748,10 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 .unwrap_or_else(|| "permanent".to_string());
             println!("✓ Ban #{id} added (expires: {exp_str}).");
         }
-
-        // ── unban ──────────────────────────────────────────────────────────
         AdminAction::Unban { ban_id } => {
             db::remove_ban(&conn, ban_id)?;
             println!("✓ Ban #{ban_id} lifted.");
         }
-
-        // ── list-bans ──────────────────────────────────────────────────────
         AdminAction::ListBans => {
             let bans = db::list_bans(&conn)?;
             if bans.is_empty() {
@@ -550,13 +771,10 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             }
         }
     }
-
     Ok(())
 }
 
 fn validate_password(p: &str) -> anyhow::Result<()> {
-    if p.len() < 8 {
-        anyhow::bail!("Password must be at least 8 characters.");
-    }
+    if p.len() < 8 { anyhow::bail!("Password must be at least 8 characters."); }
     Ok(())
 }

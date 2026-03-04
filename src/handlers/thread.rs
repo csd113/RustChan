@@ -164,7 +164,7 @@ pub async fn post_reply(
                         file_size:     data.len() as i64,
                     })
                 } else {
-                    let f = save_upload(&data, &fname, &upload_dir, thumb_size, max_image_size, max_video_size)
+                    let f = save_upload(&data, &fname, &upload_dir, &board.short_name, thumb_size, max_image_size, max_video_size)
                         .map_err(|e| AppError::BadRequest(e.to_string()))?;
                     db::record_file_hash(&conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
                     Some(f)

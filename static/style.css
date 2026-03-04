@@ -495,6 +495,12 @@ body:has(.catalog-bar) main {
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
+/* Reply preview images on the board index — smaller so they don't break layout */
+.reply .thumb {
+  max-width: 80px;
+  max-height: 80px;
+}
+
 .thumb:hover {
   border-color: var(--border-glow);
   box-shadow: 0 0 10px rgba(0,200,64,0.3);

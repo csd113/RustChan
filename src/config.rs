@@ -2,7 +2,7 @@
 //
 // Priority (highest → lowest):
 //   1. Environment variables  (CHAN_BIND, CHAN_DB, …)
-//   2. settings.toml          (<exe-dir>/chan-data/settings.toml)
+//   2. settings.toml          (<exe-dir>/rustchan-data/settings.toml)
 //   3. Hard-coded defaults
 //
 // On first run, settings.toml is generated next to the binary with all
@@ -38,10 +38,10 @@ fn binary_dir() -> PathBuf {
 }
 
 fn settings_file_path() -> PathBuf {
-    // Store settings.toml in chan-data/ alongside the database.
-    // chan-data/ is created by run_server before CONFIG is first accessed,
+    // Store settings.toml in rustrustchan-data/ alongside the database.
+    // rustrustchan-data/ is created by run_server before CONFIG is first accessed,
     // so this directory always exists by the time settings are read.
-    let data_dir = binary_dir().join("chan-data");
+    let data_dir = binary_dir().join("rustchan-data");
     data_dir.join("settings.toml")
 }
 
@@ -155,10 +155,10 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         let s        = load_settings_file();
-        let data_dir = binary_dir().join("chan-data");
+        let data_dir = binary_dir().join("rustchan-data");
 
         let default_db      = data_dir.join("chan.db").to_string_lossy().into_owned();
-        let default_uploads = data_dir.join("uploads").to_string_lossy().into_owned();
+        let default_uploads = data_dir.join("boards").to_string_lossy().into_owned();
 
         let forum_name   = env_str("CHAN_FORUM_NAME",  s.forum_name.as_deref().unwrap_or("RustChan"));
         let port         = env_u16("CHAN_PORT",         s.port.unwrap_or(8080));

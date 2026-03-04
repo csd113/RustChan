@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 # FIX[LOW-1]: Removed hardware-specific description. This binary is portable
 # and targets any architecture/OS that Rust supports.
@@ -14,7 +14,7 @@ strip          = true
 panic          = "abort"
 
 [[bin]]
-name = "rustchan"
+name = "rustchan-cli"
 path = "src/main.rs"
 
 [lib]

@@ -5,7 +5,7 @@
 //   2. Validate MIME type against allowlist (BOTH content-type header AND magic bytes)
 //   3. Validate file size
 //   4. Generate random filename (UUID-based, prevents path traversal)
-//   5. Write to upload directory
+//   5. Write to boards directory
 //   6. Generate thumbnail
 //      • Images  → scaled with the `image` crate
 //      • Videos  → first-frame JPEG via ffmpeg (falls back to SVG if unavailable)
@@ -36,9 +36,9 @@ const ALLOWED_MIME_TYPES: &[(&str, &[u8])] = &[
 const MAGIC_BYTES_LEN: usize = 12;
 
 pub struct UploadedFile {
-    /// Path on disk relative to upload_dir (e.g. "abc123.webm")
+    /// Path on disk relative to the boards root (e.g. "b/abc123.webm")
     pub file_path:     String,
-    /// Thumbnail path relative to upload_dir (e.g. "thumbs/abc123.jpg")
+    /// Thumbnail path relative to the boards root (e.g. "b/thumbs/abc123.jpg")
     pub thumb_path:    String,
     /// Original user-supplied filename, sanitised, for display only
     pub original_name: String,
@@ -78,10 +78,14 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
 /// Save an uploaded file to disk and generate its thumbnail.
+/// Files are stored under `{boards_dir}/{board_short}/` and thumbnails
+/// under `{boards_dir}/{board_short}/thumbs/`.
+/// The returned paths are relative to `boards_dir` (e.g. `"b/abc123.webm"`).
 pub fn save_upload(
     data:              &[u8],
     original_filename: &str,
-    upload_dir:        &str,
+    boards_dir:        &str,
+    board_short:       &str,
     thumb_size:        u32,
     max_image_size:    usize,
     max_video_size:    usize,
@@ -112,19 +116,25 @@ pub fn save_upload(
     let ext      = mime_to_ext(mime_type);
     let filename = format!("{}.{}", file_id, ext);
 
-    // Ensure directories exist
-    let thumbs_dir = PathBuf::from(upload_dir).join("thumbs");
+    // Ensure per-board directories exist: boards_dir/{board_short}/ and thumbs/
+    let board_dir  = PathBuf::from(boards_dir).join(board_short);
+    let thumbs_dir = board_dir.join("thumbs");
     std::fs::create_dir_all(&thumbs_dir)
-        .context("Failed to create thumbs directory")?;
+        .context("Failed to create board thumbs directory")?;
 
-    // Write original file
-    let file_path = PathBuf::from(upload_dir).join(&filename);
-    std::fs::write(&file_path, data)
+    // Write original file into the board's directory
+    let file_path_abs = board_dir.join(&filename);
+    std::fs::write(&file_path_abs, data)
         .context("Failed to write uploaded file")?;
 
-    // Generate thumbnail — returns (relative_name, absolute_path)
-    let (thumb_filename, _thumb_abs) = if is_video {
-        generate_video_thumb(data, upload_dir, &file_id, thumb_size)
+    // Paths relative to boards_dir (e.g. "b/abc123.webm", "b/thumbs/abc123.jpg")
+    let rel_file  = format!("{}/{}", board_short, filename);
+    let board_dir_str = board_dir.to_string_lossy().into_owned();
+
+    // Generate thumbnail — returns relative-to-boards_dir path
+    let thumb_rel = if is_video {
+        let (name, _) = generate_video_thumb(data, &board_dir_str, board_short, &file_id, thumb_size);
+        name
     } else {
         let thumb_ext = match mime_type {
             "image/png"  => "png",
@@ -132,16 +142,16 @@ pub fn save_upload(
             "image/webp" => "webp",
             _            => "jpg",
         };
-        let name = format!("thumbs/{}.{}", file_id, thumb_ext);
-        let path = PathBuf::from(upload_dir).join(&name);
-        generate_image_thumb(data, mime_type, &path, thumb_size)
+        let thumb_rel_name = format!("{}/thumbs/{}.{}", board_short, file_id, thumb_ext);
+        let thumb_abs      = PathBuf::from(boards_dir).join(&thumb_rel_name);
+        generate_image_thumb(data, mime_type, &thumb_abs, thumb_size)
             .context("Failed to generate image thumbnail")?;
-        (name, path)
+        thumb_rel_name
     };
 
     Ok(UploadedFile {
-        file_path:     filename,
-        thumb_path:    thumb_filename,
+        file_path:     rel_file,
+        thumb_path:    thumb_rel,
         original_name: crate::utils::sanitize::sanitize_filename(original_filename),
         mime_type:     mime_type.to_string(),
         file_size,
@@ -151,21 +161,22 @@ pub fn save_upload(
 // ─── Video thumbnail ──────────────────────────────────────────────────────────
 
 /// Try ffmpeg first-frame extraction; fall back to SVG placeholder on failure.
-/// Returns (relative_thumb_name, absolute_path).
+/// Returns (boards_dir-relative thumb path, absolute path).
 fn generate_video_thumb(
-    video_data: &[u8],
-    upload_dir: &str,
-    file_id:    &str,
-    thumb_size: u32,
+    video_data:  &[u8],
+    board_dir:   &str,
+    board_short: &str,
+    file_id:     &str,
+    thumb_size:  u32,
 ) -> (String, PathBuf) {
     // Attempt real first-frame thumbnail via ffmpeg
-    let jpg_name = format!("thumbs/{}.jpg", file_id);
-    let jpg_path = PathBuf::from(upload_dir).join(&jpg_name);
+    let jpg_rel  = format!("{}/thumbs/{}.jpg", board_short, file_id);
+    let jpg_path = PathBuf::from(board_dir).join(format!("thumbs/{}.jpg", file_id));
 
     match ffmpeg_first_frame(video_data, &jpg_path, thumb_size) {
         Ok(()) => {
             tracing::debug!("ffmpeg thumbnail generated for {}", file_id);
-            return (jpg_name, jpg_path);
+            return (jpg_rel, jpg_path);
         }
         Err(e) => {
             tracing::warn!("ffmpeg thumbnail failed ({}), using SVG placeholder", e);
@@ -173,12 +184,12 @@ fn generate_video_thumb(
     }
 
     // Fall back to SVG placeholder
-    let svg_name = format!("thumbs/{}.svg", file_id);
-    let svg_path = PathBuf::from(upload_dir).join(&svg_name);
+    let svg_rel  = format!("{}/thumbs/{}.svg", board_short, file_id);
+    let svg_path = PathBuf::from(board_dir).join(format!("thumbs/{}.svg", file_id));
     if let Err(e) = generate_video_placeholder(&svg_path) {
         tracing::error!("Failed to write SVG placeholder: {}", e);
     }
-    (svg_name, svg_path)
+    (svg_rel, svg_path)
 }
 
 /// Shell out to ffmpeg to extract the first frame as a scaled JPEG.
@@ -317,8 +328,8 @@ fn mime_to_ext(mime: &str) -> &'static str {
 }
 
 /// Delete a file from the filesystem, ignoring not-found errors.
-pub fn delete_file(upload_dir: &str, relative_path: &str) {
-    let full_path = PathBuf::from(upload_dir).join(relative_path);
+pub fn delete_file(boards_dir: &str, relative_path: &str) {
+    let full_path = PathBuf::from(boards_dir).join(relative_path);
     let _ = std::fs::remove_file(full_path);
 }
 

@@ -392,7 +392,7 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
 
     if let (Some(_file), Some(thumb)) = (&t.op_file, &t.op_thumb) {
         html.push_str(&format!(
-            r#"<div class="file-container"><a href="/{board}/thread/{tid}"><img class="thumb" src="/uploads/{th}" loading="lazy" alt="image"></a></div>"#,
+            r#"<div class="file-container"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image"></a></div>"#,
             board = escape_html(board_short),
             tid   = t.id,
             th    = escape_html(thumb),
@@ -497,7 +497,7 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
     }
 
     for post in &summary.preview_posts {
-        html.push_str(&render_post(post, board_short, csrf_token, false, is_admin, false));
+        html.push_str(&render_post(post, board_short, csrf_token, false, is_admin, true));
     }
 
     html.push_str("<hr class=\"thread-sep\">");
@@ -640,14 +640,14 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
             html.push_str(&format!(
                 r#"<div class="file-container">
 <div class="file-info">
-  <a href="/uploads/{f}">{orig}</a> ({sz})
+  <a href="/boards/{f}">{orig}</a> ({sz})
   <button class="media-close-btn" onclick="collapseMedia(this)" style="display:none">&#x2715; close</button>
 </div>
 <div class="media-preview" onclick="expandMedia(this)" title="click to play">
-  <img class="thumb" src="/uploads/{th}" loading="lazy" alt="video thumbnail">
+  <img class="thumb" src="/boards/{th}" loading="lazy" alt="video thumbnail">
   <div class="media-expand-overlay">&#9654;</div>
 </div>
-<video class="media-expanded" src="/uploads/{f}" controls preload="none"
+<video class="media-expanded" src="/boards/{f}" controls preload="none"
        type="{mime}" style="display:none"></video>
 </div>"#,
                 f    = escape_html(file),
@@ -660,14 +660,14 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
             html.push_str(&format!(
                 r#"<div class="file-container">
 <div class="file-info">
-  <a href="/uploads/{f}">{orig}</a> ({sz})
+  <a href="/boards/{f}">{orig}</a> ({sz})
   <button class="media-close-btn" onclick="collapseMedia(this)" style="display:none">&#x2715; close</button>
 </div>
 <div class="media-preview" onclick="expandMedia(this)" title="click to expand">
-  <img class="thumb" src="/uploads/{th}" loading="lazy" alt="image">
+  <img class="thumb" src="/boards/{th}" loading="lazy" alt="image">
   <div class="media-expand-overlay">&#x2922;</div>
 </div>
-<img class="media-expanded" src="" data-src="/uploads/{f}" style="display:none"
+<img class="media-expanded" src="" data-src="/boards/{f}" style="display:none"
      alt="image">
 </div>"#,
                 f    = escape_html(file),
@@ -778,7 +778,7 @@ pub fn catalog_page(board: &Board, threads: &[Thread], csrf_token: &str, boards:
 
     for t in threads {
         let thumb_html = if let Some(th) = &t.op_thumb {
-            format!(r#"<img class="catalog-thumb" src="/uploads/{}" loading="lazy" alt="">"#, escape_html(th))
+            format!(r#"<img class="catalog-thumb" src="/boards/{}" loading="lazy" alt="">"#, escape_html(th))
         } else {
             r#"<div class="catalog-no-image">no img</div>"#.to_string()
         };
