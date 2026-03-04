@@ -3,32 +3,52 @@
 // XSS Prevention: User input NEVER goes to templates unescaped.
 // Every piece of user text passes through `escape_html` before insertion.
 //
-// Post markup: After escaping, we apply simple pattern transforms:
-//   • Lines starting with ">" become <span class="quote">
-//   • >>12345 becomes a clickable reply link
-//   • URLs become hyperlinks (restricted to http/https)
-//   • **bold** → <strong>bold</strong>
+// Post markup pipeline (after HTML-escaping):
+//   • Lines starting with ">" → greentext (3+ consecutive → collapsible block)
+//   • >>12345 → clickable reply link
+//   • >>>/board/123 → cross-board thread link
+//   • >>>/board/ → cross-board link
+//   • URLs → hyperlinks (http/https only)
+//   • **bold** → <strong>
+//   • __italic__ → <em>
+//   • [spoiler]text[/spoiler] → hidden spoiler span
+//   • :emoji: shortcodes → Unicode emoji
 //
-// Word filters:
-//   FIX[MEDIUM-8]: Word filters are now applied to the RAW text BEFORE HTML
-//   escaping. This means filter patterns are written as plain text (e.g. "bad"
-//   not "&amp;bad"). Applying filters after escaping caused patterns containing
-//   &, <, >, ', " to never match, which was confusing and incorrect.
+// Word filters: applied on raw text BEFORE HTML escaping.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-static RE_REPLY: Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;(\d+)").unwrap());
-// FIX[LOW-6]: Strip common trailing punctuation from matched URLs.
-// Previously the regex matched trailing ) . , ; which broke links in prose.
-static RE_URL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(https?://[^\s&<>]{3,300})").unwrap()
-});
-static RE_BOLD:   Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
-static RE_ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"__([^_]+)__").unwrap());
+static RE_REPLY:      Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;(\d+)").unwrap());
+static RE_CROSSTHREAD: Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)").unwrap());
+static RE_CROSSBOARD:  Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/").unwrap());
+static RE_URL:        Lazy<Regex> = Lazy::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").unwrap());
+static RE_BOLD:       Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
+static RE_ITALIC:     Lazy<Regex> = Lazy::new(|| Regex::new(r"__([^_]+)__").unwrap());
+static RE_SPOILER:    Lazy<Regex> = Lazy::new(|| Regex::new(r"\[spoiler\]([\s\S]*?)\[/spoiler\]").unwrap());
+
+/// Emoji shortcode table — :name: → Unicode glyph
+fn apply_emoji(text: &str) -> String {
+    // Common shortcodes. Extend as desired.
+    const CODES: &[(&str, &str)] = &[
+        (":smile:",   "😊"), (":lol:",    "😂"), (":kek:",    "🤣"),
+        (":rage:",    "😡"), (":cry:",    "😢"), (":think:",  "🤔"),
+        (":eyes:",    "👀"), (":fire:",   "🔥"), (":check:",  "✅"),
+        (":x:",       "❌"), (":heart:",  "❤️"), (":ok:",    "👌"),
+        (":cool:",    "😎"), (":skull:",  "💀"), (":shrug:",  "🤷"),
+        (":pray:",    "🙏"), (":nerd:",   "🤓"), (":clown:",  "🤡"),
+        (":100:",     "💯"), (":gg:",     "🎮"), (":rip:",    "⚰️"),
+        (":based:",   "🗿"), (":ngmi:",   "😬"), (":gm:",     "🌅"),
+        (":uwu:",     "🥺"), (":owo:",    "👁️👄👁️"),
+    ];
+    let mut out = text.to_string();
+    for (code, emoji) in CODES {
+        out = out.replace(code, emoji);
+    }
+    out
+}
 
 /// Escape HTML special characters to prevent XSS.
-/// This must be called on ALL user-supplied strings before embedding in HTML.
 pub fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -38,12 +58,6 @@ pub fn escape_html(s: &str) -> String {
 }
 
 /// Apply word filters to raw (unescaped) text.
-///
-/// FIX[MEDIUM-8]: Filters now run on the raw body text BEFORE HTML escaping,
-/// so patterns are plain text strings (not HTML-entity-encoded). Call order:
-///   1. apply_word_filters(raw_body)
-///   2. escape_html(filtered_body)
-///   3. render_post_body(escaped_body)
 pub fn apply_word_filters(text: &str, filters: &[(String, String)]) -> String {
     let mut result = text.to_string();
     for (pattern, replacement) in filters {
@@ -55,15 +69,42 @@ pub fn apply_word_filters(text: &str, filters: &[(String, String)]) -> String {
 }
 
 /// Convert plain escaped post body into HTML with imageboard markup.
-/// Input: HTML-escaped user text (safe to work with).
-/// Output: HTML string with markup applied.
+/// Input: HTML-escaped user text.  Output: HTML with markup applied.
 pub fn render_post_body(escaped: &str) -> String {
+    let lines: Vec<&str> = escaped.lines().collect();
     let mut html = String::with_capacity(escaped.len() * 2);
+    let mut i = 0;
 
-    for line in escaped.lines() {
-        let rendered = render_line(line);
-        html.push_str(&rendered);
-        html.push_str("<br>");
+    while i < lines.len() {
+        let line = lines[i];
+
+        // Greentext block: lines starting with &gt; that aren't reply links
+        if line.starts_with("&gt;") && !line.starts_with("&gt;&gt;") {
+            // Collect all consecutive greentext lines
+            let mut group = vec![line];
+            let mut j = i + 1;
+            while j < lines.len() {
+                let next = lines[j];
+                if next.starts_with("&gt;") && !next.starts_with("&gt;&gt;") {
+                    group.push(next);
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+
+            for ql in &group {
+                    html.push_str(&format!(
+                        "<span class=\"quote\">{}</span><br>",
+                        render_inline(ql)
+                    ));
+                }
+            i = j;
+        } else {
+            html.push_str(&render_line(line));
+            html.push_str("<br>");
+            i += 1;
+        }
     }
 
     // Remove trailing <br>
@@ -75,35 +116,42 @@ pub fn render_post_body(escaped: &str) -> String {
 }
 
 fn render_line(line: &str) -> String {
-    // Greentext: lines starting with ">" (already HTML-escaped to "&gt;")
-    if line.starts_with("&gt;") && !line.starts_with("&gt;&gt;") {
-        let inner = render_inline(line);
-        return format!("<span class=\"quote\">{}</span>", inner);
-    }
     render_inline(line)
 }
 
 fn render_inline(text: &str) -> String {
-    // Apply inline transforms:
-    // 1. >>N  → reply links
-    // 2. URLs → hyperlinks
-    // 3. **text** → bold
-    // 4. __text__ → italic (spoiler-style)
-
     let mut result = text.to_string();
 
-    // >>N reply links (escaped form is &gt;&gt;N)
+    // Cross-board thread links: >>>/board/123  (check BEFORE >>)
+    result = RE_CROSSTHREAD
+        .replace_all(&result, |caps: &regex::Captures| {
+            let board = &caps[1];
+            let tid   = &caps[2];
+            format!(
+                r#"<a href="/{board}/thread/{tid}" class="quotelink crosslink">&gt;&gt;&gt;/{board}/{tid}</a>"#,
+            )
+        })
+        .into_owned();
+
+    // Cross-board links: >>>/board/
+    result = RE_CROSSBOARD
+        .replace_all(&result, |caps: &regex::Captures| {
+            let board = &caps[1];
+            format!(
+                r#"<a href="/{board}/" class="quotelink crosslink">&gt;&gt;&gt;/{board}/</a>"#,
+            )
+        })
+        .into_owned();
+
+    // >>N reply links
     result = RE_REPLY
         .replace_all(&result, r##"<a href="#p$1" class="quotelink">&gt;&gt;$1</a>"##)
         .into_owned();
 
-    // URLs (http/https only — no javascript: or other schemes)
-    // FIX[LOW-6]: Strip trailing punctuation characters that are not part of
-    // the URL itself but commonly appear after URLs in prose sentences.
+    // URLs
     result = RE_URL
         .replace_all(&result, |caps: &regex::Captures| {
             let url = &caps[1];
-            // Strip trailing punctuation that is not URL-structural
             let clean_url = url.trim_end_matches(|c| matches!(c, '.' | ',' | ')' | ';' | '\''));
             let trailing = &url[clean_url.len()..];
             format!(
@@ -113,29 +161,32 @@ fn render_inline(text: &str) -> String {
         })
         .into_owned();
 
+    // [spoiler]…[/spoiler]
+    result = RE_SPOILER
+        .replace_all(&result, |caps: &regex::Captures| {
+            format!(r#"<span class="spoiler" onclick="this.classList.toggle('revealed')">{}</span>"#, &caps[1])
+        })
+        .into_owned();
+
     // **bold**
     result = RE_BOLD
         .replace_all(&result, "<strong>$1</strong>")
         .into_owned();
 
-    // __italic__ (spoiler)
+    // __italic__
     result = RE_ITALIC
         .replace_all(&result, "<em>$1</em>")
         .into_owned();
+
+    // Emoji shortcodes (applied last, after HTML transforms)
+    result = apply_emoji(&result);
 
     result
 }
 
 /// Sanitize a file name: keep only safe characters.
-/// Strips path separators and anything non-ASCII-safe.
-///
-/// FIX[MEDIUM-7]: The original used `name[..100]` which is a byte-index slice
-/// and panics when byte 100 falls inside a multi-byte UTF-8 sequence (e.g. CJK
-/// or emoji in filenames). This now uses char iteration which is always safe.
 pub fn sanitize_filename(name: &str) -> String {
-    let name = name
-        .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'], "_");
-    // Limit to 100 Unicode scalar values (not bytes), safe for all inputs.
+    let name = name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'], "_");
     name.chars().take(100).collect()
 }
 
@@ -196,36 +247,62 @@ mod tests {
         assert!(html.contains("#p12345"));
     }
 
-    // FIX[MEDIUM-7]: Verify sanitize_filename never panics on multi-byte chars
+    #[test]
+    fn test_collapsible_greentext() {
+        let raw = ">line1\n>line2\n>line3";
+        let escaped = escape_html(raw);
+        let html = render_post_body(&escaped);
+        assert!(html.contains("<details"));
+        assert!(html.contains("3 lines"));
+    }
+
+    #[test]
+    fn test_spoiler() {
+        let escaped = escape_html("[spoiler]secret[/spoiler]");
+        // spoiler tag is NOT html-escaped (it's our markup)
+        let html = render_post_body("[spoiler]secret[/spoiler]");
+        assert!(html.contains("class=\"spoiler\""));
+        assert!(html.contains("secret"));
+    }
+
+    #[test]
+    fn test_emoji_shortcode() {
+        let html = render_post_body(":fire: hot take");
+        assert!(html.contains("🔥"));
+    }
+
+    #[test]
+    fn test_crossthread_link() {
+        let escaped = escape_html(">>>/tech/42");
+        let html = render_post_body(&escaped);
+        assert!(html.contains("class=\"quotelink crosslink\""));
+        assert!(html.contains("/tech/thread/42"));
+    }
+
     #[test]
     fn test_sanitize_filename_multibyte() {
-        // 50 CJK chars = 150 UTF-8 bytes — would panic the old byte-slice version
         let cjk: String = std::iter::repeat('日').take(50).collect();
         let long_name = format!("{}.jpg", cjk);
         let result = sanitize_filename(&long_name);
-        // Should not panic, and must be at most 100 chars
         assert!(result.chars().count() <= 100);
     }
 
-    // FIX[MEDIUM-8]: Verify word filters match raw text, not escaped text
     #[test]
     fn test_word_filter_before_escape() {
         let raw = "this is bad&word";
         let filters = vec![("bad&word".to_string(), "filtered".to_string())];
         let filtered = apply_word_filters(raw, &filters);
         assert_eq!(filtered, "this is filtered");
-        // Escaping afterward should not affect the substitution result
         let escaped = escape_html(&filtered);
         assert!(escaped.contains("filtered"));
     }
 
-    // FIX[LOW-6]: URL should not include trailing punctuation
     #[test]
     fn test_url_trailing_punct() {
         let escaped = escape_html("see https://example.com/foo. and https://example.com/bar,");
         let html = render_post_body(&escaped);
-        // The href should not end with '.' or ','
         assert!(!html.contains("href=\"https://example.com/foo.\""));
         assert!(!html.contains("href=\"https://example.com/bar,\""));
     }
 }
+

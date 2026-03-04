@@ -163,6 +163,9 @@ pub async fn create_thread(
     let name_val      = form.name;
     let subject_val   = form.subject;
     let del_token_val = form.deletion_token;
+    let poll_question  = form.poll_question;
+    let poll_options   = form.poll_options;
+    let poll_duration  = form.poll_duration_secs;
 
     let redirect_url = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -170,7 +173,6 @@ pub async fn create_thread(
             let conn = pool.get()?;
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-
             let ip_hash = hash_ip(&client_ip, &cookie_secret);
             if let Some(reason) = db::is_banned(&conn, &ip_hash)? {
                 return Err(AppError::Forbidden(format!(
@@ -255,6 +257,20 @@ pub async fn create_thread(
                 subject.as_deref(),
                 &new_post,
             )?;
+
+            // Create poll if question + at least 2 options were supplied
+            let q = poll_question.trim().to_string();
+            let valid_opts: Vec<String> = poll_options.iter()
+                .map(|o| o.trim().to_string())
+                .filter(|o| !o.is_empty())
+                .collect();
+            if !q.is_empty() && valid_opts.len() >= 2 {
+                if let Some(secs) = poll_duration {
+                    let secs = secs.max(60).min(30 * 24 * 3600); // clamp 1 min..30 days
+                    let expires_at = chrono::Utc::now().timestamp() + secs;
+                    db::create_poll(&conn, thread_id, &q, &valid_opts, expires_at)?;
+                }
+            }
 
             let max_threads = board.max_threads;
             let paths = db::prune_old_threads(&conn, board.id, max_threads)?;

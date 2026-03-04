@@ -149,6 +149,33 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             replacement TEXT NOT NULL
         );
 
+        -- Polls (one per thread, OP only)
+        CREATE TABLE IF NOT EXISTS polls (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id  INTEGER NOT NULL UNIQUE REFERENCES threads(id) ON DELETE CASCADE,
+            question   TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+
+        -- Poll options
+        CREATE TABLE IF NOT EXISTS poll_options (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            poll_id  INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+            text     TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0
+        );
+
+        -- Poll votes — one per (poll, ip_hash) pair
+        CREATE TABLE IF NOT EXISTS poll_votes (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            poll_id   INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+            option_id INTEGER NOT NULL REFERENCES poll_options(id) ON DELETE CASCADE,
+            ip_hash   TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            UNIQUE(poll_id, ip_hash)
+        );
+
         -- Indices for common query patterns
         CREATE INDEX IF NOT EXISTS idx_threads_board_sticky_bumped
             ON threads(board_id, sticky DESC, bumped_at DESC);
@@ -171,6 +198,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
     let migrations = [
         "ALTER TABLE boards ADD COLUMN allow_video   INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE boards ADD COLUMN allow_tripcodes INTEGER NOT NULL DEFAULT 1",
+        // Poll tables added later — CREATE TABLE IF NOT EXISTS handles this gracefully
     ];
     for sql in &migrations {
         let _ = conn.execute(sql, []);   // ignore "duplicate column" errors
@@ -847,6 +875,136 @@ pub fn record_file_hash(
         params![sha256, file_path, thumb_path, mime_type],
     )?;
     Ok(())
+}
+
+// ─── Poll queries ─────────────────────────────────────────────────────────────
+
+/// Create a poll with its options atomically.
+pub fn create_poll(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+    question: &str,
+    options: &[String],
+    expires_at: i64,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO polls (thread_id, question, expires_at) VALUES (?1, ?2, ?3)",
+        params![thread_id, question, expires_at],
+    )?;
+    let poll_id = conn.last_insert_rowid();
+    for (i, text) in options.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO poll_options (poll_id, text, position) VALUES (?1, ?2, ?3)",
+            params![poll_id, text, i as i64],
+        )?;
+    }
+    Ok(poll_id)
+}
+
+/// Fetch the full poll for a thread including vote counts and the user's choice.
+pub fn get_poll_for_thread(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+    ip_hash: &str,
+) -> Result<Option<crate::models::PollData>> {
+    let now = chrono::Utc::now().timestamp();
+
+    let poll_row = conn
+        .query_row(
+            "SELECT id, thread_id, question, expires_at, created_at FROM polls WHERE thread_id = ?1",
+            params![thread_id],
+            |r| {
+                Ok(crate::models::Poll {
+                    id: r.get(0)?,
+                    thread_id: r.get(1)?,
+                    question: r.get(2)?,
+                    expires_at: r.get(3)?,
+                    created_at: r.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+
+    let poll = match poll_row {
+        Some(p) => p,
+        None    => return Ok(None),
+    };
+
+    // Options with live vote counts
+    let mut stmt = conn.prepare_cached(
+        "SELECT po.id, po.poll_id, po.text, po.position,
+                COUNT(pv.id) as vote_count
+         FROM poll_options po
+         LEFT JOIN poll_votes pv ON pv.option_id = po.id
+         WHERE po.poll_id = ?1
+         GROUP BY po.id
+         ORDER BY po.position ASC",
+    )?;
+    let options: Vec<crate::models::PollOption> = stmt
+        .query_map(params![poll.id], |r| {
+            Ok(crate::models::PollOption {
+                id:         r.get(0)?,
+                poll_id:    r.get(1)?,
+                text:       r.get(2)?,
+                position:   r.get(3)?,
+                vote_count: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let total_votes: i64 = options.iter().map(|o| o.vote_count).sum();
+
+    // Did this user vote, and for which option?
+    let user_voted_option: Option<i64> = conn
+        .query_row(
+            "SELECT option_id FROM poll_votes WHERE poll_id = ?1 AND ip_hash = ?2",
+            params![poll.id, ip_hash],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let is_expired = poll.expires_at <= now;
+
+    Ok(Some(crate::models::PollData {
+        poll,
+        options,
+        total_votes,
+        user_voted_option,
+        is_expired,
+    }))
+}
+
+/// Cast a vote. Returns true if vote was recorded, false if already voted.
+pub fn cast_vote(
+    conn: &rusqlite::Connection,
+    poll_id: i64,
+    option_id: i64,
+    ip_hash: &str,
+) -> Result<bool> {
+    let result = conn.execute(
+        "INSERT OR IGNORE INTO poll_votes (poll_id, option_id, ip_hash)
+         VALUES (?1, ?2, ?3)",
+        params![poll_id, option_id, ip_hash],
+    )?;
+    Ok(result > 0)
+}
+
+/// Resolve (poll_id, thread_id, board_short) from an option_id.
+pub fn get_poll_context(
+    conn: &rusqlite::Connection,
+    option_id: i64,
+) -> Result<Option<(i64, i64, String)>> {
+    Ok(conn.query_row(
+        "SELECT p.id, p.thread_id, b.short_name
+         FROM poll_options po
+         JOIN polls p ON p.id = po.poll_id
+         JOIN threads t ON t.id = p.thread_id
+         JOIN boards b ON b.id = t.board_id
+         WHERE po.id = ?1",
+        params![option_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()?)
 }
 
 // ─── Row mapping helpers ──────────────────────────────────────────────────────

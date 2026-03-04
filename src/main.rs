@@ -228,6 +228,7 @@ fn build_router(state: AppState) -> Router {
         .route("/:board/thread/:id", get(handlers::thread::view_thread))
         .route("/:board/thread/:id", post(handlers::thread::post_reply))
         .route("/delete", post(handlers::board::delete_post))
+        .route("/vote",   post(handlers::thread::vote_handler))
         .nest_service("/boards", tower_http::services::ServeDir::new(&CONFIG.upload_dir))
         .route("/admin",                 get(handlers::admin::admin_index))
         .route("/admin/login",           post(handlers::admin::admin_login))

@@ -2,6 +2,30 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.0.4] - 2026-03-03
+
+### Added
+- **Thread IDs** — every thread is now assigned a permanent numeric ID displayed as a badge (`Thread No.1234`) at the top of its page. Board index thread summaries show a clickable `[ #1234 ]` link beside each post number.
+- **Cross-board links** — post bodies now parse `>>>/board/123` into a clickable link to that thread and `>>>/board/` into a board index link. Cross-board links are styled in amber to distinguish them from local reply links.
+- **Emoji shortcodes** — 25 shortcodes supported in post bodies (e.g. `:fire:` → 🔥, `:think:` → 🤔, `:based:` → 🗿, `:kek:` → 🤣). Applied after HTML transforms to avoid conflicts.
+- **Spoiler tags** — `[spoiler]text[/spoiler]` hides content behind a same-color block; clicking or hovering reveals it with a smooth transition.
+- **Markup hint bar** — a compact row of syntax reminders is shown below the body textarea in the new thread form listing available markup options.
+- **Thread polls** — the new thread form includes a collapsible `[ 📊 Add a Poll ]` section. Polls are OP-only, support 2–10 options (dynamically added/removed), and require a duration in hours or minutes (clamped to 1 minute–30 days). Votes are cast via a radio-button form, one vote per IP enforced at the database level. Results display as a percentage bar chart after voting or once the poll closes. Polls are anchored at `#poll` on their thread page.
+- **Resizable expanded images** — expanded images support `resize: both`, allowing users to drag the corner to any size without reloading.
+- **Per-board upload directories** — files are now stored under `rustchan-data/boards/{board}/` and thumbnails under `rustchan-data/boards/{board}/thumbs/` for clean per-board organisation.
+
+### Changed
+- **Data directory renamed** from `chan-data/` to `rustchan-data/` for clarity.
+- **Upload directory renamed** from `uploads/` to `boards/` inside the data directory. The static file route changed from `/uploads/` to `/boards/` accordingly.
+- **Bold** (`**text**`) and **italic** (`__text__`) markup now render correctly in all post bodies.
+
+### Fixed
+- Greentext CSS class mismatch — renderer emits `class="quote"` but the stylesheet only targeted `.greentext`; both are now covered.
+- Spoiler CSS specificity — `.post-body` color was overriding the spoiler hide rule; selectors updated to `.post-body .spoiler`.
+- Poll "Question" input overflowing the form on narrow layouts — label and input now use `width: 100%; box-sizing: border-box` and `min-width: 0`.
+
+---
+
 ## [1.0.3] - 2026-03-03
 
 ### Changed

@@ -153,6 +153,40 @@ pub struct LoginForm {
     pub password: String,
 }
 
+/// A poll attached to a thread's OP
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct Poll {
+    pub id: i64,
+    pub thread_id: i64,
+    pub question: String,
+    pub expires_at: i64,
+    pub created_at: i64,
+}
+
+/// A single poll option with live vote count (joined from poll_votes)
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct PollOption {
+    pub id: i64,
+    pub poll_id: i64,
+    pub text: String,
+    pub position: i64,
+    pub vote_count: i64,
+}
+
+/// Full poll data passed to templates
+#[derive(Debug, Clone)]
+pub struct PollData {
+    pub poll: Poll,
+    pub options: Vec<PollOption>,
+    pub total_votes: i64,
+    /// Which option_id this user voted for, if any
+    pub user_voted_option: Option<i64>,
+    /// true when expires_at <= now
+    pub is_expired: bool,
+}
+
 /// Search query
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {

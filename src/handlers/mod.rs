@@ -20,6 +20,11 @@ pub struct PostFormData {
     pub deletion_token: String,
     /// Raw bytes + original filename if a file was attached.
     pub file: Option<(Vec<u8>, String)>,
+    // ── Poll fields (only used when creating a new thread) ────────────────
+    pub poll_question: String,
+    pub poll_options: Vec<String>,
+    /// Duration in seconds (parsed from value + unit)
+    pub poll_duration_secs: Option<i64>,
 }
 
 /// Drain all fields from a multipart form into [`PostFormData`].
@@ -34,6 +39,10 @@ pub async fn parse_post_multipart(
     let mut body = String::new();
     let mut deletion_token = String::new();
     let mut file: Option<(Vec<u8>, String)> = None;
+    let mut poll_question = String::new();
+    let mut poll_options: Vec<String> = Vec::new();
+    let mut poll_duration_value: Option<i64> = None;
+    let mut poll_duration_unit = String::from("hours");
 
     while let Some(field) = multipart
         .next_field()
@@ -51,6 +60,21 @@ pub async fn parse_post_multipart(
             Some("subject")        => subject         = field.text().await.unwrap_or_default(),
             Some("body")           => body            = field.text().await.unwrap_or_default(),
             Some("deletion_token") => deletion_token  = field.text().await.unwrap_or_default(),
+            Some("poll_question")  => poll_question   = field.text().await.unwrap_or_default(),
+            Some("poll_option") => {
+                let v = field.text().await.unwrap_or_default();
+                let trimmed = v.trim().to_string();
+                if !trimmed.is_empty() {
+                    poll_options.push(trimmed);
+                }
+            }
+            Some("poll_duration_value") => {
+                let v = field.text().await.unwrap_or_default();
+                poll_duration_value = v.trim().parse::<i64>().ok();
+            }
+            Some("poll_duration_unit") => {
+                poll_duration_unit = field.text().await.unwrap_or_default();
+            }
             Some("file") => {
                 let fname = field.file_name().unwrap_or("upload").to_string();
                 let bytes = field
@@ -65,5 +89,17 @@ pub async fn parse_post_multipart(
         }
     }
 
-    Ok(PostFormData { csrf_verified, name, subject, body, deletion_token, file })
+    // Convert duration value + unit → seconds
+    let poll_duration_secs = if !poll_question.trim().is_empty() {
+        poll_duration_value.map(|v| {
+            if poll_duration_unit == "minutes" { v * 60 } else { v * 3600 }
+        })
+    } else {
+        None
+    };
+
+    Ok(PostFormData {
+        csrf_verified, name, subject, body, deletion_token, file,
+        poll_question, poll_options, poll_duration_secs,
+    })
 }

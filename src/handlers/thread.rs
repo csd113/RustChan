@@ -3,27 +3,27 @@
 // Handles:
 //   GET  /:board/thread/:id   — view thread with all posts
 //   POST /:board/thread/:id   — post a reply
+//   POST /vote                — cast a poll vote
 
 use crate::{
     config::CONFIG,
     db::{self, NewPost},
     error::{AppError, Result},
     handlers::{parse_post_multipart, board::ensure_csrf},
-    middleware::AppState,
+    middleware::{validate_csrf, AppState},
     utils::{
-        // FIX[LOW-8]: sha256_hex now comes from utils::crypto (deduplicated)
         crypto::{hash_ip, new_deletion_token, sha256_hex},
         files::save_upload,
-        // FIX[MEDIUM-8]: apply_word_filters runs before escape_html
         sanitize::{apply_word_filters, escape_html, render_post_body, validate_body, validate_name},
         tripcode::parse_name_tripcode,
     },
 };
 use axum::{
-    extract::{ConnectInfo, Multipart, Path, State},
+    extract::{ConnectInfo, Form, Multipart, Path, State},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
+use serde::Deserialize;
 use std::net::SocketAddr;
 use tracing::info;
 
@@ -32,20 +32,19 @@ use tracing::info;
 pub async fn view_thread(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
     let (jar, csrf) = ensure_csrf(jar);
+    let client_ip = addr.ip().to_string();
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
-        // FIX[HIGH-2]: Move admin session check inside spawn_blocking to avoid
-        // blocking DB calls on the Tokio worker thread.
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
         move || -> Result<String> {
             let conn = pool.get()?;
 
-            // Resolve admin status inside the blocking task
             let is_admin = jar_session
                 .as_deref()
                 .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
@@ -64,8 +63,12 @@ pub async fn view_thread(
             let posts = db::get_posts_for_thread(&conn, thread_id)?;
             let all_boards = db::get_all_boards(&conn)?;
 
+            // Compute ip_hash for poll vote status
+            let ip_hash = crate::utils::crypto::hash_ip(&client_ip, &crate::config::CONFIG.cookie_secret);
+            let poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)?;
+
             Ok(crate::templates::thread_page(
-                &board, &thread, &posts, &csrf_clone, &all_boards, is_admin,
+                &board, &thread, &posts, &csrf_clone, &all_boards, is_admin, poll.as_ref(),
             ))
         }
     })
@@ -211,6 +214,70 @@ pub async fn post_reply(
 
             info!("Reply {} posted in thread {} on /{}/", post_id, thread_id, board.short_name);
             Ok(format!("/{}/thread/{}#p{}", board.short_name, thread_id, post_id))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok(Redirect::to(&redirect_url).into_response())
+}
+
+// ─── POST /vote — cast poll vote ──────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct VoteForm {
+    pub _csrf:     Option<String>,
+    pub option_id: i64,
+}
+
+pub async fn vote_handler(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    jar: CookieJar,
+    Form(form): Form<VoteForm>,
+) -> Result<Response> {
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if !validate_csrf(csrf_cookie.as_deref(), form._csrf.as_deref().unwrap_or("")) {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    let client_ip     = addr.ip().to_string();
+    let cookie_secret = CONFIG.cookie_secret.clone();
+    let option_id     = form.option_id;
+
+    let redirect_url = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            let ip_hash = hash_ip(&client_ip, &cookie_secret);
+
+            let (poll_id, thread_id, board_short) = db::get_poll_context(&conn, option_id)?
+                .ok_or_else(|| AppError::NotFound("Poll option not found.".into()))?;
+
+            // Check poll has not expired
+            let now = chrono::Utc::now().timestamp();
+            let expires_at: i64 = conn.query_row(
+                "SELECT expires_at FROM polls WHERE id = ?1",
+                rusqlite::params![poll_id],
+                |r| r.get(0),
+            )?;
+            if expires_at <= now {
+                return Err(AppError::BadRequest("This poll has closed.".into()));
+            }
+
+            // Verify option belongs to this poll
+            let belongs: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM poll_options WHERE id = ?1 AND poll_id = ?2",
+                rusqlite::params![option_id, poll_id],
+                |r| r.get(0),
+            )?;
+            if belongs == 0 {
+                return Err(AppError::BadRequest("Invalid poll option.".into()));
+            }
+
+            db::cast_vote(&conn, poll_id, option_id, &ip_hash)?;
+            info!("Vote cast on poll {} option {} by {}", poll_id, option_id, &ip_hash[..8]);
+            Ok(format!("/{}/thread/{}#poll", board_short, thread_id))
         }
     })
     .await

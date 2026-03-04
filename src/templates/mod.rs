@@ -38,6 +38,7 @@ function expandMedia(preview) {
   var closeBtn  = container.querySelector('.media-close-btn');
   if (expanded.tagName === 'IMG' && expanded.dataset.src) {
     expanded.src = expanded.dataset.src;
+    delete expanded.dataset.src;
   }
   preview.style.display  = 'none';
   expanded.style.display = 'block';
@@ -55,6 +56,8 @@ function collapseMedia(btn) {
     expanded.currentTime = 0;
   }
   expanded.style.display = 'none';
+  expanded.style.maxWidth = '';
+  expanded.style.maxHeight = '';
   preview.style.display  = 'block';
   btn.style.display      = 'none';
 }
@@ -360,19 +363,77 @@ fn new_thread_form(board_short: &str, csrf_token: &str) -> String {
         <td><input type="text" name="subject" maxlength="128">
             <button type="submit">post thread</button></td></tr>
     <tr><td>body</td>
-        <td><textarea name="body" rows="5" maxlength="4096" required></textarea></td></tr>
+        <td><textarea name="body" rows="5" maxlength="4096" required></textarea>
+            <div class="markup-hint">
+              <span title="Greentext">&#62;green</span>
+              <span title="Bold">**bold**</span>
+              <span title="Italic">__italic__</span>
+              <span title="Spoiler">[spoiler]text[/spoiler]</span>
+              <span title="Reply">&gt;&gt;123</span>
+              <span title="Cross-thread">&gt;&gt;&gt;/b/123</span>
+              <span title="Emoji">:fire:</span>
+            </div>
+        </td></tr>
     <tr><td>file</td>
         <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm">
             <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB</span></td></tr>
     <tr><td>del token</td>
         <td><input type="text" name="deletion_token" placeholder="password to delete" maxlength="64"></td></tr>
+    <tr><td colspan="2">
+      <details class="poll-creator">
+        <summary>[ 📊 Add a Poll to this thread ]</summary>
+        <div class="poll-creator-inner">
+          <div class="poll-creator-row">
+            <label>Question<input type="text" name="poll_question" placeholder="What do you think?" maxlength="256"></label>
+          </div>
+          <div id="poll-options-list">
+            <div class="poll-option-row"><input type="text" name="poll_option" placeholder="Option 1" maxlength="128"><button type="button" class="poll-remove-btn" onclick="removePollOption(this)" style="display:none">✕</button></div>
+            <div class="poll-option-row"><input type="text" name="poll_option" placeholder="Option 2" maxlength="128"><button type="button" class="poll-remove-btn" onclick="removePollOption(this)" style="display:none">✕</button></div>
+          </div>
+          <button type="button" class="poll-add-btn" onclick="addPollOption()">+ Add Option</button>
+          <div class="poll-creator-row poll-duration-row">
+            <label>Duration
+              <input type="number" name="poll_duration_value" value="24" min="1" max="720" class="poll-duration-input">
+              <select name="poll_duration_unit" class="poll-duration-unit">
+                <option value="hours">Hours</option>
+                <option value="minutes">Minutes</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </details>
+    </td></tr>
   </table>
 </form>
-</div>"#,
-        board     = escape_html(board_short),
-        csrf      = escape_html(csrf_token),
-        image_mb  = image_mb,
-        video_mb  = video_mb,
+</div>
+<script>
+function addPollOption() {{
+  var list = document.getElementById('poll-options-list');
+  var count = list.querySelectorAll('.poll-option-row').length + 1;
+  if (count > 10) return;
+  var row = document.createElement('div');
+  row.className = 'poll-option-row';
+  row.innerHTML = '<input type="text" name="poll_option" placeholder="Option ' + count + '" maxlength="128">'
+    + '<button type="button" class="poll-remove-btn" onclick="removePollOption(this)">✕</button>';
+  list.appendChild(row);
+  updateRemoveButtons();
+}}
+function removePollOption(btn) {{
+  btn.closest('.poll-option-row').remove();
+  updateRemoveButtons();
+}}
+function updateRemoveButtons() {{
+  var rows = document.querySelectorAll('#poll-options-list .poll-option-row');
+  rows.forEach(function(r, i) {{
+    var btn = r.querySelector('.poll-remove-btn');
+    if (btn) btn.style.display = rows.length > 2 ? 'inline' : 'none';
+  }});
+}}
+</script>"#,
+        board    = escape_html(board_short),
+        csrf     = escape_html(csrf_token),
+        image_mb = image_mb,
+        video_mb = video_mb,
     )
 }
 
@@ -405,6 +466,7 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
 <strong class="name">{name}</strong>
 <span class="post-time">{time}</span>
 <a class="post-num" href="/{board}/thread/{tid}">No.{op_id}</a>
+<a class="thread-id-link" href="/{board}/thread/{tid}" title="Thread #{tid}">[ #{tid} ]</a>
 </div>"#,
         sticky = sticky_label,
         locked = locked_label,
@@ -513,6 +575,7 @@ pub fn thread_page(
     csrf_token: &str,
     boards: &[Board],
     is_admin: bool,
+    poll: Option<&crate::models::PollData>,
 ) -> String {
     let mut body = String::new();
 
@@ -567,11 +630,18 @@ pub fn thread_page(
     body.push_str(&format!(
         r#"<div class="board-header">
 <a href="/{s}/">[ return ]</a> | <a href="/{s}/catalog">[ catalog ]</a>
+<span class="thread-id-badge" id="poll">Thread No.<strong>{tid}</strong></span>
 </div>
 "#,
-        s = escape_html(&board.short_name),
+        s   = escape_html(&board.short_name),
+        tid = thread.id,
     ));
     body.push_str(locked_notice);
+
+    // Poll (anchored at #poll)
+    if let Some(pd) = poll {
+        body.push_str(&render_poll(pd, thread.id, &board.short_name, csrf_token));
+    }
 
     for post in posts {
         body.push_str(&render_post(post, &board.short_name, csrf_token, true, is_admin, true));
@@ -598,6 +668,95 @@ pub fn thread_page(
         csrf_token,
         boards,
     )
+}
+
+// ─── Poll renderer ────────────────────────────────────────────────────────────
+
+fn render_poll(
+    pd: &crate::models::PollData,
+    thread_id: i64,
+    board_short: &str,
+    csrf_token: &str,
+) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let time_left = pd.poll.expires_at - now;
+    let expires_str = if pd.is_expired {
+        "closed".to_string()
+    } else if time_left < 3600 {
+        format!("closes in {}m", time_left / 60)
+    } else if time_left < 86400 {
+        format!("closes in {}h {}m", time_left / 3600, (time_left % 3600) / 60)
+    } else {
+        format!("closes {}", fmt_ts(pd.poll.expires_at))
+    };
+
+    let show_results = pd.is_expired || pd.user_voted_option.is_some();
+
+    let mut html = format!(
+        r#"<div class="poll-container">
+<div class="poll-header">
+  <span class="poll-icon">📊</span>
+  <span class="poll-question">{q}</span>
+  <span class="poll-status {status_class}">[{expires}]</span>
+</div>"#,
+        q            = escape_html(&pd.poll.question),
+        status_class = if pd.is_expired { "poll-closed" } else { "poll-open" },
+        expires      = expires_str,
+    );
+
+    if show_results {
+        // Results view
+        let total = pd.total_votes.max(1);
+        html.push_str(r#"<div class="poll-results">"#);
+        for opt in &pd.options {
+            let pct = (opt.vote_count as f64 / total as f64 * 100.0).round() as i64;
+            let is_voted = pd.user_voted_option == Some(opt.id);
+            html.push_str(&format!(
+                r#"<div class="poll-option-result{voted}">
+  <div class="poll-option-label">
+    {check}<span class="poll-opt-text">{text}</span>
+    <span class="poll-opt-count">{votes} ({pct}%)</span>
+  </div>
+  <div class="poll-bar-track"><div class="poll-bar-fill" style="width:{pct}%"></div></div>
+</div>"#,
+                voted = if is_voted { " user-voted" } else { "" },
+                check = if is_voted { "✓ " } else { "" },
+                text  = escape_html(&opt.text),
+                votes = opt.vote_count,
+                pct   = pct,
+            ));
+        }
+        html.push_str(&format!(
+            r#"<div class="poll-total">{} total vote{}</div></div>"#,
+            pd.total_votes,
+            if pd.total_votes == 1 { "" } else { "s" },
+        ));
+    } else {
+        // Voting form
+        html.push_str(&format!(
+            r#"<form class="poll-vote-form" method="POST" action="/vote">
+<input type="hidden" name="_csrf"     value="{csrf}">
+<input type="hidden" name="thread_id" value="{tid}">
+<input type="hidden" name="board"     value="{board}">"#,
+            csrf  = escape_html(csrf_token),
+            tid   = thread_id,
+            board = escape_html(board_short),
+        ));
+        for opt in &pd.options {
+            html.push_str(&format!(
+                r#"<label class="poll-vote-option">
+  <input type="radio" name="option_id" value="{id}" required>
+  <span class="poll-opt-text">{text}</span>
+</label>"#,
+                id   = opt.id,
+                text = escape_html(&opt.text),
+            ));
+        }
+        html.push_str(r#"<button type="submit" class="poll-vote-btn">[ Cast Vote ]</button></form>"#);
+    }
+
+    html.push_str("</div>");
+    html
 }
 
 pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete: bool, is_admin: bool, show_media: bool) -> String {
@@ -628,7 +787,7 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
         ));
     }
 
-    // Image / Video
+    // Image / Video — uses flex layout so text wraps naturally at any size
     if show_media {
     if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
         let size_str = post.file_size.map(format_file_size).unwrap_or_default();
@@ -668,7 +827,7 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
   <div class="media-expand-overlay">&#x2922;</div>
 </div>
 <img class="media-expanded" src="" data-src="/boards/{f}" style="display:none"
-     alt="image">
+     alt="image" draggable="false">
 </div>"#,
                 f    = escape_html(file),
                 th   = escape_html(thumb),
