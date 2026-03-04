@@ -863,6 +863,57 @@ body:has(.catalog-bar) main {
   letter-spacing: 0.03em;
 }
 
+/* ── Site stats section ───────────────────────────────────────────────────── */
+
+.index-stats-section {
+  margin-top: 28px;
+  border-top: 1px solid var(--border);
+  padding-top: 18px;
+}
+
+.index-stats-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px 36px;
+  margin-top: 12px;
+}
+
+.index-stat {
+  display: flex;
+  flex-direction: column;
+}
+
+.index-stat-value {
+  font-size: 1.4rem;
+  font-weight: bold;
+  color: var(--green);
+  font-family: var(--font-mono);
+  line-height: 1;
+  letter-spacing: normal;
+}
+
+.index-stat-label {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 4px;
+}
+
+/* ── Inline post error banner ────────────────────────────────────────────── */
+
+.post-error-banner {
+  background: rgba(180, 30, 30, 0.18);
+  border: 1px solid #c0392b;
+  color: #ff6b6b;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  padding: 8px 14px;
+  margin: 0 0 14px 0;
+  border-radius: 2px;
+  letter-spacing: 0.01em;
+}
+
 /* ── Admin post controls ──────────────────────────────────────────────────── */
 
 .admin-post-controls {

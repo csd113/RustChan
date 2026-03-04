@@ -34,6 +34,7 @@ use tracing_subscriber::{fmt, filter::EnvFilter};
 
 mod config;
 mod db;
+mod detect;
 mod error;
 mod handlers;
 mod middleware;
@@ -98,6 +99,15 @@ enum AdminAction {
         description: String,
         #[arg(long)]
         nsfw: bool,
+        /// Disable image uploads on this board (default: images allowed)
+        #[arg(long = "no-images")]
+        no_images: bool,
+        /// Disable video uploads on this board (default: video allowed)
+        #[arg(long = "no-videos")]
+        no_videos: bool,
+        /// Disable audio uploads on this board (default: audio allowed)
+        #[arg(long = "no-audio")]
+        no_audio: bool,
     },
     DeleteBoard { short: String },
     ListBoards,
@@ -164,7 +174,21 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     let pool = db::init_pool()?;
     first_run_check(&pool)?;
 
-    let state = AppState { db: pool.clone() };
+    // ── External tool detection ────────────────────────────────────────────────
+    // ffmpeg: required for video thumbnails (optional — graceful degradation).
+    let ffmpeg_status = detect::detect_ffmpeg(CONFIG.require_ffmpeg);
+    let ffmpeg_available = ffmpeg_status == detect::ToolStatus::Available;
+
+    // Tor: purely informational — prints torrc hints, never blocks startup.
+    let bind_port = CONFIG.bind_addr
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8080);
+    detect::detect_tor(CONFIG.enable_tor_support, bind_port);
+    println!();
+
+    let state = AppState { db: pool.clone(), ffmpeg_available };
     let start_time = Instant::now();
 
     // Background: purge expired sessions hourly
@@ -704,14 +728,26 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 }
             }
         }
-        AdminAction::CreateBoard { short, name, description, nsfw } => {
+        AdminAction::CreateBoard { short, name, description, nsfw, no_images, no_videos, no_audio } => {
             let short = short.to_lowercase();
             if !short.chars().all(|c| c.is_ascii_alphanumeric()) || short.is_empty() || short.len() > 8 {
                 anyhow::bail!("Short name must be 1-8 alphanumeric chars (e.g. 'tech', 'b').");
             }
-            let id = db::create_board(&conn, &short, &name, &description, nsfw)?;
-            let nsfw_str = if nsfw { " [NSFW]" } else { "" };
-            println!("✓ Board /{short}/ — {name}{nsfw_str} created (id={id}).");
+            let allow_images = !no_images;
+            let allow_video  = !no_videos;
+            let allow_audio  = !no_audio;
+            let id = db::create_board_with_media_flags(
+                &conn, &short, &name, &description, nsfw,
+                allow_images, allow_video, allow_audio,
+            )?;
+            let nsfw_str   = if nsfw          { " [NSFW]"      } else { "" };
+            let media_info = format!(
+                "  images:{} video:{} audio:{}",
+                if allow_images { "yes" } else { "no" },
+                if allow_video  { "yes" } else { "no" },
+                if allow_audio  { "yes" } else { "no" },
+            );
+            println!("✓ Board /{short}/ — {name}{nsfw_str} created (id={id}).{media_info}");
         }
         AdminAction::DeleteBoard { short } => {
             let board = db::get_board_by_short(&conn, &short)?

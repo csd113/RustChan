@@ -2,38 +2,32 @@
 //
 // File handling pipeline:
 //   1. Receive multipart bytes
-//   2. Validate MIME type against allowlist (BOTH content-type header AND magic bytes)
-//   3. Validate file size
+//   2. Validate MIME type against allowlist (BOTH magic bytes AND extension)
+//   3. Validate file size using per-type limits
 //   4. Generate random filename (UUID-based, prevents path traversal)
-//   5. Write to boards directory
-//   6. Generate thumbnail
+//   5. If video and ffmpeg is available: transcode MP4 → WebM (VP9/Opus)
+//   6. Write to boards directory
+//   7. Generate thumbnail / placeholder
 //      • Images  → scaled with the `image` crate
 //      • Videos  → first-frame JPEG via ffmpeg (falls back to SVG if unavailable)
 //        NOTE: GIF thumbnails are single-frame (first frame only).
-//   7. Write thumbnail to thumbs/ subdirectory
+//      • Audio   → no thumbnail; an SVG music-note placeholder is written instead
+//   8. Write thumbnail to thumbs/ subdirectory
 //
 // Security notes:
 //   • We NEVER trust the Content-Type header alone — we check magic bytes.
 //   • Filenames are never used as filesystem paths — UUIDs only.
 //   • Files are stored flat (no user-supplied path components).
 //   • We keep the original filename only for display purposes.
+//   • ffmpeg is called with an explicit argument array (not via shell).
+//   • Audio files that fail magic-byte detection are rejected.
 
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, GenericImageView, ImageFormat};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-/// Allowed MIME types and their magic bytes
-const ALLOWED_MIME_TYPES: &[(&str, &[u8])] = &[
-    ("image/jpeg", b"\xff\xd8\xff"),
-    ("image/png",  b"\x89PNG"),
-    ("image/gif",  b"GIF8"),
-    ("image/webp", b"RIFF"),        // RIFF....WEBP — extra check below
-    ("video/mp4",  b"\x00\x00\x00"), // ftyp box check below
-    ("video/webm", b"\x1a\x45\xdf\xa3"),
-];
-
-const MAGIC_BYTES_LEN: usize = 12;
+// ─── Output type ─────────────────────────────────────────────────────────────
 
 pub struct UploadedFile {
     /// Path on disk relative to the boards root (e.g. "b/abc123.webm")
@@ -42,45 +36,100 @@ pub struct UploadedFile {
     pub thumb_path:    String,
     /// Original user-supplied filename, sanitised, for display only
     pub original_name: String,
-    /// Detected MIME type
+    /// Detected MIME type (always a &'static str value, stored as String)
     pub mime_type:     String,
     /// File size in bytes
     pub file_size:     i64,
+    /// Explicit media category derived from mime_type
+    pub media_type:    crate::models::MediaType,
 }
 
-// ─── MIME detection ───────────────────────────────────────────────────────────
+// ─── MIME / type detection ────────────────────────────────────────────────────
 
-/// Validate magic bytes and return detected MIME type.
+/// Validate file bytes against known magic signatures and return the detected
+/// MIME type string.  Returns an error when the file type is not on the allowlist.
+///
+/// We check magic bytes rather than trusting the user-supplied Content-Type
+/// header.  This prevents executables disguised as media from being served.
 pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
-    let header = &data[..data.len().min(MAGIC_BYTES_LEN)];
+    if data.is_empty() {
+        return Err(anyhow::anyhow!("File is empty."));
+    }
+    let header = &data[..data.len().min(12)];
 
-    // MP4: variable-length box; bytes 4..8 must be b"ftyp"
+    // ── MP4 / M4A disambiguation ──────────────────────────────────────────────
+    // Both share the ftyp-box heuristic.  Look at the brand field to
+    // distinguish audio-only M4A from generic MP4.
     if data.len() >= 8 && &data[4..8] == b"ftyp" {
+        if data.len() >= 12 {
+            let brand = &data[8..12];
+            if brand == b"M4A " || brand == b"m4a " {
+                return Ok("audio/mp4");
+            }
+        }
         return Ok("video/mp4");
     }
 
-    for (mime, magic) in ALLOWED_MIME_TYPES {
-        if *mime == "video/mp4" { continue; }
-        if header.starts_with(magic) {
-            if *mime == "image/webp" {
-                if data.len() < 12 || &data[8..12] != b"WEBP" {
-                    continue;
-                }
-            }
-            return Ok(mime);
+    // ── RIFF container — disambiguate WebP vs WAV ────────────────────────────
+    if header.starts_with(b"RIFF") && data.len() >= 12 {
+        if &data[8..12] == b"WEBP" {
+            return Ok("image/webp");
         }
+        if &data[8..12] == b"WAVE" {
+            return Ok("audio/wav");
+        }
+        return Err(anyhow::anyhow!(
+            "RIFF container with unknown subtype. Accepted: WebP, WAV"
+        ));
     }
+
+    // ── WebM (video or audio-only) ────────────────────────────────────────────
+    if header.starts_with(b"\x1a\x45\xdf\xa3") {
+        return Ok("video/webm");
+    }
+
+    // ── Image formats ─────────────────────────────────────────────────────────
+    if header.starts_with(b"\xff\xd8\xff") { return Ok("image/jpeg"); }
+    if header.starts_with(b"\x89PNG")      { return Ok("image/png");  }
+    if header.starts_with(b"GIF8")         { return Ok("image/gif");  }
+
+    // ── Audio formats ─────────────────────────────────────────────────────────
+    // ID3-tagged MP3
+    if header.starts_with(b"ID3")          { return Ok("audio/mpeg"); }
+    // Raw MP3 frame sync (no ID3 header)
+    if data.len() >= 2 && data[0] == 0xff
+        && (data[1] == 0xfb || data[1] == 0xf3 || data[1] == 0xf2) {
+        return Ok("audio/mpeg");
+    }
+    // OGG container (Vorbis, Opus, FLAC-in-OGG)
+    if header.starts_with(b"OggS")         { return Ok("audio/ogg");  }
+    // Native FLAC
+    if header.starts_with(b"fLaC")         { return Ok("audio/flac"); }
+    // AAC ADTS sync word
+    if data.len() >= 2 && data[0] == 0xff
+        && (data[1] & 0xf0 == 0xf0) && (data[1] != 0xff) {
+        // Distinguish from MP3 frame sync already matched above
+        return Ok("audio/aac");
+    }
+
     Err(anyhow::anyhow!(
-        "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, MP4, WebM"
+        "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, MP4, WebM, \
+         MP3, OGG, FLAC, WAV, M4A, AAC"
     ))
 }
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
-/// Save an uploaded file to disk and generate its thumbnail.
+/// Save an uploaded file to disk and generate its thumbnail (or audio placeholder).
+///
 /// Files are stored under `{boards_dir}/{board_short}/` and thumbnails
 /// under `{boards_dir}/{board_short}/thumbs/`.
 /// The returned paths are relative to `boards_dir` (e.g. `"b/abc123.webm"`).
+///
+/// When `ffmpeg_available` is true, uploaded MP4 files are transcoded to WebM
+/// (VP9 video + Opus audio) before being saved.  Already-WebM uploads are kept
+/// as-is.  If transcoding fails, the original file is saved as a fallback.
+/// Audio files never require ffmpeg; they always receive an SVG placeholder.
 pub fn save_upload(
     data:              &[u8],
     original_filename: &str,
@@ -89,31 +138,74 @@ pub fn save_upload(
     thumb_size:        u32,
     max_image_size:    usize,
     max_video_size:    usize,
+    max_audio_size:    usize,
+    ffmpeg_available:  bool,
 ) -> Result<UploadedFile> {
     if data.is_empty() {
         return Err(anyhow::anyhow!("File is empty."));
     }
 
-    // Detect type first so we can apply the right limit.
-    let mime_type = detect_mime_type(data)?;
-    let is_video  = mime_type.starts_with("video/");
-    let max_size  = if is_video { max_video_size } else { max_image_size };
+    // Detect MIME type first so we can apply the correct size limit.
+    let mime_type  = detect_mime_type(data)?;
+    let media_type = crate::models::MediaType::from_mime(mime_type)
+        .ok_or_else(|| anyhow::anyhow!("Could not classify detected MIME type: {}", mime_type))?;
+
+    let max_size = match media_type {
+        crate::models::MediaType::Video => max_video_size,
+        crate::models::MediaType::Audio => max_audio_size,
+        crate::models::MediaType::Image => max_image_size,
+    };
 
     if data.len() > max_size {
         return Err(anyhow::anyhow!(
             "File too large. Maximum {} size is {} MiB.",
-            if is_video { "video" } else { "image" },
+            match media_type {
+                crate::models::MediaType::Video => "video",
+                crate::models::MediaType::Audio => "audio",
+                crate::models::MediaType::Image => "image",
+            },
             max_size / 1024 / 1024
         ));
     }
 
-    // FIX[MEDIUM-6]: Use checked conversion to avoid silent truncation on
-    // platforms where usize > i64 range (theoretical, but defensive).
-    let file_size = i64::try_from(data.len())
-        .context("File size overflows i64 — this should not be possible given upload limits")?;
 
-    let file_id  = Uuid::new_v4().to_string().replace('-', "");
-    let ext      = mime_to_ext(mime_type);
+    let file_id = Uuid::new_v4().to_string().replace('-', "");
+
+    // ── Video transcoding ─────────────────────────────────────────────────────
+    // If ffmpeg is available and the upload is an MP4, transcode it to WebM
+    // (VP9 + Opus) before saving.  WebM uploads are kept as-is.
+    // On any transcoding failure we fall back to the original data silently.
+    // We use an Option<Vec<u8>> to own the transcoded bytes when needed so the
+    // borrow checker can track the lifetime cleanly.
+    let transcoded_webm: Option<Vec<u8>> =
+        if matches!(media_type, crate::models::MediaType::Video)
+            && ffmpeg_available
+            && mime_type == "video/mp4"
+        {
+            match ffmpeg_transcode_webm(data) {
+                Ok(bytes) => {
+                    tracing::info!("Transcoded MP4 → WebM ({} bytes)", bytes.len());
+                    Some(bytes)
+                }
+                Err(e) => {
+                    tracing::warn!("WebM transcode failed ({}); keeping original MP4", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+    let (final_data, final_mime): (&[u8], &'static str) = match &transcoded_webm {
+        Some(webm) => (webm.as_slice(), "video/webm"),
+        None       => (data, mime_type),
+    };
+
+    // File size is derived from the data we're actually saving.
+    let file_size = i64::try_from(final_data.len())
+        .context("File size overflows i64")?;
+
+    let ext      = mime_to_ext(final_mime);
     let filename = format!("{}.{}", file_id, ext);
 
     // Ensure per-board directories exist: boards_dir/{board_short}/ and thumbs/
@@ -122,40 +214,122 @@ pub fn save_upload(
     std::fs::create_dir_all(&thumbs_dir)
         .context("Failed to create board thumbs directory")?;
 
-    // Write original file into the board's directory
+    // Write the (possibly transcoded) file into the board's directory.
     let file_path_abs = board_dir.join(&filename);
-    std::fs::write(&file_path_abs, data)
+    std::fs::write(&file_path_abs, final_data)
         .context("Failed to write uploaded file")?;
 
     // Paths relative to boards_dir (e.g. "b/abc123.webm", "b/thumbs/abc123.jpg")
-    let rel_file  = format!("{}/{}", board_short, filename);
+    let rel_file      = format!("{}/{}", board_short, filename);
     let board_dir_str = board_dir.to_string_lossy().into_owned();
 
-    // Generate thumbnail — returns relative-to-boards_dir path
-    let thumb_rel = if is_video {
-        let (name, _) = generate_video_thumb(data, &board_dir_str, board_short, &file_id, thumb_size);
-        name
-    } else {
-        let thumb_ext = match mime_type {
-            "image/png"  => "png",
-            "image/gif"  => "gif",
-            "image/webp" => "webp",
-            _            => "jpg",
-        };
-        let thumb_rel_name = format!("{}/thumbs/{}.{}", board_short, file_id, thumb_ext);
-        let thumb_abs      = PathBuf::from(boards_dir).join(&thumb_rel_name);
-        generate_image_thumb(data, mime_type, &thumb_abs, thumb_size)
-            .context("Failed to generate image thumbnail")?;
-        thumb_rel_name
+    // Generate thumbnail / placeholder based on media type.
+    let thumb_rel = match media_type {
+        crate::models::MediaType::Video => {
+            // Use ffmpeg for first-frame thumbnail; SVG fallback if unavailable.
+            let (name, _) = generate_video_thumb(
+                final_data, &board_dir_str, board_short, &file_id, thumb_size, ffmpeg_available,
+            );
+            name
+        }
+        crate::models::MediaType::Audio => {
+            // Audio has no visual thumbnail — write an SVG music-note placeholder.
+            let svg_rel  = format!("{}/thumbs/{}.svg", board_short, file_id);
+            let svg_path = PathBuf::from(boards_dir).join(&svg_rel);
+            if let Err(e) = generate_audio_placeholder(&svg_path) {
+                tracing::warn!("Failed to write audio SVG placeholder: {}", e);
+            }
+            svg_rel
+        }
+        crate::models::MediaType::Image => {
+            let thumb_ext = match mime_type {
+                "image/png"  => "png",
+                "image/gif"  => "gif",
+                "image/webp" => "webp",
+                _            => "jpg",
+            };
+            let thumb_rel_name = format!("{}/thumbs/{}.{}", board_short, file_id, thumb_ext);
+            let thumb_abs      = PathBuf::from(boards_dir).join(&thumb_rel_name);
+            generate_image_thumb(data, mime_type, &thumb_abs, thumb_size)
+                .context("Failed to generate image thumbnail")?;
+            thumb_rel_name
+        }
     };
 
     Ok(UploadedFile {
         file_path:     rel_file,
         thumb_path:    thumb_rel,
         original_name: crate::utils::sanitize::sanitize_filename(original_filename),
-        mime_type:     mime_type.to_string(),
+        mime_type:     final_mime.to_string(),
         file_size,
+        media_type,
     })
+}
+
+// ─── Video transcoding ───────────────────────────────────────────────────────
+
+/// Transcode any video file to WebM (VP9 + Opus) using ffmpeg.
+///
+/// Returns the transcoded WebM bytes on success, or an error on failure.
+/// The caller is responsible for falling back to the original data on error.
+///
+/// Encoding settings:
+///   VP9  — `-deadline realtime -cpu-used 8` for fast server-side encoding.
+///           Quality target CRF 33 with unconstrained bitrate (`-b:v 0`).
+///   Opus — `-b:a 128k` for good quality stereo audio.
+///
+/// Security: all arguments passed as separate array elements — no shell.
+fn ffmpeg_transcode_webm(video_data: &[u8]) -> Result<Vec<u8>> {
+    use std::process::Command;
+
+    let temp_dir = std::env::temp_dir();
+    let tmp_id   = Uuid::new_v4().to_string().replace('-', "");
+    let temp_in  = temp_dir.join(format!("chan_in_{}.tmp",  tmp_id));
+    let temp_out = temp_dir.join(format!("chan_out_{}.webm", tmp_id));
+
+    std::fs::write(&temp_in, video_data)
+        .context("Failed to write temp video for transcoding")?;
+
+    let in_str  = temp_in.to_str().context("Temp input path is non-UTF-8")?;
+    let out_str = temp_out.to_str().context("Temp output path is non-UTF-8")?;
+
+    // Two-pass would give better quality but is too slow for interactive uploads.
+    // Single-pass VP9 at realtime deadline is fast enough and still better than
+    // the original MP4 in most cases (smaller file, open container).
+    let output = Command::new("ffmpeg")
+        .args([
+            "-loglevel", "error",
+            "-i",        in_str,
+            "-c:v",      "libvpx-vp9",
+            "-crf",      "33",
+            "-b:v",      "0",
+            "-deadline", "realtime",
+            "-cpu-used", "8",
+            "-c:a",      "libopus",
+            "-b:a",      "128k",
+            "-y",
+            out_str,
+        ])
+        .output();
+
+    // Always clean up the temp input.
+    let _ = std::fs::remove_file(&temp_in);
+
+    let out = output.context("ffmpeg not found or failed to spawn")?;
+
+    if out.status.success() && temp_out.exists() {
+        let webm = std::fs::read(&temp_out)
+            .context("Failed to read transcoded WebM output")?;
+        let _ = std::fs::remove_file(&temp_out);
+        Ok(webm)
+    } else {
+        let _ = std::fs::remove_file(&temp_out);
+        Err(anyhow::anyhow!(
+            "ffmpeg transcode exit {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
 }
 
 // ─── Video thumbnail ──────────────────────────────────────────────────────────
@@ -163,40 +337,47 @@ pub fn save_upload(
 /// Try ffmpeg first-frame extraction; fall back to SVG placeholder on failure.
 /// Returns (boards_dir-relative thumb path, absolute path).
 fn generate_video_thumb(
-    video_data:  &[u8],
-    board_dir:   &str,
-    board_short: &str,
-    file_id:     &str,
-    thumb_size:  u32,
+    video_data:       &[u8],
+    board_dir:        &str,
+    board_short:      &str,
+    file_id:          &str,
+    thumb_size:       u32,
+    ffmpeg_available: bool,
 ) -> (String, PathBuf) {
-    // Attempt real first-frame thumbnail via ffmpeg
-    let jpg_rel  = format!("{}/thumbs/{}.jpg", board_short, file_id);
-    let jpg_path = PathBuf::from(board_dir).join(format!("thumbs/{}.jpg", file_id));
+    // Only attempt ffmpeg if it was detected at startup.
+    if ffmpeg_available {
+        let jpg_rel  = format!("{}/thumbs/{}.jpg", board_short, file_id);
+        let jpg_path = PathBuf::from(board_dir).join(format!("thumbs/{}.jpg", file_id));
 
-    match ffmpeg_first_frame(video_data, &jpg_path, thumb_size) {
-        Ok(()) => {
-            tracing::debug!("ffmpeg thumbnail generated for {}", file_id);
-            return (jpg_rel, jpg_path);
+        match ffmpeg_first_frame(video_data, &jpg_path, thumb_size) {
+            Ok(()) => {
+                tracing::debug!("ffmpeg thumbnail generated for {}", file_id);
+                return (jpg_rel, jpg_path);
+            }
+            Err(e) => {
+                tracing::warn!("ffmpeg thumbnail failed ({}), using SVG placeholder", e);
+            }
         }
-        Err(e) => {
-            tracing::warn!("ffmpeg thumbnail failed ({}), using SVG placeholder", e);
-        }
+    } else {
+        tracing::debug!("ffmpeg not available — using video SVG placeholder for {}", file_id);
     }
 
     // Fall back to SVG placeholder
     let svg_rel  = format!("{}/thumbs/{}.svg", board_short, file_id);
     let svg_path = PathBuf::from(board_dir).join(format!("thumbs/{}.svg", file_id));
     if let Err(e) = generate_video_placeholder(&svg_path) {
-        tracing::error!("Failed to write SVG placeholder: {}", e);
+        tracing::error!("Failed to write video SVG placeholder: {}", e);
     }
     (svg_rel, svg_path)
 }
 
 /// Shell out to ffmpeg to extract the first frame as a scaled JPEG.
 ///
-/// Requirements: `ffmpeg` must be on PATH.
-/// The video bytes are written to a temp file, ffmpeg runs, the JPEG is
-/// moved to `output_path`, and the temp file is cleaned up.
+/// Security: all arguments are passed as separate array elements — no shell
+/// invocation, no injection surface.
+///
+/// The video bytes are written to a temp file, ffmpeg runs on that file,
+/// the JPEG output is moved to `output_path`, and the temp file is cleaned up.
 fn ffmpeg_first_frame(
     video_data:  &[u8],
     output_path: &PathBuf,
@@ -206,7 +387,7 @@ fn ffmpeg_first_frame(
 
     let temp_dir = std::env::temp_dir();
     let tmp_id   = Uuid::new_v4().to_string().replace('-', "");
-    let temp_in  = temp_dir.join(format!("chan_vid_{}.tmp",   tmp_id));
+    let temp_in  = temp_dir.join(format!("chan_vid_{}.tmp",  tmp_id));
     let temp_out = temp_dir.join(format!("chan_thm_{}.jpg", tmp_id));
 
     std::fs::write(&temp_in, video_data)
@@ -222,6 +403,7 @@ fn ffmpeg_first_frame(
     // scale=W:-2 : scale width to thumb_size, height to nearest even number
     let vf = format!("scale={}:-2", thumb_size);
 
+    // No shell invocation — explicit argument array only.
     let output = Command::new("ffmpeg")
         .args([
             "-loglevel", "error",
@@ -260,6 +442,21 @@ fn generate_video_placeholder(output_path: &PathBuf) -> Result<()> {
   <circle cx="125" cy="125" r="60" fill="#0d120d" stroke="#00c840" stroke-width="2"/>
   <polygon points="108,95 108,155 165,125" fill="#00c840"/>
   <text x="125" y="215" text-anchor="middle" fill="#3a4a3a" font-family="monospace" font-size="12">VIDEO</text>
+</svg>"##;
+    std::fs::write(output_path, svg)?;
+    Ok(())
+}
+
+// ─── Audio placeholder ────────────────────────────────────────────────────────
+
+/// SVG music-note placeholder written for every audio upload.
+/// No real thumbnail is generated for audio files.
+fn generate_audio_placeholder(output_path: &PathBuf) -> Result<()> {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="250" height="250" viewBox="0 0 250 250">
+  <rect width="250" height="250" fill="#0a0f0a"/>
+  <circle cx="125" cy="125" r="60" fill="#0d120d" stroke="#00c840" stroke-width="2"/>
+  <text x="125" y="140" text-anchor="middle" fill="#00c840" font-family="monospace" font-size="48">&#9835;</text>
+  <text x="125" y="215" text-anchor="middle" fill="#3a4a3a" font-family="monospace" font-size="12">AUDIO</text>
 </svg>"##;
     std::fs::write(output_path, svg)?;
     Ok(())
@@ -315,15 +512,24 @@ fn generate_image_thumb(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Map a MIME type string to the canonical file extension used on disk.
 fn mime_to_ext(mime: &str) -> &'static str {
     match mime {
-        "image/jpeg" => "jpg",
-        "image/png"  => "png",
-        "image/gif"  => "gif",
-        "image/webp" => "webp",
-        "video/mp4"  => "mp4",
-        "video/webm" => "webm",
-        _            => "bin",
+        "image/jpeg"  => "jpg",
+        "image/png"   => "png",
+        "image/gif"   => "gif",
+        "image/webp"  => "webp",
+        "video/mp4"   => "mp4",
+        "video/webm"  => "webm",
+        // Audio formats
+        "audio/mpeg"  => "mp3",
+        "audio/ogg"   => "ogg",
+        "audio/flac"  => "flac",
+        "audio/wav"   => "wav",
+        "audio/mp4"   => "m4a",
+        "audio/aac"   => "aac",
+        "audio/webm"  => "webm",
+        _             => "bin",
     }
 }
 

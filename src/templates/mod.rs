@@ -233,7 +233,7 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 
 // ─── Index (board list) ───────────────────────────────────────────────────────
 
-pub fn index_page(board_stats: &[crate::models::BoardStats], csrf_token: &str) -> String {
+pub fn index_page(board_stats: &[crate::models::BoardStats], site_stats: &crate::models::SiteStats, csrf_token: &str) -> String {
     // Build a plain boards list for the nav bar
     let all_boards: Vec<Board> = board_stats.iter().map(|s| s.board.clone()).collect();
 
@@ -274,14 +274,36 @@ pub fn index_page(board_stats: &[crate::models::BoardStats], csrf_token: &str) -
         "<p class=\"index-empty\">no boards yet — admin must create boards first.</p>"
     } else { "" };
 
+    let active_gb = site_stats.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let stats_sec = format!(
+        r#"<div class="index-section index-stats-section">
+<h2 class="index-section-title">// Stats</h2>
+<div class="index-stats-grid">
+  <div class="index-stat"><span class="index-stat-value">{tp}</span><span class="index-stat-label">total posts</span></div>
+  <div class="index-stat"><span class="index-stat-value">{ti}</span><span class="index-stat-label">images uploaded</span></div>
+  <div class="index-stat"><span class="index-stat-value">{tv}</span><span class="index-stat-label">videos uploaded</span></div>
+  <div class="index-stat"><span class="index-stat-value">{ta}</span><span class="index-stat-label">audio files uploaded</span></div>
+  <div class="index-stat"><span class="index-stat-value">{gb:.2} GB</span><span class="index-stat-label">active content</span></div>
+</div>
+</div>"#,
+        tp = site_stats.total_posts,
+        ti = site_stats.total_images,
+        tv = site_stats.total_videos,
+        ta = site_stats.total_audio,
+        gb = active_gb,
+    );
+
     let body = format!(
         r#"<div class="index-hero">
 <h1 class="index-title">[ {name} ]</h1>
 <p class="index-subtitle">select board to proceed</p>
 </div>
-{sfw}{nsfw}{empty}"#,
-        name = escape_html(&CONFIG.forum_name),
-        sfw = sfw_sec, nsfw = nsfw_sec, empty = empty,
+{sfw}{nsfw}{empty}{stats}"#,
+        name  = escape_html(&CONFIG.forum_name),
+        sfw   = sfw_sec,
+        nsfw  = nsfw_sec,
+        empty = empty,
+        stats = stats_sec,
     );
 
     base_layout(&CONFIG.forum_name, None, &body, csrf_token, &all_boards)
@@ -296,8 +318,17 @@ pub fn board_page(
     csrf_token: &str,
     boards: &[Board],
     is_admin: bool,
+    error: Option<&str>,
 ) -> String {
     let mut body = String::new();
+
+    // Inline error banner (e.g. validation failures on post submission)
+    if let Some(msg) = error {
+        body.push_str(&format!(
+            r#"<div class="post-error-banner">&#9888; {}</div>"#,
+            escape_html(msg)
+        ));
+    }
 
     // Visible admin toolbar — appears whenever an admin is logged in
     if is_admin {
@@ -351,6 +382,7 @@ pub fn board_page(
 fn new_thread_form(board_short: &str, csrf_token: &str) -> String {
     let image_mb = crate::config::CONFIG.max_image_size / 1024 / 1024;
     let video_mb = crate::config::CONFIG.max_video_size / 1024 / 1024;
+    let audio_mb = crate::config::CONFIG.max_audio_size / 1024 / 1024;
     format!(
         r#"<div class="post-form-container">
 <div class="post-form-title">[ new thread ]</div>
@@ -363,7 +395,7 @@ fn new_thread_form(board_short: &str, csrf_token: &str) -> String {
         <td><input type="text" name="subject" maxlength="128">
             <button type="submit">post thread</button></td></tr>
     <tr><td>body</td>
-        <td><textarea name="body" rows="5" maxlength="4096" required></textarea>
+        <td><textarea name="body" rows="5" maxlength="4096"></textarea>
             <div class="markup-hint">
               <span title="Greentext">&#62;green</span>
               <span title="Bold">**bold**</span>
@@ -375,8 +407,8 @@ fn new_thread_form(board_short: &str, csrf_token: &str) -> String {
             </div>
         </td></tr>
     <tr><td>file</td>
-        <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm">
-            <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB</span></td></tr>
+        <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
+            <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a · max {audio_mb} MiB</span></td></tr>
     <tr><td>del token</td>
         <td><input type="text" name="deletion_token" placeholder="password to delete" maxlength="64"></td></tr>
     <tr><td colspan="2">
@@ -434,6 +466,7 @@ function updateRemoveButtons() {{
         csrf     = escape_html(csrf_token),
         image_mb = image_mb,
         video_mb = video_mb,
+        audio_mb = audio_mb,
     )
 }
 
@@ -576,8 +609,17 @@ pub fn thread_page(
     boards: &[Board],
     is_admin: bool,
     poll: Option<&crate::models::PollData>,
+    error: Option<&str>,
 ) -> String {
     let mut body = String::new();
+
+    // Inline error banner (e.g. validation failures on reply submission)
+    if let Some(msg) = error {
+        body.push_str(&format!(
+            r#"<div class="post-error-banner">&#9888; {}</div>"#,
+            escape_html(msg)
+        ));
+    }
 
     // Visible admin toolbar
     if is_admin {
@@ -787,15 +829,44 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
         ));
     }
 
-    // Image / Video — uses flex layout so text wraps naturally at any size
+    // Image / Video / Audio — uses flex layout so text wraps naturally at any size
     if show_media {
     if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
-        let size_str = post.file_size.map(format_file_size).unwrap_or_default();
-        let name_str = post.file_name.as_deref().unwrap_or("file");
-        let is_video = post.mime_type.as_deref().map(|m| m.starts_with("video/")).unwrap_or(false);
-        let mime     = post.mime_type.as_deref().unwrap_or("video/mp4");
+        let size_str  = post.file_size.map(format_file_size).unwrap_or_default();
+        let name_str  = post.file_name.as_deref().unwrap_or("file");
+        let mime      = post.mime_type.as_deref().unwrap_or("application/octet-stream");
+        // Use explicit media_type when available; fall back to MIME prefix sniff.
+        let is_audio  = matches!(&post.media_type, Some(crate::models::MediaType::Audio))
+            || post.mime_type.as_deref().map(|m| m.starts_with("audio/")).unwrap_or(false);
+        let is_video  = !is_audio && (
+            matches!(&post.media_type, Some(crate::models::MediaType::Video))
+            || post.mime_type.as_deref().map(|m| m.starts_with("video/")).unwrap_or(false)
+        );
 
-        if is_video {
+        if is_audio {
+            // ── Audio player ─────────────────────────────────────────────────
+            // Rendered with <audio controls preload="none"> for zero auto-load.
+            // The SVG placeholder icon is shown above the player.
+            html.push_str(&format!(
+                r#"<div class="file-container audio-container">
+<div class="file-info">
+  <a href="/boards/{f}">{orig}</a> ({sz})
+</div>
+<div class="audio-thumb">
+  <img class="thumb" src="/boards/{th}" loading="lazy" alt="audio">
+</div>
+<audio controls preload="none" class="audio-player">
+  <source src="/boards/{f}" type="{mime}">
+  Your browser does not support the audio element.
+</audio>
+</div>"#,
+                f    = escape_html(file),
+                th   = escape_html(thumb),
+                orig = escape_html(name_str),
+                sz   = escape_html(&size_str),
+                mime = escape_html(mime),
+            ));
+        } else if is_video {
             html.push_str(&format!(
                 r#"<div class="file-container">
 <div class="file-info">
@@ -884,6 +955,7 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
 fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str) -> String {
     let image_mb = crate::config::CONFIG.max_image_size / 1024 / 1024;
     let video_mb = crate::config::CONFIG.max_video_size / 1024 / 1024;
+    let audio_mb = crate::config::CONFIG.max_audio_size / 1024 / 1024;
     format!(
         r#"<div class="post-form-container reply-form-container">
 <div class="post-form-title">[ reply to thread ]</div>
@@ -893,11 +965,11 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str) -> String {
     <tr><td>name</td>
         <td><input type="text" name="name" placeholder="Anonymous" maxlength="64"></td></tr>
     <tr><td>body</td>
-        <td><textarea id="reply-body" name="body" rows="4" maxlength="4096" required></textarea>
+        <td><textarea id="reply-body" name="body" rows="4" maxlength="4096"></textarea>
             <button type="submit">post reply</button></td></tr>
     <tr><td>file</td>
-        <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm">
-            <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB</span></td></tr>
+        <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
+            <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a · max {audio_mb} MiB</span></td></tr>
     <tr><td>del token</td>
         <td><input type="text" name="deletion_token" placeholder="password to delete" maxlength="64"></td></tr>
   </table>
@@ -908,6 +980,7 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str) -> String {
         csrf     = escape_html(csrf_token),
         image_mb = image_mb,
         video_mb = video_mb,
+        audio_mb = audio_mb,
     )
 }
 
@@ -1065,7 +1138,9 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
 </div>
 <div class="board-settings-checks">
   <label><input type="checkbox" name="nsfw"            value="1"{nsfw_ck}> NSFW</label>
+  <label><input type="checkbox" name="allow_images"    value="1"{img_ck}>  Allow images</label>
   <label><input type="checkbox" name="allow_video"     value="1"{vid_ck}>  Allow video</label>
+  <label><input type="checkbox" name="allow_audio"     value="1"{aud_ck}>  Allow audio</label>
   <label><input type="checkbox" name="allow_tripcodes" value="1"{trip_ck}> Allow tripcodes</label>
 </div>
 <div class="board-settings-actions">
@@ -1092,7 +1167,9 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
             bump     = b.bump_limit,
             maxt     = b.max_threads,
             nsfw_ck  = checked(b.nsfw),
+            img_ck   = checked(b.allow_images),
             vid_ck   = checked(b.allow_video),
+            aud_ck   = checked(b.allow_audio),
             trip_ck  = checked(b.allow_tripcodes),
         ));
     }

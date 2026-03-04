@@ -664,7 +664,9 @@ pub struct BoardSettingsForm {
     bump_limit:      Option<String>,
     max_threads:     Option<String>,
     nsfw:            Option<String>,
+    allow_images:    Option<String>,
     allow_video:     Option<String>,
+    allow_audio:     Option<String>,
     allow_tripcodes: Option<String>,
     _csrf:           Option<String>,
 }
@@ -704,7 +706,9 @@ pub async fn update_board_settings(
                 form.nsfw.as_deref() == Some("1"),
                 bump_limit,
                 max_threads,
+                form.allow_images.as_deref() == Some("1"),
                 form.allow_video.as_deref() == Some("1"),
+                form.allow_audio.as_deref() == Some("1"),
                 form.allow_tripcodes.as_deref() == Some("1"),
             )?;
             info!("Admin updated settings for board id={}", board_id);

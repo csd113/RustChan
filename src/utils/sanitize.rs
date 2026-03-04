@@ -202,6 +202,25 @@ pub fn validate_body(body: &str) -> Result<&str, String> {
     Ok(trimmed)
 }
 
+/// Validate the body when a file attachment may substitute for text.
+///
+/// Rules:
+///   • If `has_file` is true, an empty body is allowed — the file is enough.
+///   • If `has_file` is false, the body must not be blank (no empty posts).
+///   • Body length is still capped at 4096 regardless.
+///
+/// Returns the trimmed body (may be empty when a file is present).
+pub fn validate_body_with_file(body: &str, has_file: bool) -> Result<String, String> {
+    let trimmed = body.trim();
+    if trimmed.len() > 4096 {
+        return Err("Post body exceeds 4096 characters.".into());
+    }
+    if trimmed.is_empty() && !has_file {
+        return Err("Post must include either text or an attached file.".into());
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Validate and truncate a name field.
 pub fn validate_name(name: &str) -> String {
     let trimmed = name.trim();

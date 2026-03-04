@@ -22,7 +22,7 @@ use crate::{
         files::save_upload,
         sanitize::{
             // FIX[MEDIUM-8]: apply_word_filters now runs before escape_html
-            apply_word_filters, escape_html, render_post_body, validate_body, validate_name,
+            apply_word_filters, escape_html, render_post_body, validate_body, validate_body_with_file, validate_name,
             validate_subject,
         },
         tripcode::parse_name_tripcode,
@@ -48,17 +48,19 @@ pub async fn index(
 ) -> Result<(CookieJar, Html<String>)> {
     let (jar, csrf) = ensure_csrf(jar);
 
-    let board_stats = tokio::task::spawn_blocking({
+    let (board_stats, site_stats) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<Vec<crate::models::BoardStats>> {
+        move || -> Result<(Vec<crate::models::BoardStats>, crate::models::SiteStats)> {
             let conn = pool.get()?;
-            Ok(db::get_all_boards_with_stats(&conn)?)
+            let boards = db::get_all_boards_with_stats(&conn)?;
+            let stats  = db::get_site_stats(&conn).unwrap_or_default();
+            Ok((boards, stats))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(templates::index_page(&board_stats, &csrf))))
+    Ok((jar, Html(templates::index_page(&board_stats, &site_stats, &csrf))))
 }
 
 // ─── GET /:board/ — board index ───────────────────────────────────────────────
@@ -124,6 +126,7 @@ pub async fn board_index(
                 &csrf_clone,
                 &all_boards,
                 is_admin,
+                None,
             ))
         }
     })
@@ -149,15 +152,15 @@ pub async fn create_thread(
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let body_text = validate_body(&form.body)
-        .map_err(AppError::BadRequest)?
-        .to_string();
+    let raw_body = form.body;
 
     let client_ip     = addr.ip().to_string();
     let upload_dir    = CONFIG.upload_dir.clone();
     let thumb_size    = CONFIG.thumb_size;
-    let max_image_size  = CONFIG.max_image_size;
-    let max_video_size  = CONFIG.max_video_size;
+    let max_image_size    = CONFIG.max_image_size;
+    let max_video_size    = CONFIG.max_video_size;
+    let max_audio_size    = CONFIG.max_audio_size;
+    let ffmpeg_available  = state.ffmpeg_available;
     let cookie_secret = CONFIG.cookie_secret.clone();
     let file_data     = form.file;
     let name_val      = form.name;
@@ -167,7 +170,8 @@ pub async fn create_thread(
     let poll_options   = form.poll_options;
     let poll_duration  = form.poll_duration_secs;
 
-    let redirect_url = tokio::task::spawn_blocking({
+    let board_short_err = board_short.clone();
+    let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -191,6 +195,19 @@ pub async fn create_thread(
             let tripcode = if board.allow_tripcodes { tripcode } else { None };
             let subject = validate_subject(&subject_val);
 
+            // Validate body: if the board allows media uploads a file may substitute
+            // for text, but at least one of the two must be non-empty.
+            let board_allows_media = board.allow_images || board.allow_video || board.allow_audio;
+            let has_file = file_data.is_some();
+            let body_text = if board_allows_media {
+                validate_body_with_file(&raw_body, has_file)
+                    .map_err(AppError::BadRequest)?
+            } else {
+                validate_body(&raw_body)
+                    .map_err(AppError::BadRequest)?
+                    .to_string()
+            };
+
             // FIX[MEDIUM-8]: Apply word filters BEFORE HTML escaping so that
             // filter patterns are plain text, not HTML-entity strings.
             let filtered_body    = apply_word_filters(&body_text, &filters);
@@ -198,25 +215,39 @@ pub async fn create_thread(
             let body_html        = render_post_body(&escaped_body);
 
             let uploaded = if let Some((data, fname)) = file_data {
-                // Reject video if board has it disabled
-                let is_video = data.get(4..8) == Some(b"ftyp")
-                    || data.starts_with(b"\x1a\x45\xdf\xa3");
-                if is_video && !board.allow_video {
-                    return Err(AppError::BadRequest("This board does not allow video uploads.".into()));
+                // Detect media type from magic bytes to enforce per-board toggles.
+                // We call detect_mime_type here for a quick classification without
+                // doing a full save; the real detection runs again in save_upload.
+                let detected_mime = crate::utils::files::detect_mime_type(&data)
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                let detected_media = crate::models::MediaType::from_mime(detected_mime)
+                    .ok_or_else(|| AppError::BadRequest("Unsupported file type.".into()))?;
+
+                match detected_media {
+                    crate::models::MediaType::Image if !board.allow_images =>
+                        return Err(AppError::BadRequest("Image uploads are disabled on this board.".into())),
+                    crate::models::MediaType::Video if !board.allow_video =>
+                        return Err(AppError::BadRequest("Video uploads are disabled on this board.".into())),
+                    crate::models::MediaType::Audio if !board.allow_audio =>
+                        return Err(AppError::BadRequest("Audio uploads are disabled on this board.".into())),
+                    _ => {}
                 }
 
                 // SHA-256 deduplication — FIX[LOW-8]: use sha256_hex from crypto module
                 let hash = sha256_hex(&data);
                 if let Some(cached) = db::find_file_by_hash(&conn, &hash)? {
+                    let cached_media = crate::models::MediaType::from_mime(&cached.mime_type)
+                        .unwrap_or(crate::models::MediaType::Image);
                     Some(crate::utils::files::UploadedFile {
                         file_path:     cached.file_path,
                         thumb_path:    cached.thumb_path,
                         original_name: crate::utils::sanitize::sanitize_filename(&fname),
                         mime_type:     cached.mime_type,
                         file_size:     data.len() as i64,
+                        media_type:    cached_media,
                     })
                 } else {
-                    let f = save_upload(&data, &fname, &upload_dir, &board.short_name, thumb_size, max_image_size, max_video_size)
+                    let f = save_upload(&data, &fname, &upload_dir, &board.short_name, thumb_size, max_image_size, max_video_size, max_audio_size, ffmpeg_available)
                         .map_err(|e| AppError::BadRequest(e.to_string()))?;
                     db::record_file_hash(&conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
                     Some(f)
@@ -248,6 +279,7 @@ pub async fn create_thread(
                 file_size:  uploaded.as_ref().map(|u| u.file_size),
                 thumb_path: uploaded.as_ref().map(|u| u.thumb_path.clone()),
                 mime_type:  uploaded.as_ref().map(|u| u.mime_type.clone()),
+                media_type: uploaded.as_ref().map(|u| u.media_type.as_str().to_string()),
                 deletion_token,
                 is_op: true,
             };
@@ -283,7 +315,44 @@ pub async fn create_thread(
         }
     })
     .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+
+    // BadRequest → re-render the board index with an inline error banner.
+    let redirect_url = match result {
+        Ok(url) => url,
+        Err(AppError::BadRequest(msg)) => {
+            let html = tokio::task::spawn_blocking({
+                let pool        = state.db.clone();
+                let csrf_err    = csrf_cookie.clone().unwrap_or_default();
+                let board_short = board_short_err.clone();
+                let msg         = msg.clone();
+                move || -> String {
+                    let conn = match pool.get() { Ok(c) => c, Err(_) => return String::new() };
+                    let board = match db::get_board_by_short(&conn, &board_short) {
+                        Ok(Some(b)) => b, _ => return String::new(),
+                    };
+                    let all_boards = db::get_all_boards(&conn).unwrap_or_default();
+                    let total      = db::count_threads_for_board(&conn, board.id).unwrap_or(0);
+                    let pagination = crate::models::Pagination::new(1, 10, total);
+                    let threads    = db::get_threads_for_board(&conn, board.id, 10, 0).unwrap_or_default();
+                    let summaries: Vec<crate::models::ThreadSummary> = threads.into_iter().map(|t| {
+                        let preview = db::get_preview_posts(&conn, t.id, 3).unwrap_or_default();
+                        let omitted = (t.reply_count - preview.len() as i64).max(0);
+                        crate::models::ThreadSummary { thread: t, preview_posts: preview, omitted }
+                    }).collect();
+                    templates::board_page(&board, &summaries, &pagination, &csrf_err, &all_boards, false, Some(&msg))
+                }
+            })
+            .await
+            .unwrap_or_default();
+
+            if !html.is_empty() {
+                return Ok((jar, Html(html)).into_response());
+            }
+            return Err(AppError::BadRequest(msg));
+        }
+        Err(e) => return Err(e),
+    };
 
     Ok(Redirect::to(&redirect_url).into_response())
 }

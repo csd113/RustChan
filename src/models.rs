@@ -3,6 +3,65 @@
 
 use serde::{Deserialize, Serialize};
 
+// ─── Media type classification ────────────────────────────────────────────────
+
+/// Classifies an uploaded file as image, video, or audio.
+/// Stored as a TEXT column in posts ("image", "video", "audio").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaType {
+    Image,
+    Video,
+    Audio,
+}
+
+impl MediaType {
+    /// Infer MediaType from a MIME type string.
+    pub fn from_mime(mime: &str) -> Option<Self> {
+        if mime.starts_with("image/") {
+            Some(MediaType::Image)
+        } else if mime.starts_with("video/") {
+            Some(MediaType::Video)
+        } else if mime.starts_with("audio/") {
+            Some(MediaType::Audio)
+        } else {
+            None
+        }
+    }
+
+    /// Infer MediaType from a file extension (lowercase, no dot).
+    /// Used during the backfill migration for pre-existing posts.
+    #[allow(dead_code)]
+    pub fn from_ext(ext: &str) -> Option<Self> {
+        match ext {
+            "jpg" | "jpeg" | "png" | "gif" | "webp" => Some(MediaType::Image),
+            "mp4" | "webm"                           => Some(MediaType::Video),
+            "mp3" | "ogg"  | "flac" | "wav"
+            | "m4a" | "aac" | "opus"                 => Some(MediaType::Audio),
+            _ => None,
+        }
+    }
+
+    /// Serialise to the TEXT value stored in the database.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MediaType::Image => "image",
+            MediaType::Video => "video",
+            MediaType::Audio => "audio",
+        }
+    }
+
+    /// Deserialise from the TEXT value stored in the database.
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            "image" => Some(MediaType::Image),
+            "video" => Some(MediaType::Video),
+            "audio" => Some(MediaType::Audio),
+            _ => None,
+        }
+    }
+}
+
 /// A board, e.g. /tech/ — Technology
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Board {
@@ -13,7 +72,9 @@ pub struct Board {
     pub nsfw: bool,
     pub max_threads: i64,
     pub bump_limit: i64,
-    pub allow_video: bool,
+    pub allow_images: bool,  // per-board image upload toggle (default: true)
+    pub allow_video: bool,   // per-board video upload toggle (default: true)
+    pub allow_audio: bool,   // per-board audio upload toggle (default: true)
     pub allow_tripcodes: bool,
     pub created_at: i64,     // Unix timestamp
 }
@@ -55,6 +116,8 @@ pub struct Post {
     pub file_size: Option<i64>,
     pub thumb_path: Option<String>,
     pub mime_type: Option<String>,
+    /// Explicit media classification — set on all new posts; backfilled for old ones.
+    pub media_type: Option<MediaType>,
     pub created_at: i64,
     pub deletion_token: String,
     pub is_op: bool,
@@ -217,4 +280,19 @@ impl Pagination {
     }
     pub fn has_prev(&self) -> bool { self.page > 1 }
     pub fn has_next(&self) -> bool { self.page < self.total_pages() }
+}
+
+/// Aggregate site-wide statistics shown on the home page.
+#[derive(Debug, Clone, Default)]
+pub struct SiteStats {
+    /// Total posts ever made
+    pub total_posts:  i64,
+    /// Total image files ever uploaded
+    pub total_images: i64,
+    /// Total video files ever uploaded
+    pub total_videos: i64,
+    /// Total audio files ever uploaded
+    pub total_audio:  i64,
+    /// Total bytes of currently stored files (still on disk)
+    pub active_bytes: i64,
 }

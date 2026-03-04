@@ -49,13 +49,17 @@ fn settings_file_path() -> PathBuf {
 
 #[derive(Deserialize, Default)]
 struct SettingsFile {
-    forum_name:        Option<String>,
-    port:              Option<u16>,
-    max_image_size_mb: Option<u32>,
-    max_video_size_mb: Option<u32>,
+    forum_name:          Option<String>,
+    port:                Option<u16>,
+    max_image_size_mb:   Option<u32>,
+    max_video_size_mb:   Option<u32>,
+    max_audio_size_mb:   Option<u32>,
     // FIX[CRITICAL-1]: cookie_secret is now persisted in settings.toml so it
     // is generated once and stable across restarts, without being a known default.
-    cookie_secret:     Option<String>,
+    cookie_secret:       Option<String>,
+    // External tool toggles
+    enable_tor_support:  Option<bool>,
+    require_ffmpeg:      Option<bool>,
 }
 
 fn load_settings_file() -> SettingsFile {
@@ -105,6 +109,19 @@ max_image_size_mb = 8
 # Maximum size for video uploads in megabytes (mp4, webm).
 max_video_size_mb = 50
 
+# Maximum size for audio uploads in megabytes (mp3, ogg, flac, wav, m4a, aac).
+max_audio_size_mb = 150
+
+# Tor Onion Service support.
+# When true, the server probes for `tor` at startup and prints torrc hints.
+# The server always starts regardless — this is purely informational.
+enable_tor_support = true
+
+# Set to true to hard-exit at startup when ffmpeg is not found.
+# When false (default), the server starts normally and video thumbnails
+# are replaced with SVG placeholders.
+require_ffmpeg = false
+
 # Secret key for IP hashing.
 # AUTO-GENERATED on first run — do NOT change after your first post,
 # or all existing IP hashes become invalid (bans will stop working).
@@ -130,6 +147,13 @@ pub struct Config {
     pub port:                  u16,
     pub max_image_size:        usize,   // bytes
     pub max_video_size:        usize,   // bytes
+    pub max_audio_size:        usize,   // bytes
+
+    // ── External tool settings ────────────────────────────────────────────────
+    /// When true, Tor is probed at startup and hints are printed.
+    pub enable_tor_support:    bool,
+    /// When true, the server exits if ffmpeg is missing.
+    pub require_ffmpeg:        bool,
 
     // ── Internal / env-only settings ─────────────────────────────────────────
     pub bind_addr:             String,
@@ -164,6 +188,7 @@ impl Config {
         let port         = env_u16("CHAN_PORT",         s.port.unwrap_or(8080));
         let max_image_mb = env_u32("CHAN_MAX_IMAGE_MB", s.max_image_size_mb.unwrap_or(8));
         let max_video_mb = env_u32("CHAN_MAX_VIDEO_MB", s.max_video_size_mb.unwrap_or(50));
+        let max_audio_mb = env_u32("CHAN_MAX_AUDIO_MB", s.max_audio_size_mb.unwrap_or(150));
 
         let host      = env_str("CHAN_HOST", "0.0.0.0");
         let bind_addr = env_str("CHAN_BIND",  &format!("{host}:{port}"));
@@ -196,6 +221,10 @@ impl Config {
             port,
             max_image_size:        (max_image_mb as usize) * 1024 * 1024,
             max_video_size:        (max_video_mb  as usize) * 1024 * 1024,
+            max_audio_size:        (max_audio_mb  as usize) * 1024 * 1024,
+
+            enable_tor_support:    env_bool("CHAN_TOR_SUPPORT", s.enable_tor_support.unwrap_or(true)),
+            require_ffmpeg:        env_bool("CHAN_REQUIRE_FFMPEG", s.require_ffmpeg.unwrap_or(false)),
 
             bind_addr,
             database_path:         env_str("CHAN_DB",            &default_db),

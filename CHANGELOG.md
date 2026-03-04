@@ -2,6 +2,20 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.0.5] - 2026-03-04
+
+### Added
+- **Automatic WebM transcoding** — when ffmpeg is present, all uploaded MP4 files are automatically transcoded to WebM (VP9 + Opus) before being saved. Already-WebM uploads are kept as-is. If ffmpeg is unavailable or transcoding fails, the original MP4 is saved as a fallback with a warning logged.
+- **Home page stats section** — the index page now shows a `// Stats` panel at the bottom with five live counters: total posts, lifetime images uploaded, lifetime videos uploaded, lifetime audio files uploaded, and total size of active content in GB.
+
+### Fixed
+- **Tor detection on Homebrew** — the startup probe now checks `/opt/homebrew/bin/tor` (Apple Silicon) and `/usr/local/bin/tor` (Intel Mac) in addition to bare `tor` on PATH. Also changed from `.success()` to `.is_ok()` to handle tor builds that exit with code 1 for `--version` even when installed correctly.
+- **Audio uploads blocked in browser** — the file input `accept` attribute was missing all audio MIME types, causing the OS file picker to hide audio files entirely. All audio types are now listed (`audio/mpeg`, `audio/ogg`, `audio/flac`, `audio/wav`, `audio/mp4`, `audio/aac`, `audio/webm`) along with their extensions as a fallback.
+- **Audio size limit** — default `max_audio_size_mb` raised from 16 → 150 to accommodate lossless formats such as FLAC.
+- **Audio size not shown in UI** — the file hint row below the upload input now includes audio formats and their size limit alongside the existing image and video hints.
+- **Dead-code warning on `MediaType::from_ext`** — added `#[allow(dead_code)]` to suppress the compiler warning for this migration-use function.
+- **Stats section letter-spacing** — removed `letter-spacing` from `.index-stat-value` (CSS letter-spacing adds a trailing gap after the last character, breaking number alignment) and reduced label tracking from `0.08em` to `0.04em`.
+
 ## [1.0.4] - 2026-03-03
 
 ### Added

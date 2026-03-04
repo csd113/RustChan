@@ -47,7 +47,10 @@ static LAST_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
 /// Shared state for extracting the DB pool in middleware
 #[derive(Clone)]
 pub struct AppState {
-    pub db: crate::db::DbPool,
+    pub db:               crate::db::DbPool,
+    /// True when ffmpeg was detected at startup (set by detect::detect_ffmpeg).
+    /// Passed to file handling to enable/disable video thumbnail generation.
+    pub ffmpeg_available: bool,
 }
 
 /// Get current Unix timestamp in seconds.

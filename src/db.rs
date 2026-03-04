@@ -195,14 +195,38 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 
     // Additive migrations for existing databases that pre-date new columns.
     // SQLite returns an error on duplicate column — we just ignore it.
-    let migrations = [
-        "ALTER TABLE boards ADD COLUMN allow_video   INTEGER NOT NULL DEFAULT 1",
+    let migrations: &[&str] = &[
+        "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE boards ADD COLUMN allow_tripcodes INTEGER NOT NULL DEFAULT 1",
+        // Per-board image and audio toggles (Part 4)
+        "ALTER TABLE boards ADD COLUMN allow_images  INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE boards ADD COLUMN allow_audio   INTEGER NOT NULL DEFAULT 1",
+        // MediaType column on posts for explicit classification (Part 3)
+        "ALTER TABLE posts ADD COLUMN media_type TEXT",
         // Poll tables added later — CREATE TABLE IF NOT EXISTS handles this gracefully
     ];
-    for sql in &migrations {
+    for sql in migrations {
         let _ = conn.execute(sql, []);   // ignore "duplicate column" errors
     }
+
+    // Backfill media_type for existing posts that pre-date the column.
+    // We infer the type from the file extension embedded in file_path.
+    // This is non-destructive: posts without a file are left NULL.
+    let _ = conn.execute_batch(
+        "UPDATE posts
+         SET media_type = CASE
+             WHEN file_path LIKE '%.jpg'  OR file_path LIKE '%.jpeg' OR
+                  file_path LIKE '%.png'  OR file_path LIKE '%.gif'  OR
+                  file_path LIKE '%.webp' THEN 'image'
+             WHEN file_path LIKE '%.mp4'  OR file_path LIKE '%.webm' THEN 'video'
+             WHEN file_path LIKE '%.mp3'  OR file_path LIKE '%.ogg'  OR
+                  file_path LIKE '%.flac' OR file_path LIKE '%.wav'  OR
+                  file_path LIKE '%.m4a'  OR file_path LIKE '%.aac'  OR
+                  file_path LIKE '%.opus' THEN 'audio'
+             ELSE NULL
+         END
+         WHERE media_type IS NULL AND file_path IS NOT NULL;"
+    );
 
     Ok(())
 }
@@ -212,7 +236,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                allow_video, allow_tripcodes, created_at
+                allow_images, allow_video, allow_audio, allow_tripcodes, created_at
          FROM boards ORDER BY id ASC",
     )?;
     let boards = stmt
@@ -239,7 +263,7 @@ pub fn get_all_boards_with_stats(conn: &rusqlite::Connection) -> Result<Vec<crat
 pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Option<Board>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                allow_video, allow_tripcodes, created_at
+                allow_images, allow_video, allow_audio, allow_tripcodes, created_at
          FROM boards WHERE short_name = ?1",
     )?;
     Ok(stmt.query_row(params![short], map_board).optional()?)
@@ -252,9 +276,34 @@ pub fn create_board(
     description: &str,
     nsfw: bool,
 ) -> Result<i64> {
+    // New boards default to all media types enabled (images, video, audio).
     conn.execute(
-        "INSERT INTO boards (short_name, name, description, nsfw) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO boards (short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
+         VALUES (?1, ?2, ?3, ?4, 1, 1, 1)",
         params![short, name, description, nsfw as i32],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Create a board with explicit per-media-type toggles.
+/// Used by the CLI `--no-images / --no-videos / --no-audio` flags.
+pub fn create_board_with_media_flags(
+    conn: &rusqlite::Connection,
+    short: &str,
+    name: &str,
+    description: &str,
+    nsfw: bool,
+    allow_images: bool,
+    allow_video: bool,
+    allow_audio: bool,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO boards (short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            short, name, description, nsfw as i32,
+            allow_images as i32, allow_video as i32, allow_audio as i32,
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -283,17 +332,21 @@ pub fn update_board_settings(
     nsfw: bool,
     bump_limit: i64,
     max_threads: i64,
+    allow_images: bool,
     allow_video: bool,
+    allow_audio: bool,
     allow_tripcodes: bool,
 ) -> Result<()> {
     conn.execute(
         "UPDATE boards SET name=?1, description=?2, nsfw=?3,
-         bump_limit=?4, max_threads=?5, allow_video=?6, allow_tripcodes=?7
-         WHERE id=?8",
+         bump_limit=?4, max_threads=?5,
+         allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9
+         WHERE id=?10",
         params![
             name, description, nsfw as i32,
             bump_limit, max_threads,
-            allow_video as i32, allow_tripcodes as i32,
+            allow_images as i32, allow_video as i32, allow_audio as i32,
+            allow_tripcodes as i32,
             id,
         ],
     )?;
@@ -510,7 +563,7 @@ pub fn get_posts_for_thread(
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op
+                created_at, deletion_token, is_op, media_type
          FROM posts WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
     )?;
     let posts = stmt
@@ -529,7 +582,7 @@ pub fn get_preview_posts(
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op
+                created_at, deletion_token, is_op, media_type
          FROM (
              SELECT * FROM posts WHERE thread_id = ?1 AND is_op = 0
              ORDER BY created_at DESC, id DESC LIMIT ?2
@@ -547,8 +600,8 @@ fn create_post_inner(conn: &rusqlite::Connection, p: &NewPost) -> Result<i64> {
         "INSERT INTO posts
          (thread_id, board_id, name, tripcode, subject, body, body_html,
           ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-          deletion_token, is_op)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+          deletion_token, is_op, media_type)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
         params![
             p.thread_id,
             p.board_id,
@@ -565,6 +618,7 @@ fn create_post_inner(conn: &rusqlite::Connection, p: &NewPost) -> Result<i64> {
             p.mime_type,
             p.deletion_token,
             p.is_op as i32,
+            p.media_type,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -578,7 +632,7 @@ pub fn get_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<Post
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op
+                created_at, deletion_token, is_op, media_type
          FROM posts WHERE id = ?1",
     )?;
     Ok(stmt.query_row(params![post_id], map_post).optional()?)
@@ -636,7 +690,7 @@ pub fn search_posts(
     let mut stmt = conn.prepare(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op
+                created_at, deletion_token, is_op, media_type
          FROM posts WHERE board_id = ?1 AND body LIKE ?2 ESCAPE '\\'
          ORDER BY created_at DESC LIMIT ?3 OFFSET ?4",
     )?;
@@ -1011,38 +1065,47 @@ pub fn get_poll_context(
 
 fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
     Ok(Board {
-        id: row.get(0)?,
-        short_name: row.get(1)?,
-        name: row.get(2)?,
-        description: row.get(3)?,
-        nsfw: row.get::<_, i32>(4)? != 0,
-        max_threads: row.get(5)?,
-        bump_limit: row.get(6)?,
-        allow_video: row.get::<_, i32>(7)? != 0,
-        allow_tripcodes: row.get::<_, i32>(8)? != 0,
-        created_at: row.get(9)?,
+        id:            row.get(0)?,
+        short_name:    row.get(1)?,
+        name:          row.get(2)?,
+        description:   row.get(3)?,
+        nsfw:          row.get::<_, i32>(4)? != 0,
+        max_threads:   row.get(5)?,
+        bump_limit:    row.get(6)?,
+        allow_images:  row.get::<_, i32>(7)? != 0,
+        allow_video:   row.get::<_, i32>(8)? != 0,
+        allow_audio:   row.get::<_, i32>(9)? != 0,
+        allow_tripcodes: row.get::<_, i32>(10)? != 0,
+        created_at:    row.get(11)?,
     })
 }
 
 fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
+    // media_type is stored as TEXT; map NULL or unknown values to None.
+    let media_type_str: Option<String> = row.get(17)?;
+    let media_type = media_type_str
+        .as_deref()
+        .and_then(crate::models::MediaType::from_db_str);
+
     Ok(Post {
-        id: row.get(0)?,
-        thread_id: row.get(1)?,
-        board_id: row.get(2)?,
-        name: row.get(3)?,
-        tripcode: row.get(4)?,
-        subject: row.get(5)?,
-        body: row.get(6)?,
-        body_html: row.get(7)?,
-        ip_hash: row.get(8)?,
-        file_path: row.get(9)?,
-        file_name: row.get(10)?,
-        file_size: row.get(11)?,
-        thumb_path: row.get(12)?,
-        mime_type: row.get(13)?,
-        created_at: row.get(14)?,
+        id:             row.get(0)?,
+        thread_id:      row.get(1)?,
+        board_id:       row.get(2)?,
+        name:           row.get(3)?,
+        tripcode:       row.get(4)?,
+        subject:        row.get(5)?,
+        body:           row.get(6)?,
+        body_html:      row.get(7)?,
+        ip_hash:        row.get(8)?,
+        file_path:      row.get(9)?,
+        file_name:      row.get(10)?,
+        file_size:      row.get(11)?,
+        thumb_path:     row.get(12)?,
+        mime_type:      row.get(13)?,
+        created_at:     row.get(14)?,
         deletion_token: row.get(15)?,
-        is_op: row.get::<_, i32>(16)? != 0,
+        is_op:          row.get::<_, i32>(16)? != 0,
+        media_type,
     })
 }
 
@@ -1063,6 +1126,8 @@ pub struct NewPost {
     pub file_size: Option<i64>,
     pub thumb_path: Option<String>,
     pub mime_type: Option<String>,
+    /// Explicit media classification derived from MIME type at upload time.
+    pub media_type: Option<String>,
     pub deletion_token: String,
     pub is_op: bool,
 }
@@ -1076,4 +1141,45 @@ pub fn list_admins(conn: &rusqlite::Connection) -> Result<Vec<(i64, String, i64)
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<Vec<(i64, String, i64)>>>()?;
     Ok(rows)
+}
+
+/// Gather aggregate site-wide statistics for the home page.
+///
+/// Uses a single pass over the posts table to count totals by media_type,
+/// plus a SUM of file_size for posts that still have a file on disk.
+pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::SiteStats> {
+    // Total post count (all posts ever inserted; not decremented on delete
+    // because SQLite sequences don't roll back, but COUNT(*) gives live count).
+    let total_posts: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM posts",
+        [],
+        |r| r.get(0),
+    )?;
+
+    // Per-type counts and active byte total in one query.
+    let total_images: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM posts WHERE media_type = 'image'",
+        [], |r| r.get(0),
+    )?;
+    let total_videos: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM posts WHERE media_type = 'video'",
+        [], |r| r.get(0),
+    )?;
+    let total_audio: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM posts WHERE media_type = 'audio'",
+        [], |r| r.get(0),
+    )?;
+    // Active bytes: sum file_size for posts that still have a file_path recorded.
+    let active_bytes: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(file_size), 0) FROM posts WHERE file_path IS NOT NULL AND file_size IS NOT NULL",
+        [], |r| r.get(0),
+    )?;
+
+    Ok(crate::models::SiteStats {
+        total_posts,
+        total_images,
+        total_videos,
+        total_audio,
+        active_bytes,
+    })
 }
