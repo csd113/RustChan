@@ -732,12 +732,10 @@ pub async fn update_board_settings(
 
     let bump_limit  = form.bump_limit.as_deref()
         .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(500)
-        .max(1).min(10_000);
+        .unwrap_or(500).clamp(1, 10_000);
     let max_threads = form.max_threads.as_deref()
         .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(150)
-        .max(1).min(1_000);
+        .unwrap_or(150).clamp(1, 1_000);
 
     // Enforce server-side length limits on free-text fields
     let name = form.name.trim().chars().take(64).collect::<String>();
@@ -1052,7 +1050,7 @@ pub async fn admin_restore(
                 let src = rusqlite::Connection::open(&temp_db)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Open backup source: {}", e)))?;
                 use rusqlite::backup::Backup;
-                let backup = Backup::new(&src, &mut *live_conn)
+                let backup = Backup::new(&src, &mut live_conn)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup init: {}", e)))?;
                 backup.run_to_completion(100, std::time::Duration::from_millis(0), None)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup copy: {}", e)))?;
@@ -1075,7 +1073,7 @@ pub async fn admin_restore(
             // the handler should redirect to the login page instead.
             let fresh_sid = new_session_id();
             let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
-            match db::create_session(&*live_conn, &fresh_sid, admin_id, expires_at) {
+            match db::create_session(&live_conn, &fresh_sid, admin_id, expires_at) {
                 Ok(_) => {
                     info!("Admin restore completed; new session issued for admin_id={}", admin_id);
                     Ok(fresh_sid)

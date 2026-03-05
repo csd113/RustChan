@@ -302,7 +302,7 @@ pub async fn create_thread(
                 .collect();
             if !q.is_empty() && valid_opts.len() >= 2 {
                 if let Some(secs) = poll_duration {
-                    let secs = secs.max(60).min(30 * 24 * 3600); // clamp 1 min..30 days
+                    let secs = secs.clamp(60, 30 * 24 * 3600); // clamp 1 min..30 days
                     let expires_at = chrono::Utc::now().timestamp() + secs;
                     db::create_poll(&conn, thread_id, &q, &valid_opts, expires_at)?;
                 }
