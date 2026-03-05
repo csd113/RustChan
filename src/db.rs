@@ -353,9 +353,29 @@ pub fn update_board_settings(
     Ok(())
 }
 
-pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<()> {
-    conn.execute("DELETE FROM boards WHERE id=?1", params![id])?;
-    Ok(())
+pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>> {
+    // Collect every file path that belongs to this board before deletion.
+    // The CASCADE on boards→threads→posts handles DB row removal, but the
+    // on-disk files must be cleaned up by the caller.
+    let mut stmt = conn.prepare(
+        "SELECT p.file_path, p.thumb_path
+         FROM posts p
+         JOIN threads t ON p.thread_id = t.id
+         WHERE t.board_id = ?1",
+    )?;
+    let pairs: Vec<(Option<String>, Option<String>)> = stmt
+        .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let mut paths = Vec::new();
+    for (f, t) in pairs {
+        if let Some(p) = f { paths.push(p); }
+        if let Some(p) = t { paths.push(p); }
+    }
+
+    // Cascade deletes threads, posts, polls, etc.
+    conn.execute("DELETE FROM boards WHERE id = ?1", params![id])?;
+    Ok(paths)
 }
 
 // ─── Thread queries ───────────────────────────────────────────────────────────

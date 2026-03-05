@@ -87,9 +87,9 @@ pub fn generate_settings_file_if_missing() {
 
     // Generate a random 64-hex-char secret (32 bytes of entropy).
     // This runs before CONFIG is initialised, so we call OsRng directly.
-    use rand::RngCore;
+    use rand_core::{OsRng, RngCore};
     let mut secret_bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
+    OsRng.fill_bytes(&mut secret_bytes);
     let secret = hex::encode(secret_bytes);
 
     let content = format!(
@@ -212,7 +212,7 @@ impl Config {
             // Emit a random in-memory secret so each restart invalidates hashes
             // (better than a known empty string, worse than a persisted one).
             let mut b = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut b);
+            rand_core::OsRng.fill_bytes(&mut b);
             hex::encode(b)
         };
 
@@ -244,7 +244,7 @@ impl Config {
 }
 
 // ─── Import needed for OsRng in cookie_secret fallback ───────────────────────
-use rand::RngCore as _;
+use rand_core::RngCore as _;
 
 fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())

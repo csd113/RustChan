@@ -1156,6 +1156,9 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
   <button type="submit" class="btn-danger"
           onclick="return confirm('Delete /{short}/ and ALL its content?')">delete board</button>
 </form>
+<a href="/admin/board/backup/{short}" style="display:inline-block;margin-left:0.5rem;margin-top:4px">
+  <button type="button">&#8659; backup /{short}/</button>
+</a>
 </details>"#,
             short    = escape_html(&b.short_name),
             name     = escape_html(&b.name),
@@ -1268,6 +1271,33 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
 <input type="text" name="pattern" placeholder="pattern to match" required>
 <input type="text" name="replacement" placeholder="replace with">
 <button type="submit">add</button>
+</form>
+</section>
+
+<section class="admin-section">
+<h2>// backup &amp; restore</h2>
+<p style="color:var(--text-dim);font-size:0.85rem">Backup creates a zip containing the full database and all uploaded files. Restore replaces everything with the contents of a previously downloaded backup — this cannot be undone.</p>
+<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;margin-top:0.75rem">
+<form method="GET" action="/admin/backup">
+<button type="submit">&#8659; download backup</button>
+</form>
+<form method="POST" action="/admin/restore" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+<input type="hidden" name="_csrf" value="{csrf}">
+<input type="file" name="backup_file" accept=".zip" required style="color:var(--text)">
+<button type="submit" class="btn-danger"
+        onclick="return confirm('WARNING: This will overwrite the database and all uploaded files with the backup. This cannot be undone. Continue?')">&#8635; restore from backup</button>
+</form>
+</div>
+</section>
+
+<section class="admin-section">
+<h2>// board backup &amp; restore</h2>
+<p style="color:var(--text-dim);font-size:0.85rem">Download or restore a single board. Restore wipes that board's existing content and replaces it with the backup — other boards are untouched.</p>
+<form method="POST" action="/admin/board/restore" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin-top:0.75rem">
+<input type="hidden" name="_csrf" value="{csrf}">
+<input type="file" name="backup_file" accept=".zip" required style="color:var(--text)">
+<button type="submit" class="btn-danger"
+        onclick="return confirm('WARNING: This will wipe and replace the board from the backup zip. Other boards are unaffected. Continue?')">&#8635; restore board from backup</button>
 </form>
 </section>
 </div>"#,

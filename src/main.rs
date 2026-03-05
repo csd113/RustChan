@@ -245,12 +245,12 @@ fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/static/style.css", get(serve_css))
         .route("/", get(handlers::board::index))
-        .route("/:board/",        get(handlers::board::board_index))
-        .route("/:board/",        post(handlers::board::create_thread))
-        .route("/:board/catalog", get(handlers::board::catalog))
-        .route("/:board/search",  get(handlers::board::search))
-        .route("/:board/thread/:id", get(handlers::thread::view_thread))
-        .route("/:board/thread/:id", post(handlers::thread::post_reply))
+        .route("/{board}/",        get(handlers::board::board_index))
+        .route("/{board}/",        post(handlers::board::create_thread))
+        .route("/{board}/catalog", get(handlers::board::catalog))
+        .route("/{board}/search",  get(handlers::board::search))
+        .route("/{board}/thread/{id}", get(handlers::thread::view_thread))
+        .route("/{board}/thread/{id}", post(handlers::thread::post_reply))
         .route("/delete", post(handlers::board::delete_post))
         .route("/vote",   post(handlers::thread::vote_handler))
         .nest_service("/boards", tower_http::services::ServeDir::new(&CONFIG.upload_dir))
@@ -268,6 +268,22 @@ fn build_router(state: AppState) -> Router {
         .route("/admin/ban/remove",      post(handlers::admin::remove_ban))
         .route("/admin/filter/add",      post(handlers::admin::add_filter))
         .route("/admin/filter/remove",   post(handlers::admin::remove_filter))
+        .route("/admin/backup",          get(handlers::admin::admin_backup))
+        // Disable the global body-size limit for the restore endpoint so that
+        // large backup zips are accepted.  In Axum, layers added at the Router
+        // level wrap all routes, so a route-level DefaultBodyLimit::max() does
+        // NOT override the outer one — it just adds a second (inner) check.
+        // DefaultBodyLimit::disable() removes the limit entirely for this route,
+        // which is safe here because only authenticated admins reach it.
+        .route("/admin/restore",
+            post(handlers::admin::admin_restore)
+            .layer(DefaultBodyLimit::disable())
+        )
+        .route("/admin/board/backup/{board}", get(handlers::admin::board_backup))
+        .route("/admin/board/restore",
+            post(handlers::admin::board_restore)
+            .layer(DefaultBodyLimit::disable())
+        )
         .layer(axum_middleware::from_fn(middleware::rate_limit_middleware))
         .layer(DefaultBodyLimit::max(CONFIG.max_video_size))
         .layer(axum_middleware::from_fn(track_requests))

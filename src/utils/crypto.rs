@@ -31,7 +31,9 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2, Params, Algorithm, Version,
 };
-use rand::RngCore;
+// rand_core::RngCore is the same trait instance as argon2's re-exported
+// rand_core::OsRng implements — they share the same rand_core 0.6 crate.
+use rand_core::RngCore;
 use sha2::{Digest, Sha256};
 
 /// Hash an admin password using Argon2id.
