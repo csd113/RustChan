@@ -32,7 +32,7 @@
 //   • If the spawned Tor process exits within the first few seconds, we capture
 //     and display its stderr so the operator can diagnose the problem.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Result of probing for a tool at startup.
