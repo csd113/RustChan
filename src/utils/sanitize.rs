@@ -176,7 +176,7 @@ fn render_inline(text: &str) -> String {
     result = RE_URL
         .replace_all(&result, |caps: &regex::Captures| {
             let url = &caps[1];
-            let clean_url = url.trim_end_matches(|c| matches!(c, '.' | ',' | ')' | ';' | '\''));
+            let clean_url = url.trim_end_matches(['.', ',', ')', ';', '\'']);
             let trailing = &url[clean_url.len()..];
             format!(
                 r#"<a href="{}" rel="nofollow noopener" target="_blank">{}</a>{}"#,

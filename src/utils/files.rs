@@ -130,6 +130,7 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
 /// (VP9 video + Opus audio) before being saved.  Already-WebM uploads are kept
 /// as-is.  If transcoding fails, the original file is saved as a fallback.
 /// Audio files never require ffmpeg; they always receive an SVG placeholder.
+#[allow(clippy::too_many_arguments)]
 pub fn save_upload(
     data:              &[u8],
     original_filename: &str,

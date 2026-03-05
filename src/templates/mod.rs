@@ -323,6 +323,7 @@ pub fn index_page(board_stats: &[crate::models::BoardStats], site_stats: &crate:
 
 // ─── Board index ──────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub fn board_page(
     board: &Board,
     summaries: &[ThreadSummary],
@@ -615,6 +616,7 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
 
 // ─── Thread page ──────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub fn thread_page(
     board: &Board,
     thread: &Thread,

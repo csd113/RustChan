@@ -324,6 +324,7 @@ pub fn create_board(
 
 /// Create a board with explicit per-media-type toggles.
 /// Used by the CLI `--no-images / --no-videos / --no-audio` flags.
+#[allow(clippy::too_many_arguments)]
 pub fn create_board_with_media_flags(
     conn: &rusqlite::Connection,
     short: &str,
@@ -361,6 +362,7 @@ pub fn update_board(
 }
 
 /// Update all per-board settings from the admin panel.
+#[allow(clippy::too_many_arguments)]
 pub fn update_board_settings(
     conn: &rusqlite::Connection,
     id: i64,
