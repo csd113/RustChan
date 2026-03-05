@@ -34,6 +34,26 @@ All notable changes to RustChan will be documented in this file.
   blocks in `board_backup` now collect results into a named `rows` binding
   before the enclosing block closes, ensuring `Statement` (`s`) is not
   dropped while `MappedRows` still holds a borrow.
+- **`rustfmt` compliance** — removed alignment whitespace throughout the
+  codebase to pass `cargo fmt --check` in CI. Specific changes:
+  - `src/config.rs`: removed column-aligned trailing `// bytes` comments on
+    `max_image_size`, `max_video_size`, `max_audio_size` struct fields;
+    removed extra space in `(max_video_mb  as usize)` and
+    `(max_audio_mb  as usize)` expressions in `Config::from_env`.
+  - `src/db.rs`: removed extra spaces before `// ignore "duplicate column"
+    errors` inline comment.
+  - `src/detect.rs`: removed extra spaces before inline comment on
+    `.is_ok()` call.
+  - `src/models.rs`: removed column-aligned trailing comments on `Board`
+    struct fields (`short_name`, `name`, `allow_images`, `allow_video`,
+    `allow_audio`, `created_at`) and `Post` struct field (`body_html`).
+  - `src/handlers/board.rs`: removed extra spaces before inline comment on
+    `thread_id: 0` struct field initialiser.
+  - `src/handlers/admin.rs`: removed alignment padding in two
+    `(header::CONTENT_TYPE, ...)` tuple literals (in `admin_backup` and
+    `board_backup`); removed double space before `=` in two
+    `let mut form_csrf: Option<String>  = None` declarations (in
+    `admin_restore` and `board_restore`).
 
 ## [1.0.5] - 2026-03-04
 
