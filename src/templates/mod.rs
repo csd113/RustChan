@@ -82,7 +82,7 @@ fn fmt_ts_short(ts: i64) -> String {
 
 // ─── Base layout ─────────────────────────────────────────────────────────────
 
-fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &str, boards: &[Board]) -> String {
+fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &str, boards: &[Board], collapse_greentext: bool) -> String {
     let board_links: String = boards
         .iter()
         .map(|b| format!(
@@ -129,7 +129,7 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 <link rel="stylesheet" href="/static/style.css">
 <script>try{{var _t=localStorage.getItem('rustchan_theme');if(_t&&_t!=='terminal')document.documentElement.setAttribute('data-theme',_t);}}catch(e){{}}</script>
 </head>
-<body>
+<body{collapse_attr}>
 <header class="site-header">
   <a class="home-btn" href="/">&#8962; Home</a>
   <nav class="board-list">
@@ -219,15 +219,27 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 </script>
 
 <input type="hidden" id="csrf_global" value="{csrf_token}">
+<script>
+// Collapse greentext walls when the admin has enabled the feature.
+// The page injects data-collapse-greentext on <body> when the setting is on.
+(function() {{
+  if (document.body.getAttribute('data-collapse-greentext') === '1') {{
+    document.querySelectorAll('details.greentext-block').forEach(function(el) {{
+      el.removeAttribute('open');
+    }});
+  }}
+}})();
+</script>
 </body>
 </html>"#,
-        title       = escape_html(title),
-        board_links = board_links,
-        search_bar  = search_bar,
-        catalog_bar = catalog_bar,
-        forum_name  = escape_html(&CONFIG.forum_name),
-        body        = body,
-        csrf_token  = escape_html(csrf_token),
+        title           = escape_html(title),
+        board_links     = board_links,
+        search_bar      = search_bar,
+        catalog_bar     = catalog_bar,
+        forum_name      = escape_html(&CONFIG.forum_name),
+        body            = body,
+        csrf_token      = escape_html(csrf_token),
+        collapse_attr   = if collapse_greentext { " data-collapse-greentext=\"1\"" } else { "" },
     )
 }
 
@@ -306,7 +318,7 @@ pub fn index_page(board_stats: &[crate::models::BoardStats], site_stats: &crate:
         stats = stats_sec,
     );
 
-    base_layout(&CONFIG.forum_name, None, &body, csrf_token, &all_boards)
+    base_layout(&CONFIG.forum_name, None, &body, csrf_token, &all_boards, false)
 }
 
 // ─── Board index ──────────────────────────────────────────────────────────────
@@ -319,6 +331,7 @@ pub fn board_page(
     boards: &[Board],
     is_admin: bool,
     error: Option<&str>,
+    collapse_greentext: bool,
 ) -> String {
     let mut body = String::new();
 
@@ -376,6 +389,7 @@ pub fn board_page(
         &body,
         csrf_token,
         boards,
+        collapse_greentext,
     )
 }
 
@@ -610,6 +624,7 @@ pub fn thread_page(
     is_admin: bool,
     poll: Option<&crate::models::PollData>,
     error: Option<&str>,
+    collapse_greentext: bool,
 ) -> String {
     let mut body = String::new();
 
@@ -709,6 +724,7 @@ pub fn thread_page(
         &body,
         csrf_token,
         boards,
+        collapse_greentext,
     )
 }
 
@@ -986,7 +1002,7 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str) -> String {
 
 // ─── Catalog page ─────────────────────────────────────────────────────────────
 
-pub fn catalog_page(board: &Board, threads: &[Thread], csrf_token: &str, boards: &[Board]) -> String {
+pub fn catalog_page(board: &Board, threads: &[Thread], csrf_token: &str, boards: &[Board], collapse_greentext: bool) -> String {
     let bs = escape_html(&board.short_name);
     let bn = escape_html(&board.name);
 
@@ -1045,6 +1061,7 @@ pub fn catalog_page(board: &Board, threads: &[Thread], csrf_token: &str, boards:
         &body,
         csrf_token,
         boards,
+        collapse_greentext,
     )
 }
 
@@ -1057,6 +1074,7 @@ pub fn search_page(
     pagination: &Pagination,
     csrf_token: &str,
     boards: &[Board],
+    collapse_greentext: bool,
 ) -> String {
     let mut body = format!(
         r#"<div class="page-box">
@@ -1091,6 +1109,7 @@ pub fn search_page(
         &body,
         csrf_token,
         boards,
+        collapse_greentext,
     )
 }
 
@@ -1117,7 +1136,7 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
         err  = err_html,
         csrf = escape_html(csrf_token),
     );
-    base_layout("admin login", None, &body, csrf_token, boards)
+    base_layout("admin login", None, &body, csrf_token, boards, false)
 }
 
 pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], collapse_greentext: bool, csrf_token: &str) -> String {
@@ -1322,7 +1341,7 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
         collapse_ck  = if collapse_greentext { " checked" } else { "" },
     );
 
-    base_layout("admin panel", None, &body, csrf_token, boards)
+    base_layout("admin panel", None, &body, csrf_token, boards, false)
 }
 
 // ─── Error page ───────────────────────────────────────────────────────────────

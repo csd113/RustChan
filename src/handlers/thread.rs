@@ -67,8 +67,9 @@ pub async fn view_thread(
             let ip_hash = crate::utils::crypto::hash_ip(&client_ip, &crate::config::CONFIG.cookie_secret);
             let poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)?;
 
+            let collapse_greentext = db::get_collapse_greentext(&conn);
             Ok(crate::templates::thread_page(
-                &board, &thread, &posts, &csrf_clone, &all_boards, is_admin, poll.as_ref(), None,
+                &board, &thread, &posts, &csrf_clone, &all_boards, is_admin, poll.as_ref(), None, collapse_greentext,
             ))
         }
     })
@@ -160,8 +161,7 @@ pub async fn post_reply(
             // FIX[MEDIUM-8]: Apply word filters BEFORE HTML escaping.
             let filtered_body    = apply_word_filters(&body_text, &filters);
             let escaped_body     = escape_html(&filtered_body);
-            let collapse         = db::get_collapse_greentext(&conn);
-            let body_html        = render_post_body(&escaped_body, collapse);
+            let body_html        = render_post_body(&escaped_body);
 
             let uploaded = if let Some((data, fname)) = file_data {
                 // Enforce per-board media type toggles using magic-byte detection.
@@ -269,7 +269,7 @@ pub async fn post_reply(
                     let all_boards = db::get_all_boards(&conn).unwrap_or_default();
                     let ip_hash    = crate::utils::crypto::hash_ip(&client_ip_err, &crate::config::CONFIG.cookie_secret);
                     let poll       = db::get_poll_for_thread(&conn, thread_id, &ip_hash).ok().flatten();
-                    crate::templates::thread_page(&board, &thread, &posts, &csrf_err, &all_boards, false, poll.as_ref(), Some(&msg))
+                    crate::templates::thread_page(&board, &thread, &posts, &csrf_err, &all_boards, false, poll.as_ref(), Some(&msg), db::get_collapse_greentext(&conn))
                 }
             })
             .await

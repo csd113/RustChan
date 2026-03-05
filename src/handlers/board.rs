@@ -119,6 +119,7 @@ pub async fn board_index(
             }
 
             let all_boards = db::get_all_boards(&conn)?;
+            let collapse_greentext = db::get_collapse_greentext(&conn);
             Ok(templates::board_page(
                 &board,
                 &summaries,
@@ -127,6 +128,7 @@ pub async fn board_index(
                 &all_boards,
                 is_admin,
                 None,
+                collapse_greentext,
             ))
         }
     })
@@ -212,8 +214,7 @@ pub async fn create_thread(
             // filter patterns are plain text, not HTML-entity strings.
             let filtered_body    = apply_word_filters(&body_text, &filters);
             let escaped_body     = escape_html(&filtered_body);
-            let collapse         = db::get_collapse_greentext(&conn);
-            let body_html        = render_post_body(&escaped_body, collapse);
+            let body_html        = render_post_body(&escaped_body);
 
             let uploaded = if let Some((data, fname)) = file_data {
                 // Detect media type from magic bytes to enforce per-board toggles.
@@ -341,7 +342,7 @@ pub async fn create_thread(
                         let omitted = (t.reply_count - preview.len() as i64).max(0);
                         crate::models::ThreadSummary { thread: t, preview_posts: preview, omitted }
                     }).collect();
-                    templates::board_page(&board, &summaries, &pagination, &csrf_err, &all_boards, false, Some(&msg))
+                    templates::board_page(&board, &summaries, &pagination, &csrf_err, &all_boards, false, Some(&msg), db::get_collapse_greentext(&conn))
                 }
             })
             .await
@@ -376,7 +377,8 @@ pub async fn catalog(
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
             let threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
             let all_boards = db::get_all_boards(&conn)?;
-            Ok(templates::catalog_page(&board, &threads, &csrf_clone, &all_boards))
+            let collapse_greentext = db::get_collapse_greentext(&conn);
+            Ok(templates::catalog_page(&board, &threads, &csrf_clone, &all_boards, collapse_greentext))
         }
     })
     .await
@@ -418,6 +420,7 @@ pub async fn search(
             )?;
 
             let all_boards = db::get_all_boards(&conn)?;
+            let collapse_greentext = db::get_collapse_greentext(&conn);
             Ok(templates::search_page(
                 &board,
                 &query_str,
@@ -425,6 +428,7 @@ pub async fn search(
                 &pagination,
                 &csrf_clone,
                 &all_boards,
+                collapse_greentext,
             ))
         }
     })
