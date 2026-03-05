@@ -8,39 +8,42 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Speeds up builds by caching the registry index.
   CARGO_INCREMENTAL: 0
 
 jobs:
   test:
-    name: Test — ${{ matrix.target }}
+    name: Test — ${{ matrix.arch_label }}
     runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ── macOS ─────────────────────────────────────────────────────────
+          # ── macOS ──────────────────────────────────────────────────────────
+          # macos-13 (x86_64) was retired 2025-12-04. There are no longer any
+          # free x86_64 macOS hosted runners. We build for x86_64-apple-darwin
+          # on an Apple Silicon runner instead; the resulting binary runs under
+          # Rosetta 2, which is present on all GitHub macOS-15 runners.
           - target: x86_64-apple-darwin
-            os: macos-13          # macos-13 is the last x86_64 macOS runner
+            os: macos-15
             arch_label: macos-x86_64
 
           - target: aarch64-apple-darwin
-            os: macos-14          # macos-14 (M1) is the ARM64 macOS runner
+            os: macos-15
             arch_label: macos-arm64
 
-          # ── Linux ─────────────────────────────────────────────────────────
+          # ── Linux ──────────────────────────────────────────────────────────
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
             arch_label: linux-x86_64
 
+          # ubuntu-24.04-arm is GA for public repositories (free).
+          # For private repositories use a paid arm64 larger runner instead.
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04
+            os: ubuntu-24.04-arm
             arch_label: linux-arm64
-            # Cross-compilation: we install cross-rs and use it instead of cargo.
-            use_cross: true
 
-          # ── Windows ───────────────────────────────────────────────────────
+          # ── Windows ────────────────────────────────────────────────────────
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             arch_label: windows-x86_64
@@ -49,9 +52,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Cache ~/.cargo/registry, ~/.cargo/git, and the target directory.
-      # The cache key includes the target triple so each platform gets its own
-      # cache partition and cross-contamination is impossible.
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -69,35 +69,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Linux ARM64 cross-compilation via cross-rs.
-      # cross wraps cargo with a Docker-based cross-compile environment so we
-      # do not need to install a cross-linker manually on the x86_64 host.
-      - name: Install cross (Linux ARM64 only)
-        if: matrix.use_cross == true
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
-      # ── Build ──────────────────────────────────────────────────────────────
-      - name: Build (native)
-        if: matrix.use_cross != true
+      - name: Build
         run: cargo build --target ${{ matrix.target }} --verbose
 
-      - name: Build (cross)
-        if: matrix.use_cross == true
-        run: cross build --target ${{ matrix.target }} --verbose
-
-      # ── Test ───────────────────────────────────────────────────────────────
-      # Tests can only run natively; skip execution for cross-compiled targets.
-      - name: Run tests (native)
-        if: matrix.use_cross != true
+      - name: Run tests
         run: cargo test --target ${{ matrix.target }} --verbose
 
-      - name: Run tests (cross — compile only, no execution)
-        if: matrix.use_cross == true
-        run: cross test --target ${{ matrix.target }} --no-run --verbose
-
-      # ── Lint (x86_64 Linux only — one clippy run is enough) ────────────────
+      # Clippy and rustfmt only need to run once — use the Linux x86_64 job.
       - name: Clippy
         if: matrix.arch_label == 'linux-x86_64'
         run: cargo clippy --target ${{ matrix.target }} -- -D warnings
