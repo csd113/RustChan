@@ -2,6 +2,39 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.0.6] — 2026-03-04
+
+### Added
+- **Board-level backup** — each board in the admin panel now has a
+  `⬓ backup /board/` button that downloads a self-contained zip of that
+  board's data (`board.json` manifest + all uploaded files). Only the
+  selected board is included; other boards are untouched.
+- **Board-level restore** — new "// board backup & restore" section in the
+  admin panel accepts a board backup zip and restores the board in-place.
+  If the board already exists its content is wiped and replaced; if it does
+  not exist it is created from scratch. All row IDs are remapped on import
+  so there is no risk of collision with data already in the database.
+  Other boards, bans, filters, and admin accounts are never affected.
+- **`serde_json` dependency** — added to support the JSON manifest format
+  used by board-level backups.
+- **GitHub Actions CI workflow** (`.github/workflows/rust.yml`) — runs
+  `cargo build` and `cargo test` on every push and pull-request across five
+  targets: `macos-x86_64`, `macos-arm64`, `linux-x86_64`, `linux-arm64`
+  (cross-compiled via `cross-rs`), and `windows-x86_64`. Clippy and
+  `rustfmt` checks run on the Linux x86_64 job.
+
+### Fixed
+- **`rand_core::OsRng` compile error** — enabled the `getrandom` feature on
+  `rand_core = "0.6"` so `OsRng` is available in `src/config.rs` and
+  `src/utils/crypto.rs` (`E0432` / `E0425`).
+- **Axum 0.8 route syntax** — migrated all route capture groups from the
+  deprecated `/:param` syntax to the required `/{param}` syntax, fixing a
+  runtime panic on startup (`Path segments must not start with ':'`).
+- **`E0597` lifetime errors in board backup** — the six `rusqlite` query
+  blocks in `board_backup` now collect results into a named `rows` binding
+  before the enclosing block closes, ensuring `Statement` (`s`) is not
+  dropped while `MappedRows` still holds a borrow.
+
 ## [1.0.5] - 2026-03-04
 
 ### Added
