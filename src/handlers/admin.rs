@@ -246,7 +246,8 @@ pub async fn admin_panel(
             let boards = db::get_all_boards(&conn)?;
             let bans = db::list_bans(&conn)?;
             let filters = db::get_word_filters(&conn)?;
-            Ok(templates::admin_panel_page(&boards, &bans, &filters, &csrf_clone))
+            let collapse_greentext = db::get_collapse_greentext(&conn);
+            Ok(templates::admin_panel_page(&boards, &bans, &filters, collapse_greentext, &csrf_clone))
         }
     })
     .await
@@ -1613,4 +1614,44 @@ pub async fn board_restore(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(Redirect::to(&format!("/admin/panel?board_restored={}", board_short)).into_response())
+}
+
+// ─── POST /admin/site/settings ────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SiteSettingsForm {
+    pub _csrf: Option<String>,
+    /// Checkbox: present = "1", absent = not submitted (treat as false)
+    pub collapse_greentext: Option<String>,
+}
+
+pub async fn update_site_settings(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<SiteSettingsForm>,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if !crate::middleware::validate_csrf(
+        csrf_cookie.as_deref(),
+        form._csrf.as_deref().unwrap_or(""),
+    ) {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
+            let val = if form.collapse_greentext.as_deref() == Some("1") { "1" } else { "0" };
+            db::set_site_setting(&conn, "collapse_greentext", val)?;
+            info!("Admin updated site setting: collapse_greentext={}", val);
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok(Redirect::to("/admin/panel?settings_saved=1").into_response())
 }

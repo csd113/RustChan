@@ -70,7 +70,11 @@ pub fn apply_word_filters(text: &str, filters: &[(String, String)]) -> String {
 
 /// Convert plain escaped post body into HTML with imageboard markup.
 /// Input: HTML-escaped user text.  Output: HTML with markup applied.
-pub fn render_post_body(escaped: &str) -> String {
+///
+/// `collapse_greentext`: when true, 3+ consecutive greentext lines are wrapped
+/// in a `<details>` block so the reader can expand them. Defaults to false
+/// (controlled via the admin site settings panel).
+pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
     let lines: Vec<&str> = escaped.lines().collect();
     let mut html = String::with_capacity(escaped.len() * 2);
     let mut i = 0;
@@ -93,12 +97,29 @@ pub fn render_post_body(escaped: &str) -> String {
                 }
             }
 
-            for ql in &group {
+            // 3+ consecutive greentext lines → collapsible <details> block
+            // (only when the admin has enabled the feature)
+            if collapse_greentext && group.len() >= 3 {
+                let count = group.len();
+                html.push_str(&format!(
+                    "<details class=\"greentext-block\"><summary class=\"quote\">&gt; {} lines</summary>",
+                    count
+                ));
+                for ql in &group {
                     html.push_str(&format!(
                         "<span class=\"quote\">{}</span><br>",
                         render_inline(ql)
                     ));
                 }
+                html.push_str("</details>");
+            } else {
+                for ql in &group {
+                    html.push_str(&format!(
+                        "<span class=\"quote\">{}</span><br>",
+                        render_inline(ql)
+                    ));
+                }
+            }
             i = j;
         } else {
             html.push_str(&render_line(line));
@@ -254,46 +275,58 @@ mod tests {
     #[test]
     fn test_greentext() {
         let escaped = escape_html(">be me");
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(html.contains("class=\"quote\""));
     }
 
     #[test]
     fn test_reply_link() {
         let escaped = escape_html(">>12345 nice post");
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(html.contains("class=\"quotelink\""));
         assert!(html.contains("#p12345"));
     }
 
     #[test]
-    fn test_collapsible_greentext() {
+    fn test_greentext_wall_not_collapsed_by_default() {
+        // Default behaviour (collapse_greentext=false): long greentext is never
+        // wrapped in <details>, regardless of line count.
         let raw = ">line1\n>line2\n>line3";
         let escaped = escape_html(raw);
-        let html = render_post_body(&escaped);
-        assert!(html.contains("<details"));
-        assert!(html.contains("3 lines"));
+        let html = render_post_body(&escaped, false);
+        assert!(!html.contains("<details"), "greentext should NOT be collapsed when feature is off");
+        assert!(html.contains("class=\"quote\""), "lines should still render as quote spans");
+    }
+
+    #[test]
+    fn test_collapsible_greentext_when_enabled() {
+        // When collapse_greentext=true, 3+ consecutive lines get a <details> block.
+        let raw = ">line1\n>line2\n>line3";
+        let escaped = escape_html(raw);
+        let html = render_post_body(&escaped, true);
+        assert!(html.contains("<details"), "greentext should be collapsed when feature is on");
+        assert!(html.contains("3 lines"), "summary should show the line count");
     }
 
     #[test]
     fn test_spoiler() {
         let escaped = escape_html("[spoiler]secret[/spoiler]");
         // spoiler tag is NOT html-escaped (it's our markup)
-        let html = render_post_body("[spoiler]secret[/spoiler]");
+        let html = render_post_body("[spoiler]secret[/spoiler]", false);
         assert!(html.contains("class=\"spoiler\""));
         assert!(html.contains("secret"));
     }
 
     #[test]
     fn test_emoji_shortcode() {
-        let html = render_post_body(":fire: hot take");
+        let html = render_post_body(":fire: hot take", false);
         assert!(html.contains("🔥"));
     }
 
     #[test]
     fn test_crossthread_link() {
         let escaped = escape_html(">>>/tech/42");
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(html.contains("class=\"quotelink crosslink\""));
         assert!(html.contains("/tech/thread/42"));
     }
@@ -319,7 +352,7 @@ mod tests {
     #[test]
     fn test_url_trailing_punct() {
         let escaped = escape_html("see https://example.com/foo. and https://example.com/bar,");
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(!html.contains("href=\"https://example.com/foo.\""));
         assert!(!html.contains("href=\"https://example.com/bar,\""));
     }

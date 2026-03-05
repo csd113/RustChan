@@ -176,6 +176,12 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             UNIQUE(poll_id, ip_hash)
         );
 
+        -- Site-wide key/value settings (admin-configurable at runtime)
+        CREATE TABLE IF NOT EXISTS site_settings (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL
+        );
+
         -- Indices for common query patterns
         CREATE INDEX IF NOT EXISTS idx_threads_board_sticky_bumped
             ON threads(board_id, sticky DESC, bumped_at DESC);
@@ -229,6 +235,37 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
     );
 
     Ok(())
+}
+
+// ─── Site settings ───────────────────────────────────────────────────────────
+
+/// Read a site-wide setting by key. Returns None if the key has never been set.
+pub fn get_site_setting(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>> {
+    let result = conn.query_row(
+        "SELECT value FROM site_settings WHERE key = ?1",
+        params![key],
+        |r| r.get::<_, String>(0),
+    ).optional()?;
+    Ok(result)
+}
+
+/// Write (upsert) a site-wide setting.
+pub fn set_site_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+/// Convenience: read the collapsible-greentext toggle (default: false).
+pub fn get_collapse_greentext(conn: &rusqlite::Connection) -> bool {
+    get_site_setting(conn, "collapse_greentext")
+        .ok()
+        .flatten()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 // ─── Board queries ────────────────────────────────────────────────────────────

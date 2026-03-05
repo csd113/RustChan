@@ -268,6 +268,7 @@ fn build_router(state: AppState) -> Router {
         .route("/admin/ban/remove",      post(handlers::admin::remove_ban))
         .route("/admin/filter/add",      post(handlers::admin::add_filter))
         .route("/admin/filter/remove",   post(handlers::admin::remove_filter))
+        .route("/admin/site/settings",   post(handlers::admin::update_site_settings))
         .route("/admin/backup",          get(handlers::admin::admin_backup))
         // Disable the global body-size limit for the restore endpoint so that
         // large backup zips are accepted.  In Axum, layers added at the Router

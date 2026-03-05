@@ -212,7 +212,8 @@ pub async fn create_thread(
             // filter patterns are plain text, not HTML-entity strings.
             let filtered_body    = apply_word_filters(&body_text, &filters);
             let escaped_body     = escape_html(&filtered_body);
-            let body_html        = render_post_body(&escaped_body);
+            let collapse         = db::get_collapse_greentext(&conn);
+            let body_html        = render_post_body(&escaped_body, collapse);
 
             let uploaded = if let Some((data, fname)) = file_data {
                 // Detect media type from magic bytes to enforce per-board toggles.

@@ -1120,7 +1120,7 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
     base_layout("admin login", None, &body, csrf_token, boards)
 }
 
-pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], csrf_token: &str) -> String {
+pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], collapse_greentext: bool, csrf_token: &str) -> String {
     let mut board_cards = String::new();
     for b in boards {
         let checked = |v: bool| if v { " checked" } else { "" };
@@ -1275,6 +1275,20 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
 </section>
 
 <section class="admin-section">
+<h2>// site settings</h2>
+<form method="POST" action="/admin/site/settings">
+<input type="hidden" name="_csrf" value="{csrf}">
+<div class="board-settings-checks" style="margin-bottom:0.75rem">
+  <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block. Existing posts are not affected — only new posts use the current setting.">
+    <input type="checkbox" name="collapse_greentext" value="1"{collapse_ck}>
+    Collapse long greentext walls (3+ lines) into expandable blocks
+  </label>
+</div>
+<button type="submit">save settings</button>
+</form>
+</section>
+
+<section class="admin-section">
 <h2>// backup &amp; restore</h2>
 <p style="color:var(--text-dim);font-size:0.85rem">Backup creates a zip containing the full database and all uploaded files. Restore replaces everything with the contents of a previously downloaded backup — this cannot be undone.</p>
 <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;margin-top:0.75rem">
@@ -1301,10 +1315,11 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
 </form>
 </section>
 </div>"#,
-        csrf        = escape_html(csrf_token),
-        board_cards = board_cards,
-        ban_rows    = ban_rows,
-        filter_rows = filter_rows,
+        csrf         = escape_html(csrf_token),
+        board_cards  = board_cards,
+        ban_rows     = ban_rows,
+        filter_rows  = filter_rows,
+        collapse_ck  = if collapse_greentext { " checked" } else { "" },
     );
 
     base_layout("admin panel", None, &body, csrf_token, boards)

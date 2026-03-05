@@ -160,7 +160,8 @@ pub async fn post_reply(
             // FIX[MEDIUM-8]: Apply word filters BEFORE HTML escaping.
             let filtered_body    = apply_word_filters(&body_text, &filters);
             let escaped_body     = escape_html(&filtered_body);
-            let body_html        = render_post_body(&escaped_body);
+            let collapse         = db::get_collapse_greentext(&conn);
+            let body_html        = render_post_body(&escaped_body, collapse);
 
             let uploaded = if let Some((data, fname)) = file_data {
                 // Enforce per-board media type toggles using magic-byte detection.
