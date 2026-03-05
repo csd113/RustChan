@@ -308,3 +308,14 @@ pub struct SiteStats {
     /// Total bytes of currently stored files (still on disk)
     pub active_bytes: i64,
 }
+
+/// Represents a saved backup file on disk (shown in admin panel).
+#[derive(Debug, Clone)]
+pub struct BackupInfo {
+    /// Filename only (no directory path).
+    pub filename: String,
+    /// Size of the file in bytes.
+    pub size_bytes: u64,
+    /// Human-readable last-modified timestamp (UTC).
+    pub modified: String,
+}

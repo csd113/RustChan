@@ -327,6 +327,28 @@ fn build_router(state: AppState) -> Router {
             "/admin/board/restore",
             post(handlers::admin::board_restore).layer(DefaultBodyLimit::disable()),
         )
+        // ── Disk-based backup management routes ──────────────────────────────
+        .route(
+            "/admin/backup/create",
+            post(handlers::admin::create_full_backup),
+        )
+        .route(
+            "/admin/board/backup/create",
+            post(handlers::admin::create_board_backup),
+        )
+        .route(
+            "/admin/backup/download/{kind}/{filename}",
+            get(handlers::admin::download_backup),
+        )
+        .route("/admin/backup/delete", post(handlers::admin::delete_backup))
+        .route(
+            "/admin/backup/restore-saved",
+            post(handlers::admin::restore_saved_full_backup),
+        )
+        .route(
+            "/admin/board/backup/restore-saved",
+            post(handlers::admin::restore_saved_board_backup),
+        )
         .layer(axum_middleware::from_fn(middleware::rate_limit_middleware))
         .layer(DefaultBodyLimit::max(CONFIG.max_video_size))
         .layer(axum_middleware::from_fn(track_requests))

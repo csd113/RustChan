@@ -5,6 +5,35 @@ All notable changes to RustChan will be documented in this file.
 ## [1.0.6] — 2026-03-04
 
 ### Added
+- **Disk-based backup storage** — full backups are now saved to
+  `rustchan-data/full-backups/` and board backups to
+  `rustchan-data/board-backups/` on the server, keeping everything inside
+  the database folder without requiring access to the file explorer.
+- **In-panel backup management** — the admin panel's backup & restore
+  sections now show a live table of all saved backup files (filename, size,
+  creation time). Each row provides three actions accessible directly from
+  the web interface without leaving the page:
+  - **⬇ download** — stream the saved `.zip` to the browser.
+  - **↺ restore** — restore the live database directly from the saved file
+    on disk (no upload required).
+  - **✕ delete** — permanently remove the backup file from the folder, with
+    a confirmation prompt.
+- **`POST /admin/backup/create`** — creates a full backup and saves it to
+  `rustchan-data/full-backups/`; replaces the previous stream-to-browser
+  GET endpoint for the in-panel workflow (old `GET /admin/backup` kept for
+  backward compatibility).
+- **`POST /admin/board/backup/create`** — saves a board backup to
+  `rustchan-data/board-backups/` from the board card's new *save backup*
+  button.
+- **`GET /admin/backup/download/{kind}/{filename}`** — authenticated
+  download of any saved backup by filename (`kind` = `full` or `board`).
+  Filenames are validated to prevent path traversal.
+- **`POST /admin/backup/delete`** — authenticated deletion of a backup
+  file; physically removes the `.zip` from the appropriate folder.
+- **`POST /admin/backup/restore-saved`** — restore a full backup from a
+  file already saved on disk, without needing to re-upload the zip.
+- **`POST /admin/board/backup/restore-saved`** — restore a single board
+  from a saved board backup file on disk.
 - **Board-level backup** — each board in the admin panel now has a
   `⬓ backup /board/` button that downloads a self-contained zip of that
   board's data (`board.json` manifest + all uploaded files). Only the

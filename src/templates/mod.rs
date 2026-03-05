@@ -1308,6 +1308,8 @@ pub fn admin_panel_page(
     filters: &[WordFilter],
     collapse_greentext: bool,
     csrf_token: &str,
+    full_backups: &[BackupInfo],
+    board_backups: &[BackupInfo],
 ) -> String {
     let mut board_cards = String::new();
     for b in boards {
@@ -1345,8 +1347,13 @@ pub fn admin_panel_page(
           onclick="return confirm('Delete /{short}/ and ALL its content?')">delete board</button>
 </form>
 <a href="/admin/board/backup/{short}" style="display:inline-block;margin-left:0.5rem;margin-top:4px">
-  <button type="button">&#8659; backup /{short}/</button>
+  <button type="button">&#8659; download to computer /{short}/</button>
 </a>
+<form method="POST" action="/admin/board/backup/create" style="display:inline-block;margin-left:0.25rem;margin-top:4px">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_short" value="{short}">
+  <button type="submit">&#128190; save to server /{short}/</button>
+</form>
 </details>"#,
             short = escape_html(&b.short_name),
             name = escape_html(&b.name),
@@ -1409,6 +1416,78 @@ pub fn admin_panel_page(
             escape_html(&f.replacement),
             csrf = escape_html(csrf_token),
             id = f.id,
+        ));
+    }
+
+    // ── Full backup file list ─────────────────────────────────────────────────
+    let mut full_backup_rows = String::new();
+    if full_backups.is_empty() {
+        full_backup_rows.push_str(
+            "<tr><td colspan=\"4\" style=\"color:var(--text-dim);text-align:center\">no backups yet</td></tr>",
+        );
+    }
+    for bf in full_backups {
+        let size_fmt = format_file_size(bf.size_bytes as i64);
+        full_backup_rows.push_str(&format!(
+            r#"<tr>
+<td style="word-break:break-all">{fname}</td>
+<td style="white-space:nowrap">{size}</td>
+<td style="white-space:nowrap">{modified}</td>
+<td style="white-space:nowrap">
+  <a href="/admin/backup/download/full/{fname}" style="margin-right:0.4rem">&#8659; download to computer</a>
+  <form method="POST" action="/admin/backup/restore-saved" style="display:inline;margin-right:0.4rem">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="filename" value="{fname}">
+    <button type="submit" onclick="return confirm('WARNING: Restore from {fname}? This will overwrite the live database and all uploads. Cannot be undone.')">&#8635; restore</button>
+  </form>
+  <form method="POST" action="/admin/backup/delete" style="display:inline">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="kind" value="full">
+    <input type="hidden" name="filename" value="{fname}">
+    <button type="submit" class="btn-danger" onclick="return confirm('Delete {fname}? This cannot be undone.')">&#10005; delete</button>
+  </form>
+</td>
+</tr>"#,
+            fname = escape_html(&bf.filename),
+            size = size_fmt,
+            modified = escape_html(&bf.modified),
+            csrf = escape_html(csrf_token),
+        ));
+    }
+
+    // ── Board backup file list ────────────────────────────────────────────────
+    let mut board_backup_rows = String::new();
+    if board_backups.is_empty() {
+        board_backup_rows.push_str(
+            "<tr><td colspan=\"4\" style=\"color:var(--text-dim);text-align:center\">no board backups yet</td></tr>",
+        );
+    }
+    for bf in board_backups {
+        let size_fmt = format_file_size(bf.size_bytes as i64);
+        board_backup_rows.push_str(&format!(
+            r#"<tr>
+<td style="word-break:break-all">{fname}</td>
+<td style="white-space:nowrap">{size}</td>
+<td style="white-space:nowrap">{modified}</td>
+<td style="white-space:nowrap">
+  <a href="/admin/backup/download/board/{fname}" style="margin-right:0.4rem">&#8659; download to computer</a>
+  <form method="POST" action="/admin/board/backup/restore-saved" style="display:inline;margin-right:0.4rem">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="filename" value="{fname}">
+    <button type="submit" onclick="return confirm('WARNING: Restore board from {fname}? This will wipe and replace that board. Cannot be undone.')">&#8635; restore</button>
+  </form>
+  <form method="POST" action="/admin/backup/delete" style="display:inline">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="kind" value="board">
+    <input type="hidden" name="filename" value="{fname}">
+    <button type="submit" class="btn-danger" onclick="return confirm('Delete {fname}? This cannot be undone.')">&#10005; delete</button>
+  </form>
+</td>
+</tr>"#,
+            fname = escape_html(&bf.filename),
+            size = size_fmt,
+            modified = escape_html(&bf.modified),
+            csrf = escape_html(csrf_token),
         ));
     }
 
@@ -1481,29 +1560,40 @@ pub fn admin_panel_page(
 
 <section class="admin-section">
 <h2>// backup &amp; restore</h2>
-<p style="color:var(--text-dim);font-size:0.85rem">Backup creates a zip containing the full database and all uploaded files. Restore replaces everything with the contents of a previously downloaded backup — this cannot be undone.</p>
-<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;margin-top:0.75rem">
-<form method="GET" action="/admin/backup">
-<button type="submit">&#8659; download backup</button>
+<p style="color:var(--text-dim);font-size:0.85rem">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/full-backups/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer.</p>
+<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;margin-top:0.75rem;margin-bottom:0.75rem">
+<form method="POST" action="/admin/backup/create">
+<input type="hidden" name="_csrf" value="{csrf}">
+<button type="submit">&#128190; save to server</button>
 </form>
 <form method="POST" action="/admin/restore" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="file" name="backup_file" accept=".zip" required style="color:var(--text)">
 <button type="submit" class="btn-danger"
-        onclick="return confirm('WARNING: This will overwrite the database and all uploaded files with the backup. This cannot be undone. Continue?')">&#8635; restore from backup</button>
+        onclick="return confirm('WARNING: This will overwrite the database and all uploaded files. Cannot be undone. Continue?')">&#8635; restore from local file</button>
 </form>
 </div>
+<table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+<thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th></th></tr></thead>
+<tbody>{full_backup_rows}</tbody>
+</table>
 </section>
 
 <section class="admin-section">
 <h2>// board backup &amp; restore</h2>
-<p style="color:var(--text-dim);font-size:0.85rem">Download or restore a single board. Restore wipes that board's existing content and replaces it with the backup — other boards are untouched.</p>
-<form method="POST" action="/admin/board/restore" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin-top:0.75rem">
+<p style="color:var(--text-dim);font-size:0.85rem">Board backups cover a single board. Use <em>save to server</em> on a board card above to store the backup in <code>rustchan-data/board-backups/</code>, or use the table below to download, restore, or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
+<div style="margin-top:0.5rem;margin-bottom:0.75rem">
+<form method="POST" action="/admin/board/restore" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="file" name="backup_file" accept=".zip" required style="color:var(--text)">
 <button type="submit" class="btn-danger"
-        onclick="return confirm('WARNING: This will wipe and replace the board from the backup zip. Other boards are unaffected. Continue?')">&#8635; restore board from backup</button>
+        onclick="return confirm('WARNING: This will wipe and replace the board from the backup zip. Other boards are unaffected. Continue?')">&#8635; restore board from local file</button>
 </form>
+</div>
+<table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+<thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th></th></tr></thead>
+<tbody>{board_backup_rows}</tbody>
+</table>
 </section>
 </div>"#,
         csrf = escape_html(csrf_token),
@@ -1511,6 +1601,8 @@ pub fn admin_panel_page(
         ban_rows = ban_rows,
         filter_rows = filter_rows,
         collapse_ck = if collapse_greentext { " checked" } else { "" },
+        full_backup_rows = full_backup_rows,
+        board_backup_rows = board_backup_rows,
     );
 
     base_layout("admin panel", None, &body, csrf_token, boards, false)
