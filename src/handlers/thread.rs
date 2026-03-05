@@ -206,7 +206,7 @@ pub async fn post_reply(
             let deletion_token = if del_token_val.trim().is_empty() {
                 new_deletion_token()
             } else {
-                del_token_val.trim().to_string()
+                del_token_val.trim().chars().take(64).collect()
             };
 
             let should_bump = thread.reply_count < board.bump_limit;

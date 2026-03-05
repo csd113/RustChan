@@ -89,10 +89,14 @@ pub async fn parse_post_multipart(
         }
     }
 
-    // Convert duration value + unit → seconds
+    // Convert duration value + unit → seconds (saturating to prevent overflow)
     let poll_duration_secs = if !poll_question.trim().is_empty() {
         poll_duration_value.map(|v| {
-            if poll_duration_unit == "minutes" { v * 60 } else { v * 3600 }
+            if poll_duration_unit == "minutes" {
+                v.saturating_mul(60)
+            } else {
+                v.saturating_mul(3600)
+            }
         })
     } else {
         None

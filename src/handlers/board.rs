@@ -261,7 +261,9 @@ pub async fn create_thread(
             let deletion_token = if del_token_val.trim().is_empty() {
                 new_deletion_token()
             } else {
-                del_token_val.trim().to_string()
+                // Cap at 64 chars to prevent abuse; anything longer is almost
+                // certainly not a legitimate user-chosen token.
+                del_token_val.trim().chars().take(64).collect()
             };
 
             // FIX[MEDIUM-3]: Thread creation and OP post insertion are now
@@ -398,7 +400,8 @@ pub async fn search(
     let (jar, csrf) = ensure_csrf(jar);
     const SEARCH_PER_PAGE: i64 = 20;
 
-    let query_str = q.q.trim().to_string();
+    // Cap query length to prevent excessively large LIKE pattern scans.
+    let query_str: String = q.q.trim().chars().take(256).collect();
     let page = q.page.max(1);
 
     let html = tokio::task::spawn_blocking({

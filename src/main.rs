@@ -165,7 +165,11 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     print_banner();
 
     let bind_addr: String = if let Some(p) = port_override {
-        let host = CONFIG.bind_addr.split(':').next().unwrap_or("0.0.0.0");
+        // rsplit_once splits at the LAST colon only, which correctly handles
+        // both IPv4 ("0.0.0.0:8080") and IPv6 ("[::1]:8080") bind addresses.
+        // rsplit(':').nth(1) was incorrect for IPv6 — it returned "1]" instead
+        // of "[::1]" because rsplit splits on every colon in the address.
+        let host = CONFIG.bind_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or("0.0.0.0");
         format!("{}:{}", host, p)
     } else {
         CONFIG.bind_addr.clone()
@@ -180,6 +184,9 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     let ffmpeg_available = ffmpeg_status == detect::ToolStatus::Available;
 
     // Tor: purely informational — prints torrc hints, never blocks startup.
+    // rsplit(':').next() finds the last colon-delimited segment, which is always
+    // the port regardless of whether the host part is IPv4 ("0.0.0.0:8080") or
+    // IPv6 ("[::1]:8080").
     let bind_port = CONFIG.bind_addr
         .rsplit(':')
         .next()
@@ -666,8 +673,13 @@ fn kb_delete_thread(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
         return;
     }
 
-    match conn.execute("DELETE FROM threads WHERE id = ?1", [thread_id]) {
-        Ok(_)  => println!("  \x1b[32m✓\x1b[0m Thread {} deleted.", thread_id),
+    match db::delete_thread(&conn, thread_id) {
+        Ok(paths) => {
+            for p in &paths {
+                crate::utils::files::delete_file(&CONFIG.upload_dir, p);
+            }
+            println!("  \x1b[32m✓\x1b[0m Thread {} deleted ({} file(s) removed).", thread_id, paths.len());
+        }
         Err(e) => println!("  \x1b[31m[err]\x1b[0m {}", e),
     }
     println!();
@@ -794,7 +806,7 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
         }
         AdminAction::Ban { ip_hash, reason, hours } => {
             let expires = hours.filter(|&h| h > 0)
-                .map(|h| chrono::Utc::now().timestamp() + h * 3600);
+                .map(|h| chrono::Utc::now().timestamp() + h.min(87_600).saturating_mul(3600));
             let id = db::add_ban(&conn, &ip_hash, &reason, expires)?;
             let exp_str = expires
                 .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single())

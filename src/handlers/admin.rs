@@ -428,7 +428,13 @@ pub async fn thread_action(
                     return Ok(b.short_name.clone());
                 }
             }
-            Ok(form.board) // fallback to user-supplied if DB lookup fails
+            // Fallback: sanitize the user-supplied board name to prevent open-redirect.
+            // Only allow alphanumeric characters (matching the board short_name format).
+            let safe: String = form.board.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .take(8)
+                .collect();
+            Ok(safe)
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
@@ -468,10 +474,16 @@ pub async fn admin_delete_post(
                 .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
 
             // FIX[MEDIUM-10]: Resolve board name from DB, not user-supplied form field.
+            // Fallback sanitizes the user-supplied value to alphanumeric only.
             let board_name = db::get_all_boards(&conn)?.into_iter()
                 .find(|b| b.id == post.board_id)
                 .map(|b| b.short_name)
-                .unwrap_or_else(|| form.board.clone());
+                .unwrap_or_else(|| {
+                    form.board.chars()
+                        .filter(|c| c.is_ascii_alphanumeric())
+                        .take(8)
+                        .collect()
+                });
 
             let paths = if post.is_op {
                 db::delete_thread(&conn, post.thread_id)?
@@ -520,13 +532,19 @@ pub async fn admin_delete_thread(
             require_admin_session_sid(&conn, session_id.as_deref())?;
 
             // FIX[MEDIUM-10]: Resolve board name from DB.
+            // Fallback sanitizes the user-supplied value to alphanumeric only.
             let board_name = db::get_thread(&conn, thread_id)?
                 .and_then(|t| {
                     db::get_all_boards(&conn).ok()?.into_iter()
                         .find(|b| b.id == t.board_id)
                         .map(|b| b.short_name)
                 })
-                .unwrap_or_else(|| form.board.clone());
+                .unwrap_or_else(|| {
+                    form.board.chars()
+                        .filter(|c| c.is_ascii_alphanumeric())
+                        .take(8)
+                        .collect()
+                });
 
             let paths = db::delete_thread(&conn, thread_id)?;
             for p in paths {
@@ -564,7 +582,9 @@ pub async fn add_ban(
     let expires_at = form
         .duration_hours
         .filter(|&h| h > 0)
-        .map(|h| Utc::now().timestamp() + h * 3600);
+        // Cap at 87_600 hours (10 years) to prevent overflow in h * 3600.
+        // Permanent bans are represented by None (duration_hours absent or zero).
+        .map(|h| Utc::now().timestamp() + h.min(87_600).saturating_mul(3600));
 
     let ip_hash_log = form.ip_hash.chars().take(8).collect::<String>();
 
@@ -1489,6 +1509,12 @@ pub async fn board_restore(
             };
 
             // ── Threads ───────────────────────────────────────────────────
+            // All inserts are wrapped in a single transaction so that a failure
+            // at any point leaves the database unchanged rather than partially restored.
+            conn.execute("BEGIN IMMEDIATE", [])
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Begin restore tx: {}", e)))?;
+
+            let restore_result = (|| -> Result<()> {
             let mut thread_id_map: HashMap<i64, i64> = HashMap::new();
             for t in &manifest.threads {
                 conn.execute(
@@ -1575,6 +1601,19 @@ pub async fn board_restore(
                     params![fh.sha256, fh.file_path, fh.thumb_path, fh.mime_type, fh.created_at],
                 ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert file_hash: {}", e)))?;
             }
+            Ok(())
+            })();
+
+            match restore_result {
+                Ok(()) => {
+                    conn.execute("COMMIT", [])
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit restore tx: {}", e)))?;
+                }
+                Err(e) => {
+                    let _ = conn.execute("ROLLBACK", []);
+                    return Err(e);
+                }
+            }
 
             // ── Extract upload files ──────────────────────────────────────
             for i in 0..archive.len() {
@@ -1607,12 +1646,20 @@ pub async fn board_restore(
             }
 
             info!("Admin board restore completed for /{}/", board_short);
-            Ok(board_short)
+            // Sanitize board_short before returning — it comes from the zip manifest and
+            // is used in a redirect URL query parameter.  Only allow board-name characters.
+            let safe_short: String = board_short.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .take(8)
+                .collect();
+            Ok(safe_short)
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
+    // board_short is already sanitized to alphanumeric inside the spawn_blocking closure
+    // (returned as safe_short) — use it directly here.
     Ok(Redirect::to(&format!("/admin/panel?board_restored={}", board_short)).into_response())
 }
 

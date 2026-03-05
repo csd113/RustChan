@@ -273,10 +273,11 @@ impl Pagination {
         Self { page, per_page, total }
     }
     pub fn total_pages(&self) -> i64 {
-        (self.total + self.per_page - 1) / self.per_page
+        if self.per_page <= 0 { return 1; }
+        (self.total.saturating_add(self.per_page - 1)) / self.per_page
     }
     pub fn offset(&self) -> i64 {
-        (self.page - 1) * self.per_page
+        (self.page - 1).max(0).saturating_mul(self.per_page)
     }
     pub fn has_prev(&self) -> bool { self.page > 1 }
     pub fn has_next(&self) -> bool { self.page < self.total_pages() }
