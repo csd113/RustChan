@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_filename_multibyte() {
-        let cjk: String = std::iter::repeat('日').take(50).collect();
+        let cjk: String = "日".repeat(50);
         let long_name = format!("{}.jpg", cjk);
         let result = sanitize_filename(&long_name);
         assert!(result.chars().count() <= 100);
