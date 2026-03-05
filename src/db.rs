@@ -22,8 +22,7 @@ pub fn init_pool() -> Result<DbPool> {
 
     // Ensure parent directory exists
     if let Some(parent) = Path::new(db_path).parent() {
-        std::fs::create_dir_all(parent)
-            .context("Failed to create database directory")?;
+        std::fs::create_dir_all(parent).context("Failed to create database directory")?;
     }
 
     let manager = SqliteConnectionManager::file(db_path).with_init(|conn| {
@@ -212,7 +211,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         // Poll tables added later — CREATE TABLE IF NOT EXISTS handles this gracefully
     ];
     for sql in migrations {
-        let _ = conn.execute(sql, []);   // ignore "duplicate column" errors
+        let _ = conn.execute(sql, []); // ignore "duplicate column" errors
     }
 
     // Backfill media_type for existing posts that pre-date the column.
@@ -231,7 +230,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
                   file_path LIKE '%.opus' THEN 'audio'
              ELSE NULL
          END
-         WHERE media_type IS NULL AND file_path IS NOT NULL;"
+         WHERE media_type IS NULL AND file_path IS NOT NULL;",
     );
 
     Ok(())
@@ -241,11 +240,13 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 
 /// Read a site-wide setting by key. Returns None if the key has never been set.
 pub fn get_site_setting(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>> {
-    let result = conn.query_row(
-        "SELECT value FROM site_settings WHERE key = ?1",
-        params![key],
-        |r| r.get::<_, String>(0),
-    ).optional()?;
+    let result = conn
+        .query_row(
+            "SELECT value FROM site_settings WHERE key = ?1",
+            params![key],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
     Ok(result)
 }
 
@@ -283,7 +284,9 @@ pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
 }
 
 /// Like get_all_boards but also returns live thread count for each board.
-pub fn get_all_boards_with_stats(conn: &rusqlite::Connection) -> Result<Vec<crate::models::BoardStats>> {
+pub fn get_all_boards_with_stats(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<crate::models::BoardStats>> {
     let boards = get_all_boards(conn)?;
     let mut out = Vec::with_capacity(boards.len());
     for board in boards {
@@ -292,7 +295,10 @@ pub fn get_all_boards_with_stats(conn: &rusqlite::Connection) -> Result<Vec<crat
             params![board.id],
             |r| r.get(0),
         )?;
-        out.push(crate::models::BoardStats { board, thread_count });
+        out.push(crate::models::BoardStats {
+            board,
+            thread_count,
+        });
     }
     Ok(out)
 }
@@ -382,9 +388,14 @@ pub fn update_board_settings(
          allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9
          WHERE id=?10",
         params![
-            name, description, nsfw as i32,
-            bump_limit, max_threads,
-            allow_images as i32, allow_video as i32, allow_audio as i32,
+            name,
+            description,
+            nsfw as i32,
+            bump_limit,
+            max_threads,
+            allow_images as i32,
+            allow_video as i32,
+            allow_audio as i32,
             allow_tripcodes as i32,
             id,
         ],
@@ -408,8 +419,12 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>>
 
     let mut paths = Vec::new();
     for (f, t) in pairs {
-        if let Some(p) = f { paths.push(p); }
-        if let Some(p) = t { paths.push(p); }
+        if let Some(p) = f {
+            paths.push(p);
+        }
+        if let Some(p) = t {
+            paths.push(p);
+        }
     }
 
     // Cascade deletes threads, posts, polls, etc.
@@ -578,16 +593,19 @@ pub fn set_thread_locked(conn: &rusqlite::Connection, thread_id: i64, locked: bo
 
 pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<String>> {
     // Collect file paths before deletion (for filesystem cleanup)
-    let mut stmt = conn
-        .prepare("SELECT file_path, thumb_path FROM posts WHERE thread_id = ?1")?;
+    let mut stmt = conn.prepare("SELECT file_path, thumb_path FROM posts WHERE thread_id = ?1")?;
     let paths: Vec<(Option<String>, Option<String>)> = stmt
         .query_map(params![thread_id], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
 
     let mut all_paths = Vec::new();
     for (f, t) in paths {
-        if let Some(p) = f { all_paths.push(p); }
-        if let Some(p) = t { all_paths.push(p); }
+        if let Some(p) = f {
+            all_paths.push(p);
+        }
+        if let Some(p) = t {
+            all_paths.push(p);
+        }
     }
 
     conn.execute("DELETE FROM threads WHERE id = ?1", params![thread_id])?;
@@ -595,14 +613,20 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
 }
 
 /// Prune oldest non-sticky threads beyond the board limit.
-pub fn prune_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -> Result<Vec<String>> {
+pub fn prune_old_threads(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    max: i64,
+) -> Result<Vec<String>> {
     let ids: Vec<i64> = {
         let mut stmt = conn.prepare(
             "SELECT id FROM threads WHERE board_id = ?1 AND sticky = 0
              ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
         )?;
-        let x = stmt.query_map(params![board_id, max], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?; x
+        let x = stmt
+            .query_map(params![board_id, max], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        x
     };
 
     let mut all_paths = Vec::new();
@@ -615,10 +639,7 @@ pub fn prune_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -
 
 // ─── Post queries ─────────────────────────────────────────────────────────────
 
-pub fn get_posts_for_thread(
-    conn: &rusqlite::Connection,
-    thread_id: i64,
-) -> Result<Vec<Post>> {
+pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<Post>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
@@ -632,11 +653,7 @@ pub fn get_posts_for_thread(
 }
 
 /// Get last N posts for a thread (for board index preview)
-pub fn get_preview_posts(
-    conn: &rusqlite::Connection,
-    thread_id: i64,
-    n: i64,
-) -> Result<Vec<Post>> {
+pub fn get_preview_posts(conn: &rusqlite::Connection, thread_id: i64, n: i64) -> Result<Vec<Post>> {
     // Subquery gets the last N, outer query re-orders ascending for display
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
@@ -701,8 +718,12 @@ pub fn get_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<Post
 pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<String>> {
     let mut paths = Vec::new();
     if let Some(post) = get_post(conn, post_id)? {
-        if let Some(p) = post.file_path { paths.push(p); }
-        if let Some(p) = post.thumb_path { paths.push(p); }
+        if let Some(p) = post.file_path {
+            paths.push(p);
+        }
+        if let Some(p) = post.thumb_path {
+            paths.push(p);
+        }
     }
     conn.execute("DELETE FROM posts WHERE id = ?1", params![post_id])?;
     Ok(paths)
@@ -724,7 +745,9 @@ pub fn verify_deletion_token(
         )
         .optional()?;
 
-    Ok(stored.map(|s| constant_time_eq(s.as_bytes(), token.as_bytes())).unwrap_or(false))
+    Ok(stored
+        .map(|s| constant_time_eq(s.as_bytes(), token.as_bytes()))
+        .unwrap_or(false))
 }
 
 /// Constant-time byte slice comparison to prevent timing side-channel attacks.
@@ -733,7 +756,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     // XOR all bytes; any difference leaves a non-zero accumulator.
-    let diff = a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    let diff = a
+        .iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y));
     diff == 0
 }
 
@@ -801,7 +827,11 @@ pub fn create_admin(conn: &rusqlite::Connection, username: &str, hash: &str) -> 
     Ok(conn.last_insert_rowid())
 }
 
-pub fn update_admin_password(conn: &rusqlite::Connection, username: &str, hash: &str) -> Result<()> {
+pub fn update_admin_password(
+    conn: &rusqlite::Connection,
+    username: &str,
+    hash: &str,
+) -> Result<()> {
     conn.execute(
         "UPDATE admin_users SET password_hash = ?1 WHERE username = ?2",
         params![hash, username],
@@ -822,10 +852,7 @@ pub fn create_session(
     Ok(())
 }
 
-pub fn get_session(
-    conn: &rusqlite::Connection,
-    session_id: &str,
-) -> Result<Option<AdminSession>> {
+pub fn get_session(conn: &rusqlite::Connection, session_id: &str) -> Result<Option<AdminSession>> {
     let now = chrono::Utc::now().timestamp();
     let mut stmt = conn.prepare_cached(
         "SELECT id, admin_id, created_at, expires_at FROM admin_sessions
@@ -953,9 +980,9 @@ pub fn remove_word_filter(conn: &rusqlite::Connection, id: i64) -> Result<()> {
 // ─── File deduplication ───────────────────────────────────────────────────────
 
 pub struct CachedFile {
-    pub file_path:  String,
+    pub file_path: String,
     pub thumb_path: String,
-    pub mime_type:  String,
+    pub mime_type: String,
 }
 
 /// Look up an existing upload by its SHA-256 hash.
@@ -966,9 +993,9 @@ pub fn find_file_by_hash(conn: &rusqlite::Connection, sha256: &str) -> Result<Op
     Ok(stmt
         .query_row(params![sha256], |r| {
             Ok(CachedFile {
-                file_path:  r.get(0)?,
+                file_path: r.get(0)?,
                 thumb_path: r.get(1)?,
-                mime_type:  r.get(2)?,
+                mime_type: r.get(2)?,
             })
         })
         .optional()?)
@@ -1040,7 +1067,7 @@ pub fn get_poll_for_thread(
 
     let poll = match poll_row {
         Some(p) => p,
-        None    => return Ok(None),
+        None => return Ok(None),
     };
 
     // Options with live vote counts
@@ -1056,10 +1083,10 @@ pub fn get_poll_for_thread(
     let options: Vec<crate::models::PollOption> = stmt
         .query_map(params![poll.id], |r| {
             Ok(crate::models::PollOption {
-                id:         r.get(0)?,
-                poll_id:    r.get(1)?,
-                text:       r.get(2)?,
-                position:   r.get(3)?,
+                id: r.get(0)?,
+                poll_id: r.get(1)?,
+                text: r.get(2)?,
+                position: r.get(3)?,
                 vote_count: r.get(4)?,
             })
         })?
@@ -1107,35 +1134,36 @@ pub fn get_poll_context(
     conn: &rusqlite::Connection,
     option_id: i64,
 ) -> Result<Option<(i64, i64, String)>> {
-    Ok(conn.query_row(
-        "SELECT p.id, p.thread_id, b.short_name
+    Ok(conn
+        .query_row(
+            "SELECT p.id, p.thread_id, b.short_name
          FROM poll_options po
          JOIN polls p ON p.id = po.poll_id
          JOIN threads t ON t.id = p.thread_id
          JOIN boards b ON b.id = t.board_id
          WHERE po.id = ?1",
-        params![option_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )
-    .optional()?)
+            params![option_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?)
 }
 
 // ─── Row mapping helpers ──────────────────────────────────────────────────────
 
 fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
     Ok(Board {
-        id:            row.get(0)?,
-        short_name:    row.get(1)?,
-        name:          row.get(2)?,
-        description:   row.get(3)?,
-        nsfw:          row.get::<_, i32>(4)? != 0,
-        max_threads:   row.get(5)?,
-        bump_limit:    row.get(6)?,
-        allow_images:  row.get::<_, i32>(7)? != 0,
-        allow_video:   row.get::<_, i32>(8)? != 0,
-        allow_audio:   row.get::<_, i32>(9)? != 0,
+        id: row.get(0)?,
+        short_name: row.get(1)?,
+        name: row.get(2)?,
+        description: row.get(3)?,
+        nsfw: row.get::<_, i32>(4)? != 0,
+        max_threads: row.get(5)?,
+        bump_limit: row.get(6)?,
+        allow_images: row.get::<_, i32>(7)? != 0,
+        allow_video: row.get::<_, i32>(8)? != 0,
+        allow_audio: row.get::<_, i32>(9)? != 0,
         allow_tripcodes: row.get::<_, i32>(10)? != 0,
-        created_at:    row.get(11)?,
+        created_at: row.get(11)?,
     })
 }
 
@@ -1147,23 +1175,23 @@ fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
         .and_then(crate::models::MediaType::from_db_str);
 
     Ok(Post {
-        id:             row.get(0)?,
-        thread_id:      row.get(1)?,
-        board_id:       row.get(2)?,
-        name:           row.get(3)?,
-        tripcode:       row.get(4)?,
-        subject:        row.get(5)?,
-        body:           row.get(6)?,
-        body_html:      row.get(7)?,
-        ip_hash:        row.get(8)?,
-        file_path:      row.get(9)?,
-        file_name:      row.get(10)?,
-        file_size:      row.get(11)?,
-        thumb_path:     row.get(12)?,
-        mime_type:      row.get(13)?,
-        created_at:     row.get(14)?,
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        board_id: row.get(2)?,
+        name: row.get(3)?,
+        tripcode: row.get(4)?,
+        subject: row.get(5)?,
+        body: row.get(6)?,
+        body_html: row.get(7)?,
+        ip_hash: row.get(8)?,
+        file_path: row.get(9)?,
+        file_name: row.get(10)?,
+        file_size: row.get(11)?,
+        thumb_path: row.get(12)?,
+        mime_type: row.get(13)?,
+        created_at: row.get(14)?,
         deletion_token: row.get(15)?,
-        is_op:          row.get::<_, i32>(16)? != 0,
+        is_op: row.get::<_, i32>(16)? != 0,
         media_type,
     })
 }
@@ -1193,9 +1221,8 @@ pub struct NewPost {
 
 /// List all admin users (for CLI tooling)
 pub fn list_admins(conn: &rusqlite::Connection) -> Result<Vec<(i64, String, i64)>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, username, created_at FROM admin_users ORDER BY id ASC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, username, created_at FROM admin_users ORDER BY id ASC")?;
     let rows = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<Vec<(i64, String, i64)>>>()?;
@@ -1209,24 +1236,23 @@ pub fn list_admins(conn: &rusqlite::Connection) -> Result<Vec<(i64, String, i64)
 pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::SiteStats> {
     // Total post count (all posts ever inserted; not decremented on delete
     // because SQLite sequences don't roll back, but COUNT(*) gives live count).
-    let total_posts: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM posts",
-        [],
-        |r| r.get(0),
-    )?;
+    let total_posts: i64 = conn.query_row("SELECT COUNT(*) FROM posts", [], |r| r.get(0))?;
 
     // Per-type counts and active byte total in one query.
     let total_images: i64 = conn.query_row(
         "SELECT COUNT(*) FROM posts WHERE media_type = 'image'",
-        [], |r| r.get(0),
+        [],
+        |r| r.get(0),
     )?;
     let total_videos: i64 = conn.query_row(
         "SELECT COUNT(*) FROM posts WHERE media_type = 'video'",
-        [], |r| r.get(0),
+        [],
+        |r| r.get(0),
     )?;
     let total_audio: i64 = conn.query_row(
         "SELECT COUNT(*) FROM posts WHERE media_type = 'audio'",
-        [], |r| r.get(0),
+        [],
+        |r| r.get(0),
     )?;
     // Active bytes: sum file_size for posts that still have a file_path recorded.
     let active_bytes: i64 = conn.query_row(

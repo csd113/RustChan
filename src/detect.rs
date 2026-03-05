@@ -30,7 +30,7 @@ pub enum ToolStatus {
 
 /// Probe for `ffmpeg` on PATH.
 ///
-/// Runs:  ffmpeg -version
+/// Runs: ffmpeg -version
 ///
 /// If `require_ffmpeg` is true and ffmpeg is missing, the process exits with
 /// a clear error message rather than returning.
@@ -67,7 +67,7 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
 
 /// Probe for `tor` on PATH and print guidance for onion service configuration.
 ///
-/// Runs:  tor --version
+/// Runs: tor --version
 ///
 /// This is purely informational — the server always starts regardless of the
 /// result.  No torrc editing, no networking, no port binding.
@@ -81,11 +81,7 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16) {
 
     // Brew on Apple Silicon installs to /opt/homebrew/bin; Intel Macs use
     // /usr/local/bin.  Fall back to a bare "tor" for Linux / custom PATH.
-    let candidates = [
-        "/opt/homebrew/bin/tor",
-        "/usr/local/bin/tor",
-        "tor",
-    ];
+    let candidates = ["/opt/homebrew/bin/tor", "/usr/local/bin/tor", "tor"];
 
     // Some tor builds exit with code 1 for `--version` even when present, so
     // we treat *any* successful spawn (including non-zero exit) as "available".
@@ -96,7 +92,7 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16) {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .is_ok()   // is_ok() = the binary was found and spawned; ignores exit code
+            .is_ok() // is_ok() = the binary was found and spawned; ignores exit code
     });
 
     if available {

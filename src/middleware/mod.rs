@@ -47,7 +47,7 @@ static LAST_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
 /// Shared state for extracting the DB pool in middleware
 #[derive(Clone)]
 pub struct AppState {
-    pub db:               crate::db::DbPool,
+    pub db: crate::db::DbPool,
     /// True when ffmpeg was detected at startup (set by detect::detect_ffmpeg).
     /// Passed to file handling to enable/disable video thumbnail generation.
     pub ffmpeg_available: bool,
@@ -63,10 +63,7 @@ fn now_secs() -> u64 {
 
 /// Rate limit middleware — applied to ALL POST routes.
 /// Blocks requests from IPs that exceed the configured threshold.
-pub async fn rate_limit_middleware(
-    req: Request,
-    next: Next,
-) -> Response {
+pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     // Only rate-limit POST requests (thread/reply creation, etc.)
     if req.method() != axum::http::Method::POST {
         return next.run(req).await;
@@ -107,7 +104,10 @@ pub async fn rate_limit_middleware(
                 (header::CONTENT_TYPE, "text/html; charset=utf-8"),
                 (header::RETRY_AFTER, "60"),
             ],
-            crate::templates::error_page(429, "You are posting too fast. Please wait before posting again."),
+            crate::templates::error_page(
+                429,
+                "You are posting too fast. Please wait before posting again.",
+            ),
         )
             .into_response();
     }
@@ -115,8 +115,7 @@ pub async fn rate_limit_middleware(
     // FIX[MEDIUM-4]: Clean old entries when the table grows large OR at least
     // once every 10 minutes (600 seconds), whichever comes first.
     let last_cleanup = LAST_CLEANUP_SECS.load(Ordering::Relaxed);
-    let should_clean = RATE_TABLE.len() > 5000
-        || now.saturating_sub(last_cleanup) > 600;
+    let should_clean = RATE_TABLE.len() > 5000 || now.saturating_sub(last_cleanup) > 600;
 
     if should_clean {
         // Use compare_exchange to avoid concurrent threads all cleaning simultaneously
@@ -124,9 +123,8 @@ pub async fn rate_limit_middleware(
             .compare_exchange(last_cleanup, now, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
-            RATE_TABLE.retain(|_, (_, window_start)| {
-                now.saturating_sub(*window_start) <= window * 2
-            });
+            RATE_TABLE
+                .retain(|_, (_, window_start)| now.saturating_sub(*window_start) <= window * 2);
         }
     }
 

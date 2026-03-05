@@ -62,11 +62,7 @@ pub fn is_admin_session(jar: &CookieJar, pool: &DbPool) -> bool {
     require_admin_sync(jar, pool).is_ok()
 }
 
-
-pub async fn admin_index(
-    State(state): State<AppState>,
-    jar: CookieJar,
-) -> Result<Response> {
+pub async fn admin_index(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
     // FIX[HIGH-3]: Move DB I/O into spawn_blocking.
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
 
@@ -121,9 +117,22 @@ pub async fn admin_login(
         let (jar, csrf) = ensure_csrf(jar);
         let boards = tokio::task::spawn_blocking({
             let pool = state.db.clone();
-            move || { let conn = pool.get()?; db::get_all_boards(&conn) }
-        }).await.map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-        return Ok((jar, Html(templates::admin_login_page(Some("Invalid username."), &csrf, &boards))).into_response());
+            move || {
+                let conn = pool.get()?;
+                db::get_all_boards(&conn)
+            }
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+        return Ok((
+            jar,
+            Html(templates::admin_login_page(
+                Some("Invalid username."),
+                &csrf,
+                &boards,
+            )),
+        )
+            .into_response());
     }
 
     let pool = state.db.clone();
@@ -149,9 +158,22 @@ pub async fn admin_login(
             let (jar, csrf) = ensure_csrf(jar);
             let boards = tokio::task::spawn_blocking({
                 let pool = state.db.clone();
-                move || { let conn = pool.get()?; db::get_all_boards(&conn) }
-            }).await.map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-            Ok((jar, Html(templates::admin_login_page(Some("Invalid username or password."), &csrf, &boards))).into_response())
+                move || {
+                    let conn = pool.get()?;
+                    db::get_all_boards(&conn)
+                }
+            })
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+            Ok((
+                jar,
+                Html(templates::admin_login_page(
+                    Some("Invalid username or password."),
+                    &csrf,
+                    &boards,
+                )),
+            )
+                .into_response())
         }
         Some(admin_id) => {
             // Create session (FIX[HIGH-3]: in spawn_blocking)
@@ -238,8 +260,7 @@ pub async fn admin_panel(
             let conn = pool.get()?;
 
             // Auth check inside blocking task
-            let sid = session_id
-                .ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
+            let sid = session_id.ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
             db::get_session(&conn, &sid)?
                 .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
 
@@ -247,7 +268,13 @@ pub async fn admin_panel(
             let bans = db::list_bans(&conn)?;
             let filters = db::get_word_filters(&conn)?;
             let collapse_greentext = db::get_collapse_greentext(&conn);
-            Ok(templates::admin_panel_page(&boards, &bans, &filters, collapse_greentext, &csrf_clone))
+            Ok(templates::admin_panel_page(
+                &boards,
+                &bans,
+                &filters,
+                collapse_greentext,
+                &csrf_clone,
+            ))
         }
     })
     .await
@@ -275,11 +302,17 @@ pub async fn create_board(
     // FIX[HIGH-3]: auth + DB write in spawn_blocking
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form._csrf.as_deref().unwrap_or("")) {
+    if !crate::middleware::validate_csrf(
+        csrf_cookie.as_deref(),
+        form._csrf.as_deref().unwrap_or(""),
+    ) {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let short = form.short_name.trim().to_lowercase()
+    let short = form
+        .short_name
+        .trim()
+        .to_lowercase()
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .take(8)
@@ -291,7 +324,12 @@ pub async fn create_board(
 
     let nsfw = form.nsfw.as_deref() == Some("1");
     let name = form.name.trim().chars().take(64).collect::<String>();
-    let description = form.description.trim().chars().take(256).collect::<String>();
+    let description = form
+        .description
+        .trim()
+        .chars()
+        .take(256)
+        .collect::<String>();
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -335,11 +373,13 @@ pub async fn delete_board(
 
             // Fetch the board's short_name before deletion so we can remove
             // its upload directory entirely after cleaning tracked files.
-            let short_name: Option<String> = conn.query_row(
-                "SELECT short_name FROM boards WHERE id = ?1",
-                rusqlite::params![form.board_id],
-                |r| r.get(0),
-            ).ok();
+            let short_name: Option<String> = conn
+                .query_row(
+                    "SELECT short_name FROM boards WHERE id = ?1",
+                    rusqlite::params![form.board_id],
+                    |r| r.get(0),
+                )
+                .ok();
 
             // delete_board returns all file paths for posts in this board.
             let paths = db::delete_board(&conn, form.board_id)?;
@@ -360,7 +400,11 @@ pub async fn delete_board(
                 }
             }
 
-            info!("Admin deleted board id={} ({} file(s) removed)", form.board_id, paths.len());
+            info!(
+                "Admin deleted board id={} ({} file(s) removed)",
+                form.board_id,
+                paths.len()
+            );
             Ok(())
         }
     })
@@ -402,10 +446,10 @@ pub async fn thread_action(
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
             match action.as_str() {
-                "sticky"   => db::set_thread_sticky(&conn, thread_id, true)?,
+                "sticky" => db::set_thread_sticky(&conn, thread_id, true)?,
                 "unsticky" => db::set_thread_sticky(&conn, thread_id, false)?,
-                "lock"     => db::set_thread_locked(&conn, thread_id, true)?,
-                "unlock"   => db::set_thread_locked(&conn, thread_id, false)?,
+                "lock" => db::set_thread_locked(&conn, thread_id, true)?,
+                "unlock" => db::set_thread_locked(&conn, thread_id, false)?,
                 _ => {}
             }
             info!("Admin {} thread {}", action, thread_id);
@@ -430,7 +474,9 @@ pub async fn thread_action(
             }
             // Fallback: sanitize the user-supplied board name to prevent open-redirect.
             // Only allow alphanumeric characters (matching the board short_name format).
-            let safe: String = form.board.chars()
+            let safe: String = form
+                .board
+                .chars()
                 .filter(|c| c.is_ascii_alphanumeric())
                 .take(8)
                 .collect();
@@ -475,11 +521,13 @@ pub async fn admin_delete_post(
 
             // FIX[MEDIUM-10]: Resolve board name from DB, not user-supplied form field.
             // Fallback sanitizes the user-supplied value to alphanumeric only.
-            let board_name = db::get_all_boards(&conn)?.into_iter()
+            let board_name = db::get_all_boards(&conn)?
+                .into_iter()
                 .find(|b| b.id == post.board_id)
                 .map(|b| b.short_name)
                 .unwrap_or_else(|| {
-                    form.board.chars()
+                    form.board
+                        .chars()
                         .filter(|c| c.is_ascii_alphanumeric())
                         .take(8)
                         .collect()
@@ -535,12 +583,15 @@ pub async fn admin_delete_thread(
             // Fallback sanitizes the user-supplied value to alphanumeric only.
             let board_name = db::get_thread(&conn, thread_id)?
                 .and_then(|t| {
-                    db::get_all_boards(&conn).ok()?.into_iter()
+                    db::get_all_boards(&conn)
+                        .ok()?
+                        .into_iter()
                         .find(|b| b.id == t.board_id)
                         .map(|b| b.short_name)
                 })
                 .unwrap_or_else(|| {
-                    form.board.chars()
+                    form.board
+                        .chars()
                         .filter(|c| c.is_ascii_alphanumeric())
                         .take(8)
                         .collect()
@@ -657,7 +708,12 @@ pub async fn add_filter(
     }
 
     let pattern = form.pattern.trim().chars().take(256).collect::<String>();
-    let replacement = form.replacement.trim().chars().take(256).collect::<String>();
+    let replacement = form
+        .replacement
+        .trim()
+        .chars()
+        .take(256)
+        .collect::<String>();
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -709,17 +765,17 @@ pub async fn remove_filter(
 
 #[derive(Deserialize)]
 pub struct BoardSettingsForm {
-    board_id:        i64,
-    name:            String,
-    description:     String,
-    bump_limit:      Option<String>,
-    max_threads:     Option<String>,
-    nsfw:            Option<String>,
-    allow_images:    Option<String>,
-    allow_video:     Option<String>,
-    allow_audio:     Option<String>,
+    board_id: i64,
+    name: String,
+    description: String,
+    bump_limit: Option<String>,
+    max_threads: Option<String>,
+    nsfw: Option<String>,
+    allow_images: Option<String>,
+    allow_video: Option<String>,
+    allow_audio: Option<String>,
     allow_tripcodes: Option<String>,
-    _csrf:           Option<String>,
+    _csrf: Option<String>,
 }
 
 pub async fn update_board_settings(
@@ -730,16 +786,27 @@ pub async fn update_board_settings(
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
     check_csrf_jar(&jar, form._csrf.as_deref())?;
 
-    let bump_limit  = form.bump_limit.as_deref()
+    let bump_limit = form
+        .bump_limit
+        .as_deref()
         .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(500).clamp(1, 10_000);
-    let max_threads = form.max_threads.as_deref()
+        .unwrap_or(500)
+        .clamp(1, 10_000);
+    let max_threads = form
+        .max_threads
+        .as_deref()
         .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(150).clamp(1, 1_000);
+        .unwrap_or(150)
+        .clamp(1, 1_000);
 
     // Enforce server-side length limits on free-text fields
     let name = form.name.trim().chars().take(64).collect::<String>();
-    let description = form.description.trim().chars().take(256).collect::<String>();
+    let description = form
+        .description
+        .trim()
+        .chars()
+        .take(256)
+        .collect::<String>();
     let board_id = form.board_id;
 
     tokio::task::spawn_blocking({
@@ -774,10 +841,7 @@ pub async fn update_board_settings(
 
 /// Stream a full zip backup of the database + all uploaded files.
 /// The WAL is checkpointed first so the backup contains a consistent snapshot.
-pub async fn admin_backup(
-    State(state): State<AppState>,
-    jar: CookieJar,
-) -> Result<Response> {
+pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
 
     let upload_dir = CONFIG.upload_dir.clone();
@@ -793,10 +857,11 @@ pub async fn admin_backup(
             // is safe even if other connections are actively writing — SQLite
             // holds a read lock for the duration and produces a consistent
             // single-file copy with no sidecar files.
-            let temp_dir  = std::env::temp_dir();
-            let tmp_id    = uuid::Uuid::new_v4().to_string().replace('-', "");
-            let temp_db   = temp_dir.join(format!("chan_backup_{}.db", tmp_id));
-            let temp_db_str = temp_db.to_str()
+            let temp_dir = std::env::temp_dir();
+            let tmp_id = uuid::Uuid::new_v4().to_string().replace('-', "");
+            let temp_db = temp_dir.join(format!("chan_backup_{}.db", tmp_id));
+            let temp_db_str = temp_db
+                .to_str()
                 .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path is non-UTF-8")))?
                 .replace('\'', "''"); // SQL-escape single quotes in path (just in case)
 
@@ -832,14 +897,18 @@ pub async fn admin_backup(
                 add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts)?;
             }
 
-            let cursor = zip.finish()
+            let cursor = zip
+                .finish()
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
             let bytes = cursor.into_inner();
 
-            let ts    = Utc::now().format("%Y%m%d_%H%M%S");
+            let ts = Utc::now().format("%Y%m%d_%H%M%S");
             let fname = format!("rustchan-backup-{}.zip", ts);
-            info!("Admin downloaded backup ({} bytes, {} upload bytes included)",
-                  bytes.len(), db_data.len());
+            info!(
+                "Admin downloaded backup ({} bytes, {} upload bytes included)",
+                bytes.len(),
+                db_data.len()
+            );
             Ok((bytes, fname))
         }
     })
@@ -850,18 +919,19 @@ pub async fn admin_backup(
     let disposition = format!("attachment; filename=\"{}\"", filename);
     Ok((
         [
-            (header::CONTENT_TYPE,        "application/zip".to_string()),
+            (header::CONTENT_TYPE, "application/zip".to_string()),
             (header::CONTENT_DISPOSITION, disposition),
         ],
         zip_bytes,
-    ).into_response())
+    )
+        .into_response())
 }
 
 /// Recursively add every file under `dir` into the zip as `uploads/{rel_path}`.
 fn add_dir_to_zip(
-    zip:  &mut zip::ZipWriter<std::io::Cursor<Vec<u8>>>,
+    zip: &mut zip::ZipWriter<std::io::Cursor<Vec<u8>>>,
     base: &std::path::Path,
-    dir:  &std::path::Path,
+    dir: &std::path::Path,
     // zip 2+: SimpleFileOptions replaces the old generic FileOptions.
     opts: zip::write::SimpleFileOptions,
 ) -> Result<()> {
@@ -869,14 +939,14 @@ fn add_dir_to_zip(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("read_dir {}: {}", dir.display(), e)))?;
 
     for entry in entries {
-        let entry = entry
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("dir entry: {}", e)))?;
+        let entry = entry.map_err(|e| AppError::Internal(anyhow::anyhow!("dir entry: {}", e)))?;
         let path = entry.path();
 
-        let relative = path.strip_prefix(base)
+        let relative = path
+            .strip_prefix(base)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("strip_prefix: {}", e)))?;
         // Normalise to forward-slashes so the zip is portable.
-        let rel_str  = relative.to_string_lossy().replace('\\', "/");
+        let rel_str = relative.to_string_lossy().replace('\\', "/");
         let zip_path = format!("uploads/{}", rel_str);
 
         if path.is_dir() {
@@ -885,8 +955,9 @@ fn add_dir_to_zip(
             add_dir_to_zip(zip, base, &path, opts)?;
         } else if path.is_file() {
             use std::io::Write;
-            let data = std::fs::read(&path)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("read {}: {}", path.display(), e)))?;
+            let data = std::fs::read(&path).map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("read {}: {}", path.display(), e))
+            })?;
             zip.start_file(&zip_path, opts)
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("zip file: {}", e)))?;
             zip.write_all(&data)
@@ -932,19 +1003,27 @@ pub async fn admin_restore(
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
 
     // Collect multipart fields (the stream can only be consumed once).
-    let mut zip_data:  Option<Vec<u8>> = None;
-    let mut form_csrf: Option<String>  = None;
+    let mut zip_data: Option<Vec<u8>> = None;
+    let mut form_csrf: Option<String> = None;
 
-    while let Some(field) = multipart.next_field().await
+    while let Some(field) = multipart
+        .next_field()
+        .await
         .map_err(|e| AppError::BadRequest(format!("Multipart error: {}", e)))?
     {
         match field.name() {
             Some("_csrf") => {
-                form_csrf = Some(field.text().await
-                    .map_err(|e| AppError::BadRequest(e.to_string()))?);
+                form_csrf = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| AppError::BadRequest(e.to_string()))?,
+                );
             }
             Some("backup_file") => {
-                let bytes = field.bytes().await
+                let bytes = field
+                    .bytes()
+                    .await
                     .map_err(|e| AppError::BadRequest(e.to_string()))?;
                 zip_data = Some(bytes.to_vec());
             }
@@ -954,17 +1033,17 @@ pub async fn admin_restore(
 
     // CSRF check.
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(
-        csrf_cookie.as_deref(),
-        form_csrf.as_deref().unwrap_or(""),
-    ) {
+    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form_csrf.as_deref().unwrap_or(""))
+    {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let zip_bytes = zip_data
-        .ok_or_else(|| AppError::BadRequest("No backup file uploaded.".into()))?;
+    let zip_bytes =
+        zip_data.ok_or_else(|| AppError::BadRequest("No backup file uploaded.".into()))?;
     if zip_bytes.is_empty() {
-        return Err(AppError::BadRequest("Uploaded backup file is empty.".into()));
+        return Err(AppError::BadRequest(
+            "Uploaded backup file is empty.".into(),
+        ));
     }
 
     let upload_dir = CONFIG.upload_dir.clone();
@@ -996,8 +1075,8 @@ pub async fn admin_restore(
 
             // ── Single-pass extraction ────────────────────────────────────
             let temp_dir = std::env::temp_dir();
-            let tmp_id   = uuid::Uuid::new_v4().to_string().replace('-', "");
-            let temp_db  = temp_dir.join(format!("chan_restore_{}.db", tmp_id));
+            let tmp_id = uuid::Uuid::new_v4().to_string().replace('-', "");
+            let temp_db = temp_dir.join(format!("chan_restore_{}.db", tmp_id));
             let mut db_extracted = false;
 
             for i in 0..archive.len() {
@@ -1120,8 +1199,7 @@ fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
 /// Verify admin session from a session ID string.
 /// For use inside spawn_blocking closures where we have an open connection.
 fn require_admin_session_sid(conn: &rusqlite::Connection, session_id: Option<&str>) -> Result<i64> {
-    let sid = session_id
-        .ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
+    let sid = session_id.ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
     let session = db::get_session(conn, sid)?
         .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
     Ok(session.admin_id)
@@ -1135,47 +1213,81 @@ mod board_backup_types {
 
     #[derive(Serialize, Deserialize)]
     pub struct BoardRow {
-        pub id: i64, pub short_name: String, pub name: String,
-        pub description: String, pub nsfw: bool,
-        pub max_threads: i64, pub bump_limit: i64,
-        pub allow_images: bool, pub allow_video: bool,
-        pub allow_audio: bool, pub allow_tripcodes: bool,
+        pub id: i64,
+        pub short_name: String,
+        pub name: String,
+        pub description: String,
+        pub nsfw: bool,
+        pub max_threads: i64,
+        pub bump_limit: i64,
+        pub allow_images: bool,
+        pub allow_video: bool,
+        pub allow_audio: bool,
+        pub allow_tripcodes: bool,
         pub created_at: i64,
     }
     #[derive(Serialize, Deserialize)]
     pub struct ThreadRow {
-        pub id: i64, pub board_id: i64, pub subject: Option<String>,
-        pub created_at: i64, pub bumped_at: i64,
-        pub locked: bool, pub sticky: bool, pub reply_count: i64,
+        pub id: i64,
+        pub board_id: i64,
+        pub subject: Option<String>,
+        pub created_at: i64,
+        pub bumped_at: i64,
+        pub locked: bool,
+        pub sticky: bool,
+        pub reply_count: i64,
     }
     #[derive(Serialize, Deserialize)]
     pub struct PostRow {
-        pub id: i64, pub thread_id: i64, pub board_id: i64,
-        pub name: String, pub tripcode: Option<String>, pub subject: Option<String>,
-        pub body: String, pub body_html: String, pub ip_hash: String,
-        pub file_path: Option<String>, pub file_name: Option<String>,
-        pub file_size: Option<i64>, pub thumb_path: Option<String>,
-        pub mime_type: Option<String>, pub media_type: Option<String>,
-        pub created_at: i64, pub deletion_token: String, pub is_op: bool,
+        pub id: i64,
+        pub thread_id: i64,
+        pub board_id: i64,
+        pub name: String,
+        pub tripcode: Option<String>,
+        pub subject: Option<String>,
+        pub body: String,
+        pub body_html: String,
+        pub ip_hash: String,
+        pub file_path: Option<String>,
+        pub file_name: Option<String>,
+        pub file_size: Option<i64>,
+        pub thumb_path: Option<String>,
+        pub mime_type: Option<String>,
+        pub media_type: Option<String>,
+        pub created_at: i64,
+        pub deletion_token: String,
+        pub is_op: bool,
     }
     #[derive(Serialize, Deserialize)]
     pub struct PollRow {
-        pub id: i64, pub thread_id: i64, pub question: String,
-        pub expires_at: i64, pub created_at: i64,
+        pub id: i64,
+        pub thread_id: i64,
+        pub question: String,
+        pub expires_at: i64,
+        pub created_at: i64,
     }
     #[derive(Serialize, Deserialize)]
     pub struct PollOptionRow {
-        pub id: i64, pub poll_id: i64, pub text: String, pub position: i64,
+        pub id: i64,
+        pub poll_id: i64,
+        pub text: String,
+        pub position: i64,
     }
     #[derive(Serialize, Deserialize)]
     pub struct PollVoteRow {
-        pub id: i64, pub poll_id: i64, pub option_id: i64,
-        pub ip_hash: String, pub created_at: i64,
+        pub id: i64,
+        pub poll_id: i64,
+        pub option_id: i64,
+        pub ip_hash: String,
+        pub created_at: i64,
     }
     #[derive(Serialize, Deserialize)]
     pub struct FileHashRow {
-        pub sha256: String, pub file_path: String, pub thumb_path: String,
-        pub mime_type: String, pub created_at: i64,
+        pub sha256: String,
+        pub file_path: String,
+        pub thumb_path: String,
+        pub mime_type: String,
+        pub created_at: i64,
     }
     #[derive(Serialize, Deserialize)]
     pub struct BoardBackupManifest {
@@ -1215,18 +1327,18 @@ pub async fn board_backup(
                  FROM boards WHERE short_name = ?1",
                 params![board_short],
                 |r| Ok(BoardRow {
-                    id:              r.get(0)?,
-                    short_name:      r.get(1)?,
-                    name:            r.get(2)?,
-                    description:     r.get(3)?,
-                    nsfw:            r.get::<_, i64>(4)? != 0,
-                    max_threads:     r.get(5)?,
-                    bump_limit:      r.get(6)?,
-                    allow_images:    r.get::<_, i64>(7)? != 0,
-                    allow_video:     r.get::<_, i64>(8)? != 0,
-                    allow_audio:     r.get::<_, i64>(9)? != 0,
+                    id: r.get(0)?,
+                    short_name: r.get(1)?,
+                    name: r.get(2)?,
+                    description: r.get(3)?,
+                    nsfw: r.get::<_, i64>(4)? != 0,
+                    max_threads: r.get(5)?,
+                    bump_limit: r.get(6)?,
+                    allow_images: r.get::<_, i64>(7)? != 0,
+                    allow_video: r.get::<_, i64>(8)? != 0,
+                    allow_audio: r.get::<_, i64>(9)? != 0,
                     allow_tripcodes: r.get::<_, i64>(10)? != 0,
-                    created_at:      r.get(11)?,
+                    created_at: r.get(11)?,
                 }),
             ).map_err(|_| AppError::NotFound(format!("Board '{}' not found", board_short)))?;
 
@@ -1365,7 +1477,7 @@ pub async fn board_backup(
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
             let bytes = cursor.into_inner();
 
-            let ts    = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+            let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
             let fname = format!("rustchan-board-{}-{}.zip", board_short, ts);
             info!("Admin downloaded board backup for /{}/  ({} bytes)", board_short, bytes.len());
             Ok((bytes, fname))
@@ -1378,11 +1490,12 @@ pub async fn board_backup(
     let disposition = format!("attachment; filename=\"{}\"", filename);
     Ok((
         [
-            (header::CONTENT_TYPE,        "application/zip".to_string()),
+            (header::CONTENT_TYPE, "application/zip".to_string()),
             (header::CONTENT_DISPOSITION, disposition),
         ],
         zip_bytes,
-    ).into_response())
+    )
+        .into_response())
 }
 
 /// Restore a single board from a board-level backup zip.
@@ -1398,19 +1511,27 @@ pub async fn board_restore(
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
     let upload_dir = CONFIG.upload_dir.clone();
 
-    let mut zip_data:  Option<Vec<u8>> = None;
-    let mut form_csrf: Option<String>  = None;
+    let mut zip_data: Option<Vec<u8>> = None;
+    let mut form_csrf: Option<String> = None;
 
-    while let Some(field) = multipart.next_field().await
+    while let Some(field) = multipart
+        .next_field()
+        .await
         .map_err(|e| AppError::BadRequest(format!("Multipart error: {}", e)))?
     {
         match field.name() {
-            Some("_csrf")       => {
-                form_csrf = Some(field.text().await
-                    .map_err(|e| AppError::BadRequest(e.to_string()))?);
+            Some("_csrf") => {
+                form_csrf = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| AppError::BadRequest(e.to_string()))?,
+                );
             }
             Some("backup_file") => {
-                let bytes = field.bytes().await
+                let bytes = field
+                    .bytes()
+                    .await
                     .map_err(|e| AppError::BadRequest(e.to_string()))?;
                 zip_data = Some(bytes.to_vec());
             }
@@ -1419,17 +1540,17 @@ pub async fn board_restore(
     }
 
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(
-        csrf_cookie.as_deref(),
-        form_csrf.as_deref().unwrap_or(""),
-    ) {
+    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form_csrf.as_deref().unwrap_or(""))
+    {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let zip_bytes = zip_data
-        .ok_or_else(|| AppError::BadRequest("No backup file uploaded.".into()))?;
+    let zip_bytes =
+        zip_data.ok_or_else(|| AppError::BadRequest("No backup file uploaded.".into()))?;
     if zip_bytes.is_empty() {
-        return Err(AppError::BadRequest("Uploaded backup file is empty.".into()));
+        return Err(AppError::BadRequest(
+            "Uploaded backup file is empty.".into(),
+        ));
     }
 
     let board_short: String = tokio::task::spawn_blocking({
@@ -1513,93 +1634,93 @@ pub async fn board_restore(
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Begin restore tx: {}", e)))?;
 
             let restore_result = (|| -> Result<()> {
-            let mut thread_id_map: HashMap<i64, i64> = HashMap::new();
-            for t in &manifest.threads {
-                conn.execute(
-                    "INSERT INTO threads (board_id, subject, created_at, bumped_at,
-                     locked, sticky, reply_count)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                    params![
-                        live_board_id, t.subject, t.created_at, t.bumped_at,
-                        t.locked as i64, t.sticky as i64, t.reply_count,
-                    ],
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert thread {}: {}", t.id, e)))?;
-                thread_id_map.insert(t.id, conn.last_insert_rowid());
-            }
+                let mut thread_id_map: HashMap<i64, i64> = HashMap::new();
+                for t in &manifest.threads {
+                    conn.execute(
+                        "INSERT INTO threads (board_id, subject, created_at, bumped_at,
+                         locked, sticky, reply_count)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                        params![
+                            live_board_id, t.subject, t.created_at, t.bumped_at,
+                            t.locked as i64, t.sticky as i64, t.reply_count,
+                        ],
+                    ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert thread {}: {}", t.id, e)))?;
+                    thread_id_map.insert(t.id, conn.last_insert_rowid());
+                }
 
-            // ── Posts ─────────────────────────────────────────────────────
-            for p in &manifest.posts {
-                let new_tid = *thread_id_map.get(&p.thread_id)
-                    .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
-                        "Post {} refs unknown thread {}", p.id, p.thread_id)))?;
-                conn.execute(
-                    "INSERT INTO posts (thread_id, board_id, name, tripcode, subject,
-                     body, body_html, ip_hash, file_path, file_name, file_size,
-                     thumb_path, mime_type, media_type, created_at, deletion_token, is_op)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
-                    params![
-                        new_tid, live_board_id, p.name, p.tripcode, p.subject,
-                        p.body, p.body_html, p.ip_hash,
-                        p.file_path, p.file_name, p.file_size,
-                        p.thumb_path, p.mime_type, p.media_type,
-                        p.created_at, p.deletion_token, p.is_op as i64,
-                    ],
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert post {}: {}", p.id, e)))?;
-            }
+                // ── Posts ─────────────────────────────────────────────────────
+                for p in &manifest.posts {
+                    let new_tid = *thread_id_map.get(&p.thread_id)
+                        .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
+                            "Post {} refs unknown thread {}", p.id, p.thread_id)))?;
+                    conn.execute(
+                        "INSERT INTO posts (thread_id, board_id, name, tripcode, subject,
+                         body, body_html, ip_hash, file_path, file_name, file_size,
+                         thumb_path, mime_type, media_type, created_at, deletion_token, is_op)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                        params![
+                            new_tid, live_board_id, p.name, p.tripcode, p.subject,
+                            p.body, p.body_html, p.ip_hash,
+                            p.file_path, p.file_name, p.file_size,
+                            p.thumb_path, p.mime_type, p.media_type,
+                            p.created_at, p.deletion_token, p.is_op as i64,
+                        ],
+                    ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert post {}: {}", p.id, e)))?;
+                }
 
-            // ── Polls ─────────────────────────────────────────────────────
-            let mut poll_id_map: HashMap<i64, i64> = HashMap::new();
-            for p in &manifest.polls {
-                let new_tid = *thread_id_map.get(&p.thread_id)
-                    .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
-                        "Poll {} refs unknown thread {}", p.id, p.thread_id)))?;
-                conn.execute(
-                    "INSERT INTO polls (thread_id, question, expires_at, created_at)
-                     VALUES (?1,?2,?3,?4)",
-                    params![new_tid, p.question, p.expires_at, p.created_at],
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert poll {}: {}", p.id, e)))?;
-                poll_id_map.insert(p.id, conn.last_insert_rowid());
-            }
+                // ── Polls ─────────────────────────────────────────────────────
+                let mut poll_id_map: HashMap<i64, i64> = HashMap::new();
+                for p in &manifest.polls {
+                    let new_tid = *thread_id_map.get(&p.thread_id)
+                        .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
+                            "Poll {} refs unknown thread {}", p.id, p.thread_id)))?;
+                    conn.execute(
+                        "INSERT INTO polls (thread_id, question, expires_at, created_at)
+                         VALUES (?1,?2,?3,?4)",
+                        params![new_tid, p.question, p.expires_at, p.created_at],
+                    ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert poll {}: {}", p.id, e)))?;
+                    poll_id_map.insert(p.id, conn.last_insert_rowid());
+                }
 
-            // ── Poll options ──────────────────────────────────────────────
-            let mut option_id_map: HashMap<i64, i64> = HashMap::new();
-            for o in &manifest.poll_options {
-                let new_pid = *poll_id_map.get(&o.poll_id)
-                    .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
-                        "Option {} refs unknown poll {}", o.id, o.poll_id)))?;
-                conn.execute(
-                    "INSERT INTO poll_options (poll_id, text, position) VALUES (?1,?2,?3)",
-                    params![new_pid, o.text, o.position],
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert option {}: {}", o.id, e)))?;
-                option_id_map.insert(o.id, conn.last_insert_rowid());
-            }
+                // ── Poll options ──────────────────────────────────────────────
+                let mut option_id_map: HashMap<i64, i64> = HashMap::new();
+                for o in &manifest.poll_options {
+                    let new_pid = *poll_id_map.get(&o.poll_id)
+                        .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
+                            "Option {} refs unknown poll {}", o.id, o.poll_id)))?;
+                    conn.execute(
+                        "INSERT INTO poll_options (poll_id, text, position) VALUES (?1,?2,?3)",
+                        params![new_pid, o.text, o.position],
+                    ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert option {}: {}", o.id, e)))?;
+                    option_id_map.insert(o.id, conn.last_insert_rowid());
+                }
 
-            // ── Poll votes ────────────────────────────────────────────────
-            for v in &manifest.poll_votes {
-                let new_pid = *poll_id_map.get(&v.poll_id)
-                    .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
-                        "Vote {} refs unknown poll {}", v.id, v.poll_id)))?;
-                let new_oid = *option_id_map.get(&v.option_id)
-                    .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
-                        "Vote {} refs unknown option {}", v.id, v.option_id)))?;
-                conn.execute(
-                    "INSERT OR IGNORE INTO poll_votes
-                     (poll_id, option_id, ip_hash, created_at)
-                     VALUES (?1,?2,?3,?4)",
-                    params![new_pid, new_oid, v.ip_hash, v.created_at],
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert vote {}: {}", v.id, e)))?;
-            }
+                // ── Poll votes ────────────────────────────────────────────────
+                for v in &manifest.poll_votes {
+                    let new_pid = *poll_id_map.get(&v.poll_id)
+                        .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
+                            "Vote {} refs unknown poll {}", v.id, v.poll_id)))?;
+                    let new_oid = *option_id_map.get(&v.option_id)
+                        .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
+                            "Vote {} refs unknown option {}", v.id, v.option_id)))?;
+                    conn.execute(
+                        "INSERT OR IGNORE INTO poll_votes
+                         (poll_id, option_id, ip_hash, created_at)
+                         VALUES (?1,?2,?3,?4)",
+                        params![new_pid, new_oid, v.ip_hash, v.created_at],
+                    ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert vote {}: {}", v.id, e)))?;
+                }
 
-            // ── File hashes (dedup table — skip on collision) ─────────────
-            for fh in &manifest.file_hashes {
-                conn.execute(
-                    "INSERT OR IGNORE INTO file_hashes
-                     (sha256, file_path, thumb_path, mime_type, created_at)
-                     VALUES (?1,?2,?3,?4,?5)",
-                    params![fh.sha256, fh.file_path, fh.thumb_path, fh.mime_type, fh.created_at],
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert file_hash: {}", e)))?;
-            }
-            Ok(())
+                // ── File hashes (dedup table — skip on collision) ─────────────
+                for fh in &manifest.file_hashes {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO file_hashes
+                         (sha256, file_path, thumb_path, mime_type, created_at)
+                         VALUES (?1,?2,?3,?4,?5)",
+                        params![fh.sha256, fh.file_path, fh.thumb_path, fh.mime_type, fh.created_at],
+                    ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert file_hash: {}", e)))?;
+                }
+                Ok(())
             })();
 
             match restore_result {
@@ -1689,7 +1810,11 @@ pub async fn update_site_settings(
         move || -> Result<()> {
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
-            let val = if form.collapse_greentext.as_deref() == Some("1") { "1" } else { "0" };
+            let val = if form.collapse_greentext.as_deref() == Some("1") {
+                "1"
+            } else {
+                "0"
+            };
             db::set_site_setting(&conn, "collapse_greentext", val)?;
             info!("Admin updated site setting: collapse_greentext={}", val);
             Ok(())

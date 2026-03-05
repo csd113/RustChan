@@ -29,7 +29,7 @@
 use anyhow::Result;
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2, Params, Algorithm, Version,
+    Algorithm, Argon2, Params, Version,
 };
 // rand_core::RngCore is the same trait instance as argon2's re-exported
 // rand_core::OsRng implements — they share the same rand_core 0.6 crate.
@@ -53,8 +53,8 @@ pub fn hash_password(password: &str) -> Result<String> {
 
 /// Verify a password against an Argon2 hash.
 pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
-    let parsed = PasswordHash::new(hash)
-        .map_err(|e| anyhow::anyhow!("Invalid password hash: {}", e))?;
+    let parsed =
+        PasswordHash::new(hash).map_err(|e| anyhow::anyhow!("Invalid password hash: {}", e))?;
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())

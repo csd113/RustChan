@@ -35,9 +35,8 @@ impl MediaType {
     pub fn from_ext(ext: &str) -> Option<Self> {
         match ext {
             "jpg" | "jpeg" | "png" | "gif" | "webp" => Some(MediaType::Image),
-            "mp4" | "webm"                           => Some(MediaType::Video),
-            "mp3" | "ogg"  | "flac" | "wav"
-            | "m4a" | "aac" | "opus"                 => Some(MediaType::Audio),
+            "mp4" | "webm" => Some(MediaType::Video),
+            "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "opus" => Some(MediaType::Audio),
             _ => None,
         }
     }
@@ -66,17 +65,17 @@ impl MediaType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Board {
     pub id: i64,
-    pub short_name: String,  // "tech" (no slashes)
-    pub name: String,        // "Technology"
+    pub short_name: String, // "tech" (no slashes)
+    pub name: String,       // "Technology"
     pub description: String,
     pub nsfw: bool,
     pub max_threads: i64,
     pub bump_limit: i64,
-    pub allow_images: bool,  // per-board image upload toggle (default: true)
-    pub allow_video: bool,   // per-board video upload toggle (default: true)
-    pub allow_audio: bool,   // per-board audio upload toggle (default: true)
+    pub allow_images: bool, // per-board image upload toggle (default: true)
+    pub allow_video: bool,  // per-board video upload toggle (default: true)
+    pub allow_audio: bool,  // per-board audio upload toggle (default: true)
     pub allow_tripcodes: bool,
-    pub created_at: i64,     // Unix timestamp
+    pub created_at: i64, // Unix timestamp
 }
 
 /// A thread (the OP post + its replies share this record for metadata)
@@ -109,7 +108,7 @@ pub struct Post {
     pub tripcode: Option<String>,
     pub subject: Option<String>,
     pub body: String,
-    pub body_html: String,   // pre-rendered HTML (greentext, links, >>refs)
+    pub body_html: String, // pre-rendered HTML (greentext, links, >>refs)
     pub ip_hash: String,
     pub file_path: Option<String>,
     pub file_name: Option<String>,
@@ -258,7 +257,9 @@ pub struct SearchQuery {
     pub page: i64,
 }
 
-fn default_page() -> i64 { 1 }
+fn default_page() -> i64 {
+    1
+}
 
 /// Pagination helper
 #[derive(Debug, Clone)]
@@ -270,30 +271,40 @@ pub struct Pagination {
 
 impl Pagination {
     pub fn new(page: i64, per_page: i64, total: i64) -> Self {
-        Self { page, per_page, total }
+        Self {
+            page,
+            per_page,
+            total,
+        }
     }
     pub fn total_pages(&self) -> i64 {
-        if self.per_page <= 0 { return 1; }
+        if self.per_page <= 0 {
+            return 1;
+        }
         (self.total.saturating_add(self.per_page - 1)) / self.per_page
     }
     pub fn offset(&self) -> i64 {
         (self.page - 1).max(0).saturating_mul(self.per_page)
     }
-    pub fn has_prev(&self) -> bool { self.page > 1 }
-    pub fn has_next(&self) -> bool { self.page < self.total_pages() }
+    pub fn has_prev(&self) -> bool {
+        self.page > 1
+    }
+    pub fn has_next(&self) -> bool {
+        self.page < self.total_pages()
+    }
 }
 
 /// Aggregate site-wide statistics shown on the home page.
 #[derive(Debug, Clone, Default)]
 pub struct SiteStats {
     /// Total posts ever made
-    pub total_posts:  i64,
+    pub total_posts: i64,
     /// Total image files ever uploaded
     pub total_images: i64,
     /// Total video files ever uploaded
     pub total_videos: i64,
     /// Total audio files ever uploaded
-    pub total_audio:  i64,
+    pub total_audio: i64,
     /// Total bytes of currently stored files (still on disk)
     pub active_bytes: i64,
 }

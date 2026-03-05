@@ -56,11 +56,11 @@ pub async fn parse_post_multipart(
                     csrf_verified = true;
                 }
             }
-            Some("name")           => name           = field.text().await.unwrap_or_default(),
-            Some("subject")        => subject         = field.text().await.unwrap_or_default(),
-            Some("body")           => body            = field.text().await.unwrap_or_default(),
-            Some("deletion_token") => deletion_token  = field.text().await.unwrap_or_default(),
-            Some("poll_question")  => poll_question   = field.text().await.unwrap_or_default(),
+            Some("name") => name = field.text().await.unwrap_or_default(),
+            Some("subject") => subject = field.text().await.unwrap_or_default(),
+            Some("body") => body = field.text().await.unwrap_or_default(),
+            Some("deletion_token") => deletion_token = field.text().await.unwrap_or_default(),
+            Some("poll_question") => poll_question = field.text().await.unwrap_or_default(),
             Some("poll_option") => {
                 let v = field.text().await.unwrap_or_default();
                 let trimmed = v.trim().to_string();
@@ -85,7 +85,9 @@ pub async fn parse_post_multipart(
                     file = Some((bytes.to_vec(), fname));
                 }
             }
-            _ => { let _ = field.bytes().await; }
+            _ => {
+                let _ = field.bytes().await;
+            }
         }
     }
 
@@ -103,7 +105,14 @@ pub async fn parse_post_multipart(
     };
 
     Ok(PostFormData {
-        csrf_verified, name, subject, body, deletion_token, file,
-        poll_question, poll_options, poll_duration_secs,
+        csrf_verified,
+        name,
+        subject,
+        body,
+        deletion_token,
+        file,
+        poll_question,
+        poll_options,
+        poll_duration_secs,
     })
 }

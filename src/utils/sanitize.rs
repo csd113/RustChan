@@ -19,27 +19,46 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-static RE_REPLY:      Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;(\d+)").unwrap());
-static RE_CROSSTHREAD: Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)").unwrap());
-static RE_CROSSBOARD:  Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/").unwrap());
-static RE_URL:        Lazy<Regex> = Lazy::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").unwrap());
-static RE_BOLD:       Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
-static RE_ITALIC:     Lazy<Regex> = Lazy::new(|| Regex::new(r"__([^_]+)__").unwrap());
-static RE_SPOILER:    Lazy<Regex> = Lazy::new(|| Regex::new(r"\[spoiler\]([\s\S]*?)\[/spoiler\]").unwrap());
+static RE_REPLY: Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;(\d+)").unwrap());
+static RE_CROSSTHREAD: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)").unwrap());
+static RE_CROSSBOARD: Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/").unwrap());
+static RE_URL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").unwrap());
+static RE_BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
+static RE_ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"__([^_]+)__").unwrap());
+static RE_SPOILER: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\[spoiler\]([\s\S]*?)\[/spoiler\]").unwrap());
 
 /// Emoji shortcode table — :name: → Unicode glyph
 fn apply_emoji(text: &str) -> String {
     // Common shortcodes. Extend as desired.
     const CODES: &[(&str, &str)] = &[
-        (":smile:",   "😊"), (":lol:",    "😂"), (":kek:",    "🤣"),
-        (":rage:",    "😡"), (":cry:",    "😢"), (":think:",  "🤔"),
-        (":eyes:",    "👀"), (":fire:",   "🔥"), (":check:",  "✅"),
-        (":x:",       "❌"), (":heart:",  "❤️"), (":ok:",    "👌"),
-        (":cool:",    "😎"), (":skull:",  "💀"), (":shrug:",  "🤷"),
-        (":pray:",    "🙏"), (":nerd:",   "🤓"), (":clown:",  "🤡"),
-        (":100:",     "💯"), (":gg:",     "🎮"), (":rip:",    "⚰️"),
-        (":based:",   "🗿"), (":ngmi:",   "😬"), (":gm:",     "🌅"),
-        (":uwu:",     "🥺"), (":owo:",    "👁️👄👁️"),
+        (":smile:", "😊"),
+        (":lol:", "😂"),
+        (":kek:", "🤣"),
+        (":rage:", "😡"),
+        (":cry:", "😢"),
+        (":think:", "🤔"),
+        (":eyes:", "👀"),
+        (":fire:", "🔥"),
+        (":check:", "✅"),
+        (":x:", "❌"),
+        (":heart:", "❤️"),
+        (":ok:", "👌"),
+        (":cool:", "😎"),
+        (":skull:", "💀"),
+        (":shrug:", "🤷"),
+        (":pray:", "🙏"),
+        (":nerd:", "🤓"),
+        (":clown:", "🤡"),
+        (":100:", "💯"),
+        (":gg:", "🎮"),
+        (":rip:", "⚰️"),
+        (":based:", "🗿"),
+        (":ngmi:", "😬"),
+        (":gm:", "🌅"),
+        (":uwu:", "🥺"),
+        (":owo:", "👁️👄👁️"),
     ];
     let mut out = text.to_string();
     for (code, emoji) in CODES {
@@ -150,7 +169,7 @@ fn render_inline(text: &str) -> String {
     result = RE_CROSSTHREAD
         .replace_all(&result, |caps: &regex::Captures| {
             let board = &caps[1];
-            let tid   = &caps[2];
+            let tid = &caps[2];
             format!(
                 r#"<a href="/{board}/thread/{tid}" class="quotelink crosslink">&gt;&gt;&gt;/{board}/{tid}</a>"#,
             )
@@ -161,15 +180,16 @@ fn render_inline(text: &str) -> String {
     result = RE_CROSSBOARD
         .replace_all(&result, |caps: &regex::Captures| {
             let board = &caps[1];
-            format!(
-                r#"<a href="/{board}/" class="quotelink crosslink">&gt;&gt;&gt;/{board}/</a>"#,
-            )
+            format!(r#"<a href="/{board}/" class="quotelink crosslink">&gt;&gt;&gt;/{board}/</a>"#,)
         })
         .into_owned();
 
     // >>N reply links
     result = RE_REPLY
-        .replace_all(&result, r##"<a href="#p$1" class="quotelink">&gt;&gt;$1</a>"##)
+        .replace_all(
+            &result,
+            r##"<a href="#p$1" class="quotelink">&gt;&gt;$1</a>"##,
+        )
         .into_owned();
 
     // URLs
@@ -188,7 +208,10 @@ fn render_inline(text: &str) -> String {
     // [spoiler]…[/spoiler]
     result = RE_SPOILER
         .replace_all(&result, |caps: &regex::Captures| {
-            format!(r#"<span class="spoiler" onclick="this.classList.toggle('revealed')">{}</span>"#, &caps[1])
+            format!(
+                r#"<span class="spoiler" onclick="this.classList.toggle('revealed')">{}</span>"#,
+                &caps[1]
+            )
         })
         .into_owned();
 
@@ -198,9 +221,7 @@ fn render_inline(text: &str) -> String {
         .into_owned();
 
     // __italic__
-    result = RE_ITALIC
-        .replace_all(&result, "<em>$1</em>")
-        .into_owned();
+    result = RE_ITALIC.replace_all(&result, "<em>$1</em>").into_owned();
 
     // Emoji shortcodes (applied last, after HTML transforms)
     result = apply_emoji(&result);
@@ -271,7 +292,10 @@ mod tests {
 
     #[test]
     fn test_escape_html() {
-        assert_eq!(escape_html("<script>alert(1)</script>"), "&lt;script&gt;alert(1)&lt;/script&gt;");
+        assert_eq!(
+            escape_html("<script>alert(1)</script>"),
+            "&lt;script&gt;alert(1)&lt;/script&gt;"
+        );
         assert_eq!(escape_html("a & b"), "a &amp; b");
     }
 
@@ -298,11 +322,23 @@ mod tests {
         let raw = ">line1\n>line2\n>line3";
         let escaped = escape_html(raw);
         let html = render_post_body(&escaped);
-        assert!(html.contains("<details"), "3+ greentext lines should produce a <details> block");
-        assert!(html.contains("3 lines"), "summary should state the line count");
-        assert!(html.contains("class=\"quote\""), "lines should render as quote spans");
+        assert!(
+            html.contains("<details"),
+            "3+ greentext lines should produce a <details> block"
+        );
+        assert!(
+            html.contains("3 lines"),
+            "summary should state the line count"
+        );
+        assert!(
+            html.contains("class=\"quote\""),
+            "lines should render as quote spans"
+        );
         // Expanded by default — the open attribute must be present
-        assert!(html.contains("open"), "<details> should carry the open attribute by default");
+        assert!(
+            html.contains("open"),
+            "<details> should carry the open attribute by default"
+        );
     }
 
     #[test]
@@ -311,7 +347,10 @@ mod tests {
         let raw = ">one line only";
         let escaped = escape_html(raw);
         let html = render_post_body(&escaped);
-        assert!(!html.contains("<details"), "1–2 greentext lines should not be wrapped in <details>");
+        assert!(
+            !html.contains("<details"),
+            "1–2 greentext lines should not be wrapped in <details>"
+        );
         assert!(html.contains("class=\"quote\""));
     }
 
@@ -363,4 +402,3 @@ mod tests {
         assert!(!html.contains("href=\"https://example.com/bar,\""));
     }
 }
-

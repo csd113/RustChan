@@ -9,12 +9,15 @@ use crate::{
     config::CONFIG,
     db::{self, NewPost},
     error::{AppError, Result},
-    handlers::{parse_post_multipart, board::ensure_csrf},
+    handlers::{board::ensure_csrf, parse_post_multipart},
     middleware::{validate_csrf, AppState},
     utils::{
         crypto::{hash_ip, new_deletion_token, sha256_hex},
         files::save_upload,
-        sanitize::{apply_word_filters, escape_html, render_post_body, validate_body, validate_body_with_file, validate_name},
+        sanitize::{
+            apply_word_filters, escape_html, render_post_body, validate_body,
+            validate_body_with_file, validate_name,
+        },
         tripcode::parse_name_tripcode,
     },
 };
@@ -64,12 +67,21 @@ pub async fn view_thread(
             let all_boards = db::get_all_boards(&conn)?;
 
             // Compute ip_hash for poll vote status
-            let ip_hash = crate::utils::crypto::hash_ip(&client_ip, &crate::config::CONFIG.cookie_secret);
+            let ip_hash =
+                crate::utils::crypto::hash_ip(&client_ip, &crate::config::CONFIG.cookie_secret);
             let poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)?;
 
             let collapse_greentext = db::get_collapse_greentext(&conn);
             Ok(crate::templates::thread_page(
-                &board, &thread, &posts, &csrf_clone, &all_boards, is_admin, poll.as_ref(), None, collapse_greentext,
+                &board,
+                &thread,
+                &posts,
+                &csrf_clone,
+                &all_boards,
+                is_admin,
+                poll.as_ref(),
+                None,
+                collapse_greentext,
             ))
         }
     })
@@ -97,16 +109,16 @@ pub async fn post_reply(
 
     let raw_body = form.body;
 
-    let client_ip     = addr.ip().to_string();
-    let upload_dir      = CONFIG.upload_dir.clone();
-    let thumb_size      = CONFIG.thumb_size;
-    let max_image_size  = CONFIG.max_image_size;
-    let max_video_size  = CONFIG.max_video_size;
-    let max_audio_size  = CONFIG.max_audio_size;
+    let client_ip = addr.ip().to_string();
+    let upload_dir = CONFIG.upload_dir.clone();
+    let thumb_size = CONFIG.thumb_size;
+    let max_image_size = CONFIG.max_image_size;
+    let max_video_size = CONFIG.max_video_size;
+    let max_audio_size = CONFIG.max_audio_size;
     let ffmpeg_available = state.ffmpeg_available;
     let cookie_secret = CONFIG.cookie_secret.clone();
-    let file_data     = form.file;
-    let name_val      = form.name;
+    let file_data = form.file;
+    let name_val = form.name;
     let del_token_val = form.deletion_token;
 
     let board_short_err = board_short.clone();
@@ -132,7 +144,11 @@ pub async fn post_reply(
             if let Some(reason) = db::is_banned(&conn, &ip_hash)? {
                 return Err(AppError::Forbidden(format!(
                     "You are banned. Reason: {}",
-                    if reason.is_empty() { "No reason given".to_string() } else { reason }
+                    if reason.is_empty() {
+                        "No reason given".to_string()
+                    } else {
+                        reason
+                    }
                 )));
             }
 
@@ -143,15 +159,18 @@ pub async fn post_reply(
 
             let (name, tripcode) = parse_name_tripcode(&validate_name(&name_val));
             // Respect per-board tripcode setting
-            let tripcode = if board.allow_tripcodes { tripcode } else { None };
+            let tripcode = if board.allow_tripcodes {
+                tripcode
+            } else {
+                None
+            };
 
             // Validate body: a file may substitute for text on media-enabled boards,
             // but at least one of body or file must be present.
             let board_allows_media = board.allow_images || board.allow_video || board.allow_audio;
             let has_file = file_data.is_some();
             let body_text = if board_allows_media {
-                validate_body_with_file(&raw_body, has_file)
-                    .map_err(AppError::BadRequest)?
+                validate_body_with_file(&raw_body, has_file).map_err(AppError::BadRequest)?
             } else {
                 validate_body(&raw_body)
                     .map_err(AppError::BadRequest)?
@@ -159,9 +178,9 @@ pub async fn post_reply(
             };
 
             // FIX[MEDIUM-8]: Apply word filters BEFORE HTML escaping.
-            let filtered_body    = apply_word_filters(&body_text, &filters);
-            let escaped_body     = escape_html(&filtered_body);
-            let body_html        = render_post_body(&escaped_body);
+            let filtered_body = apply_word_filters(&body_text, &filters);
+            let escaped_body = escape_html(&filtered_body);
+            let body_html = render_post_body(&escaped_body);
 
             let uploaded = if let Some((data, fname)) = file_data {
                 // Enforce per-board media type toggles using magic-byte detection.
@@ -171,12 +190,21 @@ pub async fn post_reply(
                     .ok_or_else(|| AppError::BadRequest("Unsupported file type.".into()))?;
 
                 match detected_media {
-                    crate::models::MediaType::Image if !board.allow_images =>
-                        return Err(AppError::BadRequest("Image uploads are disabled on this board.".into())),
-                    crate::models::MediaType::Video if !board.allow_video =>
-                        return Err(AppError::BadRequest("Video uploads are disabled on this board.".into())),
-                    crate::models::MediaType::Audio if !board.allow_audio =>
-                        return Err(AppError::BadRequest("Audio uploads are disabled on this board.".into())),
+                    crate::models::MediaType::Image if !board.allow_images => {
+                        return Err(AppError::BadRequest(
+                            "Image uploads are disabled on this board.".into(),
+                        ))
+                    }
+                    crate::models::MediaType::Video if !board.allow_video => {
+                        return Err(AppError::BadRequest(
+                            "Video uploads are disabled on this board.".into(),
+                        ))
+                    }
+                    crate::models::MediaType::Audio if !board.allow_audio => {
+                        return Err(AppError::BadRequest(
+                            "Audio uploads are disabled on this board.".into(),
+                        ))
+                    }
                     _ => {}
                 }
 
@@ -186,16 +214,26 @@ pub async fn post_reply(
                     let cached_media = crate::models::MediaType::from_mime(&cached.mime_type)
                         .unwrap_or(crate::models::MediaType::Image);
                     Some(crate::utils::files::UploadedFile {
-                        file_path:     cached.file_path,
-                        thumb_path:    cached.thumb_path,
+                        file_path: cached.file_path,
+                        thumb_path: cached.thumb_path,
                         original_name: crate::utils::sanitize::sanitize_filename(&fname),
-                        mime_type:     cached.mime_type,
-                        file_size:     data.len() as i64,
-                        media_type:    cached_media,
+                        mime_type: cached.mime_type,
+                        file_size: data.len() as i64,
+                        media_type: cached_media,
                     })
                 } else {
-                    let f = save_upload(&data, &fname, &upload_dir, &board.short_name, thumb_size, max_image_size, max_video_size, max_audio_size, ffmpeg_available)
-                        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                    let f = save_upload(
+                        &data,
+                        &fname,
+                        &upload_dir,
+                        &board.short_name,
+                        thumb_size,
+                        max_image_size,
+                        max_video_size,
+                        max_audio_size,
+                        ffmpeg_available,
+                    )
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
                     db::record_file_hash(&conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
                     Some(f)
                 }
@@ -220,11 +258,11 @@ pub async fn post_reply(
                 body: body_text.clone(),
                 body_html,
                 ip_hash,
-                file_path:  uploaded.as_ref().map(|u| u.file_path.clone()),
-                file_name:  uploaded.as_ref().map(|u| u.original_name.clone()),
-                file_size:  uploaded.as_ref().map(|u| u.file_size),
+                file_path: uploaded.as_ref().map(|u| u.file_path.clone()),
+                file_name: uploaded.as_ref().map(|u| u.original_name.clone()),
+                file_size: uploaded.as_ref().map(|u| u.file_size),
                 thumb_path: uploaded.as_ref().map(|u| u.thumb_path.clone()),
-                mime_type:  uploaded.as_ref().map(|u| u.mime_type.clone()),
+                mime_type: uploaded.as_ref().map(|u| u.mime_type.clone()),
                 media_type: uploaded.as_ref().map(|u| u.media_type.as_str().to_string()),
                 deletion_token,
                 is_op: false,
@@ -240,8 +278,14 @@ pub async fn post_reply(
                 )?;
             }
 
-            info!("Reply {} posted in thread {} on /{}/", post_id, thread_id, board.short_name);
-            Ok(format!("/{}/thread/{}#p{}", board.short_name, thread_id, post_id))
+            info!(
+                "Reply {} posted in thread {} on /{}/",
+                post_id, thread_id, board.short_name
+            );
+            Ok(format!(
+                "/{}/thread/{}#p{}",
+                board.short_name, thread_id, post_id
+            ))
         }
     })
     .await
@@ -253,23 +297,43 @@ pub async fn post_reply(
         Err(AppError::BadRequest(msg)) => {
             let client_ip_err = addr.ip().to_string();
             let html = tokio::task::spawn_blocking({
-                let pool        = state.db.clone();
-                let csrf_err    = csrf_cookie.clone().unwrap_or_default();
+                let pool = state.db.clone();
+                let csrf_err = csrf_cookie.clone().unwrap_or_default();
                 let board_short = board_short_err.clone();
-                let msg         = msg.clone();
+                let msg = msg.clone();
                 move || -> String {
-                    let conn = match pool.get() { Ok(c) => c, Err(_) => return String::new() };
+                    let conn = match pool.get() {
+                        Ok(c) => c,
+                        Err(_) => return String::new(),
+                    };
                     let board = match db::get_board_by_short(&conn, &board_short) {
-                        Ok(Some(b)) => b, _ => return String::new(),
+                        Ok(Some(b)) => b,
+                        _ => return String::new(),
                     };
                     let thread = match db::get_thread(&conn, thread_id) {
-                        Ok(Some(t)) => t, _ => return String::new(),
+                        Ok(Some(t)) => t,
+                        _ => return String::new(),
                     };
-                    let posts      = db::get_posts_for_thread(&conn, thread_id).unwrap_or_default();
+                    let posts = db::get_posts_for_thread(&conn, thread_id).unwrap_or_default();
                     let all_boards = db::get_all_boards(&conn).unwrap_or_default();
-                    let ip_hash    = crate::utils::crypto::hash_ip(&client_ip_err, &crate::config::CONFIG.cookie_secret);
-                    let poll       = db::get_poll_for_thread(&conn, thread_id, &ip_hash).ok().flatten();
-                    crate::templates::thread_page(&board, &thread, &posts, &csrf_err, &all_boards, false, poll.as_ref(), Some(&msg), db::get_collapse_greentext(&conn))
+                    let ip_hash = crate::utils::crypto::hash_ip(
+                        &client_ip_err,
+                        &crate::config::CONFIG.cookie_secret,
+                    );
+                    let poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)
+                        .ok()
+                        .flatten();
+                    crate::templates::thread_page(
+                        &board,
+                        &thread,
+                        &posts,
+                        &csrf_err,
+                        &all_boards,
+                        false,
+                        poll.as_ref(),
+                        Some(&msg),
+                        db::get_collapse_greentext(&conn),
+                    )
                 }
             })
             .await
@@ -290,7 +354,7 @@ pub async fn post_reply(
 
 #[derive(Deserialize)]
 pub struct VoteForm {
-    pub _csrf:     Option<String>,
+    pub _csrf: Option<String>,
     pub option_id: i64,
 }
 
@@ -305,9 +369,9 @@ pub async fn vote_handler(
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let client_ip     = addr.ip().to_string();
+    let client_ip = addr.ip().to_string();
     let cookie_secret = CONFIG.cookie_secret.clone();
-    let option_id     = form.option_id;
+    let option_id = form.option_id;
 
     let redirect_url = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -340,7 +404,12 @@ pub async fn vote_handler(
             }
 
             db::cast_vote(&conn, poll_id, option_id, &ip_hash)?;
-            info!("Vote cast on poll {} option {} by {}", poll_id, option_id, &ip_hash[..8]);
+            info!(
+                "Vote cast on poll {} option {} by {}",
+                poll_id,
+                option_id,
+                &ip_hash[..8]
+            );
             Ok(format!("/{}/thread/{}#poll", board_short, thread_id))
         }
     })

@@ -15,7 +15,7 @@ use crate::utils::{files::format_file_size, sanitize::escape_html};
 const TOGGLE_SCRIPT: &str = r#"<script>
 function togglePostForm() {
   var wrap = document.getElementById('post-form-wrap');
-  var btn  = document.querySelector('.post-toggle-btn');
+  var btn = document.querySelector('.post-toggle-btn');
   if (!wrap) return;
   var opening = wrap.style.display === 'none';
   wrap.style.display = opening ? 'block' : 'none';
@@ -34,13 +34,13 @@ function appendReply(id) {
 }
 function expandMedia(preview) {
   var container = preview.closest('.file-container');
-  var expanded  = container.querySelector('.media-expanded');
-  var closeBtn  = container.querySelector('.media-close-btn');
+  var expanded = container.querySelector('.media-expanded');
+  var closeBtn = container.querySelector('.media-close-btn');
   if (expanded.tagName === 'IMG' && expanded.dataset.src) {
     expanded.src = expanded.dataset.src;
     delete expanded.dataset.src;
   }
-  preview.style.display  = 'none';
+  preview.style.display = 'none';
   expanded.style.display = 'block';
   closeBtn.style.display = 'inline-flex';
   if (expanded.tagName === 'VIDEO') {
@@ -49,8 +49,8 @@ function expandMedia(preview) {
 }
 function collapseMedia(btn) {
   var container = btn.closest('.file-container');
-  var expanded  = container.querySelector('.media-expanded');
-  var preview   = container.querySelector('.media-preview');
+  var expanded = container.querySelector('.media-expanded');
+  var preview = container.querySelector('.media-preview');
   if (expanded.tagName === 'VIDEO') {
     expanded.pause();
     expanded.currentTime = 0;
@@ -58,8 +58,8 @@ function collapseMedia(btn) {
   expanded.style.display = 'none';
   expanded.style.maxWidth = '';
   expanded.style.maxHeight = '';
-  preview.style.display  = 'block';
-  btn.style.display      = 'none';
+  preview.style.display = 'block';
+  btn.style.display = 'none';
 }
 </script>"#;
 use chrono::{TimeZone, Utc};
@@ -82,13 +82,22 @@ fn fmt_ts_short(ts: i64) -> String {
 
 // ─── Base layout ─────────────────────────────────────────────────────────────
 
-fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &str, boards: &[Board], collapse_greentext: bool) -> String {
+fn base_layout(
+    title: &str,
+    board_short: Option<&str>,
+    body: &str,
+    csrf_token: &str,
+    boards: &[Board],
+    collapse_greentext: bool,
+) -> String {
     let board_links: String = boards
         .iter()
-        .map(|b| format!(
-            r#"[<a href="/{s}/catalog">{s}</a>]"#,
-            s = escape_html(&b.short_name)
-        ))
+        .map(|b| {
+            format!(
+                r#"[<a href="/{s}/catalog">{s}</a>]"#,
+                s = escape_html(&b.short_name)
+            )
+        })
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -199,7 +208,7 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 
   // Close panel on outside click
   document.addEventListener('click', function(e) {{
-    var btn   = document.getElementById('theme-picker-btn');
+    var btn = document.getElementById('theme-picker-btn');
     var panel = document.getElementById('theme-picker-panel');
     if (!btn.contains(e.target) && !panel.contains(e.target)) {{
       closeThemePicker();
@@ -232,59 +241,85 @@ fn base_layout(title: &str, board_short: Option<&str>, body: &str, csrf_token: &
 </script>
 </body>
 </html>"#,
-        title           = escape_html(title),
-        board_links     = board_links,
-        search_bar      = search_bar,
-        catalog_bar     = catalog_bar,
-        forum_name      = escape_html(&CONFIG.forum_name),
-        body            = body,
-        csrf_token      = escape_html(csrf_token),
-        collapse_attr   = if collapse_greentext { " data-collapse-greentext=\"1\"" } else { "" },
+        title = escape_html(title),
+        board_links = board_links,
+        search_bar = search_bar,
+        catalog_bar = catalog_bar,
+        forum_name = escape_html(&CONFIG.forum_name),
+        body = body,
+        csrf_token = escape_html(csrf_token),
+        collapse_attr = if collapse_greentext {
+            " data-collapse-greentext=\"1\""
+        } else {
+            ""
+        },
     )
 }
 
 // ─── Index (board list) ───────────────────────────────────────────────────────
 
-pub fn index_page(board_stats: &[crate::models::BoardStats], site_stats: &crate::models::SiteStats, csrf_token: &str) -> String {
+pub fn index_page(
+    board_stats: &[crate::models::BoardStats],
+    site_stats: &crate::models::SiteStats,
+    csrf_token: &str,
+) -> String {
     // Build a plain boards list for the nav bar
     let all_boards: Vec<Board> = board_stats.iter().map(|s| s.board.clone()).collect();
 
-    let sfw:  Vec<&crate::models::BoardStats> = board_stats.iter().filter(|s| !s.board.nsfw).collect();
-    let nsfw: Vec<&crate::models::BoardStats> = board_stats.iter().filter(|s|  s.board.nsfw).collect();
+    let sfw: Vec<&crate::models::BoardStats> =
+        board_stats.iter().filter(|s| !s.board.nsfw).collect();
+    let nsfw: Vec<&crate::models::BoardStats> =
+        board_stats.iter().filter(|s| s.board.nsfw).collect();
 
     fn board_cards(list: &[&crate::models::BoardStats]) -> String {
-        list.iter().map(|s| {
-            let b = &s.board;
-            let nsfw_badge = if b.nsfw { r#"<span class="nsfw-badge">NSFW</span>"# } else { "" };
-            let thread_word = if s.thread_count == 1 { "thread" } else { "threads" };
-            format!(
-                r#"<a class="board-card" href="/{sh}/catalog">
+        list.iter()
+            .map(|s| {
+                let b = &s.board;
+                let nsfw_badge = if b.nsfw {
+                    r#"<span class="nsfw-badge">NSFW</span>"#
+                } else {
+                    ""
+                };
+                let thread_word = if s.thread_count == 1 {
+                    "thread"
+                } else {
+                    "threads"
+                };
+                format!(
+                    r#"<a class="board-card" href="/{sh}/catalog">
   <div class="board-card-short">/{sh}/</div>
   <div class="board-card-name">{n}{nsfw}</div>
   <div class="board-card-desc">{d}</div>
   <div class="board-card-stats">{tc} {tw}</div>
 </a>"#,
-                sh   = escape_html(&b.short_name),
-                n    = escape_html(&b.name),
-                nsfw = nsfw_badge,
-                d    = escape_html(&b.description),
-                tc   = s.thread_count,
-                tw   = thread_word,
-            )
-        }).collect()
+                    sh = escape_html(&b.short_name),
+                    n = escape_html(&b.name),
+                    nsfw = nsfw_badge,
+                    d = escape_html(&b.description),
+                    tc = s.thread_count,
+                    tw = thread_word,
+                )
+            })
+            .collect()
     }
 
     let sfw_sec = if !sfw.is_empty() {
         format!("<div class=\"index-section\"><h2 class=\"index-section-title\">// Boards</h2><div class=\"board-cards\">{}</div></div>", board_cards(&sfw))
-    } else { String::new() };
+    } else {
+        String::new()
+    };
 
     let nsfw_sec = if !nsfw.is_empty() {
         format!("<div class=\"index-section\"><h2 class=\"index-section-title\">// Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2><div class=\"board-cards\">{}</div></div>", board_cards(&nsfw))
-    } else { String::new() };
+    } else {
+        String::new()
+    };
 
     let empty = if board_stats.is_empty() {
         "<p class=\"index-empty\">no boards yet — admin must create boards first.</p>"
-    } else { "" };
+    } else {
+        ""
+    };
 
     let active_gb = site_stats.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let stats_sec = format!(
@@ -311,14 +346,21 @@ pub fn index_page(board_stats: &[crate::models::BoardStats], site_stats: &crate:
 <p class="index-subtitle">select board to proceed</p>
 </div>
 {sfw}{nsfw}{empty}{stats}"#,
-        name  = escape_html(&CONFIG.forum_name),
-        sfw   = sfw_sec,
-        nsfw  = nsfw_sec,
+        name = escape_html(&CONFIG.forum_name),
+        sfw = sfw_sec,
+        nsfw = nsfw_sec,
         empty = empty,
         stats = stats_sec,
     );
 
-    base_layout(&CONFIG.forum_name, None, &body, csrf_token, &all_boards, false)
+    base_layout(
+        &CONFIG.forum_name,
+        None,
+        &body,
+        csrf_token,
+        &all_boards,
+        false,
+    )
 }
 
 // ─── Board index ──────────────────────────────────────────────────────────────
@@ -362,8 +404,8 @@ pub fn board_page(
     body.push_str(&format!(
         r#"<div class="board-header"><h1>/{short}/  — {name}</h1><p class="board-desc">{desc}</p></div>"#,
         short = escape_html(&board.short_name),
-        name  = escape_html(&board.name),
-        desc  = escape_html(&board.description),
+        name = escape_html(&board.name),
+        desc = escape_html(&board.description),
     ));
 
     body.push_str(&format!(
@@ -377,10 +419,18 @@ pub fn board_page(
     ));
 
     for summary in summaries {
-        body.push_str(&render_thread_summary(summary, &board.short_name, csrf_token, is_admin));
+        body.push_str(&render_thread_summary(
+            summary,
+            &board.short_name,
+            csrf_token,
+            is_admin,
+        ));
     }
 
-    body.push_str(&render_pagination(pagination, &format!("/{}/", board.short_name)));
+    body.push_str(&render_pagination(
+        pagination,
+        &format!("/{}/", board.short_name),
+    ));
 
     body.push_str(TOGGLE_SCRIPT);
 
@@ -477,25 +527,38 @@ function updateRemoveButtons() {{
   }});
 }}
 </script>"#,
-        board    = escape_html(board_short),
-        csrf     = escape_html(csrf_token),
+        board = escape_html(board_short),
+        csrf = escape_html(csrf_token),
         image_mb = image_mb,
         video_mb = video_mb,
         audio_mb = audio_mb,
     )
 }
 
-fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token: &str, is_admin: bool) -> String {
+fn render_thread_summary(
+    summary: &ThreadSummary,
+    board_short: &str,
+    csrf_token: &str,
+    is_admin: bool,
+) -> String {
     let t = &summary.thread;
     let mut html = String::new();
 
-    let sticky_label = if t.sticky { r#"<span class="tag sticky">STICKY</span> "# } else { "" };
-    let locked_label = if t.locked { r#"<span class="tag locked">LOCKED</span> "# } else { "" };
+    let sticky_label = if t.sticky {
+        r#"<span class="tag sticky">STICKY</span> "#
+    } else {
+        ""
+    };
+    let locked_label = if t.locked {
+        r#"<span class="tag locked">LOCKED</span> "#
+    } else {
+        ""
+    };
 
     html.push_str(&format!(
         r#"<div class="thread" id="t{tid}">
 <div class="op post" id="p{op_id}">"#,
-        tid   = t.id,
+        tid = t.id,
         op_id = t.op_id.unwrap_or(0),
     ));
 
@@ -503,8 +566,8 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
         html.push_str(&format!(
             r#"<div class="file-container"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image"></a></div>"#,
             board = escape_html(board_short),
-            tid   = t.id,
-            th    = escape_html(thumb),
+            tid = t.id,
+            th = escape_html(thumb),
         ));
     }
 
@@ -518,19 +581,19 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
 </div>"#,
         sticky = sticky_label,
         locked = locked_label,
-        name   = escape_html(t.op_name.as_deref().unwrap_or("Anonymous")),
-        time   = fmt_ts_short(t.created_at),
-        board  = escape_html(board_short),
-        tid    = t.id,
-        op_id  = t.op_id.unwrap_or(0),
+        name = escape_html(t.op_name.as_deref().unwrap_or("Anonymous")),
+        time = fmt_ts_short(t.created_at),
+        board = escape_html(board_short),
+        tid = t.id,
+        op_id = t.op_id.unwrap_or(0),
     ));
 
     if let Some(subject) = &t.subject {
         html.push_str(&format!(
             r#"<div class="subject"><a href="/{b}/thread/{tid}"><strong>{s}</strong></a></div>"#,
-            b   = escape_html(board_short),
+            b = escape_html(board_short),
             tid = t.id,
-            s   = escape_html(subject),
+            s = escape_html(subject),
         ));
     }
 
@@ -539,7 +602,7 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
             format!(
                 r#"{} <a href="/{b}/thread/{tid}">…[Read more]</a>"#,
                 escape_html(&body[..300]),
-                b   = escape_html(board_short),
+                b = escape_html(board_short),
                 tid = t.id,
             )
         } else {
@@ -552,17 +615,29 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
         r#"<div class="thread-footer">
 <a href="/{board}/thread/{tid}">[reply] ({n} {word})</a>"#,
         board = escape_html(board_short),
-        tid   = t.id,
-        n     = t.reply_count,
-        word  = if t.reply_count == 1 { "reply" } else { "replies" },
+        tid = t.id,
+        n = t.reply_count,
+        word = if t.reply_count == 1 {
+            "reply"
+        } else {
+            "replies"
+        },
     ));
 
     // Admin: sticky/lock/delete controls on board index
     if is_admin {
         let sticky_act = if t.sticky { "unsticky" } else { "sticky" };
-        let sticky_lbl = if t.sticky { "&#128204; unsticky" } else { "&#128204; sticky" };
-        let lock_act   = if t.locked  { "unlock"   } else { "lock"   };
-        let lock_lbl   = if t.locked  { "&#128275; unlock" } else { "&#128274; lock" };
+        let sticky_lbl = if t.sticky {
+            "&#128204; unsticky"
+        } else {
+            "&#128204; sticky"
+        };
+        let lock_act = if t.locked { "unlock" } else { "lock" };
+        let lock_lbl = if t.locked {
+            "&#128275; unlock"
+        } else {
+            "&#128274; lock"
+        };
         html.push_str(&format!(
             r#" <form method="POST" action="/admin/thread/action" style="display:inline">
 <input type="hidden" name="_csrf"      value="{csrf}">
@@ -585,13 +660,13 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
 <button type="submit" class="admin-del-btn"
         onclick="return confirm('Delete thread No.{tid} and all its posts?')">&#x2715; del</button>
 </form>"#,
-            csrf       = escape_html(csrf_token),
-            tid        = t.id,
-            board      = escape_html(board_short),
+            csrf = escape_html(csrf_token),
+            tid = t.id,
+            board = escape_html(board_short),
             sticky_act = sticky_act,
             sticky_lbl = sticky_lbl,
-            lock_act   = lock_act,
-            lock_lbl   = lock_lbl,
+            lock_act = lock_act,
+            lock_lbl = lock_lbl,
         ));
     }
 
@@ -601,13 +676,20 @@ fn render_thread_summary(summary: &ThreadSummary, board_short: &str, csrf_token:
         html.push_str(&format!(
             r#"<div class="omitted">{} posts omitted. <a href="/{b}/thread/{tid}">view thread</a></div>"#,
             summary.omitted,
-            b   = escape_html(board_short),
+            b = escape_html(board_short),
             tid = t.id,
         ));
     }
 
     for post in &summary.preview_posts {
-        html.push_str(&render_post(post, board_short, csrf_token, false, is_admin, true));
+        html.push_str(&render_post(
+            post,
+            board_short,
+            csrf_token,
+            false,
+            is_admin,
+            true,
+        ));
     }
 
     html.push_str("<hr class=\"thread-sep\">");
@@ -640,8 +722,16 @@ pub fn thread_page(
 
     // Visible admin toolbar
     if is_admin {
-        let sticky_action = if thread.sticky { ("unsticky", "&#128204; Unsticky") } else { ("sticky", "&#128204; Sticky") };
-        let lock_action   = if thread.locked  { ("unlock",   "&#128275; Unlock")   } else { ("lock",   "&#128274; Lock")   };
+        let sticky_action = if thread.sticky {
+            ("unsticky", "&#128204; Unsticky")
+        } else {
+            ("sticky", "&#128204; Sticky")
+        };
+        let lock_action = if thread.locked {
+            ("unlock", "&#128275; Unlock")
+        } else {
+            ("lock", "&#128274; Lock")
+        };
         body.push_str(&format!(
             r#"<div class="admin-toolbar">
 <span class="admin-toolbar-label">&#9632; ADMIN</span>
@@ -672,19 +762,21 @@ pub fn thread_page(
 <button type="submit" class="admin-toolbar-btn">logout</button>
 </form>
 </div>"#,
-            csrf       = escape_html(csrf_token),
-            tid        = thread.id,
-            board      = escape_html(&board.short_name),
+            csrf = escape_html(csrf_token),
+            tid = thread.id,
+            board = escape_html(&board.short_name),
             sticky_act = sticky_action.0,
             sticky_lbl = sticky_action.1,
-            lock_act   = lock_action.0,
-            lock_lbl   = lock_action.1,
+            lock_act = lock_action.0,
+            lock_lbl = lock_action.1,
         ));
     }
 
     let locked_notice = if thread.locked {
         r#"<div class="notice locked-notice">this thread is locked — no new replies allowed</div>"#
-    } else { "" };
+    } else {
+        ""
+    };
 
     body.push_str(&format!(
         r#"<div class="board-header">
@@ -692,7 +784,7 @@ pub fn thread_page(
 <span class="thread-id-badge" id="poll">Thread No.<strong>{tid}</strong></span>
 </div>
 "#,
-        s   = escape_html(&board.short_name),
+        s = escape_html(&board.short_name),
         tid = thread.id,
     ));
     body.push_str(locked_notice);
@@ -703,7 +795,14 @@ pub fn thread_page(
     }
 
     for post in posts {
-        body.push_str(&render_post(post, &board.short_name, csrf_token, true, is_admin, true));
+        body.push_str(&render_post(
+            post,
+            &board.short_name,
+            csrf_token,
+            true,
+            is_admin,
+            true,
+        ));
     }
 
     if !thread.locked {
@@ -721,7 +820,11 @@ pub fn thread_page(
     body.push_str(TOGGLE_SCRIPT);
 
     base_layout(
-        &format!("/{}/  {}", board.short_name, thread.subject.as_deref().unwrap_or("thread")),
+        &format!(
+            "/{}/  {}",
+            board.short_name,
+            thread.subject.as_deref().unwrap_or("thread")
+        ),
         Some(&board.short_name),
         &body,
         csrf_token,
@@ -745,7 +848,11 @@ fn render_poll(
     } else if time_left < 3600 {
         format!("closes in {}m", time_left / 60)
     } else if time_left < 86400 {
-        format!("closes in {}h {}m", time_left / 3600, (time_left % 3600) / 60)
+        format!(
+            "closes in {}h {}m",
+            time_left / 3600,
+            (time_left % 3600) / 60
+        )
     } else {
         format!("closes {}", fmt_ts(pd.poll.expires_at))
     };
@@ -759,9 +866,13 @@ fn render_poll(
   <span class="poll-question">{q}</span>
   <span class="poll-status {status_class}">[{expires}]</span>
 </div>"#,
-        q            = escape_html(&pd.poll.question),
-        status_class = if pd.is_expired { "poll-closed" } else { "poll-open" },
-        expires      = expires_str,
+        q = escape_html(&pd.poll.question),
+        status_class = if pd.is_expired {
+            "poll-closed"
+        } else {
+            "poll-open"
+        },
+        expires = expires_str,
     );
 
     if show_results {
@@ -781,9 +892,9 @@ fn render_poll(
 </div>"#,
                 voted = if is_voted { " user-voted" } else { "" },
                 check = if is_voted { "✓ " } else { "" },
-                text  = escape_html(&opt.text),
+                text = escape_html(&opt.text),
                 votes = opt.vote_count,
-                pct   = pct,
+                pct = pct,
             ));
         }
         html.push_str(&format!(
@@ -798,8 +909,8 @@ fn render_poll(
 <input type="hidden" name="_csrf"     value="{csrf}">
 <input type="hidden" name="thread_id" value="{tid}">
 <input type="hidden" name="board"     value="{board}">"#,
-            csrf  = escape_html(csrf_token),
-            tid   = thread_id,
+            csrf = escape_html(csrf_token),
+            tid = thread_id,
             board = escape_html(board_short),
         ));
         for opt in &pd.options {
@@ -808,19 +919,30 @@ fn render_poll(
   <input type="radio" name="option_id" value="{id}" required>
   <span class="poll-opt-text">{text}</span>
 </label>"#,
-                id   = opt.id,
+                id = opt.id,
                 text = escape_html(&opt.text),
             ));
         }
-        html.push_str(r#"<button type="submit" class="poll-vote-btn">[ Cast Vote ]</button></form>"#);
+        html.push_str(
+            r#"<button type="submit" class="poll-vote-btn">[ Cast Vote ]</button></form>"#,
+        );
     }
 
     html.push_str("</div>");
     html
 }
 
-pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete: bool, is_admin: bool, show_media: bool) -> String {
-    let tripcode_html = post.tripcode.as_ref()
+pub fn render_post(
+    post: &Post,
+    board_short: &str,
+    csrf_token: &str,
+    show_delete: bool,
+    is_admin: bool,
+    show_media: bool,
+) -> String {
+    let tripcode_html = post
+        .tripcode
+        .as_ref()
         .map(|t| format!(r#"<span class="tripcode">!{}</span>"#, escape_html(t)))
         .unwrap_or_default();
 
@@ -834,10 +956,10 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
 <a class="post-num" href="#p{id}" onclick="appendReply({id})">No.{id}</a>
 </div>"##,
         op_class = op_class,
-        id       = post.id,
-        name     = escape_html(&post.name),
+        id = post.id,
+        name = escape_html(&post.name),
         tripcode = tripcode_html,
-        time     = fmt_ts_short(post.created_at),
+        time = fmt_ts_short(post.created_at),
     );
 
     if let Some(subject) = &post.subject {
@@ -849,24 +971,34 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
 
     // Image / Video / Audio — uses flex layout so text wraps naturally at any size
     if show_media {
-    if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
-        let size_str  = post.file_size.map(format_file_size).unwrap_or_default();
-        let name_str  = post.file_name.as_deref().unwrap_or("file");
-        let mime      = post.mime_type.as_deref().unwrap_or("application/octet-stream");
-        // Use explicit media_type when available; fall back to MIME prefix sniff.
-        let is_audio  = matches!(&post.media_type, Some(crate::models::MediaType::Audio))
-            || post.mime_type.as_deref().map(|m| m.starts_with("audio/")).unwrap_or(false);
-        let is_video  = !is_audio && (
-            matches!(&post.media_type, Some(crate::models::MediaType::Video))
-            || post.mime_type.as_deref().map(|m| m.starts_with("video/")).unwrap_or(false)
-        );
+        if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
+            let size_str = post.file_size.map(format_file_size).unwrap_or_default();
+            let name_str = post.file_name.as_deref().unwrap_or("file");
+            let mime = post
+                .mime_type
+                .as_deref()
+                .unwrap_or("application/octet-stream");
+            // Use explicit media_type when available; fall back to MIME prefix sniff.
+            let is_audio = matches!(&post.media_type, Some(crate::models::MediaType::Audio))
+                || post
+                    .mime_type
+                    .as_deref()
+                    .map(|m| m.starts_with("audio/"))
+                    .unwrap_or(false);
+            let is_video = !is_audio
+                && (matches!(&post.media_type, Some(crate::models::MediaType::Video))
+                    || post
+                        .mime_type
+                        .as_deref()
+                        .map(|m| m.starts_with("video/"))
+                        .unwrap_or(false));
 
-        if is_audio {
-            // ── Audio player ─────────────────────────────────────────────────
-            // Rendered with <audio controls preload="none"> for zero auto-load.
-            // The SVG placeholder icon is shown above the player.
-            html.push_str(&format!(
-                r#"<div class="file-container audio-container">
+            if is_audio {
+                // ── Audio player ─────────────────────────────────────────────────
+                // Rendered with <audio controls preload="none"> for zero auto-load.
+                // The SVG placeholder icon is shown above the player.
+                html.push_str(&format!(
+                    r#"<div class="file-container audio-container">
 <div class="file-info">
   <a href="/boards/{f}">{orig}</a> ({sz})
 </div>
@@ -878,14 +1010,14 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
   Your browser does not support the audio element.
 </audio>
 </div>"#,
-                f    = escape_html(file),
-                th   = escape_html(thumb),
-                orig = escape_html(name_str),
-                sz   = escape_html(&size_str),
-                mime = escape_html(mime),
-            ));
-        } else if is_video {
-            html.push_str(&format!(
+                    f = escape_html(file),
+                    th = escape_html(thumb),
+                    orig = escape_html(name_str),
+                    sz = escape_html(&size_str),
+                    mime = escape_html(mime),
+                ));
+            } else if is_video {
+                html.push_str(&format!(
                 r#"<div class="file-container">
 <div class="file-info">
   <a href="/boards/{f}">{orig}</a> ({sz})
@@ -898,14 +1030,14 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
 <video class="media-expanded" src="/boards/{f}" controls preload="none"
        type="{mime}" style="display:none"></video>
 </div>"#,
-                f    = escape_html(file),
-                th   = escape_html(thumb),
+                f = escape_html(file),
+                th = escape_html(thumb),
                 orig = escape_html(name_str),
-                sz   = escape_html(&size_str),
+                sz = escape_html(&size_str),
                 mime = escape_html(mime),
             ));
-        } else {
-            html.push_str(&format!(
+            } else {
+                html.push_str(&format!(
                 r#"<div class="file-container">
 <div class="file-info">
   <a href="/boards/{f}">{orig}</a> ({sz})
@@ -918,17 +1050,20 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
 <img class="media-expanded" src="" data-src="/boards/{f}" style="display:none"
      alt="image" draggable="false">
 </div>"#,
-                f    = escape_html(file),
-                th   = escape_html(thumb),
+                f = escape_html(file),
+                th = escape_html(thumb),
                 orig = escape_html(name_str),
-                sz   = escape_html(&size_str),
+                sz = escape_html(&size_str),
             ));
+            }
         }
-    }
     } // end show_media
 
     // Post body (pre-rendered, sanitised HTML)
-    html.push_str(&format!(r#"<div class="post-body">{}</div>"#, post.body_html));
+    html.push_str(&format!(
+        r#"<div class="post-body">{}</div>"#,
+        post.body_html
+    ));
 
     // User delete form (only on thread pages where show_delete=true)
     if show_delete {
@@ -942,8 +1077,8 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
 <button type="submit" class="del-btn">del</button>
 </form>
 </div>"#,
-            csrf  = escape_html(csrf_token),
-            pid   = post.id,
+            csrf = escape_html(csrf_token),
+            pid = post.id,
             board = escape_html(board_short),
         ));
     }
@@ -960,8 +1095,8 @@ pub fn render_post(post: &Post, board_short: &str, csrf_token: &str, show_delete
         onclick="return confirm('Admin delete post No.{pid}?')">&#x2715; admin del</button>
 </form>
 </div>"#,
-            csrf  = escape_html(csrf_token),
-            pid   = post.id,
+            csrf = escape_html(csrf_token),
+            pid = post.id,
             board = escape_html(board_short),
         ));
     }
@@ -993,9 +1128,9 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str) -> String {
   </table>
 </form>
 </div>"#,
-        board    = escape_html(board_short),
-        tid      = thread_id,
-        csrf     = escape_html(csrf_token),
+        board = escape_html(board_short),
+        tid = thread_id,
+        csrf = escape_html(csrf_token),
         image_mb = image_mb,
         video_mb = video_mb,
         audio_mb = audio_mb,
@@ -1004,7 +1139,13 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str) -> String {
 
 // ─── Catalog page ─────────────────────────────────────────────────────────────
 
-pub fn catalog_page(board: &Board, threads: &[Thread], csrf_token: &str, boards: &[Board], collapse_greentext: bool) -> String {
+pub fn catalog_page(
+    board: &Board,
+    threads: &[Thread],
+    csrf_token: &str,
+    boards: &[Board],
+    collapse_greentext: bool,
+) -> String {
     let bs = escape_html(&board.short_name);
     let bn = escape_html(&board.name);
 
@@ -1020,20 +1161,26 @@ pub fn catalog_page(board: &Board, threads: &[Thread], csrf_token: &str, boards:
   {form}
 </div>
 <div class="catalog-grid">"#,
-        bs   = bs,
-        bn   = bn,
+        bs = bs,
+        bn = bn,
         desc = escape_html(&board.description),
         form = new_thread_form(&board.short_name, csrf_token),
     );
 
     for t in threads {
         let thumb_html = if let Some(th) = &t.op_thumb {
-            format!(r#"<img class="catalog-thumb" src="/boards/{}" loading="lazy" alt="">"#, escape_html(th))
+            format!(
+                r#"<img class="catalog-thumb" src="/boards/{}" loading="lazy" alt="">"#,
+                escape_html(th)
+            )
         } else {
             r#"<div class="catalog-no-image">no img</div>"#.to_string()
         };
 
-        let subject = t.subject.as_deref().unwrap_or_else(|| t.op_body.as_deref().unwrap_or(""));
+        let subject = t
+            .subject
+            .as_deref()
+            .unwrap_or_else(|| t.op_body.as_deref().unwrap_or(""));
         let preview: String = subject.chars().take(80).collect();
 
         body.push_str(&format!(
@@ -1046,12 +1193,12 @@ pub fn catalog_page(board: &Board, threads: &[Thread], csrf_token: &str, boards:
 </div>
 </a>
 </div>"#,
-            sticky  = if t.sticky { " sticky" } else { "" },
-            board   = escape_html(&board.short_name),
-            tid     = t.id,
-            thumb   = thumb_html,
+            sticky = if t.sticky { " sticky" } else { "" },
+            board = escape_html(&board.short_name),
+            tid = t.id,
+            thumb = thumb_html,
             replies = t.reply_count,
-            subj    = escape_html(&preview),
+            subj = escape_html(&preview),
         ));
     }
 
@@ -1094,13 +1241,27 @@ pub fn search_page(
     if posts.is_empty() {
         body.push_str(r#"<p style="color:var(--text-dim);margin-top:8px">no results found.</p>"#);
     } else {
-        body.push_str(&format!(r#"<p style="color:var(--text-dim);font-size:0.8rem;margin-top:6px">{} result(s)</p>"#, pagination.total));
+        body.push_str(&format!(
+            r#"<p style="color:var(--text-dim);font-size:0.8rem;margin-top:6px">{} result(s)</p>"#,
+            pagination.total
+        ));
         for post in posts {
-            body.push_str(&render_post(post, &board.short_name, csrf_token, false, false, true));
+            body.push_str(&render_post(
+                post,
+                &board.short_name,
+                csrf_token,
+                false,
+                false,
+                true,
+            ));
         }
         body.push_str(&render_pagination(
             pagination,
-            &format!("/{}/search?q={}", board.short_name, urlencoding_simple(query)),
+            &format!(
+                "/{}/search?q={}",
+                board.short_name,
+                urlencoding_simple(query)
+            ),
         ));
     }
 
@@ -1135,13 +1296,19 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
 </table>
 </form>
 </div>"#,
-        err  = err_html,
+        err = err_html,
         csrf = escape_html(csrf_token),
     );
     base_layout("admin login", None, &body, csrf_token, boards, false)
 }
 
-pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], collapse_greentext: bool, csrf_token: &str) -> String {
+pub fn admin_panel_page(
+    boards: &[Board],
+    bans: &[Ban],
+    filters: &[WordFilter],
+    collapse_greentext: bool,
+    csrf_token: &str,
+) -> String {
     let mut board_cards = String::new();
     for b in boards {
         let checked = |v: bool| if v { " checked" } else { "" };
@@ -1181,26 +1348,29 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
   <button type="button">&#8659; backup /{short}/</button>
 </a>
 </details>"#,
-            short    = escape_html(&b.short_name),
-            name     = escape_html(&b.name),
+            short = escape_html(&b.short_name),
+            name = escape_html(&b.name),
             nsfw_tag = if b.nsfw { r#"<span class="tag nsfw-tag">NSFW</span>"# } else { "" },
-            csrf     = escape_html(csrf_token),
-            id       = b.id,
+            csrf = escape_html(csrf_token),
+            id = b.id,
             name_raw = escape_html(&b.name),
             desc_raw = escape_html(&b.description),
-            bump     = b.bump_limit,
-            maxt     = b.max_threads,
-            nsfw_ck  = checked(b.nsfw),
-            img_ck   = checked(b.allow_images),
-            vid_ck   = checked(b.allow_video),
-            aud_ck   = checked(b.allow_audio),
-            trip_ck  = checked(b.allow_tripcodes),
+            bump = b.bump_limit,
+            maxt = b.max_threads,
+            nsfw_ck = checked(b.nsfw),
+            img_ck = checked(b.allow_images),
+            vid_ck = checked(b.allow_video),
+            aud_ck = checked(b.allow_audio),
+            trip_ck = checked(b.allow_tripcodes),
         ));
     }
 
     let mut ban_rows = String::new();
     for ban in bans {
-        let expires = ban.expires_at.map(fmt_ts).unwrap_or_else(|| "permanent".to_string());
+        let expires = ban
+            .expires_at
+            .map(fmt_ts)
+            .unwrap_or_else(|| "permanent".to_string());
         ban_rows.push_str(&format!(
             r#"<tr>
 <td class="ip-hash">{}</td><td>{}</td><td>{}</td>
@@ -1218,7 +1388,7 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
             escape_html(ban.reason.as_deref().unwrap_or("")),
             escape_html(&expires),
             csrf = escape_html(csrf_token),
-            id   = ban.id,
+            id = ban.id,
         ));
     }
 
@@ -1238,7 +1408,7 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
             escape_html(&f.pattern),
             escape_html(&f.replacement),
             csrf = escape_html(csrf_token),
-            id   = f.id,
+            id = f.id,
         ));
     }
 
@@ -1336,11 +1506,11 @@ pub fn admin_panel_page(boards: &[Board], bans: &[Ban], filters: &[WordFilter], 
 </form>
 </section>
 </div>"#,
-        csrf         = escape_html(csrf_token),
-        board_cards  = board_cards,
-        ban_rows     = ban_rows,
-        filter_rows  = filter_rows,
-        collapse_ck  = if collapse_greentext { " checked" } else { "" },
+        csrf = escape_html(csrf_token),
+        board_cards = board_cards,
+        ban_rows = ban_rows,
+        filter_rows = filter_rows,
+        collapse_ck = if collapse_greentext { " checked" } else { "" },
     );
 
     base_layout("admin panel", None, &body, csrf_token, boards, false)
@@ -1366,7 +1536,7 @@ pub fn error_page(code: u16, message: &str) -> String {
 </div>
 </body>
 </html>"#,
-        code    = code,
+        code = code,
         message = escape_html(message),
     )
 }
@@ -1374,16 +1544,28 @@ pub fn error_page(code: u16, message: &str) -> String {
 // ─── Pagination helper ────────────────────────────────────────────────────────
 
 fn render_pagination(p: &Pagination, base_url: &str) -> String {
-    if p.total_pages() <= 1 { return String::new(); }
+    if p.total_pages() <= 1 {
+        return String::new();
+    }
     let sep = if base_url.contains('?') { "&" } else { "?" };
     let mut html = String::from(r#"<div class="pagination">"#);
 
     if p.has_prev() {
-        html.push_str(&format!(r#"<a href="{}{sep}page={}">[prev]</a> "#, base_url, p.page - 1, sep = sep));
+        html.push_str(&format!(
+            r#"<a href="{}{sep}page={}">[prev]</a> "#,
+            base_url,
+            p.page - 1,
+            sep = sep
+        ));
     }
     html.push_str(&format!("page {} / {}", p.page, p.total_pages()));
     if p.has_next() {
-        html.push_str(&format!(r#" <a href="{}{sep}page={}">[next]</a>"#, base_url, p.page + 1, sep = sep));
+        html.push_str(&format!(
+            r#" <a href="{}{sep}page={}">[next]</a>"#,
+            base_url,
+            p.page + 1,
+            sep = sep
+        ));
     }
 
     html.push_str("</div>");
@@ -1398,10 +1580,11 @@ fn urlencoding_simple(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for &byte in s.as_bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
-            | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
             b' ' => out.push('+'),
-            b    => out.push_str(&format!("%{:02X}", b)),
+            b => out.push_str(&format!("%{:02X}", b)),
         }
     }
     out
