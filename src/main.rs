@@ -198,7 +198,8 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     let ffmpeg_status = detect::detect_ffmpeg(CONFIG.require_ffmpeg);
     let ffmpeg_available = ffmpeg_status == detect::ToolStatus::Available;
 
-    // Tor: purely informational — prints torrc hints, never blocks startup.
+    // Tor: create hidden-service directory + torrc, launch tor as a background
+    // process, and poll for the hostname file (all non-blocking).
     // rsplit(':').next() finds the last colon-delimited segment, which is always
     // the port regardless of whether the host part is IPv4 ("0.0.0.0:8080") or
     // IPv6 ("[::1]:8080").
@@ -208,7 +209,7 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         .next()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(8080);
-    detect::detect_tor(CONFIG.enable_tor_support, bind_port);
+    detect::detect_tor(CONFIG.enable_tor_support, bind_port, data_dir);
     println!();
 
     let state = AppState {
