@@ -279,6 +279,7 @@ pub async fn admin_panel(
             let reports = db::get_open_reports(&conn)?;
             let appeals = db::get_open_ban_appeals(&conn)?;
             let site_name = db::get_site_name(&conn);
+            let site_subtitle = db::get_site_subtitle(&conn);
 
             // Collect saved backup file lists (read from disk, not DB).
             let full_backups = list_backup_files(&full_backup_dir());
@@ -313,6 +314,7 @@ pub async fn admin_panel(
                 &reports,
                 &appeals,
                 &site_name,
+                &site_subtitle,
                 tor_address.as_deref(),
             ))
         }
@@ -3244,6 +3246,8 @@ pub struct SiteSettingsForm {
     pub collapse_greentext: Option<String>,
     /// Custom site name (replaces [ RustChan ] on home page and footer).
     pub site_name: Option<String>,
+    /// Custom home page subtitle line below the site name.
+    pub site_subtitle: Option<String>,
 }
 
 pub async fn update_site_settings(
@@ -3286,6 +3290,19 @@ pub async fn update_site_settings(
             // Update the in-memory live name so all pages reflect it immediately.
             crate::templates::set_live_site_name(&new_name);
             info!("Admin updated site name to: {:?}", new_name);
+
+            // Save the custom subtitle.
+            let new_subtitle = form
+                .site_subtitle
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(128)
+                .collect::<String>();
+            db::set_site_setting(&conn, "site_subtitle", &new_subtitle)?;
+            crate::templates::set_live_site_subtitle(&new_subtitle);
+            info!("Admin updated site subtitle to: {:?}", new_subtitle);
             Ok(())
         }
     })

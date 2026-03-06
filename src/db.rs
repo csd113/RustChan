@@ -355,6 +355,14 @@ pub fn get_site_name(conn: &rusqlite::Connection) -> String {
         .unwrap_or_else(|| crate::config::CONFIG.forum_name.clone())
 }
 
+pub fn get_site_subtitle(conn: &rusqlite::Connection) -> String {
+    get_site_setting(conn, "site_subtitle")
+        .ok()
+        .flatten()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "select board to proceed".to_string())
+}
+
 pub fn get_collapse_greentext(conn: &rusqlite::Connection) -> bool {
     get_site_setting(conn, "collapse_greentext")
         .ok()

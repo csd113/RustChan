@@ -194,11 +194,13 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     let pool = db::init_pool()?;
     first_run_check(&pool)?;
 
-    // Initialise the live site name from DB so it's available before any request.
+    // Initialise the live site name and subtitle from DB so they're available before any request.
     {
         if let Ok(conn) = pool.get() {
             let name = db::get_site_name(&conn);
             templates::set_live_site_name(&name);
+            let subtitle = db::get_site_subtitle(&conn);
+            templates::set_live_site_subtitle(&subtitle);
         }
     }
 

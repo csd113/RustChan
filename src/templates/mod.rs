@@ -15,6 +15,8 @@ use std::sync::RwLock;
 // ─── Live site name (DB-overridable, falls back to CONFIG.forum_name) ─────────
 
 static LIVE_SITE_NAME: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(CONFIG.forum_name.clone()));
+static LIVE_SITE_SUBTITLE: Lazy<RwLock<String>> =
+    Lazy::new(|| RwLock::new("select board to proceed".to_string()));
 
 /// Call this at startup (after first DB read) and after admin saves a new name.
 pub fn set_live_site_name(name: &str) {
@@ -27,12 +29,29 @@ pub fn set_live_site_name(name: &str) {
     }
 }
 
+pub fn set_live_site_subtitle(subtitle: &str) {
+    if let Ok(mut guard) = LIVE_SITE_SUBTITLE.write() {
+        *guard = if subtitle.trim().is_empty() {
+            "select board to proceed".to_string()
+        } else {
+            subtitle.to_string()
+        };
+    }
+}
+
 /// Read the current live site name.
 fn live_site_name() -> String {
     LIVE_SITE_NAME
         .read()
         .map(|g| g.clone())
         .unwrap_or_else(|_| CONFIG.forum_name.clone())
+}
+
+fn live_site_subtitle() -> String {
+    LIVE_SITE_SUBTITLE
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| "select board to proceed".to_string())
 }
 
 // ─── Shared JS injected once per page ────────────────────────────────────────
@@ -1088,10 +1107,11 @@ pub fn index_page(
     let body = format!(
         r#"<div class="index-hero">
 <h1 class="index-title">[ {name} ]</h1>
-<p class="index-subtitle">select board to proceed</p>
+<p class="index-subtitle">{subtitle}</p>
 </div>
 {sfw}{nsfw}{empty}{stats}{onion}"#,
         name = escape_html(&live_site_name()),
+        subtitle = escape_html(&live_site_subtitle()),
         sfw = sfw_sec,
         nsfw = nsfw_sec,
         empty = empty,
@@ -2956,6 +2976,7 @@ pub fn admin_panel_page(
     reports: &[crate::models::ReportWithContext],
     appeals: &[crate::models::BanAppeal],
     site_name: &str,
+    site_subtitle: &str,
     tor_address: Option<&str>,
 ) -> String {
     let mut board_cards = String::new();
@@ -3333,6 +3354,10 @@ pub fn admin_panel_page(
     <input type="text" name="site_name" value="{site_name_val}" maxlength="64" placeholder="RustChan"
            style="font-family:inherit">
   </label>
+  <label>Home page subtitle
+    <input type="text" name="site_subtitle" value="{site_subtitle_val}" maxlength="128" placeholder="select board to proceed"
+           style="font-family:inherit">
+  </label>
 </div>
 <div class="board-settings-checks" style="margin-bottom:0.75rem">
   <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block. Existing posts are not affected — only new posts use the current setting.">
@@ -3416,6 +3441,7 @@ pub fn admin_panel_page(
         appeal_rows = appeal_rows,
         appeal_badge = appeal_badge,
         site_name_val = escape_html(site_name),
+        site_subtitle_val = escape_html(site_subtitle),
         tor_section = match tor_address {
             Some(addr) => format!(
                 r#"<section class="admin-section" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
