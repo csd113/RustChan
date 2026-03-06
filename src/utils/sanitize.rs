@@ -366,11 +366,18 @@ fn render_inline(text: &str) -> String {
                 r#"<a href="{}" rel="nofollow noopener" target="_blank">{}</a>{}"#,
                 clean_url, clean_url, trailing
             );
-            // Check for supported video embed URLs and append a placeholder if matched.
+            // Check for supported video embed URLs. Emit only the embed span —
+            // the URL becomes a data attribute and the span text, not a hyperlink.
+            // The client-side buildEmbed() function replaces the span with a
+            // thumbnail+iframe widget positioned before the post body (like a webm).
             if let Some((embed_type, embed_id)) = extract_video_embed(clean_url) {
                 format!(
-                    r#"{}<span class="video-unfurl" data-embed-type="{}" data-embed-id="{}"></span>"#,
-                    link, embed_type, embed_id
+                    r#"<span class="video-unfurl" data-embed-type="{etype}" data-embed-id="{eid}" data-url="{url}">{display}{trail}</span>"#,
+                    etype   = embed_type,
+                    eid     = embed_id,
+                    url     = escape_html(clean_url),
+                    display = escape_html(clean_url),
+                    trail   = trailing,
                 )
             } else {
                 link

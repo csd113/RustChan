@@ -108,6 +108,32 @@ function collapseMedia(btn) {
   preview.style.display = 'block';
   btn.style.display = 'none';
 }
+function expandVideoEmbed(preview, type, id, container) {
+  var iframe = document.createElement('iframe');
+  if (type === 'youtube') {
+    iframe.src = 'https://www.youtube-nocookie.com/embed/' + id + '?autoplay=1&rel=0';
+  } else if (type === 'streamable') {
+    iframe.src = 'https://streamable.com/e/' + id + '?autoplay=1';
+  }
+  iframe.className = 'embed-iframe';
+  iframe.setAttribute('frameborder', '0');
+  iframe.setAttribute('allowfullscreen', '');
+  iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen');
+  iframe.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+  preview.style.display = 'none';
+  var closeBtn = container.querySelector('.media-close-btn');
+  if (closeBtn) closeBtn.style.display = 'inline-flex';
+  container.appendChild(iframe);
+}
+function collapseVideoEmbed(btn) {
+  var container = btn.closest('.video-embed-container');
+  if (!container) return;
+  var iframe = container.querySelector('.embed-iframe');
+  var preview = container.querySelector('.media-preview');
+  if (iframe) { iframe.src = ''; iframe.remove(); }
+  if (preview) preview.style.display = '';
+  btn.style.display = 'none';
+}
 </script>"#;
 
 // ─── Auto-compress modal (injected into forms that accept image/video) ────────
@@ -750,6 +776,22 @@ use chrono::{TimeZone, Utc};
 
 // ─── Timestamp helpers ────────────────────────────────────────────────────────
 
+/// Scan raw post body text for a video embed URL and return its thumbnail URL.
+/// Used by catalog and board-index summaries when the OP has no uploaded file.
+/// Currently returns YouTube thumbnails only (Streamable has no public thumb API).
+fn embed_thumb_from_body(body: &str) -> Option<String> {
+    for token in body.split_whitespace() {
+        // Strip trailing punctuation the same way render_inline does
+        let clean = token.trim_end_matches(['.', ',', ')', ';', '\'']);
+        if let Some((embed_type, id)) = crate::utils::sanitize::extract_video_embed(clean) {
+            if embed_type == "youtube" {
+                return Some(format!("https://img.youtube.com/vi/{}/mqdefault.jpg", id));
+            }
+        }
+    }
+    None
+}
+
 fn fmt_ts(ts: i64) -> String {
     match Utc.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
@@ -1382,6 +1424,13 @@ fn render_thread_summary(
             tid = t.id,
             th = escape_html(thumb),
         ));
+    } else if let Some(embed_thumb) = t.op_body.as_deref().and_then(embed_thumb_from_body) {
+        html.push_str(&format!(
+            r#"<div class="file-container"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" alt="video thumbnail"></a></div>"#,
+            board = escape_html(board_short),
+            tid = t.id,
+            src = escape_html(&embed_thumb),
+        ));
     }
 
     html.push_str(&format!(
@@ -1983,7 +2032,8 @@ function adminBanDelete(form, pid) {
 
     // ── Video embed unfurling (opt-in per board) ────────────────────────────
     // When enabled, .video-unfurl placeholder spans emitted by the markup parser
-    // are replaced with a thumbnail + click-to-embed iframe widget.
+    // are replaced with a thumbnail + click-to-embed iframe widget matching the
+    // webm/image layout — positioned before the post body, not inline with text.
     let embed_enabled = if board.allow_video_embeds {
         "true"
     } else {
@@ -1998,54 +2048,69 @@ function adminBanDelete(form, pid) {
   function buildEmbed(span) {{
     var type = span.getAttribute('data-embed-type');
     var id   = span.getAttribute('data-embed-id');
+    var url  = span.getAttribute('data-url') || span.textContent.trim();
     if (!type || !id) return;
 
+    // ── outer container: matches .file-container webm layout ─────────────
     var container = document.createElement('div');
-    container.className = 'video-embed-container';
+    container.className = 'file-container video-embed-container';
+
+    // ── file-info row (link + close button) ───────────────────────────────
+    var info = document.createElement('div');
+    info.className = 'file-info';
+    var a = document.createElement('a');
+    a.href = url; a.rel = 'nofollow noopener'; a.target = '_blank';
+    a.textContent = url;
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'media-close-btn';
+    closeBtn.innerHTML = '&#x2715; close';
+    closeBtn.style.display = 'none';
+    closeBtn.addEventListener('click', function(e) {{
+      e.stopPropagation();
+      collapseVideoEmbed(closeBtn);
+    }});
+    info.appendChild(a);
+    info.appendChild(closeBtn);
+    container.appendChild(info);
+
+    // ── thumbnail preview (styled like webm .media-preview) ───────────────
+    var preview = document.createElement('div');
+    preview.className = 'media-preview';
+    preview.title = 'click to play';
 
     if (type === 'youtube') {{
-      var thumb = document.createElement('img');
-      thumb.src = 'https://img.youtube.com/vi/' + id + '/hqdefault.jpg';
-      thumb.className = 'video-embed-thumb';
-      thumb.alt = 'YouTube video thumbnail';
-      var play = document.createElement('div');
-      play.className = 'video-embed-play';
-      play.innerHTML = '&#9654;';
-      container.appendChild(thumb);
-      container.appendChild(play);
-      container.addEventListener('click', function() {{
-        var iframe = document.createElement('iframe');
-        iframe.src = 'https://www.youtube.com/embed/' + id + '?autoplay=1';
-        iframe.width = '480';
-        iframe.height = '270';
-        iframe.setAttribute('frameborder', '0');
-        iframe.setAttribute('allowfullscreen', '');
-        iframe.setAttribute('allow', 'autoplay; encrypted-media');
-        container.innerHTML = '';
-        container.appendChild(iframe);
-      }});
+      var img = document.createElement('img');
+      img.className = 'thumb';
+      img.loading = 'lazy';
+      img.alt = 'video thumbnail';
+      // Use mqdefault (320×180) — reliable across all videos, no black bars
+      img.src = 'https://img.youtube.com/vi/' + id + '/mqdefault.jpg';
+      preview.appendChild(img);
     }} else if (type === 'streamable') {{
-      var thumb2 = document.createElement('div');
-      thumb2.className = 'video-embed-thumb video-embed-thumb-placeholder';
-      thumb2.textContent = 'Streamable: ' + id;
-      var play2 = document.createElement('div');
-      play2.className = 'video-embed-play';
-      play2.innerHTML = '&#9654;';
-      container.appendChild(thumb2);
-      container.appendChild(play2);
-      container.addEventListener('click', function() {{
-        var iframe = document.createElement('iframe');
-        iframe.src = 'https://streamable.com/e/' + id + '?autoplay=1';
-        iframe.width = '480';
-        iframe.height = '270';
-        iframe.setAttribute('frameborder', '0');
-        iframe.setAttribute('allowfullscreen', '');
-        container.innerHTML = '';
-        container.appendChild(iframe);
-      }});
+      var ph = document.createElement('div');
+      ph.className = 'thumb embed-placeholder-thumb';
+      ph.innerHTML = '&#9654; streamable';
+      preview.appendChild(ph);
     }}
 
-    span.replaceWith(container);
+    var overlay = document.createElement('div');
+    overlay.className = 'media-expand-overlay';
+    overlay.innerHTML = '&#9654;';
+    preview.appendChild(overlay);
+
+    preview.addEventListener('click', function() {{
+      expandVideoEmbed(preview, type, id, container);
+    }});
+    container.appendChild(preview);
+
+    // ── move container before the post-body, remove span from body text ───
+    var postBody = span.closest('.post-body');
+    if (postBody && postBody.parentNode) {{
+      span.remove();
+      postBody.parentNode.insertBefore(container, postBody);
+    }} else {{
+      span.replaceWith(container);
+    }}
   }}
 
   function applyEmbeds(root) {{
@@ -2595,6 +2660,11 @@ pub fn catalog_page(
             format!(
                 r#"<img class="catalog-thumb" src="/boards/{}" loading="lazy" alt="">"#,
                 escape_html(th)
+            )
+        } else if let Some(embed_thumb) = t.op_body.as_deref().and_then(embed_thumb_from_body) {
+            format!(
+                r#"<img class="catalog-thumb embed-catalog-thumb" src="{}" loading="lazy" alt="video thumbnail">"#,
+                escape_html(&embed_thumb)
             )
         } else {
             r#"<div class="catalog-no-image">no img</div>"#.to_string()
