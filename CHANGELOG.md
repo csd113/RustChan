@@ -2,6 +2,57 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.0.9] — 2026-03-06
+
+### Added
+- **Per-board post editing toggle** — each board now has an `allow_editing`
+  flag (off by default) that gates whether users can edit their own posts.
+  When disabled the edit link is hidden and the edit endpoints return an error
+  immediately, regardless of the global edit-window logic.  The flag is
+  exposed as a checkbox in the admin board-settings form (*Enable editing*).
+- **Per-board edit window** — a companion `edit_window_secs` column on the
+  `boards` table lets operators configure how long after posting a user may
+  edit their own post on a per-board basis.  Setting it to `0` falls back to
+  the server-wide default of 300 s (5 minutes).  The value is shown in the
+  admin board-settings form as a number input (*Edit window (s)*) and is
+  respected by both the edit-form handler and the edit-submit handler.
+- **Per-board archive toggle** — a new `allow_archive` column on the `boards`
+  table (default `1` on existing rows, i.e. archiving enabled) lets operators
+  choose, per board, whether overflow threads are archived or permanently
+  deleted when the board hits its `max_threads` limit.  The `ThreadPrune`
+  background worker now reads this flag from the job payload and calls either
+  `db::archive_old_threads` or `db::prune_old_threads` accordingly.  The
+  admin board-settings form exposes this as a checkbox (*Enable archive*).
+
+### Fixed
+- **WebM AV1 → VP9 transcoding** — uploaded WebM files containing an AV1
+  video stream are now detected via `ffprobe` and re-encoded to VP9 + Opus
+  by the `VideoTranscode` background worker.  Previously, all WebM uploads
+  were accepted as-is regardless of codec, meaning AV1 content would be
+  served to browsers that do not support it.  VP8 and VP9 WebM files are
+  identified and skipped cheaply so they are never unnecessarily re-encoded.
+- **VP9 CRF rate-control conflict** (`exit status: 234`) — the `ffmpeg`
+  transcode command previously combined `-b:v 0` (pure CRF mode) with
+  `-maxrate 2M -bufsize 4M` (constrained-quality mode).  libvpx-vp9 treats
+  these as mutually exclusive: setting a peak bitrate cap without a target
+  bitrate causes the encoder to abort with *"Rate control parameters set
+  without a bitrate"*.  The `-maxrate` and `-bufsize` flags have been
+  removed; the transcoder now uses pure CRF 33 with unconstrained average
+  bitrate (`-b:v 0`), which is the correct mode for quality-driven encoding.
+- **`E0597` borrow lifetime in `db::prune_file_paths`** — the
+  `stmt.query_map(…).collect()` expression at the end of a block created a
+  temporary `MappedRows` iterator that outlived `stmt` (dropped at the
+  closing brace), causing a compile error.  The result is now collected into
+  an explicit `let` binding before the block ends, ensuring the iterator is
+  fully consumed while `stmt` is still in scope.
+
+### Changed
+- **`Board` model** — three new fields: `allow_editing: bool`,
+  `edit_window_secs: i64`, and `allow_archive: bool`.  All DB queries that
+  read or write board rows have been updated accordingly.  Board backup /
+  restore manifests also include these fields so settings survive a
+  round-trip.
+
 ## [1.0.8] — 2026-03-05
 
 ### Added

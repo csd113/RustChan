@@ -231,7 +231,13 @@ pub fn save_upload(
     // The handler enqueues the correct Job after db::create_post gives it post_id.
     let processing_pending = ffmpeg_available
         && match media_type {
-            crate::models::MediaType::Video => mime_type == "video/mp4",
+            // MP4 always needs transcoding to WebM.
+            // WebM is flagged pending so the worker can probe the codec and
+            // transcode AV1 → VP9 when necessary.  VP8/VP9 WebM files are
+            // detected and skipped cheaply inside the worker.
+            crate::models::MediaType::Video => {
+                mime_type == "video/mp4" || mime_type == "video/webm"
+            }
             crate::models::MediaType::Audio => true,
             _ => false,
         };
@@ -476,9 +482,15 @@ fn ffmpeg_audio_waveform(
 /// The caller is responsible for falling back to the original data on error.
 ///
 /// Encoding settings:
-///   VP9  — `-deadline realtime -cpu-used 8` for fast server-side encoding.
-///           Quality target CRF 33 with unconstrained bitrate (`-b:v 0`).
-///   Opus — `-b:a 128k` for good quality stereo audio.
+///   VP9  — `-deadline good -cpu-used 4` for a good quality/speed balance.
+///           CRF 33 with unconstrained average bitrate (`-b:v 0`) but a
+///           peak bitrate cap (`-maxrate 2M -bufsize 4M`) to prevent large
+///           bitrate spikes on complex scenes that cause player stalling.
+///           `-row-mt 1` enables row-based multithreading (significant speedup
+///           on multi-core hosts, no quality cost).
+///           `-tile-columns 2` improves both encode parallelism and decode
+///           performance on multi-core playback devices (including mobile).
+///   Opus — `-b:a 96k` — transparent quality for speech and music.
 ///
 /// Security: all arguments passed as separate array elements — no shell.
 fn ffmpeg_transcode_webm(video_data: &[u8]) -> Result<Vec<u8>> {
@@ -494,9 +506,11 @@ fn ffmpeg_transcode_webm(video_data: &[u8]) -> Result<Vec<u8>> {
     let in_str = temp_in.to_str().context("Temp input path is non-UTF-8")?;
     let out_str = temp_out.to_str().context("Temp output path is non-UTF-8")?;
 
-    // Two-pass would give better quality but is too slow for interactive uploads.
-    // Single-pass VP9 at realtime deadline is fast enough and still better than
-    // the original MP4 in most cases (smaller file, open container).
+    // VP9 CRF mode: `-b:v 0` means "unconstrained bitrate, let CRF drive quality".
+    // `-maxrate` / `-bufsize` cannot be combined with `-b:v 0` in libvpx-vp9 —
+    // the encoder treats that as "constrained quality" and requires a real
+    // target bitrate, producing exit-234 / "Rate control parameters set without
+    // a bitrate".  Pure CRF (`-b:v 0 -crf 33`) is the correct mode here.
     let output = Command::new("ffmpeg")
         .args([
             "-loglevel",
@@ -510,13 +524,19 @@ fn ffmpeg_transcode_webm(video_data: &[u8]) -> Result<Vec<u8>> {
             "-b:v",
             "0",
             "-deadline",
-            "realtime",
+            "good",
             "-cpu-used",
-            "8",
+            "4",
+            "-row-mt",
+            "1",
+            "-tile-columns",
+            "2",
+            "-threads",
+            "0",
             "-c:a",
             "libopus",
             "-b:a",
-            "128k",
+            "96k",
             "-y",
             out_str,
         ])
@@ -744,6 +764,61 @@ fn mime_to_ext(mime: &str) -> &'static str {
         "audio/webm" => "webm",
         _ => "bin",
     }
+}
+
+// ─── Video codec probing ──────────────────────────────────────────────────────
+
+/// Use ffprobe to determine the video codec of the first video stream in a
+/// file.  Returns the codec name in lower-case (e.g. `"av1"`, `"vp9"`,
+/// `"vp8"`, `"h264"`).
+///
+/// Security: arguments are passed as a separate array — no shell invocation.
+fn ffprobe_video_codec(file_path: &str) -> Result<String> {
+    use std::process::Command;
+
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+            file_path,
+        ])
+        .output()
+        .context("ffprobe not found or failed to spawn")?;
+
+    if !out.status.success() {
+        return Err(anyhow::anyhow!(
+            "ffprobe exit {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+
+    let codec = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .to_ascii_lowercase();
+
+    if codec.is_empty() {
+        return Err(anyhow::anyhow!(
+            "ffprobe returned no codec for: {}",
+            file_path
+        ));
+    }
+
+    Ok(codec)
+}
+
+/// Probe the video codec of a file on disk.
+/// Returns the codec name in lower-case (e.g. `"av1"`, `"vp9"`, `"vp8"`).
+/// Called by the VideoTranscode background worker to decide whether a WebM
+/// upload needs AV1 → VP9 re-encoding.
+pub fn probe_video_codec(file_path: &str) -> anyhow::Result<String> {
+    ffprobe_video_codec(file_path)
 }
 
 /// Delete a file from the filesystem, ignoring not-found errors.

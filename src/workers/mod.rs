@@ -277,15 +277,47 @@ async fn transcode_video(
             ));
         }
 
-        // Only MP4 → WebM makes sense here; WebM uploads are already final.
+        // Handle MP4 and WebM (AV1) inputs; skip anything else.
         let ext = src
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if ext != "mp4" {
-            debug!("VideoTranscode: skipping non-MP4 file {}", file_path);
+        if ext != "mp4" && ext != "webm" {
+            debug!("VideoTranscode: skipping unrecognised extension {}", file_path);
             return Ok(());
+        }
+
+        // For WebM uploads, probe the codec first.  VP8/VP9 WebM is already
+        // in the correct format; only AV1 needs re-encoding.
+        if ext == "webm" {
+            let src_str = src
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8: {:?}", src))?;
+
+            match crate::utils::files::probe_video_codec(src_str) {
+                Ok(ref codec) if codec == "av1" => {
+                    info!(
+                        "VideoTranscode: WebM/AV1 detected for post {} — re-encoding to VP9",
+                        post_id
+                    );
+                    // Falls through to the shared transcode block below.
+                }
+                Ok(ref codec) => {
+                    debug!(
+                        "VideoTranscode: skipping WebM with codec '{}' for post {} (already VP8/VP9)",
+                        codec, post_id
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(
+                        "VideoTranscode: could not probe codec for post {} ({}); skipping",
+                        post_id, e
+                    );
+                    return Ok(());
+                }
+            }
         }
 
         let stem = src
@@ -309,18 +341,38 @@ async fn transcode_video(
 
         std::fs::write(&webm_abs, &webm_bytes)?;
 
-        // Update the post record.
         let conn = pool.get()?;
-        crate::db::update_post_file_info(&conn, post_id, &webm_rel, "video/webm")?;
+
+        // Update EVERY post that references the old MP4 path to point at the
+        // new WebM.  The deduplication system shares one physical file across
+        // multiple posts; updating only the triggering post (post_id) left all
+        // other posts with a stale MP4 path.  When any of those stale posts
+        // were later deleted, paths_safe_to_delete found zero live references
+        // to the old path (since post_id had already been updated) and
+        // considered the file orphaned — even though the WebM was still
+        // actively serving the other deduplicated posts.
+        let updated =
+            crate::db::update_all_posts_file_path(&conn, &file_path, &webm_rel, "video/webm")?;
+        if updated == 0 {
+            // Triggering post may have been deleted while the worker was running;
+            // update by post_id as a fallback so we don't silently skip.
+            crate::db::update_post_file_info(&conn, post_id, &webm_rel, "video/webm")?;
+        }
 
         // Refresh the file-hash table: remove stale MP4 entry, insert WebM entry.
+        // Use the triggering post's thumb_path (all dedup'd posts share the same
+        // thumb, so any of them would give the same value).
         let thumb_path = crate::db::get_post_thumb_path(&conn, post_id)?.unwrap_or_default();
         let webm_sha256 = crate::utils::crypto::sha256_hex(&webm_bytes);
         crate::db::delete_file_hash_by_path(&conn, &file_path)?;
         crate::db::record_file_hash(&conn, &webm_sha256, &webm_rel, &thumb_path, "video/webm")?;
 
-        // Remove the original MP4 now that WebM is saved and DB is updated.
-        let _ = std::fs::remove_file(&src);
+        // For MP4 sources the original is now redundant; remove it.
+        // For WebM/AV1 sources the file was overwritten in place above, so
+        // there is nothing extra to delete.
+        if ext != "webm" {
+            let _ = std::fs::remove_file(&src);
+        }
 
         info!(
             "VideoTranscode done: post {} {} → {} ({} bytes)",
@@ -413,11 +465,19 @@ async fn prune_threads(
                 );
             }
         } else {
-            let count = crate::db::prune_old_threads(&conn, board_id, max_threads)?;
+            // prune_old_threads now returns the file paths that are safe to
+            // delete from disk (i.e. no longer referenced by any remaining
+            // post).  Previously it returned only a count, orphaning all files
+            // belonging to pruned threads on disk.
+            let paths = crate::db::prune_old_threads(&conn, board_id, max_threads)?;
+            let count = paths.len();
+            for p in &paths {
+                crate::utils::files::delete_file(&CONFIG.upload_dir, p);
+            }
             if count > 0 {
                 info!(
-                    "ThreadPrune: deleted {} overflow thread(s) from /{}/ (board_id={})",
-                    count, board_short, board_id
+                    "ThreadPrune: deleted {} overflow thread(s) from /{}/ (board_id={}), removed {} file(s)",
+                    count, board_short, board_id, paths.len()
                 );
             }
         }

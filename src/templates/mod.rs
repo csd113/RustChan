@@ -242,7 +242,7 @@ fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> Stri
   async function _compressVideo(file, targetBytes) {{
     var videoEl = document.createElement('video');
     videoEl.src = URL.createObjectURL(file);
-    videoEl.muted = false;
+    videoEl.muted = true;   // mute speaker output; audio is captured via captureStream below
     videoEl.preload = 'metadata';
     await new Promise(function(res, rej) {{
       videoEl.onloadedmetadata = res;
@@ -250,20 +250,48 @@ fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> Stri
     }});
     var dur = videoEl.duration;
     if (!dur || !isFinite(dur)) throw new Error('Cannot determine video duration.');
-    // Reserve ~15% of the budget for audio (128 kbps Opus); the rest goes to video.
-    var audioBps  = 131072;
-    var totalBps  = Math.max(250000, Math.floor(targetBytes * 8 * 0.82 / dur));
-    var videoBps  = Math.max(120000, totalBps - audioBps);
+
+    // Bitrate budget: 85% efficiency factor covers container and muxer overhead.
+    // 96 kbps Opus is transparent for speech and music; remaining bits go to video.
+    var audioBps = 98304; // 96 kbps
+    var totalBps = Math.max(250000, Math.floor(targetBytes * 8 * 0.85 / dur));
+    var videoBps = Math.max(120000, totalBps - audioBps);
+
+    // Downscale resolution for high-res sources — the in-browser VP9 encoder
+    // cannot cleanly hit low bitrate targets at full 1080p/4K resolution, and
+    // the resulting blocking artifacts look worse than a properly downscaled video.
+    // Cap the long edge at 1280px and round dimensions to even numbers (VP9 req).
+    var srcW = videoEl.videoWidth  || 640;
+    var srcH = videoEl.videoHeight || 360;
+    var MAX_LONG_EDGE = 1280;
+    var scale = Math.min(1, MAX_LONG_EDGE / Math.max(srcW, srcH));
+    var canvasW = Math.max(2, Math.round(srcW * scale / 2) * 2);
+    var canvasH = Math.max(2, Math.round(srcH * scale / 2) * 2);
+
     var canvas = document.createElement('canvas');
-    canvas.width  = videoEl.videoWidth  || 640;
-    canvas.height = videoEl.videoHeight || 360;
+    canvas.width  = canvasW;
+    canvas.height = canvasH;
     var ctx = canvas.getContext('2d');
+
     // Prefer codecs that include audio; fall back gracefully.
     var mime = ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']
                  .find(function(m) {{ return MediaRecorder.isTypeSupported(m); }});
     if (!mime) throw new Error('Browser does not support MediaRecorder for video/webm.');
-    var stream = canvas.captureStream(24);
-    // Attach audio tracks from the source video so they are included in the recording.
+
+    // captureStream(0) = manual frame-driven mode. The browser only emits a new
+    // frame to the encoder when we explicitly call videoTrack.requestFrame().
+    // This prevents two classes of stuttering:
+    //   1. Duplicate frames: requestAnimationFrame fires at display refresh rate
+    //      (~60-120 Hz), much faster than most video framerates (24-30 fps).
+    //      With captureStream(24), the encoder receives the same frame 2-3 times
+    //      with non-uniform timestamps, producing jitter on playback.
+    //   2. Auto-generated blank frames: captureStream(N>0) generates frames at
+    //      a fixed rate regardless of whether new video content has been drawn,
+    //      producing black or frozen frames during any playback stall.
+    var stream = canvas.captureStream(0);
+    var videoTrack = stream.getVideoTracks()[0];
+
+    // Attach audio tracks from the source video element.
     var srcStream = (typeof videoEl.captureStream === 'function')
                       ? videoEl.captureStream()
                       : (typeof videoEl.mozCaptureStream === 'function')
@@ -272,23 +300,50 @@ fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> Stri
     if (srcStream) {{
       srcStream.getAudioTracks().forEach(function(track) {{ stream.addTrack(track); }});
     }}
+
     var recorder = new MediaRecorder(stream, {{ mimeType: mime, videoBitsPerSecond: videoBps }});
-    var chunks   = [];
+    var chunks = [];
     recorder.ondataavailable = function(e) {{ if (e.data.size > 0) chunks.push(e.data); }};
-    recorder.start(300);
-    var rafId;
-    function draw() {{
-      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+
+    // Draw one video frame to canvas and notify the stream encoder.
+    function captureFrame() {{
+      ctx.drawImage(videoEl, 0, 0, canvasW, canvasH);
+      videoTrack.requestFrame();
       var pct = dur > 0 ? Math.min(98, Math.round(videoEl.currentTime / dur * 100)) : 0;
       _setProgress(pct, 'Compressing video\u2026 ' + pct + '%  (real-time)');
-      if (!videoEl.ended && !videoEl.paused) rafId = requestAnimationFrame(draw);
     }}
-    videoEl.play();
-    rafId = requestAnimationFrame(draw);
+
+    // requestVideoFrameCallback (Chrome 83+, Safari 15.4+, Firefox 132+) fires
+    // exactly once per decoded video frame — perfect frame-accurate capture.
+    // Fall back to timeupdate for older browsers: fires ~4 times/sec which gives
+    // a low but consistent framerate rather than the stuttering rAF caused.
+    var useRVFC = typeof videoEl.requestVideoFrameCallback === 'function';
+    function onFrame() {{
+      captureFrame();
+      if (!videoEl.ended && !videoEl.paused && useRVFC) {{
+        videoEl.requestVideoFrameCallback(onFrame);
+      }}
+    }}
+
+    // Register the frame callback and start the recorder BEFORE calling play()
+    // so the first frame and any pre-roll audio are captured, not dropped.
+    if (useRVFC) {{
+      videoEl.requestVideoFrameCallback(onFrame);
+    }} else {{
+      videoEl.addEventListener('timeupdate', captureFrame);
+    }}
+    recorder.start(250);
+
+    // Await play() so we know playback has actually started before waiting for
+    // the ended event — on slow devices play() can take a moment to resolve.
+    await videoEl.play();
+
     await new Promise(function(res) {{
-      videoEl.onended = function() {{ cancelAnimationFrame(rafId); recorder.stop(); res(); }};
-      videoEl.onerror = function() {{ cancelAnimationFrame(rafId); recorder.stop(); res(); }};
+      videoEl.onended = function() {{ recorder.stop(); res(); }};
+      videoEl.onerror = function() {{ recorder.stop(); res(); }};
     }});
+
+    if (!useRVFC) {{ videoEl.removeEventListener('timeupdate', captureFrame); }}
     await new Promise(function(res) {{ recorder.onstop = res; }});
     URL.revokeObjectURL(videoEl.src);
     if (!chunks.length) throw new Error('No video frames captured.');
@@ -1792,8 +1847,9 @@ pub fn render_post(
   <img class="thumb" src="/boards/{th}" loading="lazy" alt="video thumbnail">
   <div class="media-expand-overlay">&#9654;</div>
 </div>
-<video class="media-expanded" src="/boards/{f}" controls preload="none"
-       type="{mime}" style="display:none"></video>
+<video class="media-expanded" controls preload="none" style="display:none">
+  <source src="/boards/{f}" type="{mime}">
+</video>
 </div>"#,
                 f = escape_html(file),
                 th = escape_html(thumb),

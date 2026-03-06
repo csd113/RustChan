@@ -754,7 +754,10 @@ pub async fn file_report(
 // links (created before the background transcoder replaced them with .webm)
 // and issue a permanent redirect. All other paths are served via ServeFile.
 
-pub async fn serve_board_media(Path(media_path): Path<String>) -> Response {
+pub async fn serve_board_media(
+    Path(media_path): Path<String>,
+    req: axum::extract::Request,
+) -> Response {
     use axum::http::StatusCode;
     use std::path::PathBuf;
     use tower::ServiceExt;
@@ -769,8 +772,12 @@ pub async fn serve_board_media(Path(media_path): Path<String>) -> Response {
     let target = base.join(&media_path);
 
     if target.exists() {
-        // File present — serve with proper Range/ETag/Content-Type headers.
-        let req = axum::http::Request::new(axum::body::Body::empty());
+        // File present — forward the real request (with Range, ETag, etc.) to
+        // ServeFile so it can respond with 206 Partial Content when needed.
+        // iOS Safari requires Range request support to play video — dropping
+        // the request headers caused it to receive 200 instead of 206 and
+        // refuse playback on videos it tried to stream in chunks.
+        let req = req.map(|_| axum::body::Body::empty());
         match ServeFile::new(&target).oneshot(req).await {
             Ok(resp) => resp.map(axum::body::Body::new).into_response(),
             Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

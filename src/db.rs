@@ -494,33 +494,85 @@ pub fn update_board_settings(
     Ok(())
 }
 
+// ─── Safe file deletion helper ────────────────────────────────────────────────
+
+/// Given a list of candidate file paths collected from posts about to be deleted,
+/// return only those paths that are no longer referenced by *any* remaining post.
+///
+/// This is the fix for the deduplication cascade-delete bug: when a file is
+/// reposted, both posts share the same file_path / thumb_path on disk (stored
+/// once, referenced by N posts).  Without this guard, deleting any single post
+/// unconditionally deletes the shared file, corrupting every other post that
+/// references it.
+///
+/// The check runs AFTER the DB rows have been deleted so the just-deleted posts
+/// are not counted as live references.
+///
+/// Also purges the corresponding file_hashes rows for files that have no
+/// remaining references, so the dedup table never points at deleted files.
+fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>) -> Vec<String> {
+    candidates
+        .into_iter()
+        .filter(|path| {
+            // Count posts that still reference this path as file, thumb, or audio.
+            let still_used: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM posts
+                      WHERE file_path = ?1
+                         OR thumb_path = ?1
+                         OR audio_file_path = ?1",
+                    params![path],
+                    |r| r.get(0),
+                )
+                .unwrap_or(1); // on error, assume still in use — safer to leak than corrupt
+            if still_used == 0 {
+                // No remaining posts reference this file; safe to remove from
+                // the dedup table too so a future re-upload is not handed a
+                // pointer to a file that no longer exists on disk.
+                let _ = conn.execute(
+                    "DELETE FROM file_hashes WHERE file_path = ?1 OR thumb_path = ?1",
+                    params![path],
+                );
+                true // caller should delete from disk
+            } else {
+                false // still referenced — keep the file
+            }
+        })
+        .collect()
+}
+
 pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>> {
     // Collect every file path that belongs to this board before deletion.
     // The CASCADE on boards→threads→posts handles DB row removal, but the
     // on-disk files must be cleaned up by the caller.
     let mut stmt = conn.prepare(
-        "SELECT p.file_path, p.thumb_path
+        "SELECT p.file_path, p.thumb_path, p.audio_file_path
          FROM posts p
          JOIN threads t ON p.thread_id = t.id
          WHERE t.board_id = ?1",
     )?;
-    let pairs: Vec<(Option<String>, Option<String>)> = stmt
-        .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let rows: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
+        .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
 
-    let mut paths = Vec::new();
-    for (f, t) in pairs {
+    let mut candidates = Vec::new();
+    for (f, t, a) in rows {
         if let Some(p) = f {
-            paths.push(p);
+            candidates.push(p);
         }
         if let Some(p) = t {
-            paths.push(p);
+            candidates.push(p);
+        }
+        if let Some(p) = a {
+            candidates.push(p);
         }
     }
 
     // Cascade deletes threads, posts, polls, etc.
     conn.execute("DELETE FROM boards WHERE id = ?1", params![id])?;
-    Ok(paths)
+    // A board deletion removes every post on the board, but a file may be
+    // shared with a post on a different board via deduplication; protect those.
+    Ok(paths_safe_to_delete(conn, candidates))
 }
 
 // ─── Thread queries ───────────────────────────────────────────────────────────
@@ -695,30 +747,31 @@ pub fn set_thread_locked(conn: &rusqlite::Connection, thread_id: i64, locked: bo
 }
 
 pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<String>> {
-    // Collect file paths before deletion (for filesystem cleanup)
+    // Collect file paths from all posts in this thread before deletion.
     let mut stmt = conn
         .prepare("SELECT file_path, thumb_path, audio_file_path FROM posts WHERE thread_id = ?1")?;
-    let paths: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
+    let rows: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
         .query_map(params![thread_id], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
 
-    let mut all_paths = Vec::new();
-    for (f, t, a) in paths {
+    let mut candidates = Vec::new();
+    for (f, t, a) in rows {
         if let Some(p) = f {
-            all_paths.push(p);
+            candidates.push(p);
         }
         if let Some(p) = t {
-            all_paths.push(p);
+            candidates.push(p);
         }
         if let Some(p) = a {
-            all_paths.push(p);
+            candidates.push(p);
         }
     }
 
     conn.execute("DELETE FROM threads WHERE id = ?1", params![thread_id])?;
-    Ok(all_paths)
+    // Only return paths that no other post (outside this thread) still references.
+    Ok(paths_safe_to_delete(conn, candidates))
 }
 
 /// Archive oldest non-sticky threads that exceed the board's max_threads limit.
@@ -749,8 +802,15 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
 
 /// Hard-delete oldest non-sticky, non-archived threads that exceed max_threads.
 /// Used when a board has archiving disabled — threads are permanently removed.
-/// Returns the count of threads deleted.
-pub fn prune_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -> Result<usize> {
+///
+/// Returns the on-disk paths that are now safe to delete (i.e. no longer
+/// referenced by any remaining post after the prune). The caller is responsible
+/// for actually removing these files from disk.
+pub fn prune_old_threads(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    max: i64,
+) -> Result<Vec<String>> {
     let ids: Vec<i64> = {
         let mut stmt = conn.prepare(
             "SELECT id FROM threads
@@ -762,11 +822,34 @@ pub fn prune_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -
             .collect::<rusqlite::Result<Vec<_>>>()?;
         ids
     };
-    let count = ids.len();
-    for id in ids {
+
+    let mut candidates: Vec<String> = Vec::new();
+    for id in &ids {
+        // Collect file paths from every post before cascade-deleting the thread.
+        let mut stmt = conn.prepare(
+            "SELECT file_path, thumb_path, audio_file_path FROM posts WHERE thread_id = ?1",
+        )?;
+        let rows: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
+            .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (f, t, a) in rows {
+            if let Some(p) = f {
+                candidates.push(p);
+            }
+            if let Some(p) = t {
+                candidates.push(p);
+            }
+            if let Some(p) = a {
+                candidates.push(p);
+            }
+        }
         conn.execute("DELETE FROM threads WHERE id = ?1", params![id])?;
     }
-    Ok(count)
+
+    // Only return paths that no other post still references after the prune.
+    // A file may be shared via deduplication with a post on a different board
+    // or thread and must not be deleted in that case.
+    Ok(paths_safe_to_delete(conn, candidates))
 }
 pub fn get_archived_threads_for_board(
     conn: &rusqlite::Connection,
@@ -935,20 +1018,23 @@ pub fn get_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<Post
 
 /// Delete a post by id; returns file paths for cleanup.
 pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<String>> {
-    let mut paths = Vec::new();
+    let mut candidates = Vec::new();
     if let Some(post) = get_post(conn, post_id)? {
         if let Some(p) = post.file_path {
-            paths.push(p);
+            candidates.push(p);
         }
         if let Some(p) = post.thumb_path {
-            paths.push(p);
+            candidates.push(p);
         }
         if let Some(p) = post.audio_file_path {
-            paths.push(p);
+            candidates.push(p);
         }
     }
     conn.execute("DELETE FROM posts WHERE id = ?1", params![post_id])?;
-    Ok(paths)
+    // Only return paths that no other post still references.
+    // Deduplication means multiple posts can share the same physical file;
+    // deleting it on the first removal would corrupt every other post using it.
+    Ok(paths_safe_to_delete(conn, candidates))
 }
 
 /// FIX[LOW-3]: Use constant-time byte comparison to prevent timing attacks on
@@ -1771,6 +1857,32 @@ pub fn update_post_file_info(
         params![file_path, mime_type, post_id],
     )?;
     Ok(())
+}
+
+/// Update every post that currently stores `old_path` as its `file_path`.
+///
+/// Required after video transcoding: the deduplication system shares one
+/// physical file across N posts. The VideoTranscode worker knows only the
+/// post_id that triggered the job, but ALL posts that reference the same MP4
+/// must be migrated to the new WebM path before the MP4 is removed from disk.
+/// Without this, `paths_safe_to_delete` counts zero references to the old MP4
+/// (because only the triggering post was updated) and marks the file safe to
+/// delete — but the WebM it was replaced with also gets considered orphaned the
+/// next time any of those stale posts are deleted, silently destroying the file
+/// while the other posts still "exist" in the DB.
+///
+/// Returns the number of posts updated.
+pub fn update_all_posts_file_path(
+    conn: &rusqlite::Connection,
+    old_path: &str,
+    new_path: &str,
+    new_mime: &str,
+) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE posts SET file_path = ?1, mime_type = ?2 WHERE file_path = ?3",
+        params![new_path, new_mime, old_path],
+    )?;
+    Ok(n)
 }
 
 /// Update a post's thumb_path after background waveform / thumbnail generation.
