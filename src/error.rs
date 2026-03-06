@@ -75,6 +75,15 @@ impl IntoResponse for AppError {
             }
         };
 
+        // Render a richer ban page with an appeal form instead of the generic error page
+        if status == StatusCode::FORBIDDEN && message.starts_with("You are banned") {
+            let reason = message
+                .strip_prefix("You are banned. Reason: ")
+                .unwrap_or(&message);
+            let html = crate::templates::ban_page(reason);
+            return (status, Html(html)).into_response();
+        }
+
         let html = crate::templates::error_page(status.as_u16(), &message);
         (status, Html(html)).into_response()
     }

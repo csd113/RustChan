@@ -332,11 +332,21 @@ fn build_router(state: AppState) -> Router {
             post(handlers::thread::edit_post_post),
         )
         .route("/report", post(handlers::board::file_report))
+        .route("/appeal", post(handlers::board::submit_appeal))
         .route("/vote", post(handlers::thread::vote_handler))
         .route(
             "/api/post/{board}/{thread_id}",
             get(handlers::board::api_post_preview),
         )
+        .route(
+            "/admin/post/ban-delete",
+            post(handlers::admin::admin_ban_and_delete),
+        )
+        .route(
+            "/admin/appeal/dismiss",
+            post(handlers::admin::dismiss_appeal),
+        )
+        .route("/admin/appeal/accept", post(handlers::admin::accept_appeal))
         .route(
             "/{board}/thread/{id}/updates",
             get(handlers::thread::thread_updates),

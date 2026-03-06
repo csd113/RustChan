@@ -5,6 +5,42 @@ All notable changes to RustChan will be documented in this file.
 ## [1.0.10] — 2026-03-06
 
 ### Added
+- **Per-post inline ban+delete** — the admin toolbar that appears on every post in
+  thread view now includes a **⛔ ban+del** button alongside the existing delete
+  button.  Clicking it prompts for a ban reason and duration (hours; `0` = permanent)
+  via browser dialog, then submits a `POST /admin/post/ban-delete` action that
+  atomically bans the post author's IP hash and deletes the post (or the entire
+  thread if the post is the OP), then redirects back to the thread (or the board
+  index if the thread was deleted).  No more manual copy-pasting of IP hashes in
+  the admin panel.  Backed by a new `admin_ban_and_delete` handler.
+- **Ban appeal system** — when a banned user attempts to post and receives the ban
+  page they now see a short textarea below the ban reason to submit an appeal
+  (max 512 chars).  Submissions hit `POST /appeal` and are stored in a new
+  `ban_appeals` SQLite table (added via additive migration).  All open appeals
+  appear in a new **// ban appeals** section in the admin panel (adjacent to the
+  report inbox), with **✕ dismiss** and **✓ accept + unban** buttons.  Accepting
+  an appeal deletes the corresponding ban and marks the appeal closed.  A 24-hour
+  per-IP cooldown prevents appeal spam (`has_recent_appeal` DB helper).  New DB
+  functions: `file_ban_appeal`, `get_open_ban_appeals`, `dismiss_ban_appeal`,
+  `accept_ban_appeal`, `has_recent_appeal`.  New routes: `POST /appeal`,
+  `POST /admin/appeal/dismiss`, `POST /admin/appeal/accept`.
+- **PoW CAPTCHA for new threads** — thread creation can now require a lightweight
+  hashcash-style proof-of-work solved entirely in JS before the form submits.
+  Replies are intentionally exempt to keep them frictionless.  When a board has
+  the new **"PoW CAPTCHA on new threads"** checkbox enabled, the new-thread form
+  shows a status row ("solving proof-of-work…") and automatically mines a SHA-256
+  nonce with `POW_DIFFICULTY = 20` leading zero bits (~1 M iterations on average,
+  ~50–200 ms in a modern browser) using the native Web Crypto API
+  (`crypto.subtle.digest`).  The nonce is submitted as a hidden `pow_nonce` field.
+  The server calls `verify_pow` in `src/utils/crypto.rs`, which accepts solutions
+  for the current minute and up to 4 prior minutes (5-minute grace window covering
+  clock skew and solve time).  The feature is off by default; enabled per-board via
+  the admin settings panel.  Backed by a new `allow_captcha` column on the `boards`
+  table (default `0`) added via additive SQLite migration.
+- **Spoiler text markup** *(verified existing)* — `[spoiler]text[/spoiler]` renders
+  as hidden text that is revealed on hover or click.  Confirmed complete with XSS
+  safety analysis and passing unit test.
+
 - **Video embed unfurling** — when a post body contains a YouTube, Invidious, or
   Streamable URL, the markup parser now emits a `<span class="video-unfurl">`
   placeholder alongside the hyperlink, carrying `data-embed-type` and

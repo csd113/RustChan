@@ -79,6 +79,7 @@ pub struct Board {
     pub edit_window_secs: i64, // seconds users can edit their posts (0 = use board default 300)
     pub allow_archive: bool,   // when true, overflow threads are archived instead of deleted
     pub allow_video_embeds: bool, // per-board inline video embed unfurling (YouTube/Invidious/Streamable)
+    pub allow_captcha: bool,      // per-board PoW CAPTCHA on new threads only (hashcash-style)
     pub created_at: i64,          // Unix timestamp
 }
 
@@ -376,4 +377,15 @@ pub struct BackupInfo {
     pub size_bytes: u64,
     /// Human-readable last-modified timestamp (UTC).
     pub modified: String,
+}
+
+/// A user-submitted ban appeal
+#[derive(Debug, Clone)]
+pub struct BanAppeal {
+    pub id: i64,
+    pub ip_hash: String,
+    pub reason: String,
+    #[allow(dead_code)]
+    pub status: String, // "open" | "dismissed"
+    pub created_at: i64,
 }

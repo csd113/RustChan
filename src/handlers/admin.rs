@@ -277,6 +277,7 @@ pub async fn admin_panel(
             let filters = db::get_word_filters(&conn)?;
             let collapse_greentext = db::get_collapse_greentext(&conn);
             let reports = db::get_open_reports(&conn)?;
+            let appeals = db::get_open_ban_appeals(&conn)?;
             let site_name = db::get_site_name(&conn);
 
             // Collect saved backup file lists (read from disk, not DB).
@@ -310,6 +311,7 @@ pub async fn admin_panel(
                 &board_backups_list,
                 db_size_bytes,
                 &reports,
+                &appeals,
                 &site_name,
                 tor_address.as_deref(),
             ))
@@ -783,7 +785,189 @@ pub async fn remove_ban(
     Ok(Redirect::to("/admin/panel").into_response())
 }
 
-// ─── POST /admin/filter/add ───────────────────────────────────────────────────
+// ─── POST /admin/post/ban-delete ──────────────────────────────────────────────
+// Inline ban + delete from the per-post admin toolbar.
+// Bans the post author's IP hash, deletes the post, then redirects back to
+// the thread (or the board index if the OP is deleted).
+
+#[derive(Deserialize)]
+pub struct BanDeleteForm {
+    post_id: i64,
+    ip_hash: String,
+    board: String,
+    thread_id: i64,
+    is_op: Option<String>,
+    reason: Option<String>,
+    duration_hours: Option<i64>,
+    _csrf: Option<String>,
+}
+
+pub async fn admin_ban_and_delete(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<BanDeleteForm>,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    check_csrf_jar(&jar, form._csrf.as_deref())?;
+
+    let reason = form
+        .reason
+        .as_deref()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| "Rule violation".to_string());
+
+    let expires_at = form
+        .duration_hours
+        .filter(|&h| h > 0)
+        .map(|h| chrono::Utc::now().timestamp() + h.min(87_600).saturating_mul(3600));
+
+    let ip_hash_log = form.ip_hash.chars().take(8).collect::<String>();
+    let post_id = form.post_id;
+    let board_short = form.board.clone();
+    let thread_id = form.thread_id;
+    let is_op = form.is_op.as_deref() == Some("1");
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            let (admin_id, admin_name) =
+                require_admin_session_with_name(&conn, session_id.as_deref())?;
+
+            // Ban first so the IP cannot re-post before the delete lands
+            db::add_ban(&conn, &form.ip_hash, &reason, expires_at)?;
+            let _ = db::log_mod_action(
+                &conn,
+                admin_id,
+                &admin_name,
+                "ban",
+                "ban",
+                None,
+                &board_short,
+                &format!("inline ban — ip_hash={}… reason={}", &ip_hash_log, reason),
+            );
+
+            // Delete post (or whole thread if OP)
+            if is_op {
+                let paths = db::delete_thread(&conn, thread_id)?;
+                for p in paths {
+                    crate::utils::files::delete_file(&crate::config::CONFIG.upload_dir, &p);
+                }
+                let _ = db::log_mod_action(
+                    &conn,
+                    admin_id,
+                    &admin_name,
+                    "delete_thread",
+                    "thread",
+                    Some(thread_id),
+                    &board_short,
+                    "",
+                );
+            } else {
+                let paths = db::delete_post(&conn, post_id)?;
+                for p in paths {
+                    crate::utils::files::delete_file(&crate::config::CONFIG.upload_dir, &p);
+                }
+                let _ = db::log_mod_action(
+                    &conn,
+                    admin_id,
+                    &admin_name,
+                    "delete_post",
+                    "post",
+                    Some(post_id),
+                    &board_short,
+                    "",
+                );
+            }
+
+            info!(
+                "Admin ban+delete: post={} ip_hash={}… board={}",
+                post_id, ip_hash_log, board_short
+            );
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    // If OP was deleted, the thread is gone — send to board index
+    let redirect = if is_op {
+        format!("/{}/", form.board)
+    } else {
+        format!("/{}/thread/{}#p{}", form.board, thread_id, post_id)
+    };
+    Ok(Redirect::to(&redirect).into_response())
+}
+
+// ─── POST /admin/appeal/dismiss ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct AppealActionForm {
+    appeal_id: i64,
+    ip_hash: Option<String>,
+    _csrf: Option<String>,
+}
+
+pub async fn dismiss_appeal(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<AppealActionForm>,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    check_csrf_jar(&jar, form._csrf.as_deref())?;
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
+            db::dismiss_ban_appeal(&conn, form.appeal_id)?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok(Redirect::to("/admin/panel#appeals").into_response())
+}
+
+// ─── POST /admin/appeal/accept ────────────────────────────────────────────────
+
+pub async fn accept_appeal(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<AppealActionForm>,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    check_csrf_jar(&jar, form._csrf.as_deref())?;
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            let (admin_id, admin_name) =
+                require_admin_session_with_name(&conn, session_id.as_deref())?;
+            let ip = form.ip_hash.as_deref().unwrap_or("");
+            db::accept_ban_appeal(&conn, form.appeal_id, ip)?;
+            let _ = db::log_mod_action(
+                &conn,
+                admin_id,
+                &admin_name,
+                "accept_appeal",
+                "ban",
+                None,
+                "",
+                &format!("appeal {} — ip unban", form.appeal_id),
+            );
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok(Redirect::to("/admin/panel#appeals").into_response())
+}
 
 #[derive(Deserialize)]
 pub struct AddFilterForm {
@@ -876,6 +1060,7 @@ pub struct BoardSettingsForm {
     edit_window_secs: Option<String>,
     allow_archive: Option<String>,
     allow_video_embeds: Option<String>,
+    allow_captcha: Option<String>,
     _csrf: Option<String>,
 }
 
@@ -937,6 +1122,7 @@ pub async fn update_board_settings(
                 form.allow_editing.as_deref() == Some("1"),
                 form.allow_archive.as_deref() == Some("1"),
                 form.allow_video_embeds.as_deref() == Some("1"),
+                form.allow_captcha.as_deref() == Some("1"),
             )?;
             info!("Admin updated settings for board id={}", board_id);
             Ok(())
@@ -1513,7 +1699,7 @@ pub async fn create_board_backup(
                 .query_row(
                     "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                              allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                             allow_editing, allow_archive, allow_video_embeds, created_at
+                             allow_editing, allow_archive, allow_video_embeds, allow_captcha, created_at
                       FROM boards WHERE short_name = ?1",
                     params![board_short],
                     |r| {
@@ -1533,7 +1719,8 @@ pub async fn create_board_backup(
                             allow_editing: r.get::<_, i64>(12)? != 0,
                             allow_archive: r.get::<_, i64>(13)? != 0,
                             allow_video_embeds: r.get::<_, i64>(14)? != 0,
-                            created_at: r.get(15)?,
+                            allow_captcha: r.get::<_, i64>(15)? != 0,
+                            created_at: r.get(16)?,
                         })
                     },
                 )
@@ -2114,8 +2301,8 @@ pub async fn restore_saved_board_backup(
                      max_threads=?4, bump_limit=?5,
                      allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
                      edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-                     allow_video_embeds=?13
-                     WHERE id=?14",
+                     allow_video_embeds=?13, allow_captcha=?14
+                     WHERE id=?15",
                     params![
                         manifest.board.name,
                         manifest.board.description,
@@ -2130,6 +2317,7 @@ pub async fn restore_saved_board_backup(
                         manifest.board.allow_editing as i64,
                         manifest.board.allow_archive as i64,
                         manifest.board.allow_video_embeds as i64,
+                        manifest.board.allow_captcha as i64,
                         eid,
                     ],
                 )
@@ -2139,8 +2327,8 @@ pub async fn restore_saved_board_backup(
                 conn.execute(
                     "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
                      bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
-                     edit_window_secs, allow_editing, allow_archive, allow_video_embeds, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                     edit_window_secs, allow_editing, allow_archive, allow_video_embeds, allow_captcha, created_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                     params![
                         manifest.board.short_name,
                         manifest.board.name,
@@ -2156,6 +2344,7 @@ pub async fn restore_saved_board_backup(
                         manifest.board.allow_editing as i64,
                         manifest.board.allow_archive as i64,
                         manifest.board.allow_video_embeds as i64,
+                        manifest.board.allow_captcha as i64,
                         manifest.board.created_at,
                     ],
                 )
@@ -2375,6 +2564,9 @@ mod board_backup_types {
         /// Added in v1.0.10 — absent in older backups; default to false.
         #[serde(default)]
         pub allow_video_embeds: bool,
+        /// Added in v1.0.10 — absent in older backups; default to false.
+        #[serde(default)]
+        pub allow_captcha: bool,
         pub created_at: i64,
     }
 
@@ -2483,7 +2675,7 @@ pub async fn board_backup(
             let board: BoardRow = conn.query_row(
                 "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                         allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                        allow_editing, allow_archive, allow_video_embeds, created_at
+                        allow_editing, allow_archive, allow_video_embeds, allow_captcha, created_at
                  FROM boards WHERE short_name = ?1",
                 params![board_short],
                 |r| Ok(BoardRow {
@@ -2502,7 +2694,8 @@ pub async fn board_backup(
                     allow_editing: r.get::<_, i64>(12)? != 0,
                     allow_archive: r.get::<_, i64>(13)? != 0,
                     allow_video_embeds: r.get::<_, i64>(14)? != 0,
-                    created_at: r.get(15)?,
+                    allow_captcha: r.get::<_, i64>(15)? != 0,
+                    created_at: r.get(16)?,
                 }),
             ).map_err(|_| AppError::NotFound(format!("Board '{}' not found", board_short)))?;
 
@@ -2769,8 +2962,8 @@ pub async fn board_restore(
                      max_threads=?4, bump_limit=?5,
                      allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
                      edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-                     allow_video_embeds=?13
-                     WHERE id=?14",
+                     allow_video_embeds=?13, allow_captcha=?14
+                     WHERE id=?15",
                     params![
                         manifest.board.name,
                         manifest.board.description,
@@ -2785,6 +2978,7 @@ pub async fn board_restore(
                         manifest.board.allow_editing as i64,
                         manifest.board.allow_archive as i64,
                         manifest.board.allow_video_embeds as i64,
+                        manifest.board.allow_captcha as i64,
                         eid,
                     ],
                 )
@@ -2794,8 +2988,8 @@ pub async fn board_restore(
                 conn.execute(
                     "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
                      bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
-                     edit_window_secs, allow_editing, allow_archive, allow_video_embeds, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                     edit_window_secs, allow_editing, allow_archive, allow_video_embeds, allow_captcha, created_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                     params![
                         manifest.board.short_name,
                         manifest.board.name,
@@ -2811,6 +3005,7 @@ pub async fn board_restore(
                         manifest.board.allow_editing as i64,
                         manifest.board.allow_archive as i64,
                         manifest.board.allow_video_embeds as i64,
+                        manifest.board.allow_captcha as i64,
                         manifest.board.created_at,
                     ],
                 )

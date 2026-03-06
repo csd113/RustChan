@@ -1035,7 +1035,7 @@ pub fn index_page(
     let onion_html = if let Some(addr) = onion_address {
         format!(
             r#"<div class="index-section index-onion-section">
-<p class="index-onion">&#x1F9C5; .onion: <code class="onion-addr">{}</code></p>
+<p class="index-onion"><code class="onion-addr">{}</code></p>
 </div>"#,
             escape_html(addr)
         )
@@ -1160,6 +1160,84 @@ fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String
     let video_mb = crate::config::CONFIG.max_video_size / 1024 / 1024;
     let audio_mb = crate::config::CONFIG.max_audio_size / 1024 / 1024;
 
+    // PoW CAPTCHA block — only rendered when the board has it enabled.
+    // The JS miner runs on page load, solving in the background. The nonce
+    // field starts empty and is filled when a solution is found.
+    let captcha_row = if board.allow_captcha {
+        format!(
+            r#"    <tr id="captcha-row-{b}"><td>captcha</td>
+        <td>
+          <span id="captcha-status-{b}" style="font-size:0.8rem;color:var(--text-dim)">solving proof-of-work… (this takes a moment)</span>
+          <input type="hidden" name="pow_nonce" id="pow-nonce-{b}" value="">
+        </td></tr>"#,
+            b = escape_html(board_short),
+        )
+    } else {
+        String::new()
+    };
+
+    let captcha_js = if board.allow_captcha {
+        let difficulty: u32 = crate::utils::crypto::POW_DIFFICULTY;
+        let board_json = format!(
+            "\"{}\"",
+            board_short.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        format!(
+            r#"<script>
+(function() {{
+  var DIFFICULTY = {diff};
+  var board = {board_json};
+  var minute = Math.floor(Date.now() / 1000 / 60);
+  var challenge = board + ':' + minute;
+
+  function sha256(str) {{
+    // Use the Web Crypto API — fast, native, available in all modern browsers.
+    return crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  }}
+
+  function countLeadingZeroBits(buf) {{
+    var bytes = new Uint8Array(buf);
+    var count = 0;
+    for (var i = 0; i < bytes.length; i++) {{
+      if (bytes[i] === 0) {{ count += 8; }}
+      else {{ count += Math.clz32(bytes[i]) - 24; break; }}
+    }}
+    return count;
+  }}
+
+  async function mine() {{
+    var nonce = 0;
+    var statusEl = document.getElementById('captcha-status-{b}');
+    var nonceEl  = document.getElementById('pow-nonce-{b}');
+    while (true) {{
+      var buf = await sha256(challenge + ':' + nonce);
+      if (countLeadingZeroBits(buf) >= DIFFICULTY) {{
+        nonceEl.value = nonce;
+        if (statusEl) statusEl.textContent = '✓ captcha solved';
+        return;
+      }}
+      nonce++;
+      if (nonce % 50000 === 0) {{
+        if (statusEl) statusEl.textContent = 'solving… ' + nonce.toLocaleString() + ' attempts';
+        await new Promise(function(r) {{ setTimeout(r, 0); }});
+      }}
+    }}
+  }}
+
+  mine().catch(function(e) {{
+    var statusEl = document.getElementById('captcha-status-{b}');
+    if (statusEl) statusEl.textContent = 'captcha error: ' + e;
+  }});
+}})();
+</script>"#,
+            diff = difficulty,
+            b = escape_html(board_short),
+            board_json = board_json,
+        )
+    } else {
+        String::new()
+    };
+
     // Show the secondary audio input only when the board allows both images and audio.
     let audio_combo_row = if board.allow_images && board.allow_audio {
         format!(
@@ -1207,6 +1285,7 @@ fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String
             <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a · max {audio_mb} MiB</span></td></tr>
     {audio_combo_row}
     {edit_token_row}
+    {captcha_row}
     <tr><td colspan="2">
       <details class="poll-creator">
         <summary>[ 📊 Add a Poll to this thread ]</summary>
@@ -1265,7 +1344,8 @@ function updateRemoveButtons() {{
         audio_mb = audio_mb,
         audio_combo_row = audio_combo_row,
         edit_token_row = edit_token_row,
-    )
+        captcha_row = captcha_row,
+    ) + &captcha_js
 }
 
 fn render_thread_summary(
@@ -1775,6 +1855,25 @@ pub fn thread_page(
   };
 })();
 </script>"#);
+
+    // ── Inline ban+delete prompt ───────────────────────────────────────────
+    if is_admin {
+        body.push_str(
+            r#"<script>
+function adminBanDelete(form, pid) {
+  var reason = prompt('Ban reason (leave blank for "Rule violation"):');
+  if (reason === null) return false; // cancelled
+  var dur = prompt('Ban duration in hours (0 = permanent):');
+  if (dur === null) return false;
+  var hours = parseInt(dur, 10);
+  if (isNaN(hours) || hours < 0) hours = 0;
+  document.getElementById('ban-reason-' + pid).value = reason.trim() || 'Rule violation';
+  document.getElementById('ban-dur-' + pid).value = hours;
+  return confirm('Ban IP + delete post No.' + pid + '?');
+}
+</script>"#,
+        );
+    }
 
     // ── Cross-board quotelink hover preview ────────────────────────────────
     // Fetches /api/post/{board}/{thread_id} on hover over >>>/ cross-board links
@@ -2318,8 +2417,9 @@ pub fn render_post(
         ));
     }
 
-    // Admin delete button + IP history link — shown whenever admin is logged in
+    // Admin delete button + IP history link + inline ban+delete — shown whenever admin is logged in
     if is_admin {
+        let is_op_val = if post.is_op { "1" } else { "0" };
         html.push_str(&format!(
             r#"<div class="post-controls admin-post-controls">
 <form method="POST" action="/admin/post/delete">
@@ -2327,14 +2427,28 @@ pub fn render_post(
 <input type="hidden" name="post_id" value="{pid}">
 <input type="hidden" name="board"   value="{board}">
 <button type="submit" class="admin-del-btn"
-        onclick="return confirm('Admin delete post No.{pid}?')">&#x2715; admin del</button>
+        onclick="return confirm('Admin delete post No.{pid}?')">&#x2715; del</button>
 </form>
-<a class="admin-ip-link" href="/admin/ip/{ip_hash}" title="View all posts from this IP hash">&#x1F50D; ip history</a>
+<form method="POST" action="/admin/post/ban-delete"
+      onsubmit="return adminBanDelete(this,{pid})">
+<input type="hidden" name="_csrf"      value="{csrf}">
+<input type="hidden" name="post_id"    value="{pid}">
+<input type="hidden" name="ip_hash"    value="{ip_hash}">
+<input type="hidden" name="board"      value="{board}">
+<input type="hidden" name="thread_id"  value="{tid}">
+<input type="hidden" name="is_op"      value="{is_op}">
+<input type="hidden" name="reason"     id="ban-reason-{pid}" value="">
+<input type="hidden" name="duration_hours" id="ban-dur-{pid}" value="0">
+<button type="submit" class="admin-del-btn btn-danger">&#x26D4; ban+del</button>
+</form>
+<a class="admin-ip-link" href="/admin/ip/{ip_hash}" title="View all posts from this IP hash">&#x1F50D; ip</a>
 </div>"#,
-            csrf = escape_html(csrf_token),
-            pid = post.id,
-            board = escape_html(board_short),
+            csrf    = escape_html(csrf_token),
+            pid     = post.id,
+            board   = escape_html(board_short),
             ip_hash = escape_html(&post.ip_hash),
+            tid     = post.thread_id,
+            is_op   = is_op_val,
         ));
     }
 
@@ -2770,6 +2884,7 @@ pub fn admin_panel_page(
     board_backups: &[BackupInfo],
     db_size_bytes: i64,
     reports: &[crate::models::ReportWithContext],
+    appeals: &[crate::models::BanAppeal],
     site_name: &str,
     tor_address: Option<&str>,
 ) -> String {
@@ -2796,6 +2911,7 @@ pub fn admin_panel_page(
   <label><input type="checkbox" name="allow_tripcodes" value="1"{trip_ck}> Allow tripcodes</label>
   <label><input type="checkbox" name="allow_archive"   value="1"{archive_ck}> Enable archive</label>
   <label><input type="checkbox" name="allow_video_embeds" value="1"{embeds_ck}> Embed video links (YouTube / Invidious / Streamable)</label>
+  <label><input type="checkbox" name="allow_captcha"      value="1"{captcha_ck}> PoW CAPTCHA on new threads (hashcash, JS-solved)</label>
   <label><input type="checkbox" name="allow_editing"   value="1"{edit_ck}
     onchange="(function(cb){{var row=cb.closest('form').querySelector('.edit-window-row');if(row)row.style.display=cb.checked?'':'none';}})(this)">
     Allow post editing</label>
@@ -2846,6 +2962,7 @@ pub fn admin_panel_page(
             archive_ck = checked(b.allow_archive),
             edit_ck = checked(b.allow_editing),
             embeds_ck = checked(b.allow_video_embeds),
+            captcha_ck = checked(b.allow_captcha),
         ));
     }
 
@@ -3022,6 +3139,52 @@ pub fn admin_panel_page(
         let _ = ip_short; // suppress unused warning
     }
 
+    // ── Ban appeals section ───────────────────────────────────────────────
+    let appeal_badge = if !appeals.is_empty() {
+        format!(r#" <span class="report-badge">{}</span>"#, appeals.len())
+    } else {
+        String::new()
+    };
+
+    let mut appeal_rows = String::new();
+    if appeals.is_empty() {
+        appeal_rows.push_str(
+            r#"<tr><td colspan="4" style="color:var(--text-dim);text-align:center">no open appeals</td></tr>"#,
+        );
+    }
+    for a in appeals {
+        let reason = escape_html(a.reason.trim());
+        let age = fmt_ts(a.created_at);
+        let ip_short = a.ip_hash.get(..16).unwrap_or(&a.ip_hash);
+        appeal_rows.push_str(&format!(
+            r#"<tr>
+<td style="font-size:0.78rem;font-family:monospace">{ip_short}…</td>
+<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{reason}">{reason}</td>
+<td style="white-space:nowrap;font-size:0.78rem">{age}</td>
+<td style="white-space:nowrap">
+  <form method="POST" action="/admin/appeal/dismiss" style="display:inline">
+    <input type="hidden" name="_csrf"      value="{csrf}">
+    <input type="hidden" name="appeal_id"  value="{aid}">
+    <button type="submit">✕ dismiss</button>
+  </form>
+  <form method="POST" action="/admin/appeal/accept" style="display:inline;margin-left:0.35rem"
+        onsubmit="return confirm('Accept appeal and lift ban for this IP?')">
+    <input type="hidden" name="_csrf"      value="{csrf}">
+    <input type="hidden" name="appeal_id"  value="{aid}">
+    <input type="hidden" name="ip_hash"    value="{ip_hash}">
+    <button type="submit" class="btn-success">✓ accept + unban</button>
+  </form>
+</td>
+</tr>"#,
+            ip_short = ip_short,
+            reason   = reason,
+            age      = escape_html(&age),
+            csrf     = escape_html(csrf_token),
+            aid      = a.id,
+            ip_hash  = escape_html(&a.ip_hash),
+        ));
+    }
+
     let body = format!(
         r#"<div class="admin-panel">
 <h1>[ admin panel ]</h1>
@@ -3035,6 +3198,14 @@ pub fn admin_panel_page(
 <table class="admin-table">
 <thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
 <tbody>{report_rows}</tbody>
+</table>
+</section>
+
+<section class="admin-section" id="appeals">
+<h2>// ban appeals{appeal_badge}</h2>
+<table class="admin-table">
+<thead><tr><th>ip (partial)</th><th>appeal message</th><th>filed</th><th>action</th></tr></thead>
+<tbody>{appeal_rows}</tbody>
 </table>
 </section>
 
@@ -3172,12 +3343,14 @@ pub fn admin_panel_page(
         db_size_str = format_file_size(db_size_bytes),
         report_rows = report_rows,
         report_badge = report_badge,
+        appeal_rows = appeal_rows,
+        appeal_badge = appeal_badge,
         site_name_val = escape_html(site_name),
         tor_section = match tor_address {
             Some(addr) => format!(
                 r#"<section class="admin-section" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
 <p style="color:var(--text-dim);font-size:0.82rem;margin:0">
-  &#x1F9C5; tor onion address: <code style="user-select:all;color:var(--text)">{}</code>
+  <code style="user-select:all;color:var(--text)">{}</code>
 </p>
 </section>"#,
                 escape_html(addr)
@@ -3252,6 +3425,43 @@ pub fn edit_post_page(
         boards,
         collapse_greentext,
         board.allow_archive,
+    )
+}
+
+pub fn ban_page(reason: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>You Are Banned</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="page-box error-page">
+<h1>you are banned</h1>
+<p style="color:var(--text-dim)">reason: <strong>{reason}</strong></p>
+<p style="margin-top:1.5rem;font-size:0.9rem">if you believe this ban was made in error, you may submit an appeal below.<br>
+appeals are reviewed by site staff. one appeal per 24 hours.</p>
+<form method="POST" action="/appeal" class="appeal-form">
+<input type="hidden" name="_csrf" id="appeal-csrf-field" value="">
+<script>
+(function(){{
+  var c = document.cookie.split('; ').find(function(r){{ return r.startsWith('csrf_token='); }});
+  if (c) document.getElementById('appeal-csrf-field').value = c.split('=')[1];
+}})();
+</script>
+<textarea name="reason" rows="4" maxlength="512"
+  placeholder="Briefly explain why you believe this ban should be lifted…"
+  style="width:100%;box-sizing:border-box;margin:0.75rem 0;background:var(--bg-post);color:var(--text);border:1px solid var(--border);padding:0.5rem;resize:vertical"></textarea>
+<button type="submit" style="margin-top:0.25rem">submit appeal</button>
+</form>
+<p style="margin-top:1.5rem"><a href="/">return home</a></p>
+</div>
+</body>
+</html>"#,
+        reason = escape_html(reason),
     )
 }
 

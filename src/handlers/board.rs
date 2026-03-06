@@ -18,7 +18,7 @@ use crate::{
     templates,
     utils::{
         // FIX[LOW-8]: sha256_hex now lives in utils::crypto (deduplicated)
-        crypto::{hash_ip, new_csrf_token, new_deletion_token, sha256_hex},
+        crypto::{hash_ip, new_csrf_token, new_deletion_token, sha256_hex, verify_pow},
         files::save_upload,
         sanitize::{
             // FIX[MEDIUM-8]: apply_word_filters now runs before escape_html
@@ -196,6 +196,7 @@ pub async fn create_thread(
     let poll_question = form.poll_question;
     let poll_options = form.poll_options;
     let poll_duration = form.poll_duration_secs;
+    let pow_nonce = form.pow_nonce;
 
     let board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
@@ -215,6 +216,13 @@ pub async fn create_thread(
                         reason
                     }
                 )));
+            }
+
+            // PoW CAPTCHA — verified only when the board has it enabled
+            if board.allow_captcha && !verify_pow(&board_short, &pow_nonce) {
+                return Err(AppError::BadRequest(
+                    "CAPTCHA verification failed. Please wait for the solver to complete before posting.".into()
+                ));
             }
 
             let filters: Vec<(String, String)> = db::get_word_filters(&conn)?
@@ -885,4 +893,80 @@ pub async fn api_post_preview(
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, json_ct, body).into_response()
         }
     }
+}
+
+// ─── POST /appeal ─────────────────────────────────────────────────────────────
+// Banned users submit a brief appeal message here.
+// Appeals appear in the admin panel under // ban appeals.
+
+#[derive(serde::Deserialize)]
+pub struct AppealForm {
+    pub reason: String,
+    pub _csrf: Option<String>,
+}
+
+pub async fn submit_appeal(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    jar: CookieJar,
+    Form(form): Form<AppealForm>,
+) -> impl axum::response::IntoResponse {
+    use axum::response::Html;
+
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if !crate::middleware::validate_csrf(
+        csrf_cookie.as_deref(),
+        form._csrf.as_deref().unwrap_or(""),
+    ) {
+        return Html(crate::templates::error_page(403, "CSRF token mismatch.")).into_response();
+    }
+
+    let ip_hash = hash_ip(&addr.ip().to_string(), &CONFIG.cookie_secret);
+    let reason = form.reason.trim().chars().take(512).collect::<String>();
+    if reason.is_empty() {
+        return Html(crate::templates::error_page(
+            400,
+            "Appeal message cannot be empty.",
+        ))
+        .into_response();
+    }
+
+    let result = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> crate::error::Result<&'static str> {
+            let conn = pool.get()?;
+            // Rate-limit: one appeal per IP per 24 hours
+            if db::has_recent_appeal(&conn, &ip_hash)? {
+                return Ok("already_filed");
+            }
+            // Only allow appeals from actually-banned IPs
+            if db::is_banned(&conn, &ip_hash)?.is_none() {
+                return Ok("not_banned");
+            }
+            db::file_ban_appeal(&conn, &ip_hash, &reason)?;
+            Ok("ok")
+        }
+    })
+    .await;
+
+    let msg = match result {
+        Ok(Ok("ok")) => "Your appeal has been submitted. An admin will review it.",
+        Ok(Ok("already_filed")) => "You have already filed an appeal in the last 24 hours.",
+        Ok(Ok("not_banned")) => "Your IP is not currently banned.",
+        _ => "An error occurred. Please try again.",
+    };
+
+    let html = format!(
+        r#"<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Appeal Submitted</title>
+<link rel="stylesheet" href="/static/style.css">
+</head><body><div class="page-box error-page">
+<h1>appeal submitted</h1>
+<p>{msg}</p>
+<p><a href="/">return home</a></p>
+</div></body></html>"#,
+        msg = crate::utils::sanitize::escape_html(msg)
+    );
+    Html(html).into_response()
 }

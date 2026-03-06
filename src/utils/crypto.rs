@@ -104,3 +104,46 @@ pub fn sha256_hex(data: &[u8]) -> String {
     h.update(data);
     hex::encode(h.finalize())
 }
+
+// ─── PoW CAPTCHA (hashcash-style) ────────────────────────────────────────────
+// The challenge is "{board_short}:{unix_minutes}" — valid for a 5-minute window.
+// The client finds a nonce such that SHA-256(challenge + ":" + nonce) has at
+// least POW_DIFFICULTY leading zero bits.
+
+pub const POW_DIFFICULTY: u32 = 20; // ~1M avg iterations; ~50–200 ms in JS
+
+/// Build the expected challenge string for the given board and time.
+pub fn pow_challenge(board_short: &str, unix_ts: i64) -> String {
+    let minute = unix_ts / 60;
+    format!("{}:{}", board_short, minute)
+}
+
+/// Verify a submitted PoW nonce.  Accepts solutions for the current minute and
+/// up to 4 prior minutes (5-minute grace window covering clock skew + solve time).
+pub fn verify_pow(board_short: &str, nonce: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let now_minutes = chrono::Utc::now().timestamp() / 60;
+    // Try current minute and the 4 prior minutes
+    for delta in 0i64..=4 {
+        let challenge = pow_challenge(board_short, (now_minutes - delta) * 60);
+        let input = format!("{}:{}", challenge, nonce);
+        let hash = Sha256::digest(input.as_bytes());
+        if leading_zero_bits(&hash) >= POW_DIFFICULTY {
+            return true;
+        }
+    }
+    false
+}
+
+fn leading_zero_bits(bytes: &[u8]) -> u32 {
+    let mut count = 0u32;
+    for &byte in bytes {
+        if byte == 0 {
+            count += 8;
+        } else {
+            count += byte.leading_zeros();
+            break;
+        }
+    }
+    count
+}

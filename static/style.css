@@ -242,6 +242,13 @@ button:hover,
   background: rgba(255,34,68,0.08);
   box-shadow: 0 0 8px rgba(255,34,68,0.3);
 }
+.btn-success { border-color: #1a4a2a; color: #44cc77; }
+.btn-success:hover {
+  border-color: #44cc77;
+  color: #44cc77;
+  background: rgba(68,204,119,0.08);
+  box-shadow: 0 0 8px rgba(68,204,119,0.3);
+}
 
 /* ── Main layout ──────────────────────────────────────────────────────────── */
 

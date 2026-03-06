@@ -29,6 +29,8 @@ pub struct PostFormData {
     pub poll_duration_secs: Option<i64>,
     /// Sage — when true the reply must not bump the thread.
     pub sage: bool,
+    /// PoW CAPTCHA nonce — submitted by the thread-creation form when enabled.
+    pub pow_nonce: String,
 }
 
 /// Drain all fields from a multipart form into [`PostFormData`].
@@ -49,6 +51,7 @@ pub async fn parse_post_multipart(
     let mut poll_duration_value: Option<i64> = None;
     let mut poll_duration_unit = String::from("hours");
     let mut sage = false;
+    let mut pow_nonce = String::new();
 
     while let Some(field) = multipart
         .next_field()
@@ -70,6 +73,7 @@ pub async fn parse_post_multipart(
                 let v = field.text().await.unwrap_or_default();
                 sage = v == "1" || v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true");
             }
+            Some("pow_nonce") => pow_nonce = field.text().await.unwrap_or_default(),
             Some("poll_question") => poll_question = field.text().await.unwrap_or_default(),
             Some("poll_option") => {
                 let v = field.text().await.unwrap_or_default();
@@ -136,5 +140,6 @@ pub async fn parse_post_multipart(
         poll_options,
         poll_duration_secs,
         sage,
+        pow_nonce,
     })
 }

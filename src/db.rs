@@ -284,6 +284,16 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         "ALTER TABLE boards ADD COLUMN allow_archive INTEGER NOT NULL DEFAULT 1",
         // v1.0.10: per-board video embed unfurling (off by default)
         "ALTER TABLE boards ADD COLUMN allow_video_embeds INTEGER NOT NULL DEFAULT 0",
+        // v1.0.10: per-board PoW CAPTCHA on new threads (off by default)
+        "ALTER TABLE boards ADD COLUMN allow_captcha INTEGER NOT NULL DEFAULT 0",
+        // v1.0.10: ban appeal table
+        r"CREATE TABLE IF NOT EXISTS ban_appeals (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_hash     TEXT NOT NULL,
+            reason      TEXT NOT NULL DEFAULT '',
+            status      TEXT NOT NULL DEFAULT 'open',
+            created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+        )",
     ];
     for sql in migrations {
         let _ = conn.execute(sql, []); // ignore "duplicate column" errors
@@ -359,7 +369,7 @@ pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                allow_editing, allow_archive, allow_video_embeds, created_at
+                allow_editing, allow_archive, allow_video_embeds, allow_captcha, created_at
          FROM boards ORDER BY id ASC",
     )?;
     let boards = stmt
@@ -392,7 +402,7 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                allow_editing, allow_archive, allow_video_embeds, created_at
+                allow_editing, allow_archive, allow_video_embeds, allow_captcha, created_at
          FROM boards WHERE short_name = ?1",
     )?;
     Ok(stmt.query_row(params![short], map_board).optional()?)
@@ -471,14 +481,15 @@ pub fn update_board_settings(
     allow_editing: bool,
     allow_archive: bool,
     allow_video_embeds: bool,
+    allow_captcha: bool,
 ) -> Result<()> {
     conn.execute(
         "UPDATE boards SET name=?1, description=?2, nsfw=?3,
          bump_limit=?4, max_threads=?5,
          allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
          edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-         allow_video_embeds=?13
-         WHERE id=?14",
+         allow_video_embeds=?13, allow_captcha=?14
+         WHERE id=?15",
         params![
             name,
             description,
@@ -493,6 +504,7 @@ pub fn update_board_settings(
             allow_editing as i32,
             allow_archive as i32,
             allow_video_embeds as i32,
+            allow_captcha as i32,
             id,
         ],
     )?;
@@ -1548,7 +1560,8 @@ fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         allow_editing: row.get::<_, i32>(12)? != 0,
         allow_archive: row.get::<_, i32>(13)? != 0,
         allow_video_embeds: row.get::<_, i32>(14)? != 0,
-        created_at: row.get(15)?,
+        allow_captcha: row.get::<_, i32>(15)? != 0,
+        created_at: row.get(16)?,
     })
 }
 
@@ -2095,4 +2108,75 @@ pub fn get_admin_name_by_id(conn: &rusqlite::Connection, admin_id: i64) -> Resul
             |r| r.get(0),
         )
         .optional()?)
+}
+
+// ─── Ban appeals ──────────────────────────────────────────────────────────────
+
+/// Insert a new ban appeal. Returns the new appeal id.
+pub fn file_ban_appeal(conn: &rusqlite::Connection, ip_hash: &str, reason: &str) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO ban_appeals (ip_hash, reason) VALUES (?1, ?2)",
+        params![ip_hash, reason],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Return all open ban appeals, newest first.
+pub fn get_open_ban_appeals(conn: &rusqlite::Connection) -> Result<Vec<crate::models::BanAppeal>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, ip_hash, reason, status, created_at
+         FROM ban_appeals WHERE status = 'open'
+         ORDER BY created_at DESC LIMIT 200",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(crate::models::BanAppeal {
+            id: r.get(0)?,
+            ip_hash: r.get(1)?,
+            reason: r.get(2)?,
+            status: r.get(3)?,
+            created_at: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Dismiss a ban appeal (mark it closed without unbanning).
+pub fn dismiss_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE ban_appeals SET status='dismissed' WHERE id=?1",
+        params![appeal_id],
+    )?;
+    Ok(())
+}
+
+/// Dismiss appeal AND lift the ban for this ip_hash.
+pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64, ip_hash: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE ban_appeals SET status='dismissed' WHERE id=?1",
+        params![appeal_id],
+    )?;
+    conn.execute("DELETE FROM bans WHERE ip_hash=?1", params![ip_hash])?;
+    Ok(())
+}
+
+/// Count of currently open ban appeals.
+#[allow(dead_code)]
+pub fn open_appeal_count(conn: &rusqlite::Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM ban_appeals WHERE status='open'",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// Check if an appeal has already been filed from this ip_hash (any status)
+/// within the last 24 hours, to prevent spam.
+pub fn has_recent_appeal(conn: &rusqlite::Connection, ip_hash: &str) -> Result<bool> {
+    let cutoff = chrono::Utc::now().timestamp() - 86400;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM ban_appeals WHERE ip_hash=?1 AND created_at > ?2",
+        params![ip_hash, cutoff],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
 }
