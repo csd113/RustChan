@@ -1223,12 +1223,13 @@ pub fn thread_page(
     body.push_str("</div><!-- #thread-posts -->\n");
 
     if !thread.locked {
+        let form_html = reply_form(&board.short_name, thread.id, csrf_token, board);
         body.push_str(&format!(
             r#"<div class="post-toggle-bar reply">
   <button class="post-toggle-btn" onclick="togglePostForm()">[ Reply ]</button>
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
-  {}
+  {form}
 </div>
 
 <!-- Mobile sticky reply drawer — visible only on small screens via CSS -->
@@ -1241,11 +1242,10 @@ pub fn thread_page(
     <button class="mobile-drawer-close" onclick="toggleMobileDrawer()">✕</button>
   </div>
   <div class="mobile-drawer-body">
-    {}
+    {form}
   </div>
 </div>"#,
-            reply_form(&board.short_name, thread.id, csrf_token, board),
-            reply_form(&board.short_name, thread.id, csrf_token, board),
+            form = form_html,
         ));
     }
 
@@ -1646,6 +1646,27 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str, board: &Board
     let video_mb = crate::config::CONFIG.max_video_size / 1024 / 1024;
     let audio_mb = crate::config::CONFIG.max_audio_size / 1024 / 1024;
 
+    // Build the accept attribute and hint for the primary file input
+    // based on which media types are enabled for this board.
+    let mut accept_parts: Vec<&str> = Vec::new();
+    let mut hint_parts: Vec<String> = Vec::new();
+    if board.allow_images {
+        accept_parts.push("image/jpeg,image/png,image/gif,image/webp");
+        hint_parts.push(format!("jpg/png/gif/webp · max {} MiB", image_mb));
+    }
+    if board.allow_video {
+        accept_parts.push("video/mp4,video/webm");
+        hint_parts.push(format!("mp4/webm · max {} MiB", video_mb));
+    }
+    if board.allow_audio {
+        accept_parts.push("audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac");
+        hint_parts.push(format!("mp3/ogg/flac/wav/m4a · max {} MiB", audio_mb));
+    }
+    let file_accept = accept_parts.join(",");
+    let file_hint = hint_parts.join(" &nbsp;|&nbsp; ");
+
+    // The secondary audio-alongside-image row is only shown when both
+    // images and audio are enabled.
     let audio_combo_row = if board.allow_images && board.allow_audio {
         format!(
             r#"    <tr><td>audio<br><span style="font-size:0.65rem;color:var(--text-dim)">(+ image)</span></td>
@@ -1669,8 +1690,8 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str, board: &Board
         <td><textarea id="reply-body" name="body" rows="4" maxlength="4096"></textarea>
             <button type="submit">post reply</button></td></tr>
     <tr><td>file</td>
-        <td><input type="file" name="file" onchange="checkFileSize(this)" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
-            <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a · max {audio_mb} MiB</span></td></tr>
+        <td><input type="file" name="file" onchange="checkFileSize(this)" accept="{file_accept}">
+            <span style="font-size:0.72rem;color:var(--text-dim)">{file_hint}</span></td></tr>
 {audio_combo_row}    <tr><td>options</td>
         <td><label class="sage-label"><input type="checkbox" name="sage" value="1"> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
     <tr><td>del token</td>
@@ -1681,9 +1702,8 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str, board: &Board
         board = escape_html(board_short),
         tid = thread_id,
         csrf = escape_html(csrf_token),
-        image_mb = image_mb,
-        video_mb = video_mb,
-        audio_mb = audio_mb,
+        file_accept = file_accept,
+        file_hint = file_hint,
         audio_combo_row = audio_combo_row,
     )
 }

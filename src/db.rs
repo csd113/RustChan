@@ -256,7 +256,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         "ALTER TABLE boards ADD COLUMN allow_tripcodes INTEGER NOT NULL DEFAULT 1",
         // Per-board image and audio toggles (Part 4)
         "ALTER TABLE boards ADD COLUMN allow_images  INTEGER NOT NULL DEFAULT 1",
-        "ALTER TABLE boards ADD COLUMN allow_audio   INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE boards ADD COLUMN allow_audio   INTEGER NOT NULL DEFAULT 0",
         // MediaType column on posts for explicit classification (Part 3)
         "ALTER TABLE posts ADD COLUMN media_type TEXT",
         "ALTER TABLE posts ADD COLUMN audio_file_path TEXT",
@@ -386,10 +386,10 @@ pub fn create_board(
     description: &str,
     nsfw: bool,
 ) -> Result<i64> {
-    // New boards default to all media types enabled (images, video, audio).
+    // New boards default to images and video enabled; audio off by default.
     conn.execute(
         "INSERT INTO boards (short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
-         VALUES (?1, ?2, ?3, ?4, 1, 1, 1)",
+         VALUES (?1, ?2, ?3, ?4, 1, 1, 0)",
         params![short, name, description, nsfw as i32],
     )?;
     Ok(conn.last_insert_rowid())
