@@ -434,6 +434,7 @@ pub async fn create_thread(
                 board_id: board.id,
                 board_short: board.short_name.clone(),
                 max_threads,
+                allow_archive: board.allow_archive,
             });
 
             info!("New thread {} created in /{}/", thread_id, board.short_name);
@@ -563,6 +564,12 @@ pub async fn board_archive(
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
 
+            if !board.allow_archive {
+                return Err(AppError::NotFound(format!(
+                    "/{board_short}/ does not have an archive."
+                )));
+            }
+
             let total = db::count_archived_threads_for_board(&conn, board.id)?;
             let pagination = Pagination::new(page, ARCHIVE_PER_PAGE, total);
             let threads = db::get_archived_threads_for_board(
@@ -640,76 +647,6 @@ pub async fn search(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok((jar, Html(html)))
-}
-
-// ─── POST /delete — user-initiated post deletion ─────────────────────────────
-
-#[derive(serde::Deserialize)]
-pub struct UserDeleteForm {
-    pub post_id: i64,
-    pub deletion_token: String,
-    #[allow(dead_code)]
-    pub board: String,
-    pub _csrf: Option<String>,
-}
-
-pub async fn delete_post(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<UserDeleteForm>,
-) -> Result<Response> {
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form._csrf.as_deref().unwrap_or("")) {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
-
-    // FIX[MEDIUM-10]: Validate the board short-name to prevent open-redirect
-    // or path-confusion attacks via a crafted form.board value.
-    // We look up the post's actual board from the DB and use that for the
-    // redirect, ignoring the user-supplied board name entirely.
-    let upload_dir = CONFIG.upload_dir.clone();
-
-    let redirect_board = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<String> {
-            let conn = pool.get()?;
-
-            if !db::verify_deletion_token(&conn, form.post_id, &form.deletion_token)? {
-                return Err(AppError::Forbidden("Incorrect deletion token.".into()));
-            }
-
-            let post = db::get_post(&conn, form.post_id)?
-                .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
-
-            // FIX[MEDIUM-10]: Resolve the board short-name from the database
-            // using the post's board_id, never from the user-supplied form field.
-            let board = {
-                let boards = db::get_all_boards(&conn)?;
-                boards
-                    .into_iter()
-                    .find(|b| b.id == post.board_id)
-                    .map(|b| b.short_name)
-                    .unwrap_or_else(|| "unknown".to_string())
-            };
-
-            let paths = if post.is_op {
-                db::delete_thread(&conn, post.thread_id)?
-            } else {
-                db::delete_post(&conn, form.post_id)?
-            };
-
-            for p in paths {
-                crate::utils::files::delete_file(&upload_dir, &p);
-            }
-
-            info!("Post {} deleted by user", form.post_id);
-            Ok(board)
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to(&format!("/{}/", redirect_board)).into_response())
 }
 
 // ─── CSRF cookie helper ───────────────────────────────────────────────────────

@@ -311,22 +311,17 @@ document.getElementById('report-modal').addEventListener('click', function(e) {
 
 // ─── Thread auto-update script ────────────────────────────────────────────────
 
-/// Returns the auto-update toggle + polling JS for thread pages.
+/// Returns the auto-update JS for thread pages.
+/// The Update/Auto buttons are in the nav bar; this script just wires them up.
 fn thread_autoupdate_script() -> &'static str {
     r#"
-<div class="autoupdate-bar" id="autoupdate-bar">
-  <label class="autoupdate-label">
-    <input type="checkbox" id="autoupdate-toggle" onchange="setAutoUpdate(this.checked)">
-    auto-update every 30s
-  </label>
-  <span class="autoupdate-status" id="autoupdate-status"></span>
-</div>
 <script>
 (function() {
   var container  = document.getElementById('thread-posts');
   var statusEl   = document.getElementById('autoupdate-status');
   var timer      = null;
   var updating   = false;
+  var autoOn     = false;
 
   if (!container) return;
 
@@ -338,7 +333,7 @@ fn thread_autoupdate_script() -> &'static str {
     if (statusEl) statusEl.textContent = msg;
   }
 
-  function fetchUpdates() {
+  window.fetchUpdates = function() {
     if (updating) return;
     updating = true;
     setStatus('checking…');
@@ -352,6 +347,8 @@ fn thread_autoupdate_script() -> &'static str {
           while (wrap.firstChild) container.appendChild(wrap.firstChild);
           lastId = data.last_id;
           container.dataset.lastId = lastId;
+          // Wire click-to-collapse on newly added images
+          wireImageCollapse(container);
           setStatus('+' + data.count + ' new — ' + new Date().toLocaleTimeString());
         } else {
           setStatus('up to date — ' + new Date().toLocaleTimeString());
@@ -362,17 +359,46 @@ fn thread_autoupdate_script() -> &'static str {
         setStatus('error (' + err + ')');
         updating = false;
       });
-  }
+  };
 
-  window.setAutoUpdate = function(enabled) {
-    if (timer) { clearInterval(timer); timer = null; }
-    if (enabled) {
+  window.toggleAutoUpdate = function(cb) {
+    autoOn = cb.checked;
+    if (autoOn) {
       fetchUpdates();
       timer = setInterval(fetchUpdates, 30000);
       setStatus('watching…');
     } else {
+      if (timer) { clearInterval(timer); timer = null; }
       setStatus('');
     }
+  };
+
+  // Click expanded image to collapse back to thumbnail
+  function wireImageCollapse(root) {
+    var imgs = root.querySelectorAll('.media-expanded');
+    imgs.forEach(function(img) {
+      if (img.tagName !== 'IMG') return;
+      if (img.dataset.collapseWired) return;
+      img.dataset.collapseWired = '1';
+      img.style.cursor = 'zoom-out';
+      img.addEventListener('click', function() {
+        var container = img.closest('.file-container');
+        if (!container) return;
+        var closeBtn = container.querySelector('.media-close-btn');
+        if (closeBtn) collapseMedia(closeBtn);
+      });
+    });
+  }
+
+  // Wire existing images on page load
+  wireImageCollapse(document);
+
+  // Re-wire after expand so click-to-collapse is ready when image appears
+  var origExpand = window.expandMedia;
+  window.expandMedia = function(preview) {
+    origExpand(preview);
+    var fc = preview.closest('.file-container');
+    if (fc) wireImageCollapse(fc);
   };
 })();
 </script>"#
@@ -444,7 +470,15 @@ pub fn mod_log_page(
         pagination = pagination_html,
     );
 
-    base_layout("mod log — admin", None, &body, csrf_token, boards, false)
+    base_layout(
+        "mod log — admin",
+        None,
+        &body,
+        csrf_token,
+        boards,
+        false,
+        false,
+    )
 }
 
 use chrono::{TimeZone, Utc};
@@ -474,6 +508,7 @@ fn base_layout(
     csrf_token: &str,
     boards: &[Board],
     collapse_greentext: bool,
+    allow_archive: bool,
 ) -> String {
     let board_links: String = boards
         .iter()
@@ -500,15 +535,19 @@ fn base_layout(
 
     // Sticky catalog bar shown when browsing a specific board
     let catalog_bar = if let Some(b) = board_short {
+        let b_esc = escape_html(b);
+        let archive_link = if allow_archive {
+            format!(
+                "  <span class=\"catalog-bar-sep\">|</span>\n  <a class=\"catalog-bar-link\" href=\"/{b}/archive\">[ archive ]</a>",
+                b = b_esc
+            )
+        } else {
+            String::new()
+        };
         format!(
-            r#"<div class="catalog-bar">
-  <a class="catalog-bar-link" href="/{b}/catalog">[ /{b}/ catalog ]</a>
-  <span class="catalog-bar-sep">|</span>
-  <a class="catalog-bar-link" href="/{b}/">[ /{b}/ index ]</a>
-  <span class="catalog-bar-sep">|</span>
-  <a class="catalog-bar-link" href="/{b}/archive">[ archive ]</a>
-</div>"#,
-            b = escape_html(b)
+            "<div class=\"catalog-bar\">\n  <a class=\"catalog-bar-link\" href=\"/{b}/catalog\">[ /{b}/ catalog ]</a>\n  <span class=\"catalog-bar-sep\">|</span>\n  <a class=\"catalog-bar-link\" href=\"/{b}/\">[ /{b}/ index ]</a>\n{archive_link}\n</div>",
+            b = b_esc,
+            archive_link = archive_link,
         )
     } else {
         String::new()
@@ -747,6 +786,7 @@ pub fn index_page(
         csrf_token,
         &all_boards,
         false,
+        false,
     )
 }
 
@@ -789,14 +829,14 @@ pub fn board_page(
     }
 
     body.push_str(&format!(
-        r#"<div class="board-header"><h1>/{short}/  — {name}</h1><p class="board-desc">{desc}</p></div>"#,
+        r#"<div class="board-header board-index-header"><h1>/{short}/  — {name}</h1><p class="board-desc">{desc}</p></div>"#,
         short = escape_html(&board.short_name),
         name = escape_html(&board.name),
         desc = escape_html(&board.description),
     ));
 
     body.push_str(&format!(
-        r#"<div class="post-toggle-bar centered">
+        r#"<div class="post-toggle-bar centered catalog-toggle-bar">
   <button class="post-toggle-btn" onclick="togglePostForm()">[ Start a New Thread ]</button>
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
@@ -832,6 +872,7 @@ pub fn board_page(
         csrf_token,
         boards,
         collapse_greentext,
+        board.allow_archive,
     )
 }
 
@@ -850,6 +891,13 @@ fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String
         )
     } else {
         String::new()
+    };
+
+    let edit_token_row = if board.allow_editing {
+        r#"    <tr><td>edit token</td>
+        <td><input type="text" name="deletion_token" placeholder="optional — lets you edit post" maxlength="64"><span style="font-size:0.72rem;color:var(--text-dim)"> keep it secret</span></td></tr>"#
+    } else {
+        ""
     };
 
     format!(
@@ -879,8 +927,7 @@ fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String
         <td><input type="file" name="file" onchange="checkFileSize(this)" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
             <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a · max {audio_mb} MiB</span></td></tr>
     {audio_combo_row}
-    <tr><td>del token</td>
-        <td><input type="text" name="deletion_token" placeholder="password to delete" maxlength="64"></td></tr>
+    {edit_token_row}
     <tr><td colspan="2">
       <details class="poll-creator">
         <summary>[ 📊 Add a Poll to this thread ]</summary>
@@ -938,6 +985,7 @@ function updateRemoveButtons() {{
         video_mb = video_mb,
         audio_mb = audio_mb,
         audio_combo_row = audio_combo_row,
+        edit_token_row = edit_token_row,
     )
 }
 
@@ -1095,6 +1143,7 @@ fn render_thread_summary(
             false,
             is_admin,
             true,
+            0, // no edit link on board index previews
         ));
     }
 
@@ -1185,13 +1234,21 @@ pub fn thread_page(
     };
 
     body.push_str(&format!(
-        r#"<div class="board-header">
-<a href="/{s}/">[ return ]</a> | <a href="/{s}/catalog">[ catalog ]</a>
-<span class="thread-id-badge" id="poll">Thread No.<strong>{tid}</strong></span>
+        r##"<div class="thread-board-banner board-thread-header">/{s}/ — {bn}</div>
+<div class="board-header thread-nav">
+  <a href="/{s}/">[ Return ]</a>
+  <a href="/{s}/catalog">[ Catalog ]</a>
+  <a href="#bottom">[ Bottom ]</a>
+  <button class="thread-nav-btn" onclick="fetchUpdates()">[ Update ]</button>
+  <label class="autoupdate-label">
+    <input type="checkbox" id="autoupdate-toggle-cb" onchange="toggleAutoUpdate(this)">
+    Auto
+  </label>
+  <span class="autoupdate-status" id="autoupdate-status"></span>
 </div>
-"#,
+"##,
         s = escape_html(&board.short_name),
-        tid = thread.id,
+        bn = escape_html(&board.name),
     ));
     body.push_str(locked_notice);
 
@@ -1216,11 +1273,13 @@ pub fn thread_page(
             true,
             is_admin,
             true,
+            board.edit_window_secs,
         ));
     }
 
     // Close the posts container opened above
     body.push_str("</div><!-- #thread-posts -->\n");
+    body.push_str("<div id=\"bottom\"></div>\n");
 
     if !thread.locked {
         let form_html = reply_form(&board.short_name, thread.id, csrf_token, board);
@@ -1301,6 +1360,7 @@ pub fn thread_page(
         csrf_token,
         boards,
         collapse_greentext,
+        board.allow_archive,
     )
 }
 
@@ -1410,6 +1470,7 @@ pub fn render_post(
     show_delete: bool,
     is_admin: bool,
     show_media: bool,
+    edit_window_secs: i64,
 ) -> String {
     let tripcode_html = post
         .tripcode
@@ -1575,13 +1636,13 @@ pub fn render_post(
         post.body_html
     ));
 
-    // User delete form (only on thread pages where show_delete=true)
+    // Edit link + report button (only on thread pages where show_delete=true)
     if show_delete {
         let now = chrono::Utc::now().timestamp();
-        let within_edit_window = now - post.created_at <= crate::db::EDIT_WINDOW_SECS;
+        let within_edit_window = edit_window_secs > 0 && now - post.created_at <= edit_window_secs;
         let edit_link = if within_edit_window {
             format!(
-                r#" <a class="edit-btn" href="/{board}/post/{pid}/edit" title="Edit within 5 minutes of posting">edit</a>"#,
+                r#" <a class="edit-btn" href="/{board}/post/{pid}/edit" title="Edit post">edit</a>"#,
                 board = escape_html(board_short),
                 pid = post.id,
             )
@@ -1600,18 +1661,7 @@ pub fn render_post(
         );
 
         html.push_str(&format!(
-            r#"<div class="post-controls">
-<form class="delete-form" method="POST" action="/delete">
-<input type="hidden" name="_csrf"    value="{csrf}">
-<input type="hidden" name="post_id"  value="{pid}">
-<input type="hidden" name="board"    value="{board}">
-<input type="text"   name="deletion_token" placeholder="del token" maxlength="64" size="12">
-<button type="submit" class="del-btn">del</button>
-</form>{edit_link}{report_btn}
-</div>"#,
-            csrf = escape_html(csrf_token),
-            pid = post.id,
-            board = escape_html(board_short),
+            r#"<div class="post-controls">{edit_link}{report_btn}</div>"#,
             edit_link = edit_link,
             report_btn = report_btn,
         ));
@@ -1678,6 +1728,13 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str, board: &Board
         String::new()
     };
 
+    let edit_token_row = if board.allow_editing {
+        r#"    <tr><td>edit token</td>
+        <td><input type="text" name="deletion_token" placeholder="optional — lets you edit post" maxlength="64"><span style="font-size:0.72rem;color:var(--text-dim)"> keep it secret</span></td></tr>"#
+    } else {
+        ""
+    };
+
     format!(
         r#"<div class="post-form-container reply-form-container">
 <div class="post-form-title">[ reply to thread ]</div>
@@ -1694,8 +1751,7 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str, board: &Board
             <span style="font-size:0.72rem;color:var(--text-dim)">{file_hint}</span></td></tr>
 {audio_combo_row}    <tr><td>options</td>
         <td><label class="sage-label"><input type="checkbox" name="sage" value="1"> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
-    <tr><td>del token</td>
-        <td><input type="text" name="deletion_token" placeholder="password to delete" maxlength="64"></td></tr>
+    {edit_token_row}
   </table>
 </form>
 </div>"#,
@@ -1705,6 +1761,7 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str, board: &Board
         file_accept = file_accept,
         file_hint = file_hint,
         audio_combo_row = audio_combo_row,
+        edit_token_row = edit_token_row,
     )
 }
 
@@ -1721,17 +1778,28 @@ pub fn catalog_page(
     let bn = escape_html(&board.name);
 
     let mut body = format!(
-        r#"<div class="board-header">
-  <h1>/{bs}/  — {bn} — catalog</h1>
-  <p class="board-desc">{desc}</p>
+        r#"<div class="board-header catalog-header-row">
+  <div class="catalog-header-left board-catalog-header">
+    <h1>/{bs}/  — {bn}</h1>
+    <p class="board-desc">{desc}</p>
+  </div>
+  <div class="catalog-sort-wrap">
+    <label class="catalog-sort-label" for="catalog-sort">sort:</label>
+    <select id="catalog-sort" class="catalog-sort-select" onchange="sortCatalog(this.value)">
+      <option value="bump" selected>bump order</option>
+      <option value="replies">reply count</option>
+      <option value="created">creation date</option>
+      <option value="last_reply">last reply</option>
+    </select>
+  </div>
 </div>
-<div class="post-toggle-bar centered">
+<div class="post-toggle-bar centered catalog-toggle-bar">
   <button class="post-toggle-btn" onclick="togglePostForm()">[ Start a New Thread ]</button>
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {form}
 </div>
-<div class="catalog-grid">"#,
+<div class="catalog-grid" id="catalog-grid">"#,
         bs = bs,
         bn = bn,
         desc = escape_html(&board.description),
@@ -1755,25 +1823,72 @@ pub fn catalog_page(
         let preview: String = subject.chars().take(80).collect();
 
         body.push_str(&format!(
-            r#"<div class="catalog-item{sticky}">
+            r#"<div class="catalog-item{sticky}" data-replies="{replies}" data-created="{created}" data-bumped="{bumped}" data-sticky="{is_sticky}">
 <a href="/{board}/thread/{tid}">
 {thumb}
 <div class="catalog-info">
-<span class="catalog-replies">{replies}R</span>
+<span class="catalog-replies">R: {replies} / I: {images}</span>
 <p class="catalog-subject">{subj}</p>
 </div>
 </a>
 </div>"#,
             sticky = if t.sticky { " sticky" } else { "" },
+            is_sticky = if t.sticky { "1" } else { "0" },
             board = escape_html(&board.short_name),
             tid = t.id,
             thumb = thumb_html,
             replies = t.reply_count,
+            images = t.image_count,
             subj = escape_html(&preview),
+            created = t.created_at,
+            bumped = t.bumped_at,
         ));
     }
 
     body.push_str("</div>");
+    body.push_str(
+        r#"<script>
+(function() {
+  var SORT_KEY = 'catalog_sort';
+  var saved = sessionStorage.getItem(SORT_KEY);
+  if (saved) {
+    var sel = document.getElementById('catalog-sort');
+    if (sel) { sel.value = saved; sortCatalog(saved); }
+  }
+})();
+
+function sortCatalog(mode) {
+  sessionStorage.setItem('catalog_sort', mode);
+  var grid = document.getElementById('catalog-grid');
+  if (!grid) return;
+  var items = Array.from(grid.querySelectorAll('.catalog-item'));
+
+  items.sort(function(a, b) {
+    // bump order: stickies always pinned to front
+    if (mode === 'bump') {
+      var as_ = parseInt(a.dataset.sticky) || 0;
+      var bs_ = parseInt(b.dataset.sticky) || 0;
+      if (as_ !== bs_) return bs_ - as_;
+      return parseInt(b.dataset.bumped) - parseInt(a.dataset.bumped);
+    }
+    if (mode === 'replies') {
+      return parseInt(b.dataset.replies) - parseInt(a.dataset.replies);
+    }
+    if (mode === 'created') {
+      return parseInt(b.dataset.created) - parseInt(a.dataset.created);
+    }
+    if (mode === 'last_reply') {
+      return parseInt(b.dataset.bumped) - parseInt(a.dataset.bumped);
+    }
+    return 0;
+  });
+
+  var frag = document.createDocumentFragment();
+  items.forEach(function(item) { frag.appendChild(item); });
+  grid.appendChild(frag);
+}
+</script>"#,
+    );
     body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
         crate::config::CONFIG.max_image_size,
@@ -1786,6 +1901,7 @@ pub fn catalog_page(
         csrf_token,
         boards,
         collapse_greentext,
+        board.allow_archive,
     )
 }
 
@@ -1828,6 +1944,7 @@ pub fn search_page(
                 false,
                 false,
                 true,
+                0, // no edit link on search results
             ));
         }
         body.push_str(&render_pagination(
@@ -1848,10 +1965,9 @@ pub fn search_page(
         csrf_token,
         boards,
         collapse_greentext,
+        board.allow_archive,
     )
 }
-
-// ─── Archive page ─────────────────────────────────────────────────────────────
 
 pub fn archive_page(
     board: &Board,
@@ -1946,10 +2062,9 @@ They are preserved here permanently.</p>
         csrf_token,
         boards,
         collapse_greentext,
+        true, // archive page — link is always shown
     )
 }
-
-// ─── Admin pages ──────────────────────────────────────────────────────────────
 
 pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board]) -> String {
     let err_html = error
@@ -1972,7 +2087,7 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
         err = err_html,
         csrf = escape_html(csrf_token),
     );
-    base_layout("admin login", None, &body, csrf_token, boards, false)
+    base_layout("admin login", None, &body, csrf_token, boards, false, false)
 }
 
 pub fn admin_panel_page(
@@ -2000,6 +2115,9 @@ pub fn admin_panel_page(
   <label>Description<input type="text" name="description" value="{desc_raw}" maxlength="256"></label>
   <label>Bump limit<input type="number" name="bump_limit" value="{bump}" min="1" max="10000"></label>
   <label>Max threads<input type="number" name="max_threads" value="{maxt}" min="1" max="1000"></label>
+  <label title="How long (seconds) after posting a user may edit. 0 = use default (300 s).">
+    Edit window (s)<input type="number" name="edit_window_secs" value="{edit_win}" min="0" max="86400">
+  </label>
 </div>
 <div class="board-settings-checks">
   <label><input type="checkbox" name="nsfw"            value="1"{nsfw_ck}> NSFW</label>
@@ -2007,7 +2125,12 @@ pub fn admin_panel_page(
   <label><input type="checkbox" name="allow_video"     value="1"{vid_ck}>  Allow video</label>
   <label><input type="checkbox" name="allow_audio"     value="1"{aud_ck}>  Allow audio</label>
   <label><input type="checkbox" name="allow_tripcodes" value="1"{trip_ck}> Allow tripcodes</label>
+  <label><input type="checkbox" name="allow_archive"   value="1"{archive_ck}> Enable archive</label>
+  <label><input type="checkbox" name="allow_editing"   value="1"{edit_ck}
+    onchange="(function(cb){{var row=cb.closest('form').querySelector('.edit-window-row');if(row)row.style.display=cb.checked?'':'none';}})(this)">
+    Allow post editing</label>
 </div>
+<div class="board-settings-grid edit-window-row" style="margin-top:0.4rem;{edit_win_display}">
 <div class="board-settings-actions">
   <button type="submit">save settings</button>
 </div>
@@ -2039,11 +2162,15 @@ pub fn admin_panel_page(
             desc_raw = escape_html(&b.description),
             bump = b.bump_limit,
             maxt = b.max_threads,
+            edit_win = b.edit_window_secs,
+            edit_win_display = if b.allow_editing { "" } else { "display:none" },
             nsfw_ck = checked(b.nsfw),
             img_ck = checked(b.allow_images),
             vid_ck = checked(b.allow_video),
             aud_ck = checked(b.allow_audio),
             trip_ck = checked(b.allow_tripcodes),
+            archive_ck = checked(b.allow_archive),
+            edit_ck = checked(b.allow_editing),
         ));
     }
 
@@ -2365,7 +2492,7 @@ pub fn admin_panel_page(
         report_badge = report_badge,
     );
 
-    base_layout("admin panel", None, &body, csrf_token, boards, false)
+    base_layout("admin panel", None, &body, csrf_token, boards, false, false)
 }
 
 // ─── Edit post page ───────────────────────────────────────────────────────────
@@ -2397,16 +2524,16 @@ pub fn edit_post_page(
 <div class="post-form-container">
 <div class="post-form-title">[ edit post No.{pid} ]</div>
 <p style="font-size:0.8rem;color:var(--text-dim)">
-  You have 5 minutes from when a post is made to edit it.<br>
-  Your deletion token is required to confirm the edit.
+  You can edit this post within the board's edit window.<br>
+  Your edit token is required to confirm the edit.
 </p>
 <form class="post-form" method="POST" action="/{board}/post/{pid}/edit">
   <input type="hidden" name="_csrf" value="{csrf}">
   <table>
     <tr><td>body</td>
         <td><textarea name="body" rows="6" maxlength="4096">{current_body}</textarea></td></tr>
-    <tr><td>del token</td>
-        <td><input type="text" name="deletion_token" value="{token}" placeholder="your deletion token" maxlength="64"></td></tr>
+    <tr><td>edit token</td>
+        <td><input type="text" name="deletion_token" value="{token}" placeholder="your edit token" maxlength="64"></td></tr>
     <tr><td></td>
         <td><button type="submit">save edit</button>
             <a href="/{board}/thread/{tid}#p{pid}" style="margin-left:1rem">cancel</a></td></tr>
@@ -2430,10 +2557,9 @@ pub fn edit_post_page(
         csrf_token,
         boards,
         collapse_greentext,
+        board.allow_archive,
     )
 }
-
-// ─── Error page ───────────────────────────────────────────────────────────────
 
 pub fn error_page(code: u16, message: &str) -> String {
     format!(
@@ -2541,7 +2667,7 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
     );
 
     // Use a minimal boards list (empty) since we don't need board nav here
-    base_layout("VACUUM result", None, &body, csrf_token, &[], false)
+    base_layout("VACUUM result", None, &body, csrf_token, &[], false, false)
 }
 
 // ─── Admin IP history page ─────────────────────────────────────────────────────
@@ -2656,6 +2782,7 @@ pub fn admin_ip_history_page(
         &body,
         csrf_token,
         all_boards,
+        false,
         false,
     )
 }

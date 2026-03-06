@@ -323,7 +323,6 @@ fn build_router(state: AppState) -> Router {
             "/{board}/post/{id}/edit",
             post(handlers::thread::edit_post_post),
         )
-        .route("/delete", post(handlers::board::delete_post))
         .route("/report", post(handlers::board::file_report))
         .route("/vote", post(handlers::thread::vote_handler))
         .route(

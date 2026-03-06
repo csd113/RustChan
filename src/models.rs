@@ -75,7 +75,10 @@ pub struct Board {
     pub allow_video: bool,  // per-board video upload toggle (default: true)
     pub allow_audio: bool,  // per-board audio upload toggle (default: true)
     pub allow_tripcodes: bool,
-    pub created_at: i64, // Unix timestamp
+    pub allow_editing: bool,   // per-board post editing toggle (default: off)
+    pub edit_window_secs: i64, // seconds users can edit their posts (0 = use board default 300)
+    pub allow_archive: bool,   // when true, overflow threads are archived instead of deleted
+    pub created_at: i64,       // Unix timestamp
 }
 
 /// A thread (the OP post + its replies share this record for metadata)
@@ -90,6 +93,7 @@ pub struct Thread {
     pub sticky: bool,
     pub archived: bool,
     pub reply_count: i64,
+    pub image_count: i64,
     // Joined from posts (OP's body/image for catalog previews)
     pub op_body: Option<String>,
     pub op_file: Option<String>,

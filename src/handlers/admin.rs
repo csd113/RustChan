@@ -838,6 +838,9 @@ pub struct BoardSettingsForm {
     allow_video: Option<String>,
     allow_audio: Option<String>,
     allow_tripcodes: Option<String>,
+    allow_editing: Option<String>,
+    edit_window_secs: Option<String>,
+    allow_archive: Option<String>,
     _csrf: Option<String>,
 }
 
@@ -861,6 +864,12 @@ pub async fn update_board_settings(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(150)
         .clamp(1, 1_000);
+    let edit_window_secs = form
+        .edit_window_secs
+        .as_deref()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(300)
+        .clamp(0, 86_400); // 0 = disabled, max 24 h
 
     // Enforce server-side length limits on free-text fields
     let name = form.name.trim().chars().take(64).collect::<String>();
@@ -889,6 +898,9 @@ pub async fn update_board_settings(
                 form.allow_video.as_deref() == Some("1"),
                 form.allow_audio.as_deref() == Some("1"),
                 form.allow_tripcodes.as_deref() == Some("1"),
+                edit_window_secs,
+                form.allow_editing.as_deref() == Some("1"),
+                form.allow_archive.as_deref() == Some("1"),
             )?;
             info!("Admin updated settings for board id={}", board_id);
             Ok(())
@@ -1464,7 +1476,8 @@ pub async fn create_board_backup(
             let board: BoardRow = conn
                 .query_row(
                     "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                             allow_images, allow_video, allow_audio, allow_tripcodes, created_at
+                             allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
+                             allow_editing, allow_archive, created_at
                       FROM boards WHERE short_name = ?1",
                     params![board_short],
                     |r| {
@@ -1480,7 +1493,10 @@ pub async fn create_board_backup(
                             allow_video: r.get::<_, i64>(8)? != 0,
                             allow_audio: r.get::<_, i64>(9)? != 0,
                             allow_tripcodes: r.get::<_, i64>(10)? != 0,
-                            created_at: r.get(11)?,
+                            edit_window_secs: r.get(11)?,
+                            allow_editing: r.get::<_, i64>(12)? != 0,
+                            allow_archive: r.get::<_, i64>(13)? != 0,
+                            created_at: r.get(14)?,
                         })
                     },
                 )
@@ -2059,8 +2075,9 @@ pub async fn restore_saved_board_backup(
                 conn.execute(
                     "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                      max_threads=?4, bump_limit=?5,
-                     allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9
-                     WHERE id=?10",
+                     allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
+                     edit_window_secs=?10, allow_editing=?11, allow_archive=?12
+                     WHERE id=?13",
                     params![
                         manifest.board.name,
                         manifest.board.description,
@@ -2071,6 +2088,9 @@ pub async fn restore_saved_board_backup(
                         manifest.board.allow_video as i64,
                         manifest.board.allow_audio as i64,
                         manifest.board.allow_tripcodes as i64,
+                        manifest.board.edit_window_secs,
+                        manifest.board.allow_editing as i64,
+                        manifest.board.allow_archive as i64,
                         eid,
                     ],
                 )
@@ -2079,8 +2099,9 @@ pub async fn restore_saved_board_backup(
             } else {
                 conn.execute(
                     "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
-                     bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                     bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
+                     edit_window_secs, allow_editing, allow_archive, created_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
                     params![
                         manifest.board.short_name,
                         manifest.board.name,
@@ -2092,6 +2113,9 @@ pub async fn restore_saved_board_backup(
                         manifest.board.allow_video as i64,
                         manifest.board.allow_audio as i64,
                         manifest.board.allow_tripcodes as i64,
+                        manifest.board.edit_window_secs,
+                        manifest.board.allow_editing as i64,
+                        manifest.board.allow_archive as i64,
                         manifest.board.created_at,
                     ],
                 )
@@ -2236,15 +2260,18 @@ pub async fn restore_saved_board_backup(
                     continue;
                 }
                 if let Some(rel) = name.strip_prefix("uploads/") {
-                    if rel.is_empty() { continue; }
+                    if rel.is_empty() {
+                        continue;
+                    }
                     let target = PathBuf::from(&upload_dir).join(rel);
                     if entry.is_dir() {
                         std::fs::create_dir_all(&target)
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {}", e)))?;
                     } else {
                         if let Some(p) = target.parent() {
-                            std::fs::create_dir_all(p)
-                                .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir parent: {}", e)))?;
+                            std::fs::create_dir_all(p).map_err(|e| {
+                                AppError::Internal(anyhow::anyhow!("mkdir parent: {}", e))
+                            })?;
                         }
                         let mut out = std::fs::File::create(&target)
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("Create: {}", e)))?;
@@ -2288,6 +2315,9 @@ mod board_backup_types {
         pub allow_video: bool,
         pub allow_audio: bool,
         pub allow_tripcodes: bool,
+        pub edit_window_secs: i64,
+        pub allow_editing: bool,
+        pub allow_archive: bool,
         pub created_at: i64,
     }
     #[derive(Serialize, Deserialize)]
@@ -2387,7 +2417,8 @@ pub async fn board_backup(
             // ── Board row ─────────────────────────────────────────────────
             let board: BoardRow = conn.query_row(
                 "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                        allow_images, allow_video, allow_audio, allow_tripcodes, created_at
+                        allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
+                        allow_editing, allow_archive, created_at
                  FROM boards WHERE short_name = ?1",
                 params![board_short],
                 |r| Ok(BoardRow {
@@ -2402,7 +2433,10 @@ pub async fn board_backup(
                     allow_video: r.get::<_, i64>(8)? != 0,
                     allow_audio: r.get::<_, i64>(9)? != 0,
                     allow_tripcodes: r.get::<_, i64>(10)? != 0,
-                    created_at: r.get(11)?,
+                    edit_window_secs: r.get(11)?,
+                    allow_editing: r.get::<_, i64>(12)? != 0,
+                    allow_archive: r.get::<_, i64>(13)? != 0,
+                    created_at: r.get(14)?,
                 }),
             ).map_err(|_| AppError::NotFound(format!("Board '{}' not found", board_short)))?;
 
@@ -2634,12 +2668,14 @@ pub async fn board_restore(
             if !archive.file_names().any(|n| n == "board.json") {
                 return Err(AppError::BadRequest(
                     "Invalid board backup: zip must contain 'board.json'. \
-                     (Did you upload a full-site backup instead?)".into(),
+                     (Did you upload a full-site backup instead?)"
+                        .into(),
                 ));
             }
 
             let manifest: BoardBackupManifest = {
-                let mut entry = archive.by_name("board.json")
+                let mut entry = archive
+                    .by_name("board.json")
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Read board.json: {}", e)))?;
                 let mut buf = Vec::new();
                 std::io::Read::read_to_end(&mut entry, &mut buf)
@@ -2651,10 +2687,13 @@ pub async fn board_restore(
             let board_short = manifest.board.short_name.clone();
 
             // ── Wipe or create the board ──────────────────────────────────
-            let existing_id: Option<i64> = conn.query_row(
-                "SELECT id FROM boards WHERE short_name = ?1",
-                params![board_short], |r| r.get(0),
-            ).ok();
+            let existing_id: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM boards WHERE short_name = ?1",
+                    params![board_short],
+                    |r| r.get(0),
+                )
+                .ok();
 
             let live_board_id: i64 = if let Some(eid) = existing_id {
                 conn.execute("DELETE FROM threads WHERE board_id = ?1", params![eid])
@@ -2662,32 +2701,51 @@ pub async fn board_restore(
                 conn.execute(
                     "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                      max_threads=?4, bump_limit=?5,
-                     allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9
-                     WHERE id=?10",
+                     allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
+                     edit_window_secs=?10, allow_editing=?11, allow_archive=?12
+                     WHERE id=?13",
                     params![
-                        manifest.board.name, manifest.board.description,
+                        manifest.board.name,
+                        manifest.board.description,
                         manifest.board.nsfw as i64,
-                        manifest.board.max_threads, manifest.board.bump_limit,
-                        manifest.board.allow_images as i64, manifest.board.allow_video as i64,
-                        manifest.board.allow_audio as i64, manifest.board.allow_tripcodes as i64,
+                        manifest.board.max_threads,
+                        manifest.board.bump_limit,
+                        manifest.board.allow_images as i64,
+                        manifest.board.allow_video as i64,
+                        manifest.board.allow_audio as i64,
+                        manifest.board.allow_tripcodes as i64,
+                        manifest.board.edit_window_secs,
+                        manifest.board.allow_editing as i64,
+                        manifest.board.allow_archive as i64,
                         eid,
                     ],
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!("Update board: {}", e)))?;
+                )
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Update board: {}", e)))?;
                 eid
             } else {
                 conn.execute(
                     "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
-                     bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                     bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
+                     edit_window_secs, allow_editing, allow_archive, created_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
                     params![
-                        manifest.board.short_name, manifest.board.name,
-                        manifest.board.description, manifest.board.nsfw as i64,
-                        manifest.board.max_threads, manifest.board.bump_limit,
-                        manifest.board.allow_images as i64, manifest.board.allow_video as i64,
-                        manifest.board.allow_audio as i64, manifest.board.allow_tripcodes as i64,
+                        manifest.board.short_name,
+                        manifest.board.name,
+                        manifest.board.description,
+                        manifest.board.nsfw as i64,
+                        manifest.board.max_threads,
+                        manifest.board.bump_limit,
+                        manifest.board.allow_images as i64,
+                        manifest.board.allow_video as i64,
+                        manifest.board.allow_audio as i64,
+                        manifest.board.allow_tripcodes as i64,
+                        manifest.board.edit_window_secs,
+                        manifest.board.allow_editing as i64,
+                        manifest.board.allow_archive as i64,
                         manifest.board.created_at,
                     ],
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert board: {}", e)))?;
+                )
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert board: {}", e)))?;
                 conn.last_insert_rowid()
             };
 
@@ -2705,74 +2763,126 @@ pub async fn board_restore(
                          locked, sticky, reply_count)
                          VALUES (?1,?2,?3,?4,?5,?6,?7)",
                         params![
-                            live_board_id, t.subject, t.created_at, t.bumped_at,
-                            t.locked as i64, t.sticky as i64, t.reply_count,
+                            live_board_id,
+                            t.subject,
+                            t.created_at,
+                            t.bumped_at,
+                            t.locked as i64,
+                            t.sticky as i64,
+                            t.reply_count,
                         ],
-                    ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert thread {}: {}", t.id, e)))?;
+                    )
+                    .map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Insert thread {}: {}", t.id, e))
+                    })?;
                     thread_id_map.insert(t.id, conn.last_insert_rowid());
                 }
 
                 // ── Posts ─────────────────────────────────────────────────────
                 for p in &manifest.posts {
-                    let new_tid = *thread_id_map.get(&p.thread_id)
-                        .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
-                            "Post {} refs unknown thread {}", p.id, p.thread_id)))?;
+                    let new_tid = *thread_id_map.get(&p.thread_id).ok_or_else(|| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Post {} refs unknown thread {}",
+                            p.id,
+                            p.thread_id
+                        ))
+                    })?;
                     conn.execute(
                         "INSERT INTO posts (thread_id, board_id, name, tripcode, subject,
                          body, body_html, ip_hash, file_path, file_name, file_size,
                          thumb_path, mime_type, media_type, created_at, deletion_token, is_op)
                          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
                         params![
-                            new_tid, live_board_id, p.name, p.tripcode, p.subject,
-                            p.body, p.body_html, p.ip_hash,
-                            p.file_path, p.file_name, p.file_size,
-                            p.thumb_path, p.mime_type, p.media_type,
-                            p.created_at, p.deletion_token, p.is_op as i64,
+                            new_tid,
+                            live_board_id,
+                            p.name,
+                            p.tripcode,
+                            p.subject,
+                            p.body,
+                            p.body_html,
+                            p.ip_hash,
+                            p.file_path,
+                            p.file_name,
+                            p.file_size,
+                            p.thumb_path,
+                            p.mime_type,
+                            p.media_type,
+                            p.created_at,
+                            p.deletion_token,
+                            p.is_op as i64,
                         ],
-                    ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert post {}: {}", p.id, e)))?;
+                    )
+                    .map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Insert post {}: {}", p.id, e))
+                    })?;
                 }
 
                 // ── Polls ─────────────────────────────────────────────────────
                 let mut poll_id_map: HashMap<i64, i64> = HashMap::new();
                 for p in &manifest.polls {
-                    let new_tid = *thread_id_map.get(&p.thread_id)
-                        .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
-                            "Poll {} refs unknown thread {}", p.id, p.thread_id)))?;
+                    let new_tid = *thread_id_map.get(&p.thread_id).ok_or_else(|| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Poll {} refs unknown thread {}",
+                            p.id,
+                            p.thread_id
+                        ))
+                    })?;
                     conn.execute(
                         "INSERT INTO polls (thread_id, question, expires_at, created_at)
                          VALUES (?1,?2,?3,?4)",
                         params![new_tid, p.question, p.expires_at, p.created_at],
-                    ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert poll {}: {}", p.id, e)))?;
+                    )
+                    .map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Insert poll {}: {}", p.id, e))
+                    })?;
                     poll_id_map.insert(p.id, conn.last_insert_rowid());
                 }
 
                 // ── Poll options ──────────────────────────────────────────────
                 let mut option_id_map: HashMap<i64, i64> = HashMap::new();
                 for o in &manifest.poll_options {
-                    let new_pid = *poll_id_map.get(&o.poll_id)
-                        .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
-                            "Option {} refs unknown poll {}", o.id, o.poll_id)))?;
+                    let new_pid = *poll_id_map.get(&o.poll_id).ok_or_else(|| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Option {} refs unknown poll {}",
+                            o.id,
+                            o.poll_id
+                        ))
+                    })?;
                     conn.execute(
                         "INSERT INTO poll_options (poll_id, text, position) VALUES (?1,?2,?3)",
                         params![new_pid, o.text, o.position],
-                    ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert option {}: {}", o.id, e)))?;
+                    )
+                    .map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Insert option {}: {}", o.id, e))
+                    })?;
                     option_id_map.insert(o.id, conn.last_insert_rowid());
                 }
 
                 // ── Poll votes ────────────────────────────────────────────────
                 for v in &manifest.poll_votes {
-                    let new_pid = *poll_id_map.get(&v.poll_id)
-                        .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
-                            "Vote {} refs unknown poll {}", v.id, v.poll_id)))?;
-                    let new_oid = *option_id_map.get(&v.option_id)
-                        .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
-                            "Vote {} refs unknown option {}", v.id, v.option_id)))?;
+                    let new_pid = *poll_id_map.get(&v.poll_id).ok_or_else(|| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Vote {} refs unknown poll {}",
+                            v.id,
+                            v.poll_id
+                        ))
+                    })?;
+                    let new_oid = *option_id_map.get(&v.option_id).ok_or_else(|| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Vote {} refs unknown option {}",
+                            v.id,
+                            v.option_id
+                        ))
+                    })?;
                     conn.execute(
                         "INSERT OR IGNORE INTO poll_votes
                          (poll_id, option_id, ip_hash, created_at)
                          VALUES (?1,?2,?3,?4)",
                         params![new_pid, new_oid, v.ip_hash, v.created_at],
-                    ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert vote {}: {}", v.id, e)))?;
+                    )
+                    .map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Insert vote {}: {}", v.id, e))
+                    })?;
                 }
 
                 // ── File hashes (dedup table — skip on collision) ─────────────
@@ -2781,16 +2891,24 @@ pub async fn board_restore(
                         "INSERT OR IGNORE INTO file_hashes
                          (sha256, file_path, thumb_path, mime_type, created_at)
                          VALUES (?1,?2,?3,?4,?5)",
-                        params![fh.sha256, fh.file_path, fh.thumb_path, fh.mime_type, fh.created_at],
-                    ).map_err(|e| AppError::Internal(anyhow::anyhow!("Insert file_hash: {}", e)))?;
+                        params![
+                            fh.sha256,
+                            fh.file_path,
+                            fh.thumb_path,
+                            fh.mime_type,
+                            fh.created_at
+                        ],
+                    )
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert file_hash: {}", e)))?;
                 }
                 Ok(())
             })();
 
             match restore_result {
                 Ok(()) => {
-                    conn.execute("COMMIT", [])
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit restore tx: {}", e)))?;
+                    conn.execute("COMMIT", []).map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Commit restore tx: {}", e))
+                    })?;
                 }
                 Err(e) => {
                     let _ = conn.execute("ROLLBACK", []);
@@ -2800,7 +2918,8 @@ pub async fn board_restore(
 
             // ── Extract upload files ──────────────────────────────────────
             for i in 0..archive.len() {
-                let mut entry = archive.by_index(i)
+                let mut entry = archive
+                    .by_index(i)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{}]: {}", i, e)))?;
                 let name = entry.name().to_string();
 
@@ -2810,20 +2929,25 @@ pub async fn board_restore(
                 }
 
                 if let Some(rel) = name.strip_prefix("uploads/") {
-                    if rel.is_empty() { continue; }
+                    if rel.is_empty() {
+                        continue;
+                    }
                     let target = PathBuf::from(&upload_dir).join(rel);
                     if entry.is_dir() {
                         std::fs::create_dir_all(&target)
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {}", e)))?;
                     } else {
                         if let Some(p) = target.parent() {
-                            std::fs::create_dir_all(p)
-                                .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir parent: {}", e)))?;
+                            std::fs::create_dir_all(p).map_err(|e| {
+                                AppError::Internal(anyhow::anyhow!("mkdir parent: {}", e))
+                            })?;
                         }
-                        let mut out = std::fs::File::create(&target)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Create file: {}", e)))?;
-                        std::io::copy(&mut entry, &mut out)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write file: {}", e)))?;
+                        let mut out = std::fs::File::create(&target).map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Create file: {}", e))
+                        })?;
+                        std::io::copy(&mut entry, &mut out).map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Write file: {}", e))
+                        })?;
                     }
                 }
             }
@@ -2831,7 +2955,8 @@ pub async fn board_restore(
             info!("Admin board restore completed for /{}/", board_short);
             // Sanitize board_short before returning — it comes from the zip manifest and
             // is used in a redirect URL query parameter.  Only allow board-name characters.
-            let safe_short: String = board_short.chars()
+            let safe_short: String = board_short
+                .chars()
                 .filter(|c| c.is_ascii_alphanumeric())
                 .take(8)
                 .collect();

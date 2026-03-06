@@ -276,6 +276,12 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         // v1.0.8: archive column on threads (non-destructive prune)
         "ALTER TABLE threads ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
         "CREATE INDEX IF NOT EXISTS idx_threads_archived ON threads(board_id, archived, bumped_at DESC)",
+        // v1.0.9: per-board edit window; 0 = use 300s when editing enabled
+        "ALTER TABLE boards ADD COLUMN edit_window_secs INTEGER NOT NULL DEFAULT 0",
+        // v1.0.9: per-board editing toggle (off by default)
+        "ALTER TABLE boards ADD COLUMN allow_editing INTEGER NOT NULL DEFAULT 0",
+        // v1.0.9: per-board archive toggle (on by default for existing boards)
+        "ALTER TABLE boards ADD COLUMN allow_archive INTEGER NOT NULL DEFAULT 1",
     ];
     for sql in migrations {
         let _ = conn.execute(sql, []); // ignore "duplicate column" errors
@@ -341,7 +347,8 @@ pub fn get_collapse_greentext(conn: &rusqlite::Connection) -> bool {
 pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                allow_images, allow_video, allow_audio, allow_tripcodes, created_at
+                allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
+                allow_editing, allow_archive, created_at
          FROM boards ORDER BY id ASC",
     )?;
     let boards = stmt
@@ -373,7 +380,8 @@ pub fn get_all_boards_with_stats(
 pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Option<Board>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                allow_images, allow_video, allow_audio, allow_tripcodes, created_at
+                allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
+                allow_editing, allow_archive, created_at
          FROM boards WHERE short_name = ?1",
     )?;
     Ok(stmt.query_row(params![short], map_board).optional()?)
@@ -448,12 +456,16 @@ pub fn update_board_settings(
     allow_video: bool,
     allow_audio: bool,
     allow_tripcodes: bool,
+    edit_window_secs: i64,
+    allow_editing: bool,
+    allow_archive: bool,
 ) -> Result<()> {
     conn.execute(
         "UPDATE boards SET name=?1, description=?2, nsfw=?3,
          bump_limit=?4, max_threads=?5,
-         allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9
-         WHERE id=?10",
+         allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
+         edit_window_secs=?10, allow_editing=?11, allow_archive=?12
+         WHERE id=?13",
         params![
             name,
             description,
@@ -464,6 +476,9 @@ pub fn update_board_settings(
             allow_video as i32,
             allow_audio as i32,
             allow_tripcodes as i32,
+            edit_window_secs,
+            allow_editing as i32,
+            allow_archive as i32,
             id,
         ],
     )?;
@@ -513,7 +528,16 @@ pub fn get_threads_for_board(
         "SELECT t.id, t.board_id, t.subject, t.created_at, t.bumped_at,
                 t.locked, t.sticky, t.reply_count,
                 op.body, op.file_path, op.thumb_path, op.name, op.tripcode, op.id,
-                t.archived
+                t.archived,
+                (SELECT COUNT(*) FROM posts p WHERE p.thread_id = t.id
+                 AND p.file_path IS NOT NULL
+                 AND (p.media_type = 'image'
+                      OR (p.media_type IS NULL AND (
+                          p.file_path LIKE '%.jpg' OR p.file_path LIKE '%.jpeg' OR
+                          p.file_path LIKE '%.png' OR p.file_path LIKE '%.gif' OR
+                          p.file_path LIKE '%.webp'
+                      ))
+                 )) AS image_count
          FROM threads t
          JOIN posts op ON op.thread_id = t.id AND op.is_op = 1
          WHERE t.board_id = ?1 AND t.archived = 0
@@ -539,6 +563,7 @@ pub fn get_threads_for_board(
                 op_tripcode: row.get(12)?,
                 op_id: row.get(13)?,
                 archived: row.get::<_, i32>(14)? != 0,
+                image_count: row.get(15)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -558,7 +583,16 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
         "SELECT t.id, t.board_id, t.subject, t.created_at, t.bumped_at,
                 t.locked, t.sticky, t.reply_count,
                 op.body, op.file_path, op.thumb_path, op.name, op.tripcode, op.id,
-                t.archived
+                t.archived,
+                (SELECT COUNT(*) FROM posts p WHERE p.thread_id = t.id
+                 AND p.file_path IS NOT NULL
+                 AND (p.media_type = 'image'
+                      OR (p.media_type IS NULL AND (
+                          p.file_path LIKE '%.jpg' OR p.file_path LIKE '%.jpeg' OR
+                          p.file_path LIKE '%.png' OR p.file_path LIKE '%.gif' OR
+                          p.file_path LIKE '%.webp'
+                      ))
+                 )) AS image_count
          FROM threads t
          JOIN posts op ON op.thread_id = t.id AND op.is_op = 1
          WHERE t.id = ?1",
@@ -581,6 +615,7 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
                 op_tripcode: row.get(12)?,
                 op_id: row.get(13)?,
                 archived: row.get::<_, i32>(14)? != 0,
+                image_count: row.get(15)?,
             })
         })
         .optional()?)
@@ -715,7 +750,27 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
     Ok(count)
 }
 
-/// Fetch archived threads for a board, newest-bumped first with pagination.
+/// Hard-delete oldest non-sticky, non-archived threads that exceed max_threads.
+/// Used when a board has archiving disabled — threads are permanently removed.
+/// Returns the count of threads deleted.
+pub fn prune_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -> Result<usize> {
+    let ids: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM threads
+             WHERE board_id = ?1 AND sticky = 0 AND archived = 0
+             ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
+        )?;
+        let ids = stmt
+            .query_map(params![board_id, max], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids
+    };
+    let count = ids.len();
+    for id in ids {
+        conn.execute("DELETE FROM threads WHERE id = ?1", params![id])?;
+    }
+    Ok(count)
+}
 pub fn get_archived_threads_for_board(
     conn: &rusqlite::Connection,
     board_id: i64,
@@ -726,7 +781,16 @@ pub fn get_archived_threads_for_board(
         "SELECT t.id, t.board_id, t.subject, t.created_at, t.bumped_at,
                 t.locked, t.sticky, t.reply_count,
                 op.body, op.file_path, op.thumb_path, op.name, op.tripcode, op.id,
-                t.archived
+                t.archived,
+                (SELECT COUNT(*) FROM posts p WHERE p.thread_id = t.id
+                 AND p.file_path IS NOT NULL
+                 AND (p.media_type = 'image'
+                      OR (p.media_type IS NULL AND (
+                          p.file_path LIKE '%.jpg' OR p.file_path LIKE '%.jpeg' OR
+                          p.file_path LIKE '%.png' OR p.file_path LIKE '%.gif' OR
+                          p.file_path LIKE '%.webp'
+                      ))
+                 )) AS image_count
          FROM threads t
          JOIN posts op ON op.thread_id = t.id AND op.is_op = 1
          WHERE t.board_id = ?1 AND t.archived = 1
@@ -751,6 +815,7 @@ pub fn get_archived_threads_for_board(
                 op_tripcode: row.get(12)?,
                 op_id: row.get(13)?,
                 archived: row.get::<_, i32>(14)? != 0,
+                image_count: row.get(15)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -916,20 +981,27 @@ pub fn verify_deletion_token(
         .unwrap_or(false))
 }
 
-/// How long (in seconds) after posting a user may edit their post (5 minutes).
-pub const EDIT_WINDOW_SECS: i64 = 20;
-
-/// Edit a post's body, verified against the deletion token and the edit window.
+/// Edit a post's body, verified against the deletion token and a per-board edit window.
 ///
+/// `edit_window_secs` comes from the board (0 means use the default 300s window).
+/// The caller is responsible for checking `board.allow_editing` before calling this.
 /// Returns `Ok(true)` on success, `Ok(false)` if the token is wrong or the
-/// edit window has closed, and `Err` for database failures.
+/// edit window has closed; `Err` for database failures.
 pub fn edit_post(
     conn: &rusqlite::Connection,
     post_id: i64,
     token: &str,
     new_body: &str,
     new_body_html: &str,
+    edit_window_secs: i64,
 ) -> Result<bool> {
+    // 0 means "use the default window of 300 seconds"
+    let window = if edit_window_secs <= 0 {
+        300
+    } else {
+        edit_window_secs
+    };
+
     // Verify token first (constant-time)
     if !verify_deletion_token(conn, post_id, token)? {
         return Ok(false);
@@ -950,7 +1022,7 @@ pub fn edit_post(
     };
 
     let now = chrono::Utc::now().timestamp();
-    if now - created_at > EDIT_WINDOW_SECS {
+    if now - created_at > window {
         return Ok(false);
     }
 
@@ -1377,7 +1449,10 @@ fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         allow_video: row.get::<_, i32>(8)? != 0,
         allow_audio: row.get::<_, i32>(9)? != 0,
         allow_tripcodes: row.get::<_, i32>(10)? != 0,
-        created_at: row.get(11)?,
+        edit_window_secs: row.get(11)?,
+        allow_editing: row.get::<_, i32>(12)? != 0,
+        allow_archive: row.get::<_, i32>(13)? != 0,
+        created_at: row.get(14)?,
     })
 }
 

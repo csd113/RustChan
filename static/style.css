@@ -245,15 +245,91 @@ body:has(.catalog-bar) main {
 }
 
 .board-header h1 {
-  font-size: 1rem;
+  font-size: 2rem;
   color: var(--green-bright);
   text-shadow: 0 0 10px rgba(0,255,65,0.4);
   letter-spacing: 0.05em;
 }
 
+/* Centered title on board index and catalog */
+.board-index-header,
+.board-catalog-header {
+  text-align: center;
+}
+.board-index-header h1,
+.board-catalog-header h1 {
+  text-align: center;
+}
+
 .board-desc { color: var(--text-dim); font-size: 0.8rem; margin-top: 2px; }
 
-/* ── Post toggle button ───────────────────────────────────────────────────── */
+/* Thread title banner — 2x size */
+.board-thread-header {
+  font-size: 2rem;
+  font-weight: bold;
+  color: var(--green-bright);
+  text-shadow: 0 0 10px rgba(0,255,65,0.4);
+  letter-spacing: 0.05em;
+  padding-bottom: 4px;
+  text-align: center;
+}
+
+/* ── Catalog header row with sort dropdown ────────────────────────────────── */
+
+.catalog-header-row {
+  position: relative;
+  text-align: center;
+}
+
+.catalog-header-left { display: block; }
+
+.catalog-sort-wrap {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.catalog-sort-label {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.catalog-sort-select {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--green);
+  font-family: var(--font);
+  font-size: 0.78rem;
+  padding: 2px 20px 2px 6px;
+  cursor: pointer;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2300c840'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 5px center;
+  transition: border-color 0.15s;
+}
+
+.catalog-sort-select:hover,
+.catalog-sort-select:focus {
+  border-color: var(--border-glow);
+}
+
+.catalog-sort-select option {
+  background: var(--bg-panel);
+  color: var(--green);
+}
+
+
 
 .post-toggle-bar {
   margin-bottom: 12px;
@@ -284,6 +360,62 @@ body:has(.catalog-bar) main {
   font-size: 2rem;
   letter-spacing: 0.06em;
   padding: 8px 0;
+}
+
+/* Catalog "Start New Thread" — half the standard centered size */
+.catalog-toggle-bar .post-toggle-btn {
+  font-size: 1rem !important;
+  letter-spacing: 0.04em !important;
+  padding: 4px 0 !important;
+}
+
+/* ── Auto-update checkbox label ───────────────────────────────────────────── */
+
+.autoupdate-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+  font-family: var(--font);
+  font-size: 0.82rem;
+  cursor: pointer;
+  user-select: none;
+  letter-spacing: 0.04em;
+}
+
+.autoupdate-label input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 13px;
+  height: 13px;
+  border: 1px solid var(--green-dim);
+  background: var(--bg-input);
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.autoupdate-label input[type="checkbox"]:checked {
+  background: var(--green-dim);
+  border-color: var(--green-bright);
+}
+
+.autoupdate-label input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 0px;
+  width: 5px;
+  height: 9px;
+  border: 2px solid var(--green-bright);
+  border-top: none;
+  border-left: none;
+  transform: rotate(45deg);
+}
+
+.autoupdate-label:hover input[type="checkbox"] {
+  border-color: var(--green-bright);
 }
 
 .post-toggle-bar.reply .post-toggle-btn {
@@ -723,7 +855,7 @@ body:has(.catalog-bar) main {
 }
 
 .catalog-info { font-size: 0.72rem; }
-.catalog-replies { color: var(--green-dim); font-weight: bold; }
+.catalog-replies { color: var(--green-dim); font-weight: bold; letter-spacing: 0.03em; }
 .catalog-subject { color: var(--text-dim); margin-top: 2px; }
 
 /* ── Index / home ─────────────────────────────────────────────────────────── */
@@ -1399,7 +1531,7 @@ body:has(.catalog-bar) main {
   border-bottom: 1px solid #82cece;
   box-shadow: 0 2px 10px rgba(74,184,200,0.12);
 }
-[data-theme="neoncubicle"] .site-header::before { color: #c84898; }
+[data-theme="neoncubicle"] .site-header::before { display: none; }
 [data-theme="neoncubicle"] a { color: #8a2a6a; }
 [data-theme="neoncubicle"] a:hover { color: #c84898; text-shadow: none; }
 [data-theme="neoncubicle"] button,
@@ -2089,34 +2221,58 @@ body:has(.catalog-bar) main {
   margin-left: 0.4rem;
 }
 
-/* ── Thread auto-update bar ───────────────────────────────────────────────── */
-.autoupdate-bar {
+/* ── Thread board banner & nav bar ───────────────────────────────────────── */
+.thread-board-banner {
+  text-align: center;
+  font-size: 1.1rem;
+  font-weight: bold;
+  color: var(--green-bright);
+  letter-spacing: 0.06em;
+  text-shadow: 0 0 10px rgba(0,255,65,0.35);
+  padding: 6px 0 4px;
+}
+
+.thread-nav {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.9rem;
-  padding: 0.45rem 0.6rem;
-  margin: 0.5rem 0 1rem;
-  border: 1px solid var(--border);
-  background: var(--bg-post);
+  gap: 2px 0;
+  padding: 4px 0 8px;
+}
+
+.thread-nav a,
+.thread-nav-btn {
+  color: var(--green-bright);
   font-family: var(--font);
-  font-size: 0.8rem;
-}
-.autoupdate-label {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
+  font-size: 0.88rem;
+  background: none;
+  border: none;
+  padding: 0 4px;
   cursor: pointer;
-  color: var(--text-dim);
-  user-select: none;
+  text-decoration: none;
 }
-.autoupdate-label input[type="checkbox"] {
-  cursor: pointer;
+
+.thread-nav a:hover,
+.thread-nav-btn:hover {
+  color: var(--green-bright);
+  text-decoration: underline;
 }
+
+.thread-nav-btn.active {
+  color: var(--green-bright);
+  text-shadow: 0 0 8px rgba(0,255,65,0.6);
+}
+
 .autoupdate-status {
   color: var(--green-bright);
   font-size: 0.75rem;
   opacity: 0.8;
+  margin-left: 4px;
 }
+
+/* old .autoupdate-bar kept for graceful fallback */
+.autoupdate-bar { display: none; }
+
 
 /* ── Dice roll display ────────────────────────────────────────────────────── */
 .dice-roll {

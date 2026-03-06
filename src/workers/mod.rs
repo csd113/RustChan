@@ -65,6 +65,7 @@ pub enum Job {
         board_id: i64,
         board_short: String,
         max_threads: i64,
+        allow_archive: bool,
     },
     /// Spam / abuse analysis hook — currently logs; extend for auto-banning.
     SpamCheck {
@@ -232,7 +233,8 @@ async fn handle_job(
             board_id,
             board_short,
             max_threads,
-        } => prune_threads(board_id, board_short, max_threads, pool).await,
+            allow_archive,
+        } => prune_threads(board_id, board_short, max_threads, allow_archive, pool).await,
 
         Job::SpamCheck {
             post_id,
@@ -397,16 +399,27 @@ async fn prune_threads(
     board_id: i64,
     board_short: String,
     max_threads: i64,
+    allow_archive: bool,
     pool: DbPool,
 ) -> Result<()> {
     tokio::task::spawn_blocking(move || {
         let conn = pool.get()?;
-        let count = crate::db::archive_old_threads(&conn, board_id, max_threads)?;
-        if count > 0 {
-            info!(
-                "ThreadArchive: moved {} overflow thread(s) to archive in /{}/ (board_id={})",
-                count, board_short, board_id
-            );
+        if allow_archive {
+            let count = crate::db::archive_old_threads(&conn, board_id, max_threads)?;
+            if count > 0 {
+                info!(
+                    "ThreadArchive: moved {} overflow thread(s) to archive in /{}/ (board_id={})",
+                    count, board_short, board_id
+                );
+            }
+        } else {
+            let count = crate::db::prune_old_threads(&conn, board_id, max_threads)?;
+            if count > 0 {
+                info!(
+                    "ThreadPrune: deleted {} overflow thread(s) from /{}/ (board_id={})",
+                    count, board_short, board_id
+                );
+            }
         }
         Ok(())
     })

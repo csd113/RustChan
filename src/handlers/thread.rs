@@ -465,10 +465,21 @@ pub async fn edit_post_get(
                 return Err(AppError::NotFound("Post not found in this board.".into()));
             }
 
+            if !board.allow_editing {
+                return Err(AppError::NotFound(
+                    "Post editing is not enabled on this board.".into(),
+                ));
+            }
+
+            let window = if board.edit_window_secs <= 0 {
+                300
+            } else {
+                board.edit_window_secs
+            };
             let now = chrono::Utc::now().timestamp();
-            if now - post.created_at > db::EDIT_WINDOW_SECS {
+            if now - post.created_at > window {
                 return Err(AppError::Forbidden(
-                    "The 5-minute edit window for this post has closed.".into(),
+                    "The edit window for this post has closed.".into(),
                 ));
             }
 
@@ -539,6 +550,12 @@ pub async fn edit_post_post(
                 return Err(AppError::NotFound("Post not found in this board.".into()));
             }
 
+            if !board.allow_editing {
+                return Err(AppError::NotFound(
+                    "Post editing is not enabled on this board.".into(),
+                ));
+            }
+
             // Validate body text length / content before attempting the edit
             let body_text = crate::utils::sanitize::validate_body(&raw_body)
                 .map_err(AppError::BadRequest)?
@@ -553,16 +570,28 @@ pub async fn edit_post_post(
             let escaped = crate::utils::sanitize::escape_html(&filtered);
             let body_html = crate::utils::sanitize::render_post_body(&escaped);
 
-            let success = db::edit_post(&conn, post_id, &token, &body_text, &body_html)?;
+            let success = db::edit_post(
+                &conn,
+                post_id,
+                &token,
+                &body_text,
+                &body_html,
+                board.edit_window_secs,
+            )?;
 
+            let window = if board.edit_window_secs <= 0 {
+                300
+            } else {
+                board.edit_window_secs
+            };
             if !success {
                 let all_boards = db::get_all_boards(&conn)?;
                 let collapse_greentext = db::get_collapse_greentext(&conn);
                 let now = chrono::Utc::now().timestamp();
-                let err_msg = if now - post.created_at > db::EDIT_WINDOW_SECS {
-                    "The 5-minute edit window for this post has closed."
+                let err_msg = if now - post.created_at > window {
+                    "The edit window for this post has closed."
                 } else {
-                    "Incorrect deletion token."
+                    "Incorrect edit token."
                 };
                 let html = crate::templates::edit_post_page(
                     &board,
@@ -710,6 +739,7 @@ pub async fn thread_updates(
                     false,
                     false,
                     true,
+                    0, // no edit link in auto-appended HTML; reload restores it
                 ));
             }
             Ok((html, last_id, count))
