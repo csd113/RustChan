@@ -65,9 +65,29 @@ pub async fn index(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
+    // Read the tor onion address from the hostname file if tor is enabled.
+    let onion_address: Option<String> = if crate::config::CONFIG.enable_tor_support {
+        let data_dir = std::path::PathBuf::from(&crate::config::CONFIG.database_path)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let hostname_path = data_dir.join("tor_hidden_service").join("hostname");
+        std::fs::read_to_string(&hostname_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+
     Ok((
         jar,
-        Html(templates::index_page(&board_stats, &site_stats, &csrf)),
+        Html(templates::index_page(
+            &board_stats,
+            &site_stats,
+            &csrf,
+            onion_address.as_deref(),
+        )),
     ))
 }
 
@@ -517,8 +537,13 @@ pub async fn catalog(
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
+        let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
         move || -> Result<String> {
             let conn = pool.get()?;
+            let is_admin = jar_session
+                .as_deref()
+                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
+                .unwrap_or(false);
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
             let threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
@@ -529,6 +554,7 @@ pub async fn catalog(
                 &threads,
                 &csrf_clone,
                 &all_boards,
+                is_admin,
                 collapse_greentext,
             ))
         }
@@ -793,5 +819,70 @@ pub async fn serve_board_media(
         }
     } else {
         StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+// ─── GET /api/post/{board}/{thread_id} ────────────────────────────────────────
+//
+// Lightweight JSON endpoint for cross-board quotelink hover previews.
+// Returns the rendered HTML of the OP post for the referenced thread so the
+// client-side popup can show a preview without navigating to the other board.
+//
+// Response: `{"html": "<div class=\"post …\">…</div>"}` or 404 JSON.
+
+pub async fn api_post_preview(
+    State(state): State<AppState>,
+    Path((board_short, thread_id)): Path<(String, i64)>,
+) -> impl axum::response::IntoResponse {
+    use axum::http::header;
+
+    let result = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> crate::error::Result<Option<String>> {
+            let conn = pool.get()?;
+
+            // Validate board exists
+            let board = db::get_board_by_short(&conn, &board_short)?;
+            if board.is_none() {
+                return Ok(None);
+            }
+
+            // Fetch the OP post for the thread
+            let post = db::get_op_post_for_thread(&conn, thread_id)?;
+            match post {
+                None => Ok(None),
+                Some(p) => {
+                    let html = crate::templates::render_post(
+                        &p,
+                        &board_short,
+                        "",    // no CSRF needed — preview is read-only
+                        false, // no delete controls
+                        false, // not admin
+                        true,  // show media thumbnail
+                        0,     // no edit window
+                    );
+                    Ok(Some(html))
+                }
+            }
+        }
+    })
+    .await;
+
+    let json_ct = [(header::CONTENT_TYPE, "application/json")];
+
+    match result {
+        Ok(Ok(Some(html))) => {
+            let body = serde_json::to_string(&serde_json::json!({ "html": html }))
+                .unwrap_or_else(|_| r#"{"html":""}"#.to_string());
+            (axum::http::StatusCode::OK, json_ct, body).into_response()
+        }
+        Ok(Ok(None)) => {
+            let body = r#"{"error":"not found"}"#.to_string();
+            (axum::http::StatusCode::NOT_FOUND, json_ct, body).into_response()
+        }
+        _ => {
+            let body = r#"{"error":"internal error"}"#.to_string();
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, json_ct, body).into_response()
+        }
     }
 }

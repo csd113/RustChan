@@ -96,6 +96,36 @@ hr { border: none; border-top: 1px solid var(--border); margin: 0.6rem 0; }
   background: rgba(0,255,65,0.08);
 }
 
+/* Admin link pinned to far right of site header */
+.admin-header-link {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  white-space: nowrap;
+  padding: 1px 4px;
+  font-family: var(--font);
+}
+.admin-header-link:hover {
+  color: var(--green-bright);
+  background: rgba(0,255,65,0.08);
+}
+
+/* Onion address on home page */
+.index-onion-section {
+  text-align: center;
+  padding: 0.5rem 0 0.25rem;
+}
+.index-onion {
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  margin: 0;
+}
+.onion-addr {
+  color: var(--green-pale);
+  user-select: all;
+  font-size: 0.82rem;
+}
+
 /* ── Home button ──────────────────────────────────────────────────────────── */
 
 .home-btn {
@@ -1798,6 +1828,67 @@ body:has(.catalog-bar) main {
 
 .crosslink:hover { color: #ffd060; text-shadow: 0 0 6px rgba(255,179,0,0.5); }
 
+/* ── Video embed unfurl widget ──────────────────────────────────────────────── */
+.video-embed-container {
+  display: inline-block;
+  position: relative;
+  margin: 6px 0 2px 0;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  max-width: 480px;
+  background: #000;
+  vertical-align: top;
+}
+
+.video-embed-container iframe {
+  display: block;
+  max-width: 100%;
+}
+
+.video-embed-thumb {
+  display: block;
+  width: 480px;
+  max-width: 100%;
+  height: auto;
+  opacity: 0.85;
+  transition: opacity 0.15s;
+}
+
+.video-embed-thumb-placeholder {
+  width: 480px;
+  height: 270px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+.video-embed-container:hover .video-embed-thumb { opacity: 1; }
+
+.video-embed-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 52px;
+  height: 52px;
+  background: rgba(0,0,0,0.65);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
+  color: #fff;
+  pointer-events: none;
+  transition: background 0.15s;
+}
+
+.video-embed-container:hover .video-embed-play { background: rgba(200,0,0,0.82); }
+
 /* Markup hint bar */
 .markup-hint {
   display: flex;
@@ -2490,4 +2581,54 @@ body:has(.catalog-bar) main {
 .archive-meta {
   font-size: 0.7rem;
   color: var(--text-dim, #666);
+}
+
+/* ── Feature 1: Floating new-replies pill ─────────────────────────────────── */
+.new-replies-pill {
+  position: fixed;
+  bottom: 72px;
+  right: 20px;
+  z-index: 1200;
+  background: var(--green-bright, #00c840);
+  color: #000;
+  font-family: var(--font, monospace);
+  font-size: 0.82rem;
+  font-weight: bold;
+  padding: 7px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 3px 14px rgba(0,0,0,0.55);
+  transition: transform 0.12s ease, opacity 0.18s ease;
+  user-select: none;
+  white-space: nowrap;
+}
+.new-replies-pill:hover {
+  transform: translateY(-2px);
+  opacity: 0.92;
+}
+/* Dark-theme fallback — pill is always legible */
+[data-theme] .new-replies-pill {
+  box-shadow: 0 3px 14px rgba(0,0,0,0.4);
+}
+
+/* ── Feature 2: Thread reply-count stat in nav bar ───────────────────────── */
+.thread-reply-stat {
+  font-size: 0.77rem;
+  color: var(--text-dim, #666);
+  margin-left: 0.5rem;
+}
+#thread-reply-count {
+  color: var(--green-pale, #99cc99);
+}
+
+/* ── Feature 3: (You) badge ──────────────────────────────────────────────── */
+.you-badge {
+  display: inline-block;
+  margin-left: 5px;
+  font-size: 0.72rem;
+  color: var(--green-bright, #00c840);
+  font-weight: bold;
+  opacity: 0.85;
+  vertical-align: middle;
+  pointer-events: none;
 }

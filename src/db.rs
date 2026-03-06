@@ -282,6 +282,8 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         "ALTER TABLE boards ADD COLUMN allow_editing INTEGER NOT NULL DEFAULT 0",
         // v1.0.9: per-board archive toggle (on by default for existing boards)
         "ALTER TABLE boards ADD COLUMN allow_archive INTEGER NOT NULL DEFAULT 1",
+        // v1.0.10: per-board video embed unfurling (off by default)
+        "ALTER TABLE boards ADD COLUMN allow_video_embeds INTEGER NOT NULL DEFAULT 0",
     ];
     for sql in migrations {
         let _ = conn.execute(sql, []); // ignore "duplicate column" errors
@@ -357,7 +359,7 @@ pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                allow_editing, allow_archive, created_at
+                allow_editing, allow_archive, allow_video_embeds, created_at
          FROM boards ORDER BY id ASC",
     )?;
     let boards = stmt
@@ -390,7 +392,7 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                allow_editing, allow_archive, created_at
+                allow_editing, allow_archive, allow_video_embeds, created_at
          FROM boards WHERE short_name = ?1",
     )?;
     Ok(stmt.query_row(params![short], map_board).optional()?)
@@ -468,13 +470,15 @@ pub fn update_board_settings(
     edit_window_secs: i64,
     allow_editing: bool,
     allow_archive: bool,
+    allow_video_embeds: bool,
 ) -> Result<()> {
     conn.execute(
         "UPDATE boards SET name=?1, description=?2, nsfw=?3,
          bump_limit=?4, max_threads=?5,
          allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
-         edit_window_secs=?10, allow_editing=?11, allow_archive=?12
-         WHERE id=?13",
+         edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
+         allow_video_embeds=?13
+         WHERE id=?14",
         params![
             name,
             description,
@@ -488,6 +492,7 @@ pub fn update_board_settings(
             edit_window_secs,
             allow_editing as i32,
             allow_archive as i32,
+            allow_video_embeds as i32,
             id,
         ],
     )?;
@@ -1016,6 +1021,19 @@ pub fn get_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<Post
     Ok(stmt.query_row(params![post_id], map_post).optional()?)
 }
 
+/// Fetch the OP post for a given thread — used by the cross-board preview API.
+pub fn get_op_post_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<Post>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
+                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
+                created_at, deletion_token, is_op, media_type,
+                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
+                edited_at
+         FROM posts WHERE thread_id = ?1 AND is_op = 1 LIMIT 1",
+    )?;
+    Ok(stmt.query_row(params![thread_id], map_post).optional()?)
+}
+
 /// Delete a post by id; returns file paths for cleanup.
 pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<String>> {
     let mut candidates = Vec::new();
@@ -1529,7 +1547,8 @@ fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         edit_window_secs: row.get(11)?,
         allow_editing: row.get::<_, i32>(12)? != 0,
         allow_archive: row.get::<_, i32>(13)? != 0,
-        created_at: row.get(14)?,
+        allow_video_embeds: row.get::<_, i32>(14)? != 0,
+        created_at: row.get(15)?,
     })
 }
 

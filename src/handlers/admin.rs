@@ -210,6 +210,7 @@ pub async fn admin_login(
 #[derive(Deserialize)]
 pub struct CsrfOnly {
     _csrf: Option<String>,
+    return_to: Option<String>,
 }
 
 pub async fn admin_logout(
@@ -241,7 +242,13 @@ pub async fn admin_logout(
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
     }
     let jar = jar.remove(Cookie::from(SESSION_COOKIE));
-    Ok((jar, Redirect::to("/admin")).into_response())
+    // Redirect back to the page where logout was triggered, or fall back to login.
+    let destination = form
+        .return_to
+        .as_deref()
+        .filter(|s| s.starts_with('/') && !s.contains("//") && !s.contains(".."))
+        .unwrap_or("/admin");
+    Ok((jar, Redirect::to(destination)).into_response())
 }
 
 // ─── GET /admin/panel ─────────────────────────────────────────────────────────
@@ -577,6 +584,9 @@ pub async fn admin_delete_post(
                         .collect()
                 });
 
+            let thread_id = post.thread_id;
+            let is_op = post.is_op;
+
             let paths = if post.is_op {
                 db::delete_thread(&conn, post.thread_id)?
             } else {
@@ -587,7 +597,7 @@ pub async fn admin_delete_post(
                 crate::utils::files::delete_file(&upload_dir, &p);
             }
 
-            let action = if post.is_op {
+            let action = if is_op {
                 "delete_thread"
             } else {
                 "delete_post"
@@ -603,13 +613,19 @@ pub async fn admin_delete_post(
                 &post.body.chars().take(80).collect::<String>(),
             );
             info!("Admin deleted post {}", post_id);
-            Ok(board_name)
+            // Return board_name + thread context so we can redirect back to the thread.
+            // If the post was an OP, redirect to the board index (thread is gone).
+            if is_op {
+                Ok(format!("/{}/", board_name))
+            } else {
+                Ok(format!("/{}/thread/{}", board_name, thread_id))
+            }
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to(&format!("/{}/", redirect_board)).into_response())
+    Ok(Redirect::to(&redirect_board).into_response())
 }
 
 // ─── POST /admin/thread/delete ────────────────────────────────────────────────
@@ -859,6 +875,7 @@ pub struct BoardSettingsForm {
     allow_editing: Option<String>,
     edit_window_secs: Option<String>,
     allow_archive: Option<String>,
+    allow_video_embeds: Option<String>,
     _csrf: Option<String>,
 }
 
@@ -919,6 +936,7 @@ pub async fn update_board_settings(
                 edit_window_secs,
                 form.allow_editing.as_deref() == Some("1"),
                 form.allow_archive.as_deref() == Some("1"),
+                form.allow_video_embeds.as_deref() == Some("1"),
             )?;
             info!("Admin updated settings for board id={}", board_id);
             Ok(())
@@ -1495,7 +1513,7 @@ pub async fn create_board_backup(
                 .query_row(
                     "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                              allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                             allow_editing, allow_archive, created_at
+                             allow_editing, allow_archive, allow_video_embeds, created_at
                       FROM boards WHERE short_name = ?1",
                     params![board_short],
                     |r| {
@@ -1514,7 +1532,8 @@ pub async fn create_board_backup(
                             edit_window_secs: r.get(11)?,
                             allow_editing: r.get::<_, i64>(12)? != 0,
                             allow_archive: r.get::<_, i64>(13)? != 0,
-                            created_at: r.get(14)?,
+                            allow_video_embeds: r.get::<_, i64>(14)? != 0,
+                            created_at: r.get(15)?,
                         })
                     },
                 )
@@ -2094,8 +2113,9 @@ pub async fn restore_saved_board_backup(
                     "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                      max_threads=?4, bump_limit=?5,
                      allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
-                     edit_window_secs=?10, allow_editing=?11, allow_archive=?12
-                     WHERE id=?13",
+                     edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
+                     allow_video_embeds=?13
+                     WHERE id=?14",
                     params![
                         manifest.board.name,
                         manifest.board.description,
@@ -2109,6 +2129,7 @@ pub async fn restore_saved_board_backup(
                         manifest.board.edit_window_secs,
                         manifest.board.allow_editing as i64,
                         manifest.board.allow_archive as i64,
+                        manifest.board.allow_video_embeds as i64,
                         eid,
                     ],
                 )
@@ -2118,8 +2139,8 @@ pub async fn restore_saved_board_backup(
                 conn.execute(
                     "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
                      bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
-                     edit_window_secs, allow_editing, allow_archive, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                     edit_window_secs, allow_editing, allow_archive, allow_video_embeds, created_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                     params![
                         manifest.board.short_name,
                         manifest.board.name,
@@ -2134,6 +2155,7 @@ pub async fn restore_saved_board_backup(
                         manifest.board.edit_window_secs,
                         manifest.board.allow_editing as i64,
                         manifest.board.allow_archive as i64,
+                        manifest.board.allow_video_embeds as i64,
                         manifest.board.created_at,
                     ],
                 )
@@ -2350,6 +2372,9 @@ mod board_backup_types {
         /// Added in a later version — absent in older backups; default to true.
         #[serde(default = "default_true")]
         pub allow_archive: bool,
+        /// Added in v1.0.10 — absent in older backups; default to false.
+        #[serde(default)]
+        pub allow_video_embeds: bool,
         pub created_at: i64,
     }
 
@@ -2458,7 +2483,7 @@ pub async fn board_backup(
             let board: BoardRow = conn.query_row(
                 "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                         allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                        allow_editing, allow_archive, created_at
+                        allow_editing, allow_archive, allow_video_embeds, created_at
                  FROM boards WHERE short_name = ?1",
                 params![board_short],
                 |r| Ok(BoardRow {
@@ -2476,7 +2501,8 @@ pub async fn board_backup(
                     edit_window_secs: r.get(11)?,
                     allow_editing: r.get::<_, i64>(12)? != 0,
                     allow_archive: r.get::<_, i64>(13)? != 0,
-                    created_at: r.get(14)?,
+                    allow_video_embeds: r.get::<_, i64>(14)? != 0,
+                    created_at: r.get(15)?,
                 }),
             ).map_err(|_| AppError::NotFound(format!("Board '{}' not found", board_short)))?;
 
@@ -2742,8 +2768,9 @@ pub async fn board_restore(
                     "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                      max_threads=?4, bump_limit=?5,
                      allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
-                     edit_window_secs=?10, allow_editing=?11, allow_archive=?12
-                     WHERE id=?13",
+                     edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
+                     allow_video_embeds=?13
+                     WHERE id=?14",
                     params![
                         manifest.board.name,
                         manifest.board.description,
@@ -2757,6 +2784,7 @@ pub async fn board_restore(
                         manifest.board.edit_window_secs,
                         manifest.board.allow_editing as i64,
                         manifest.board.allow_archive as i64,
+                        manifest.board.allow_video_embeds as i64,
                         eid,
                     ],
                 )
@@ -2766,8 +2794,8 @@ pub async fn board_restore(
                 conn.execute(
                     "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
                      bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
-                     edit_window_secs, allow_editing, allow_archive, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                     edit_window_secs, allow_editing, allow_archive, allow_video_embeds, created_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                     params![
                         manifest.board.short_name,
                         manifest.board.name,
@@ -2782,6 +2810,7 @@ pub async fn board_restore(
                         manifest.board.edit_window_secs,
                         manifest.board.allow_editing as i64,
                         manifest.board.allow_archive as i64,
+                        manifest.board.allow_video_embeds as i64,
                         manifest.board.created_at,
                     ],
                 )

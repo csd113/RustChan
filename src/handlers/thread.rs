@@ -692,10 +692,20 @@ pub async fn vote_handler(
 
 // ─── GET /:board/thread/:id/updates?since=N ──────────────────────────────────
 //
-// Lightweight polling endpoint for the thread auto-update toggle.
-// Returns JSON: { "html": "<rendered posts>", "last_id": N, "count": N }
-// Posts are rendered without the delete form or admin controls so the response
-// is the same regardless of session state (no auth leakage).
+// Delta-compressed polling endpoint for the thread auto-update toggle.
+//
+// Returns a JSON envelope with:
+//   html         — rendered HTML for any new posts since `since`
+//   last_id      — highest post ID seen (client bumps its cursor)
+//   count        — number of new posts in this response
+//   reply_count  — current total reply count for the thread
+//   bump_time    — current bumped_at UNIX timestamp
+//   locked       — current lock state
+//   sticky       — current sticky state
+//
+// The extra state fields let the client keep the nav-bar thread stats in
+// sync without a full page reload.  Posts are rendered without delete/admin
+// controls so the response is auth-state-independent (safe to cache).
 
 #[derive(Deserialize)]
 pub struct UpdatesQuery {
@@ -711,49 +721,64 @@ pub async fn thread_updates(
 
     let since = params.since;
 
-    let (html, last_id, count) = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> crate::error::Result<(String, i64, usize)> {
-            let conn = pool.get()?;
+    let (html, last_id, count, reply_count, bump_time, locked, sticky) =
+        tokio::task::spawn_blocking({
+            let pool = state.db.clone();
+            move || -> crate::error::Result<(String, i64, usize, i64, i64, bool, bool)> {
+                let conn = pool.get()?;
 
-            // Validate board + thread exist (returns 404 for bad URLs).
-            let _board = db::get_board_by_short(&conn, &board_short)?
-                .ok_or_else(|| crate::error::AppError::NotFound("Board not found.".into()))?;
-            let _thread = db::get_thread(&conn, thread_id)?
-                .ok_or_else(|| crate::error::AppError::NotFound("Thread not found.".into()))?;
+                // Validate board + thread exist (returns 404 for bad URLs).
+                let _board = db::get_board_by_short(&conn, &board_short)?
+                    .ok_or_else(|| crate::error::AppError::NotFound("Board not found.".into()))?;
+                let thread = db::get_thread(&conn, thread_id)?
+                    .ok_or_else(|| crate::error::AppError::NotFound("Thread not found.".into()))?;
 
-            // Fetch posts newer than `since`, ordered oldest-first so they
-            // render in the correct chronological order when appended.
-            let posts = db::get_new_posts_since(&conn, thread_id, since)?;
-            let last_id = posts.iter().map(|p| p.id).max().unwrap_or(since);
-            let count = posts.len();
+                // Fetch posts newer than `since`, ordered oldest-first so they
+                // render in the correct chronological order when appended.
+                let posts = db::get_new_posts_since(&conn, thread_id, since)?;
+                let last_id = posts.iter().map(|p| p.id).max().unwrap_or(since);
+                let count = posts.len();
 
-            let mut html = String::new();
-            for post in &posts {
-                // show_delete=false, is_admin=false — no user controls in
-                // auto-appended HTML; a full reload restores them.
-                html.push_str(&crate::templates::render_post(
-                    post,
-                    &board_short,
-                    "",
-                    false,
-                    false,
-                    true,
-                    0, // no edit link in auto-appended HTML; reload restores it
-                ));
+                let mut html = String::new();
+                for post in &posts {
+                    // show_delete=false, is_admin=false — no user controls in
+                    // auto-appended HTML; a full reload restores them.
+                    html.push_str(&crate::templates::render_post(
+                        post,
+                        &board_short,
+                        "",
+                        false,
+                        false,
+                        true,
+                        0, // no edit link in auto-appended HTML; reload restores it
+                    ));
+                }
+
+                Ok((
+                    html,
+                    last_id,
+                    count,
+                    thread.reply_count,
+                    thread.bumped_at,
+                    thread.locked,
+                    thread.sticky,
+                ))
             }
-            Ok((html, last_id, count))
-        }
-    })
-    .await
-    .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!(e)))??;
+        })
+        .await
+        .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!(e)))??;
 
-    // Escape the HTML inside a JSON string manually — no serde dependency needed.
+    // Build a JSON envelope with new-post HTML plus current thread state.
+    // The client consumes the state fields to keep the nav bar in sync.
     let json = format!(
-        r#"{{"html":{html_json},"last_id":{last_id},"count":{count}}}"#,
+        r#"{{"html":{html_json},"last_id":{last_id},"count":{count},"reply_count":{reply_count},"bump_time":{bump_time},"locked":{locked},"sticky":{sticky}}}"#,
         html_json = serde_json::to_string(&html).unwrap_or_else(|_| "\"\"".to_string()),
         last_id = last_id,
         count = count,
+        reply_count = reply_count,
+        bump_time = bump_time,
+        locked = locked,
+        sticky = sticky,
     );
 
     Ok(([(header::CONTENT_TYPE, "application/json")], json).into_response())

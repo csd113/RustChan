@@ -405,7 +405,10 @@ document.getElementById('report-modal').addEventListener('click', function(e) {
 // ─── Thread auto-update script ────────────────────────────────────────────────
 
 /// Returns the auto-update JS for thread pages.
-/// The Update/Auto buttons are in the nav bar; this script just wires them up.
+/// Includes:
+///   • Floating "+N new replies ↓" pill (Feature 1)
+///   • Delta-compressed state sync — reply count, lock/sticky via JSON envelope (Feature 2)
+///   • "(You)" post tracking via localStorage (Feature 3)
 fn thread_autoupdate_script() -> &'static str {
     r#"
 <script>
@@ -422,14 +425,90 @@ fn thread_autoupdate_script() -> &'static str {
   var threadId = container.dataset.threadId;
   var lastId   = parseInt(container.dataset.lastId, 10) || 0;
 
+  // ── Feature 1: Floating new-replies pill ─────────────────────────────────
+  var pill = document.createElement('div');
+  pill.id = 'new-replies-pill';
+  pill.className = 'new-replies-pill';
+  pill.style.display = 'none';
+  document.body.appendChild(pill);
+
+  var pillTimer = null;
+  var pillCount = 0;
+
+  function showPill(n) {
+    pillCount += n;
+    pill.textContent = '+' + pillCount + ' new repl' + (pillCount === 1 ? 'y' : 'ies') + ' \u2193';
+    pill.style.display = 'block';
+    if (pillTimer) clearTimeout(pillTimer);
+    pillTimer = setTimeout(hidePill, 30000);
+  }
+
+  function hidePill() {
+    pill.style.display = 'none';
+    pillCount = 0;
+    if (pillTimer) { clearTimeout(pillTimer); pillTimer = null; }
+  }
+
+  pill.addEventListener('click', function() {
+    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    hidePill();
+  });
+
+  // Hide pill when user manually scrolls to within 200px of the bottom
+  window.addEventListener('scroll', function() {
+    if (!pillCount) return;
+    var distFromBottom = document.body.scrollHeight - window.scrollY - window.innerHeight;
+    if (distFromBottom < 200) hidePill();
+  }, { passive: true });
+
   function setStatus(msg) {
     if (statusEl) statusEl.textContent = msg;
   }
 
+  // ── Feature 2: Delta-state helpers ───────────────────────────────────────
+
+  // Update the reply-count span in the thread nav bar if present.
+  function applyDeltaState(data) {
+    // Reply count
+    var rcEl = document.getElementById('thread-reply-count');
+    if (rcEl && data.reply_count !== undefined) {
+      rcEl.textContent = data.reply_count;
+    }
+
+    // Locked state — inject a lock notice above the posts if newly locked
+    if (data.locked) {
+      if (!document.getElementById('thread-locked-notice')) {
+        var notice = document.createElement('div');
+        notice.id = 'thread-locked-notice';
+        notice.className = 'notice locked-notice';
+        notice.textContent = 'this thread is locked \u2014 no new replies allowed';
+        container.parentNode.insertBefore(notice, container);
+      }
+      // Hide the reply toggle button so the user sees it immediately
+      var toggleBar = document.querySelector('.post-toggle-bar.reply');
+      if (toggleBar) toggleBar.style.display = 'none';
+    }
+
+    // Sticky badge in nav — add/remove a small indicator
+    var stickyBadge = document.getElementById('thread-sticky-badge');
+    if (data.sticky && !stickyBadge) {
+      var badge = document.createElement('span');
+      badge.id = 'thread-sticky-badge';
+      badge.className = 'tag sticky';
+      badge.textContent = 'STICKY';
+      badge.style.marginLeft = '0.4rem';
+      var navEl = document.querySelector('.board-header.thread-nav');
+      if (navEl) navEl.appendChild(badge);
+    } else if (!data.sticky && stickyBadge) {
+      stickyBadge.remove();
+    }
+  }
+
+  // ── Main fetch loop ───────────────────────────────────────────────────────
   window.fetchUpdates = function() {
     if (updating) return;
     updating = true;
-    setStatus('checking…');
+    setStatus('checking\u2026');
     var url = '/' + board + '/thread/' + threadId + '/updates?since=' + lastId;
     fetch(url, { credentials: 'same-origin' })
       .then(function(r) { return r.ok ? r.json() : Promise.reject(r.status); })
@@ -442,12 +521,21 @@ fn thread_autoupdate_script() -> &'static str {
           container.dataset.lastId = lastId;
           // Wire click-to-collapse on newly added images
           wireImageCollapse(container);
-          // Notify other scripts (e.g. quotelink handler) about new posts
+          // Notify other scripts (e.g. quotelink handler, You tracker)
           if (window._onNewPostsInserted) window._onNewPostsInserted(container);
-          setStatus('+' + data.count + ' new — ' + new Date().toLocaleTimeString());
+          setStatus('+' + data.count + ' new \u2014 ' + new Date().toLocaleTimeString());
+          // Show floating pill only if user isn't already at the bottom
+          var distFromBottom = document.body.scrollHeight - window.scrollY - window.innerHeight;
+          if (distFromBottom > 200) {
+            showPill(data.count);
+          }
         } else {
-          setStatus('up to date — ' + new Date().toLocaleTimeString());
+          setStatus('up to date \u2014 ' + new Date().toLocaleTimeString());
         }
+
+        // Always apply delta state so nav bar stays in sync
+        applyDeltaState(data);
+
         updating = false;
       })
       .catch(function(err) {
@@ -461,7 +549,7 @@ fn thread_autoupdate_script() -> &'static str {
     if (autoOn) {
       fetchUpdates();
       timer = setInterval(fetchUpdates, 30000);
-      setStatus('watching…');
+      setStatus('watching\u2026');
     } else {
       if (timer) { clearInterval(timer); timer = null; }
       setStatus('');
@@ -495,6 +583,88 @@ fn thread_autoupdate_script() -> &'static str {
     var fc = preview.closest('.file-container');
     if (fc) wireImageCollapse(fc);
   };
+})();
+</script>
+
+<script>
+// ── Feature 3: "(You)" post tracking ─────────────────────────────────────────
+// Post IDs submitted by this browser are stored in localStorage and displayed
+// with a subtle "(You)" badge next to the post number — persisted across reloads.
+(function() {
+  var container = document.getElementById('thread-posts');
+  if (!container) return;
+
+  var board    = container.dataset.board;
+  var threadId = container.dataset.threadId;
+
+  var POSTS_KEY   = 'rustchan_my_posts_'   + board + '_' + threadId;
+  var PENDING_KEY = 'rustchan_you_pending_' + board + '_' + threadId;
+
+  // ── On page load: if a form submission just completed, capture the new ID ──
+  try {
+    var pending = localStorage.getItem(PENDING_KEY);
+    if (pending === '1') {
+      localStorage.removeItem(PENDING_KEY);
+      var hash = window.location.hash;
+      var m = hash.match(/^#p(\d+)$/);
+      if (m) {
+        var newId = parseInt(m[1], 10);
+        var existing = JSON.parse(localStorage.getItem(POSTS_KEY) || '[]');
+        if (existing.indexOf(newId) === -1) existing.push(newId);
+        localStorage.setItem(POSTS_KEY, JSON.stringify(existing));
+      }
+    }
+  } catch(e) {}
+
+  // ── Apply (You) badges to every known post on this page ──────────────────
+  window._applyYouBadges = function() {
+    try {
+      var myPosts = JSON.parse(localStorage.getItem(POSTS_KEY) || '[]');
+      myPosts.forEach(function(pid) {
+        var postEl = document.getElementById('p' + pid);
+        if (!postEl) return;
+        var postNum = postEl.querySelector('.post-num');
+        if (postNum && !postNum.parentNode.querySelector('.you-badge')) {
+          var badge = document.createElement('span');
+          badge.className = 'you-badge';
+          badge.title = 'You posted this';
+          badge.textContent = '(You)';
+          postNum.insertAdjacentElement('afterend', badge);
+        }
+      });
+    } catch(e) {}
+  };
+
+  _applyYouBadges();
+
+  // Re-apply after auto-update inserts new posts (in case one of them is yours
+  // via another tab, though the main use is for page-load and manual updates)
+  var origInsert = window._onNewPostsInserted;
+  window._onNewPostsInserted = function(c) {
+    if (origInsert) origInsert(c);
+    _applyYouBadges();
+  };
+
+  // ── Set the pending flag before form submit so we capture the ID on redirect
+  function wireFormTracking() {
+    var forms = document.querySelectorAll(
+      'form[action*="/thread/' + threadId + '"]'
+    );
+    forms.forEach(function(form) {
+      if (form.dataset.youWired) return;
+      form.dataset.youWired = '1';
+      form.addEventListener('submit', function() {
+        try { localStorage.setItem(PENDING_KEY, '1'); } catch(e) {}
+      });
+    });
+  }
+  wireFormTracking();
+  // Also wire any forms that appear after the drawer opens
+  document.addEventListener('click', function(e) {
+    if (e.target && (e.target.id === 'mobile-reply-fab' || e.target.classList.contains('post-toggle-btn'))) {
+      setTimeout(wireFormTracking, 150);
+    }
+  });
 })();
 </script>"#
 }
@@ -664,9 +834,9 @@ fn base_layout(
   <a class="home-btn" href="/">&#8962; Home</a>
   <nav class="board-list">
     {board_links}
-    [<a href="/admin">Admin</a>]
   </nav>
   <div class="header-search">{search_bar}</div>
+  <a class="admin-header-link" href="/admin">[Admin]</a>
 </header>
 {catalog_bar}
 <main>
@@ -783,6 +953,7 @@ pub fn index_page(
     board_stats: &[crate::models::BoardStats],
     site_stats: &crate::models::SiteStats,
     csrf_token: &str,
+    onion_address: Option<&str>,
 ) -> String {
     // Build a plain boards list for the nav bar
     let all_boards: Vec<Board> = board_stats.iter().map(|s| s.board.clone()).collect();
@@ -861,17 +1032,29 @@ pub fn index_page(
         gb = active_gb,
     );
 
+    let onion_html = if let Some(addr) = onion_address {
+        format!(
+            r#"<div class="index-section index-onion-section">
+<p class="index-onion">&#x1F9C5; .onion: <code class="onion-addr">{}</code></p>
+</div>"#,
+            escape_html(addr)
+        )
+    } else {
+        String::new()
+    };
+
     let body = format!(
         r#"<div class="index-hero">
 <h1 class="index-title">[ {name} ]</h1>
 <p class="index-subtitle">select board to proceed</p>
 </div>
-{sfw}{nsfw}{empty}{stats}"#,
+{sfw}{nsfw}{empty}{stats}{onion}"#,
         name = escape_html(&live_site_name()),
         sfw = sfw_sec,
         nsfw = nsfw_sec,
         empty = empty,
         stats = stats_sec,
+        onion = onion_html,
     );
 
     base_layout(
@@ -913,13 +1096,14 @@ pub fn board_page(
         body.push_str(&format!(
             r#"<div class="admin-toolbar">
 <span class="admin-toolbar-label">&#9632; ADMIN</span>
-<a href="/admin/panel">panel</a>
 <form method="POST" action="/admin/logout" style="display:inline">
 <input type="hidden" name="_csrf" value="{csrf}">
+<input type="hidden" name="return_to" value="/{board}/">
 <button type="submit" class="admin-toolbar-btn">logout</button>
 </form>
 </div>"#,
             csrf = escape_html(csrf_token),
+            board = escape_html(&board.short_name),
         ));
     }
 
@@ -1285,7 +1469,6 @@ pub fn thread_page(
         body.push_str(&format!(
             r#"<div class="admin-toolbar">
 <span class="admin-toolbar-label">&#9632; ADMIN</span>
-<a href="/admin/panel">panel</a>
 <form method="POST" action="/admin/thread/action" style="display:inline">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="hidden" name="thread_id" value="{tid}">
@@ -1309,6 +1492,7 @@ pub fn thread_page(
 </form>
 <form method="POST" action="/admin/logout" style="display:inline">
 <input type="hidden" name="_csrf" value="{csrf}">
+<input type="hidden" name="return_to" value="/{board}/thread/{tid}">
 <button type="submit" class="admin-toolbar-btn">logout</button>
 </form>
 </div>"#,
@@ -1340,10 +1524,12 @@ pub fn thread_page(
     Auto
   </label>
   <span class="autoupdate-status" id="autoupdate-status"></span>
+  <span class="thread-reply-stat">R: <span id="thread-reply-count">{rc}</span></span>
 </div>
 "##,
         s = escape_html(&board.short_name),
         bn = escape_html(&board.name),
+        rc = thread.reply_count,
     ));
     body.push_str(locked_notice);
 
@@ -1589,6 +1775,195 @@ pub fn thread_page(
   };
 })();
 </script>"#);
+
+    // ── Cross-board quotelink hover preview ────────────────────────────────
+    // Fetches /api/post/{board}/{thread_id} on hover over >>>/ cross-board links
+    // and shows the OP post in the same floating popup used by same-thread quotelinks.
+    body.push_str(
+        r#"<script>
+(function() {
+  var _cbCache = {};   // board:pid → html string
+  var _cbInFlight = {}; // board:pid → true while fetching
+
+  function getCbPopup() {
+    return document.getElementById('ql-popup');
+  }
+
+  function fetchAndShow(link, board, pid) {
+    var key = board + ':' + pid;
+    var popup = getCbPopup();
+    if (!popup) return;
+
+    if (_cbCache[key]) {
+      popup.innerHTML = _cbCache[key];
+      popup.style.display = 'block';
+      positionCbPopup(link, popup);
+      return;
+    }
+    if (_cbInFlight[key]) return;
+
+    _cbInFlight[key] = true;
+    popup.innerHTML = '<div style="padding:8px;color:var(--text-dim)">loading…</div>';
+    popup.style.display = 'block';
+    positionCbPopup(link, popup);
+
+    fetch('/api/post/' + board + '/' + pid)
+      .then(function(r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function(data) {
+        _cbCache[key] = data.html || '';
+        delete _cbInFlight[key];
+        // Only update if the popup is still showing this link
+        if (popup.style.display !== 'none') {
+          popup.innerHTML = _cbCache[key];
+          positionCbPopup(link, popup);
+        }
+      })
+      .catch(function() {
+        delete _cbInFlight[key];
+        _cbCache[key] = '<div style="padding:8px;color:var(--red,#f55)">Post not found</div>';
+      });
+  }
+
+  function positionCbPopup(anchor, popup) {
+    var rect = anchor.getBoundingClientRect();
+    var pw = popup.offsetWidth || 420;
+    var ph = popup.offsetHeight || 200;
+    var vw = window.innerWidth;
+    var vh = window.innerHeight;
+    var scrollY = window.pageYOffset;
+    var left = rect.left + window.pageXOffset;
+    if (left + pw > vw - 10) left = Math.max(4, vw - pw - 10);
+    var top;
+    if (rect.bottom + ph + 8 < vh) {
+      top = rect.bottom + scrollY + 8;
+    } else {
+      top = rect.top + scrollY - ph - 8;
+    }
+    popup.style.left = left + 'px';
+    popup.style.top  = top  + 'px';
+  }
+
+  function wireCrossLinks(root) {
+    root.querySelectorAll('a.crosslink[data-crossboard][data-pid]').forEach(function(link) {
+      var board = link.getAttribute('data-crossboard');
+      var pid   = link.getAttribute('data-pid');
+      if (!board || !pid) return;
+
+      var _hideTimer = null;
+      var popup = getCbPopup();
+
+      link.addEventListener('mouseenter', function() {
+        clearTimeout(_hideTimer);
+        fetchAndShow(link, board, pid);
+      });
+      link.addEventListener('mouseleave', function() {
+        _hideTimer = setTimeout(function() {
+          if (popup) popup.style.display = 'none';
+        }, 120);
+      });
+      if (popup) {
+        popup.addEventListener('mouseenter', function() { clearTimeout(_hideTimer); });
+        popup.addEventListener('mouseleave', function() {
+          _hideTimer = setTimeout(function() { popup.style.display = 'none'; }, 120);
+        });
+      }
+    });
+  }
+
+  wireCrossLinks(document);
+
+  // Also wire cross-links injected by the auto-updater
+  var _origCb = window._onNewPostsInserted;
+  window._onNewPostsInserted = function(container) {
+    if (_origCb) _origCb(container);
+    wireCrossLinks(container);
+  };
+})();
+</script>"#,
+    );
+
+    // ── Video embed unfurling (opt-in per board) ────────────────────────────
+    // When enabled, .video-unfurl placeholder spans emitted by the markup parser
+    // are replaced with a thumbnail + click-to-embed iframe widget.
+    let embed_enabled = if board.allow_video_embeds {
+        "true"
+    } else {
+        "false"
+    };
+    body.push_str(&format!(
+        r#"<script>
+(function() {{
+  var EMBED_ENABLED = {embed_enabled};
+  if (!EMBED_ENABLED) return;
+
+  function buildEmbed(span) {{
+    var type = span.getAttribute('data-embed-type');
+    var id   = span.getAttribute('data-embed-id');
+    if (!type || !id) return;
+
+    var container = document.createElement('div');
+    container.className = 'video-embed-container';
+
+    if (type === 'youtube') {{
+      var thumb = document.createElement('img');
+      thumb.src = 'https://img.youtube.com/vi/' + id + '/hqdefault.jpg';
+      thumb.className = 'video-embed-thumb';
+      thumb.alt = 'YouTube video thumbnail';
+      var play = document.createElement('div');
+      play.className = 'video-embed-play';
+      play.innerHTML = '&#9654;';
+      container.appendChild(thumb);
+      container.appendChild(play);
+      container.addEventListener('click', function() {{
+        var iframe = document.createElement('iframe');
+        iframe.src = 'https://www.youtube.com/embed/' + id + '?autoplay=1';
+        iframe.width = '480';
+        iframe.height = '270';
+        iframe.setAttribute('frameborder', '0');
+        iframe.setAttribute('allowfullscreen', '');
+        iframe.setAttribute('allow', 'autoplay; encrypted-media');
+        container.innerHTML = '';
+        container.appendChild(iframe);
+      }});
+    }} else if (type === 'streamable') {{
+      var thumb2 = document.createElement('div');
+      thumb2.className = 'video-embed-thumb video-embed-thumb-placeholder';
+      thumb2.textContent = 'Streamable: ' + id;
+      var play2 = document.createElement('div');
+      play2.className = 'video-embed-play';
+      play2.innerHTML = '&#9654;';
+      container.appendChild(thumb2);
+      container.appendChild(play2);
+      container.addEventListener('click', function() {{
+        var iframe = document.createElement('iframe');
+        iframe.src = 'https://streamable.com/e/' + id + '?autoplay=1';
+        iframe.width = '480';
+        iframe.height = '270';
+        iframe.setAttribute('frameborder', '0');
+        iframe.setAttribute('allowfullscreen', '');
+        container.innerHTML = '';
+        container.appendChild(iframe);
+      }});
+    }}
+
+    span.replaceWith(container);
+  }}
+
+  function applyEmbeds(root) {{
+    root.querySelectorAll('span.video-unfurl[data-embed-type]').forEach(buildEmbed);
+  }}
+
+  applyEmbeds(document);
+
+  var _origEmbed = window._onNewPostsInserted;
+  window._onNewPostsInserted = function(container) {{
+    if (_origEmbed) _origEmbed(container);
+    applyEmbeds(container);
+  }};
+}})();
+</script>"#,
+        embed_enabled = embed_enabled
+    ));
 
     // Draft autosave
     let draft_key = format!("rustchan_draft_{}_{}", board.short_name, thread.id);
@@ -2048,12 +2423,31 @@ pub fn catalog_page(
     threads: &[Thread],
     csrf_token: &str,
     boards: &[Board],
+    is_admin: bool,
     collapse_greentext: bool,
 ) -> String {
     let bs = escape_html(&board.short_name);
     let bn = escape_html(&board.name);
 
-    let mut body = format!(
+    let mut body = String::new();
+
+    // Visible admin toolbar — appears whenever an admin is logged in
+    if is_admin {
+        body.push_str(&format!(
+            r#"<div class="admin-toolbar">
+<span class="admin-toolbar-label">&#9632; ADMIN</span>
+<form method="POST" action="/admin/logout" style="display:inline">
+<input type="hidden" name="_csrf" value="{csrf}">
+<input type="hidden" name="return_to" value="/{board}/catalog">
+<button type="submit" class="admin-toolbar-btn">logout</button>
+</form>
+</div>"#,
+            csrf = escape_html(csrf_token),
+            board = escape_html(&board.short_name),
+        ));
+    }
+
+    body.push_str(&format!(
         r#"<div class="board-header catalog-header-row">
   <div class="catalog-header-left board-catalog-header">
     <h1>/{bs}/  — {bn}</h1>
@@ -2080,7 +2474,7 @@ pub fn catalog_page(
         bn = bn,
         desc = escape_html(&board.description),
         form = new_thread_form(&board.short_name, csrf_token, board),
-    );
+    ));
 
     for t in threads {
         let thumb_html = if let Some(th) = &t.op_thumb {
@@ -2401,6 +2795,7 @@ pub fn admin_panel_page(
   <label><input type="checkbox" name="allow_audio"     value="1"{aud_ck}>  Allow audio</label>
   <label><input type="checkbox" name="allow_tripcodes" value="1"{trip_ck}> Allow tripcodes</label>
   <label><input type="checkbox" name="allow_archive"   value="1"{archive_ck}> Enable archive</label>
+  <label><input type="checkbox" name="allow_video_embeds" value="1"{embeds_ck}> Embed video links (YouTube / Invidious / Streamable)</label>
   <label><input type="checkbox" name="allow_editing"   value="1"{edit_ck}
     onchange="(function(cb){{var row=cb.closest('form').querySelector('.edit-window-row');if(row)row.style.display=cb.checked?'':'none';}})(this)">
     Allow post editing</label>
@@ -2450,6 +2845,7 @@ pub fn admin_panel_page(
             trip_ck = checked(b.allow_tripcodes),
             archive_ck = checked(b.allow_archive),
             edit_ck = checked(b.allow_editing),
+            embeds_ck = checked(b.allow_video_embeds),
         ));
     }
 

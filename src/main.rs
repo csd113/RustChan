@@ -334,6 +334,10 @@ fn build_router(state: AppState) -> Router {
         .route("/report", post(handlers::board::file_report))
         .route("/vote", post(handlers::thread::vote_handler))
         .route(
+            "/api/post/{board}/{thread_id}",
+            get(handlers::board::api_post_preview),
+        )
+        .route(
             "/{board}/thread/{id}/updates",
             get(handlers::thread::thread_updates),
         )

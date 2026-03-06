@@ -33,6 +33,98 @@ static RE_SPOILER: Lazy<Regex> =
 // Limits: 1–20 dice, 2–999 sides.
 static RE_DICE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[dice (\d{1,2})d(\d{1,3})\]").unwrap());
 
+// ─── Video embed URL detection ────────────────────────────────────────────────
+// These extract a canonical video ID from supported platforms so the client-side
+// embed script can build the appropriate iframe/thumbnail without a server round-trip.
+
+/// Try to extract a (embed_type, video_id) pair from a URL.
+/// Supports YouTube (youtube.com and youtu.be), any Invidious instance
+/// (detected by the `/watch?v=` path), and Streamable.
+/// Returns None for all other URLs.
+pub fn extract_video_embed(url: &str) -> Option<(&'static str, String)> {
+    // YouTube — youtube.com/watch?v=ID or youtu.be/ID or youtube.com/shorts/ID
+    if url.contains("youtube.com") || url.contains("youtu.be") {
+        if let Some(id) = extract_yt_id(url) {
+            return Some(("youtube", id));
+        }
+    }
+    // Streamable — streamable.com/CODE
+    if url.contains("streamable.com/") {
+        if let Some(code) = extract_streamable_id(url) {
+            return Some(("streamable", code));
+        }
+    }
+    // Invidious — any domain serving /watch?v=ID (11-char YouTube-style ID)
+    if !url.contains("youtube.com") && !url.contains("youtu.be") {
+        if let Some(id) = extract_yt_id_from_watch_param(url) {
+            return Some(("youtube", id));
+        }
+    }
+    None
+}
+
+fn extract_yt_id(url: &str) -> Option<String> {
+    // youtu.be/ID
+    if let Some(pos) = url.find("youtu.be/") {
+        let rest = &url[pos + 9..];
+        let id: String = rest.chars().take(11).collect();
+        if id.len() == 11
+            && id
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Some(id);
+        }
+    }
+    // youtube.com/shorts/ID
+    if let Some(pos) = url.find("/shorts/") {
+        let rest = &url[pos + 8..];
+        let id: String = rest.chars().take(11).collect();
+        if id.len() == 11
+            && id
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Some(id);
+        }
+    }
+    // ?v=ID or &v=ID
+    extract_yt_id_from_watch_param(url)
+}
+
+fn extract_yt_id_from_watch_param(url: &str) -> Option<String> {
+    for prefix in &["?v=", "&v="] {
+        if let Some(pos) = url.find(prefix) {
+            let rest = &url[pos + prefix.len()..];
+            let id: String = rest.chars().take(11).collect();
+            if id.len() == 11
+                && id
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+fn extract_streamable_id(url: &str) -> Option<String> {
+    // streamable.com/CODE — code is alphanumeric, typically 6 chars
+    if let Some(pos) = url.find("streamable.com/") {
+        let rest = &url[pos + 15..];
+        // Strip any query/fragment
+        let code: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if !code.is_empty() && code.len() <= 16 {
+            return Some(code);
+        }
+    }
+    None
+}
+
 /// Unicode die-face characters for d6 results (⚀–⚅, value 1–6).
 fn d6_face(n: u32) -> char {
     match n {
@@ -239,8 +331,9 @@ fn render_inline(text: &str) -> String {
         .replace_all(&result, |caps: &regex::Captures| {
             let board = &caps[1];
             let tid = &caps[2];
+            // data-crossboard and data-pid enable client-side hover preview fetch
             format!(
-                r#"<a href="/{board}/thread/{tid}" class="quotelink crosslink">&gt;&gt;&gt;/{board}/{tid}</a>"#,
+                r#"<a href="/{board}/thread/{tid}" class="quotelink crosslink" data-crossboard="{board}" data-pid="{tid}">&gt;&gt;&gt;/{board}/{tid}</a>"#,
             )
         })
         .into_owned();
@@ -261,16 +354,27 @@ fn render_inline(text: &str) -> String {
         })
         .into_owned();
 
-    // URLs
+    // URLs — also append a video embed placeholder when the URL is a known video link.
+    // The placeholder is an empty <span> with data attributes; the client-side embed
+    // script replaces it with a thumbnail + iframe when embeds are enabled for the board.
     result = RE_URL
         .replace_all(&result, |caps: &regex::Captures| {
             let url = &caps[1];
             let clean_url = url.trim_end_matches(['.', ',', ')', ';', '\'']);
             let trailing = &url[clean_url.len()..];
-            format!(
+            let link = format!(
                 r#"<a href="{}" rel="nofollow noopener" target="_blank">{}</a>{}"#,
                 clean_url, clean_url, trailing
-            )
+            );
+            // Check for supported video embed URLs and append a placeholder if matched.
+            if let Some((embed_type, embed_id)) = extract_video_embed(clean_url) {
+                format!(
+                    r#"{}<span class="video-unfurl" data-embed-type="{}" data-embed-id="{}"></span>"#,
+                    link, embed_type, embed_id
+                )
+            } else {
+                link
+            }
         })
         .into_owned();
 

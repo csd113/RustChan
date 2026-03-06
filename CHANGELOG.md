@@ -2,6 +2,77 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.0.10] — 2026-03-06
+
+### Added
+- **Video embed unfurling** — when a post body contains a YouTube, Invidious, or
+  Streamable URL, the markup parser now emits a `<span class="video-unfurl">`
+  placeholder alongside the hyperlink, carrying `data-embed-type` and
+  `data-embed-id` attributes.  On thread pages a new client-side script replaces
+  each placeholder with a thumbnail + circular play button; clicking it swaps in
+  the embedded iframe with autoplay.  YouTube thumbnails are loaded directly from
+  `img.youtube.com`; Streamable shows a labelled placeholder until clicked.
+  Invidious instances are detected by the standard `?v=` query parameter on any
+  non-YouTube domain, so any self-hosted instance is automatically supported.  The
+  feature is opt-in at the board level via a new **"Embed video links"** checkbox
+  in the admin board-settings panel.  The embed JS is a no-op when the board flag
+  is off, and the placeholder spans in existing `body_html` are simply hidden by
+  CSS, so toggling the flag does not require re-rendering stored posts.  Backed by
+  a new `allow_video_embeds` column on the `boards` table (default `0`) added via
+  an additive SQLite migration.
+- **Cross-board quotelink hover previews** — `>>>/board/123` links were previously
+  rendered as styled amber anchors with no interactive preview.  They now carry
+  `data-crossboard` and `data-pid` attributes and are wired by a new client-side
+  script that fetches `GET /api/post/{board}/{thread_id}` on hover, renders the OP
+  post in the same floating popup used by same-thread `>>N` quotelinks, and caches
+  results for the lifetime of the page so repeat hovers are instant.  A loading
+  placeholder is shown while the fetch is in flight; a terse error message is
+  shown for non-existent threads.  The new `GET /api/post/{board}/{thread_id}`
+  endpoint is rate-limited by the existing middleware and returns JSON
+  `{"html":"…"}` containing the server-rendered OP post (thumbnail included,
+  delete/admin controls stripped).  A new `db::get_op_post_for_thread` DB
+  function powers the lookup.  The cross-board popup shares the popup `div` and
+  positioning logic already used by same-thread quotelinks, so all five visual
+  themes render correctly without additional CSS.
+- **Spoiler text markup** — `[spoiler]text[/spoiler]` tags were already parsed by
+  the markup pipeline and confirmed to produce `<span class="spoiler">` with CSS
+  `background == color` (text invisible at rest, revealed on hover or click via
+  `.spoiler:hover` / `.spoiler.revealed`).  No code change was required; this entry
+  documents that the feature is fully implemented, tested (`test_spoiler` passes),
+  and safe against XSS (the `[` and `]` delimiters survive `escape_html` unchanged
+  because they are not HTML-special characters, and the rendered content is already
+  escaped before the spoiler regex runs).
+- **Floating new-reply pill** — when the auto-updater fetches new posts, a
+  floating pill reading "+N new replies ↓" fades in over the thread.  Clicking
+  it smooth-scrolls to the bottom of the page and dismisses the pill.  The pill
+  also auto-dismisses when the user scrolls within 200 px of the bottom, or
+  after 30 seconds.  This replaces reliance on the small status span in the nav
+  bar, which was easy to miss — directly equivalent to 4chan X's new-post
+  notification pill.
+- **Delta-compressed thread state in the auto-update endpoint** — the
+  `GET /:board/thread/:id/updates?since=N` response now carries a richer JSON
+  envelope: `reply_count`, `bump_time`, `locked`, and `sticky` alongside the
+  existing `html`/`last_id`/`count` fields.  The client consumes these to keep
+  the nav-bar reply counter and lock/sticky badges in sync without a full page
+  reload.  A new `R: N` reply counter has been added to the thread nav bar and
+  is updated live on every poll cycle.  If the thread becomes locked while the
+  user is watching, a lock notice is injected above the posts automatically.
+- **"(You)" post tracking** — post IDs submitted by the current browser are
+  persisted in `localStorage` under a per-thread key and survive page refreshes.
+  A subtle `(You)` badge is rendered next to the post number of every post you
+  authored, making it easy to spot replies to your own posts.  The mechanism
+  works by setting a `rustchan_you_pending_<board>_<thread>` flag before the
+  reply form submits; on the redirect landing, the post ID is extracted from
+  the URL fragment and saved.  Badges are also re-applied whenever the
+  auto-updater inserts new posts.
+
+### Changed
+- **`Board` model** — one new field: `allow_video_embeds: bool` (default `false`).
+  All DB queries reading or writing board rows have been updated.  Board backup /
+  restore manifests include the new field so the setting survives a round-trip;
+  older backup zips that pre-date the field default it to `false` on restore via
+  `#[serde(default)]`.
+
 ## [1.0.9] — 2026-03-06
 
 ### Added
