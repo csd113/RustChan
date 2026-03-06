@@ -83,6 +83,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             bumped_at   INTEGER NOT NULL DEFAULT (unixepoch()),
             locked      INTEGER NOT NULL DEFAULT 0,
             sticky      INTEGER NOT NULL DEFAULT 0,
+            archived    INTEGER NOT NULL DEFAULT 0,
             reply_count INTEGER NOT NULL DEFAULT 0
         );
 
@@ -97,14 +98,18 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             body           TEXT NOT NULL,
             body_html      TEXT NOT NULL,
             ip_hash        TEXT NOT NULL,
-            file_path      TEXT,
-            file_name      TEXT,
-            file_size      INTEGER,
-            thumb_path     TEXT,
-            mime_type      TEXT,
-            created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
-            deletion_token TEXT NOT NULL,
-            is_op          INTEGER NOT NULL DEFAULT 0
+            file_path        TEXT,
+            file_name        TEXT,
+            file_size        INTEGER,
+            thumb_path       TEXT,
+            mime_type        TEXT,
+            created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+            deletion_token   TEXT NOT NULL,
+            is_op            INTEGER NOT NULL DEFAULT 0,
+            audio_file_path  TEXT,
+            audio_file_name  TEXT,
+            audio_file_size  INTEGER,
+            audio_mime_type  TEXT
         );
 
         -- File deduplication table (SHA-256 hash → existing file paths)
@@ -181,6 +186,46 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             value      TEXT NOT NULL
         );
 
+        -- User-filed reports
+        CREATE TABLE IF NOT EXISTS reports (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id        INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+            thread_id      INTEGER NOT NULL,
+            board_id       INTEGER NOT NULL,
+            reason         TEXT NOT NULL DEFAULT '',
+            reporter_hash  TEXT NOT NULL,
+            status         TEXT NOT NULL DEFAULT 'open',
+            created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+            resolved_at    INTEGER,
+            resolved_by    INTEGER
+        );
+
+        -- Moderation action log
+        CREATE TABLE IF NOT EXISTS mod_log (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_id     INTEGER NOT NULL,
+            admin_name   TEXT NOT NULL,
+            action       TEXT NOT NULL,
+            target_type  TEXT NOT NULL DEFAULT '',
+            target_id    INTEGER,
+            board_short  TEXT NOT NULL DEFAULT '',
+            detail       TEXT NOT NULL DEFAULT '',
+            created_at   INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+
+        -- Background job queue (persistent across restarts)
+        CREATE TABLE IF NOT EXISTS background_jobs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_type    TEXT NOT NULL,
+            payload     TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed
+            priority    INTEGER NOT NULL DEFAULT 0,
+            attempts    INTEGER NOT NULL DEFAULT 0,
+            last_error  TEXT,
+            created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+
         -- Indices for common query patterns
         CREATE INDEX IF NOT EXISTS idx_threads_board_sticky_bumped
             ON threads(board_id, sticky DESC, bumped_at DESC);
@@ -194,6 +239,12 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             ON admin_sessions(expires_at);
         CREATE INDEX IF NOT EXISTS idx_file_hashes
             ON file_hashes(sha256);
+        CREATE INDEX IF NOT EXISTS idx_jobs_pending
+            ON background_jobs(status, priority DESC, created_at ASC);
+        CREATE INDEX IF NOT EXISTS idx_reports_status
+            ON reports(status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_mod_log_created
+            ON mod_log(created_at DESC);
         ",
     )
     .context("Schema creation failed")?;
@@ -208,7 +259,23 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         "ALTER TABLE boards ADD COLUMN allow_audio   INTEGER NOT NULL DEFAULT 1",
         // MediaType column on posts for explicit classification (Part 3)
         "ALTER TABLE posts ADD COLUMN media_type TEXT",
+        "ALTER TABLE posts ADD COLUMN audio_file_path TEXT",
+        "ALTER TABLE posts ADD COLUMN audio_file_name TEXT",
+        "ALTER TABLE posts ADD COLUMN audio_file_size INTEGER",
+        "ALTER TABLE posts ADD COLUMN audio_mime_type TEXT",
         // Poll tables added later — CREATE TABLE IF NOT EXISTS handles this gracefully
+        // Post editing support: timestamp of last edit (NULL = never edited)
+        "ALTER TABLE posts ADD COLUMN edited_at INTEGER",
+        // Background job queue — added to CREATE TABLE IF NOT EXISTS above,
+        // but the index must also exist on databases created before this version.
+        "CREATE INDEX IF NOT EXISTS idx_jobs_pending ON background_jobs(status, priority DESC, created_at ASC)",
+        // Reports and mod_log — CREATE TABLE IF NOT EXISTS handles new installs;
+        // these indexes ensure they exist on pre-existing databases too.
+        "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_mod_log_created ON mod_log(created_at DESC)",
+        // v1.0.8: archive column on threads (non-destructive prune)
+        "ALTER TABLE threads ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+        "CREATE INDEX IF NOT EXISTS idx_threads_archived ON threads(board_id, archived, bumped_at DESC)",
     ];
     for sql in migrations {
         let _ = conn.execute(sql, []); // ignore "duplicate column" errors
@@ -445,10 +512,11 @@ pub fn get_threads_for_board(
     let mut stmt = conn.prepare_cached(
         "SELECT t.id, t.board_id, t.subject, t.created_at, t.bumped_at,
                 t.locked, t.sticky, t.reply_count,
-                op.body, op.file_path, op.thumb_path, op.name, op.tripcode, op.id
+                op.body, op.file_path, op.thumb_path, op.name, op.tripcode, op.id,
+                t.archived
          FROM threads t
          JOIN posts op ON op.thread_id = t.id AND op.is_op = 1
-         WHERE t.board_id = ?1
+         WHERE t.board_id = ?1 AND t.archived = 0
          ORDER BY t.sticky DESC, t.bumped_at DESC
          LIMIT ?2 OFFSET ?3",
     )?;
@@ -470,6 +538,7 @@ pub fn get_threads_for_board(
                 op_name: row.get(11)?,
                 op_tripcode: row.get(12)?,
                 op_id: row.get(13)?,
+                archived: row.get::<_, i32>(14)? != 0,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -478,7 +547,7 @@ pub fn get_threads_for_board(
 
 pub fn count_threads_for_board(conn: &rusqlite::Connection, board_id: i64) -> Result<i64> {
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM threads WHERE board_id = ?1",
+        "SELECT COUNT(*) FROM threads WHERE board_id = ?1 AND archived = 0",
         params![board_id],
         |r| r.get(0),
     )?)
@@ -488,7 +557,8 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
     let mut stmt = conn.prepare_cached(
         "SELECT t.id, t.board_id, t.subject, t.created_at, t.bumped_at,
                 t.locked, t.sticky, t.reply_count,
-                op.body, op.file_path, op.thumb_path, op.name, op.tripcode, op.id
+                op.body, op.file_path, op.thumb_path, op.name, op.tripcode, op.id,
+                t.archived
          FROM threads t
          JOIN posts op ON op.thread_id = t.id AND op.is_op = 1
          WHERE t.id = ?1",
@@ -510,6 +580,7 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
                 op_name: row.get(11)?,
                 op_tripcode: row.get(12)?,
                 op_id: row.get(13)?,
+                archived: row.get::<_, i32>(14)? != 0,
             })
         })
         .optional()?)
@@ -593,17 +664,23 @@ pub fn set_thread_locked(conn: &rusqlite::Connection, thread_id: i64, locked: bo
 
 pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<String>> {
     // Collect file paths before deletion (for filesystem cleanup)
-    let mut stmt = conn.prepare("SELECT file_path, thumb_path FROM posts WHERE thread_id = ?1")?;
-    let paths: Vec<(Option<String>, Option<String>)> = stmt
-        .query_map(params![thread_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let mut stmt = conn
+        .prepare("SELECT file_path, thumb_path, audio_file_path FROM posts WHERE thread_id = ?1")?;
+    let paths: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
+        .query_map(params![thread_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
 
     let mut all_paths = Vec::new();
-    for (f, t) in paths {
+    for (f, t, a) in paths {
         if let Some(p) = f {
             all_paths.push(p);
         }
         if let Some(p) = t {
+            all_paths.push(p);
+        }
+        if let Some(p) = a {
             all_paths.push(p);
         }
     }
@@ -612,29 +689,81 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
     Ok(all_paths)
 }
 
-/// Prune oldest non-sticky threads beyond the board limit.
-pub fn prune_old_threads(
-    conn: &rusqlite::Connection,
-    board_id: i64,
-    max: i64,
-) -> Result<Vec<String>> {
+/// Archive oldest non-sticky threads that exceed the board's max_threads limit.
+/// Archived threads are locked and marked read-only instead of deleted, so
+/// their content remains accessible via /{board}/archive.
+/// Returns the count of threads archived (no file deletion occurs).
+pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -> Result<usize> {
     let ids: Vec<i64> = {
         let mut stmt = conn.prepare(
-            "SELECT id FROM threads WHERE board_id = ?1 AND sticky = 0
+            "SELECT id FROM threads
+             WHERE board_id = ?1 AND sticky = 0 AND archived = 0
              ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
         )?;
-        let x = stmt
+        let ids = stmt
             .query_map(params![board_id, max], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        x
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids
     };
-
-    let mut all_paths = Vec::new();
+    let count = ids.len();
     for id in ids {
-        let mut paths = delete_thread(conn, id)?;
-        all_paths.append(&mut paths);
+        conn.execute(
+            "UPDATE threads SET archived = 1, locked = 1 WHERE id = ?1",
+            params![id],
+        )?;
     }
-    Ok(all_paths)
+    Ok(count)
+}
+
+/// Fetch archived threads for a board, newest-bumped first with pagination.
+pub fn get_archived_threads_for_board(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Thread>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT t.id, t.board_id, t.subject, t.created_at, t.bumped_at,
+                t.locked, t.sticky, t.reply_count,
+                op.body, op.file_path, op.thumb_path, op.name, op.tripcode, op.id,
+                t.archived
+         FROM threads t
+         JOIN posts op ON op.thread_id = t.id AND op.is_op = 1
+         WHERE t.board_id = ?1 AND t.archived = 1
+         ORDER BY t.bumped_at DESC
+         LIMIT ?2 OFFSET ?3",
+    )?;
+    let threads = stmt
+        .query_map(params![board_id, limit, offset], |row| {
+            Ok(Thread {
+                id: row.get(0)?,
+                board_id: row.get(1)?,
+                subject: row.get(2)?,
+                created_at: row.get(3)?,
+                bumped_at: row.get(4)?,
+                locked: row.get::<_, i32>(5)? != 0,
+                sticky: row.get::<_, i32>(6)? != 0,
+                reply_count: row.get(7)?,
+                op_body: row.get(8)?,
+                op_file: row.get(9)?,
+                op_thumb: row.get(10)?,
+                op_name: row.get(11)?,
+                op_tripcode: row.get(12)?,
+                op_id: row.get(13)?,
+                archived: row.get::<_, i32>(14)? != 0,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(threads)
+}
+
+/// Count archived threads for a board (used for archive pagination).
+pub fn count_archived_threads_for_board(conn: &rusqlite::Connection, board_id: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM threads WHERE board_id = ?1 AND archived = 1",
+        params![board_id],
+        |r| r.get(0),
+    )?)
 }
 
 // ─── Post queries ─────────────────────────────────────────────────────────────
@@ -643,11 +772,36 @@ pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Resu
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type
+                created_at, deletion_token, is_op, media_type,
+                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
+                edited_at
          FROM posts WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
     )?;
     let posts = stmt
         .query_map(params![thread_id], map_post)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(posts)
+}
+
+/// Fetch posts in `thread_id` whose id is strictly greater than `since_id`.
+/// Returns them oldest-first. Used by the thread auto-update polling endpoint.
+pub fn get_new_posts_since(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+    since_id: i64,
+) -> Result<Vec<Post>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
+                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
+                created_at, deletion_token, is_op, media_type,
+                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
+                edited_at
+         FROM posts WHERE thread_id = ?1 AND id > ?2
+         ORDER BY id ASC
+         LIMIT 100",
+    )?;
+    let posts = stmt
+        .query_map(params![thread_id, since_id], map_post)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(posts)
 }
@@ -658,7 +812,9 @@ pub fn get_preview_posts(conn: &rusqlite::Connection, thread_id: i64, n: i64) ->
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type
+                created_at, deletion_token, is_op, media_type,
+                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
+                edited_at
          FROM (
              SELECT * FROM posts WHERE thread_id = ?1 AND is_op = 0
              ORDER BY created_at DESC, id DESC LIMIT ?2
@@ -676,8 +832,9 @@ fn create_post_inner(conn: &rusqlite::Connection, p: &NewPost) -> Result<i64> {
         "INSERT INTO posts
          (thread_id, board_id, name, tripcode, subject, body, body_html,
           ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-          deletion_token, is_op, media_type)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+          deletion_token, is_op, media_type,
+          audio_file_path, audio_file_name, audio_file_size, audio_mime_type)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
         params![
             p.thread_id,
             p.board_id,
@@ -695,6 +852,10 @@ fn create_post_inner(conn: &rusqlite::Connection, p: &NewPost) -> Result<i64> {
             p.deletion_token,
             p.is_op as i32,
             p.media_type,
+            p.audio_file_path,
+            p.audio_file_name,
+            p.audio_file_size,
+            p.audio_mime_type,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -708,7 +869,9 @@ pub fn get_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<Post
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type
+                created_at, deletion_token, is_op, media_type,
+                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
+                edited_at
          FROM posts WHERE id = ?1",
     )?;
     Ok(stmt.query_row(params![post_id], map_post).optional()?)
@@ -722,6 +885,9 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
             paths.push(p);
         }
         if let Some(p) = post.thumb_path {
+            paths.push(p);
+        }
+        if let Some(p) = post.audio_file_path {
             paths.push(p);
         }
     }
@@ -750,6 +916,52 @@ pub fn verify_deletion_token(
         .unwrap_or(false))
 }
 
+/// How long (in seconds) after posting a user may edit their post (5 minutes).
+pub const EDIT_WINDOW_SECS: i64 = 300;
+
+/// Edit a post's body, verified against the deletion token and the edit window.
+///
+/// Returns `Ok(true)` on success, `Ok(false)` if the token is wrong or the
+/// edit window has closed, and `Err` for database failures.
+pub fn edit_post(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    token: &str,
+    new_body: &str,
+    new_body_html: &str,
+) -> Result<bool> {
+    // Verify token first (constant-time)
+    if !verify_deletion_token(conn, post_id, token)? {
+        return Ok(false);
+    }
+
+    // Check edit window
+    let created_at: Option<i64> = conn
+        .query_row(
+            "SELECT created_at FROM posts WHERE id = ?1",
+            params![post_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let created_at = match created_at {
+        Some(t) => t,
+        None => return Ok(false),
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    if now - created_at > EDIT_WINDOW_SECS {
+        return Ok(false);
+    }
+
+    conn.execute(
+        "UPDATE posts SET body = ?1, body_html = ?2, edited_at = ?3 WHERE id = ?4",
+        params![new_body, new_body_html, now, post_id],
+    )?;
+
+    Ok(true)
+}
+
 /// Constant-time byte slice comparison to prevent timing side-channel attacks.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -775,7 +987,9 @@ pub fn search_posts(
     let mut stmt = conn.prepare(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type
+                created_at, deletion_token, is_op, media_type,
+                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
+                edited_at
          FROM posts WHERE board_id = ?1 AND body LIKE ?2 ESCAPE '\\'
          ORDER BY created_at DESC LIMIT ?3 OFFSET ?4",
     )?;
@@ -1193,6 +1407,11 @@ fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
         deletion_token: row.get(15)?,
         is_op: row.get::<_, i32>(16)? != 0,
         media_type,
+        audio_file_path: row.get(18)?,
+        audio_file_name: row.get(19)?,
+        audio_file_size: row.get(20)?,
+        audio_mime_type: row.get(21)?,
+        edited_at: row.get(22)?,
     })
 }
 
@@ -1215,6 +1434,11 @@ pub struct NewPost {
     pub mime_type: Option<String>,
     /// Explicit media classification derived from MIME type at upload time.
     pub media_type: Option<String>,
+    /// Secondary audio file for image+audio combo posts.
+    pub audio_file_path: Option<String>,
+    pub audio_file_name: Option<String>,
+    pub audio_file_size: Option<i64>,
+    pub audio_mime_type: Option<String>,
     pub deletion_token: String,
     pub is_op: bool,
 }
@@ -1267,4 +1491,411 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
         total_audio,
         active_bytes,
     })
+}
+
+// ─── WAL checkpoint ───────────────────────────────────────────────────────────
+
+/// Run PRAGMA wal_checkpoint(TRUNCATE) and return (log_pages, moved_pages, busy).
+///
+/// SQLite's wal_checkpoint pragma returns three columns:
+///   col 0 — busy:         1 if a checkpoint could not complete due to an active reader/writer
+///   col 1 — log:          total pages in the WAL file
+///   col 2 — checkpointed: pages that were actually written back to the database
+///
+/// TRUNCATE mode: after a complete checkpoint, the WAL file is truncated to
+/// zero bytes, reclaiming disk space immediately.  It is safe to call at any
+/// time; if a reader or writer is active the checkpoint proceeds partially and
+/// the next run will complete it.
+pub fn run_wal_checkpoint(conn: &rusqlite::Connection) -> Result<(i64, i64, i64)> {
+    let (busy, log_pages, checkpointed) =
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+    Ok((log_pages, checkpointed, busy))
+}
+
+// ─── Database size ────────────────────────────────────────────────────────────
+
+/// Return the current on-disk size of the database in bytes
+/// (page_count × page_size, as reported by SQLite).
+///
+/// This reflects the main database file only; the WAL file is separate and
+/// typically small after a checkpoint.
+pub fn get_db_size_bytes(conn: &rusqlite::Connection) -> Result<i64> {
+    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    Ok(page_count * page_size)
+}
+
+/// Run VACUUM on the database, rebuilding it into a minimal file.
+///
+/// VACUUM rewrites the entire database file, compacting free pages left by
+/// bulk deletions.  It cannot run inside a transaction.  The call blocks until
+/// the full rebuild is complete; for large databases this may take several
+/// seconds.  Always call `get_db_size_bytes` before and after to report the
+/// space saving to the operator.
+pub fn run_vacuum(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch("VACUUM")?;
+    Ok(())
+}
+
+// ─── IP history ───────────────────────────────────────────────────────────────
+
+/// Count total posts by IP hash across all boards.
+pub fn count_posts_by_ip_hash(conn: &rusqlite::Connection, ip_hash: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM posts WHERE ip_hash = ?1",
+        rusqlite::params![ip_hash],
+        |r| r.get(0),
+    )?)
+}
+
+/// Return paginated posts by IP hash, newest first, across all boards.
+/// Each post is joined with its board short_name for display.
+pub fn get_posts_by_ip_hash(
+    conn: &rusqlite::Connection,
+    ip_hash: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<(crate::models::Post, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.thread_id, p.board_id, p.name, p.tripcode, p.subject,
+                p.body, p.body_html, p.ip_hash, p.file_path, p.file_name,
+                p.file_size, p.thumb_path, p.mime_type, p.created_at,
+                p.deletion_token, p.is_op, p.media_type,
+                p.audio_file_path, p.audio_file_name, p.audio_file_size, p.audio_mime_type,
+                p.edited_at,
+                b.short_name
+         FROM posts p
+         JOIN threads t ON p.thread_id = t.id
+         JOIN boards  b ON t.board_id  = b.id
+         WHERE p.ip_hash = ?1
+         ORDER BY p.created_at DESC, p.id DESC
+         LIMIT ?2 OFFSET ?3",
+    )?;
+
+    let rows = stmt.query_map(rusqlite::params![ip_hash, limit, offset], |row| {
+        let media_type_str: Option<String> = row.get(17)?;
+        let media_type = media_type_str
+            .as_deref()
+            .and_then(crate::models::MediaType::from_db_str);
+        let post = crate::models::Post {
+            id: row.get(0)?,
+            thread_id: row.get(1)?,
+            board_id: row.get(2)?,
+            name: row.get(3)?,
+            tripcode: row.get(4)?,
+            subject: row.get(5)?,
+            body: row.get(6)?,
+            body_html: row.get(7)?,
+            ip_hash: row.get(8)?,
+            file_path: row.get(9)?,
+            file_name: row.get(10)?,
+            file_size: row.get(11)?,
+            thumb_path: row.get(12)?,
+            mime_type: row.get(13)?,
+            created_at: row.get(14)?,
+            deletion_token: row.get(15)?,
+            is_op: row.get::<_, i32>(16)? != 0,
+            media_type,
+            audio_file_path: row.get(18)?,
+            audio_file_name: row.get(19)?,
+            audio_file_size: row.get(20)?,
+            audio_mime_type: row.get(21)?,
+            edited_at: row.get(22)?,
+        };
+        let board_short: String = row.get(23)?;
+        Ok((post, board_short))
+    })?;
+
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+// ─── Background job queue ─────────────────────────────────────────────────────
+//
+// Jobs flow through: pending → running → done | failed
+// claim_next_job uses UPDATE … RETURNING for atomic claim with no TOCTOU race.
+
+/// Persist a new job in the pending state. Returns the new row id.
+pub fn enqueue_job(conn: &rusqlite::Connection, job_type: &str, payload: &str) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO background_jobs (job_type, payload, status, updated_at)
+         VALUES (?1, ?2, 'pending', unixepoch())",
+        params![job_type, payload],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Atomically claim the highest-priority pending job that has not exhausted
+/// its retry budget. Returns (job_id, payload) or None when the queue is empty.
+///
+/// The UPDATE … RETURNING subquery is a single atomic operation in SQLite's
+/// WAL mode, so no two workers can claim the same job.
+pub fn claim_next_job(conn: &rusqlite::Connection) -> Result<Option<(i64, String)>> {
+    let mut stmt = conn.prepare_cached(
+        "UPDATE background_jobs
+         SET status = 'running',
+             attempts  = attempts + 1,
+             updated_at = unixepoch()
+         WHERE id = (
+             SELECT id FROM background_jobs
+             WHERE status = 'pending' AND attempts < 3
+             ORDER BY priority DESC, created_at ASC
+             LIMIT 1
+         )
+         RETURNING id, payload",
+    )?;
+    let result = stmt
+        .query_row([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .optional()?;
+    Ok(result)
+}
+
+/// Mark a job as successfully completed.
+pub fn complete_job(conn: &rusqlite::Connection, id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE background_jobs SET status = 'done', updated_at = unixepoch()
+         WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// Record a job failure. After MAX_ATTEMPTS the job stays "failed" permanently.
+pub fn fail_job(conn: &rusqlite::Connection, id: i64, error: &str) -> Result<()> {
+    // Truncate error to 512 chars to prevent runaway row sizes.
+    let err_trunc: String = error.chars().take(512).collect();
+    conn.execute(
+        "UPDATE background_jobs
+         SET status = CASE WHEN attempts >= 3 THEN 'failed' ELSE 'pending' END,
+             last_error  = ?2,
+             updated_at  = unixepoch()
+         WHERE id = ?1",
+        params![id, err_trunc],
+    )?;
+    Ok(())
+}
+
+/// Count jobs currently in the 'pending' state (used for monitoring).
+#[allow(dead_code)]
+pub fn pending_job_count(conn: &rusqlite::Connection) -> Result<i64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM background_jobs WHERE status = 'pending'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
+// ─── Post update helpers (used by background workers) ────────────────────────
+
+/// Update a post's file_path and mime_type after background transcoding.
+pub fn update_post_file_info(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    file_path: &str,
+    mime_type: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE posts SET file_path = ?1, mime_type = ?2 WHERE id = ?3",
+        params![file_path, mime_type, post_id],
+    )?;
+    Ok(())
+}
+
+/// Update a post's thumb_path after background waveform / thumbnail generation.
+pub fn update_post_thumb_path(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    thumb_path: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE posts SET thumb_path = ?1 WHERE id = ?2",
+        params![thumb_path, post_id],
+    )?;
+    Ok(())
+}
+
+/// Retrieve just the thumb_path for a post (used by VideoTranscode worker to
+/// preserve the existing thumbnail when refreshing the file-hash record).
+pub fn get_post_thumb_path(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<String>> {
+    let result = conn
+        .query_row(
+            "SELECT thumb_path FROM posts WHERE id = ?1",
+            params![post_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(result)
+}
+
+/// Delete a file-hash record by its stored file_path (used when the worker
+/// replaces an MP4 with the transcoded WebM and needs to refresh the index).
+pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM file_hashes WHERE file_path = ?1",
+        params![file_path],
+    )?;
+    Ok(())
+}
+
+// ─── Reports ──────────────────────────────────────────────────────────────────
+
+/// File a new report against a post. Returns the new report id.
+pub fn file_report(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    thread_id: i64,
+    board_id: i64,
+    reason: &str,
+    reporter_hash: &str,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO reports (post_id, thread_id, board_id, reason, reporter_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![post_id, thread_id, board_id, reason, reporter_hash],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Return all open reports enriched with board name and post preview.
+pub fn get_open_reports(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<crate::models::ReportWithContext>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id, r.post_id, r.thread_id, r.board_id, r.reason,
+                r.reporter_hash, r.status, r.created_at, r.resolved_at, r.resolved_by,
+                b.short_name, p.body, p.ip_hash
+         FROM reports r
+         JOIN boards b ON b.id = r.board_id
+         JOIN posts  p ON p.id = r.post_id
+         WHERE r.status = 'open'
+         ORDER BY r.created_at DESC
+         LIMIT 200",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let report = crate::models::Report {
+            id: row.get(0)?,
+            post_id: row.get(1)?,
+            thread_id: row.get(2)?,
+            board_id: row.get(3)?,
+            reason: row.get(4)?,
+            reporter_hash: row.get(5)?,
+            status: row.get(6)?,
+            created_at: row.get(7)?,
+            resolved_at: row.get(8)?,
+            resolved_by: row.get(9)?,
+        };
+        let board_short: String = row.get(10)?;
+        let body: String = row.get(11)?;
+        let ip_hash: String = row.get(12)?;
+        let preview: String = body.chars().take(120).collect();
+        Ok(crate::models::ReportWithContext {
+            report,
+            board_short,
+            post_preview: preview,
+            post_ip_hash: ip_hash,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Resolve a report (mark it closed).
+pub fn resolve_report(conn: &rusqlite::Connection, report_id: i64, admin_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE reports SET status='resolved', resolved_at=unixepoch(), resolved_by=?1
+         WHERE id = ?2",
+        params![admin_id, report_id],
+    )?;
+    Ok(())
+}
+
+/// Count of currently open (unresolved) reports.
+#[allow(dead_code)]
+pub fn open_report_count(conn: &rusqlite::Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM reports WHERE status='open'",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+// ─── Moderation log ───────────────────────────────────────────────────────────
+
+/// Append one entry to the moderation action log.
+pub fn log_mod_action(
+    conn: &rusqlite::Connection,
+    admin_id: i64,
+    admin_name: &str,
+    action: &str,
+    target_type: &str,
+    target_id: Option<i64>,
+    board_short: &str,
+    detail: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO mod_log
+             (admin_id, admin_name, action, target_type, target_id, board_short, detail)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            admin_id,
+            admin_name,
+            action,
+            target_type,
+            target_id,
+            board_short,
+            detail
+        ],
+    )?;
+    Ok(())
+}
+
+/// Retrieve a page of mod log entries, newest first.
+pub fn get_mod_log(
+    conn: &rusqlite::Connection,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<crate::models::ModLogEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, admin_id, admin_name, action, target_type, target_id,
+                board_short, detail, created_at
+         FROM mod_log
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?1 OFFSET ?2",
+    )?;
+    let rows = stmt.query_map(params![limit, offset], |row| {
+        Ok(crate::models::ModLogEntry {
+            id: row.get(0)?,
+            admin_id: row.get(1)?,
+            admin_name: row.get(2)?,
+            action: row.get(3)?,
+            target_type: row.get(4)?,
+            target_id: row.get(5)?,
+            board_short: row.get(6)?,
+            detail: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Total count of mod_log entries (for pagination).
+pub fn count_mod_log(conn: &rusqlite::Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT COUNT(*) FROM mod_log", [], |r| r.get(0))?)
+}
+
+/// Retrieve admin username by admin_id (used when building log entries).
+pub fn get_admin_name_by_id(conn: &rusqlite::Connection, admin_id: i64) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT username FROM admin_users WHERE id = ?1",
+            params![admin_id],
+            |r| r.get(0),
+        )
+        .optional()?)
 }

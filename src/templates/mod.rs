@@ -25,11 +25,33 @@ function togglePostForm() {
     if (first) first.focus();
   }
 }
+function toggleMobileDrawer() {
+  var drawer = document.getElementById('mobile-reply-drawer');
+  var fab = document.getElementById('mobile-reply-fab');
+  if (!drawer) return;
+  var opening = !drawer.classList.contains('open');
+  drawer.classList.toggle('open', opening);
+  if (fab) fab.classList.toggle('hidden', opening);
+  if (opening) {
+    var ta = drawer.querySelector('textarea');
+    if (ta) { setTimeout(function(){ ta.focus(); }, 120); }
+  }
+}
 function appendReply(id) {
+  // Desktop: open the inline form
   var wrap = document.getElementById('post-form-wrap');
-  if (wrap && wrap.style.display === 'none') togglePostForm();
-  var ta = document.getElementById('reply-body');
-  if (ta) { ta.value += '>>' + id + '\n'; ta.focus(); }
+  // Mobile: open the drawer instead if we're on a small screen
+  var isMobile = window.matchMedia('(max-width: 767px)').matches;
+  if (isMobile) {
+    var drawer = document.getElementById('mobile-reply-drawer');
+    if (drawer && !drawer.classList.contains('open')) toggleMobileDrawer();
+    var ta = drawer ? drawer.querySelector('textarea') : null;
+    if (ta) { ta.value += '>>' + id + '\n'; ta.focus(); }
+  } else {
+    if (wrap && wrap.style.display === 'none') togglePostForm();
+    var ta = document.getElementById('reply-body');
+    if (ta) { ta.value += '>>' + id + '\n'; ta.focus(); }
+  }
   return false;
 }
 function expandMedia(preview) {
@@ -62,6 +84,369 @@ function collapseMedia(btn) {
   btn.style.display = 'none';
 }
 </script>"#;
+
+// ─── Auto-compress modal (injected into forms that accept image/video) ────────
+
+/// Returns the compress-modal overlay HTML + all supporting JavaScript.
+/// `max_image_bytes` and `max_video_bytes` are injected as JS constants so the
+/// client-side size check matches the server-side limit exactly.
+fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> String {
+    format!(
+        r#"
+<!-- Auto-compress modal — shared by new-thread and reply forms on this page -->
+<div id="compress-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="compress-modal-title">
+  <div class="compress-modal-box">
+    <div class="compress-modal-title" id="compress-modal-title">&#9888; File Too Large</div>
+    <div class="compress-modal-info" id="compress-info"></div>
+    <div class="compress-progress" id="compress-progress" style="display:none">
+      <div class="compress-progress-track"><div class="compress-progress-bar" id="compress-progress-bar"></div></div>
+      <div class="compress-progress-text" id="compress-progress-text">Preparing…</div>
+    </div>
+    <div class="compress-modal-actions" id="compress-actions">
+      <button class="compress-cancel-btn" onclick="dismissCompressModal()">Cancel</button>
+      <button class="compress-do-btn" id="compress-do-btn" onclick="startCompress()">&#9881; Auto-compress</button>
+    </div>
+    <div class="compress-done-actions" id="compress-done-actions" style="display:none">
+      <button class="compress-cancel-btn" onclick="dismissCompressModal()">Close</button>
+    </div>
+  </div>
+</div>
+<script>
+(function() {{
+  var MAX_IMAGE = {max_image};
+  var MAX_VIDEO = {max_video};
+  var _input = null, _file = null, _max = 0, _compressing = false;
+
+  // Called from onchange on every file input that accepts images or videos.
+  window.checkFileSize = function(input) {{
+    var file = input.files && input.files[0];
+    if (!file) return;
+    var isImg   = file.type.startsWith('image/');
+    var isVideo = file.type.startsWith('video/');
+    var limit   = isImg ? MAX_IMAGE : (isVideo ? MAX_VIDEO : 0);
+    if (limit === 0 || file.size <= limit) return;
+    _input = input;
+    _file  = file;
+    _max   = limit;
+    var sizeMiB = (file.size   / 1048576).toFixed(1);
+    var limMiB  = (limit       / 1048576).toFixed(1);
+    document.getElementById('compress-info').textContent =
+      '\u201c' + file.name + '\u201d is ' + sizeMiB + ' MiB \u2014 board limit is ' + limMiB + ' MiB.';
+    _setView('actions');
+    document.getElementById('compress-modal').style.display = 'flex';
+  }};
+
+  window.dismissCompressModal = function() {{
+    if (_compressing) return; // block dismiss while running
+    document.getElementById('compress-modal').style.display = 'none';
+    if (_input) {{ _input.value = ''; }}
+    _input = null; _file = null; _compressing = false;
+  }};
+
+  window.startCompress = function() {{
+    if (!_file || !_input || _compressing) return;
+    _compressing = true;
+    _setView('progress');
+    _setProgress(0, 'Starting\u2026');
+
+    var isImg   = _file.type.startsWith('image/');
+    var isVideo = _file.type.startsWith('video/');
+    var promise = isImg   ? _compressImage(_file, _max)
+                : isVideo ? _compressVideo(_file, _max)
+                : Promise.reject(new Error('Unsupported type'));
+
+    promise.then(function(blob) {{
+      if (!blob || blob.size > _max) {{
+        _setProgress(100, 'Could not compress to the required size. Please use a smaller file.');
+        _compressing = false;
+        _setView('done');
+        return;
+      }}
+      var ext     = isImg ? 'jpg' : 'webm';
+      var newName = _file.name.replace(/\.[^.]+$/, '') + '_compressed.' + ext;
+      var dt      = new DataTransfer();
+      dt.items.add(new File([blob], newName, {{ type: blob.type }}));
+      _input.files = dt.files;
+      var finalMiB = (blob.size / 1048576).toFixed(2);
+      _setProgress(100, '\u2713 Compressed to ' + finalMiB + ' MiB. Ready to post.');
+      _compressing = false;
+      setTimeout(function() {{
+        document.getElementById('compress-modal').style.display = 'none';
+        _input = null; _file = null;
+      }}, 1200);
+    }}).catch(function(err) {{
+      _setProgress(0, 'Error: ' + (err.message || err));
+      _compressing = false;
+      _setView('done');
+    }});
+  }};
+
+  function _setView(which) {{
+    document.getElementById('compress-actions').style.display = which === 'actions'  ? 'flex' : 'none';
+    document.getElementById('compress-progress').style.display = which === 'progress' ? 'block': 'none';
+    document.getElementById('compress-done-actions').style.display = which === 'done' ? 'flex' : 'none';
+  }}
+
+  function _setProgress(pct, text) {{
+    document.getElementById('compress-progress-bar').style.width = pct + '%';
+    document.getElementById('compress-progress-text').textContent = text;
+  }}
+
+  // ── Image compression via Canvas API ─────────────────────────────────────
+  async function _compressImage(file, targetBytes) {{
+    var img = await createImageBitmap(file);
+    var canvas = document.createElement('canvas');
+    var quality = 0.88, scale = 1.0;
+    for (var i = 0; i < 22; i++) {{
+      canvas.width  = Math.max(1, Math.round(img.width  * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
+      var ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      var blob = await new Promise(function(res) {{ canvas.toBlob(res, 'image/jpeg', quality); }});
+      var pct = Math.min(95, Math.round((i + 1) / 22 * 100));
+      _setProgress(pct, 'Compressing image\u2026 ' + (blob.size / 1048576).toFixed(2) + ' MiB');
+      if (blob.size <= targetBytes) return blob;
+      if (quality > 0.42) {{ quality -= 0.10; }}
+      else {{ scale *= 0.72; quality = 0.72; }}
+      if (scale < 0.08) break;
+    }}
+    return null;
+  }}
+
+  // ── Video compression via MediaRecorder API ───────────────────────────────
+  async function _compressVideo(file, targetBytes) {{
+    var videoEl = document.createElement('video');
+    videoEl.src = URL.createObjectURL(file);
+    videoEl.muted = true;
+    videoEl.preload = 'metadata';
+    await new Promise(function(res, rej) {{
+      videoEl.onloadedmetadata = res;
+      videoEl.onerror = function() {{ rej(new Error('Cannot load video metadata')); }};
+    }});
+    var dur = videoEl.duration;
+    if (!dur || !isFinite(dur)) throw new Error('Cannot determine video duration.');
+    var bps = Math.max(120000, Math.floor(targetBytes * 8 * 0.82 / dur));
+    var canvas = document.createElement('canvas');
+    canvas.width  = videoEl.videoWidth  || 640;
+    canvas.height = videoEl.videoHeight || 360;
+    var ctx = canvas.getContext('2d');
+    var mime = ['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm']
+                 .find(function(m) {{ return MediaRecorder.isTypeSupported(m); }});
+    if (!mime) throw new Error('Browser does not support MediaRecorder for video/webm.');
+    var stream   = canvas.captureStream(24);
+    var recorder = new MediaRecorder(stream, {{ mimeType: mime, videoBitsPerSecond: bps }});
+    var chunks   = [];
+    recorder.ondataavailable = function(e) {{ if (e.data.size > 0) chunks.push(e.data); }};
+    recorder.start(300);
+    var rafId;
+    function draw() {{
+      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      var pct = dur > 0 ? Math.min(98, Math.round(videoEl.currentTime / dur * 100)) : 0;
+      _setProgress(pct, 'Compressing video\u2026 ' + pct + '%  (real-time)');
+      if (!videoEl.ended && !videoEl.paused) rafId = requestAnimationFrame(draw);
+    }}
+    videoEl.play();
+    rafId = requestAnimationFrame(draw);
+    await new Promise(function(res) {{
+      videoEl.onended = function() {{ cancelAnimationFrame(rafId); recorder.stop(); res(); }};
+      videoEl.onerror = function() {{ cancelAnimationFrame(rafId); recorder.stop(); res(); }};
+    }});
+    await new Promise(function(res) {{ recorder.onstop = res; }});
+    URL.revokeObjectURL(videoEl.src);
+    if (!chunks.length) throw new Error('No video frames captured.');
+    return new Blob(chunks, {{ type: 'video/webm' }});
+  }}
+}})();
+</script>"#,
+        max_image = max_image_bytes,
+        max_video = max_video_bytes,
+    )
+}
+
+// ─── Report modal ─────────────────────────────────────────────────────────────
+
+/// Returns the report overlay HTML + JS. Injected once per thread page.
+fn report_modal_script() -> &'static str {
+    r#"
+<div id="report-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true">
+  <div class="compress-modal-box">
+    <div class="compress-modal-title">&#9873; Report Post</div>
+    <form method="POST" action="/report" id="report-form">
+      <input type="hidden" name="_csrf"     id="report-csrf">
+      <input type="hidden" name="post_id"   id="report-post-id">
+      <input type="hidden" name="thread_id" id="report-thread-id">
+      <input type="hidden" name="board"     id="report-board">
+      <div class="compress-modal-info" id="report-info" style="margin-bottom:0.6rem"></div>
+      <input type="text" name="reason" id="report-reason"
+             placeholder="reason (optional)" maxlength="256"
+             style="width:100%;background:var(--bg-input);border:1px solid var(--border);
+                    color:var(--text);padding:5px 8px;font-family:var(--font);font-size:0.82rem;
+                    box-sizing:border-box;margin-bottom:0.75rem">
+      <div class="compress-modal-actions">
+        <button type="button" class="compress-cancel-btn" onclick="closeReportModal()">Cancel</button>
+        <button type="submit" class="compress-do-btn">&#9873; Submit Report</button>
+      </div>
+    </form>
+  </div>
+</div>
+<script>
+function openReportModal(postId, threadId, board, csrf) {
+  document.getElementById('report-post-id').value   = postId;
+  document.getElementById('report-thread-id').value = threadId;
+  document.getElementById('report-board').value     = board;
+  document.getElementById('report-csrf').value      = csrf;
+  document.getElementById('report-info').textContent = 'Reporting post No.' + postId;
+  document.getElementById('report-reason').value    = '';
+  document.getElementById('report-modal').style.display = 'flex';
+  document.getElementById('report-reason').focus();
+}
+function closeReportModal() {
+  document.getElementById('report-modal').style.display = 'none';
+}
+document.getElementById('report-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeReportModal();
+});
+</script>"#
+}
+
+// ─── Thread auto-update script ────────────────────────────────────────────────
+
+/// Returns the auto-update toggle + polling JS for thread pages.
+fn thread_autoupdate_script() -> &'static str {
+    r#"
+<div class="autoupdate-bar" id="autoupdate-bar">
+  <label class="autoupdate-label">
+    <input type="checkbox" id="autoupdate-toggle" onchange="setAutoUpdate(this.checked)">
+    auto-update every 30s
+  </label>
+  <span class="autoupdate-status" id="autoupdate-status"></span>
+</div>
+<script>
+(function() {
+  var container  = document.getElementById('thread-posts');
+  var statusEl   = document.getElementById('autoupdate-status');
+  var timer      = null;
+  var updating   = false;
+
+  if (!container) return;
+
+  var board    = container.dataset.board;
+  var threadId = container.dataset.threadId;
+  var lastId   = parseInt(container.dataset.lastId, 10) || 0;
+
+  function setStatus(msg) {
+    if (statusEl) statusEl.textContent = msg;
+  }
+
+  function fetchUpdates() {
+    if (updating) return;
+    updating = true;
+    setStatus('checking…');
+    var url = '/' + board + '/thread/' + threadId + '/updates?since=' + lastId;
+    fetch(url, { credentials: 'same-origin' })
+      .then(function(r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function(data) {
+        if (data.count > 0) {
+          var wrap = document.createElement('div');
+          wrap.innerHTML = data.html;
+          while (wrap.firstChild) container.appendChild(wrap.firstChild);
+          lastId = data.last_id;
+          container.dataset.lastId = lastId;
+          setStatus('+' + data.count + ' new — ' + new Date().toLocaleTimeString());
+        } else {
+          setStatus('up to date — ' + new Date().toLocaleTimeString());
+        }
+        updating = false;
+      })
+      .catch(function(err) {
+        setStatus('error (' + err + ')');
+        updating = false;
+      });
+  }
+
+  window.setAutoUpdate = function(enabled) {
+    if (timer) { clearInterval(timer); timer = null; }
+    if (enabled) {
+      fetchUpdates();
+      timer = setInterval(fetchUpdates, 30000);
+      setStatus('watching…');
+    } else {
+      setStatus('');
+    }
+  };
+})();
+</script>"#
+}
+
+/// Standalone admin moderation log page.
+pub fn mod_log_page(
+    entries: &[crate::models::ModLogEntry],
+    pagination: &crate::models::Pagination,
+    csrf_token: &str,
+    boards: &[Board],
+) -> String {
+    let mut rows = String::new();
+    if entries.is_empty() {
+        rows.push_str(r#"<tr><td colspan="6" style="color:var(--text-dim);text-align:center">no entries yet</td></tr>"#);
+    }
+    for e in entries {
+        let target = if let Some(id) = e.target_id {
+            format!("{} #{}", e.target_type, id)
+        } else {
+            e.target_type.clone()
+        };
+        let board_link = if !e.board_short.is_empty() {
+            format!(
+                r#"<a href="/{s}/">{s}</a>"#,
+                s = escape_html(&e.board_short)
+            )
+        } else {
+            String::new()
+        };
+        rows.push_str(&format!(
+            r#"<tr>
+<td style="white-space:nowrap;font-size:0.78rem">{time}</td>
+<td><strong>{admin}</strong></td>
+<td><code>{action}</code></td>
+<td style="font-size:0.82rem">{target}</td>
+<td>{board}</td>
+<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.8rem"
+    title="{detail}">{detail}</td>
+</tr>"#,
+            time   = escape_html(&fmt_ts(e.created_at)),
+            admin  = escape_html(&e.admin_name),
+            action = escape_html(&e.action),
+            target = escape_html(&target),
+            board  = board_link,
+            detail = escape_html(&e.detail),
+        ));
+    }
+
+    let pagination_html = render_pagination(pagination, "/admin/mod-log");
+
+    let body = format!(
+        r#"<div class="page-box">
+<div class="board-header">
+  <a href="/admin/panel">[ back to panel ]</a>
+  <h2 style="margin:0.5rem 0 0.25rem">// moderation log</h2>
+  <p style="color:var(--text-dim);font-size:0.82rem">{total} total entries</p>
+</div>
+<table class="admin-table" style="width:100%;font-size:0.85rem">
+<thead><tr>
+  <th>time</th><th>admin</th><th>action</th><th>target</th><th>board</th><th>detail</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+{pagination}
+</div>"#,
+        total = pagination.total,
+        rows = rows,
+        pagination = pagination_html,
+    );
+
+    base_layout("mod log — admin", None, &body, csrf_token, boards, false)
+}
+
 use chrono::{TimeZone, Utc};
 
 // ─── Timestamp helpers ────────────────────────────────────────────────────────
@@ -120,6 +505,8 @@ fn base_layout(
   <a class="catalog-bar-link" href="/{b}/catalog">[ /{b}/ catalog ]</a>
   <span class="catalog-bar-sep">|</span>
   <a class="catalog-bar-link" href="/{b}/">[ /{b}/ index ]</a>
+  <span class="catalog-bar-sep">|</span>
+  <a class="catalog-bar-link" href="/{b}/archive">[ archive ]</a>
 </div>"#,
             b = escape_html(b)
         )
@@ -415,7 +802,7 @@ pub fn board_page(
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {}
 </div>"#,
-        new_thread_form(&board.short_name, csrf_token),
+        new_thread_form(&board.short_name, csrf_token, board),
     ));
 
     for summary in summaries {
@@ -433,6 +820,10 @@ pub fn board_page(
     ));
 
     body.push_str(TOGGLE_SCRIPT);
+    body.push_str(&compress_modal_script(
+        crate::config::CONFIG.max_image_size,
+        crate::config::CONFIG.max_video_size,
+    ));
 
     base_layout(
         &format!("/{}/", board.short_name),
@@ -444,10 +835,23 @@ pub fn board_page(
     )
 }
 
-fn new_thread_form(board_short: &str, csrf_token: &str) -> String {
+fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String {
     let image_mb = crate::config::CONFIG.max_image_size / 1024 / 1024;
     let video_mb = crate::config::CONFIG.max_video_size / 1024 / 1024;
     let audio_mb = crate::config::CONFIG.max_audio_size / 1024 / 1024;
+
+    // Show the secondary audio input only when the board allows both images and audio.
+    let audio_combo_row = if board.allow_images && board.allow_audio {
+        format!(
+            r#"    <tr><td>audio<br><span style="font-size:0.65rem;color:var(--text-dim)">(+ image)</span></td>
+        <td><input type="file" name="audio_file" accept="audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
+            <span style="font-size:0.72rem;color:var(--text-dim)">optional audio alongside image · max {audio_mb} MiB</span></td></tr>"#,
+            audio_mb = audio_mb,
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         r#"<div class="post-form-container">
 <div class="post-form-title">[ new thread ]</div>
@@ -472,8 +876,9 @@ fn new_thread_form(board_short: &str, csrf_token: &str) -> String {
             </div>
         </td></tr>
     <tr><td>file</td>
-        <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
+        <td><input type="file" name="file" onchange="checkFileSize(this)" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
             <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a · max {audio_mb} MiB</span></td></tr>
+    {audio_combo_row}
     <tr><td>del token</td>
         <td><input type="text" name="deletion_token" placeholder="password to delete" maxlength="64"></td></tr>
     <tr><td colspan="2">
@@ -532,6 +937,7 @@ function updateRemoveButtons() {{
         image_mb = image_mb,
         video_mb = video_mb,
         audio_mb = audio_mb,
+        audio_combo_row = audio_combo_row,
     )
 }
 
@@ -794,6 +1200,14 @@ pub fn thread_page(
         body.push_str(&render_poll(pd, thread.id, &board.short_name, csrf_token));
     }
 
+    // Container for live-updating posts — the auto-update script appends here.
+    let last_post_id = posts.iter().map(|p| p.id).max().unwrap_or(0);
+    body.push_str(&format!(
+        r#"<div id="thread-posts" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}">"#,
+        tid   = thread.id,
+        board = escape_html(&board.short_name),
+        last  = last_post_id,
+    ));
     for post in posts {
         body.push_str(&render_post(
             post,
@@ -805,6 +1219,9 @@ pub fn thread_page(
         ));
     }
 
+    // Close the posts container opened above
+    body.push_str("</div><!-- #thread-posts -->\n");
+
     if !thread.locked {
         body.push_str(&format!(
             r#"<div class="post-toggle-bar reply">
@@ -812,12 +1229,66 @@ pub fn thread_page(
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {}
+</div>
+
+<!-- Mobile sticky reply drawer — visible only on small screens via CSS -->
+<div class="mobile-reply-fab" id="mobile-reply-fab" onclick="toggleMobileDrawer()">
+  ✏ Reply
+</div>
+<div class="mobile-reply-drawer" id="mobile-reply-drawer">
+  <div class="mobile-drawer-header">
+    <span>reply to thread</span>
+    <button class="mobile-drawer-close" onclick="toggleMobileDrawer()">✕</button>
+  </div>
+  <div class="mobile-drawer-body">
+    {}
+  </div>
 </div>"#,
-            reply_form(&board.short_name, thread.id, csrf_token),
+            reply_form(&board.short_name, thread.id, csrf_token, board),
+            reply_form(&board.short_name, thread.id, csrf_token, board),
         ));
     }
 
     body.push_str(TOGGLE_SCRIPT);
+    body.push_str(&compress_modal_script(
+        crate::config::CONFIG.max_image_size,
+        crate::config::CONFIG.max_video_size,
+    ));
+    body.push_str(report_modal_script());
+    body.push_str(thread_autoupdate_script());
+
+    // Draft autosave
+    let draft_key = format!("rustchan_draft_{}_{}", board.short_name, thread.id);
+    let draft_key_debug = format!("{:?}", draft_key);
+    body.push_str(&format!(
+        r#"<script>
+(function() {{
+  var DRAFT_KEY = {key};
+  var ta = document.getElementById('reply-body');
+  if (!ta) return;
+
+  // Restore draft on load
+  try {{
+    var saved = localStorage.getItem(DRAFT_KEY);
+    if (saved) {{ ta.value = saved; }}
+  }} catch(e) {{}}
+
+  // Autosave every 3 seconds
+  setInterval(function() {{
+    try {{ localStorage.setItem(DRAFT_KEY, ta.value); }} catch(e) {{}}
+  }}, 3000);
+
+  // Clear draft when the reply form is submitted
+  var form = ta.closest('form');
+  if (form) {{
+    form.addEventListener('submit', function() {{
+      try {{ localStorage.removeItem(DRAFT_KEY); }} catch(e) {{}}
+    }});
+  }}
+}})();
+</script>"#,
+        key = draft_key_debug,
+    ));
 
     base_layout(
         &format!(
@@ -946,13 +1417,25 @@ pub fn render_post(
         .map(|t| format!(r#"<span class="tripcode">!{}</span>"#, escape_html(t)))
         .unwrap_or_default();
 
+    // "edited" badge — shown when the post body was modified after creation.
+    let edited_html = post
+        .edited_at
+        .map(|ts| {
+            format!(
+                r#" <span class="post-edited" title="last edited {full}">(edited {short})</span>"#,
+                full = fmt_ts(ts),
+                short = fmt_ts_short(ts),
+            )
+        })
+        .unwrap_or_default();
+
     let op_class = if post.is_op { " op" } else { " reply" };
 
     let mut html = format!(
         r##"<div class="post{op_class}" id="p{id}">
 <div class="post-meta">
 <strong class="name">{name}</strong>{tripcode}
-<span class="post-time">{time}</span>
+<span class="post-time">{time}</span>{edited}
 <a class="post-num" href="#p{id}" onclick="appendReply({id})">No.{id}</a>
 </div>"##,
         op_class = op_class,
@@ -960,6 +1443,7 @@ pub fn render_post(
         name = escape_html(&post.name),
         tripcode = tripcode_html,
         time = fmt_ts_short(post.created_at),
+        edited = edited_html,
     );
 
     if let Some(subject) = &post.subject {
@@ -996,7 +1480,7 @@ pub fn render_post(
             if is_audio {
                 // ── Audio player ─────────────────────────────────────────────────
                 // Rendered with <audio controls preload="none"> for zero auto-load.
-                // The SVG placeholder icon is shown above the player.
+                // The waveform PNG (or SVG placeholder) is shown above the player.
                 html.push_str(&format!(
                     r#"<div class="file-container audio-container">
 <div class="file-info">
@@ -1059,6 +1543,32 @@ pub fn render_post(
         }
     } // end show_media
 
+    // ── Secondary audio for image+audio combo posts ───────────────────────────
+    if show_media {
+        if let (Some(aud_file), Some(aud_mime)) = (&post.audio_file_path, &post.audio_mime_type) {
+            let aud_name = post.audio_file_name.as_deref().unwrap_or("audio");
+            let aud_size = post
+                .audio_file_size
+                .map(format_file_size)
+                .unwrap_or_default();
+            html.push_str(&format!(
+                r#"<div class="file-container audio-container audio-combo">
+<div class="file-info">
+  <a href="/boards/{f}">{orig}</a> ({sz})
+</div>
+<audio controls preload="none" class="audio-player">
+  <source src="/boards/{f}" type="{mime}">
+  Your browser does not support the audio element.
+</audio>
+</div>"#,
+                f = escape_html(aud_file),
+                orig = escape_html(aud_name),
+                sz = escape_html(&aud_size),
+                mime = escape_html(aud_mime),
+            ));
+        }
+    }
+
     // Post body (pre-rendered, sanitised HTML)
     html.push_str(&format!(
         r#"<div class="post-body">{}</div>"#,
@@ -1067,6 +1577,28 @@ pub fn render_post(
 
     // User delete form (only on thread pages where show_delete=true)
     if show_delete {
+        let now = chrono::Utc::now().timestamp();
+        let within_edit_window = now - post.created_at <= crate::db::EDIT_WINDOW_SECS;
+        let edit_link = if within_edit_window {
+            format!(
+                r#" <a class="edit-btn" href="/{board}/post/{pid}/edit" title="Edit within 5 minutes of posting">edit</a>"#,
+                board = escape_html(board_short),
+                pid = post.id,
+            )
+        } else {
+            String::new()
+        };
+
+        // Report button — opens the shared report modal with this post's data.
+        let report_btn = format!(
+            r#" <button type="button" class="report-btn"
+                onclick="openReportModal({pid},{tid},'{board}','{csrf}')">report</button>"#,
+            pid = post.id,
+            tid = post.thread_id,
+            board = escape_html(board_short),
+            csrf = escape_html(csrf_token),
+        );
+
         html.push_str(&format!(
             r#"<div class="post-controls">
 <form class="delete-form" method="POST" action="/delete">
@@ -1075,15 +1607,17 @@ pub fn render_post(
 <input type="hidden" name="board"    value="{board}">
 <input type="text"   name="deletion_token" placeholder="del token" maxlength="64" size="12">
 <button type="submit" class="del-btn">del</button>
-</form>
+</form>{edit_link}{report_btn}
 </div>"#,
             csrf = escape_html(csrf_token),
             pid = post.id,
             board = escape_html(board_short),
+            edit_link = edit_link,
+            report_btn = report_btn,
         ));
     }
 
-    // Admin delete button — shown whenever admin is logged in, regardless of page
+    // Admin delete button + IP history link — shown whenever admin is logged in
     if is_admin {
         html.push_str(&format!(
             r#"<div class="post-controls admin-post-controls">
@@ -1094,10 +1628,12 @@ pub fn render_post(
 <button type="submit" class="admin-del-btn"
         onclick="return confirm('Admin delete post No.{pid}?')">&#x2715; admin del</button>
 </form>
+<a class="admin-ip-link" href="/admin/ip/{ip_hash}" title="View all posts from this IP hash">&#x1F50D; ip history</a>
 </div>"#,
             csrf = escape_html(csrf_token),
             pid = post.id,
             board = escape_html(board_short),
+            ip_hash = escape_html(&post.ip_hash),
         ));
     }
 
@@ -1105,10 +1641,22 @@ pub fn render_post(
     html
 }
 
-fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str) -> String {
+fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str, board: &Board) -> String {
     let image_mb = crate::config::CONFIG.max_image_size / 1024 / 1024;
     let video_mb = crate::config::CONFIG.max_video_size / 1024 / 1024;
     let audio_mb = crate::config::CONFIG.max_audio_size / 1024 / 1024;
+
+    let audio_combo_row = if board.allow_images && board.allow_audio {
+        format!(
+            r#"    <tr><td>audio<br><span style="font-size:0.65rem;color:var(--text-dim)">(+ image)</span></td>
+        <td><input type="file" name="audio_file" accept="audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
+            <span style="font-size:0.72rem;color:var(--text-dim)">optional audio alongside image · max {audio_mb} MiB</span></td></tr>"#,
+            audio_mb = audio_mb,
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         r#"<div class="post-form-container reply-form-container">
 <div class="post-form-title">[ reply to thread ]</div>
@@ -1121,8 +1669,10 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str) -> String {
         <td><textarea id="reply-body" name="body" rows="4" maxlength="4096"></textarea>
             <button type="submit">post reply</button></td></tr>
     <tr><td>file</td>
-        <td><input type="file" name="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
+        <td><input type="file" name="file" onchange="checkFileSize(this)" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
             <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a · max {audio_mb} MiB</span></td></tr>
+{audio_combo_row}    <tr><td>options</td>
+        <td><label class="sage-label"><input type="checkbox" name="sage" value="1"> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
     <tr><td>del token</td>
         <td><input type="text" name="deletion_token" placeholder="password to delete" maxlength="64"></td></tr>
   </table>
@@ -1134,6 +1684,7 @@ fn reply_form(board_short: &str, thread_id: i64, csrf_token: &str) -> String {
         image_mb = image_mb,
         video_mb = video_mb,
         audio_mb = audio_mb,
+        audio_combo_row = audio_combo_row,
     )
 }
 
@@ -1164,7 +1715,7 @@ pub fn catalog_page(
         bs = bs,
         bn = bn,
         desc = escape_html(&board.description),
-        form = new_thread_form(&board.short_name, csrf_token),
+        form = new_thread_form(&board.short_name, csrf_token, board),
     );
 
     for t in threads {
@@ -1204,6 +1755,10 @@ pub fn catalog_page(
 
     body.push_str("</div>");
     body.push_str(TOGGLE_SCRIPT);
+    body.push_str(&compress_modal_script(
+        crate::config::CONFIG.max_image_size,
+        crate::config::CONFIG.max_video_size,
+    ));
     base_layout(
         &format!("/{}/  catalog", board.short_name),
         Some(&board.short_name),
@@ -1276,6 +1831,104 @@ pub fn search_page(
     )
 }
 
+// ─── Archive page ─────────────────────────────────────────────────────────────
+
+pub fn archive_page(
+    board: &Board,
+    threads: &[Thread],
+    pagination: &Pagination,
+    csrf_token: &str,
+    boards: &[Board],
+    collapse_greentext: bool,
+) -> String {
+    let bs = escape_html(&board.short_name);
+    let bn = escape_html(&board.name);
+
+    let mut body = format!(
+        r#"<div class="board-header">
+<span class="board-title">/{bs}/  {bn}</span>
+<span class="board-desc">{desc}</span>
+</div>
+<div class="page-box">
+<h2 class="archive-heading">&#128190; /{bs}/ &mdash; Archive</h2>
+<p class="archive-subtext">These threads have been cycled off the board index and are read-only.
+They are preserved here permanently.</p>
+<a href="/{bs}/" class="catalog-bar-link">[ return to index ]</a>
+&nbsp;|&nbsp;
+<a href="/{bs}/catalog" class="catalog-bar-link">[ catalog ]</a>
+</div>"#,
+        bs = bs,
+        bn = bn,
+        desc = escape_html(&board.description),
+    );
+
+    if threads.is_empty() {
+        body.push_str(
+            r#"<div class="page-box"><p style="color:var(--text-dim)">no archived threads yet.</p></div>"#,
+        );
+    } else {
+        body.push_str(r#"<div class="archive-list">"#);
+        for t in threads {
+            let preview: String = t
+                .op_body
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect();
+            let subj = if let Some(s) = &t.subject {
+                format!(
+                    r#"<span class="archive-thread-subj">{}</span> — "#,
+                    escape_html(s)
+                )
+            } else {
+                String::new()
+            };
+            let thumb_html = if let Some(thumb) = &t.op_thumb {
+                format!(
+                    r#"<img src="/static/{}" class="archive-thumb" alt="thumb" loading="lazy">"#,
+                    escape_html(thumb)
+                )
+            } else {
+                String::new()
+            };
+            let ts = fmt_ts(t.created_at);
+            body.push_str(&format!(
+                r#"<div class="archive-row">
+  {thumb}
+  <div class="archive-row-info">
+    <a href="/{board}/thread/{tid}" class="archive-thread-link">
+      {subj}<span class="archive-preview">{preview}</span>
+    </a>
+    <span class="archive-meta">No.{tid} &mdash; {replies} replies &mdash; {ts} &#128190;</span>
+  </div>
+</div>"#,
+                thumb = thumb_html,
+                board = bs,
+                tid = t.id,
+                subj = subj,
+                preview = escape_html(&preview),
+                replies = t.reply_count,
+                ts = ts,
+            ));
+        }
+        body.push_str("</div>");
+        body.push_str(&render_pagination(
+            pagination,
+            &format!("/{}/archive", board.short_name),
+        ));
+    }
+
+    base_layout(
+        &format!("/{}/  archive", board.short_name),
+        Some(&board.short_name),
+        &body,
+        csrf_token,
+        boards,
+        collapse_greentext,
+    )
+}
+
 // ─── Admin pages ──────────────────────────────────────────────────────────────
 
 pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board]) -> String {
@@ -1310,6 +1963,8 @@ pub fn admin_panel_page(
     csrf_token: &str,
     full_backups: &[BackupInfo],
     board_backups: &[BackupInfo],
+    db_size_bytes: i64,
+    reports: &[crate::models::ReportWithContext],
 ) -> String {
     let mut board_cards = String::new();
     for b in boards {
@@ -1491,6 +2146,60 @@ pub fn admin_panel_page(
         ));
     }
 
+    // ── Report inbox ──────────────────────────────────────────────────────────
+    let report_count = reports.len();
+    let report_badge = if report_count > 0 {
+        format!(r#" <span class="report-badge">{}</span>"#, report_count)
+    } else {
+        String::new()
+    };
+
+    let mut report_rows = String::new();
+    if reports.is_empty() {
+        report_rows.push_str(
+            r#"<tr><td colspan="5" style="color:var(--text-dim);text-align:center">no open reports</td></tr>"#,
+        );
+    }
+    for rc in reports {
+        let preview = escape_html(rc.post_preview.trim());
+        let reason = escape_html(&rc.report.reason);
+        let age = fmt_ts(rc.report.created_at);
+        let ip_short = rc.post_ip_hash.get(..16).unwrap_or(&rc.post_ip_hash);
+        report_rows.push_str(&format!(
+            r#"<tr>
+<td><a href="/{board}/thread/{tid}#p{pid}" title="view post">/{board}/ No.{pid}</a></td>
+<td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{preview}">{preview}</td>
+<td>{reason}</td>
+<td style="white-space:nowrap;font-size:0.78rem">{age}</td>
+<td style="white-space:nowrap">
+  <form method="POST" action="/admin/report/resolve" style="display:inline">
+    <input type="hidden" name="_csrf"      value="{csrf}">
+    <input type="hidden" name="report_id"  value="{rid}">
+    <button type="submit">&#10003; resolve</button>
+  </form>
+  <form method="POST" action="/admin/report/resolve" style="display:inline;margin-left:0.35rem"
+        onsubmit="return confirm('Resolve report AND permanently ban this IP?')">
+    <input type="hidden" name="_csrf"      value="{csrf}">
+    <input type="hidden" name="report_id"  value="{rid}">
+    <input type="hidden" name="ban_ip_hash" value="{ip_hash}">
+    <input type="hidden" name="ban_reason"  value="Reported content">
+    <button type="submit" class="btn-danger">&#10003; resolve + ban</button>
+  </form>
+</td>
+</tr>"#,
+            board   = escape_html(&rc.board_short),
+            tid     = rc.report.thread_id,
+            pid     = rc.report.post_id,
+            preview = preview,
+            reason  = reason,
+            age     = escape_html(&age),
+            csrf    = escape_html(csrf_token),
+            rid     = rc.report.id,
+            ip_hash = escape_html(&rc.post_ip_hash),
+        ));
+        let _ = ip_short; // suppress unused warning
+    }
+
     let body = format!(
         r#"<div class="admin-panel">
 <h1>[ admin panel ]</h1>
@@ -1498,6 +2207,14 @@ pub fn admin_panel_page(
 <input type="hidden" name="_csrf" value="{csrf}">
 <button type="submit">logout</button>
 </form>
+
+<section class="admin-section" id="reports">
+<h2>// report inbox{report_badge}</h2>
+<table class="admin-table">
+<thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
+<tbody>{report_rows}</tbody>
+</table>
+</section>
 
 <section class="admin-section">
 <h2>// boards</h2>
@@ -1559,6 +2276,11 @@ pub fn admin_panel_page(
 </section>
 
 <section class="admin-section">
+<h2>// moderation log <a href="/admin/mod-log" style="font-size:0.78rem;margin-left:0.6rem;color:var(--text-dim)">[ view full log ]</a></h2>
+<p style="color:var(--text-dim);font-size:0.82rem">All admin actions are recorded in the moderation log. Click <em>view full log</em> to browse the history.</p>
+</section>
+
+<section class="admin-section">
 <h2>// backup &amp; restore</h2>
 <p style="color:var(--text-dim);font-size:0.85rem">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/full-backups/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer.</p>
 <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;margin-top:0.75rem;margin-bottom:0.75rem">
@@ -1595,6 +2317,21 @@ pub fn admin_panel_page(
 <tbody>{board_backup_rows}</tbody>
 </table>
 </section>
+
+<section class="admin-section">
+<h2>// database maintenance</h2>
+<p style="color:var(--text-dim);font-size:0.85rem">
+  Current database size: <strong>{db_size_str}</strong>.
+  Running <strong>VACUUM</strong> rewrites the database file compactly, reclaiming space left after
+  bulk deletions (deleted threads, pruned posts, etc.).  This may take a few seconds on large
+  databases and briefly blocks writes.
+</p>
+<form method="POST" action="/admin/vacuum">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <button type="submit"
+          onclick="return confirm('Run VACUUM? This will briefly block the database while it rebuilds. Continue?')">&#x1F9F9; run VACUUM</button>
+</form>
+</section>
 </div>"#,
         csrf = escape_html(csrf_token),
         board_cards = board_cards,
@@ -1603,9 +2340,77 @@ pub fn admin_panel_page(
         collapse_ck = if collapse_greentext { " checked" } else { "" },
         full_backup_rows = full_backup_rows,
         board_backup_rows = board_backup_rows,
+        db_size_str = format_file_size(db_size_bytes),
+        report_rows = report_rows,
+        report_badge = report_badge,
     );
 
     base_layout("admin panel", None, &body, csrf_token, boards, false)
+}
+
+// ─── Edit post page ───────────────────────────────────────────────────────────
+
+pub fn edit_post_page(
+    board: &Board,
+    post: &Post,
+    csrf_token: &str,
+    boards: &[Board],
+    prefill_token: &str,
+    error: Option<&str>,
+    collapse_greentext: bool,
+) -> String {
+    let error_html = error
+        .map(|msg| {
+            format!(
+                r#"<div class="post-error-banner">&#9888; {}</div>"#,
+                escape_html(msg)
+            )
+        })
+        .unwrap_or_default();
+
+    let body = format!(
+        r#"{error_html}
+<div class="board-header">
+  <a href="/{board}/thread/{tid}#p{pid}">[ return to thread ]</a>
+</div>
+<div class="page-box">
+<div class="post-form-container">
+<div class="post-form-title">[ edit post No.{pid} ]</div>
+<p style="font-size:0.8rem;color:var(--text-dim)">
+  You have 5 minutes from when a post is made to edit it.<br>
+  Your deletion token is required to confirm the edit.
+</p>
+<form class="post-form" method="POST" action="/{board}/post/{pid}/edit">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <table>
+    <tr><td>body</td>
+        <td><textarea name="body" rows="6" maxlength="4096">{current_body}</textarea></td></tr>
+    <tr><td>del token</td>
+        <td><input type="text" name="deletion_token" value="{token}" placeholder="your deletion token" maxlength="64"></td></tr>
+    <tr><td></td>
+        <td><button type="submit">save edit</button>
+            <a href="/{board}/thread/{tid}#p{pid}" style="margin-left:1rem">cancel</a></td></tr>
+  </table>
+</form>
+</div>
+</div>"#,
+        error_html = error_html,
+        board = escape_html(&board.short_name),
+        tid = post.thread_id,
+        pid = post.id,
+        csrf = escape_html(csrf_token),
+        current_body = escape_html(&post.body),
+        token = escape_html(prefill_token),
+    );
+
+    base_layout(
+        &format!("edit post No.{} — /{}/", post.id, board.short_name),
+        Some(&board.short_name),
+        &body,
+        csrf_token,
+        boards,
+        collapse_greentext,
+    )
 }
 
 // ─── Error page ───────────────────────────────────────────────────────────────
@@ -1680,4 +2485,157 @@ fn urlencoding_simple(s: &str) -> String {
         }
     }
     out
+}
+
+// ─── Admin VACUUM result page ─────────────────────────────────────────────────
+
+pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &str) -> String {
+    let saved = size_before.saturating_sub(size_after);
+    let pct = if size_before > 0 {
+        (saved as f64 / size_before as f64 * 100.0) as u64
+    } else {
+        0
+    };
+
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>[ VACUUM complete ]</h1>
+<section class="admin-section">
+<h2>// result</h2>
+<table class="admin-table" style="max-width:420px">
+<tbody>
+  <tr><td>Before</td><td><strong>{before}</strong></td></tr>
+  <tr><td>After</td><td><strong>{after}</strong></td></tr>
+  <tr><td>Reclaimed</td><td><strong style="color:var(--green-bright)">{saved}</strong> ({pct}%)</td></tr>
+</tbody>
+</table>
+<p style="margin-top:1rem">
+  <a href="/admin/panel">&#8592; back to admin panel</a>
+</p>
+</section>
+</div>"#,
+        before = format_file_size(size_before),
+        after = format_file_size(size_after),
+        saved = format_file_size(saved),
+        pct = pct,
+    );
+
+    // Use a minimal boards list (empty) since we don't need board nav here
+    base_layout("VACUUM result", None, &body, csrf_token, &[], false)
+}
+
+// ─── Admin IP history page ─────────────────────────────────────────────────────
+
+pub fn admin_ip_history_page(
+    ip_hash: &str,
+    posts_with_boards: &[(crate::models::Post, String)],
+    pagination: &crate::models::Pagination,
+    all_boards: &[Board],
+    csrf_token: &str,
+) -> String {
+    use crate::models::MediaType;
+
+    let mut rows = String::new();
+
+    if posts_with_boards.is_empty() {
+        rows.push_str(r#"<tr><td colspan="6" style="color:var(--text-dim);text-align:center">no posts found for this IP hash</td></tr>"#);
+    }
+
+    for (post, board_short) in posts_with_boards {
+        let media_badge = match &post.media_type {
+            Some(MediaType::Image) => r#"<span style="color:var(--green-bright)">[img]</span>"#,
+            Some(MediaType::Video) => r#"<span style="color:var(--text-dim)">[vid]</span>"#,
+            Some(MediaType::Audio) => r#"<span style="color:var(--text-dim)">[aud]</span>"#,
+            None => "",
+        };
+        let thread_link = format!(
+            r#"<a href="/{board}/thread/{tid}#p{pid}">/{board}/ No.{pid}</a>"#,
+            board = escape_html(board_short),
+            tid = post.thread_id,
+            pid = post.id,
+        );
+        let op_badge = if post.is_op {
+            r#" <span style="color:var(--green-bright);font-size:0.75rem">OP</span>"#
+        } else {
+            ""
+        };
+        // Truncate body for the table — full thread link gives full context
+        let body_preview: String = post.body.chars().take(120).collect();
+        let body_preview = if post.body.len() > 120 {
+            format!("{}…", escape_html(&body_preview))
+        } else {
+            escape_html(&body_preview)
+        };
+
+        // Admin delete form for each post
+        let del_form = format!(
+            r#"<form method="POST" action="/admin/post/delete" style="display:inline">
+<input type="hidden" name="_csrf"   value="{csrf}">
+<input type="hidden" name="post_id" value="{pid}">
+<input type="hidden" name="board"   value="{board}">
+<button type="submit" class="admin-del-btn"
+        onclick="return confirm('Admin delete post No.{pid}?')">&#x2715;</button>
+</form>"#,
+            csrf = escape_html(csrf_token),
+            pid = post.id,
+            board = escape_html(board_short),
+        );
+
+        rows.push_str(&format!(
+            r#"<tr>
+<td style="white-space:nowrap;font-size:0.8rem">{time}</td>
+<td>{link}{op}</td>
+<td style="font-size:0.8rem">{media}</td>
+<td style="max-width:480px;word-break:break-word;font-size:0.85rem">{body}</td>
+<td>{del}</td>
+</tr>"#,
+            time = fmt_ts_short(post.created_at),
+            link = thread_link,
+            op = op_badge,
+            media = media_badge,
+            body = body_preview,
+            del = del_form,
+        ));
+    }
+
+    // Pagination
+    let pag_html = render_pagination(pagination, &format!("/admin/ip/{}", escape_html(ip_hash)));
+
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>[ IP history ]</h1>
+<section class="admin-section">
+<h2>// posts by <code style="font-size:0.9rem">{hash_display}</code></h2>
+<p style="color:var(--text-dim);font-size:0.85rem">
+  {total} post{plural} found across all boards.
+  <a href="/admin/panel" style="margin-left:1rem">&#8592; back to panel</a>
+</p>
+<table class="admin-table" style="width:100%">
+<thead><tr>
+  <th style="text-align:left">time</th>
+  <th style="text-align:left">post</th>
+  <th>media</th>
+  <th style="text-align:left">body</th>
+  <th>del</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+{pagination}
+</section>
+</div>"#,
+        hash_display = escape_html(ip_hash),
+        total = pagination.total,
+        plural = if pagination.total == 1 { "" } else { "s" },
+        rows = rows,
+        pagination = pag_html,
+    );
+
+    base_layout(
+        &format!("IP history — {}", &ip_hash[..ip_hash.len().min(12)]),
+        None,
+        &body,
+        csrf_token,
+        all_boards,
+        false,
+    )
 }

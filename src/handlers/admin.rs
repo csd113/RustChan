@@ -25,7 +25,7 @@ use crate::{
     utils::crypto::{new_session_id, verify_password},
 };
 use axum::{
-    extract::{Form, Multipart, State},
+    extract::{Form, Multipart, Path, Query, State},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -269,10 +269,13 @@ pub async fn admin_panel(
             let bans = db::list_bans(&conn)?;
             let filters = db::get_word_filters(&conn)?;
             let collapse_greentext = db::get_collapse_greentext(&conn);
+            let reports = db::get_open_reports(&conn)?;
 
             // Collect saved backup file lists (read from disk, not DB).
             let full_backups = list_backup_files(&full_backup_dir());
             let board_backups_list = list_backup_files(&board_backup_dir());
+
+            let db_size_bytes = db::get_db_size_bytes(&conn).unwrap_or(0);
 
             Ok(templates::admin_panel_page(
                 &boards,
@@ -282,6 +285,8 @@ pub async fn admin_panel(
                 &csrf_clone,
                 &full_backups,
                 &board_backups_list,
+                db_size_bytes,
+                &reports,
             ))
         }
     })
@@ -448,11 +453,13 @@ pub async fn thread_action(
 
     let action = form.action.clone();
     let thread_id = form.thread_id;
+    let board_for_log = form.board.clone();
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            let (admin_id, admin_name) =
+                require_admin_session_with_name(&conn, session_id.as_deref())?;
             match action.as_str() {
                 "sticky" => db::set_thread_sticky(&conn, thread_id, true)?,
                 "unsticky" => db::set_thread_sticky(&conn, thread_id, false)?,
@@ -460,6 +467,16 @@ pub async fn thread_action(
                 "unlock" => db::set_thread_locked(&conn, thread_id, false)?,
                 _ => {}
             }
+            let _ = db::log_mod_action(
+                &conn,
+                admin_id,
+                &admin_name,
+                &action,
+                "thread",
+                Some(thread_id),
+                &board_for_log,
+                "",
+            );
             info!("Admin {} thread {}", action, thread_id);
             Ok(())
         }
@@ -522,7 +539,8 @@ pub async fn admin_delete_post(
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            let (admin_id, admin_name) =
+                require_admin_session_with_name(&conn, session_id.as_deref())?;
 
             let post = db::get_post(&conn, post_id)?
                 .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
@@ -551,6 +569,21 @@ pub async fn admin_delete_post(
                 crate::utils::files::delete_file(&upload_dir, &p);
             }
 
+            let action = if post.is_op {
+                "delete_thread"
+            } else {
+                "delete_post"
+            };
+            let _ = db::log_mod_action(
+                &conn,
+                admin_id,
+                &admin_name,
+                action,
+                "post",
+                Some(post_id),
+                &board_name,
+                &post.body.chars().take(80).collect::<String>(),
+            );
             info!("Admin deleted post {}", post_id);
             Ok(board_name)
         }
@@ -585,7 +618,8 @@ pub async fn admin_delete_thread(
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            let (admin_id, admin_name) =
+                require_admin_session_with_name(&conn, session_id.as_deref())?;
 
             // FIX[MEDIUM-10]: Resolve board name from DB.
             // Fallback sanitizes the user-supplied value to alphanumeric only.
@@ -610,6 +644,16 @@ pub async fn admin_delete_thread(
                 crate::utils::files::delete_file(&upload_dir, &p);
             }
 
+            let _ = db::log_mod_action(
+                &conn,
+                admin_id,
+                &admin_name,
+                "delete_thread",
+                "thread",
+                Some(thread_id),
+                &board_name,
+                "",
+            );
             info!("Admin deleted thread {}", thread_id);
             Ok(board_name)
         }
@@ -651,8 +695,19 @@ pub async fn add_ban(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            let (admin_id, admin_name) =
+                require_admin_session_with_name(&conn, session_id.as_deref())?;
             db::add_ban(&conn, &form.ip_hash, &form.reason, expires_at)?;
+            let _ = db::log_mod_action(
+                &conn,
+                admin_id,
+                &admin_name,
+                "ban",
+                "ban",
+                None,
+                "",
+                &format!("ip_hash={}… reason={}", &ip_hash_log, form.reason),
+            );
             info!("Admin added ban for ip_hash {}…", ip_hash_log);
             Ok(())
         }
@@ -1195,6 +1250,17 @@ pub async fn admin_restore(
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Check CSRF using the cookie jar. Returns error on mismatch.
+/// Verify admin session and also return the admin's username.
+/// For use inside spawn_blocking closures.
+fn require_admin_session_with_name(
+    conn: &rusqlite::Connection,
+    session_id: Option<&str>,
+) -> Result<(i64, String)> {
+    let admin_id = require_admin_session_sid(conn, session_id)?;
+    let name = db::get_admin_name_by_id(conn, admin_id)?.unwrap_or_else(|| "unknown".to_string());
+    Ok((admin_id, name))
+}
+
 fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
     let cookie_token = jar.get("csrf_token").map(|c| c.value().to_string());
     if !crate::middleware::validate_csrf(cookie_token.as_deref(), form_token.unwrap_or("")) {
@@ -2822,4 +2888,239 @@ pub async fn update_site_settings(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(Redirect::to("/admin/panel?settings_saved=1").into_response())
+}
+
+// ─── POST /admin/vacuum ───────────────────────────────────────────────────────
+//
+// Runs SQLite VACUUM to reclaim space after bulk deletions.
+// Returns an inline result page showing DB size before and after.
+
+#[derive(Deserialize)]
+pub struct VacuumForm {
+    pub _csrf: Option<String>,
+}
+
+pub async fn admin_vacuum(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<VacuumForm>,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if !crate::middleware::validate_csrf(
+        csrf_cookie.as_deref(),
+        form._csrf.as_deref().unwrap_or(""),
+    ) {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    let (jar, csrf) = ensure_csrf(jar);
+
+    let html = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let csrf_clone = csrf.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
+
+            let size_before = db::get_db_size_bytes(&conn).unwrap_or(0);
+
+            db::run_vacuum(&conn)?;
+
+            let size_after = db::get_db_size_bytes(&conn).unwrap_or(0);
+
+            let saved = size_before.saturating_sub(size_after);
+
+            info!(
+                "Admin ran VACUUM: {} → {} bytes ({} reclaimed)",
+                size_before, size_after, saved
+            );
+
+            Ok(crate::templates::admin_vacuum_result_page(
+                size_before,
+                size_after,
+                &csrf_clone,
+            ))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok((jar, Html(html)).into_response())
+}
+
+// ─── GET /admin/ip/{ip_hash} ──────────────────────────────────────────────────
+//
+// Shows all posts made by a given IP hash across all boards, newest first,
+// with pagination.  Requires an active admin session.
+
+#[derive(Deserialize)]
+pub struct IpHistoryQuery {
+    #[serde(default = "default_page")]
+    pub page: i64,
+}
+
+fn default_page() -> i64 {
+    1
+}
+
+pub async fn admin_ip_history(
+    State(state): State<AppState>,
+    Path(ip_hash): Path<String>,
+    Query(params): Query<IpHistoryQuery>,
+    jar: CookieJar,
+) -> Result<(CookieJar, Html<String>)> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let (jar, csrf) = ensure_csrf(jar);
+    let csrf_clone = csrf.clone();
+
+    // Sanitise the IP hash: must be a hex string (SHA-256 = 64 chars).
+    // Any other value would produce empty results; we reject it explicitly
+    // to avoid leaking information via crafted paths.
+    if ip_hash.len() > 64 || !ip_hash.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(AppError::BadRequest("Invalid IP hash.".into()));
+    }
+
+    let page = params.page.max(1);
+
+    let html = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
+
+            const PER_PAGE: i64 = 25;
+            let total = db::count_posts_by_ip_hash(&conn, &ip_hash)?;
+            let pagination = crate::models::Pagination::new(page, PER_PAGE, total);
+            let posts_with_boards =
+                db::get_posts_by_ip_hash(&conn, &ip_hash, PER_PAGE, pagination.offset())?;
+
+            let all_boards = db::get_all_boards(&conn)?;
+
+            Ok(crate::templates::admin_ip_history_page(
+                &ip_hash,
+                &posts_with_boards,
+                &pagination,
+                &all_boards,
+                &csrf_clone,
+            ))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok((jar, Html(html)))
+}
+
+// ─── POST /admin/report/resolve ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ResolveReportForm {
+    report_id: i64,
+    /// Optional: also ban the reported post's author
+    ban_ip_hash: Option<String>,
+    ban_reason: Option<String>,
+    _csrf: Option<String>,
+}
+
+pub async fn resolve_report(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<ResolveReportForm>,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    check_csrf_jar(&jar, form._csrf.as_deref())?;
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            let (admin_id, admin_name) =
+                require_admin_session_with_name(&conn, session_id.as_deref())?;
+
+            db::resolve_report(&conn, form.report_id, admin_id)?;
+
+            // Optionally ban the reporter's target while resolving.
+            if let Some(ref ip) = form.ban_ip_hash {
+                if !ip.trim().is_empty() {
+                    let reason = form.ban_reason.as_deref().unwrap_or("Reported content");
+                    db::add_ban(&conn, ip, reason, None)?; // permanent ban
+                    let _ = db::log_mod_action(
+                        &conn,
+                        admin_id,
+                        &admin_name,
+                        "ban",
+                        "ban",
+                        None,
+                        "",
+                        &format!("via report {} — {}", form.report_id, reason),
+                    );
+                }
+            }
+
+            let _ = db::log_mod_action(
+                &conn,
+                admin_id,
+                &admin_name,
+                "resolve_report",
+                "report",
+                Some(form.report_id),
+                "",
+                "",
+            );
+            info!("Admin resolved report {}", form.report_id);
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok(Redirect::to("/admin/panel#reports").into_response())
+}
+
+// ─── GET /admin/mod-log ───────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ModLogQuery {
+    #[serde(default = "default_mod_log_page")]
+    page: i64,
+}
+
+fn default_mod_log_page() -> i64 {
+    1
+}
+
+pub async fn mod_log_page(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(params): Query<ModLogQuery>,
+) -> Result<(CookieJar, Html<String>)> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let (jar, csrf) = ensure_csrf(jar);
+    let csrf_clone = csrf.clone();
+    let page = params.page.max(1);
+
+    let html = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
+
+            const PER_PAGE: i64 = 50;
+            let total = db::count_mod_log(&conn)?;
+            let pagination = crate::models::Pagination::new(page, PER_PAGE, total);
+            let entries = db::get_mod_log(&conn, PER_PAGE, pagination.offset())?;
+            let boards = db::get_all_boards(&conn)?;
+            Ok(crate::templates::mod_log_page(
+                &entries,
+                &pagination,
+                &csrf_clone,
+                &boards,
+            ))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok((jar, Html(html)))
 }

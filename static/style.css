@@ -1898,3 +1898,399 @@ body:has(.catalog-bar) main {
 }
 
 .poll-add-btn:hover { border-color: var(--border-glow); color: var(--green-bright); }
+
+/* ── Audio combo (secondary audio player in image+audio posts) ────────────── */
+.audio-combo {
+  margin-top: 4px;
+  border-top: 1px dashed var(--border);
+  padding-top: 4px;
+}
+
+/* ── Admin IP history link (shown next to admin-del button on each post) ───── */
+.admin-ip-link {
+  margin-left: 0.6rem;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--border);
+}
+.admin-ip-link:hover {
+  color: var(--green-bright);
+  border-bottom-color: var(--green-bright);
+}
+
+/* ── Post sage checkbox ──────────────────────────────────────────────────────── */
+.sage-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.sage-label input[type="checkbox"] {
+  accent-color: var(--green-bright);
+  cursor: pointer;
+}
+.sage-hint {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
+/* ── Post edited badge ───────────────────────────────────────────────────────── */
+.post-edited {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  opacity: 0.75;
+  margin-left: 0.4rem;
+  font-style: italic;
+}
+
+/* ── Edit post link (shown next to del form within 5-min window) ─────────────── */
+.edit-btn {
+  margin-left: 0.6rem;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--border);
+}
+.edit-btn:hover {
+  color: var(--green-bright);
+  border-bottom-color: var(--green-bright);
+}
+
+/* ── Auto-compress modal ──────────────────────────────────────────────────── */
+.compress-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+.compress-modal-box {
+  background: var(--bg-post);
+  border: 1px solid var(--green-bright);
+  border-radius: 4px;
+  padding: 1.4rem 1.8rem 1.2rem;
+  max-width: 420px;
+  width: calc(100% - 2rem);
+  box-shadow: 0 0 24px rgba(0,200,64,0.18);
+}
+.compress-modal-title {
+  color: var(--green-bright);
+  font-family: var(--font);
+  font-size: 0.95rem;
+  font-weight: bold;
+  margin-bottom: 0.7rem;
+  letter-spacing: 0.02em;
+}
+.compress-modal-info {
+  color: var(--text);
+  font-size: 0.83rem;
+  margin-bottom: 1rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.compress-modal-actions,
+.compress-done-actions {
+  display: flex;
+  gap: 0.7rem;
+  margin-top: 0.8rem;
+}
+.compress-cancel-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 0.35rem 0.9rem;
+  font-family: var(--font);
+  font-size: 0.8rem;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: border-color .15s, color .15s;
+}
+.compress-cancel-btn:hover {
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+.compress-do-btn {
+  background: var(--green-dim);
+  border: 1px solid var(--green-bright);
+  color: var(--green-bright);
+  padding: 0.35rem 1rem;
+  font-family: var(--font);
+  font-size: 0.8rem;
+  cursor: pointer;
+  border-radius: 2px;
+  font-weight: bold;
+  transition: background .15s, box-shadow .15s;
+}
+.compress-do-btn:hover {
+  background: var(--green-bright);
+  color: var(--bg-body);
+  box-shadow: 0 0 8px rgba(0,200,64,0.35);
+}
+.compress-progress {
+  margin-top: 0.6rem;
+}
+.compress-progress-track {
+  height: 6px;
+  background: var(--bg-body);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+}
+.compress-progress-bar {
+  height: 100%;
+  background: var(--green-bright);
+  width: 0%;
+  transition: width 0.25s ease;
+  border-radius: 3px;
+}
+.compress-progress-text {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  min-height: 1.2em;
+}
+
+/* ── Report button ────────────────────────────────────────────────────────── */
+.report-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-family: var(--font);
+  font-size: 0.72rem;
+  cursor: pointer;
+  padding: 0 0.2rem;
+  margin-left: 0.5rem;
+  opacity: 0.6;
+  text-decoration: underline dotted;
+  transition: opacity .15s, color .15s;
+}
+.report-btn:hover {
+  opacity: 1;
+  color: #d44;
+}
+
+/* ── Report badge (admin panel) ───────────────────────────────────────────── */
+.report-badge {
+  display: inline-block;
+  background: #c33;
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: bold;
+  padding: 1px 6px;
+  border-radius: 10px;
+  vertical-align: middle;
+  margin-left: 0.4rem;
+}
+
+/* ── Thread auto-update bar ───────────────────────────────────────────────── */
+.autoupdate-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.45rem 0.6rem;
+  margin: 0.5rem 0 1rem;
+  border: 1px solid var(--border);
+  background: var(--bg-post);
+  font-family: var(--font);
+  font-size: 0.8rem;
+}
+.autoupdate-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  color: var(--text-dim);
+  user-select: none;
+}
+.autoupdate-label input[type="checkbox"] {
+  cursor: pointer;
+}
+.autoupdate-status {
+  color: var(--green-bright);
+  font-size: 0.75rem;
+  opacity: 0.8;
+}
+
+/* ── Dice roll display ────────────────────────────────────────────────────── */
+.dice-roll {
+  display: inline-block;
+  background: var(--bg-post);
+  border: 1px solid var(--green-dim, #006600);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 0.9em;
+  letter-spacing: 0.03em;
+  color: var(--green-bright, #00c840);
+  white-space: nowrap;
+  cursor: default;
+}
+
+/* ── Mobile reply drawer ──────────────────────────────────────────────────── */
+
+/* FAB: floating "✏ Reply" button — only visible on mobile */
+.mobile-reply-fab {
+  display: none;
+}
+
+/* Drawer: hidden off-screen on all viewports by default */
+.mobile-reply-drawer {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 900;
+  background: var(--bg-post, #111);
+  border-top: 2px solid var(--green-bright, #00c840);
+  max-height: 80vh;
+  overflow-y: auto;
+  transform: translateY(100%);
+  transition: transform 0.22s ease;
+}
+.mobile-reply-drawer.open {
+  transform: translateY(0);
+}
+.mobile-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border, #333);
+  font-family: var(--font);
+  font-size: 0.78rem;
+  color: var(--text-dim, #888);
+  background: var(--bg-header, #0a0a0a);
+  position: sticky;
+  top: 0;
+}
+.mobile-drawer-close {
+  background: none;
+  border: none;
+  color: var(--green-bright, #00c840);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 2px 6px;
+  font-family: var(--font);
+}
+.mobile-drawer-body {
+  padding: 8px;
+}
+/* On mobile, hide the desktop reply form and show the FAB + drawer */
+@media (max-width: 767px) {
+  .post-toggle-bar.reply {
+    display: none;
+  }
+  .post-form-wrap {
+    display: none !important;
+  }
+  .mobile-reply-fab {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    bottom: 18px;
+    right: 18px;
+    z-index: 910;
+    background: var(--green-bright, #00c840);
+    color: #000;
+    font-family: var(--font);
+    font-size: 0.85rem;
+    font-weight: bold;
+    border: none;
+    border-radius: 24px;
+    padding: 10px 20px;
+    cursor: pointer;
+    box-shadow: 0 3px 14px rgba(0,200,64,0.35);
+    transition: opacity 0.15s;
+  }
+  .mobile-reply-fab.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .mobile-reply-drawer {
+    display: block;
+  }
+  /* Make forms inside the drawer compact */
+  .mobile-drawer-body .post-form-container {
+    border: none;
+    padding: 0;
+    margin: 0;
+  }
+  .mobile-drawer-body .post-form table {
+    width: 100%;
+  }
+  .mobile-drawer-body .post-form td:first-child {
+    width: 60px;
+    font-size: 0.72rem;
+  }
+  .mobile-drawer-body textarea {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 80px;
+  }
+}
+
+/* ── Archive page ─────────────────────────────────────────────────────────── */
+.archive-heading {
+  font-size: 0.95rem;
+  color: var(--green-pale, #99cc99);
+  margin: 0 0 4px;
+  font-weight: normal;
+}
+.archive-subtext {
+  font-size: 0.78rem;
+  color: var(--text-dim, #666);
+  margin: 0 0 10px;
+}
+.archive-list {
+  margin-top: 8px;
+}
+.archive-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border, #222);
+}
+.archive-row:last-child {
+  border-bottom: none;
+}
+.archive-thumb {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid var(--border, #222);
+}
+.archive-row-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.archive-thread-link {
+  color: var(--green-pale, #99cc99);
+  text-decoration: none;
+  font-size: 0.82rem;
+  word-break: break-word;
+}
+.archive-thread-link:hover {
+  color: var(--green-bright, #00c840);
+}
+.archive-thread-subj {
+  font-weight: bold;
+}
+.archive-preview {
+  color: var(--text-main, #ccc);
+}
+.archive-meta {
+  font-size: 0.7rem;
+  color: var(--text-dim, #666);
+}

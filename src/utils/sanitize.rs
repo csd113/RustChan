@@ -17,6 +17,7 @@
 // Word filters: applied on raw text BEFORE HTML escaping.
 
 use once_cell::sync::Lazy;
+use rand_core::{OsRng, RngCore};
 use regex::Regex;
 
 static RE_REPLY: Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;(\d+)").unwrap());
@@ -28,6 +29,71 @@ static RE_BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap
 static RE_ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"__([^_]+)__").unwrap());
 static RE_SPOILER: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\[spoiler\]([\s\S]*?)\[/spoiler\]").unwrap());
+// Dice syntax: [dice NdM] — rolled server-side at post time, embedded immutably.
+// Limits: 1–20 dice, 2–999 sides.
+static RE_DICE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[dice (\d{1,2})d(\d{1,3})\]").unwrap());
+
+/// Unicode die-face characters for d6 results (⚀–⚅, value 1–6).
+fn d6_face(n: u32) -> char {
+    match n {
+        1 => '⚀',
+        2 => '⚁',
+        3 => '⚂',
+        4 => '⚃',
+        5 => '⚄',
+        6 => '⚅',
+        _ => '🎲',
+    }
+}
+
+/// Roll `count` dice each with `sides` faces, return (rolls, sum).
+fn roll_dice(count: u32, sides: u32) -> (Vec<u32>, u32) {
+    let mut rolls = Vec::with_capacity(count as usize);
+    let mut sum = 0u32;
+    for _ in 0..count {
+        // next_u32 % sides gives a value 0..sides-1; add 1 for 1..=sides.
+        // Modulo bias is negligible for dice-sized ranges.
+        let roll = (OsRng.next_u32() % sides) + 1;
+        rolls.push(roll);
+        sum = sum.saturating_add(roll);
+    }
+    (rolls, sum)
+}
+
+/// Replace [dice NdM] tags in HTML-escaped post text with their rolled results.
+/// Called once per post at creation time — the result is stored in body_html so
+/// the same rolls are shown to every reader forever.
+fn apply_dice(text: &str) -> String {
+    RE_DICE
+        .replace_all(text, |caps: &regex::Captures| {
+            let count: u32 = caps[1].parse().unwrap_or(1).clamp(1, 20);
+            let sides: u32 = caps[2].parse().unwrap_or(6).clamp(2, 999);
+            let (rolls, sum) = roll_dice(count, sides);
+
+            // Build the individual roll display
+            let roll_str: Vec<String> = rolls
+                .iter()
+                .map(|&r| {
+                    if sides == 6 {
+                        d6_face(r).to_string()
+                    } else {
+                        format!("【{}】", r)
+                    }
+                })
+                .collect();
+
+            format!(
+                r#"<span class="dice-roll" title="{}d{} roll">🎲 {}d{} ▸ {} = {}</span>"#,
+                count,
+                sides,
+                count,
+                sides,
+                roll_str.join(" "),
+                sum,
+            )
+        })
+        .into_owned()
+}
 
 /// Emoji shortcode table — :name: → Unicode glyph
 fn apply_emoji(text: &str) -> String {
@@ -96,6 +162,9 @@ pub fn apply_word_filters(text: &str, filters: &[(String, String)]) -> String {
 /// the client side (JS removes the `open` attribute when the page-level
 /// `data-collapse-greentext` attribute is present on `<body>`).
 pub fn render_post_body(escaped: &str) -> String {
+    // Dice tags are resolved first — rolls are seeded from OsRng at post creation
+    // time and stored in body_html, making them immutable for all future readers.
+    let escaped = apply_dice(escaped);
     let lines: Vec<&str> = escaped.lines().collect();
     let mut html = String::with_capacity(escaped.len() * 2);
     let mut i = 0;

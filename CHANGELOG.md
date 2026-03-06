@@ -2,6 +2,150 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.0.8] — 2026-03-05
+
+### Added
+- **Thread archiving** — when a board hits its `max_threads` limit, the oldest
+  non-sticky threads are now moved to an *archived* state instead of being
+  deleted.  Archived threads gain `archived = 1, locked = 1` in the database:
+  they remain fully readable and are kept forever, but no new replies can be
+  posted to them and they do not appear in the board index or catalog.  A new
+  `GET /{board}/archive` page lists all archived threads for a board with
+  pagination (20 per page), newest-bumped first, showing a thumbnail, subject,
+  body preview, reply count, and creation date.  The archive is linked from the
+  sticky catalog bar that appears on every board page.  A new
+  `db::archive_old_threads` function replaces the old `prune_old_threads`; the
+  background worker (`ThreadPrune` job) now calls it instead of deleting.  An
+  additive SQLite migration adds the `archived INTEGER NOT NULL DEFAULT 0`
+  column to `threads` and a covering index
+  `idx_threads_archived(board_id, archived, bumped_at DESC)`.  All existing
+  board-index and catalog queries gain `AND t.archived = 0` so they are
+  unaffected by archived rows.  The `Thread` model gains an `archived: bool`
+  field that is populated everywhere a thread row is mapped from the database.
+- **Mobile-optimised reply drawer** — on viewports ≤ 767 px the desktop
+  inline reply form toggle is hidden and replaced with a floating action button
+  (FAB) fixed to the bottom-right corner labelled *✏ Reply*.  Tapping it
+  slides a full-width drawer up from the bottom of the screen (max-height 80 vh,
+  scroll-overflow enabled) containing the reply form.  A close button in the
+  drawer header (✕) collapses it.  The `appendReply(id)` function that
+  populates the `>>N` quote when tapping a post number is media-query aware: on
+  mobile it opens and populates the drawer textarea rather than the desktop
+  form.  All behaviour is implemented with vanilla JS and a `@media
+  (max-width: 767px)` CSS block — no external dependencies.  The drawer slides
+  with a CSS `transform: translateY` transition (0.22 s ease) and the FAB fades
+  out while the drawer is open to avoid overlap.
+- **Server-side dice rolling** — posts may now include `[dice NdM]` anywhere
+  in their body (e.g. `[dice 2d6]`, `[dice 1d20]`).  The server rolls the
+  dice using `OsRng` at the moment the post body is processed through
+  `render_post_body`, and the result is embedded immutably in `body_html` so
+  every reader sees the same rolls forever.  The rendered output is a `<span
+  class="dice-roll">` element showing the notation, individual die results, and
+  sum: e.g. `🎲 2d6 ▸ ⚄ ⚅ = 11`.  For d6 rolls each individual die is
+  displayed as the corresponding Unicode die-face character (⚀–⚅); for all
+  other dice sizes the value is shown as `【N】`.  Limits: 1–20 dice, 2–999
+  sides; out-of-range values are clamped silently.  The feature is implemented
+  entirely in `utils/sanitize.rs` as a pre-pass regex substitution inside
+  `render_post_body` using `rand_core::OsRng` (already a transitive
+  dependency) — no new dependencies are added.
+- **Post sage** — the reply form now includes a *sage* checkbox. When checked,
+  the reply is posted normally but does not bump the thread's `bumped_at`
+  timestamp, so it does not rise in the board index regardless of its reply
+  count relative to the bump limit.  Sage is parsed as a standard multipart
+  checkbox field (`name="sage" value="1"`), stored nowhere server-side (it
+  only controls whether `db::bump_thread` is called), and is a no-op when
+  posting a new thread.  The label is rendered in a dimmed style with a brief
+  "(don't bump thread)" hint to match the classic imageboard convention.
+- **Post editing** — users may edit their own post within a 5-minute window
+  after it was created, authenticated by the same deletion token they set (or
+  were assigned) at post time.  A small *edit* link appears next to the delete
+  form on every post while the window is open; clicking it navigates to
+  `GET /{board}/post/{id}/edit`, which shows the current post body in a
+  pre-filled textarea alongside a deletion-token input.  Submitting the form
+  (`POST /{board}/post/{id}/edit`) verifies the token with constant-time
+  comparison, re-validates and re-renders the body through the same word-filter
+  and HTML-sanitisation pipeline as a normal post, then writes the updated
+  `body`, `body_html`, and an `edited_at` Unix timestamp to the database.
+  Invalid tokens or expired windows display an inline error without losing the
+  typed text.  After a successful edit the user is redirected back to the post
+  anchor in the thread.  An *(edited HH:MM:SS)* badge is appended to the
+  post-meta line of any post whose `edited_at` is not NULL, with the full
+  timestamp in the title attribute.  The feature is backed by an additive
+  SQLite migration (`ALTER TABLE posts ADD COLUMN edited_at INTEGER`) and a
+  new `db::edit_post` function that enforces the window check atomically.
+  `EDIT_WINDOW_SECS = 300` is a public constant in `db.rs` for easy tuning.
+- **Draft autosave** — the reply textarea contents are automatically
+  persisted to `localStorage` every 3 seconds under the key
+  `rustchan_draft_{board}_{thread_id}`.  On page load the saved draft is
+  restored into the textarea so a refresh, accidental navigation, or browser
+  crash does not lose a half-written reply.  The draft is cleared when the
+  reply form is submitted.  All localStorage access is wrapped in try/catch so
+  environments with storage disabled (e.g. private-browsing with strict
+  settings) fail silently.  The script is injected once per thread page and
+  does not affect new-thread forms or any other page type.
+- **WAL checkpoint tuning** — a background Tokio task now runs
+  `PRAGMA wal_checkpoint(TRUNCATE)` at a configurable interval to prevent
+  SQLite's write-ahead log from growing unbounded under sustained write load.
+  TRUNCATE mode performs a full checkpoint and then resets the WAL file to
+  zero bytes, reclaiming disk space immediately.  The interval is set via
+  `wal_checkpoint_interval_secs` in `settings.toml` (default: 3600, i.e.
+  hourly) or the `CHAN_WAL_CHECKPOINT_SECS` environment variable; set to
+  `0` to disable entirely.  The task is staggered to fire at half the
+  configured interval after startup so it does not overlap with the session
+  purge task.  Checkpoint pages/moved/backfill counts are logged at DEBUG
+  level; failures are logged as warnings and do not crash the server.
+- **SQLite VACUUM endpoint** — a new *"// database maintenance"* section in
+  the admin panel shows the current database file size and provides a
+  `POST /admin/vacuum` button that runs `VACUUM` to compact the database
+  after bulk deletions.  The button requires a CSRF-token-protected form
+  submission and an active admin session.  On completion a result page is
+  shown with the before/after file size and the number of bytes reclaimed
+  (and the percentage reduction).  The `db::get_db_size_bytes` helper
+  (using `PRAGMA page_count * page_size`) and `db::run_vacuum` are exposed
+  as public DB functions for use by any future tooling.
+- **IP history view** — every post rendered in an admin session now has an
+  `&#x1F50D; ip history` link beside the admin-delete button.  Clicking it
+  opens `GET /admin/ip/{ip_hash}`, which lists every post that IP hash has
+  ever made across all boards, newest first, with pagination (25 per page).
+  Each row shows the timestamp, a clickable link to the exact post in its
+  thread, an OP badge when applicable, a media type indicator, a 120-char
+  body preview, and an inline admin-delete button.  The IP hash path
+  component is validated (must be alphanumeric, ≤ 64 chars) to prevent
+  information leakage through crafted URLs.  Two new DB functions support
+  this: `count_posts_by_ip_hash` and `get_posts_by_ip_hash`.
+
+## [1.0.7] — 2026-03-05
+
+### Added
+- **JPEG EXIF stripping** — all uploaded JPEG files are now re-encoded
+  server-side through the `image` crate before being written to disk.
+  Re-encoding produces a clean JFIF stream that contains only pixel data —
+  no EXIF, XMP, IPTC, GPS coordinates, device serial numbers, or any other
+  embedded metadata survive the process.  The stripping is transparent to
+  users; image quality is preserved at the crate's default JPEG output
+  quality (90).  If re-encoding fails for any reason (corrupt JPEG, OOM)
+  the original bytes are saved instead and a warning is logged.
+- **Multiple file attachments (image + audio combo)** — on boards where
+  both images and audio are enabled, a second *"audio (+ image)"* file
+  input is now shown in the new-thread and reply forms.  Submitting both
+  fields simultaneously stores the image as the primary post file and the
+  audio as a secondary attachment.  Only the image+audio combination is
+  supported; other multi-file mixes (e.g. two images, video+audio) are
+  rejected with a clear error message.  The secondary audio file is stored
+  in four new database columns (`audio_file_path`, `audio_file_name`,
+  `audio_file_size`, `audio_mime_type`) added via additive SQLite
+  migrations, so existing databases are upgraded automatically on first
+  startup.  Deleting a post also cleans up its secondary audio file.
+- **Audio waveform thumbnail** — when a standalone audio file is uploaded
+  (without a companion image) and ffmpeg is available, a static waveform
+  PNG is now generated as the thumbnail instead of a generic SVG music-note
+  icon.  The waveform is rendered using ffmpeg's `showwavespic` filter at
+  `thumb_size × (thumb_size / 2)` pixels with the board's terminal-green
+  colour scheme.  Falls back to the SVG placeholder if ffmpeg is
+  unavailable or waveform generation fails.  When an audio file is
+  uploaded *alongside* an image (the combo feature above), the image's
+  thumbnail is reused as the audio's thumbnail — no separate waveform is
+  generated for that case.
+
 ## [1.0.6] — 2026-03-04
 
 ### Added
@@ -158,6 +302,103 @@ All notable changes to RustChan will be documented in this file.
 ### Changed
 - **FluoroGrid**: Softened from pure cyan/magenta to muted teal borders and dusty plum accents for a more comfortable reading experience.
 - **DORFic**: Fully redesigned as *DORFic Aero* — dark stone walls, amber glass panels, copper glow borders, parchment text.
+- **Report system** — every post now shows a small *report* button next to the
+  delete form.  Clicking it opens a modal overlay where the user can optionally
+  type a reason and submit with a single click.  Reports are written to a
+  `reports` table (post_id, thread_id, board_id, reason, reporter IP hash,
+  status) and persist across restarts.  The admin panel gains a *// report inbox*
+  section at the top, showing all open reports with a content preview, the
+  reason, and two quick-action buttons: **resolve** (mark closed, no further
+  action) and **resolve + ban** (permanently bans the post author's IP hash in
+  one click).  The report count is shown as a red badge in the section heading
+  so the inbox is immediately visible even on a long panel page.  The route
+  `POST /report` is CSRF-protected and validates that the post belongs to the
+  named board before writing to the DB.
+
+- **Moderation log** — every admin action now appends a row to a new `mod_log`
+  table recording the admin's username, the action name
+  (`delete_post`, `delete_thread`, `ban`, `sticky`, `lock`, `resolve_report`,
+  …), the target type and ID, the board, and an optional detail string
+  (e.g. a truncated post body preview or ban reason).  The mod log is viewable
+  at `GET /admin/mod-log` as a paginated table (50 entries per page), linked
+  from the admin panel under *// moderation log — view full log*.  Actions are
+  logged in every spawn_blocking handler that mutates content, using a
+  `require_admin_session_with_name` helper that returns both the admin_id and
+  username in a single DB lookup.  The `mod_log` table is append-only —
+  nothing in the UI can delete log entries.
+
+- **Thread auto-update toggle** — a checkbox labelled *auto-update every 30s*
+  appears at the bottom of every thread page (off by default).  When enabled,
+  the browser polls `GET /{board}/thread/{id}/updates?since={last_post_id}`
+  every 30 seconds.  The endpoint returns JSON `{html, last_id, count}`: the
+  rendered HTML of any new posts, the highest post ID seen, and the count of
+  new posts appended.  New posts are rendered without user-delete controls or
+  admin controls to keep the response stateless (a full page reload restores
+  all controls).  New HTML is appended to a `<div id="thread-posts">` container
+  so existing posts are never re-rendered.  The `data-last-id` attribute on
+  that container is updated after each successful fetch so consecutive polls
+  are cumulative.  A status line next to the toggle shows the last check time
+  and how many new replies arrived.  The JS runs inside an IIFE with no global
+  pollution; `clearInterval` is called when the toggle is unchecked.
+
+- **Background worker system** — CPU-heavy and slow file-processing tasks are
+  now handled by an async worker pool instead of blocking HTTP requests.
+  The system is SQLite-backed (`background_jobs` table), so jobs survive a
+  server restart and are picked up again on next boot.  A pool of
+  `min(available_cpus, 4)` Tokio workers claims jobs atomically via
+  `UPDATE … RETURNING` so no two workers can double-process a job.  Workers
+  sleep until a `tokio::sync::Notify` fires (triggered by `enqueue`) or a
+  5-second poll timeout elapses, keeping CPU usage near zero when the queue
+  is empty.  Job types and their new behaviour:
+  - **`VideoTranscode`** — MP4 → WebM (VP9 + Opus) transcoding is now fully
+    asynchronous.  On upload, the MP4 is saved immediately and the HTTP
+    response returns; the worker transcodes it in the background, writes the
+    WebM file, updates `posts.file_path` and `posts.mime_type`, refreshes the
+    `file_hashes` dedup table, and removes the original MP4.  The JPEG
+    thumbnail (first-frame extraction) is still generated synchronously during
+    the upload request because it is fast (<1 s) and needed immediately.
+  - **`AudioWaveform`** — ffmpeg waveform-PNG generation is now asynchronous.
+    An SVG music-note placeholder is written immediately so the post renders
+    at once; the worker generates the real waveform PNG and updates
+    `posts.thumb_path` once complete.
+  - **`ThreadPrune`** — overflow-thread deletion is now enqueued after a
+    new thread is created, so the response returns before any files are
+    deleted.  The prune logic itself (`db::prune_old_threads`) is unchanged.
+  - **`SpamCheck`** — scaffolded hook for future spam/abuse analysis.
+    Currently logs unusually long posts at `DEBUG` level; extend this worker
+    to add auto-flagging or shadow-banning without touching the hot path.
+  - Failed jobs are retried up to **3 times** with the last error recorded in
+    `background_jobs.last_error`; permanently failed jobs remain in the table
+    for inspection.  The `pending_job_count()` helper is available for
+    dashboard / terminal-stats display.
+- **Client-side auto-compression** — when a user selects an image or video
+  that exceeds the board's file-size limit a modal overlay appears instead of
+  waiting for the server to reject it.  The modal shows the file name, actual
+  size, and board limit, then offers two choices:
+  - **Cancel** — clears the file-input selection.
+  - **Auto-compress** — compresses the file client-side to fit within the
+    limit, shows a live progress bar, and replaces the file-input value with
+    the compressed result so the user can post without re-selecting a file.
+    No data is sent to the server until the user submits the form.
+  Compression strategies by media type:
+  - *Images* — Canvas API iterative re-encode as JPEG with progressively
+    lower quality (0.88 → 0.42) then progressive scale reduction (×0.72 per
+    step down to 8% of original) until the target size is reached or the
+    iteration budget (22 passes) is exhausted.
+  - *Videos* — `MediaRecorder` (VP9/VP8/WebM, whichever the browser
+    supports) captures the video playing at real-time speed onto a hidden
+    canvas with a bitrate calculated as `(targetBytes × 8 × 0.82) / duration`.
+    The result is a `video/webm` blob.  Progress is shown as a percentage of
+    the video's playback duration.  A minimum bitrate floor of 120 kbps is
+    enforced to prevent unreadable output.
+  The board's `max_image_size` and `max_video_size` limits are injected as JS
+  constants directly from `CONFIG` so the client check always matches the
+  server-side validation exactly.  The modal is rendered once per page (shared
+  by both the new-thread and reply forms) and wired via `onchange="checkFileSize(this)"`
+  on every primary file `<input>`.  All logic runs inside an IIFE — no global
+  namespace pollution.  The feature degrades gracefully: if `MediaRecorder` or
+  `createImageBitmap` are unavailable (rare, old browsers) the error is shown
+  in the progress area; the user can still upload after cancelling.
 
 ---
 

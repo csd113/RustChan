@@ -54,12 +54,12 @@ struct SettingsFile {
     max_image_size_mb: Option<u32>,
     max_video_size_mb: Option<u32>,
     max_audio_size_mb: Option<u32>,
-    // FIX[CRITICAL-1]: cookie_secret is now persisted in settings.toml so it
-    // is generated once and stable across restarts, without being a known default.
     cookie_secret: Option<String>,
-    // External tool toggles
     enable_tor_support: Option<bool>,
     require_ffmpeg: Option<bool>,
+    /// How often to run PRAGMA wal_checkpoint(TRUNCATE), in seconds.
+    /// Set to 0 to disable. Default: 3600 (hourly).
+    wal_checkpoint_interval_secs: Option<u64>,
 }
 
 fn load_settings_file() -> SettingsFile {
@@ -122,6 +122,11 @@ enable_tor_support = true
 # are replaced with SVG placeholders.
 require_ffmpeg = false
 
+# How often (in seconds) to run PRAGMA wal_checkpoint(TRUNCATE) to keep
+# the SQLite WAL file from growing unbounded under write load.
+# Set to 0 to disable. Default: 3600 (hourly).
+wal_checkpoint_interval_secs = 3600
+
 # Secret key for IP hashing.
 # AUTO-GENERATED on first run — do NOT change after your first post,
 # or all existing IP hashes become invalid (bans will stop working).
@@ -166,14 +171,12 @@ pub struct Config {
     pub max_threads_per_board: u32,
     pub rate_limit_posts: u32,
     pub rate_limit_window: u64,
-    // FIX[CRITICAL-1]: cookie_secret is now loaded from settings.toml or env.
-    // It is never left at a hardcoded default string.
     pub cookie_secret: String,
     pub session_duration: i64,
     pub behind_proxy: bool,
-    // FIX[MEDIUM-11]: explicit flag for whether to set Secure on cookies.
-    // Defaults to true when behind_proxy is true (i.e. TLS is expected).
     pub https_cookies: bool,
+    /// Interval in seconds between WAL checkpoint runs. 0 = disabled.
+    pub wal_checkpoint_interval: u64,
 }
 
 impl Config {
@@ -240,8 +243,11 @@ impl Config {
             cookie_secret,
             session_duration: env_i64("CHAN_SESSION_SECS", 8 * 3600),
             behind_proxy,
-            // FIX[MEDIUM-11]: default Secure=true when running behind a proxy (TLS expected)
             https_cookies: env_bool("CHAN_HTTPS_COOKIES", behind_proxy),
+            wal_checkpoint_interval: env_u64(
+                "CHAN_WAL_CHECKPOINT_SECS",
+                s.wal_checkpoint_interval_secs.unwrap_or(3600),
+            ),
         }
     }
 }

@@ -20,11 +20,15 @@ pub struct PostFormData {
     pub deletion_token: String,
     /// Raw bytes + original filename if a file was attached.
     pub file: Option<(Vec<u8>, String)>,
+    /// Secondary audio file for image+audio combo uploads.
+    pub audio_file: Option<(Vec<u8>, String)>,
     // ── Poll fields (only used when creating a new thread) ────────────────
     pub poll_question: String,
     pub poll_options: Vec<String>,
     /// Duration in seconds (parsed from value + unit)
     pub poll_duration_secs: Option<i64>,
+    /// Sage — when true the reply must not bump the thread.
+    pub sage: bool,
 }
 
 /// Drain all fields from a multipart form into [`PostFormData`].
@@ -39,10 +43,12 @@ pub async fn parse_post_multipart(
     let mut body = String::new();
     let mut deletion_token = String::new();
     let mut file: Option<(Vec<u8>, String)> = None;
+    let mut audio_file: Option<(Vec<u8>, String)> = None;
     let mut poll_question = String::new();
     let mut poll_options: Vec<String> = Vec::new();
     let mut poll_duration_value: Option<i64> = None;
     let mut poll_duration_unit = String::from("hours");
+    let mut sage = false;
 
     while let Some(field) = multipart
         .next_field()
@@ -60,6 +66,10 @@ pub async fn parse_post_multipart(
             Some("subject") => subject = field.text().await.unwrap_or_default(),
             Some("body") => body = field.text().await.unwrap_or_default(),
             Some("deletion_token") => deletion_token = field.text().await.unwrap_or_default(),
+            Some("sage") => {
+                let v = field.text().await.unwrap_or_default();
+                sage = v == "1" || v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true");
+            }
             Some("poll_question") => poll_question = field.text().await.unwrap_or_default(),
             Some("poll_option") => {
                 let v = field.text().await.unwrap_or_default();
@@ -83,6 +93,16 @@ pub async fn parse_post_multipart(
                     .map_err(|e| AppError::BadRequest(format!("File read error: {e}")))?;
                 if !bytes.is_empty() {
                     file = Some((bytes.to_vec(), fname));
+                }
+            }
+            Some("audio_file") => {
+                let fname = field.file_name().unwrap_or("audio").to_string();
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("Audio file read error: {e}")))?;
+                if !bytes.is_empty() {
+                    audio_file = Some((bytes.to_vec(), fname));
                 }
             }
             _ => {
@@ -111,8 +131,10 @@ pub async fn parse_post_multipart(
         body,
         deletion_token,
         file,
+        audio_file,
         poll_question,
         poll_options,
         poll_duration_secs,
+        sage,
     })
 }

@@ -51,6 +51,9 @@ pub struct AppState {
     /// True when ffmpeg was detected at startup (set by detect::detect_ffmpeg).
     /// Passed to file handling to enable/disable video thumbnail generation.
     pub ffmpeg_available: bool,
+    /// Background job queue — enqueue CPU-heavy work here instead of blocking
+    /// the HTTP request path.
+    pub job_queue: std::sync::Arc<crate::workers::JobQueue>,
 }
 
 /// Get current Unix timestamp in seconds.

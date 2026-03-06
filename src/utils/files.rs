@@ -5,14 +5,17 @@
 //   2. Validate MIME type against allowlist (BOTH magic bytes AND extension)
 //   3. Validate file size using per-type limits
 //   4. Generate random filename (UUID-based, prevents path traversal)
-//   5. If video and ffmpeg is available: transcode MP4 → WebM (VP9/Opus)
-//   6. Write to boards directory
-//   7. Generate thumbnail / placeholder
+//   5. If JPEG: re-encode through the `image` crate to strip all EXIF metadata
+//   6. If video and ffmpeg is available: transcode MP4 → WebM (VP9/Opus)
+//   7. Write to boards directory
+//   8. Generate thumbnail / placeholder
 //      • Images  → scaled with the `image` crate
 //      • Videos  → first-frame JPEG via ffmpeg (falls back to SVG if unavailable)
 //        NOTE: GIF thumbnails are single-frame (first frame only).
-//      • Audio   → no thumbnail; an SVG music-note placeholder is written instead
-//   8. Write thumbnail to thumbs/ subdirectory
+//      • Audio   → waveform PNG via ffmpeg (falls back to SVG music-note placeholder)
+//                  unless uploaded alongside an image, in which case the image IS
+//                  the audio thumbnail (see `save_audio_with_image_thumb`).
+//   9. Write thumbnail to thumbs/ subdirectory
 //
 // Security notes:
 //   • We NEVER trust the Content-Type header alone — we check magic bytes.
@@ -42,6 +45,12 @@ pub struct UploadedFile {
     pub file_size: i64,
     /// Explicit media category derived from mime_type
     pub media_type: crate::models::MediaType,
+    /// True when the file needs async background processing:
+    ///   • Video (MP4) → VideoTranscode job (MP4 → WebM via ffmpeg)
+    ///   • Audio       → AudioWaveform job  (waveform PNG via ffmpeg)
+    /// The handler must enqueue the appropriate Job after the post is inserted
+    /// so that the post_id is available. Always false for cached/dedup hits.
+    pub processing_pending: bool,
 }
 
 // ─── MIME / type detection ────────────────────────────────────────────────────
@@ -182,23 +191,24 @@ pub fn save_upload(
 
     let file_id = Uuid::new_v4().to_string().replace('-', "");
 
-    // ── Video transcoding ─────────────────────────────────────────────────────
-    // If ffmpeg is available and the upload is an MP4, transcode it to WebM
-    // (VP9 + Opus) before saving.  WebM uploads are kept as-is.
-    // On any transcoding failure we fall back to the original data silently.
-    // We use an Option<Vec<u8>> to own the transcoded bytes when needed so the
-    // borrow checker can track the lifetime cleanly.
-    let transcoded_webm: Option<Vec<u8>> = if matches!(media_type, crate::models::MediaType::Video)
-        && ffmpeg_available
-        && mime_type == "video/mp4"
-    {
-        match ffmpeg_transcode_webm(data) {
-            Ok(bytes) => {
-                tracing::info!("Transcoded MP4 → WebM ({} bytes)", bytes.len());
-                Some(bytes)
+    // ── JPEG EXIF stripping ───────────────────────────────────────────────────
+    // Re-encoding a JPEG through the `image` crate produces a clean output with
+    // no EXIF, IPTC, XMP, or any other metadata segment — only the pixel data
+    // is retained.  This is the recommended approach when the crate is already
+    // in the dependency tree.  We replace `data` with the stripped bytes so
+    // every downstream step (transcoding, size check, disk write) sees clean data.
+    let stripped_jpeg: Option<Vec<u8>> = if mime_type == "image/jpeg" {
+        match strip_jpeg_exif(data) {
+            Ok(clean) => {
+                tracing::debug!(
+                    "EXIF stripped from JPEG ({} → {} bytes)",
+                    data.len(),
+                    clean.len()
+                );
+                Some(clean)
             }
             Err(e) => {
-                tracing::warn!("WebM transcode failed ({}); keeping original MP4", e);
+                tracing::warn!("JPEG EXIF strip failed ({}); saving original", e);
                 None
             }
         }
@@ -206,10 +216,28 @@ pub fn save_upload(
         None
     };
 
-    let (final_data, final_mime): (&[u8], &'static str) = match &transcoded_webm {
-        Some(webm) => (webm.as_slice(), "video/webm"),
-        None => (data, mime_type),
+    // Use the EXIF-stripped bytes when available, otherwise the original.
+    let data: &[u8] = if let Some(ref stripped) = stripped_jpeg {
+        stripped.as_slice()
+    } else {
+        data
     };
+
+    // ── Async processing flag ─────────────────────────────────────────────────
+    // Heavy CPU work (MP4→WebM transcoding, audio waveform) is deferred to the
+    // background worker pool so HTTP responses return immediately.
+    //   • Video (MP4) + ffmpeg → save as-is now; worker transcodes to WebM.
+    //   • Audio       + ffmpeg → use SVG placeholder now; worker adds PNG waveform.
+    // The handler enqueues the correct Job after db::create_post gives it post_id.
+    let processing_pending = ffmpeg_available
+        && match media_type {
+            crate::models::MediaType::Video => mime_type == "video/mp4",
+            crate::models::MediaType::Audio => true,
+            _ => false,
+        };
+
+    // Always save the original bytes — no inline transcoding.
+    let (final_data, final_mime): (&[u8], &'static str) = (data, mime_type);
 
     // File size is derived from the data we're actually saving.
     let file_size = i64::try_from(final_data.len()).context("File size overflows i64")?;
@@ -245,7 +273,9 @@ pub fn save_upload(
             name
         }
         crate::models::MediaType::Audio => {
-            // Audio has no visual thumbnail — write an SVG music-note placeholder.
+            // When ffmpeg is available the background worker will generate a
+            // waveform PNG and update this post's thumb_path.  For now write
+            // the SVG placeholder so the post is immediately renderable.
             let svg_rel = format!("{}/thumbs/{}.svg", board_short, file_id);
             let svg_path = PathBuf::from(boards_dir).join(&svg_rel);
             if let Err(e) = generate_audio_placeholder(&svg_path) {
@@ -275,7 +305,167 @@ pub fn save_upload(
         mime_type: final_mime.to_string(),
         file_size,
         media_type,
+        processing_pending,
     })
+}
+
+// ─── Image+audio combo: save audio with an existing image as its thumbnail ───
+
+/// Save an audio file to disk for an image+audio combo post.
+///
+/// Instead of generating a separate thumbnail, the already-saved image's
+/// `thumb_path` (relative to `boards_dir`) is reused as the audio's visual
+/// thumbnail.  No ffmpeg waveform is generated for this case.
+///
+/// Returns an `UploadedFile` whose `thumb_path` is set to `image_thumb_rel`.
+#[allow(clippy::too_many_arguments)]
+pub fn save_audio_with_image_thumb(
+    audio_data: &[u8],
+    original_filename: &str,
+    boards_dir: &str,
+    board_short: &str,
+    max_audio_size: usize,
+) -> Result<UploadedFile> {
+    if audio_data.is_empty() {
+        return Err(anyhow::anyhow!("Audio file is empty."));
+    }
+
+    let mime_type = detect_mime_type(audio_data)?;
+    let media_type = crate::models::MediaType::from_mime(mime_type)
+        .ok_or_else(|| anyhow::anyhow!("Not an audio file: {}", mime_type))?;
+
+    if !matches!(media_type, crate::models::MediaType::Audio) {
+        return Err(anyhow::anyhow!(
+            "Expected an audio file for the audio slot; got {}",
+            mime_type
+        ));
+    }
+
+    if audio_data.len() > max_audio_size {
+        return Err(anyhow::anyhow!(
+            "Audio file too large. Maximum size is {} MiB.",
+            max_audio_size / 1024 / 1024
+        ));
+    }
+
+    let file_id = Uuid::new_v4().to_string().replace('-', "");
+    let ext = mime_to_ext(mime_type);
+    let filename = format!("{}.{}", file_id, ext);
+
+    let board_dir = PathBuf::from(boards_dir).join(board_short);
+    std::fs::create_dir_all(&board_dir).context("Failed to create board directory")?;
+
+    let file_path_abs = board_dir.join(&filename);
+    std::fs::write(&file_path_abs, audio_data).context("Failed to write audio file")?;
+
+    let rel_file = format!("{}/{}", board_short, filename);
+    let file_size = i64::try_from(audio_data.len()).context("File size overflows i64")?;
+
+    // The thumb_path is intentionally left empty here; the caller sets it to
+    // the companion image's thumb path when constructing the NewPost record.
+    Ok(UploadedFile {
+        file_path: rel_file,
+        thumb_path: String::new(), // filled in by caller from the image UploadedFile
+        original_name: crate::utils::sanitize::sanitize_filename(original_filename),
+        mime_type: mime_type.to_string(),
+        file_size,
+        media_type,
+        processing_pending: false, // image serves as thumb; no waveform needed
+    })
+}
+
+// ─── JPEG EXIF stripping ─────────────────────────────────────────────────────
+
+/// Re-encode a JPEG through the `image` crate, stripping all metadata.
+///
+/// The `image` crate's JPEG encoder writes a clean JFIF stream with no EXIF,
+/// XMP, or IPTC segments — only the pixel data and ICC colour profile are
+/// written (and only when the crate chooses to include a profile, which for
+/// basic re-encodes it does not).  This is the most reliable stripping approach
+/// available without pulling in a separate EXIF library.
+///
+/// Quality is set to 90 (the `image` crate's default for JPEG output), which
+/// is indistinguishable from the original for display purposes but slightly
+/// changes the file byte-for-byte.
+fn strip_jpeg_exif(data: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Cursor;
+    let img = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
+        .context("Failed to decode JPEG for EXIF strip")?;
+    let mut cursor = Cursor::new(Vec::with_capacity(data.len()));
+    img.write_to(&mut cursor, image::ImageFormat::Jpeg)
+        .context("Failed to re-encode JPEG after EXIF strip")?;
+    Ok(cursor.into_inner())
+}
+
+// ─── Audio waveform thumbnail ─────────────────────────────────────────────────
+
+/// Generate a waveform PNG thumbnail for an audio file using ffmpeg's
+/// `showwavespic` filter.
+///
+/// The output is a `width × height` greyscale-on-dark PNG that gives the
+/// post a visual identity without revealing anything about the audio content
+/// beyond its amplitude envelope.
+///
+/// Security: arguments are passed as an explicit array — no shell invocation.
+fn ffmpeg_audio_waveform(
+    audio_data: &[u8],
+    output_path: &PathBuf,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    use std::process::Command;
+
+    let temp_dir = std::env::temp_dir();
+    let tmp_id = Uuid::new_v4().to_string().replace('-', "");
+    let temp_in = temp_dir.join(format!("chan_aud_{}.tmp", tmp_id));
+    let temp_out = temp_dir.join(format!("chan_wav_{}.png", tmp_id));
+
+    std::fs::write(&temp_in, audio_data).context("Failed to write temp audio for waveform")?;
+
+    let temp_in_str = temp_in
+        .to_str()
+        .context("Temp audio path contains non-UTF-8 characters")?;
+    let temp_out_str = temp_out
+        .to_str()
+        .context("Temp waveform output path contains non-UTF-8 characters")?;
+
+    // showwavespic: renders the entire file as a single static image.
+    // split_channels=0 → mono composite, colours=white|#00c840 for the terminal theme.
+    let vf = format!(
+        "showwavespic=s={}x{}:colors=#00c840|#007020:split_channels=0",
+        width, height
+    );
+
+    let output = Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-i",
+            temp_in_str,
+            "-lavfi",
+            &vf,
+            "-frames:v",
+            "1",
+            "-y",
+            temp_out_str,
+        ])
+        .output();
+
+    let _ = std::fs::remove_file(&temp_in);
+
+    let out = output.context("ffmpeg not found or failed to spawn")?;
+
+    if out.status.success() && temp_out.exists() {
+        std::fs::rename(&temp_out, output_path).context("Failed to move waveform PNG")?;
+        Ok(())
+    } else {
+        let _ = std::fs::remove_file(&temp_out);
+        Err(anyhow::anyhow!(
+            "ffmpeg waveform exit {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
 }
 
 // ─── Video transcoding ───────────────────────────────────────────────────────
@@ -571,4 +761,23 @@ pub fn format_file_size(bytes: i64) -> String {
     } else {
         format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+// ─── Public wrappers used by background workers ───────────────────────────────
+
+/// Transcode any video (typically MP4) to WebM (VP9 + Opus) via ffmpeg.
+/// Called by the VideoTranscode background worker.
+pub fn transcode_to_webm(data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    ffmpeg_transcode_webm(data)
+}
+
+/// Generate a waveform PNG for an audio file via ffmpeg.
+/// Called by the AudioWaveform background worker.
+pub fn gen_waveform_png(
+    data: &[u8],
+    output_path: &std::path::PathBuf,
+    width: u32,
+    height: u32,
+) -> anyhow::Result<()> {
+    ffmpeg_audio_waveform(data, output_path, width, height)
 }

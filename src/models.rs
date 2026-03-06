@@ -88,6 +88,7 @@ pub struct Thread {
     pub bumped_at: i64,
     pub locked: bool,
     pub sticky: bool,
+    pub archived: bool,
     pub reply_count: i64,
     // Joined from posts (OP's body/image for catalog previews)
     pub op_body: Option<String>,
@@ -117,9 +118,16 @@ pub struct Post {
     pub mime_type: Option<String>,
     /// Explicit media classification — set on all new posts; backfilled for old ones.
     pub media_type: Option<MediaType>,
+    /// Secondary audio file for image+audio combo posts (audio path only).
+    pub audio_file_path: Option<String>,
+    pub audio_file_name: Option<String>,
+    pub audio_file_size: Option<i64>,
+    pub audio_mime_type: Option<String>,
     pub created_at: i64,
     pub deletion_token: String,
     pub is_op: bool,
+    /// Set when the post body has been edited; None means never edited.
+    pub edited_at: Option<i64>,
 }
 
 /// Admin user record
@@ -307,6 +315,51 @@ pub struct SiteStats {
     pub total_audio: i64,
     /// Total bytes of currently stored files (still on disk)
     pub active_bytes: i64,
+}
+
+/// A user-filed report against a post
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct Report {
+    pub id: i64,
+    pub post_id: i64,
+    pub thread_id: i64,
+    pub board_id: i64,
+    pub reason: String,
+    pub reporter_hash: String,
+    pub status: String, // "open" | "resolved"
+    pub created_at: i64,
+    pub resolved_at: Option<i64>,
+    pub resolved_by: Option<i64>,
+}
+
+/// Report enriched with context from joined tables (used in admin inbox)
+#[derive(Debug, Clone)]
+pub struct ReportWithContext {
+    pub report: Report,
+    pub board_short: String,
+    /// First 120 chars of the reported post body for preview
+    pub post_preview: String,
+    /// IP hash of the post's author (for quick ban from the inbox)
+    pub post_ip_hash: String,
+}
+
+/// A single entry in the moderation action log
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ModLogEntry {
+    pub id: i64,
+    pub admin_id: i64,
+    pub admin_name: String,
+    /// E.g. "delete_post", "ban", "sticky", "lock", "resolve_report"
+    pub action: String,
+    /// "post" | "thread" | "board" | "ban" | "report"
+    pub target_type: String,
+    pub target_id: Option<i64>,
+    pub board_short: String,
+    /// Human-readable extra context (reason, post body preview, etc.)
+    pub detail: String,
+    pub created_at: i64,
 }
 
 /// Represents a saved backup file on disk (shown in admin panel).

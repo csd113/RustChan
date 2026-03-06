@@ -41,6 +41,7 @@ mod middleware;
 mod models;
 mod templates;
 mod utils;
+mod workers;
 
 use config::{generate_settings_file_if_missing, CONFIG};
 use middleware::AppState;
@@ -215,6 +216,11 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     let state = AppState {
         db: pool.clone(),
         ffmpeg_available,
+        job_queue: {
+            let q = std::sync::Arc::new(workers::JobQueue::new(pool.clone()));
+            workers::start_worker_pool(q.clone(), ffmpeg_available);
+            q
+        },
     };
     let start_time = Instant::now();
 
@@ -230,6 +236,38 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                         Ok(n) if n > 0 => info!("Purged {} expired sessions", n),
                         Err(e) => tracing::error!("Session purge error: {}", e),
                         _ => {}
+                    }
+                }
+            }
+        });
+    }
+
+    // Background: WAL checkpoint — prevent WAL files growing unbounded.
+    // Runs PRAGMA wal_checkpoint(TRUNCATE) at the configured interval.
+    // TRUNCATE mode resets the WAL file to zero bytes after a full checkpoint,
+    // which is the most aggressive space-reclaiming option.  It blocks writers
+    // briefly but is safe and transactionally correct.
+    if CONFIG.wal_checkpoint_interval > 0 {
+        let bg = pool.clone();
+        let interval_secs = CONFIG.wal_checkpoint_interval;
+        tokio::spawn(async move {
+            // Stagger the first run by half the interval so it doesn't fire
+            // immediately at startup alongside the session purge.
+            tokio::time::sleep(Duration::from_secs(interval_secs / 2 + 1)).await;
+            let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                iv.tick().await;
+                if let Ok(conn) = bg.get() {
+                    match db::run_wal_checkpoint(&conn) {
+                        Ok((pages, moved, backfill)) => {
+                            tracing::debug!(
+                                "WAL checkpoint: {} pages total, {} moved, {} backfilled",
+                                pages,
+                                moved,
+                                backfill
+                            );
+                        }
+                        Err(e) => tracing::warn!("WAL checkpoint failed: {}", e),
                     }
                 }
             }
@@ -273,11 +311,25 @@ fn build_router(state: AppState) -> Router {
         .route("/{board}/", get(handlers::board::board_index))
         .route("/{board}/", post(handlers::board::create_thread))
         .route("/{board}/catalog", get(handlers::board::catalog))
+        .route("/{board}/archive", get(handlers::board::board_archive))
         .route("/{board}/search", get(handlers::board::search))
         .route("/{board}/thread/{id}", get(handlers::thread::view_thread))
         .route("/{board}/thread/{id}", post(handlers::thread::post_reply))
+        .route(
+            "/{board}/post/{id}/edit",
+            get(handlers::thread::edit_post_get),
+        )
+        .route(
+            "/{board}/post/{id}/edit",
+            post(handlers::thread::edit_post_post),
+        )
         .route("/delete", post(handlers::board::delete_post))
+        .route("/report", post(handlers::board::file_report))
         .route("/vote", post(handlers::thread::vote_handler))
+        .route(
+            "/{board}/thread/{id}/updates",
+            get(handlers::thread::thread_updates),
+        )
         .nest_service(
             "/boards",
             tower_http::services::ServeDir::new(&CONFIG.upload_dir),
@@ -303,11 +355,21 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/admin/ban/add", post(handlers::admin::add_ban))
         .route("/admin/ban/remove", post(handlers::admin::remove_ban))
+        .route(
+            "/admin/report/resolve",
+            post(handlers::admin::resolve_report),
+        )
+        .route("/admin/mod-log", get(handlers::admin::mod_log_page))
         .route("/admin/filter/add", post(handlers::admin::add_filter))
         .route("/admin/filter/remove", post(handlers::admin::remove_filter))
         .route(
             "/admin/site/settings",
             post(handlers::admin::update_site_settings),
+        )
+        .route("/admin/vacuum", post(handlers::admin::admin_vacuum))
+        .route(
+            "/admin/ip/{ip_hash}",
+            get(handlers::admin::admin_ip_history),
         )
         .route("/admin/backup", get(handlers::admin::admin_backup))
         // Disable the global body-size limit for the restore endpoint so that

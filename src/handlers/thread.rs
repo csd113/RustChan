@@ -22,7 +22,7 @@ use crate::{
     },
 };
 use axum::{
-    extract::{ConnectInfo, Form, Multipart, Path, State},
+    extract::{ConnectInfo, Form, Multipart, Path, Query, State},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -118,12 +118,15 @@ pub async fn post_reply(
     let ffmpeg_available = state.ffmpeg_available;
     let cookie_secret = CONFIG.cookie_secret.clone();
     let file_data = form.file;
+    let audio_file_data = form.audio_file;
     let name_val = form.name;
     let del_token_val = form.deletion_token;
+    let form_sage = form.sage;
 
     let board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
+        let job_queue = state.job_queue.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
 
@@ -220,6 +223,7 @@ pub async fn post_reply(
                         mime_type: cached.mime_type,
                         file_size: data.len() as i64,
                         media_type: cached_media,
+                        processing_pending: false,
                     })
                 } else {
                     let f = save_upload(
@@ -241,13 +245,56 @@ pub async fn post_reply(
                 None
             };
 
+            // ── Image+audio combo ─────────────────────────────────────────────
+            let audio_uploaded: Option<crate::utils::files::UploadedFile> =
+                if let Some((aud_data, aud_fname)) = audio_file_data {
+                    if !board.allow_audio {
+                        return Err(AppError::BadRequest(
+                            "Audio uploads are disabled on this board.".into(),
+                        ));
+                    }
+                    let primary_is_image = uploaded
+                        .as_ref()
+                        .map(|u| matches!(u.media_type, crate::models::MediaType::Image))
+                        .unwrap_or(false);
+                    if !primary_is_image {
+                        return Err(AppError::BadRequest(
+                            "Audio can only be combined with an image upload.".into(),
+                        ));
+                    }
+                    let aud_mime = crate::utils::files::detect_mime_type(&aud_data)
+                        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                    let aud_media = crate::models::MediaType::from_mime(aud_mime)
+                        .ok_or_else(|| AppError::BadRequest("Unsupported audio type.".into()))?;
+                    if !matches!(aud_media, crate::models::MediaType::Audio) {
+                        return Err(AppError::BadRequest(
+                            "The audio slot only accepts audio files.".into(),
+                        ));
+                    }
+                    let mut aud_file = crate::utils::files::save_audio_with_image_thumb(
+                        &aud_data,
+                        &aud_fname,
+                        &upload_dir,
+                        &board.short_name,
+                        max_audio_size,
+                    )
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                    if let Some(ref img) = uploaded {
+                        aud_file.thumb_path = img.thumb_path.clone();
+                    }
+                    Some(aud_file)
+                } else {
+                    None
+                };
+
             let deletion_token = if del_token_val.trim().is_empty() {
                 new_deletion_token()
             } else {
                 del_token_val.trim().chars().take(64).collect()
             };
 
-            let should_bump = thread.reply_count < board.bump_limit;
+            // Sage suppresses the bump regardless of reply count.
+            let should_bump = !form_sage && thread.reply_count < board.bump_limit;
 
             let new_post = NewPost {
                 thread_id,
@@ -257,13 +304,17 @@ pub async fn post_reply(
                 subject: None,
                 body: body_text.clone(),
                 body_html,
-                ip_hash,
+                ip_hash: ip_hash.clone(),
                 file_path: uploaded.as_ref().map(|u| u.file_path.clone()),
                 file_name: uploaded.as_ref().map(|u| u.original_name.clone()),
                 file_size: uploaded.as_ref().map(|u| u.file_size),
                 thumb_path: uploaded.as_ref().map(|u| u.thumb_path.clone()),
                 mime_type: uploaded.as_ref().map(|u| u.mime_type.clone()),
                 media_type: uploaded.as_ref().map(|u| u.media_type.as_str().to_string()),
+                audio_file_path: audio_uploaded.as_ref().map(|u| u.file_path.clone()),
+                audio_file_name: audio_uploaded.as_ref().map(|u| u.original_name.clone()),
+                audio_file_size: audio_uploaded.as_ref().map(|u| u.file_size),
+                audio_mime_type: audio_uploaded.as_ref().map(|u| u.mime_type.clone()),
                 deletion_token,
                 is_op: false,
             };
@@ -277,6 +328,39 @@ pub async fn post_reply(
                     rusqlite::params![thread_id],
                 )?;
             }
+
+            // ── Background jobs ───────────────────────────────────────────────
+            if let Some(ref up) = uploaded {
+                if up.processing_pending {
+                    let job = match up.media_type {
+                        crate::models::MediaType::Video => {
+                            Some(crate::workers::Job::VideoTranscode {
+                                post_id,
+                                file_path: up.file_path.clone(),
+                                board_short: board.short_name.clone(),
+                            })
+                        }
+                        crate::models::MediaType::Audio => {
+                            Some(crate::workers::Job::AudioWaveform {
+                                post_id,
+                                file_path: up.file_path.clone(),
+                                board_short: board.short_name.clone(),
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(j) = job {
+                        if let Err(e) = job_queue.enqueue(&j) {
+                            tracing::warn!("Failed to enqueue media job for reply: {}", e);
+                        }
+                    }
+                }
+            }
+            let _ = job_queue.enqueue(&crate::workers::Job::SpamCheck {
+                post_id,
+                ip_hash: ip_hash.clone(),
+                body_len: body_text.len(),
+            });
 
             info!(
                 "Reply {} posted in thread {} on /{}/",
@@ -350,6 +434,164 @@ pub async fn post_reply(
     Ok(Redirect::to(&redirect_url).into_response())
 }
 
+// ─── GET /:board/post/:id/edit — show edit form ───────────────────────────────
+
+#[derive(Deserialize)]
+pub struct EditQuery {
+    pub token: Option<String>,
+}
+
+pub async fn edit_post_get(
+    State(state): State<AppState>,
+    Path((board_short, post_id)): Path<(String, i64)>,
+    Query(query): Query<EditQuery>,
+    jar: CookieJar,
+) -> Result<(CookieJar, Html<String>)> {
+    let (jar, csrf) = ensure_csrf(jar);
+
+    let html = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let prefill_token = query.token.clone().unwrap_or_default();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+
+            let post = db::get_post(&conn, post_id)?
+                .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
+
+            if post.board_id != board.id {
+                return Err(AppError::NotFound("Post not found in this board.".into()));
+            }
+
+            let now = chrono::Utc::now().timestamp();
+            if now - post.created_at > db::EDIT_WINDOW_SECS {
+                return Err(AppError::Forbidden(
+                    "The 5-minute edit window for this post has closed.".into(),
+                ));
+            }
+
+            let all_boards = db::get_all_boards(&conn)?;
+            let collapse_greentext = db::get_collapse_greentext(&conn);
+
+            Ok(crate::templates::edit_post_page(
+                &board,
+                &post,
+                &csrf,
+                &all_boards,
+                &prefill_token,
+                None,
+                collapse_greentext,
+            ))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok((jar, Html(html)))
+}
+
+// ─── POST /:board/post/:id/edit — submit edit ─────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct EditForm {
+    pub _csrf: Option<String>,
+    pub deletion_token: String,
+    pub body: String,
+}
+
+/// Internal result type for the edit submission handler.
+enum EditOutcome {
+    /// Redirect the user to this URL.
+    Redirect(String),
+    /// Re-render the edit page with this error HTML.
+    ErrorPage(String),
+}
+
+pub async fn edit_post_post(
+    State(state): State<AppState>,
+    Path((board_short, post_id)): Path<(String, i64)>,
+    jar: CookieJar,
+    Form(form): Form<EditForm>,
+) -> Result<Response> {
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if !validate_csrf(csrf_cookie.as_deref(), form._csrf.as_deref().unwrap_or("")) {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    let raw_body = form.body;
+    let token = form.deletion_token;
+
+    let outcome = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let csrf_clone = csrf_cookie.clone().unwrap_or_default();
+        move || -> Result<EditOutcome> {
+            let conn = pool.get()?;
+
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+
+            let post = db::get_post(&conn, post_id)?
+                .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
+
+            if post.board_id != board.id {
+                return Err(AppError::NotFound("Post not found in this board.".into()));
+            }
+
+            // Validate body text length / content before attempting the edit
+            let body_text = crate::utils::sanitize::validate_body(&raw_body)
+                .map_err(AppError::BadRequest)?
+                .to_string();
+
+            let filters: Vec<(String, String)> = db::get_word_filters(&conn)?
+                .into_iter()
+                .map(|f| (f.pattern, f.replacement))
+                .collect();
+
+            let filtered = crate::utils::sanitize::apply_word_filters(&body_text, &filters);
+            let escaped = crate::utils::sanitize::escape_html(&filtered);
+            let body_html = crate::utils::sanitize::render_post_body(&escaped);
+
+            let success = db::edit_post(&conn, post_id, &token, &body_text, &body_html)?;
+
+            if !success {
+                let all_boards = db::get_all_boards(&conn)?;
+                let collapse_greentext = db::get_collapse_greentext(&conn);
+                let now = chrono::Utc::now().timestamp();
+                let err_msg = if now - post.created_at > db::EDIT_WINDOW_SECS {
+                    "The 5-minute edit window for this post has closed."
+                } else {
+                    "Incorrect deletion token."
+                };
+                let html = crate::templates::edit_post_page(
+                    &board,
+                    &post,
+                    &csrf_clone,
+                    &all_boards,
+                    &token,
+                    Some(err_msg),
+                    collapse_greentext,
+                );
+                return Ok(EditOutcome::ErrorPage(html));
+            }
+
+            info!("Post {} edited on /{}/", post_id, board.short_name);
+            Ok(EditOutcome::Redirect(format!(
+                "/{}/thread/{}#p{}",
+                board.short_name, post.thread_id, post_id
+            )))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    match outcome {
+        EditOutcome::Redirect(url) => Ok(Redirect::to(&url).into_response()),
+        EditOutcome::ErrorPage(html) => Ok(Html(html).into_response()),
+    }
+}
+
 // ─── POST /vote — cast poll vote ──────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -417,4 +659,72 @@ pub async fn vote_handler(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(Redirect::to(&redirect_url).into_response())
+}
+
+// ─── GET /:board/thread/:id/updates?since=N ──────────────────────────────────
+//
+// Lightweight polling endpoint for the thread auto-update toggle.
+// Returns JSON: { "html": "<rendered posts>", "last_id": N, "count": N }
+// Posts are rendered without the delete form or admin controls so the response
+// is the same regardless of session state (no auth leakage).
+
+#[derive(Deserialize)]
+pub struct UpdatesQuery {
+    since: i64,
+}
+
+pub async fn thread_updates(
+    State(state): State<AppState>,
+    Path((board_short, thread_id)): Path<(String, i64)>,
+    Query(params): Query<UpdatesQuery>,
+) -> Result<Response> {
+    use axum::http::header;
+
+    let since = params.since;
+
+    let (html, last_id, count) = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> crate::error::Result<(String, i64, usize)> {
+            let conn = pool.get()?;
+
+            // Validate board + thread exist (returns 404 for bad URLs).
+            let _board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| crate::error::AppError::NotFound("Board not found.".into()))?;
+            let _thread = db::get_thread(&conn, thread_id)?
+                .ok_or_else(|| crate::error::AppError::NotFound("Thread not found.".into()))?;
+
+            // Fetch posts newer than `since`, ordered oldest-first so they
+            // render in the correct chronological order when appended.
+            let posts = db::get_new_posts_since(&conn, thread_id, since)?;
+            let last_id = posts.iter().map(|p| p.id).max().unwrap_or(since);
+            let count = posts.len();
+
+            let mut html = String::new();
+            for post in &posts {
+                // show_delete=false, is_admin=false — no user controls in
+                // auto-appended HTML; a full reload restores them.
+                html.push_str(&crate::templates::render_post(
+                    post,
+                    &board_short,
+                    "",
+                    false,
+                    false,
+                    true,
+                ));
+            }
+            Ok((html, last_id, count))
+        }
+    })
+    .await
+    .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!(e)))??;
+
+    // Escape the HTML inside a JSON string manually — no serde dependency needed.
+    let json = format!(
+        r#"{{"html":{html_json},"last_id":{last_id},"count":{count}}}"#,
+        html_json = serde_json::to_string(&html).unwrap_or_else(|_| "\"\"".to_string()),
+        last_id = last_id,
+        count = count,
+    );
+
+    Ok(([(header::CONTENT_TYPE, "application/json")], json).into_response())
 }

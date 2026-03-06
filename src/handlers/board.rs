@@ -169,6 +169,7 @@ pub async fn create_thread(
     let ffmpeg_available = state.ffmpeg_available;
     let cookie_secret = CONFIG.cookie_secret.clone();
     let file_data = form.file;
+    let audio_file_data = form.audio_file;
     let name_val = form.name;
     let subject_val = form.subject;
     let del_token_val = form.deletion_token;
@@ -179,6 +180,7 @@ pub async fn create_thread(
     let board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
+        let job_queue = state.job_queue.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
             let board = db::get_board_by_short(&conn, &board_short)?
@@ -267,6 +269,7 @@ pub async fn create_thread(
                         mime_type: cached.mime_type,
                         file_size: data.len() as i64,
                         media_type: cached_media,
+                        processing_pending: false, // cached = already fully processed
                     })
                 } else {
                     let f = save_upload(
@@ -288,6 +291,56 @@ pub async fn create_thread(
                 None
             };
 
+            // ── Image+audio combo ─────────────────────────────────────────────
+            // If an audio file was also submitted alongside an image, and the
+            // board permits both, save the audio file using the image's thumb.
+            let audio_uploaded: Option<crate::utils::files::UploadedFile> =
+                if let Some((aud_data, aud_fname)) = audio_file_data {
+                    // Validate that the board allows audio
+                    if !board.allow_audio {
+                        return Err(AppError::BadRequest(
+                            "Audio uploads are disabled on this board.".into(),
+                        ));
+                    }
+                    // The primary file must be an image for the combo to be valid
+                    let primary_is_image = uploaded
+                        .as_ref()
+                        .map(|u| matches!(u.media_type, crate::models::MediaType::Image))
+                        .unwrap_or(false);
+                    if !primary_is_image {
+                        return Err(AppError::BadRequest(
+                            "Audio can only be combined with an image upload.".into(),
+                        ));
+                    }
+                    // Confirm it's actually audio via magic bytes
+                    let aud_mime = crate::utils::files::detect_mime_type(&aud_data)
+                        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                    let aud_media = crate::models::MediaType::from_mime(aud_mime)
+                        .ok_or_else(|| AppError::BadRequest("Unsupported audio type.".into()))?;
+                    if !matches!(aud_media, crate::models::MediaType::Audio) {
+                        return Err(AppError::BadRequest(
+                            "The audio slot only accepts audio files.".into(),
+                        ));
+                    }
+
+                    let mut aud_file = crate::utils::files::save_audio_with_image_thumb(
+                        &aud_data,
+                        &aud_fname,
+                        &upload_dir,
+                        &board.short_name,
+                        max_audio_size,
+                    )
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+                    // Use the image thumbnail as the audio's thumbnail
+                    if let Some(ref img) = uploaded {
+                        aud_file.thumb_path = img.thumb_path.clone();
+                    }
+                    Some(aud_file)
+                } else {
+                    None
+                };
+
             let deletion_token = if del_token_val.trim().is_empty() {
                 new_deletion_token()
             } else {
@@ -307,17 +360,21 @@ pub async fn create_thread(
                 subject: subject.clone(),
                 body: body_text.clone(),
                 body_html,
-                ip_hash,
+                ip_hash: ip_hash.clone(),
                 file_path: uploaded.as_ref().map(|u| u.file_path.clone()),
                 file_name: uploaded.as_ref().map(|u| u.original_name.clone()),
                 file_size: uploaded.as_ref().map(|u| u.file_size),
                 thumb_path: uploaded.as_ref().map(|u| u.thumb_path.clone()),
                 mime_type: uploaded.as_ref().map(|u| u.mime_type.clone()),
                 media_type: uploaded.as_ref().map(|u| u.media_type.as_str().to_string()),
+                audio_file_path: audio_uploaded.as_ref().map(|u| u.file_path.clone()),
+                audio_file_name: audio_uploaded.as_ref().map(|u| u.original_name.clone()),
+                audio_file_size: audio_uploaded.as_ref().map(|u| u.file_size),
+                audio_mime_type: audio_uploaded.as_ref().map(|u| u.mime_type.clone()),
                 deletion_token,
                 is_op: true,
             };
-            let (thread_id, _post_id) =
+            let (thread_id, post_id) =
                 db::create_thread_with_op(&conn, board.id, subject.as_deref(), &new_post)?;
 
             // Create poll if question + at least 2 options were supplied
@@ -335,11 +392,49 @@ pub async fn create_thread(
                 }
             }
 
-            let max_threads = board.max_threads;
-            let paths = db::prune_old_threads(&conn, board.id, max_threads)?;
-            for path in paths {
-                crate::utils::files::delete_file(&upload_dir, &path);
+            // ── Background jobs ───────────────────────────────────────────────
+            // 1. Media post-processing (video transcode / audio waveform)
+            if let Some(ref up) = uploaded {
+                if up.processing_pending {
+                    let job = match up.media_type {
+                        crate::models::MediaType::Video => {
+                            Some(crate::workers::Job::VideoTranscode {
+                                post_id,
+                                file_path: up.file_path.clone(),
+                                board_short: board.short_name.clone(),
+                            })
+                        }
+                        crate::models::MediaType::Audio => {
+                            Some(crate::workers::Job::AudioWaveform {
+                                post_id,
+                                file_path: up.file_path.clone(),
+                                board_short: board.short_name.clone(),
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(j) = job {
+                        if let Err(e) = job_queue.enqueue(&j) {
+                            tracing::warn!("Failed to enqueue media job: {}", e);
+                        }
+                    }
+                }
             }
+
+            // 2. Spam analysis
+            let _ = job_queue.enqueue(&crate::workers::Job::SpamCheck {
+                post_id,
+                ip_hash: ip_hash.clone(),
+                body_len: body_text.len(),
+            });
+
+            // 3. Thread pruning — now async so HTTP response returns immediately.
+            let max_threads = board.max_threads;
+            let _ = job_queue.enqueue(&crate::workers::Job::ThreadPrune {
+                board_id: board.id,
+                board_short: board.short_name.clone(),
+                max_threads,
+            });
 
             info!("New thread {} created in /{}/", thread_id, board.short_name);
             Ok(format!("/{}/thread/{}", board.short_name, thread_id))
@@ -431,6 +526,58 @@ pub async fn catalog(
             Ok(templates::catalog_page(
                 &board,
                 &threads,
+                &csrf_clone,
+                &all_boards,
+                collapse_greentext,
+            ))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok((jar, Html(html)))
+}
+
+// ─── GET /:board/archive ──────────────────────────────────────────────────────
+
+pub async fn board_archive(
+    State(state): State<AppState>,
+    Path(board_short): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    jar: CookieJar,
+) -> Result<(CookieJar, Html<String>)> {
+    let (jar, csrf) = ensure_csrf(jar);
+    const ARCHIVE_PER_PAGE: i64 = 20;
+
+    let page: i64 = params
+        .get("page")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+
+    let html = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let csrf_clone = csrf.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+
+            let total = db::count_archived_threads_for_board(&conn, board.id)?;
+            let pagination = Pagination::new(page, ARCHIVE_PER_PAGE, total);
+            let threads = db::get_archived_threads_for_board(
+                &conn,
+                board.id,
+                ARCHIVE_PER_PAGE,
+                pagination.offset(),
+            )?;
+
+            let all_boards = db::get_all_boards(&conn)?;
+            let collapse_greentext = db::get_collapse_greentext(&conn);
+            Ok(templates::archive_page(
+                &board,
+                &threads,
+                &pagination,
                 &csrf_clone,
                 &all_boards,
                 collapse_greentext,
@@ -586,4 +733,80 @@ pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
     // FIX[MEDIUM-11]: set Secure flag based on config (true when behind proxy / HTTPS)
     cookie.set_secure(CONFIG.https_cookies);
     (jar.add(cookie), token)
+}
+
+// ─── POST /report ─────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct ReportForm {
+    pub post_id: i64,
+    pub thread_id: i64,
+    pub board: String,
+    pub reason: Option<String>,
+    pub _csrf: Option<String>,
+}
+
+pub async fn file_report(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    jar: CookieJar,
+    Form(form): Form<ReportForm>,
+) -> Result<Response> {
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if !validate_csrf(csrf_cookie.as_deref(), form._csrf.as_deref().unwrap_or("")) {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    let ip_hash = hash_ip(&addr.ip().to_string(), &CONFIG.cookie_secret);
+    let reason = form
+        .reason
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(256)
+        .collect::<String>();
+
+    let post_id = form.post_id;
+    let thread_id = form.thread_id;
+    let board_raw = form
+        .board
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>();
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            let board = db::get_board_by_short(&conn, &board_raw)?
+                .ok_or_else(|| AppError::NotFound("Board not found.".into()))?;
+            // Verify post exists and belongs to this board to prevent spoofed reports.
+            let post = db::get_post(&conn, post_id)?
+                .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
+            if post.board_id != board.id {
+                return Err(AppError::BadRequest(
+                    "Post does not belong to this board.".into(),
+                ));
+            }
+            db::file_report(&conn, post_id, thread_id, board.id, &reason, &ip_hash)?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    // Redirect back to the thread the reported post lives in.
+    let safe_board = form
+        .board
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>();
+    Ok(Redirect::to(&format!(
+        "/{}/thread/{}#p{}",
+        safe_board, form.thread_id, form.post_id
+    ))
+    .into_response())
 }
