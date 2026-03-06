@@ -337,9 +337,13 @@ fn build_router(state: AppState) -> Router {
             "/{board}/thread/{id}/updates",
             get(handlers::thread::thread_updates),
         )
-        .nest_service(
-            "/boards",
-            tower_http::services::ServeDir::new(&CONFIG.upload_dir),
+        // Wildcard board media route: handles all /boards/** requests.
+        // For .mp4 files that have been transcoded away to .webm, issues a
+        // permanent redirect. All other paths are served directly from disk
+        // via tower-http ServeFile (Range, ETag, Content-Type handled correctly).
+        .route(
+            "/boards/{*media_path}",
+            get(handlers::board::serve_board_media),
         )
         .route("/admin", get(handlers::admin::admin_index))
         .route("/admin/login", post(handlers::admin::admin_login))

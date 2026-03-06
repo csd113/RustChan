@@ -255,10 +255,10 @@ fn render_inline(text: &str) -> String {
 
     // >>N reply links
     result = RE_REPLY
-        .replace_all(
-            &result,
-            r##"<a href="#p$1" class="quotelink">&gt;&gt;$1</a>"##,
-        )
+        .replace_all(&result, |caps: &regex::Captures| {
+            let n = &caps[1];
+            format!(r##"<a href="#p{n}" class="quotelink" data-pid="{n}">&gt;&gt;{n}</a>"##)
+        })
         .into_owned();
 
     // URLs

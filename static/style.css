@@ -596,6 +596,51 @@ body:has(.catalog-bar) main {
 .post-body .quote { color: #789922; }
 .post-body .quote-link { color: var(--green); }
 .post-body .quote-link:hover { color: var(--green-bright); }
+
+/* ── Quotelinks (>>N) ──────────────────────────────────────────────────────── */
+.post-body .quotelink {
+  color: var(--green);
+  text-decoration: none;
+  cursor: pointer;
+}
+.post-body .quotelink:hover { color: var(--green-bright); text-decoration: underline; }
+
+/* ── Backref links (>>N shown next to the cited post's number) ─────────────── */
+.backrefs { margin-left: 0.35rem; }
+.backrefs .backref {
+  color: var(--green-dim);
+  font-size: 0.75rem;
+  text-decoration: none;
+  margin-right: 0.25rem;
+  cursor: pointer;
+}
+.backrefs .backref:hover { color: var(--green-bright); text-decoration: underline; }
+
+/* ── Hover popup preview ───────────────────────────────────────────────────── */
+.quotelink-popup {
+  position: absolute;
+  z-index: 9000;
+  max-width: 520px;
+  min-width: 260px;
+  background: var(--bg-post, var(--bg));
+  border: 1px solid var(--border-glow, var(--border));
+  padding: 6px 8px;
+  pointer-events: auto;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.55);
+  border-radius: 2px;
+  font-size: 0.88rem;
+  /* prevent the clone's ID from affecting page anchors */
+  overflow: hidden;
+}
+.quotelink-popup .post { margin: 0; border: none; padding: 0; }
+.quotelink-popup .reply { margin: 0; border: none; }
+
+/* ── Highlighted post (clicked quotelink target) ───────────────────────────── */
+.post-highlighted {
+  outline: 2px solid var(--green, #00c840) !important;
+  background: rgba(0, 200, 64, 0.07) !important;
+  transition: background 0.15s, outline 0.15s;
+}
 .post-body code {
   background: #060c06;
   border: 1px solid var(--border);
@@ -1671,10 +1716,6 @@ body:has(.catalog-bar) main {
   /* smooth rotation */
   transition: transform 0.25s ease;
   transform-origin: center center;
-  /* allow user drag-to-resize on desktop */
-  resize: both;
-  overflow: auto;
-  cursor: nw-resize;
   /* ensure the post-body text wraps below when image is wide */
   clear: left;
 }

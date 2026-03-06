@@ -374,6 +374,8 @@ fn thread_autoupdate_script() -> &'static str {
           container.dataset.lastId = lastId;
           // Wire click-to-collapse on newly added images
           wireImageCollapse(container);
+          // Notify other scripts (e.g. quotelink handler) about new posts
+          if (window._onNewPostsInserted) window._onNewPostsInserted(container);
           setStatus('+' + data.count + ' new — ' + new Date().toLocaleTimeString());
         } else {
           setStatus('up to date — ' + new Date().toLocaleTimeString());
@@ -1341,6 +1343,185 @@ pub fn thread_page(
     body.push_str(report_modal_script());
     body.push_str(thread_autoupdate_script());
 
+    // ── Quotelink hover preview + highlight + backref injection ───────────────
+    body.push_str(r#"<script>
+(function() {
+  /* ── Post highlight ──────────────────────────────────────────────────── */
+  var _highlighted = null;
+
+  function highlightPost(id) {
+    clearHighlight();
+    var el = document.getElementById('p' + id);
+    if (!el) return;
+    el.classList.add('post-highlighted');
+    _highlighted = el;
+  }
+
+  function clearHighlight() {
+    if (_highlighted) {
+      _highlighted.classList.remove('post-highlighted');
+      _highlighted = null;
+    }
+  }
+
+  document.addEventListener('click', function(e) {
+    // Don't clear when clicking a quotelink or the highlighted post itself
+    if (e.target.classList.contains('quotelink')) return;
+    if (e.target.classList.contains('backref')) return;
+    clearHighlight();
+  });
+
+  /* ── Hover popup ─────────────────────────────────────────────────────── */
+  var popup = document.createElement('div');
+  popup.id = 'ql-popup';
+  popup.className = 'quotelink-popup';
+  popup.style.display = 'none';
+  document.body.appendChild(popup);
+
+  var _popupTarget = null;
+  var _hideTimer   = null;
+
+  function showPopup(link, pid) {
+    var src = document.getElementById('p' + pid);
+    if (!src) return;
+
+    // Clone the post and strip the backrefs/controls to keep the preview clean
+    var clone = src.cloneNode(true);
+    clone.removeAttribute('id');
+    clone.querySelectorAll('.post-controls, .admin-post-controls, .post-toggle-bar').forEach(function(n){ n.remove(); });
+
+    popup.innerHTML = '';
+    popup.appendChild(clone);
+    popup.style.display = 'block';
+    _popupTarget = pid;
+
+    positionPopup(link);
+  }
+
+  function positionPopup(anchor) {
+    var rect  = anchor.getBoundingClientRect();
+    var pw    = popup.offsetWidth  || 420;
+    var ph    = popup.offsetHeight || 200;
+    var vw    = window.innerWidth;
+    var vh    = window.innerHeight;
+    var scrollY = window.pageYOffset;
+
+    var left = rect.left + window.pageXOffset;
+    if (left + pw > vw - 10) left = Math.max(4, vw - pw - 10);
+
+    // prefer below; flip above if no room
+    var top;
+    if (rect.bottom + ph + 8 < vh) {
+      top = rect.bottom + scrollY + 8;
+    } else {
+      top = rect.top + scrollY - ph - 8;
+    }
+
+    popup.style.left = left + 'px';
+    popup.style.top  = top  + 'px';
+  }
+
+  function hidePopup() {
+    popup.style.display = 'none';
+    _popupTarget = null;
+  }
+
+  /* ── Wire quotelinks ─────────────────────────────────────────────────── */
+  function wireQuotelinks(root) {
+    root.querySelectorAll('a.quotelink[data-pid]').forEach(function(link) {
+      var pid = link.getAttribute('data-pid');
+
+      link.addEventListener('mouseenter', function() {
+        clearTimeout(_hideTimer);
+        showPopup(link, pid);
+      });
+      link.addEventListener('mouseleave', function() {
+        _hideTimer = setTimeout(hidePopup, 120);
+      });
+      link.addEventListener('click', function(e) {
+        var target = document.getElementById('p' + pid);
+        if (!target) return;
+        e.preventDefault();
+        // Scroll so the post sits near the top with a small gap
+        var offset = target.getBoundingClientRect().top + window.pageYOffset - 60;
+        window.scrollTo({ top: offset, behavior: 'smooth' });
+        highlightPost(pid);
+        hidePopup();
+      });
+    });
+  }
+
+  popup.addEventListener('mouseenter', function() { clearTimeout(_hideTimer); });
+  popup.addEventListener('mouseleave', function() { _hideTimer = setTimeout(hidePopup, 120); });
+
+  /* ── Wire backref links ──────────────────────────────────────────────── */
+  function wireBackrefs(root) {
+    root.querySelectorAll('a.backref[data-pid]').forEach(function(link) {
+      var pid = link.getAttribute('data-pid');
+
+      link.addEventListener('mouseenter', function() {
+        clearTimeout(_hideTimer);
+        showPopup(link, pid);
+      });
+      link.addEventListener('mouseleave', function() {
+        _hideTimer = setTimeout(hidePopup, 120);
+      });
+      link.addEventListener('click', function(e) {
+        var target = document.getElementById('p' + pid);
+        if (!target) return;
+        e.preventDefault();
+        var offset = target.getBoundingClientRect().top + window.pageYOffset - 60;
+        window.scrollTo({ top: offset, behavior: 'smooth' });
+        highlightPost(pid);
+        hidePopup();
+      });
+    });
+  }
+
+  /* ── Build backref index and inject >>N labels ───────────────────────── */
+  function buildBackrefs() {
+    // map: cited_post_id → [citing_post_id, ...]
+    var refs = {};
+    document.querySelectorAll('#thread-posts a.quotelink[data-pid]').forEach(function(link) {
+      var citedPid  = link.getAttribute('data-pid');
+      var postEl    = link.closest('.post');
+      if (!postEl) return;
+      var citingId  = postEl.id.replace('p', '');
+      if (!refs[citedPid]) refs[citedPid] = [];
+      if (refs[citedPid].indexOf(citingId) === -1) refs[citedPid].push(citingId);
+    });
+
+    Object.keys(refs).forEach(function(citedPid) {
+      var span = document.getElementById('backrefs-' + citedPid);
+      if (!span) return;
+      refs[citedPid].forEach(function(citingId) {
+        var a = document.createElement('a');
+        a.href = '#p' + citingId;
+        a.className = 'backref';
+        a.setAttribute('data-pid', citingId);
+        a.textContent = '>>' + citingId;
+        span.appendChild(a);
+      });
+      wireBackrefs(span);
+    });
+  }
+
+  /* ── Init ────────────────────────────────────────────────────────────── */
+  wireQuotelinks(document);
+  buildBackrefs();
+
+  /* ── Hook into the auto-updater so new posts also get wired ─────────── */
+  if (window._qlHooked) return;
+  window._qlHooked = true;
+  var _origInsert = window._onNewPostsInserted;
+  window._onNewPostsInserted = function(container) {
+    if (_origInsert) _origInsert(container);
+    wireQuotelinks(container);
+    buildBackrefs(); // rebuild whole map so new quotes point back too
+  };
+})();
+</script>"#);
+
     // Draft autosave
     let draft_key = format!("rustchan_draft_{}_{}", board.short_name, thread.id);
     let draft_key_debug = format!("{:?}", draft_key);
@@ -1523,6 +1704,7 @@ pub fn render_post(
 <strong class="name">{name}</strong>{tripcode}
 <span class="post-time">{time}</span>{edited}
 <a class="post-num" href="#p{id}" onclick="appendReply({id})">No.{id}</a>
+<span class="backrefs" id="backrefs-{id}"></span>
 </div>"##,
         op_class = op_class,
         id = post.id,
@@ -1852,7 +2034,7 @@ pub fn catalog_page(
 <a href="/{board}/thread/{tid}">
 {thumb}
 <div class="catalog-info">
-<span class="catalog-replies">R: {replies} / I: {images}</span>
+<span class="catalog-replies">R: {replies} / F: {images}</span>
 <p class="catalog-subject">{subj}</p>
 </div>
 </a>
@@ -2142,9 +2324,6 @@ pub fn admin_panel_page(
   <label>Description<input type="text" name="description" value="{desc_raw}" maxlength="256"></label>
   <label>Bump limit<input type="number" name="bump_limit" value="{bump}" min="1" max="10000"></label>
   <label>Max threads<input type="number" name="max_threads" value="{maxt}" min="1" max="1000"></label>
-  <label title="How long (seconds) after posting a user may edit. 0 = use default (300 s).">
-    Edit window (s)<input type="number" name="edit_window_secs" value="{edit_win}" min="0" max="86400">
-  </label>
 </div>
 <div class="board-settings-checks">
   <label><input type="checkbox" name="nsfw"            value="1"{nsfw_ck}> NSFW</label>
@@ -2158,6 +2337,10 @@ pub fn admin_panel_page(
     Allow post editing</label>
 </div>
 <div class="board-settings-grid edit-window-row" style="margin-top:0.4rem;{edit_win_display}">
+  <label title="How long (seconds) after posting a user may edit. 0 = use default (300 s).">
+    Edit window (s)<input type="number" name="edit_window_secs" value="{edit_win}" min="0" max="86400">
+  </label>
+</div>
 <div class="board-settings-actions">
   <button type="submit">save settings</button>
 </div>

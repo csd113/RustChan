@@ -540,13 +540,7 @@ pub fn get_threads_for_board(
                 t.archived,
                 (SELECT COUNT(*) FROM posts p WHERE p.thread_id = t.id
                  AND p.file_path IS NOT NULL
-                 AND (p.media_type = 'image'
-                      OR (p.media_type IS NULL AND (
-                          p.file_path LIKE '%.jpg' OR p.file_path LIKE '%.jpeg' OR
-                          p.file_path LIKE '%.png' OR p.file_path LIKE '%.gif' OR
-                          p.file_path LIKE '%.webp'
-                      ))
-                 )) AS image_count
+                 ) AS image_count
          FROM threads t
          JOIN posts op ON op.thread_id = t.id AND op.is_op = 1
          WHERE t.board_id = ?1 AND t.archived = 0
@@ -595,13 +589,7 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
                 t.archived,
                 (SELECT COUNT(*) FROM posts p WHERE p.thread_id = t.id
                  AND p.file_path IS NOT NULL
-                 AND (p.media_type = 'image'
-                      OR (p.media_type IS NULL AND (
-                          p.file_path LIKE '%.jpg' OR p.file_path LIKE '%.jpeg' OR
-                          p.file_path LIKE '%.png' OR p.file_path LIKE '%.gif' OR
-                          p.file_path LIKE '%.webp'
-                      ))
-                 )) AS image_count
+                 ) AS image_count
          FROM threads t
          JOIN posts op ON op.thread_id = t.id AND op.is_op = 1
          WHERE t.id = ?1",
@@ -793,13 +781,7 @@ pub fn get_archived_threads_for_board(
                 t.archived,
                 (SELECT COUNT(*) FROM posts p WHERE p.thread_id = t.id
                  AND p.file_path IS NOT NULL
-                 AND (p.media_type = 'image'
-                      OR (p.media_type IS NULL AND (
-                          p.file_path LIKE '%.jpg' OR p.file_path LIKE '%.jpeg' OR
-                          p.file_path LIKE '%.png' OR p.file_path LIKE '%.gif' OR
-                          p.file_path LIKE '%.webp'
-                      ))
-                 )) AS image_count
+                 ) AS image_count
          FROM threads t
          JOIN posts op ON op.thread_id = t.id AND op.is_op = 1
          WHERE t.board_id = ?1 AND t.archived = 1

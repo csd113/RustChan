@@ -2329,14 +2329,36 @@ mod board_backup_types {
         pub nsfw: bool,
         pub max_threads: i64,
         pub bump_limit: i64,
+        /// Added via ALTER TABLE — absent in oldest backups; default true.
+        #[serde(default = "default_true")]
         pub allow_images: bool,
+        /// Added via ALTER TABLE — absent in oldest backups; default true.
+        #[serde(default = "default_true")]
         pub allow_video: bool,
+        /// Added via ALTER TABLE — absent in oldest backups; default false.
+        #[serde(default)]
         pub allow_audio: bool,
+        /// Added via ALTER TABLE — absent in oldest backups; default true.
+        #[serde(default = "default_true")]
         pub allow_tripcodes: bool,
+        /// Added in a later version — absent in older backups; default to 300 s.
+        #[serde(default = "default_edit_window_secs")]
         pub edit_window_secs: i64,
+        /// Added in a later version — absent in older backups; default to false.
+        #[serde(default)]
         pub allow_editing: bool,
+        /// Added in a later version — absent in older backups; default to true.
+        #[serde(default = "default_true")]
         pub allow_archive: bool,
         pub created_at: i64,
+    }
+
+    fn default_true() -> bool {
+        true
+    }
+
+    fn default_edit_window_secs() -> i64 {
+        300
     }
     #[derive(Serialize, Deserialize)]
     pub struct ThreadRow {

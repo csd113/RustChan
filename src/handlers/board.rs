@@ -747,3 +747,44 @@ pub async fn file_report(
     ))
     .into_response())
 }
+
+// ─── GET /boards/{*media_path} — serve media with mp4→webm redirect ──────────
+//
+// Replaces the former nest_service(ServeDir) so we can intercept stale .mp4
+// links (created before the background transcoder replaced them with .webm)
+// and issue a permanent redirect. All other paths are served via ServeFile.
+
+pub async fn serve_board_media(Path(media_path): Path<String>) -> Response {
+    use axum::http::StatusCode;
+    use std::path::PathBuf;
+    use tower::ServiceExt;
+    use tower_http::services::ServeFile;
+
+    // Reject path-traversal attempts.
+    if media_path.contains("..") {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let base = PathBuf::from(&CONFIG.upload_dir);
+    let target = base.join(&media_path);
+
+    if target.exists() {
+        // File present — serve with proper Range/ETag/Content-Type headers.
+        let req = axum::http::Request::new(axum::body::Body::empty());
+        match ServeFile::new(&target).oneshot(req).await {
+            Ok(resp) => resp.map(axum::body::Body::new).into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    } else if media_path.ends_with(".mp4") {
+        // MP4 was transcoded away — redirect permanently to the .webm sibling.
+        let webm_path_str = format!("{}.webm", &media_path[..media_path.len() - 4]);
+        let webm_abs = base.join(&webm_path_str);
+        if webm_abs.exists() {
+            Redirect::permanent(&format!("/boards/{}", webm_path_str)).into_response()
+        } else {
+            StatusCode::NOT_FOUND.into_response()
+        }
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
