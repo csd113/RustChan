@@ -242,7 +242,7 @@ fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> Stri
   async function _compressVideo(file, targetBytes) {{
     var videoEl = document.createElement('video');
     videoEl.src = URL.createObjectURL(file);
-    videoEl.muted = true;
+    videoEl.muted = false;
     videoEl.preload = 'metadata';
     await new Promise(function(res, rej) {{
       videoEl.onloadedmetadata = res;
@@ -250,16 +250,29 @@ fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> Stri
     }});
     var dur = videoEl.duration;
     if (!dur || !isFinite(dur)) throw new Error('Cannot determine video duration.');
-    var bps = Math.max(120000, Math.floor(targetBytes * 8 * 0.82 / dur));
+    // Reserve ~15% of the budget for audio (128 kbps Opus); the rest goes to video.
+    var audioBps  = 131072;
+    var totalBps  = Math.max(250000, Math.floor(targetBytes * 8 * 0.82 / dur));
+    var videoBps  = Math.max(120000, totalBps - audioBps);
     var canvas = document.createElement('canvas');
     canvas.width  = videoEl.videoWidth  || 640;
     canvas.height = videoEl.videoHeight || 360;
     var ctx = canvas.getContext('2d');
-    var mime = ['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm']
+    // Prefer codecs that include audio; fall back gracefully.
+    var mime = ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']
                  .find(function(m) {{ return MediaRecorder.isTypeSupported(m); }});
     if (!mime) throw new Error('Browser does not support MediaRecorder for video/webm.');
-    var stream   = canvas.captureStream(24);
-    var recorder = new MediaRecorder(stream, {{ mimeType: mime, videoBitsPerSecond: bps }});
+    var stream = canvas.captureStream(24);
+    // Attach audio tracks from the source video so they are included in the recording.
+    var srcStream = (typeof videoEl.captureStream === 'function')
+                      ? videoEl.captureStream()
+                      : (typeof videoEl.mozCaptureStream === 'function')
+                          ? videoEl.mozCaptureStream()
+                          : null;
+    if (srcStream) {{
+      srcStream.getAudioTracks().forEach(function(track) {{ stream.addTrack(track); }});
+    }}
+    var recorder = new MediaRecorder(stream, {{ mimeType: mime, videoBitsPerSecond: videoBps }});
     var chunks   = [];
     recorder.ondataavailable = function(e) {{ if (e.data.size > 0) chunks.push(e.data); }};
     recorder.start(300);
