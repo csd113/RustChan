@@ -59,7 +59,6 @@ allow = [
     "Zlib",
 
     # Public domain equivalents
-    "CC0-1.0",
     "Unlicense",
 
     # OpenSSL — present transitively through some TLS / crypto crates.

@@ -917,7 +917,7 @@ pub fn verify_deletion_token(
 }
 
 /// How long (in seconds) after posting a user may edit their post (5 minutes).
-pub const EDIT_WINDOW_SECS: i64 = 300;
+pub const EDIT_WINDOW_SECS: i64 = 20;
 
 /// Edit a post's body, verified against the deletion token and the edit window.
 ///
