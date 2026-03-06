@@ -334,6 +334,15 @@ pub fn set_site_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> 
 }
 
 /// Convenience: read the collapsible-greentext toggle (default: false).
+/// Returns the admin-configured site name, or falls back to CONFIG.forum_name.
+pub fn get_site_name(conn: &rusqlite::Connection) -> String {
+    get_site_setting(conn, "site_name")
+        .ok()
+        .flatten()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| crate::config::CONFIG.forum_name.clone())
+}
+
 pub fn get_collapse_greentext(conn: &rusqlite::Connection) -> bool {
     get_site_setting(conn, "collapse_greentext")
         .ok()

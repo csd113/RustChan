@@ -194,6 +194,14 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     let pool = db::init_pool()?;
     first_run_check(&pool)?;
 
+    // Initialise the live site name from DB so it's available before any request.
+    {
+        if let Ok(conn) = pool.get() {
+            let name = db::get_site_name(&conn);
+            templates::set_live_site_name(&name);
+        }
+    }
+
     // ── External tool detection ────────────────────────────────────────────────
     // ffmpeg: required for video thumbnails (optional — graceful degradation).
     let ffmpeg_status = detect::detect_ffmpeg(CONFIG.require_ffmpeg);

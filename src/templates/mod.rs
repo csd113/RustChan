@@ -9,6 +9,31 @@
 use crate::config::CONFIG;
 use crate::models::*;
 use crate::utils::{files::format_file_size, sanitize::escape_html};
+use once_cell::sync::Lazy;
+use std::sync::RwLock;
+
+// ─── Live site name (DB-overridable, falls back to CONFIG.forum_name) ─────────
+
+static LIVE_SITE_NAME: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(CONFIG.forum_name.clone()));
+
+/// Call this at startup (after first DB read) and after admin saves a new name.
+pub fn set_live_site_name(name: &str) {
+    if let Ok(mut guard) = LIVE_SITE_NAME.write() {
+        *guard = if name.trim().is_empty() {
+            CONFIG.forum_name.clone()
+        } else {
+            name.to_string()
+        };
+    }
+}
+
+/// Read the current live site name.
+fn live_site_name() -> String {
+    LIVE_SITE_NAME
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| CONFIG.forum_name.clone())
+}
 
 // ─── Shared JS injected once per page ────────────────────────────────────────
 
@@ -671,7 +696,7 @@ fn base_layout(
         board_links = board_links,
         search_bar = search_bar,
         catalog_bar = catalog_bar,
-        forum_name = escape_html(&CONFIG.forum_name),
+        forum_name = escape_html(&live_site_name()),
         body = body,
         csrf_token = escape_html(csrf_token),
         collapse_attr = if collapse_greentext {
@@ -772,7 +797,7 @@ pub fn index_page(
 <p class="index-subtitle">select board to proceed</p>
 </div>
 {sfw}{nsfw}{empty}{stats}"#,
-        name = escape_html(&CONFIG.forum_name),
+        name = escape_html(&live_site_name()),
         sfw = sfw_sec,
         nsfw = nsfw_sec,
         empty = empty,
@@ -780,7 +805,7 @@ pub fn index_page(
     );
 
     base_layout(
-        &CONFIG.forum_name,
+        &live_site_name(),
         None,
         &body,
         csrf_token,
@@ -2100,6 +2125,8 @@ pub fn admin_panel_page(
     board_backups: &[BackupInfo],
     db_size_bytes: i64,
     reports: &[crate::models::ReportWithContext],
+    site_name: &str,
+    tor_address: Option<&str>,
 ) -> String {
     let mut board_cards = String::new();
     for b in boards {
@@ -2412,6 +2439,12 @@ pub fn admin_panel_page(
 <h2>// site settings</h2>
 <form method="POST" action="/admin/site/settings">
 <input type="hidden" name="_csrf" value="{csrf}">
+<div class="board-settings-grid" style="margin-bottom:0.75rem">
+  <label>Site name
+    <input type="text" name="site_name" value="{site_name_val}" maxlength="64" placeholder="RustChan"
+           style="font-family:inherit">
+  </label>
+</div>
 <div class="board-settings-checks" style="margin-bottom:0.75rem">
   <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block. Existing posts are not affected — only new posts use the current setting.">
     <input type="checkbox" name="collapse_greentext" value="1"{collapse_ck}>
@@ -2479,6 +2512,7 @@ pub fn admin_panel_page(
           onclick="return confirm('Run VACUUM? This will briefly block the database while it rebuilds. Continue?')">&#x1F9F9; run VACUUM</button>
 </form>
 </section>
+{tor_section}
 </div>"#,
         csrf = escape_html(csrf_token),
         board_cards = board_cards,
@@ -2490,6 +2524,18 @@ pub fn admin_panel_page(
         db_size_str = format_file_size(db_size_bytes),
         report_rows = report_rows,
         report_badge = report_badge,
+        site_name_val = escape_html(site_name),
+        tor_section = match tor_address {
+            Some(addr) => format!(
+                r#"<section class="admin-section" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
+<p style="color:var(--text-dim);font-size:0.82rem;margin:0">
+  &#x1F9C5; tor onion address: <code style="user-select:all;color:var(--text)">{}</code>
+</p>
+</section>"#,
+                escape_html(addr)
+            ),
+            None => String::new(),
+        },
     );
 
     base_layout("admin panel", None, &body, csrf_token, boards, false, false)

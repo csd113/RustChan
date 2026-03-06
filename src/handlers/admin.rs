@@ -270,12 +270,28 @@ pub async fn admin_panel(
             let filters = db::get_word_filters(&conn)?;
             let collapse_greentext = db::get_collapse_greentext(&conn);
             let reports = db::get_open_reports(&conn)?;
+            let site_name = db::get_site_name(&conn);
 
             // Collect saved backup file lists (read from disk, not DB).
             let full_backups = list_backup_files(&full_backup_dir());
             let board_backups_list = list_backup_files(&board_backup_dir());
 
             let db_size_bytes = db::get_db_size_bytes(&conn).unwrap_or(0);
+
+            // Read the tor onion address from the hostname file if tor is enabled.
+            let tor_address: Option<String> = if CONFIG.enable_tor_support {
+                let data_dir = std::path::PathBuf::from(&CONFIG.database_path)
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let hostname_path = data_dir.join("tor_hidden_service").join("hostname");
+                std::fs::read_to_string(&hostname_path)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            };
 
             Ok(templates::admin_panel_page(
                 &boards,
@@ -287,6 +303,8 @@ pub async fn admin_panel(
                 &board_backups_list,
                 db_size_bytes,
                 &reports,
+                &site_name,
+                tor_address.as_deref(),
             ))
         }
     })
@@ -2978,6 +2996,8 @@ pub struct SiteSettingsForm {
     pub _csrf: Option<String>,
     /// Checkbox: present = "1", absent = not submitted (treat as false)
     pub collapse_greentext: Option<String>,
+    /// Custom site name (replaces [ RustChan ] on home page and footer).
+    pub site_name: Option<String>,
 }
 
 pub async fn update_site_settings(
@@ -3006,6 +3026,20 @@ pub async fn update_site_settings(
             };
             db::set_site_setting(&conn, "collapse_greentext", val)?;
             info!("Admin updated site setting: collapse_greentext={}", val);
+
+            // Save the custom site name (trimmed, max 64 chars).
+            let new_name = form
+                .site_name
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(64)
+                .collect::<String>();
+            db::set_site_setting(&conn, "site_name", &new_name)?;
+            // Update the in-memory live name so all pages reflect it immediately.
+            crate::templates::set_live_site_name(&new_name);
+            info!("Admin updated site name to: {:?}", new_name);
             Ok(())
         }
     })
