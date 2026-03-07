@@ -502,10 +502,11 @@ fn build_router(state: AppState) -> Router {
                 "default-src 'self'; \
                  script-src 'self' 'unsafe-inline'; \
                  style-src 'self' 'unsafe-inline'; \
-                 img-src 'self' data: blob:; \
+                 img-src 'self' data: blob: https://img.youtube.com; \
                  media-src 'self' blob:; \
                  font-src 'self'; \
                  connect-src 'self'; \
+                 frame-src https://www.youtube-nocookie.com https://streamable.com; \
                  frame-ancestors 'none'; \
                  object-src 'none'; \
                  base-uri 'self'",
