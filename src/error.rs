@@ -1,50 +1,71 @@
 // error.rs — Unified error type.
+//
 // Every handler returns Result<T, AppError>. AppError converts to an HTTP
 // response automatically, so handlers never need to manually build error pages.
+//
+// Variants map 1-to-1 to HTTP status codes so the right code is always returned:
+//   NotFound          → 404
+//   BadRequest        → 400
+//   Forbidden         → 403
+//   UploadTooLarge    → 413  (Content Too Large)
+//   InvalidMediaType  → 415  (Unsupported Media Type)
+//   RateLimited       → 429  (Too Many Requests)
+//   DbBusy            → 503  (Service Unavailable, with Retry-After)
+//   Internal          → 500
 
 use axum::{
     http::StatusCode,
     response::{Html, IntoResponse, Response},
 };
+use thiserror::Error;
 use tracing::error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum AppError {
     /// 404 — board or thread not found
+    #[error("Not found: {0}")]
     NotFound(String),
+
     /// 400 — bad input from user
+    #[error("Bad request: {0}")]
     BadRequest(String),
+
     /// 403 — forbidden (banned, CSRF failure, etc.)
+    #[error("Forbidden: {0}")]
     Forbidden(String),
+
+    /// 413 — upload body too large
+    #[error("Upload too large: {0}")]
+    UploadTooLarge(String),
+
+    /// 415 — MIME type not accepted
+    #[error("Invalid media type: {0}")]
+    InvalidMediaType(String),
+
     /// 429 — rate limited
-    #[allow(dead_code)]
+    #[error("Rate limited: posting too fast")]
     RateLimited,
+
+    /// 503 — database write contention; client should retry
+    #[error("Database busy — please retry")]
+    DbBusy,
+
     /// 500 — internal error (database failure, IO error, etc.)
-    Internal(anyhow::Error),
+    #[error("Internal error: {0}")]
+    Internal(#[from] anyhow::Error),
 }
 
-impl std::fmt::Display for AppError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AppError::NotFound(msg) => write!(f, "Not found: {}", msg),
-            AppError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
-            AppError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
-            AppError::RateLimited => write!(f, "Rate limited"),
-            AppError::Internal(e) => write!(f, "Internal error: {}", e),
-        }
-    }
-}
-
-// Allow ? operator on anyhow::Error
-impl From<anyhow::Error> for AppError {
-    fn from(e: anyhow::Error) -> Self {
-        AppError::Internal(e)
-    }
-}
-
-// Allow ? operator on rusqlite::Error
+// Allow ? operator on rusqlite::Error — map SQLITE_BUSY to DbBusy (503) and
+// everything else to Internal (500).
 impl From<rusqlite::Error> for AppError {
     fn from(e: rusqlite::Error) -> Self {
+        if let rusqlite::Error::SqliteFailure(ref fe, _) = e {
+            if fe.code == rusqlite::ErrorCode::DatabaseBusy
+                || fe.code == rusqlite::ErrorCode::DatabaseLocked
+            {
+                return AppError::DbBusy;
+            }
+        }
         AppError::Internal(anyhow::Error::new(e))
     }
 }
@@ -62,9 +83,15 @@ impl IntoResponse for AppError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
+            AppError::UploadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
+            AppError::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg.clone()),
             AppError::RateLimited => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "You are posting too fast. Slow down.".to_string(),
+            ),
+            AppError::DbBusy => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The server is temporarily busy. Please try again in a moment.".to_string(),
             ),
             AppError::Internal(e) => {
                 error!("Internal error: {:?}", e);

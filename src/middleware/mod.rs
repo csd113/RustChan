@@ -28,7 +28,6 @@
 use crate::config::CONFIG;
 use axum::{
     extract::Request,
-    http::{header, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -101,18 +100,7 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     };
 
     if blocked {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [
-                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                (header::RETRY_AFTER, "60"),
-            ],
-            crate::templates::error_page(
-                429,
-                "You are posting too fast. Please wait before posting again.",
-            ),
-        )
-            .into_response();
+        return crate::error::AppError::RateLimited.into_response();
     }
 
     // FIX[MEDIUM-4]: Clean old entries when the table grows large OR at least

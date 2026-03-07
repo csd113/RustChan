@@ -50,12 +50,21 @@ fn compute_tripcode(password: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(password.as_bytes());
     let result = hasher.finalize();
-    // Encode first 7.5 bytes as 10 base64url chars (no padding)
-    let encoded = base64url_encode(&result[..8]);
-    format!("!{}", &encoded[..10])
+    // Encode first 8 bytes as base64url, take first 10 chars.
+    // result is a 32-byte GenericArray — get(..8) is always Some.
+    let eight = result.get(..8).expect("SHA-256 output is 32 bytes");
+    let encoded = base64url_encode(eight);
+    // encoded of 8 bytes = ceil(8/3)*4 = 12 chars; take first 10.
+    let ten = encoded.get(..10).expect("base64url of 8 bytes is 12 chars");
+    format!("!{ten}")
 }
 
-/// Minimal base64url encoding (URL-safe alphabet, no padding)
+/// Minimal base64url encoding (URL-safe alphabet, no padding).
+///
+/// All slice indexing here is on `input` (controlled by the loop bounds)
+/// and on ALPHABET (a 64-byte constant indexed by a value masked to 6 bits,
+/// so always 0–63).  Both are provably in-bounds; allow the lint.
+#[allow(clippy::indexing_slicing)]
 fn base64url_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut output = String::new();
@@ -94,7 +103,8 @@ mod tests {
         let (_, t2) = parse_name_tripcode("DifferentName#password123");
         // Same password → same tripcode regardless of name
         assert_eq!(t1, t2);
-        assert!(t1.unwrap().starts_with('!'));
+        // Panic on failure is the correct behaviour inside a test assertion.
+        assert!(t1.expect("tripcode should be present").starts_with('!'));
     }
 
     #[test]

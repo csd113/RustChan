@@ -43,7 +43,7 @@ mod templates;
 mod utils;
 mod workers;
 
-use config::{generate_settings_file_if_missing, CONFIG};
+use config::{check_cookie_secret_rotation, generate_settings_file_if_missing, CONFIG};
 use middleware::AppState;
 
 // ─── Embedded static assets ───────────────────────────────────────────────────
@@ -167,6 +167,10 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
 
     generate_settings_file_if_missing();
 
+    // Validate critical configuration values immediately — fail fast with a
+    // clear error rather than discovering misconfiguration at runtime (#8).
+    CONFIG.validate()?;
+
     let data_dir = std::path::Path::new(&CONFIG.database_path)
         .parent()
         .unwrap_or(std::path::Path::new("."));
@@ -193,6 +197,12 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
 
     let pool = db::init_pool()?;
     first_run_check(&pool)?;
+
+    // Check whether cookie_secret has changed since the last run (#19).
+    // Must run after DB init so the site_settings table exists.
+    if let Ok(conn) = pool.get() {
+        check_cookie_secret_rotation(&conn);
+    }
 
     // Initialise the live site name and subtitle from DB so they're available before any request.
     {
@@ -232,6 +242,8 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
             q
         },
     };
+    // Keep a reference to the job queue cancel token for graceful shutdown (#7).
+    let worker_cancel = state.job_queue.cancel.clone();
     let start_time = Instant::now();
 
     // Background: purge expired sessions hourly
@@ -253,10 +265,8 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     }
 
     // Background: WAL checkpoint — prevent WAL files growing unbounded.
-    // Runs PRAGMA wal_checkpoint(TRUNCATE) at the configured interval.
-    // TRUNCATE mode resets the WAL file to zero bytes after a full checkpoint,
-    // which is the most aggressive space-reclaiming option.  It blocks writers
-    // briefly but is safe and transactionally correct.
+    // Runs PRAGMA wal_checkpoint(TRUNCATE) at the configured interval, plus
+    // PRAGMA optimize to keep query-planner statistics current (#18).
     if CONFIG.wal_checkpoint_interval > 0 {
         let bg = pool.clone();
         let interval_secs = CONFIG.wal_checkpoint_interval;
@@ -278,6 +288,11 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                             );
                         }
                         Err(e) => tracing::warn!("WAL checkpoint failed: {}", e),
+                    }
+                    // PRAGMA optimize updates internal statistics used by the
+                    // query planner. It is cheap and idempotent (#18).
+                    if let Ok(conn) = bg.get() {
+                        let _ = conn.execute_batch("PRAGMA optimize;");
                     }
                 }
             }
@@ -309,6 +324,12 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     )
     .with_graceful_shutdown(shutdown_signal())
     .await?;
+
+    // Signal background workers to drain and exit (#7).
+    info!("Signalling background workers to shut down…");
+    worker_cancel.cancel();
+    // Give workers up to 10 seconds to finish in-flight jobs.
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     info!("Server shut down gracefully.");
     Ok(())
@@ -446,6 +467,18 @@ fn build_router(state: AppState) -> Router {
         .layer(axum_middleware::from_fn(middleware::rate_limit_middleware))
         .layer(DefaultBodyLimit::max(CONFIG.max_video_size))
         .layer(axum_middleware::from_fn(track_requests))
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            header::HeaderName::from_static("x-content-type-options"),
+            header::HeaderValue::from_static("nosniff"),
+        ))
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            header::HeaderName::from_static("x-frame-options"),
+            header::HeaderValue::from_static("SAMEORIGIN"),
+        ))
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            header::HeaderName::from_static("referrer-policy"),
+            header::HeaderValue::from_static("same-origin"),
+        ))
         .with_state(state)
 }
 
@@ -469,9 +502,26 @@ async fn track_requests(
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
 
-    // Record the client IP for the "users online" display
+    // Attach a per-request UUID to every tracing span so correlated log lines
+    // can be grouped by request even under concurrent load (#12).
+    let req_id = uuid::Uuid::new_v4();
+    let method = req.method().clone();
+    let path = req.uri().path().to_owned();
+    let span = tracing::info_span!(
+        "request",
+        req_id = %req_id,
+        method = %method,
+        path  = %path,
+    );
+
+    // Record the client IP for the "users online" display.
+    // Cap at 10,000 entries to prevent unbounded memory growth under a
+    // Sybil/bot attack rotating IPs (#11). The count is cosmetic so
+    // dropping inserts beyond the cap has no functional impact.
     if let Some(ci) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
-        ACTIVE_IPS.insert(ci.0.ip().to_string(), Instant::now());
+        if ACTIVE_IPS.len() < 10_000 {
+            ACTIVE_IPS.insert(ci.0.ip().to_string(), Instant::now());
+        }
     }
 
     // Detect file uploads by Content-Type
@@ -486,7 +536,8 @@ async fn track_requests(
         ACTIVE_UPLOADS.fetch_add(1, Ordering::Relaxed);
     }
 
-    let resp = next.run(req).await;
+    use tracing::Instrument as _;
+    let resp = next.run(req).instrument(span).await;
 
     IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
     if is_upload {
@@ -611,7 +662,10 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
     if active_uploads > 0 {
         let tick = SPINNER_TICK.load(Ordering::Relaxed);
         let spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let spin = spinners[(tick as usize) % spinners.len()];
+        let spin = spinners
+            .get((tick as usize) % spinners.len())
+            .copied()
+            .unwrap_or("⠋");
         let fill = ((tick % 20) as usize).min(10);
         let bar = format!("{}{}", "█".repeat(fill), "░".repeat(10 - fill));
         println!(
@@ -627,7 +681,12 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
     );
 
     // Users online line
-    println!("   users online: {}  │  IPs: {}", online_count, ip_list);
+    println!(
+        "   users online: {}  │  IPs: {}  │  mem: {} KiB RSS",
+        online_count,
+        ip_list,
+        process_rss_kb()
+    );
 
     // Per-board breakdown
     if !board_stats.is_empty() {
@@ -654,6 +713,28 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
             println!("{}", line);
         }
     }
+}
+
+/// Read the process RSS (resident set size) from /proc/self/status on Linux.
+/// Returns 0 on non-Linux platforms or if the file cannot be read.
+/// No additional dependencies needed — /proc/self/status is always present.
+fn process_rss_kb() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+            for line in s.lines() {
+                if let Some(val) = line.strip_prefix("VmRSS:") {
+                    let kb: u64 = val
+                        .split_whitespace()
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0);
+                    return kb;
+                }
+            }
+        }
+    }
+    0
 }
 
 fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64)> {

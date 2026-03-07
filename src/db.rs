@@ -37,7 +37,8 @@ pub fn init_pool() -> Result<DbPool> {
              PRAGMA foreign_keys = ON;
              PRAGMA cache_size = -4096;  -- 4 MiB page cache per connection
              PRAGMA temp_store = MEMORY;
-             PRAGMA mmap_size = 67108864; -- 64 MiB memory-mapped IO",
+             PRAGMA mmap_size = 67108864; -- 64 MiB memory-mapped IO
+             PRAGMA busy_timeout = 10000; -- 10s: wait instead of instant SQLITE_BUSY",
         )
     });
 
@@ -249,54 +250,95 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
     )
     .context("Schema creation failed")?;
 
-    // Additive migrations for existing databases that pre-date new columns.
-    // SQLite returns an error on duplicate column — we just ignore it.
-    let migrations: &[&str] = &[
-        "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1",
-        "ALTER TABLE boards ADD COLUMN allow_tripcodes INTEGER NOT NULL DEFAULT 1",
-        // Per-board image and audio toggles (Part 4)
-        "ALTER TABLE boards ADD COLUMN allow_images  INTEGER NOT NULL DEFAULT 1",
-        "ALTER TABLE boards ADD COLUMN allow_audio   INTEGER NOT NULL DEFAULT 0",
-        // MediaType column on posts for explicit classification (Part 3)
-        "ALTER TABLE posts ADD COLUMN media_type TEXT",
-        "ALTER TABLE posts ADD COLUMN audio_file_path TEXT",
-        "ALTER TABLE posts ADD COLUMN audio_file_name TEXT",
-        "ALTER TABLE posts ADD COLUMN audio_file_size INTEGER",
-        "ALTER TABLE posts ADD COLUMN audio_mime_type TEXT",
-        // Poll tables added later — CREATE TABLE IF NOT EXISTS handles this gracefully
-        // Post editing support: timestamp of last edit (NULL = never edited)
-        "ALTER TABLE posts ADD COLUMN edited_at INTEGER",
-        // Background job queue — added to CREATE TABLE IF NOT EXISTS above,
-        // but the index must also exist on databases created before this version.
-        "CREATE INDEX IF NOT EXISTS idx_jobs_pending ON background_jobs(status, priority DESC, created_at ASC)",
-        // Reports and mod_log — CREATE TABLE IF NOT EXISTS handles new installs;
-        // these indexes ensure they exist on pre-existing databases too.
-        "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, created_at DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_mod_log_created ON mod_log(created_at DESC)",
-        // v1.0.8: archive column on threads (non-destructive prune)
-        "ALTER TABLE threads ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
-        "CREATE INDEX IF NOT EXISTS idx_threads_archived ON threads(board_id, archived, bumped_at DESC)",
-        // v1.0.9: per-board edit window; 0 = use 300s when editing enabled
-        "ALTER TABLE boards ADD COLUMN edit_window_secs INTEGER NOT NULL DEFAULT 0",
-        // v1.0.9: per-board editing toggle (off by default)
-        "ALTER TABLE boards ADD COLUMN allow_editing INTEGER NOT NULL DEFAULT 0",
-        // v1.0.9: per-board archive toggle (on by default for existing boards)
-        "ALTER TABLE boards ADD COLUMN allow_archive INTEGER NOT NULL DEFAULT 1",
-        // v1.0.10: per-board video embed unfurling (off by default)
-        "ALTER TABLE boards ADD COLUMN allow_video_embeds INTEGER NOT NULL DEFAULT 0",
-        // v1.0.10: per-board PoW CAPTCHA on new threads (off by default)
-        "ALTER TABLE boards ADD COLUMN allow_captcha INTEGER NOT NULL DEFAULT 0",
-        // v1.0.10: ban appeal table
-        r"CREATE TABLE IF NOT EXISTS ban_appeals (
+    // ─── Schema versioning ──────────────────────────────────────────────────
+    // A schema_version table tracks which migrations have been applied.
+    // We create it unconditionally so fresh installs and existing installs
+    // both end up with the same table.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_version (
+            version    INTEGER NOT NULL DEFAULT 0
+         );
+         INSERT INTO schema_version (version)
+         SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM schema_version);",
+    )
+    .context("Failed to create schema_version table")?;
+
+    let current_version: i64 =
+        conn.query_row("SELECT version FROM schema_version", [], |r| r.get(0))?;
+
+    // Each entry is (introduced_at_version, sql).
+    // Migrations are applied in order when current_version < introduced_at_version.
+    // SQLite returns SQLITE_ERROR (code 1) for "duplicate column" — we allow
+    // that specific error so that re-running against an already-upgraded DB is safe.
+    // All other errors are propagated immediately.
+    let migrations: &[(i64, &str)] = &[
+        (1,  "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
+        (2,  "ALTER TABLE boards ADD COLUMN allow_tripcodes INTEGER NOT NULL DEFAULT 1"),
+        (3,  "ALTER TABLE boards ADD COLUMN allow_images  INTEGER NOT NULL DEFAULT 1"),
+        (4,  "ALTER TABLE boards ADD COLUMN allow_audio   INTEGER NOT NULL DEFAULT 0"),
+        (5,  "ALTER TABLE posts ADD COLUMN media_type TEXT"),
+        (6,  "ALTER TABLE posts ADD COLUMN audio_file_path TEXT"),
+        (7,  "ALTER TABLE posts ADD COLUMN audio_file_name TEXT"),
+        (8,  "ALTER TABLE posts ADD COLUMN audio_file_size INTEGER"),
+        (9,  "ALTER TABLE posts ADD COLUMN audio_mime_type TEXT"),
+        (10, "ALTER TABLE posts ADD COLUMN edited_at INTEGER"),
+        (11, "CREATE INDEX IF NOT EXISTS idx_jobs_pending ON background_jobs(status, priority DESC, created_at ASC)"),
+        (12, "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, created_at DESC)"),
+        (13, "CREATE INDEX IF NOT EXISTS idx_mod_log_created ON mod_log(created_at DESC)"),
+        (14, "ALTER TABLE threads ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"),
+        (15, "CREATE INDEX IF NOT EXISTS idx_threads_archived ON threads(board_id, archived, bumped_at DESC)"),
+        (16, "ALTER TABLE boards ADD COLUMN edit_window_secs INTEGER NOT NULL DEFAULT 0"),
+        (17, "ALTER TABLE boards ADD COLUMN allow_editing INTEGER NOT NULL DEFAULT 0"),
+        (18, "ALTER TABLE boards ADD COLUMN allow_archive INTEGER NOT NULL DEFAULT 1"),
+        (19, "ALTER TABLE boards ADD COLUMN allow_video_embeds INTEGER NOT NULL DEFAULT 0"),
+        (20, "ALTER TABLE boards ADD COLUMN allow_captcha INTEGER NOT NULL DEFAULT 0"),
+        (21, r"CREATE TABLE IF NOT EXISTS ban_appeals (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             ip_hash     TEXT NOT NULL,
             reason      TEXT NOT NULL DEFAULT '',
             status      TEXT NOT NULL DEFAULT 'open',
             created_at  INTEGER NOT NULL DEFAULT (unixepoch())
-        )",
+        )"),
     ];
-    for sql in migrations {
-        let _ = conn.execute(sql, []); // ignore "duplicate column" errors
+
+    let mut highest_applied = current_version;
+    for &(version, sql) in migrations {
+        if version <= current_version {
+            continue; // already applied
+        }
+        match conn.execute(sql, []) {
+            Ok(_) => {
+                tracing::debug!("Applied migration v{}", version);
+                highest_applied = version;
+            }
+            Err(rusqlite::Error::SqliteFailure(ref e, _))
+                if e.code == rusqlite::ErrorCode::Unknown =>
+            {
+                // SQLITE_ERROR with "duplicate column name" — idempotent, skip.
+                tracing::debug!(
+                    "Migration v{} already applied (idempotent), skipping",
+                    version
+                );
+                highest_applied = version;
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Migration v{} failed: {} — SQL: {}",
+                    version,
+                    e,
+                    sql
+                ));
+            }
+        }
+    }
+
+    // Persist the new high-water mark only if we advanced it.
+    if highest_applied > current_version {
+        conn.execute(
+            "UPDATE schema_version SET version = ?1",
+            rusqlite::params![highest_applied],
+        )
+        .context("Failed to update schema_version")?;
     }
 
     // Backfill media_type for existing posts that pre-date the column.
@@ -1442,17 +1484,24 @@ pub fn create_poll(
     options: &[String],
     expires_at: i64,
 ) -> Result<i64> {
-    conn.execute(
+    // Wrap poll row + all option rows in one transaction so a crash mid-loop
+    // cannot leave a poll with zero options (which would cause divide-by-zero
+    // in the vote-percentage display).
+    let tx = conn
+        .unchecked_transaction()
+        .context("Failed to begin poll transaction")?;
+    tx.execute(
         "INSERT INTO polls (thread_id, question, expires_at) VALUES (?1, ?2, ?3)",
         params![thread_id, question, expires_at],
     )?;
-    let poll_id = conn.last_insert_rowid();
+    let poll_id = tx.last_insert_rowid();
     for (i, text) in options.iter().enumerate() {
-        conn.execute(
+        tx.execute(
             "INSERT INTO poll_options (poll_id, text, position) VALUES (?1, ?2, ?3)",
             params![poll_id, text, i as i64],
         )?;
     }
+    tx.commit().context("Failed to commit poll transaction")?;
     Ok(poll_id)
 }
 
@@ -2173,11 +2222,18 @@ pub fn dismiss_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64) -> Result
 
 /// Dismiss appeal AND lift the ban for this ip_hash.
 pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64, ip_hash: &str) -> Result<()> {
-    conn.execute(
+    // Both updates must succeed together: if the ban delete fails the appeal
+    // must not be marked dismissed, and vice versa.
+    let tx = conn
+        .unchecked_transaction()
+        .context("Failed to begin accept-appeal transaction")?;
+    tx.execute(
         "UPDATE ban_appeals SET status='dismissed' WHERE id=?1",
         params![appeal_id],
     )?;
-    conn.execute("DELETE FROM bans WHERE ip_hash=?1", params![ip_hash])?;
+    tx.execute("DELETE FROM bans WHERE ip_hash=?1", params![ip_hash])?;
+    tx.commit()
+        .context("Failed to commit accept-appeal transaction")?;
     Ok(())
 }
 

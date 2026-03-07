@@ -311,7 +311,7 @@ pub async fn create_thread(
                         max_audio_size,
                         ffmpeg_available,
                     )
-                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                    .map_err(crate::handlers::classify_upload_error)?;
                     db::record_file_hash(&conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
                     Some(f)
                 }
@@ -358,7 +358,7 @@ pub async fn create_thread(
                         &board.short_name,
                         max_audio_size,
                     )
-                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                    .map_err(crate::handlers::classify_upload_error)?;
 
                     // Use the image thumbnail as the audio's thumbnail
                     if let Some(ref img) = uploaded {

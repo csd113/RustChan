@@ -49,9 +49,6 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
 
-    # ISC — common in crypto / networking crates (ring, webpki ancestors).
-    "ISC",
-
     # Unicode data tables (unicode-ident, unicode-xid, etc.)
     "Unicode-3.0",
 
@@ -60,12 +57,6 @@ allow = [
 
     # Public domain equivalents
     "Unlicense",
-
-    # OpenSSL — present transitively through some TLS / crypto crates.
-    "OpenSSL",
-
-    # Mozilla Public Licence — used by a small number of crates.
-    "MPL-2.0",
 ]
 
 # Per-crate exceptions for licences that don't appear in `allow` above but
@@ -94,6 +85,59 @@ multiple-versions = "warn"
 # name    = "some-crate"
 # version = "*"
 # reason  = "use X instead"
+
+# Unavoidable transitive version splits — different subtrees pin different
+# majors/minors and cannot be unified without upstream changes.
+
+# argon2 → password-hash → rand_core 0.6; uuid → rand 0.9 → rand_core 0.9
+[[bans.skip]]
+name    = "rand_core"
+version = "0.6"
+
+[[bans.skip]]
+name    = "rand_core"
+version = "0.9"
+
+# rand_core 0.6 pulls getrandom 0.2; rand 0.9 pulls getrandom 0.3;
+# tempfile pulls getrandom 0.4 via rustix
+[[bans.skip]]
+name    = "getrandom"
+version = "0.2"
+
+[[bans.skip]]
+name    = "getrandom"
+version = "0.3"
+
+[[bans.skip]]
+name    = "getrandom"
+version = "0.4"
+
+# getrandom 0.3/0.4 each pull a different r-efi minor
+[[bans.skip]]
+name    = "r-efi"
+version = "5"
+
+[[bans.skip]]
+name    = "r-efi"
+version = "6"
+
+# dashmap 6 uses hashbrown 0.14; rusqlite/zip use hashbrown 0.16
+[[bans.skip]]
+name    = "hashbrown"
+version = "0.14"
+
+[[bans.skip]]
+name    = "hashbrown"
+version = "0.16"
+
+# socket2 (tokio) uses windows-sys 0.60; clap/tempfile/rustix use 0.61
+[[bans.skip]]
+name    = "windows-sys"
+version = "0.60"
+
+[[bans.skip]]
+name    = "windows-sys"
+version = "0.61"
 
 # ---------------------------------------------------------------------------
 # Crate sources

@@ -26,8 +26,9 @@ path  = "src/lib.rs"
 axum       = { version = "0.8",  features = ["multipart"] }
 axum-extra = { version = "0.12", features = ["cookie"] }
 tower      = "0.5"
-tower-http = { version = "0.6",  features = ["fs"] }
+tower-http = { version = "0.6",  features = ["fs", "set-header"] }
 tokio      = { version = "1",    features = ["full"] }
+tokio-util = "0.7"
 
 rusqlite    = { version = "0.38", features = ["bundled", "backup"] }
 r2d2        = "0.8"
@@ -69,6 +70,15 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+thiserror = "2"
+tempfile  = "3"
+libc      = "0.2"
+
 [lints.clippy]
-too_many_arguments           = "allow"
+too_many_arguments             = "allow"
 manual_pattern_char_comparison = "allow"
+# Deny the most dangerous footguns
+unwrap_used                    = "warn"   # force .expect("reason") or proper handling
+expect_used                    = "allow"  # allow in tests; use with a message in production
+indexing_slicing               = "warn"   # prefer .get() with bounds check
+arithmetic_side_effects        = "allow"  # too noisy for general arithmetic

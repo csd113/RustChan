@@ -64,14 +64,12 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     if data.is_empty() {
         return Err(anyhow::anyhow!("File is empty."));
     }
-    let header = &data[..data.len().min(12)];
+    // Use .get() for all slice access — no panics, bounds proven by the len checks.
+    let header = data.get(..data.len().min(12)).unwrap_or(data);
 
     // ── MP4 / M4A disambiguation ──────────────────────────────────────────────
-    // Both share the ftyp-box heuristic.  Look at the brand field to
-    // distinguish audio-only M4A from generic MP4.
-    if data.len() >= 8 && &data[4..8] == b"ftyp" {
-        if data.len() >= 12 {
-            let brand = &data[8..12];
+    if data.get(4..8) == Some(b"ftyp") {
+        if let Some(brand) = data.get(8..12) {
             if brand == b"M4A " || brand == b"m4a " {
                 return Ok("audio/mp4");
             }
@@ -80,16 +78,16 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     }
 
     // ── RIFF container — disambiguate WebP vs WAV ────────────────────────────
-    if header.starts_with(b"RIFF") && data.len() >= 12 {
-        if &data[8..12] == b"WEBP" {
-            return Ok("image/webp");
+    if header.starts_with(b"RIFF") {
+        match data.get(8..12) {
+            Some(b"WEBP") => return Ok("image/webp"),
+            Some(b"WAVE") => return Ok("audio/wav"),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "RIFF container with unknown subtype. Accepted: WebP, WAV"
+                ))
+            }
         }
-        if &data[8..12] == b"WAVE" {
-            return Ok("audio/wav");
-        }
-        return Err(anyhow::anyhow!(
-            "RIFF container with unknown subtype. Accepted: WebP, WAV"
-        ));
     }
 
     // ── WebM (video or audio-only) ────────────────────────────────────────────
@@ -109,27 +107,26 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     }
 
     // ── Audio formats ─────────────────────────────────────────────────────────
-    // ID3-tagged MP3
     if header.starts_with(b"ID3") {
         return Ok("audio/mpeg");
     }
-    // Raw MP3 frame sync (no ID3 header)
-    if data.len() >= 2 && data[0] == 0xff && (data[1] == 0xfb || data[1] == 0xf3 || data[1] == 0xf2)
-    {
-        return Ok("audio/mpeg");
+    // Raw MP3 frame sync (no ID3 header): FF FB/F3/F2
+    if let (Some(&0xff), Some(&b1)) = (data.first(), data.get(1)) {
+        if b1 == 0xfb || b1 == 0xf3 || b1 == 0xf2 {
+            return Ok("audio/mpeg");
+        }
     }
-    // OGG container (Vorbis, Opus, FLAC-in-OGG)
     if header.starts_with(b"OggS") {
         return Ok("audio/ogg");
     }
-    // Native FLAC
     if header.starts_with(b"fLaC") {
         return Ok("audio/flac");
     }
-    // AAC ADTS sync word
-    if data.len() >= 2 && data[0] == 0xff && (data[1] & 0xf0 == 0xf0) && (data[1] != 0xff) {
-        // Distinguish from MP3 frame sync already matched above
-        return Ok("audio/aac");
+    // AAC ADTS sync word: FF F0–FE (not FF FF, and not the MP3 bytes above)
+    if let (Some(&0xff), Some(&b1)) = (data.first(), data.get(1)) {
+        if (b1 & 0xf0 == 0xf0) && b1 != 0xff {
+            return Ok("audio/aac");
+        }
     }
 
     Err(anyhow::anyhow!(
@@ -256,9 +253,44 @@ pub fn save_upload(
     let thumbs_dir = board_dir.join("thumbs");
     std::fs::create_dir_all(&thumbs_dir).context("Failed to create board thumbs directory")?;
 
-    // Write the (possibly transcoded) file into the board's directory.
     let file_path_abs = board_dir.join(&filename);
-    std::fs::write(&file_path_abs, final_data).context("Failed to write uploaded file")?;
+
+    // Disk-space pre-check (#14): verify at least 2× the file size is available
+    // before writing.  Uses statvfs on Unix; skipped on other platforms.
+    #[cfg(unix)]
+    {
+        unsafe {
+            let dir_bytes = board_dir.to_string_lossy();
+            if let Ok(path_cstr) = std::ffi::CString::new(dir_bytes.as_bytes()) {
+                let mut stat: libc::statvfs = std::mem::zeroed();
+                if libc::statvfs(path_cstr.as_ptr(), &mut stat) == 0 {
+                    let free_bytes = stat.f_bavail as u64 * stat.f_frsize as u64;
+                    let needed = (final_data.len() as u64).saturating_mul(2);
+                    if free_bytes < needed {
+                        return Err(anyhow::anyhow!(
+                            "Insufficient disk space: need ~{} MiB free, only ~{} MiB available.",
+                            needed / (1024 * 1024),
+                            free_bytes / (1024 * 1024)
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Write via a temp file in the same directory, then atomically rename.
+    // This guarantees no partial/corrupt file survives a crash or OOM mid-write.
+    // tempfile::NamedTempFile::new_in writes to a UUID-named .tmp in the same
+    // directory, ensuring the rename is always on the same filesystem (POSIX atomic).
+    {
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new_in(&board_dir)
+            .context("Failed to create temp file for upload")?;
+        tmp.write_all(final_data)
+            .context("Failed to write upload data to temp file")?;
+        tmp.persist(&file_path_abs)
+            .context("Failed to atomically rename upload temp file")?;
+    }
 
     // Paths relative to boards_dir (e.g. "b/abc123.webm", "b/thumbs/abc123.jpg")
     let rel_file = format!("{}/{}", board_short, filename);
@@ -362,7 +394,15 @@ pub fn save_audio_with_image_thumb(
     std::fs::create_dir_all(&board_dir).context("Failed to create board directory")?;
 
     let file_path_abs = board_dir.join(&filename);
-    std::fs::write(&file_path_abs, audio_data).context("Failed to write audio file")?;
+    {
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new_in(&board_dir)
+            .context("Failed to create temp file for audio upload")?;
+        tmp.write_all(audio_data)
+            .context("Failed to write audio data to temp file")?;
+        tmp.persist(&file_path_abs)
+            .context("Failed to atomically rename audio temp file")?;
+    }
 
     let rel_file = format!("{}/{}", board_short, filename);
     let file_size = i64::try_from(audio_data.len()).context("File size overflows i64")?;

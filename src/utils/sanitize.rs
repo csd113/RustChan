@@ -20,22 +20,20 @@ use once_cell::sync::Lazy;
 use rand_core::{OsRng, RngCore};
 use regex::Regex;
 
-static RE_REPLY: Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;(\d+)").unwrap());
-// Single regex for all >>>/board/… forms.
-// Cap 1 = board slug (required).
-// Cap 2 = post ID digits (optional) — present → crosspost link, absent → board-index link.
-// One regex, one pass: no ordering conflict and no need for lookahead (unsupported by the
-// `regex` crate).
+static RE_REPLY: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"&gt;&gt;(\d+)").expect("RE_REPLY is valid"));
 static RE_CROSSLINK: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)?").unwrap());
-static RE_URL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").unwrap());
-static RE_BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
-static RE_ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"__([^_]+)__").unwrap());
+    Lazy::new(|| Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)?").expect("RE_CROSSLINK is valid"));
+static RE_URL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").expect("RE_URL is valid"));
+static RE_BOLD: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("RE_BOLD is valid"));
+static RE_ITALIC: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"__([^_]+)__").expect("RE_ITALIC is valid"));
 static RE_SPOILER: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\[spoiler\]([\s\S]*?)\[/spoiler\]").unwrap());
-// Dice syntax: [dice NdM] — rolled server-side at post time, embedded immutably.
-// Limits: 1–20 dice, 2–999 sides.
-static RE_DICE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[dice (\d{1,2})d(\d{1,3})\]").unwrap());
+    Lazy::new(|| Regex::new(r"\[spoiler\]([\s\S]*?)\[/spoiler\]").expect("RE_SPOILER is valid"));
+static RE_DICE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\[dice (\d{1,2})d(\d{1,3})\]").expect("RE_DICE is valid"));
 
 // ─── Video embed URL detection ────────────────────────────────────────────────
 // These extract a canonical video ID from supported platforms so the client-side
@@ -249,8 +247,16 @@ pub fn apply_word_filters(text: &str, filters: &[(String, String)]) -> String {
     result
 }
 
+/// Maximum post body length accepted by the sanitizer pipeline.
+/// Input longer than this is rejected before any regex runs, preventing
+/// theoretical ReDoS on deeply-nested or pathological patterns.
+const MAX_BODY_BYTES: usize = 32 * 1024; // 32 KiB
+
 /// Convert plain escaped post body into HTML with imageboard markup.
 /// Input: HTML-escaped user text.  Output: HTML with markup applied.
+///
+/// Returns an error if the input exceeds MAX_BODY_BYTES to prevent DoS
+/// via extremely large inputs through the regex pipeline.
 ///
 /// When 3 or more consecutive greentext lines appear they are wrapped in a
 /// `<details open>` block — expanded by default.  The admin site-settings
@@ -258,6 +264,15 @@ pub fn apply_word_filters(text: &str, filters: &[(String, String)]) -> String {
 /// the client side (JS removes the `open` attribute when the page-level
 /// `data-collapse-greentext` attribute is present on `<body>`).
 pub fn render_post_body(escaped: &str) -> String {
+    // Hard length guard before touching any regex. Must be enforced here
+    // (not only at the HTTP layer) because the sanitizer is also called
+    // from background workers and tests.
+    if escaped.len() > MAX_BODY_BYTES {
+        return format!(
+            "<em>[Post body too large — truncated at {} KiB]</em>",
+            MAX_BODY_BYTES / 1024
+        );
+    }
     // Dice tags are resolved first — rolls are seeded from OsRng at post creation
     // time and stored in body_html, making them immutable for all future readers.
     let escaped = apply_dice(escaped);
@@ -265,6 +280,7 @@ pub fn render_post_body(escaped: &str) -> String {
     let mut html = String::with_capacity(escaped.len() * 2);
     let mut i = 0;
 
+    #[allow(clippy::indexing_slicing)] // i < lines.len() and j < lines.len() are invariants
     while i < lines.len() {
         let line = lines[i];
 
@@ -618,5 +634,176 @@ mod tests {
         let html = render_post_body(&escaped);
         assert!(!html.contains("href=\"https://example.com/foo.\""));
         assert!(!html.contains("href=\"https://example.com/bar,\""));
+    }
+
+    // ─── XSS vector tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_xss_script_tag() {
+        let input = "<script>alert(1)</script>";
+        let escaped = escape_html(input);
+        let html = render_post_body(&escaped);
+        assert!(
+            !html.contains("<script>"),
+            "raw <script> must not appear in output"
+        );
+        assert!(
+            html.contains("&lt;script&gt;"),
+            "script tags must be entity-escaped"
+        );
+    }
+
+    #[test]
+    fn test_xss_event_attribute() {
+        let input = "<img onerror=alert(1)>";
+        let escaped = escape_html(input);
+        let html = render_post_body(&escaped);
+        assert!(
+            !html.contains("<img"),
+            "raw HTML tags must not pass through"
+        );
+    }
+
+    #[test]
+    fn test_xss_javascript_url() {
+        // javascript: URLs must not become clickable hrefs
+        let input = "javascript:alert(1)";
+        let escaped = escape_html(input);
+        let html = render_post_body(&escaped);
+        // RE_URL only matches http:// and https:// — javascript: must not be linked
+        assert!(
+            !html.contains("href=\"javascript:"),
+            "javascript: URL must not be linkified"
+        );
+    }
+
+    #[test]
+    fn test_xss_data_uri() {
+        let input = "data:text/html,<script>alert(1)</script>";
+        let escaped = escape_html(input);
+        let html = render_post_body(&escaped);
+        assert!(
+            !html.contains("href=\"data:"),
+            "data: URI must not be linkified"
+        );
+    }
+
+    #[test]
+    fn test_xss_style_attribute() {
+        let input = "<p style=\"background:url(javascript:alert(1))\">x</p>";
+        let escaped = escape_html(input);
+        let html = render_post_body(&escaped);
+        assert!(!html.contains("<p "), "raw p tag must not appear");
+    }
+
+    #[test]
+    fn test_xss_entity_encoded_script() {
+        // &lt;script&gt; in the raw input should stay double-escaped after processing
+        let input = "&lt;script&gt;alert(1)&lt;/script&gt;";
+        // Already escaped by a hypothetical upstream — escape_html again to simulate
+        let escaped = escape_html(input);
+        let html = render_post_body(&escaped);
+        assert!(
+            !html.contains("<script>"),
+            "double-encoded script must not become executable"
+        );
+    }
+
+    // ─── Edge case tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_max_body_length_guard() {
+        // Input exceeding MAX_BODY_BYTES must be rejected without panicking
+        let huge = "A".repeat(MAX_BODY_BYTES + 1);
+        let result = render_post_body(&huge);
+        assert!(
+            result.contains("too large"),
+            "oversized input must produce a truncation notice"
+        );
+    }
+
+    #[test]
+    fn test_deeply_nested_spoilers() {
+        // Deeply nested spoilers should not panic or produce runaway output
+        let depth = 50;
+        let input = "[spoiler]".repeat(depth) + "x" + &"[/spoiler]".repeat(depth);
+        let result = render_post_body(&input);
+        // Must complete without panic; output length should be bounded
+        assert!(
+            result.len() < input.len() * 10,
+            "output must not grow unboundedly"
+        );
+    }
+
+    #[test]
+    fn test_malformed_crossboard_link() {
+        // Invalid board slug characters must not produce broken HTML
+        let escaped = escape_html(">>>/BOARD_WITH_CAPS/123");
+        let html = render_post_body(&escaped);
+        // Should not match RE_CROSSLINK (which only accepts [a-z0-9]+)
+        assert!(
+            !html.contains("crosslink"),
+            "uppercase board slug must not be linkified"
+        );
+    }
+
+    #[test]
+    fn test_reply_link_no_numeric_overflow() {
+        // Extremely large post IDs should not cause integer overflow
+        let escaped = escape_html(">>99999999999999999999");
+        let html = render_post_body(&escaped);
+        // Must render as a link regardless of numeric size
+        assert!(
+            html.contains("quotelink"),
+            "large post ID should still produce a link"
+        );
+    }
+
+    #[test]
+    fn test_only_gt_chars_does_not_panic() {
+        // Input consisting entirely of > characters should not panic or loop
+        let input: String = ">".repeat(1000);
+        let escaped = escape_html(&input);
+        let _html = render_post_body(&escaped); // must not panic
+    }
+
+    #[test]
+    fn test_long_greentext_chain_collapsible() {
+        // 100 consecutive greentext lines should produce exactly one <details> block
+        let raw = (0..100)
+            .map(|i| format!(">line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let escaped = escape_html(&raw);
+        let html = render_post_body(&escaped);
+        assert_eq!(
+            html.matches("<details").count(),
+            1,
+            "100 lines = exactly one details block"
+        );
+        assert!(
+            html.contains("100 lines"),
+            "summary should reflect the actual line count"
+        );
+    }
+
+    #[test]
+    fn test_empty_input_does_not_panic() {
+        let html = render_post_body("");
+        // Empty input → empty output (no crash)
+        assert!(html.is_empty() || html.len() < 10);
+    }
+
+    #[test]
+    fn test_bold_and_italic_do_not_xss() {
+        // **<script>** and __<script>__ must not inject HTML
+        let input = "**<script>alert(1)</script>**";
+        let escaped = escape_html(input);
+        let html = render_post_body(&escaped);
+        assert!(
+            !html.contains("<script>"),
+            "bold markup must not bypass XSS escaping"
+        );
+        assert!(html.contains("<strong>"), "bold markup should still render");
     }
 }

@@ -250,10 +250,130 @@ impl Config {
             ),
         }
     }
+
+    /// Validate critical configuration values and abort with a clear error
+    /// message if any are out of range.  Called once at startup so operators
+    /// catch misconfiguration immediately rather than discovering it at runtime.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        // cookie_secret is hex-encoded: 64 hex chars = 32 bytes of entropy.
+        if self.cookie_secret.len() < 64 {
+            anyhow::bail!(
+                "CONFIG ERROR: cookie_secret is too short ({} chars). \
+                 It must be at least 64 hex characters (32 bytes). \
+                 Delete settings.toml and restart to auto-generate a secure secret.",
+                self.cookie_secret.len()
+            );
+        }
+
+        const MIB: usize = 1024 * 1024;
+        const MAX_IMAGE_MIB: usize = 100;
+        const MAX_VIDEO_MIB: usize = 2048;
+        const MAX_AUDIO_MIB: usize = 512;
+
+        if self.max_image_size < MIB || self.max_image_size > MAX_IMAGE_MIB * MIB {
+            anyhow::bail!(
+                "CONFIG ERROR: max_image_size_mb must be between 1 and {} MiB (got {} MiB).",
+                MAX_IMAGE_MIB,
+                self.max_image_size / MIB
+            );
+        }
+        if self.max_video_size < MIB || self.max_video_size > MAX_VIDEO_MIB * MIB {
+            anyhow::bail!(
+                "CONFIG ERROR: max_video_size_mb must be between 1 and {} MiB (got {} MiB).",
+                MAX_VIDEO_MIB,
+                self.max_video_size / MIB
+            );
+        }
+        if self.max_audio_size < MIB || self.max_audio_size > MAX_AUDIO_MIB * MIB {
+            anyhow::bail!(
+                "CONFIG ERROR: max_audio_size_mb must be between 1 and {} MiB (got {} MiB).",
+                MAX_AUDIO_MIB,
+                self.max_audio_size / MIB
+            );
+        }
+
+        // Port 0 is technically valid (OS assigns one) but almost certainly a
+        // misconfiguration in a server context.
+        if self.port == 0 {
+            anyhow::bail!("CONFIG ERROR: port must not be 0.");
+        }
+
+        // Verify the upload directory is writable.
+        let upload_path = std::path::Path::new(&self.upload_dir);
+        if upload_path.exists() {
+            // Try writing a probe file to verify write permission.
+            let probe = upload_path.join(".write_probe");
+            if std::fs::write(&probe, b"").is_err() {
+                anyhow::bail!(
+                    "CONFIG ERROR: upload_dir '{}' is not writable.",
+                    self.upload_dir
+                );
+            }
+            let _ = std::fs::remove_file(probe);
+        }
+
+        Ok(())
+    }
 }
 
 // ─── Import needed for OsRng in cookie_secret fallback ───────────────────────
 use rand_core::RngCore as _;
+
+/// Check whether the cookie_secret has changed since the last run by comparing
+/// a SHA-256 hash stored in the DB against the currently loaded secret.
+///
+/// Called once at startup after the DB pool is ready.
+/// If the secret has rotated, all IP-based bans become invalid — warn loudly.
+/// On first run (no stored hash), silently stores the current hash and returns.
+pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
+    use sha2::{Digest, Sha256};
+
+    let current_hash = {
+        let mut h = Sha256::new();
+        h.update(CONFIG.cookie_secret.as_bytes());
+        hex::encode(h.finalize())
+    };
+
+    const KEY: &str = "cookie_secret_hash";
+
+    let stored = conn
+        .query_row(
+            "SELECT value FROM site_settings WHERE key = ?1",
+            rusqlite::params![KEY],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+
+    match stored {
+        None => {
+            // First run — store the hash silently.
+            let _ = conn.execute(
+                "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![KEY, current_hash],
+            );
+        }
+        Some(ref h) if h == &current_hash => {
+            // Secret unchanged — nothing to do.
+        }
+        Some(_) => {
+            // Secret has rotated.
+            tracing::warn!(
+                "SECURITY WARNING: cookie_secret has changed since the last run. \
+                 All IP-based bans are now invalid because all IP hashes have changed. \
+                 If this was unintentional, restore the previous cookie_secret from \
+                 settings.toml. If intentional, consider running: \
+                 DELETE FROM bans; DELETE FROM ban_appeals;"
+            );
+            // Update the stored hash so subsequent restarts with the same secret are silent.
+            let _ = conn.execute(
+                "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![KEY, current_hash],
+            );
+        }
+    }
+}
 
 fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())

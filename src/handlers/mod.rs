@@ -143,3 +143,23 @@ pub async fn parse_post_multipart(
         pow_nonce,
     })
 }
+
+// ─── Upload error classifier (#6) ────────────────────────────────────────────
+
+/// Convert an anyhow error from `save_upload` into the most appropriate
+/// `AppError` variant, giving clients accurate HTTP status codes:
+///   • "File too large"          → 413 UploadTooLarge
+///   • "Insufficient disk space" → 413 UploadTooLarge
+///   • "File type not allowed"   → 415 InvalidMediaType
+///   • "Not an audio file"       → 415 InvalidMediaType
+///   • anything else             → 400 BadRequest
+pub fn classify_upload_error(e: anyhow::Error) -> AppError {
+    let msg = e.to_string();
+    if msg.starts_with("File too large") || msg.starts_with("Insufficient disk space") {
+        AppError::UploadTooLarge(msg)
+    } else if msg.starts_with("File type not allowed") || msg.starts_with("Not an audio file") {
+        AppError::InvalidMediaType(msg)
+    } else {
+        AppError::BadRequest(msg)
+    }
+}

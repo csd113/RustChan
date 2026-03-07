@@ -9,6 +9,8 @@
 //   • Workers sleep until a Notify fires or a 5-second poll timeout elapses.
 //   • Failed jobs are retried up to MAX_ATTEMPTS times; then marked "failed"
 //     with the last error message recorded for inspection.
+//   • A CancellationToken is threaded through every worker so that a graceful
+//     shutdown drains in-progress jobs before exiting (#7).
 //
 // Job types:
 //   VideoTranscode — MP4 → WebM (VP9 + Opus) via ffmpeg (off the hot path)
@@ -30,7 +32,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Notify;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 // How many times a job may be attempted before being permanently failed.
@@ -38,6 +41,10 @@ use tracing::{debug, error, info, warn};
 const MAX_ATTEMPTS: i64 = 3;
 // How long a worker sleeps when the queue is empty.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
+// Maximum wall-clock time allowed for a single ffmpeg transcode (#10).
+const FFMPEG_TRANSCODE_TIMEOUT: Duration = Duration::from_secs(120);
+// Maximum wall-clock time allowed for ffmpeg waveform generation (#10).
+const FFMPEG_WAVEFORM_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ─── Job definitions ──────────────────────────────────────────────────────────
 
@@ -93,8 +100,10 @@ impl Job {
 /// Clone this into every handler that needs to enqueue work.
 #[derive(Clone)]
 pub struct JobQueue {
-    pool: DbPool,
-    notify: Arc<Notify>,
+    pub pool: DbPool,
+    pub notify: Arc<Notify>,
+    /// Token cancelled at shutdown; workers observe this to exit cleanly.
+    pub cancel: CancellationToken,
 }
 
 impl JobQueue {
@@ -102,6 +111,7 @@ impl JobQueue {
         Self {
             pool,
             notify: Arc::new(Notify::new()),
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -130,6 +140,7 @@ impl JobQueue {
 // ─── Worker pool startup ──────────────────────────────────────────────────────
 
 /// Spawn the background worker pool. Call exactly once at server startup.
+/// Returns a vec of JoinHandles so the caller can await them during shutdown.
 /// Workers are pure async Tokio tasks — they do not consume OS threads at rest.
 pub fn start_worker_pool(queue: Arc<JobQueue>, ffmpeg_available: bool) {
     let n = std::thread::available_parallelism()
@@ -152,6 +163,12 @@ pub fn start_worker_pool(queue: Arc<JobQueue>, ffmpeg_available: bool) {
 async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
     debug!("Worker {} started", id);
     loop {
+        // Check for shutdown before trying to claim a job.
+        if queue.cancel.is_cancelled() {
+            debug!("Worker {} exiting: shutdown requested", id);
+            return;
+        }
+
         // Atomically claim the next pending job (UPDATE … RETURNING).
         let pool_claim = queue.pool.clone();
         let claim = tokio::task::spawn_blocking(move || {
@@ -185,19 +202,30 @@ async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
                 .await;
             }
             Ok(Ok(None)) => {
-                // Queue is empty — sleep until notified or POLL_INTERVAL elapses.
+                // Queue is empty — sleep until notified, POLL_INTERVAL elapses,
+                // or a shutdown is requested (#7).
                 tokio::select! {
                     _ = queue.notify.notified() => {}
                     _ = sleep(POLL_INTERVAL) => {}
+                    _ = queue.cancel.cancelled() => {
+                        debug!("Worker {} exiting: shutdown requested while idle", id);
+                        return;
+                    }
                 }
             }
             Ok(Err(e)) => {
                 error!("Worker {}: DB error while claiming job: {}", id, e);
-                sleep(Duration::from_secs(2)).await;
+                tokio::select! {
+                    _ = sleep(Duration::from_secs(2)) => {}
+                    _ = queue.cancel.cancelled() => { return; }
+                }
             }
             Err(e) => {
                 error!("Worker {}: panic in spawn_blocking: {}", id, e);
-                sleep(Duration::from_secs(2)).await;
+                tokio::select! {
+                    _ = sleep(Duration::from_secs(2)) => {}
+                    _ = queue.cancel.cancelled() => { return; }
+                }
             }
         }
     }
@@ -249,8 +277,7 @@ async fn handle_job(
 /// Transcode an MP4 upload to WebM (VP9 + Opus), then update the post's
 /// file_path and mime_type. The original MP4 is deleted on success.
 ///
-/// Thumbnail is unaffected — it was generated synchronously from the MP4's
-/// first frame (which is visually identical to the WebM frame).
+/// A hard timeout of FFMPEG_TRANSCODE_TIMEOUT is applied (#10).
 async fn transcode_video(
     post_id: i64,
     file_path: String,
@@ -266,132 +293,144 @@ async fn transcode_video(
         return Ok(());
     }
 
-    tokio::task::spawn_blocking(move || {
-        let upload_dir = &CONFIG.upload_dir;
-        let src = PathBuf::from(upload_dir).join(&file_path);
-
-        if !src.exists() {
-            return Err(anyhow::anyhow!(
-                "Source file not found for transcode: {:?}",
-                src
-            ));
+    // Wrap the entire blocking transcode in a timeout (#10).
+    match timeout(
+        FFMPEG_TRANSCODE_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            transcode_video_inner(post_id, file_path, board_short, pool)
+        }),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(join_err)) => Err(anyhow::anyhow!("spawn_blocking panicked: {}", join_err)),
+        Err(_elapsed) => {
+            warn!(
+                "VideoTranscode: job for post {} timed out after {}s — ffmpeg killed",
+                post_id,
+                FFMPEG_TRANSCODE_TIMEOUT.as_secs()
+            );
+            Err(anyhow::anyhow!(
+                "ffmpeg transcode timed out after {}s",
+                FFMPEG_TRANSCODE_TIMEOUT.as_secs()
+            ))
         }
+    }
+}
 
-        // Handle MP4 and WebM (AV1) inputs; skip anything else.
-        let ext = src
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if ext != "mp4" && ext != "webm" {
-            debug!("VideoTranscode: skipping unrecognised extension {}", file_path);
-            return Ok(());
-        }
+fn transcode_video_inner(
+    post_id: i64,
+    file_path: String,
+    board_short: String,
+    pool: DbPool,
+) -> Result<()> {
+    let upload_dir = &CONFIG.upload_dir;
+    let src = PathBuf::from(upload_dir).join(&file_path);
 
-        // For WebM uploads, probe the codec first.  VP8/VP9 WebM is already
-        // in the correct format; only AV1 needs re-encoding.
-        if ext == "webm" {
-            let src_str = src
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8: {:?}", src))?;
+    if !src.exists() {
+        return Err(anyhow::anyhow!(
+            "Source file not found for transcode: {:?}",
+            src
+        ));
+    }
 
-            match crate::utils::files::probe_video_codec(src_str) {
-                Ok(ref codec) if codec == "av1" => {
-                    info!(
-                        "VideoTranscode: WebM/AV1 detected for post {} — re-encoding to VP9",
-                        post_id
-                    );
-                    // Falls through to the shared transcode block below.
-                }
-                Ok(ref codec) => {
-                    debug!(
-                        "VideoTranscode: skipping WebM with codec '{}' for post {} (already VP8/VP9)",
-                        codec, post_id
-                    );
-                    return Ok(());
-                }
-                Err(e) => {
-                    warn!(
-                        "VideoTranscode: could not probe codec for post {} ({}); skipping",
-                        post_id, e
-                    );
-                    return Ok(());
-                }
+    // Handle MP4 and WebM (AV1) inputs; skip anything else.
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext != "mp4" && ext != "webm" {
+        debug!(
+            "VideoTranscode: skipping unrecognised extension {}",
+            file_path
+        );
+        return Ok(());
+    }
+
+    // For WebM uploads, probe the codec first.  VP8/VP9 WebM is already
+    // in the correct format; only AV1 needs re-encoding.
+    if ext == "webm" {
+        let src_str = src
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8: {:?}", src))?;
+
+        match crate::utils::files::probe_video_codec(src_str) {
+            Ok(ref codec) if codec == "av1" => {
+                info!(
+                    "VideoTranscode: WebM/AV1 detected for post {} — re-encoding to VP9",
+                    post_id
+                );
+            }
+            Ok(ref codec) => {
+                debug!(
+                    "VideoTranscode: skipping WebM with codec '{}' for post {} (already VP8/VP9)",
+                    codec, post_id
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    "VideoTranscode: could not probe codec for post {} ({}); skipping",
+                    post_id, e
+                );
+                return Ok(());
             }
         }
+    }
 
-        let stem = src
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Malformed filename: {:?}", src))?
-            .to_string();
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Malformed filename: {:?}", src))?
+        .to_string();
 
-        info!(
-            "VideoTranscode: transcoding post {} ({})…",
-            post_id, file_path
-        );
+    info!(
+        "VideoTranscode: transcoding post {} ({})…",
+        post_id, file_path
+    );
 
-        let data = std::fs::read(&src)?;
-        let webm_bytes = crate::utils::files::transcode_to_webm(&data)?;
+    let data = std::fs::read(&src)?;
+    let webm_bytes = crate::utils::files::transcode_to_webm(&data)?;
 
-        let board_dir = PathBuf::from(upload_dir).join(&board_short);
-        let webm_name = format!("{}.webm", stem);
-        let webm_abs = board_dir.join(&webm_name);
-        let webm_rel = format!("{}/{}", board_short, webm_name);
+    let board_dir = PathBuf::from(upload_dir).join(&board_short);
+    let webm_name = format!("{}.webm", stem);
+    let webm_abs = board_dir.join(&webm_name);
+    let webm_rel = format!("{}/{}", board_short, webm_name);
 
-        std::fs::write(&webm_abs, &webm_bytes)?;
+    std::fs::write(&webm_abs, &webm_bytes)?;
 
-        let conn = pool.get()?;
+    let conn = pool.get()?;
 
-        // Update EVERY post that references the old MP4 path to point at the
-        // new WebM.  The deduplication system shares one physical file across
-        // multiple posts; updating only the triggering post (post_id) left all
-        // other posts with a stale MP4 path.  When any of those stale posts
-        // were later deleted, paths_safe_to_delete found zero live references
-        // to the old path (since post_id had already been updated) and
-        // considered the file orphaned — even though the WebM was still
-        // actively serving the other deduplicated posts.
-        let updated =
-            crate::db::update_all_posts_file_path(&conn, &file_path, &webm_rel, "video/webm")?;
-        if updated == 0 {
-            // Triggering post may have been deleted while the worker was running;
-            // update by post_id as a fallback so we don't silently skip.
-            crate::db::update_post_file_info(&conn, post_id, &webm_rel, "video/webm")?;
-        }
+    let updated =
+        crate::db::update_all_posts_file_path(&conn, &file_path, &webm_rel, "video/webm")?;
+    if updated == 0 {
+        crate::db::update_post_file_info(&conn, post_id, &webm_rel, "video/webm")?;
+    }
 
-        // Refresh the file-hash table: remove stale MP4 entry, insert WebM entry.
-        // Use the triggering post's thumb_path (all dedup'd posts share the same
-        // thumb, so any of them would give the same value).
-        let thumb_path = crate::db::get_post_thumb_path(&conn, post_id)?.unwrap_or_default();
-        let webm_sha256 = crate::utils::crypto::sha256_hex(&webm_bytes);
-        crate::db::delete_file_hash_by_path(&conn, &file_path)?;
-        crate::db::record_file_hash(&conn, &webm_sha256, &webm_rel, &thumb_path, "video/webm")?;
+    let thumb_path = crate::db::get_post_thumb_path(&conn, post_id)?.unwrap_or_default();
+    let webm_sha256 = crate::utils::crypto::sha256_hex(&webm_bytes);
+    crate::db::delete_file_hash_by_path(&conn, &file_path)?;
+    crate::db::record_file_hash(&conn, &webm_sha256, &webm_rel, &thumb_path, "video/webm")?;
 
-        // For MP4 sources the original is now redundant; remove it.
-        // For WebM/AV1 sources the file was overwritten in place above, so
-        // there is nothing extra to delete.
-        if ext != "webm" {
-            let _ = std::fs::remove_file(&src);
-        }
+    if ext != "webm" {
+        let _ = std::fs::remove_file(&src);
+    }
 
-        info!(
-            "VideoTranscode done: post {} {} → {} ({} bytes)",
-            post_id,
-            file_path,
-            webm_rel,
-            webm_bytes.len()
-        );
-        Ok(())
-    })
-    .await?
+    info!(
+        "VideoTranscode done: post {} {} → {} ({} bytes)",
+        post_id,
+        file_path,
+        webm_rel,
+        webm_bytes.len()
+    );
+    Ok(())
 }
 
 // ─── AudioWaveform ────────────────────────────────────────────────────────────
 
-/// Generate a waveform PNG thumbnail for an audio upload via ffmpeg,
-/// then update the post's thumb_path to point to the PNG.
-/// The original SVG placeholder (written inline during the request) is kept
-/// as a fallback but is no longer served once the PNG is in place.
+/// Generate a waveform PNG thumbnail for an audio upload via ffmpeg.
+/// A hard timeout of FFMPEG_WAVEFORM_TIMEOUT is applied (#10).
 async fn generate_waveform(
     post_id: i64,
     file_path: String,
@@ -403,50 +442,74 @@ async fn generate_waveform(
         return Ok(());
     }
 
-    tokio::task::spawn_blocking(move || {
-        let upload_dir = &CONFIG.upload_dir;
-        let src = PathBuf::from(upload_dir).join(&file_path);
-
-        if !src.exists() {
-            return Err(anyhow::anyhow!(
-                "Audio source not found for waveform: {:?}",
-                src
-            ));
+    match timeout(
+        FFMPEG_WAVEFORM_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            generate_waveform_inner(post_id, file_path, board_short, pool)
+        }),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(join_err)) => Err(anyhow::anyhow!("spawn_blocking panicked: {}", join_err)),
+        Err(_elapsed) => {
+            warn!(
+                "AudioWaveform: job for post {} timed out after {}s",
+                post_id,
+                FFMPEG_WAVEFORM_TIMEOUT.as_secs()
+            );
+            Err(anyhow::anyhow!(
+                "ffmpeg waveform timed out after {}s",
+                FFMPEG_WAVEFORM_TIMEOUT.as_secs()
+            ))
         }
+    }
+}
 
-        let stem = src
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Malformed audio filename: {:?}", src))?
-            .to_string();
+fn generate_waveform_inner(
+    post_id: i64,
+    file_path: String,
+    board_short: String,
+    pool: DbPool,
+) -> Result<()> {
+    let upload_dir = &CONFIG.upload_dir;
+    let src = PathBuf::from(upload_dir).join(&file_path);
 
-        let data = std::fs::read(&src)?;
-        let thumb_size = CONFIG.thumb_size;
+    if !src.exists() {
+        return Err(anyhow::anyhow!(
+            "Audio source not found for waveform: {:?}",
+            src
+        ));
+    }
 
-        let board_dir = PathBuf::from(upload_dir).join(&board_short);
-        let thumbs_dir = board_dir.join("thumbs");
-        std::fs::create_dir_all(&thumbs_dir)?;
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Malformed audio filename: {:?}", src))?
+        .to_string();
 
-        let png_name = format!("{}.png", stem);
-        let png_abs = thumbs_dir.join(&png_name);
-        let png_rel = format!("{}/thumbs/{}", board_short, png_name);
+    let data = std::fs::read(&src)?;
+    let thumb_size = CONFIG.thumb_size;
 
-        crate::utils::files::gen_waveform_png(&data, &png_abs, thumb_size, thumb_size / 2)?;
+    let board_dir = PathBuf::from(upload_dir).join(&board_short);
+    let thumbs_dir = board_dir.join("thumbs");
+    std::fs::create_dir_all(&thumbs_dir)?;
 
-        let conn = pool.get()?;
-        crate::db::update_post_thumb_path(&conn, post_id, &png_rel)?;
+    let png_name = format!("{}.png", stem);
+    let png_abs = thumbs_dir.join(&png_name);
+    let png_rel = format!("{}/thumbs/{}", board_short, png_name);
 
-        info!("AudioWaveform done: post {} → {}", post_id, png_rel);
-        Ok(())
-    })
-    .await?
+    crate::utils::files::gen_waveform_png(&data, &png_abs, thumb_size, thumb_size / 2)?;
+
+    let conn = pool.get()?;
+    crate::db::update_post_thumb_path(&conn, post_id, &png_rel)?;
+
+    info!("AudioWaveform done: post {} → {}", post_id, png_rel);
+    Ok(())
 }
 
 // ─── ThreadPrune ─────────────────────────────────────────────────────────────
 
-/// Archive threads that exceed the board's max_threads limit.
-/// Archived threads are locked and marked read-only instead of deleted, so
-/// their content remains accessible via /{board}/archive.
 async fn prune_threads(
     board_id: i64,
     board_short: String,
@@ -465,10 +528,6 @@ async fn prune_threads(
                 );
             }
         } else {
-            // prune_old_threads now returns the file paths that are safe to
-            // delete from disk (i.e. no longer referenced by any remaining
-            // post).  Previously it returned only a count, orphaning all files
-            // belonging to pruned threads on disk.
             let paths = crate::db::prune_old_threads(&conn, board_id, max_threads)?;
             let count = paths.len();
             for p in &paths {
@@ -488,17 +547,13 @@ async fn prune_threads(
 
 // ─── SpamCheck ────────────────────────────────────────────────────────────────
 
-/// Spam / abuse analysis hook. Currently logs suspicious patterns; extend
-/// this function to auto-flag, rate-limit, or shadow-ban as needed.
 async fn run_spam_check(post_id: i64, ip_hash: String, body_len: usize) -> Result<()> {
-    // Flag unusually long posts for manual review.
     if body_len > 3500 {
         debug!(
             "SpamCheck: post {} body_len={} exceeds 3500 chars (flagged for review)",
             post_id, body_len
         );
     }
-    // ip_hash retained for future per-IP frequency analysis.
     let _ = ip_hash;
     Ok(())
 }

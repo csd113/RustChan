@@ -237,7 +237,7 @@ pub async fn post_reply(
                         max_audio_size,
                         ffmpeg_available,
                     )
-                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                    .map_err(crate::handlers::classify_upload_error)?;
                     db::record_file_hash(&conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
                     Some(f)
                 }
@@ -278,7 +278,7 @@ pub async fn post_reply(
                         &board.short_name,
                         max_audio_size,
                     )
-                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                    .map_err(crate::handlers::classify_upload_error)?;
                     if let Some(ref img) = uploaded {
                         aud_file.thumb_path = img.thumb_path.clone();
                     }
