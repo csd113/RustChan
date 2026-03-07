@@ -830,36 +830,39 @@ pub async fn serve_board_media(
     }
 }
 
-// ─── GET /api/post/{board}/{thread_id} ────────────────────────────────────────
+// ─── GET /api/post/{board}/{post_id} ──────────────────────────────────────────
 //
 // Lightweight JSON endpoint for cross-board quotelink hover previews.
-// Returns the rendered HTML of the OP post for the referenced thread so the
-// client-side popup can show a preview without navigating to the other board.
 //
-// Response: `{"html": "<div class=\"post …\">…</div>"}` or 404 JSON.
+// `post_id` is the **global** post ID (the AUTOINCREMENT primary key of the
+// `posts` table).  The board name is used only to validate ownership — a link
+// like >>>/tech/12345 will 404 if post 12345 actually lives on /b/, preventing
+// cross-board information leakage.
+//
+// Response on success:
+//   { "html": "<div class=\"post …\">…</div>", "thread_id": 42 }
+// The `thread_id` field lets the client update the link's href to the canonical
+// /{board}/thread/{thread_id}#p{post_id} URL after the first hover.
+//
+// Response on failure: 404 { "error": "not found" }
 
 pub async fn api_post_preview(
     State(state): State<AppState>,
-    Path((board_short, thread_id)): Path<(String, i64)>,
+    Path((board_short, post_id)): Path<(String, i64)>,
 ) -> impl axum::response::IntoResponse {
     use axum::http::header;
 
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> crate::error::Result<Option<String>> {
+        move || -> crate::error::Result<Option<(String, i64)>> {
             let conn = pool.get()?;
 
-            // Validate board exists
-            let board = db::get_board_by_short(&conn, &board_short)?;
-            if board.is_none() {
-                return Ok(None);
-            }
-
-            // Fetch the OP post for the thread
-            let post = db::get_op_post_for_thread(&conn, thread_id)?;
+            // Fetch the post, validating it belongs to this board.
+            let post = db::get_post_on_board(&conn, &board_short, post_id)?;
             match post {
                 None => Ok(None),
                 Some(p) => {
+                    let thread_id = p.thread_id;
                     let html = crate::templates::render_post(
                         &p,
                         &board_short,
@@ -869,7 +872,7 @@ pub async fn api_post_preview(
                         true,  // show media thumbnail
                         0,     // no edit window
                     );
-                    Ok(Some(html))
+                    Ok(Some((html, thread_id)))
                 }
             }
         }
@@ -879,9 +882,10 @@ pub async fn api_post_preview(
     let json_ct = [(header::CONTENT_TYPE, "application/json")];
 
     match result {
-        Ok(Ok(Some(html))) => {
-            let body = serde_json::to_string(&serde_json::json!({ "html": html }))
-                .unwrap_or_else(|_| r#"{"html":""}"#.to_string());
+        Ok(Ok(Some((html, thread_id)))) => {
+            let body =
+                serde_json::to_string(&serde_json::json!({ "html": html, "thread_id": thread_id }))
+                    .unwrap_or_else(|_| r#"{"html":"","thread_id":0}"#.to_string());
             (axum::http::StatusCode::OK, json_ct, body).into_response()
         }
         Ok(Ok(None)) => {
@@ -891,6 +895,44 @@ pub async fn api_post_preview(
         _ => {
             let body = r#"{"error":"internal error"}"#.to_string();
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, json_ct, body).into_response()
+        }
+    }
+}
+
+// ─── GET /{board}/post/{post_id} ──────────────────────────────────────────────
+//
+// Canonical redirect for `>>>/board/N` links.  Resolves the global post ID to
+// its containing thread and issues a 302 to /{board}/thread/{thread_id}#p{post_id}.
+//
+// Users clicking a cross-board quotelink land here on the first click; after
+// the first hover preview the JS upgrades the href in-place so subsequent
+// clicks go directly to the thread anchor without a server round-trip.
+
+pub async fn redirect_to_post(
+    State(state): State<AppState>,
+    Path((board_short, post_id)): Path<(String, i64)>,
+) -> impl axum::response::IntoResponse {
+    use axum::response::Redirect;
+
+    let board_short_for_url = board_short.clone();
+    let result = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> crate::error::Result<Option<i64>> {
+            let conn = pool.get()?;
+            let post = db::get_post_on_board(&conn, &board_short, post_id)?;
+            Ok(post.map(|p| p.thread_id))
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(Some(thread_id))) => {
+            let url = format!("/{}/thread/{}#p{}", board_short_for_url, thread_id, post_id);
+            Redirect::to(&url).into_response()
+        }
+        _ => {
+            // Post not found or wrong board — return a plain 404.
+            axum::http::StatusCode::NOT_FOUND.into_response()
         }
     }
 }

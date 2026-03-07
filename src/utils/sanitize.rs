@@ -21,9 +21,13 @@ use rand_core::{OsRng, RngCore};
 use regex::Regex;
 
 static RE_REPLY: Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;(\d+)").unwrap());
-static RE_CROSSTHREAD: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)").unwrap());
-static RE_CROSSBOARD: Lazy<Regex> = Lazy::new(|| Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/").unwrap());
+// Single regex for all >>>/board/… forms.
+// Cap 1 = board slug (required).
+// Cap 2 = post ID digits (optional) — present → crosspost link, absent → board-index link.
+// One regex, one pass: no ordering conflict and no need for lookahead (unsupported by the
+// `regex` crate).
+static RE_CROSSLINK: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)?").unwrap());
 static RE_URL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").unwrap());
 static RE_BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
 static RE_ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"__([^_]+)__").unwrap());
@@ -326,23 +330,23 @@ fn render_line(line: &str) -> String {
 fn render_inline(text: &str) -> String {
     let mut result = text.to_string();
 
-    // Cross-board thread links: >>>/board/123  (check BEFORE >>)
-    result = RE_CROSSTHREAD
+    // >>>/board/POST_ID → crosspost link (post redirect + hover preview data attrs)
+    // >>>/board/        → board index link
+    // Both handled in one pass by RE_CROSSLINK so there is no second-pass corruption.
+    result = RE_CROSSLINK
         .replace_all(&result, |caps: &regex::Captures| {
             let board = &caps[1];
-            let tid = &caps[2];
-            // data-crossboard and data-pid enable client-side hover preview fetch
-            format!(
-                r#"<a href="/{board}/thread/{tid}" class="quotelink crosslink" data-crossboard="{board}" data-pid="{tid}">&gt;&gt;&gt;/{board}/{tid}</a>"#,
-            )
-        })
-        .into_owned();
-
-    // Cross-board links: >>>/board/
-    result = RE_CROSSBOARD
-        .replace_all(&result, |caps: &regex::Captures| {
-            let board = &caps[1];
-            format!(r#"<a href="/{board}/" class="quotelink crosslink">&gt;&gt;&gt;/{board}/</a>"#,)
+            match caps.get(2) {
+                Some(pid) => {
+                    let pid = pid.as_str();
+                    format!(
+                        r#"<a href="/{board}/post/{pid}" class="quotelink crosslink" data-crossboard="{board}" data-pid="{pid}">&gt;&gt;&gt;/{board}/{pid}</a>"#,
+                    )
+                }
+                None => {
+                    format!(r#"<a href="/{board}/" class="quotelink crosslink">&gt;&gt;&gt;/{board}/</a>"#)
+                }
+            }
         })
         .into_owned();
 
@@ -549,11 +553,45 @@ mod tests {
     }
 
     #[test]
-    fn test_crossthread_link() {
+    fn test_crosspost_link() {
         let escaped = escape_html(">>>/tech/42");
         let html = render_post_body(&escaped);
         assert!(html.contains("class=\"quotelink crosslink\""));
-        assert!(html.contains("/tech/thread/42"));
+        // href now resolves via the post-redirect endpoint, not a raw thread URL
+        assert!(html.contains("/tech/post/42"));
+        assert!(html.contains("data-crossboard=\"tech\""));
+        assert!(html.contains("data-pid=\"42\""));
+    }
+
+    #[test]
+    fn test_crosspost_not_corrupted_by_crossboard() {
+        // RE_CROSSBOARD must not re-match the display text inside an already-replaced
+        // crosspost anchor and produce a double-wrapped or href-corrupted link.
+        let escaped = escape_html(">>>/b/12345");
+        let html = render_post_body(&escaped);
+        // Exactly one anchor tag
+        assert_eq!(
+            html.matches("<a ").count(),
+            1,
+            "must produce exactly one anchor"
+        );
+        // href must point to the post redirect, not the board index
+        assert!(
+            html.contains("href=\"/b/post/12345\""),
+            "href must be the post link"
+        );
+        assert!(
+            !html.contains("href=\"/b/\""),
+            "href must not be the board index"
+        );
+    }
+
+    #[test]
+    fn test_crossboard_link_no_post_id() {
+        // >>>/board/ (no post number) should still produce a board-index link
+        let escaped = escape_html(">>>/b/");
+        let html = render_post_body(&escaped);
+        assert!(html.contains("href=\"/b/\""));
     }
 
     #[test]

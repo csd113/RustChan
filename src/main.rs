@@ -337,8 +337,12 @@ fn build_router(state: AppState) -> Router {
         .route("/appeal", post(handlers::board::submit_appeal))
         .route("/vote", post(handlers::thread::vote_handler))
         .route(
-            "/api/post/{board}/{thread_id}",
+            "/api/post/{board}/{post_id}",
             get(handlers::board::api_post_preview),
+        )
+        .route(
+            "/{board}/post/{post_id}",
+            get(handlers::board::redirect_to_post),
         )
         .route(
             "/admin/post/ban-delete",

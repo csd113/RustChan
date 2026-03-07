@@ -1041,17 +1041,31 @@ pub fn get_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<Post
     Ok(stmt.query_row(params![post_id], map_post).optional()?)
 }
 
-/// Fetch the OP post for a given thread — used by the cross-board preview API.
-pub fn get_op_post_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<Post>> {
+/// Fetch a post by its global post ID, verifying it belongs to the given board.
+///
+/// Because the `posts` table uses a single SQLite AUTOINCREMENT sequence, every
+/// post has a globally unique `id`.  `>>>/board/N` links therefore unambiguously
+/// identify one post; this function validates the board membership so a crafted
+/// link cannot leak posts from a different board.
+pub fn get_post_on_board(
+    conn: &rusqlite::Connection,
+    board_short: &str,
+    post_id: i64,
+) -> Result<Option<Post>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at
-         FROM posts WHERE thread_id = ?1 AND is_op = 1 LIMIT 1",
+        "SELECT p.id, p.thread_id, p.board_id, p.name, p.tripcode, p.subject,
+                p.body, p.body_html, p.ip_hash, p.file_path, p.file_name, p.file_size,
+                p.thumb_path, p.mime_type, p.created_at, p.deletion_token, p.is_op,
+                p.media_type, p.audio_file_path, p.audio_file_name, p.audio_file_size,
+                p.audio_mime_type, p.edited_at
+         FROM posts p
+         JOIN boards b ON b.id = p.board_id
+         WHERE p.id = ?1 AND b.short_name = ?2
+         LIMIT 1",
     )?;
-    Ok(stmt.query_row(params![thread_id], map_post).optional()?)
+    Ok(stmt
+        .query_row(params![post_id, board_short], map_post)
+        .optional()?)
 }
 
 /// Delete a post by id; returns file paths for cleanup.

@@ -1945,25 +1945,33 @@ function adminBanDelete(form, pid) {
     }
 
     // ── Cross-board quotelink hover preview ────────────────────────────────
-    // Fetches /api/post/{board}/{thread_id} on hover over >>>/ cross-board links
-    // and shows the OP post in the same floating popup used by same-thread quotelinks.
+    // Handles >>>/board/POST_ID links produced by the markup parser.
+    //
+    // POST_ID is the global post ID (SQLite AUTOINCREMENT, unique across all
+    // boards).  On first hover the JS fetches /api/post/{board}/{post_id},
+    // which returns { html, thread_id }.  After the fetch it upgrades the
+    // link's href from the redirect stub (/{board}/post/{pid}) to the direct
+    // canonical anchor (/{board}/thread/{thread_id}#p{pid}) so every subsequent
+    // click goes straight there without a server round-trip.
     body.push_str(
         r#"<script>
 (function() {
-  var _cbCache = {};   // board:pid → html string
-  var _cbInFlight = {}; // board:pid → true while fetching
+  // board:pid → { html, thread_id } — populated after first successful fetch
+  var _cbCache    = {};
+  var _cbInFlight = {};
 
   function getCbPopup() {
     return document.getElementById('ql-popup');
   }
 
   function fetchAndShow(link, board, pid) {
-    var key = board + ':' + pid;
+    var key   = board + ':' + pid;
     var popup = getCbPopup();
     if (!popup) return;
 
+    // Cache hit — show immediately
     if (_cbCache[key]) {
-      popup.innerHTML = _cbCache[key];
+      popup.innerHTML = _cbCache[key].html;
       popup.style.display = 'block';
       positionCbPopup(link, popup);
       return;
@@ -1971,35 +1979,50 @@ function adminBanDelete(form, pid) {
     if (_cbInFlight[key]) return;
 
     _cbInFlight[key] = true;
-    popup.innerHTML = '<div style="padding:8px;color:var(--text-dim)">loading…</div>';
+    popup.innerHTML = '<div style="padding:8px;color:var(--text-dim)">loading\u2026</div>';
     popup.style.display = 'block';
     positionCbPopup(link, popup);
 
     fetch('/api/post/' + board + '/' + pid)
       .then(function(r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function(data) {
-        _cbCache[key] = data.html || '';
+        _cbCache[key] = { html: data.html || '', thread_id: data.thread_id || 0 };
         delete _cbInFlight[key];
-        // Only update if the popup is still showing this link
+
+        // Upgrade every matching link's href to the direct thread anchor so
+        // the next click skips the server redirect.
+        if (_cbCache[key].thread_id) {
+          var directHref = '/' + board + '/thread/' + _cbCache[key].thread_id + '#p' + pid;
+          document.querySelectorAll(
+            'a.crosslink[data-crossboard="' + board + '"][data-pid="' + pid + '"]'
+          ).forEach(function(a) { a.href = directHref; });
+        }
+
         if (popup.style.display !== 'none') {
-          popup.innerHTML = _cbCache[key];
+          popup.innerHTML = _cbCache[key].html;
           positionCbPopup(link, popup);
         }
       })
       .catch(function() {
         delete _cbInFlight[key];
-        _cbCache[key] = '<div style="padding:8px;color:var(--red,#f55)">Post not found</div>';
+        _cbCache[key] = {
+          html: '<div style="padding:8px;color:var(--red,#f55)">Post not found</div>',
+          thread_id: 0
+        };
+        if (popup.style.display !== 'none') {
+          popup.innerHTML = _cbCache[key].html;
+        }
       });
   }
 
   function positionCbPopup(anchor, popup) {
-    var rect = anchor.getBoundingClientRect();
-    var pw = popup.offsetWidth || 420;
-    var ph = popup.offsetHeight || 200;
-    var vw = window.innerWidth;
-    var vh = window.innerHeight;
+    var rect   = anchor.getBoundingClientRect();
+    var pw     = popup.offsetWidth  || 420;
+    var ph     = popup.offsetHeight || 200;
+    var vw     = window.innerWidth;
+    var vh     = window.innerHeight;
     var scrollY = window.pageYOffset;
-    var left = rect.left + window.pageXOffset;
+    var left   = rect.left + window.pageXOffset;
     if (left + pw > vw - 10) left = Math.max(4, vw - pw - 10);
     var top;
     if (rect.bottom + ph + 8 < vh) {
@@ -2035,12 +2058,51 @@ function adminBanDelete(form, pid) {
           _hideTimer = setTimeout(function() { popup.style.display = 'none'; }, 120);
         });
       }
+
+      // Click: navigate to the exact post anchor.
+      // HTTP 302 redirects strip the #fragment in many browsers, so we always
+      // resolve the thread_id ourselves and set location directly.
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        var key = board + ':' + pid;
+
+        function navigate(threadId) {
+          window.location.href = '/' + board + '/thread/' + threadId + '#p' + pid;
+        }
+
+        // Cache already populated (e.g. user hovered first) — navigate immediately.
+        if (_cbCache[key] && _cbCache[key].thread_id) {
+          navigate(_cbCache[key].thread_id);
+          return;
+        }
+
+        // No cache yet — fetch then navigate.  Show a brief loading state on the
+        // link so the user knows something is happening.
+        var origText = link.textContent;
+        link.textContent = '\u2026';
+        fetch('/api/post/' + board + '/' + pid)
+          .then(function(r) { return r.ok ? r.json() : Promise.reject(r.status); })
+          .then(function(data) {
+            _cbCache[key] = { html: data.html || '', thread_id: data.thread_id || 0 };
+            link.textContent = origText;
+            if (data.thread_id) {
+              navigate(data.thread_id);
+            } else {
+              // post not found — fall back to the board index
+              window.location.href = '/' + board + '/';
+            }
+          })
+          .catch(function() {
+            link.textContent = origText;
+            window.location.href = '/' + board + '/';
+          });
+      });
     });
   }
 
   wireCrossLinks(document);
 
-  // Also wire cross-links injected by the auto-updater
+  // Wire cross-links that arrive via the thread auto-updater
   var _origCb = window._onNewPostsInserted;
   window._onNewPostsInserted = function(container) {
     if (_origCb) _origCb(container);
