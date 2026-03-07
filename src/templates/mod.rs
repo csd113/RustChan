@@ -834,18 +834,23 @@ fn base_layout(
     csrf_token: &str,
     boards: &[Board],
     collapse_greentext: bool,
-    allow_archive: bool,
+    _allow_archive: bool,
 ) -> String {
-    let board_links: String = boards
+    let inner_links: String = boards
         .iter()
         .map(|b| {
             format!(
-                r#"[<a href="/{s}/catalog">{s}</a>]"#,
+                r#"<a href="/{s}/catalog">{s}</a>"#,
                 s = escape_html(&b.short_name)
             )
         })
         .collect::<Vec<_>>()
-        .join(" ");
+        .join(" / ");
+    let board_links = if inner_links.is_empty() {
+        String::new()
+    } else {
+        format!("[ {} ]", inner_links)
+    };
 
     let search_bar = if let Some(b) = board_short {
         format!(
@@ -854,26 +859,6 @@ fn base_layout(
 <button type="submit">go</button>
 </form>"#,
             b = escape_html(b)
-        )
-    } else {
-        String::new()
-    };
-
-    // Sticky catalog bar shown when browsing a specific board
-    let catalog_bar = if let Some(b) = board_short {
-        let b_esc = escape_html(b);
-        let archive_link = if allow_archive {
-            format!(
-                "  <span class=\"catalog-bar-sep\">|</span>\n  <a class=\"catalog-bar-link\" href=\"/{b}/archive\">[ archive ]</a>",
-                b = b_esc
-            )
-        } else {
-            String::new()
-        };
-        format!(
-            "<div class=\"catalog-bar\">\n  <a class=\"catalog-bar-link\" href=\"/{b}/catalog\">[ /{b}/ catalog ]</a>\n  <span class=\"catalog-bar-sep\">|</span>\n  <a class=\"catalog-bar-link\" href=\"/{b}/\">[ /{b}/ index ]</a>\n{archive_link}\n</div>",
-            b = b_esc,
-            archive_link = archive_link,
         )
     } else {
         String::new()
@@ -892,6 +877,7 @@ fn base_layout(
 </head>
 <body{collapse_attr}>
 <header class="site-header">
+  <span class="site-name">{forum_name}</span>
   <a class="home-btn" href="/">&#8962; Home</a>
   <nav class="board-list">
     {board_links}
@@ -899,7 +885,6 @@ fn base_layout(
   <div class="header-search">{search_bar}</div>
   <a class="admin-header-link" href="/admin">[Admin]</a>
 </header>
-{catalog_bar}
 <main>
 {body}
 </main>
@@ -908,23 +893,23 @@ fn base_layout(
 </footer>
 
 <!-- Theme Picker -->
-<button id="theme-picker-btn" onclick="toggleThemePicker()" title="Select Theme">&#9681; Theme</button>
+<button id="theme-picker-btn" onclick="toggleThemePicker()" title="Select Theme">&#127912; Theme</button>
 <div id="theme-picker-panel">
   <div class="tp-title">// SELECT THEME</div>
   <button class="tp-option" onclick="setTheme('terminal')">
-    <span class="tp-swatch" style="background:#050505;border-color:#00c840;"></span>Terminal
+    <span class="tp-swatch" style="background:#00ff41;"></span>Terminal
   </button>
   <button class="tp-option" onclick="setTheme('aero')">
-    <span class="tp-swatch" style="background:linear-gradient(135deg,#b8e0f8,#dff4ff);border-color:#38b6ff;"></span>Frutiger Aero
+    <span class="tp-swatch" style="background:#6aaed6;"></span>Frutiger Aero
   </button>
   <button class="tp-option" onclick="setTheme('dorfic')">
-    <span class="tp-swatch" style="background:#FFD700;border-color:#FF4500;"></span>DORFic
+    <span class="tp-swatch" style="background:#ffcc66;"></span>DORFic
   </button>
   <button class="tp-option" onclick="setTheme('fluorogrid')">
-    <span class="tp-swatch" style="background:#D0FFE0;border-color:#00FFFF;"></span>FluoroGrid
+    <span class="tp-swatch" style="background:#8833aa;"></span>FluoroGrid
   </button>
   <button class="tp-option" onclick="setTheme('neoncubicle')">
-    <span class="tp-swatch" style="background:#F0F4F8;border-color:#0FF0FF;"></span>NeonCubicle
+    <span class="tp-swatch" style="background:#b03888;"></span>NeonCubicle
   </button>
 </div>
 
@@ -996,7 +981,6 @@ fn base_layout(
         title = escape_html(title),
         board_links = board_links,
         search_bar = search_bar,
-        catalog_bar = catalog_bar,
         forum_name = escape_html(&live_site_name()),
         body = body,
         csrf_token = escape_html(csrf_token),
@@ -1169,16 +1153,24 @@ pub fn board_page(
         ));
     }
 
-    body.push_str(&format!(
-        r#"<div class="board-header board-index-header"><h1>/{short}/  — {name}</h1><p class="board-desc">{desc}</p></div>"#,
-        short = escape_html(&board.short_name),
-        name = escape_html(&board.name),
-        desc = escape_html(&board.description),
-    ));
+    {
+        let short = escape_html(&board.short_name);
+        let name = escape_html(&board.name);
+        let desc = escape_html(&board.description);
+        let nav_archive = if board.allow_archive {
+            format!(r#"<a class="board-nav-link" href="/{short}/archive">[Archive]</a>"#)
+        } else {
+            String::new()
+        };
+        body.push_str(&format!(
+            r#"<div class="board-header board-index-header"><h1>/{short}/  — {name}</h1><p class="board-desc">{desc}</p></div>
+<div class="board-nav"><a class="board-nav-link active" href="/{short}/">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}</div>"#,
+        ));
+    }
 
     body.push_str(&format!(
         r#"<div class="post-toggle-bar centered catalog-toggle-bar">
-  <button class="post-toggle-btn" onclick="togglePostForm()">[ Start a New Thread ]</button>
+  <button class="post-toggle-btn" onclick="togglePostForm()">[ Post a New Thread ]</button>
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {}
@@ -2778,8 +2770,9 @@ pub fn catalog_page(
     </select>
   </div>
 </div>
+<div class="board-nav"><a class="board-nav-link" href="/{bs}/">[Index]</a><a class="board-nav-link active" href="/{bs}/catalog">[Catalog]</a>{nav_archive}</div>
 <div class="post-toggle-bar centered catalog-toggle-bar">
-  <button class="post-toggle-btn" onclick="togglePostForm()">[ Start a New Thread ]</button>
+  <button class="post-toggle-btn" onclick="togglePostForm()">[ Post a New Thread ]</button>
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {form}
@@ -2788,6 +2781,9 @@ pub fn catalog_page(
         bs = bs,
         bn = bn,
         desc = escape_html(&board.description),
+        nav_archive = if board.allow_archive {
+            format!(r#"<a class="board-nav-link" href="/{bs}/archive">[Archive]</a>"#, bs = bs)
+        } else { String::new() },
         form = new_thread_form(&board.short_name, csrf_token, board),
     ));
 
@@ -2979,9 +2975,9 @@ pub fn archive_page(
 <h2 class="archive-heading">&#128190; /{bs}/ &mdash; Archive</h2>
 <p class="archive-subtext">These threads have been cycled off the board index and are read-only.
 They are preserved here permanently.</p>
-<a href="/{bs}/" class="catalog-bar-link">[ return to index ]</a>
+<a href="/{bs}/" class="board-nav-link">[ return to index ]</a>
 &nbsp;|&nbsp;
-<a href="/{bs}/catalog" class="catalog-bar-link">[ catalog ]</a>
+<a href="/{bs}/catalog" class="board-nav-link">[ catalog ]</a>
 </div>"#,
         bs = bs,
         bn = bn,
