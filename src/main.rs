@@ -16,7 +16,7 @@
 // Static CSS is compiled into the binary — no external files needed.
 
 use axum::{
-    extract::{ConnectInfo, DefaultBodyLimit},
+    extract::DefaultBodyLimit,
     http::{header, StatusCode},
     middleware as axum_middleware,
     response::IntoResponse,
@@ -58,7 +58,9 @@ static IN_FLIGHT: AtomicI64 = AtomicI64::new(0);
 static ACTIVE_UPLOADS: AtomicI64 = AtomicI64::new(0);
 /// Monotonic tick used to animate the upload spinner.
 static SPINNER_TICK: AtomicU64 = AtomicU64::new(0);
-/// Recently active client IPs (last ~5 min); maps IP-string → last-seen Instant.
+/// Recently active client IPs (last ~5 min); maps SHA-256(IP) → last-seen Instant.
+/// CRIT-5: Keys are hashed so raw IP addresses are never retained in process
+/// memory (or coredumps). The count is used for the "users online" display.
 static ACTIVE_IPS: Lazy<DashMap<String, Instant>> = Lazy::new(DashMap::new);
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
@@ -354,9 +356,18 @@ fn build_router(state: AppState) -> Router {
             "/{board}/post/{id}/edit",
             post(handlers::thread::edit_post_post),
         )
-        .route("/report", post(handlers::board::file_report))
-        .route("/appeal", post(handlers::board::submit_appeal))
-        .route("/vote", post(handlers::thread::vote_handler))
+        .route(
+            "/report",
+            post(handlers::board::file_report).layer(DefaultBodyLimit::max(65_536)),
+        )
+        .route(
+            "/appeal",
+            post(handlers::board::submit_appeal).layer(DefaultBodyLimit::max(65_536)),
+        )
+        .route(
+            "/vote",
+            post(handlers::thread::vote_handler).layer(DefaultBodyLimit::max(65_536)),
+        )
         .route(
             "/api/post/{board}/{post_id}",
             get(handlers::board::api_post_preview),
@@ -387,7 +398,10 @@ fn build_router(state: AppState) -> Router {
             get(handlers::board::serve_board_media),
         )
         .route("/admin", get(handlers::admin::admin_index))
-        .route("/admin/login", post(handlers::admin::admin_login))
+        .route(
+            "/admin/login",
+            post(handlers::admin::admin_login).layer(DefaultBodyLimit::max(65_536)),
+        )
         .route("/admin/logout", post(handlers::admin::admin_logout))
         .route("/admin/panel", get(handlers::admin::admin_panel))
         .route("/admin/board/create", post(handlers::admin::create_board))
@@ -479,6 +493,34 @@ fn build_router(state: AppState) -> Router {
             header::HeaderName::from_static("referrer-policy"),
             header::HeaderValue::from_static("same-origin"),
         ))
+        // CRIT-1: Add Content-Security-Policy, HSTS, and Permissions-Policy.
+        // CSP restricts script/style/image sources to self, preventing XSS
+        // from loading external payloads or exfiltrating data.
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            header::HeaderName::from_static("content-security-policy"),
+            header::HeaderValue::from_static(
+                "default-src 'self'; \
+                 script-src 'self' 'unsafe-inline'; \
+                 style-src 'self' 'unsafe-inline'; \
+                 img-src 'self' data: blob:; \
+                 media-src 'self' blob:; \
+                 font-src 'self'; \
+                 connect-src 'self'; \
+                 frame-ancestors 'none'; \
+                 object-src 'none'; \
+                 base-uri 'self'",
+            ),
+        ))
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            header::HeaderName::from_static("strict-transport-security"),
+            header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        ))
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            header::HeaderName::from_static("permissions-policy"),
+            header::HeaderValue::from_static(
+                "geolocation=(), camera=(), microphone=(), payment=()",
+            ),
+        ))
         .with_state(state)
 }
 
@@ -515,12 +557,21 @@ async fn track_requests(
     );
 
     // Record the client IP for the "users online" display.
+    // CRIT-5: Store a SHA-256 hash of the IP (not the raw address) to avoid
+    // retaining PII in process memory and coredumps.
+    // CRIT-2: Use extract_ip() so proxy-forwarded real IPs are used instead
+    // of the raw socket address (which would always be the proxy's IP).
     // Cap at 10,000 entries to prevent unbounded memory growth under a
     // Sybil/bot attack rotating IPs (#11). The count is cosmetic so
     // dropping inserts beyond the cap has no functional impact.
-    if let Some(ci) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+    {
+        use sha2::{Digest, Sha256};
+        let real_ip = middleware::extract_ip(&req);
+        let mut h = Sha256::new();
+        h.update(real_ip.as_bytes());
+        let ip_hash = hex::encode(h.finalize());
         if ACTIVE_IPS.len() < 10_000 {
-            ACTIVE_IPS.insert(ci.0.ip().to_string(), Instant::now());
+            ACTIVE_IPS.insert(ip_hash, Instant::now());
         }
     }
 
@@ -646,14 +697,18 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
     // Active connections / users online
     let in_flight = IN_FLIGHT.load(Ordering::Relaxed).max(0) as u64;
     let online_count = ACTIVE_IPS.len();
+    // CRIT-5: Keys are SHA-256 hashes — show 8-char prefixes for diagnostics.
     let ip_list: String = {
-        let mut ips: Vec<String> = ACTIVE_IPS.iter().map(|e| e.key().clone()).collect();
-        ips.sort();
-        ips.truncate(5);
-        if ips.is_empty() {
+        let mut hashes: Vec<String> = ACTIVE_IPS
+            .iter()
+            .map(|e| e.key()[..8].to_string())
+            .collect();
+        hashes.sort();
+        hashes.truncate(5);
+        if hashes.is_empty() {
             "none".into()
         } else {
-            ips.join(", ")
+            hashes.join(", ")
         }
     };
 

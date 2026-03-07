@@ -34,12 +34,11 @@ use crate::{
     },
 };
 use axum::{
-    extract::{ConnectInfo, Form, Multipart, Path, Query, State},
+    extract::{Form, Multipart, Path, Query, State},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use tracing::info;
 
 const PREVIEW_REPLIES: i64 = 3;
@@ -167,7 +166,7 @@ pub async fn board_index(
 pub async fn create_thread(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     multipart: Multipart,
 ) -> Result<Response> {
@@ -180,7 +179,6 @@ pub async fn create_thread(
 
     let raw_body = form.body;
 
-    let client_ip = addr.ip().to_string();
     let upload_dir = CONFIG.upload_dir.clone();
     let thumb_size = CONFIG.thumb_size;
     let max_image_size = CONFIG.max_image_size;
@@ -719,7 +717,7 @@ pub struct ReportForm {
 
 pub async fn file_report(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     Form(form): Form<ReportForm>,
 ) -> Result<Response> {
@@ -728,7 +726,7 @@ pub async fn file_report(
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let ip_hash = hash_ip(&addr.ip().to_string(), &CONFIG.cookie_secret);
+    let ip_hash = hash_ip(&client_ip, &CONFIG.cookie_secret);
     let reason = form
         .reason
         .as_deref()
@@ -949,7 +947,7 @@ pub struct AppealForm {
 
 pub async fn submit_appeal(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     Form(form): Form<AppealForm>,
 ) -> impl axum::response::IntoResponse {
@@ -963,7 +961,7 @@ pub async fn submit_appeal(
         return Html(crate::templates::error_page(403, "CSRF token mismatch.")).into_response();
     }
 
-    let ip_hash = hash_ip(&addr.ip().to_string(), &CONFIG.cookie_secret);
+    let ip_hash = hash_ip(&client_ip, &CONFIG.cookie_secret);
     let reason = form.reason.trim().chars().take(512).collect::<String>();
     if reason.is_empty() {
         return Html(crate::templates::error_page(
