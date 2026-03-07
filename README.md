@@ -131,6 +131,11 @@ Two external tools plug in as **optional enhancements**: [**ffmpeg**](#ffmpeg--v
 </table>
 
 <br>
+<img width="1511" height="781" alt="Screenshot 2026-03-06 at 7 31 48 PM" src="https://github.com/user-attachments/assets/0ad5ca51-9d7a-40a6-a754-dbdaebacf66a" />
+<img width="1512" height="778" alt="Screenshot 2026-03-06 at 7 32 10 PM" src="https://github.com/user-attachments/assets/5ff2658c-8689-4895-8300-9d29effdb090" />
+
+<img width="274" height="511" alt="Screenshot 2026-03-06 at 7 32 46 PM" src="https://github.com/user-attachments/assets/7f467e5c-92a2-4764-a7e3-8790a1dcf3e4" />
+
 
 ## 🔌 Optional Integrations: ffmpeg & Tor
 
