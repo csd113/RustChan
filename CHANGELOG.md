@@ -2,7 +2,88 @@
 
 All notable changes to RustChan will be documented in this file.
 
-## [1.0.10] — 2026-03-06
+## [1.0.11] — 2026-03-06
+
+### Security — Critical
+
+- **CRIT-1: Security headers** — added `Content-Security-Policy`, `Strict-Transport-Security`,
+  and `Permissions-Policy` response headers to `build_router()`. CSP restricts scripts, styles,
+  and media to `'self'`, preventing external payload loading or data exfiltration via XSS.
+  HSTS enforces HTTPS for one year including subdomains. Permissions-Policy disables
+  camera, microphone, and geolocation APIs.
+
+- **CRIT-2: Proxy-aware IP extraction in post handlers** — all post-creation handlers
+  (`create_thread`, `post_reply`) now use the proxy-aware `extract_ip()` / `ClientIp` extractor
+  instead of the raw socket address. Bans and rate limits are now effective when the server
+  runs behind nginx or any other reverse proxy.
+
+- **CRIT-3: Rate limiting on GET endpoints** — the catalog, search, thread-update, and JSON
+  API endpoints were previously completely unrate-limited, allowing trivial DoS via unbounded
+  LIKE scans or 200-thread catalog loads. A separate GET rate limiter (60 req/min per IP)
+  has been applied to all read-heavy routes.
+
+- **CRIT-4: Zip-bomb protection on restore handlers** — all four backup restore handlers
+  previously used `std::io::copy` with no size or entry limits. Each entry is now capped at
+  1 GiB via `.take()` and extraction aborts if more than 50 000 entries are encountered,
+  preventing a 1 KB zip from exhausting disk space.
+
+- **CRIT-5: IP address hashing** — raw IP addresses are no longer stored in the `ACTIVE_IPS`
+  `DashMap` or printed to stdout/logs. All IP tracking now uses the same HMAC-keyed hash
+  (`hash_ip`) used elsewhere, preventing IP exposure in coredumps or log aggregators.
+
+- **CRIT-6: Admin login brute-force lockout** — the admin login endpoint previously had no
+  per-IP failure tracking beyond the global rate limit (~600 attempts/hour). Failed login
+  attempts are now counted per IP and the account is locked for a progressive delay after
+  5 consecutive failures.
+
+- **CRIT-7: Constant-time CSRF token comparison** — CSRF token validation was using
+  standard `==` string comparison, leaking prefix-matching information via timing side
+  channel. Comparison now uses `subtle::ct_eq` for constant-time equality.
+
+- **CRIT-8: Poll input length and count caps** — poll questions and options had no
+  server-side limits, allowing megabytes of text or thousands of options per submission.
+  Poll options are now capped at 10, each option at 128 characters, and the question
+  at 256 characters.
+
+### Security — High
+
+- **HIGH-1: Admin session cookie `Max-Age`** — the session cookie previously had no
+  `Max-Age` or `Expires` attribute, causing browsers to persist it indefinitely after the
+  tab was closed. The cookie now carries a `Max-Age` matching the server-side
+  `session_duration` config value.
+
+- **HIGH-2: Database connection pool timeout** — the r2d2 connection pool had no
+  acquisition timeout, allowing `spawn_blocking` threads to block forever under load and
+  exhaust the Tokio thread pool. A 5-second `connection_timeout` has been added to the
+  pool builder.
+
+- **HIGH-3: Per-route body limits on small-payload endpoints** — the global 50 MiB
+  `DefaultBodyLimit` was applied to every route including login, vote, report, and appeal,
+  causing the server to buffer 50 MiB before returning 400 on oversized requests. These
+  four endpoints now carry an explicit 64 KiB per-route limit.
+
+- **HIGH-4: Open redirect hardening on `return_to`** — the logout `return_to` parameter
+  check only blocked `//` and `..`, allowing backslash (`\`) and URL-encoded variants
+  (`%5C`) to redirect to external hosts on some browsers. The filter now also rejects any
+  value containing a literal backslash or its percent-encoded form.
+
+- **HIGH-5: Proxy-aware IP in `file_report` and `submit_appeal`** — these two handlers
+  were using the raw socket IP for per-IP rate limiting, making the limit ineffective
+  behind a reverse proxy. Both now use the `ClientIp` extractor, consistent with post
+  handlers (same root cause as CRIT-2).
+
+- **HIGH-6: Exponential backoff with jitter in worker error recovery** — all four
+  background workers recovered from DB errors with a flat 2-second sleep, meaning all
+  workers could retry simultaneously and storm the database. Error recovery now uses
+  exponential backoff (500 ms base, doubling per failure, capped at 60 s) with 0–500 ms
+  random jitter to spread retries across workers.
+
+- **HIGH-7: TOCTOU race in file deduplication** — concurrent identical uploads could both
+  pass the hash check before either had written to `file_hashes`, causing the second
+  `record_file_hash` call to return a 500. The insert now uses `INSERT OR IGNORE` so the
+  second concurrent insert is silently a no-op instead of an error.
+
+
 
 ### Added
 - **Per-post inline ban+delete** — the admin toolbar that appears on every post in
