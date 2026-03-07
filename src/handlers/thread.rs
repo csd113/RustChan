@@ -22,12 +22,11 @@ use crate::{
     },
 };
 use axum::{
-    extract::{ConnectInfo, Form, Multipart, Path, Query, State},
+    extract::{Form, Multipart, Path, Query, State},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
-use std::net::SocketAddr;
 use tracing::info;
 
 // ─── GET /:board/thread/:id ───────────────────────────────────────────────────
@@ -35,11 +34,10 @@ use tracing::info;
 pub async fn view_thread(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
     let (jar, csrf) = ensure_csrf(jar);
-    let client_ip = addr.ip().to_string();
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -96,7 +94,7 @@ pub async fn view_thread(
 pub async fn post_reply(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     multipart: Multipart,
 ) -> Result<Response> {
@@ -109,7 +107,6 @@ pub async fn post_reply(
 
     let raw_body = form.body;
 
-    let client_ip = addr.ip().to_string();
     let upload_dir = CONFIG.upload_dir.clone();
     let thumb_size = CONFIG.thumb_size;
     let max_image_size = CONFIG.max_image_size;
@@ -124,6 +121,7 @@ pub async fn post_reply(
     let form_sage = form.sage;
 
     let board_short_err = board_short.clone();
+    let client_ip_err = client_ip.clone(); // CRIT-2: keep for the error re-render path below
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = state.job_queue.clone();
@@ -379,7 +377,6 @@ pub async fn post_reply(
     let redirect_url = match result {
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
-            let client_ip_err = addr.ip().to_string();
             let html = tokio::task::spawn_blocking({
                 let pool = state.db.clone();
                 let csrf_err = csrf_cookie.clone().unwrap_or_default();
@@ -631,7 +628,7 @@ pub struct VoteForm {
 
 pub async fn vote_handler(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     Form(form): Form<VoteForm>,
 ) -> Result<Response> {
@@ -640,7 +637,6 @@ pub async fn vote_handler(
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let client_ip = addr.ip().to_string();
     let cookie_secret = CONFIG.cookie_secret.clone();
     let option_id = form.option_id;
 

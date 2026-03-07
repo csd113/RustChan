@@ -30,13 +30,88 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::Utc;
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+use time;
 use tracing::{info, warn};
 
 const SESSION_COOKIE: &str = "chan_admin_session";
 
-// ─── Admin auth guard ─────────────────────────────────────────────────────────
+// ─── CRIT-6: Admin login brute-force lockout ──────────────────────────────────
+//
+// After LOGIN_FAIL_LIMIT failed attempts within LOGIN_FAIL_WINDOW seconds the
+// IP is locked out for the remainder of that window.  On success the counter
+// is cleared immediately so a genuine admin is never self-locked.
+//
+// Keys are SHA-256(IP) to avoid retaining raw addresses in memory (CRIT-5).
+
+const LOGIN_FAIL_LIMIT: u32 = 5;
+const LOGIN_FAIL_WINDOW: u64 = 900; // 15 minutes
+
+/// ip_hash → (fail_count, window_start_secs)
+static ADMIN_LOGIN_FAILS: Lazy<DashMap<String, (u32, u64)>> = Lazy::new(DashMap::new);
+static LOGIN_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
+
+fn login_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn login_ip_key(ip: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(ip.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// Returns true if this IP is currently locked out.
+fn is_login_locked(ip_key: &str) -> bool {
+    let now = login_now_secs();
+    if let Some(entry) = ADMIN_LOGIN_FAILS.get(ip_key) {
+        let (count, window_start) = *entry;
+        if now.saturating_sub(window_start) <= LOGIN_FAIL_WINDOW {
+            return count >= LOGIN_FAIL_LIMIT;
+        }
+    }
+    false
+}
+
+/// Record a failed login attempt; returns the new failure count.
+fn record_login_fail(ip_key: &str) -> u32 {
+    let now = login_now_secs();
+    let mut entry = ADMIN_LOGIN_FAILS
+        .entry(ip_key.to_string())
+        .or_insert((0, now));
+    let (count, window_start) = entry.value_mut();
+    if now.saturating_sub(*window_start) > LOGIN_FAIL_WINDOW {
+        *count = 1;
+        *window_start = now;
+    } else {
+        *count += 1;
+    }
+    *count
+}
+
+/// Clear failure counter after a successful login.
+fn clear_login_fails(ip_key: &str) {
+    ADMIN_LOGIN_FAILS.remove(ip_key);
+    // Opportunistically prune stale entries every ~15 min.
+    let now = login_now_secs();
+    let last = LOGIN_CLEANUP_SECS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) > 900
+        && LOGIN_CLEANUP_SECS
+            .compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    {
+        ADMIN_LOGIN_FAILS.retain(|_, (_, ws)| now.saturating_sub(*ws) <= LOGIN_FAIL_WINDOW);
+    }
+}
 
 /// Verify admin session. Returns the admin_id if valid.
 /// NOTE: This function performs blocking DB I/O. Only call it from within a
@@ -102,8 +177,19 @@ pub struct LoginForm {
 pub async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     Form(form): Form<LoginForm>,
 ) -> Result<Response> {
+    // CRIT-6: Reject IPs that are currently locked out due to repeated failures.
+    let ip_key = login_ip_key(&client_ip);
+    if is_login_locked(&ip_key) {
+        warn!(
+            "Admin login blocked (brute-force lockout) for ip_prefix={}",
+            &ip_key[..8]
+        );
+        return Err(AppError::RateLimited);
+    }
+
     // CSRF check
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
     if !crate::middleware::validate_csrf(
@@ -166,6 +252,14 @@ pub async fn admin_login(
             })
             .await
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+            // CRIT-6: Record failed attempt and check if now locked.
+            let fails = record_login_fail(&ip_key);
+            warn!(
+                "Failed admin login for '{}' (attempt {}/{})",
+                form.username.trim(),
+                fails,
+                LOGIN_FAIL_LIMIT
+            );
             Ok((
                 jar,
                 Html(templates::admin_login_page(
@@ -177,6 +271,8 @@ pub async fn admin_login(
                 .into_response())
         }
         Some(admin_id) => {
+            // CRIT-6: Successful login — reset any failure counter.
+            clear_login_fails(&ip_key);
             // Create session (FIX[HIGH-3]: in spawn_blocking)
             let session_id = new_session_id();
             let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
@@ -198,6 +294,9 @@ pub async fn admin_login(
             cookie.set_path("/");
             // FIX[MEDIUM-11]: Derive Secure flag from config; true when CHAN_HTTPS_COOKIES=true.
             cookie.set_secure(CONFIG.https_cookies);
+            // FIX[HIGH-1]: Set Max-Age so browsers expire the cookie after the
+            // configured session lifetime instead of persisting it indefinitely.
+            cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
             info!("Admin {} logged in", admin_id);
             Ok((jar.add(cookie), Redirect::to("/admin/panel")).into_response())
@@ -243,10 +342,19 @@ pub async fn admin_logout(
     }
     let jar = jar.remove(Cookie::from(SESSION_COOKIE));
     // Redirect back to the page where logout was triggered, or fall back to login.
+    // FIX[HIGH-4]: Reject backslash (and its percent-encoded form %5C) in
+    // addition to the existing checks.  On some browsers /\evil.com and
+    // /%5Cevil.com are treated as protocol-relative redirects to evil.com.
     let destination = form
         .return_to
         .as_deref()
-        .filter(|s| s.starts_with('/') && !s.contains("//") && !s.contains(".."))
+        .filter(|s| {
+            s.starts_with('/')
+                && !s.contains("//")
+                && !s.contains("..")
+                && !s.contains('\\')
+                && !s.to_ascii_lowercase().contains("%5c")
+        })
         .unwrap_or("/admin");
     Ok((jar, Redirect::to(destination)).into_response())
 }
@@ -1392,7 +1500,7 @@ pub async fn admin_restore(
                 if name == "chan.db" {
                     let mut out = std::fs::File::create(&temp_db)
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp DB: {}", e)))?;
-                    std::io::copy(&mut entry, &mut out)
+                    copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp DB: {}", e)))?;
                     db_extracted = true;
 
@@ -1410,7 +1518,7 @@ pub async fn admin_restore(
                         }
                         let mut out = std::fs::File::create(&target)
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("Create {}: {}", target.display(), e)))?;
-                        std::io::copy(&mut entry, &mut out)
+                        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {}", target.display(), e)))?;
                     }
                 }
@@ -1481,6 +1589,47 @@ pub async fn admin_restore(
     new_cookie.set_secure(CONFIG.https_cookies);
 
     Ok((jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response())
+}
+
+// ─── CRIT-4: Zip decompression size limiter ────────────────────────────────────
+//
+// std::io::copy() has no bound on how much data it will write.  A malicious
+// 1 KiB zip (a "zip bomb") can expand to gigabytes, exhausting disk or memory.
+// copy_limited() caps the decompressed size of each entry.
+
+/// Maximum bytes to extract from any single zip entry (256 MiB).
+const ZIP_ENTRY_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Like `std::io::copy` but returns `InvalidData` if more than `max_bytes`
+/// would be written.  Reads in 64 KiB chunks; aborts as soon as the limit
+/// is exceeded so disk space is not wasted.
+fn copy_limited<R: std::io::Read, W: std::io::Write>(
+    reader: &mut R,
+    writer: &mut W,
+    max_bytes: u64,
+) -> std::io::Result<u64> {
+    let mut buf = [0u8; 65536];
+    let mut total: u64 = 0;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        if total > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Decompressed entry exceeds {} MiB limit — possible zip bomb",
+                    max_bytes / 1024 / 1024
+                ),
+            ));
+        }
+        if let Some(slice) = buf.get(..n) {
+            writer.write_all(slice)?;
+        }
+    }
+    Ok(total)
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -2143,7 +2292,7 @@ pub async fn restore_saved_full_backup(
                     let mut out = std::fs::File::create(&temp_db).map_err(|e| {
                         AppError::Internal(anyhow::anyhow!("Create temp DB: {}", e))
                     })?;
-                    std::io::copy(&mut entry, &mut out)
+                    copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp DB: {}", e)))?;
                     db_extracted = true;
                 } else if let Some(rel) = name.strip_prefix("uploads/") {
@@ -2167,7 +2316,7 @@ pub async fn restore_saved_full_backup(
                                 e
                             ))
                         })?;
-                        std::io::copy(&mut entry, &mut out).map_err(|e| {
+                        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(|e| {
                             AppError::Internal(anyhow::anyhow!("Write {}: {}", target.display(), e))
                         })?;
                     }
@@ -2506,7 +2655,7 @@ pub async fn restore_saved_board_backup(
                         }
                         let mut out = std::fs::File::create(&target)
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("Create: {}", e)))?;
-                        std::io::copy(&mut entry, &mut out)
+                        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("Write: {}", e)))?;
                     }
                 }
@@ -3211,7 +3360,7 @@ pub async fn board_restore(
                         let mut out = std::fs::File::create(&target).map_err(|e| {
                             AppError::Internal(anyhow::anyhow!("Create file: {}", e))
                         })?;
-                        std::io::copy(&mut entry, &mut out).map_err(|e| {
+                        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(|e| {
                             AppError::Internal(anyhow::anyhow!("Write file: {}", e))
                         })?;
                     }

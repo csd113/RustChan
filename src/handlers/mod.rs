@@ -74,11 +74,31 @@ pub async fn parse_post_multipart(
                 sage = v == "1" || v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true");
             }
             Some("pow_nonce") => pow_nonce = field.text().await.unwrap_or_default(),
-            Some("poll_question") => poll_question = field.text().await.unwrap_or_default(),
+            Some("poll_question") => {
+                let v = field.text().await.unwrap_or_default();
+                // CRIT-8: Enforce server-side length cap on poll question.
+                if v.len() > 500 {
+                    return Err(AppError::BadRequest(
+                        "Poll question must be 500 characters or fewer.".into(),
+                    ));
+                }
+                poll_question = v;
+            }
             Some("poll_option") => {
                 let v = field.text().await.unwrap_or_default();
                 let trimmed = v.trim().to_string();
+                // CRIT-8: Enforce server-side caps on option count and length.
                 if !trimmed.is_empty() {
+                    if poll_options.len() >= 20 {
+                        return Err(AppError::BadRequest(
+                            "Polls are limited to 20 options.".into(),
+                        ));
+                    }
+                    if trimmed.len() > 200 {
+                        return Err(AppError::BadRequest(
+                            "Each poll option must be 200 characters or fewer.".into(),
+                        ));
+                    }
                     poll_options.push(trimmed);
                 }
             }

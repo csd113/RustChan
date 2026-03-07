@@ -28,6 +28,7 @@
 use crate::config::CONFIG;
 use crate::db::DbPool;
 use anyhow::Result;
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -162,6 +163,9 @@ pub fn start_worker_pool(queue: Arc<JobQueue>, ffmpeg_available: bool) {
 
 async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
     debug!("Worker {} started", id);
+    // FIX[HIGH-6]: Track consecutive errors for exponential back-off.
+    // Reset to 0 whenever a job is successfully claimed or the queue is empty.
+    let mut consecutive_errors: u32 = 0;
     loop {
         // Check for shutdown before trying to claim a job.
         if queue.cancel.is_cancelled() {
@@ -181,6 +185,7 @@ async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
 
         match claim {
             Ok(Ok(Some((job_id, payload)))) => {
+                consecutive_errors = 0; // reset back-off on any successful claim
                 debug!("Worker {}: picked up job #{}", id, job_id);
                 let pool_done = queue.pool.clone();
                 let result =
@@ -202,8 +207,9 @@ async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
                 .await;
             }
             Ok(Ok(None)) => {
-                // Queue is empty — sleep until notified, POLL_INTERVAL elapses,
-                // or a shutdown is requested (#7).
+                consecutive_errors = 0; // queue empty is not an error
+                                        // Queue is empty — sleep until notified, POLL_INTERVAL elapses,
+                                        // or a shutdown is requested (#7).
                 tokio::select! {
                     _ = queue.notify.notified() => {}
                     _ = sleep(POLL_INTERVAL) => {}
@@ -215,20 +221,41 @@ async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
             }
             Ok(Err(e)) => {
                 error!("Worker {}: DB error while claiming job: {}", id, e);
+                let delay = backoff_duration(consecutive_errors);
+                consecutive_errors = consecutive_errors.saturating_add(1);
                 tokio::select! {
-                    _ = sleep(Duration::from_secs(2)) => {}
+                    _ = sleep(delay) => {}
                     _ = queue.cancel.cancelled() => { return; }
                 }
             }
             Err(e) => {
                 error!("Worker {}: panic in spawn_blocking: {}", id, e);
+                let delay = backoff_duration(consecutive_errors);
+                consecutive_errors = consecutive_errors.saturating_add(1);
                 tokio::select! {
-                    _ = sleep(Duration::from_secs(2)) => {}
+                    _ = sleep(delay) => {}
                     _ = queue.cancel.cancelled() => { return; }
                 }
             }
         }
     }
+}
+
+/// FIX[HIGH-6]: Compute exponential back-off with random jitter.
+///
+/// Base: 500 ms × 2^n, capped at 60 s.
+/// Jitter: uniform random 0–500 ms added to spread simultaneous retries
+/// across all workers so they do not storm the DB at the same instant.
+fn backoff_duration(consecutive_errors: u32) -> Duration {
+    const BASE_MS: u64 = 500;
+    const MAX_MS: u64 = 60_000;
+    const JITTER_MAX_MS: u64 = 500;
+
+    let exp = consecutive_errors.min(7); // 2^7 = 128 → 64 s before cap
+    let base = BASE_MS.saturating_mul(1u64 << exp).min(MAX_MS);
+    // Use OsRng (already a dependency) for jitter — no new deps required.
+    let jitter = OsRng.next_u32() as u64 % JITTER_MAX_MS;
+    Duration::from_millis(base + jitter)
 }
 
 // ─── Job dispatch ─────────────────────────────────────────────────────────────

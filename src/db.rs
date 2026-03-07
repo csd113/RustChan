@@ -47,6 +47,10 @@ pub fn init_pool() -> Result<DbPool> {
         // enough headroom for concurrent requests without exhausting SQLite's
         // WAL-mode write serialisation.
         .max_size(8)
+        // FIX[HIGH-2]: Bound how long spawn_blocking threads wait for a
+        // connection.  Without this, a burst of requests can exhaust the Tokio
+        // blocking thread pool if all 8 connections are in use.
+        .connection_timeout(std::time::Duration::from_secs(5))
         .build(manager)
         .context("Failed to build database pool")?;
 

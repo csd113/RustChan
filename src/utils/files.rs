@@ -264,7 +264,7 @@ pub fn save_upload(
             if let Ok(path_cstr) = std::ffi::CString::new(dir_bytes.as_bytes()) {
                 let mut stat: libc::statvfs = std::mem::zeroed();
                 if libc::statvfs(path_cstr.as_ptr(), &mut stat) == 0 {
-                    let free_bytes = stat.f_bavail * stat.f_frsize;
+                    let free_bytes = u64::from(stat.f_bavail) * stat.f_frsize;
                     let needed = (final_data.len() as u64).saturating_mul(2);
                     if free_bytes < needed {
                         return Err(anyhow::anyhow!(
