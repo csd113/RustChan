@@ -63,11 +63,13 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Rate limit middleware — applied to ALL POST routes.
-/// Blocks requests from IPs that exceed the configured threshold.
+/// Rate limit middleware — applied to ALL routes (GET and POST).
+/// POST requests use the tighter `rate_limit_posts` limit.
+/// GET requests use the looser `rate_limit_gets` limit (CRIT-3: catalog/search DoS).
 pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
-    // Only rate-limit POST requests (thread/reply creation, etc.)
-    if req.method() != axum::http::Method::POST {
+    let is_post = req.method() == axum::http::Method::POST;
+    // Only rate-limit POST and GET; skip HEAD/OPTIONS/etc.
+    if !is_post && req.method() != axum::http::Method::GET {
         return next.run(req).await;
     }
 
@@ -77,11 +79,17 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(ip.as_bytes());
+        // Use method as a namespace so GET and POST buckets are independent.
+        h.update(if is_post { b"P" } else { b"G" });
         hex::encode(h.finalize())
     };
     let now = now_secs();
     let window = CONFIG.rate_limit_window;
-    let limit = CONFIG.rate_limit_posts;
+    let limit = if is_post {
+        CONFIG.rate_limit_posts
+    } else {
+        CONFIG.rate_limit_gets
+    };
 
     // Check and update rate limit counter
     let blocked = {
@@ -167,9 +175,85 @@ pub fn extract_ip(req: &Request) -> String {
 
 /// Validate CSRF token from a form against the cookie.
 /// Returns true if valid, false if CSRF check fails.
+///
+/// CRIT-7: Uses constant-time comparison to prevent timing side-channel attacks
+/// that could leak token prefix information through response latency differences.
 pub fn validate_csrf(cookie_token: Option<&str>, form_token: &str) -> bool {
     match cookie_token {
-        Some(cookie) => !cookie.is_empty() && !form_token.is_empty() && cookie == form_token,
+        Some(cookie) => {
+            if cookie.is_empty() || form_token.is_empty() {
+                return false;
+            }
+            constant_time_eq(cookie.as_bytes(), form_token.as_bytes())
+        }
         None => false,
+    }
+}
+
+/// Constant-time byte-slice equality comparison.
+/// Always visits every byte so the runtime does not depend on where the
+/// strings first differ, closing the CRIT-7 timing side-channel.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    // Length check is not secret information — it is fine to branch here.
+    if a.len() != b.len() {
+        return false;
+    }
+    // XOR all byte pairs and OR the results; any mismatch sets a bit in `diff`.
+    let diff: u8 = a
+        .iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    diff == 0
+}
+
+/// Proxy-aware client IP extractor for use in Axum handler signatures.
+///
+/// CRIT-2: Replaces direct use of `ConnectInfo<SocketAddr>` in post handlers.
+/// When `CHAN_BEHIND_PROXY=true` this reads X-Real-IP (set by nginx to the
+/// real TCP peer) rather than the raw socket address (which would always be
+/// the proxy's IP, making IP bans and rate-limits ineffective).
+pub struct ClientIp(pub String);
+
+impl<S> axum::extract::FromRequestParts<S> for ClientIp
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        if CONFIG.behind_proxy {
+            // Prefer X-Real-IP (nginx $remote_addr — not client-controlled).
+            if let Some(val) = parts
+                .headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Ok(ClientIp(val.to_string()));
+            }
+            // Fall back to rightmost X-Forwarded-For entry (added by the
+            // trusted proxy, not by the client).
+            if let Some(val) = parts
+                .headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(',').next_back())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Ok(ClientIp(val.to_string()));
+            }
+        }
+        // Direct connection (or proxy headers absent).
+        let ip = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        Ok(ClientIp(ip))
     }
 }
