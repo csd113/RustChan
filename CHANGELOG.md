@@ -7,6 +7,12 @@ All notable changes to RustChan will be documented in this file.
 ## [1.0.12] — 2026-03-07
 
 ### 🔄 Changed
+- **Database module split** — the 2,264-line monolithic `db.rs` has been reorganized into five focused modules with zero call-site changes (all existing `db::` references compile unchanged):
+  - `mod.rs` (466 lines) — connection pool, shared types (`NewPost`, `CachedFile`), schema initialization, shared helpers
+  - `boards.rs` (293 lines) — site settings, board CRUD, stats
+  - `threads.rs` (333 lines) — thread listing, creation, mutation, archiving, pruning
+  - `posts.rs` (642 lines) — post CRUD, file deduplication, polls, job queue, worker helpers
+  - `admin.rs` (558 lines) — admin sessions, bans, word filters, reports, mod log, ban appeals, IP history, maintenance
 - **Template module split** — the 2,736-line monolithic template file has been reorganized into five focused modules with no changes to the public API (all existing handler code works without modification):
   - `mod.rs` (392 lines) — shared infrastructure: site name/subtitle statics, base layout, pagination, timestamp formatting, utility helpers
   - `board.rs` (697 lines) — home page, board index, catalog, search, and archive rendering
