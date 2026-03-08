@@ -196,6 +196,9 @@ pub async fn create_thread(
     let poll_duration = form.poll_duration_secs;
     let pow_nonce = form.pow_nonce;
 
+    // Extract admin session before spawn_blocking (cookie jar is !Send).
+    let admin_session_id = jar.get("chan_admin_session").map(|c| c.value().to_string());
+
     let board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -214,6 +217,28 @@ pub async fn create_thread(
                         reason
                     }
                 )));
+            }
+
+            // Verify admin session — admins bypass the per-board cooldown entirely.
+            let is_admin = admin_session_id
+                .as_deref()
+                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
+                .unwrap_or(false);
+
+            // Per-board post cooldown — the SOLE post rate control.
+            // post_cooldown_secs = 0 means no cooldown at all; admins always bypass it.
+            if board.post_cooldown_secs > 0 && !is_admin {
+                let elapsed = db::get_seconds_since_last_post(&conn, board.id, &ip_hash)?;
+                if let Some(secs) = elapsed {
+                    let remaining = board.post_cooldown_secs.saturating_sub(secs);
+                    if remaining > 0 {
+                        return Err(AppError::BadRequest(format!(
+                            "Please wait {} more second{} before posting again.",
+                            remaining,
+                            if remaining == 1 { "" } else { "s" }
+                        )));
+                    }
+                }
             }
 
             // PoW CAPTCHA — verified only when the board has it enabled

@@ -12,7 +12,7 @@ use crate::{
     handlers::{board::ensure_csrf, parse_post_multipart},
     middleware::{validate_csrf, AppState},
     utils::{
-        crypto::{hash_ip, new_deletion_token, sha256_hex},
+        crypto::{hash_ip, new_deletion_token, sha256_hex, verify_pow},
         files::save_upload,
         sanitize::{
             apply_word_filters, escape_html, render_post_body, validate_body,
@@ -119,6 +119,10 @@ pub async fn post_reply(
     let name_val = form.name;
     let del_token_val = form.deletion_token;
     let form_sage = form.sage;
+    let pow_nonce = form.pow_nonce; // FIX[NEW-C1]: needed for per-reply PoW check
+                                    // Extract admin session before spawn_blocking so we can skip the per-board
+                                    // cooldown for admins (the cookie value is !Send and can't cross the boundary).
+    let admin_session_id = jar.get("chan_admin_session").map(|c| c.value().to_string());
 
     let board_short_err = board_short.clone();
     let client_ip_err = client_ip.clone(); // CRIT-2: keep for the error re-render path below
@@ -151,6 +155,37 @@ pub async fn post_reply(
                         reason
                     }
                 )));
+            }
+
+            // Per-board post cooldown — the SOLE post rate control.
+            // Verify admin session first; admins bypass the cooldown entirely.
+            let is_admin = admin_session_id
+                .as_deref()
+                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
+                .unwrap_or(false);
+
+            // post_cooldown_secs = 0 means no cooldown at all on this board.
+            if board.post_cooldown_secs > 0 && !is_admin {
+                let elapsed = db::get_seconds_since_last_post(&conn, board.id, &ip_hash)?;
+                if let Some(secs) = elapsed {
+                    let remaining = board.post_cooldown_secs.saturating_sub(secs);
+                    if remaining > 0 {
+                        return Err(AppError::BadRequest(format!(
+                            "Please wait {} more second{} before posting again.",
+                            remaining,
+                            if remaining == 1 { "" } else { "s" }
+                        )));
+                    }
+                }
+            }
+
+            // FIX[NEW-C1]: PoW CAPTCHA check for replies, mirroring create_thread().
+            // Previously this check was absent, allowing bots to bypass CAPTCHA on
+            // captcha-protected boards by posting replies instead of new threads.
+            if board.allow_captcha && !verify_pow(&board_short, &pow_nonce) {
+                return Err(AppError::BadRequest(
+                    "CAPTCHA verification failed. Please wait for the solver to complete before posting.".into()
+                ));
             }
 
             let filters: Vec<(String, String)> = db::get_word_filters(&conn)?

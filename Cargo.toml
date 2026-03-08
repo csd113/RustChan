@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.0.11"
+version = "1.0.12"
 edition = "2021"
 license = "MIT"
 # FIX[LOW-1]: Removed hardware-specific description. This binary is portable

@@ -169,7 +169,6 @@ pub struct Config {
     pub default_bump_limit: u32,
     #[allow(dead_code)]
     pub max_threads_per_board: u32,
-    pub rate_limit_posts: u32,
     /// Maximum GET requests per IP per rate_limit_window (CRIT-3: DoS via catalog/search).
     pub rate_limit_gets: u32,
     pub rate_limit_window: u64,
@@ -240,7 +239,6 @@ impl Config {
             thumb_size: env_u32("CHAN_THUMB_SIZE", 250),
             default_bump_limit: env_u32("CHAN_BUMP_LIMIT", 500),
             max_threads_per_board: env_u32("CHAN_MAX_THREADS", 150),
-            rate_limit_posts: env_u32("CHAN_RATE_POSTS", 10),
             rate_limit_gets: env_u32("CHAN_RATE_GETS", 60),
             rate_limit_window: env_u64("CHAN_RATE_WINDOW", 60),
             cookie_secret,

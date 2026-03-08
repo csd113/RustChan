@@ -360,7 +360,7 @@ fn render_inline(text: &str) -> String {
                     )
                 }
                 None => {
-                    format!(r#"<a href="/{board}/" class="quotelink crosslink">&gt;&gt;&gt;/{board}/</a>"#)
+                    format!(r#"<a href="/{board}" class="quotelink crosslink">&gt;&gt;&gt;/{board}/</a>"#)
                 }
             }
         })
@@ -604,10 +604,12 @@ mod tests {
 
     #[test]
     fn test_crossboard_link_no_post_id() {
-        // >>>/board/ (no post number) should still produce a board-index link
+        // >>>/board/ (no post number) should produce a board-index link.
+        // href uses the canonical slash-free form; the trailing-slash middleware
+        // redirects any /b/ URLs at runtime so both forms resolve correctly.
         let escaped = escape_html(">>>/b/");
         let html = render_post_body(&escaped);
-        assert!(html.contains("href=\"/b/\""));
+        assert!(html.contains("href=\"/b\""));
     }
 
     #[test]

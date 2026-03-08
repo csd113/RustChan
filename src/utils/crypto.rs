@@ -33,6 +33,8 @@ use argon2::{
 };
 // rand_core::RngCore is the same trait instance as argon2's re-exported
 // rand_core::OsRng implements — they share the same rand_core 0.6 crate.
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use rand_core::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -112,6 +114,20 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 pub const POW_DIFFICULTY: u32 = 20; // ~1M avg iterations; ~50–200 ms in JS
 
+/// FIX[NEW-C2]: In-memory nonce replay cache.
+///
+/// Maps "board_short:nonce" → unix timestamp (seconds) at which the nonce was
+/// first accepted.  Any nonce seen within the PoW validity window (5 minutes)
+/// is rejected on a second submission, preventing a solved nonce from being
+/// replayed unlimited times.
+///
+/// Entries older than POW_WINDOW_SECS are pruned on every call to verify_pow
+/// so memory usage is bounded by the rate of legitimate solves.
+static SEEN_NONCES: Lazy<DashMap<String, i64>> = Lazy::new(DashMap::new);
+
+/// The PoW grace window in seconds — must match the 5 × 60 s window in verify_pow.
+const POW_WINDOW_SECS: i64 = 300;
+
 /// Build the expected challenge string for the given board and time.
 pub fn pow_challenge(board_short: &str, unix_ts: i64) -> String {
     let minute = unix_ts / 60;
@@ -120,15 +136,32 @@ pub fn pow_challenge(board_short: &str, unix_ts: i64) -> String {
 
 /// Verify a submitted PoW nonce.  Accepts solutions for the current minute and
 /// up to 4 prior minutes (5-minute grace window covering clock skew + solve time).
+///
+/// FIX[NEW-C2]: Each (board, nonce) pair is recorded in SEEN_NONCES after its
+/// first successful verification and rejected on any subsequent call within the
+/// same window, closing the replay attack vector.
 pub fn verify_pow(board_short: &str, nonce: &str) -> bool {
     use sha2::{Digest, Sha256};
-    let now_minutes = chrono::Utc::now().timestamp() / 60;
-    // Try current minute and the 4 prior minutes
+    let now = chrono::Utc::now().timestamp();
+    let now_minutes = now / 60;
+
+    // Prune stale entries to bound memory usage.
+    SEEN_NONCES.retain(|_, ts| now - *ts < POW_WINDOW_SECS);
+
+    // Check whether this (board, nonce) pair has already been accepted.
+    let cache_key = format!("{}:{}", board_short, nonce);
+    if SEEN_NONCES.contains_key(&cache_key) {
+        return false; // FIX[NEW-C2]: replay rejected
+    }
+
+    // Try current minute and the 4 prior minutes.
     for delta in 0i64..=4 {
         let challenge = pow_challenge(board_short, (now_minutes - delta) * 60);
         let input = format!("{}:{}", challenge, nonce);
         let hash = Sha256::digest(input.as_bytes());
         if leading_zero_bits(&hash) >= POW_DIFFICULTY {
+            // Record this nonce as consumed.
+            SEEN_NONCES.insert(cache_key, now);
             return true;
         }
     }

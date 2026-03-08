@@ -171,7 +171,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 0.6rem 0; }
   color: var(--green-bright) !important;
 }
 
-/* ── Board nav (Index / Catalog / Archive — inline under board title) ────── */
+/* ── Board nav (Index / Catalog / Archive) ────────────────────────────────── */
 
 .board-nav {
   display: flex;
@@ -274,7 +274,6 @@ main {
   padding: 16px 10px 12px;
 }
 
-
 .page-box {
   border: 1px solid var(--border);
   background: var(--bg-panel);
@@ -311,7 +310,7 @@ main {
 
 .board-desc { color: var(--text-dim); font-size: 0.8rem; margin-top: 2px; }
 
-/* Thread title banner — 2x size */
+/* Thread title banner */
 .board-thread-header {
   font-size: 2rem;
   font-weight: bold;
@@ -377,8 +376,6 @@ main {
   color: var(--green);
 }
 
-
-
 .post-toggle-bar {
   margin-bottom: 12px;
 }
@@ -410,7 +407,7 @@ main {
   padding: 8px 0;
 }
 
-/* Catalog "Start New Thread" — half the standard centered size */
+/* Catalog "Start New Thread" */
 .catalog-toggle-bar .post-toggle-btn {
   font-size: 1rem !important;
   letter-spacing: 0.04em !important;
@@ -639,11 +636,8 @@ main {
   word-break: break-word;
 }
 
-.post-body .greentext { color: #44cc44; }
-/* .quote is what render_post_body actually emits */
+/* .quote is emitted by render_post_body for greentext lines */
 .post-body .quote { color: #789922; }
-.post-body .quote-link { color: var(--green); }
-.post-body .quote-link:hover { color: var(--green-bright); }
 
 /* ── Quotelinks (>>N) ──────────────────────────────────────────────────────── */
 .post-body .quotelink {
@@ -653,7 +647,7 @@ main {
 }
 .post-body .quotelink:hover { color: var(--green-bright); text-decoration: underline; }
 
-/* ── Backref links (>>N shown next to the cited post's number) ─────────────── */
+/* ── Backref links ─────────────────────────────────────────────────────────── */
 .backrefs { margin-left: 0.35rem; }
 .backrefs .backref {
   color: var(--green-dim);
@@ -677,18 +671,18 @@ main {
   box-shadow: 0 4px 18px rgba(0,0,0,0.55);
   border-radius: 2px;
   font-size: 0.88rem;
-  /* prevent the clone's ID from affecting page anchors */
   overflow: hidden;
 }
 .quotelink-popup .post { margin: 0; border: none; padding: 0; }
 .quotelink-popup .reply { margin: 0; border: none; }
 
-/* ── Highlighted post (clicked quotelink target) ───────────────────────────── */
+/* ── Highlighted post ──────────────────────────────────────────────────────── */
 .post-highlighted {
   outline: 2px solid var(--green, #00c840) !important;
   background: rgba(0, 200, 64, 0.07) !important;
   transition: background 0.15s, outline 0.15s;
 }
+
 .post-body code {
   background: #060c06;
   border: 1px solid var(--border);
@@ -703,6 +697,16 @@ main {
   margin: 6px 0;
   float: left;
   margin-right: 10px;
+  max-width: 100%;
+}
+
+/* When media is expanded, clear the float so the full-size image/video
+   stacks above the post text instead of widening the float and pushing
+   the text off to the right. */
+.file-container.media-is-expanded {
+  float: none;
+  clear: both;
+  margin-right: 0;
 }
 
 .file-info {
@@ -722,7 +726,7 @@ main {
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
-/* Reply preview images on the board index — smaller so they don't break layout */
+/* Reply preview images — smaller so they don't break layout */
 .reply .thumb {
   max-width: 80px;
   max-height: 80px;
@@ -764,12 +768,15 @@ main {
 
 .media-expanded {
   display: block;
-  max-width: min(100%, 560px);
-  max-height: 560px;
+  max-width: min(100%, 640px);
+  max-height: 640px;
   border: 1px solid var(--border-glow);
   background: #000;
   box-shadow: 0 0 14px rgba(0,200,64,0.2);
   object-fit: contain;
+  transition: transform 0.25s ease;
+  transform-origin: center center;
+  clear: left;
 }
 
 .media-close-btn {
@@ -851,19 +858,6 @@ main {
   border-color: var(--red);
   color: var(--red);
   background: rgba(255,34,68,0.08);
-}
-
-.admin-thread-del-btn {
-  font-size: 0.72rem;
-  padding: 2px 8px;
-  border-color: #5a0000;
-  color: #ff2244;
-  letter-spacing: 0.05em;
-}
-
-.admin-thread-del-btn:hover {
-  background: rgba(255,34,68,0.12);
-  box-shadow: 0 0 8px rgba(255,34,68,0.35);
 }
 
 /* ── Notices ──────────────────────────────────────────────────────────────── */
@@ -1026,7 +1020,7 @@ main {
 
 .index-empty { color: var(--text-dim); font-style: italic; }
 
-/* ── Admin toolbar (visible bar when logged in as admin) ──────────────────── */
+/* ── Admin toolbar ────────────────────────────────────────────────────────── */
 
 .admin-toolbar {
   display: flex;
@@ -1112,7 +1106,7 @@ main {
   font-size: 1.4rem;
   font-weight: bold;
   color: var(--green);
-  font-family: var(--font-mono);
+  font-family: var(--font);
   line-height: 1;
   letter-spacing: normal;
 }
@@ -1131,7 +1125,7 @@ main {
   background: rgba(180, 30, 30, 0.18);
   border: 1px solid #c0392b;
   color: #ff6b6b;
-  font-family: var(--font-mono);
+  font-family: var(--font);
   font-size: 0.82rem;
   padding: 8px 14px;
   margin: 0 0 14px 0;
@@ -1145,12 +1139,31 @@ main {
   margin-top: 3px;
 }
 
-
-
 .admin-panel {
   max-width: 900px;
   margin: 0 auto;
 }
+
+/* ── Admin restore flash messages ────────────────────────────────────────── */
+.admin-flash {
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border-radius: 2px;
+  font-size: 0.88rem;
+  border-left: 4px solid;
+  word-break: break-word;
+}
+.admin-flash.flash-ok {
+  background: rgba(0, 255, 65, 0.08);
+  border-color: var(--green-bright, #00ff41);
+  color: var(--green-bright, #00ff41);
+}
+.admin-flash.flash-error {
+  background: rgba(255, 60, 60, 0.1);
+  border-color: #ff4040;
+  color: #ff9090;
+}
+
 
 .admin-panel h1 {
   color: var(--green-bright);
@@ -1406,7 +1419,6 @@ main {
   .reply { margin-left: 10px; }
   .catalog-grid { grid-template-columns: repeat(3, 1fr); }
   .board-cards { grid-template-columns: repeat(2, 1fr); }
-  .video-player { max-width: 100%; }
   .thumb { max-width: 120px; max-height: 120px; }
   .post-form td:first-child { display: none; }
 }
@@ -1478,7 +1490,6 @@ main {
 [data-theme="aero"] .catalog-item { border-radius: 8px; }
 
 /* ── DORFic Aero ──────────────────────────────────────────────────────────── */
-/* Torchlit underground fortress through Vista-era amber glass.               */
 [data-theme="dorfic"] {
   color-scheme: dark;
   --bg:           #1c1610;
@@ -1545,7 +1556,6 @@ main {
 [data-theme="dorfic"] .board-card { box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
 
 /* ── FluoroGrid ───────────────────────────────────────────────────────────── */
-/* Softened: muted teal borders, dusty lavender panels, plum accents.        */
 [data-theme="fluorogrid"] {
   color-scheme: light;
   --bg:           #e8f8ef;
@@ -1736,20 +1746,7 @@ main {
   display: inline-block;
 }
 
-/* ── Thread ID badge ──────────────────────────────────────────────────────── */
-
-.thread-id-badge {
-  display: inline-block;
-  margin-left: 12px;
-  padding: 1px 8px;
-  border: 1px solid var(--green-dim);
-  color: var(--green-pale);
-  font-size: 0.75rem;
-  letter-spacing: 0.05em;
-  vertical-align: middle;
-}
-
-.thread-id-badge strong { color: var(--green-bright); }
+/* ── Thread ID link ───────────────────────────────────────────────────────── */
 
 .thread-id-link {
   font-size: 0.72rem;
@@ -1758,53 +1755,6 @@ main {
 }
 
 .thread-id-link:hover { color: var(--green-bright); }
-
-/* ── Enhanced media: expanded image rotation + resize ─────────────────────── */
-
-.media-expanded {
-  display: block;
-  max-width: min(100%, 640px);
-  max-height: 640px;
-  border: 1px solid var(--border-glow);
-  background: #000;
-  box-shadow: 0 0 14px rgba(0,200,64,0.2);
-  object-fit: contain;
-  /* smooth rotation */
-  transition: transform 0.25s ease;
-  transform-origin: center center;
-  /* ensure the post-body text wraps below when image is wide */
-  clear: left;
-}
-
-.media-rotate-btn {
-  display: inline-flex;
-  align-items: center;
-  margin-left: 6px;
-  padding: 2px 8px;
-  background: rgba(0,200,64,0.1);
-  border: 1px solid var(--green-dim);
-  color: var(--green-pale);
-  font-family: var(--font);
-  font-size: 0.82rem;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-  vertical-align: middle;
-}
-
-.media-rotate-btn:hover {
-  background: rgba(0,200,64,0.22);
-  color: var(--green-bright);
-}
-
-/* Post layout: file-container floats left; post-body flows alongside.
-   The .op/.reply containers use flow-root (existing) to contain the float.
-   Text naturally wraps below the image once the image width is exceeded.
-   The clear:both on .post-controls / .thread-footer ensures they sit below. */
-
-.file-container {
-  /* Keep original float - text wraps around image naturally */
-  max-width: 100%;
-}
 
 /* ── Markup / post body enhancements ──────────────────────────────────────── */
 
@@ -1825,12 +1775,12 @@ main {
   color: var(--green-pale);
 }
 
-/* Collapsible greentext block */
-.quote-block {
+/* Collapsible greentext block — sanitize.rs emits <details class="greentext-block"> */
+details.greentext-block {
   margin: 2px 0;
 }
 
-.quote-toggle {
+details.greentext-block > summary {
   color: var(--green-dim);
   font-size: 0.8rem;
   cursor: pointer;
@@ -1843,8 +1793,8 @@ main {
   user-select: none;
 }
 
-.quote-toggle:hover { color: var(--green-bright); border-color: var(--green-dim); }
-.quote-block[open] .quote-toggle { color: var(--green-pale); }
+details.greentext-block > summary:hover { color: var(--green-bright); border-color: var(--green-dim); }
+details.greentext-block[open] > summary { color: var(--green-pale); }
 
 /* Cross-board links */
 .crosslink {
@@ -1855,8 +1805,6 @@ main {
 .crosslink:hover { color: #ffd060; text-shadow: 0 0 6px rgba(255,179,0,0.5); }
 
 /* ── Video embed unfurl widget ──────────────────────────────────────────────── */
-/* The JS buildEmbed() creates a .file-container.video-embed-container div      */
-/* with the same .file-info / .media-preview / .thumb structure as webm posts.  */
 
 .embed-placeholder-thumb {
   display: flex;
@@ -1879,7 +1827,6 @@ main {
   background: #000;
 }
 
-/* YouTube/embed thumbnails on board index and catalog */
 .embed-index-thumb {
   max-width: 150px;
   max-height: 150px;
@@ -1890,7 +1837,8 @@ main {
   object-fit: cover;
 }
 
-/* Markup hint bar */
+/* ── Markup hint bar ──────────────────────────────────────────────────────── */
+
 .markup-hint {
   display: flex;
   flex-wrap: wrap;
@@ -1944,7 +1892,6 @@ main {
 .poll-open   { border-color: var(--green-dim); color: var(--green-pale); }
 .poll-closed { border-color: var(--gray);      color: var(--gray-light); }
 
-/* Vote form */
 .poll-vote-form {
   display: flex;
   flex-direction: column;
@@ -1988,7 +1935,6 @@ main {
   color: var(--green-bright);
 }
 
-/* Results */
 .poll-results { display: flex; flex-direction: column; gap: 6px; }
 
 .poll-option-result {
@@ -2042,7 +1988,6 @@ main {
   padding-top: 4px;
 }
 
-/* Poll creator (in new thread form) */
 .poll-creator {
   margin-top: 6px;
 }
@@ -2164,14 +2109,14 @@ main {
 
 .poll-add-btn:hover { border-color: var(--border-glow); color: var(--green-bright); }
 
-/* ── Audio combo (secondary audio player in image+audio posts) ────────────── */
+/* ── Audio combo ──────────────────────────────────────────────────────────── */
 .audio-combo {
   margin-top: 4px;
   border-top: 1px dashed var(--border);
   padding-top: 4px;
 }
 
-/* ── Admin IP history link (shown next to admin-del button on each post) ───── */
+/* ── Admin IP history link ────────────────────────────────────────────────── */
 .admin-ip-link {
   margin-left: 0.6rem;
   font-size: 0.78rem;
@@ -2184,7 +2129,7 @@ main {
   border-bottom-color: var(--green-bright);
 }
 
-/* ── Post sage checkbox ──────────────────────────────────────────────────────── */
+/* ── Post sage checkbox ──────────────────────────────────────────────────── */
 .sage-label {
   display: inline-flex;
   align-items: center;
@@ -2204,7 +2149,7 @@ main {
   opacity: 0.7;
 }
 
-/* ── Post edited badge ───────────────────────────────────────────────────────── */
+/* ── Post edited badge ───────────────────────────────────────────────────── */
 .post-edited {
   font-size: 0.7rem;
   color: var(--text-dim);
@@ -2213,7 +2158,7 @@ main {
   font-style: italic;
 }
 
-/* ── Edit post link (shown next to del form within 5-min window) ─────────────── */
+/* ── Edit post link ──────────────────────────────────────────────────────── */
 .edit-btn {
   margin-left: 0.6rem;
   font-size: 0.78rem;
@@ -2295,7 +2240,7 @@ main {
 }
 .compress-do-btn:hover {
   background: var(--green-bright);
-  color: var(--bg-body);
+  color: var(--bg);
   box-shadow: 0 0 8px rgba(0,200,64,0.35);
 }
 .compress-progress {
@@ -2303,7 +2248,7 @@ main {
 }
 .compress-progress-track {
   height: 6px;
-  background: var(--bg-body);
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 3px;
   overflow: hidden;
@@ -2403,10 +2348,6 @@ main {
   margin-left: 4px;
 }
 
-/* old .autoupdate-bar kept for graceful fallback */
-.autoupdate-bar { display: none; }
-
-
 /* ── Dice roll display ────────────────────────────────────────────────────── */
 .dice-roll {
   display: inline-block;
@@ -2423,12 +2364,10 @@ main {
 
 /* ── Mobile reply drawer ──────────────────────────────────────────────────── */
 
-/* FAB: floating "✏ Reply" button — only visible on mobile */
 .mobile-reply-fab {
   display: none;
 }
 
-/* Drawer: hidden off-screen on all viewports by default */
 .mobile-reply-drawer {
   display: none;
   position: fixed;
@@ -2455,7 +2394,7 @@ main {
   font-family: var(--font);
   font-size: 0.78rem;
   color: var(--text-dim, #888);
-  background: var(--bg-header, #0a0a0a);
+  background: var(--bg-panel, #0a0a0a);
   position: sticky;
   top: 0;
 }
@@ -2471,7 +2410,7 @@ main {
 .mobile-drawer-body {
   padding: 8px;
 }
-/* On mobile, hide the desktop reply form and show the FAB + drawer */
+
 @media (max-width: 767px) {
   .post-toggle-bar.reply {
     display: none;
@@ -2506,7 +2445,6 @@ main {
   .mobile-reply-drawer {
     display: block;
   }
-  /* Make forms inside the drawer compact */
   .mobile-drawer-body .post-form-container {
     border: none;
     padding: 0;
@@ -2527,12 +2465,6 @@ main {
 }
 
 /* ── Archive page ─────────────────────────────────────────────────────────── */
-.archive-heading {
-  font-size: 0.95rem;
-  color: var(--green-pale, #99cc99);
-  margin: 0 0 4px;
-  font-weight: normal;
-}
 .archive-subtext {
   font-size: 0.78rem;
   color: var(--text-dim, #666);
@@ -2577,14 +2509,14 @@ main {
   font-weight: bold;
 }
 .archive-preview {
-  color: var(--text-main, #ccc);
+  color: var(--text, #ccc);
 }
 .archive-meta {
   font-size: 0.7rem;
   color: var(--text-dim, #666);
 }
 
-/* ── Feature 1: Floating new-replies pill ─────────────────────────────────── */
+/* ── Floating new-replies pill ────────────────────────────────────────────── */
 .new-replies-pill {
   position: fixed;
   bottom: 72px;
@@ -2607,12 +2539,11 @@ main {
   transform: translateY(-2px);
   opacity: 0.92;
 }
-/* Dark-theme fallback — pill is always legible */
 [data-theme] .new-replies-pill {
   box-shadow: 0 3px 14px rgba(0,0,0,0.4);
 }
 
-/* ── Feature 2: Thread reply-count stat in nav bar ───────────────────────── */
+/* ── Thread reply-count stat ──────────────────────────────────────────────── */
 .thread-reply-stat {
   font-size: 0.77rem;
   color: var(--text-dim, #666);
@@ -2622,7 +2553,7 @@ main {
   color: var(--green-pale, #99cc99);
 }
 
-/* ── Feature 3: (You) badge ──────────────────────────────────────────────── */
+/* ── (You) badge ─────────────────────────────────────────────────────────── */
 .you-badge {
   display: inline-block;
   margin-left: 5px;

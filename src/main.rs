@@ -48,6 +48,8 @@ use middleware::AppState;
 
 // ─── Embedded static assets ───────────────────────────────────────────────────
 static STYLE_CSS: &str = include_str!("../static/style.css");
+static MAIN_JS: &str = include_str!("../static/main.js");
+static THEME_INIT_JS: &str = include_str!("../static/theme-init.js");
 
 // ─── Global terminal state ─────────────────────────────────────────────────────
 /// Total HTTP requests handled since startup.
@@ -213,9 +215,12 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
             templates::set_live_site_name(&name);
             let subtitle = db::get_site_subtitle(&conn);
             templates::set_live_site_subtitle(&subtitle);
+            // Seed the default-theme cache so the first page served already
+            // carries the correct data-default-theme attribute on <html>.
+            let default_theme = db::get_default_user_theme(&conn);
+            templates::set_live_default_theme(&default_theme);
         }
     }
-
     // ── External tool detection ────────────────────────────────────────────────
     // ffmpeg: required for video thumbnails (optional — graceful degradation).
     let ffmpeg_status = detect::detect_ffmpeg(CONFIG.require_ffmpeg);
@@ -340,9 +345,11 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/static/style.css", get(serve_css))
+        .route("/static/main.js", get(serve_main_js))
+        .route("/static/theme-init.js", get(serve_theme_init_js))
         .route("/", get(handlers::board::index))
-        .route("/{board}/", get(handlers::board::board_index))
-        .route("/{board}/", post(handlers::board::create_thread))
+        .route("/{board}", get(handlers::board::board_index))
+        .route("/{board}", post(handlers::board::create_thread))
         .route("/{board}/catalog", get(handlers::board::catalog))
         .route("/{board}/archive", get(handlers::board::board_archive))
         .route("/{board}/search", get(handlers::board::search))
@@ -438,12 +445,9 @@ fn build_router(state: AppState) -> Router {
             get(handlers::admin::admin_ip_history),
         )
         .route("/admin/backup", get(handlers::admin::admin_backup))
-        // Disable the global body-size limit for the restore endpoint so that
-        // large backup zips are accepted.  In Axum, layers added at the Router
-        // level wrap all routes, so a route-level DefaultBodyLimit::max() does
-        // NOT override the outer one — it just adds a second (inner) check.
-        // DefaultBodyLimit::disable() removes the limit entirely for this route,
-        // which is safe here because only authenticated admins reach it.
+        // Admin restore routes have no body-size cap — backups can be multi-GB
+        // and these endpoints require a valid admin session, so there is no
+        // anonymous upload risk.
         .route(
             "/admin/restore",
             post(handlers::admin::admin_restore).layer(DefaultBodyLimit::disable()),
@@ -481,6 +485,11 @@ fn build_router(state: AppState) -> Router {
         .layer(axum_middleware::from_fn(middleware::rate_limit_middleware))
         .layer(DefaultBodyLimit::max(CONFIG.max_video_size))
         .layer(axum_middleware::from_fn(track_requests))
+        // Normalize trailing slashes before routing: redirect /path/ → /path (301).
+        // Applied last (outermost) so it fires before any other middleware sees the URI.
+        .layer(axum_middleware::from_fn(
+            middleware::normalize_trailing_slash,
+        ))
         .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
             header::HeaderName::from_static("x-content-type-options"),
             header::HeaderValue::from_static("nosniff"),
@@ -493,14 +502,16 @@ fn build_router(state: AppState) -> Router {
             header::HeaderName::from_static("referrer-policy"),
             header::HeaderValue::from_static("same-origin"),
         ))
-        // CRIT-1: Add Content-Security-Policy, HSTS, and Permissions-Policy.
-        // CSP restricts script/style/image sources to self, preventing XSS
-        // from loading external payloads or exfiltrating data.
+        // FIX[NEW-H1]: 'unsafe-inline' removed from script-src.  All JavaScript
+        // has been moved to /static/main.js (loaded with 'self') and
+        // /static/theme-init.js.  Inline event handlers (onclick= etc.) have
+        // been replaced with data-* attributes handled by main.js event
+        // delegation, so no inline script execution is required.
         .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
             header::HeaderName::from_static("content-security-policy"),
             header::HeaderValue::from_static(
                 "default-src 'self'; \
-                 script-src 'self' 'unsafe-inline'; \
+                 script-src 'self'; \
                  style-src 'self' 'unsafe-inline'; \
                  img-src 'self' data: blob: https://img.youtube.com; \
                  media-src 'self' blob:; \
@@ -533,6 +544,34 @@ async fn serve_css() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         STYLE_CSS,
+    )
+}
+
+async fn serve_main_js() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        MAIN_JS,
+    )
+}
+
+async fn serve_theme_init_js() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        THEME_INIT_JS,
     )
 }
 
