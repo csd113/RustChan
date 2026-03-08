@@ -12,7 +12,7 @@ use crate::{
     handlers::{board::ensure_csrf, parse_post_multipart},
     middleware::{validate_csrf, AppState},
     utils::{
-        crypto::{hash_ip, new_deletion_token, sha256_hex},
+        crypto::{hash_ip, new_deletion_token, sha256_hex, verify_pow},
         files::save_upload,
         sanitize::{
             apply_word_filters, escape_html, render_post_body, validate_body,
@@ -119,6 +119,7 @@ pub async fn post_reply(
     let name_val = form.name;
     let del_token_val = form.deletion_token;
     let form_sage = form.sage;
+    let pow_nonce = form.pow_nonce; // FIX[NEW-C1]: needed for per-reply PoW check
 
     let board_short_err = board_short.clone();
     let client_ip_err = client_ip.clone(); // CRIT-2: keep for the error re-render path below
@@ -151,6 +152,15 @@ pub async fn post_reply(
                         reason
                     }
                 )));
+            }
+
+            // FIX[NEW-C1]: PoW CAPTCHA check for replies, mirroring create_thread().
+            // Previously this check was absent, allowing bots to bypass CAPTCHA on
+            // captcha-protected boards by posting replies instead of new threads.
+            if board.allow_captcha && !verify_pow(&board_short, &pow_nonce) {
+                return Err(AppError::BadRequest(
+                    "CAPTCHA verification failed. Please wait for the solver to complete before posting.".into()
+                ));
             }
 
             let filters: Vec<(String, String)> = db::get_word_filters(&conn)?

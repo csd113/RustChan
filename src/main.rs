@@ -438,15 +438,13 @@ fn build_router(state: AppState) -> Router {
             get(handlers::admin::admin_ip_history),
         )
         .route("/admin/backup", get(handlers::admin::admin_backup))
-        // Disable the global body-size limit for the restore endpoint so that
-        // large backup zips are accepted.  In Axum, layers added at the Router
-        // level wrap all routes, so a route-level DefaultBodyLimit::max() does
-        // NOT override the outer one — it just adds a second (inner) check.
-        // DefaultBodyLimit::disable() removes the limit entirely for this route,
-        // which is safe here because only authenticated admins reach it.
+        // FIX[NEW-H2]: Cap restore upload at 512 MiB instead of disabling the
+        // body-size limit entirely.  The previous DefaultBodyLimit::disable() let
+        // a multi-GB upload exhaust process memory and crash the server.  512 MiB
+        // is generous for any realistic backup zip while bounding OOM exposure.
         .route(
             "/admin/restore",
-            post(handlers::admin::admin_restore).layer(DefaultBodyLimit::disable()),
+            post(handlers::admin::admin_restore).layer(DefaultBodyLimit::max(512 * 1024 * 1024)),
         )
         .route(
             "/admin/board/backup/{board}",
@@ -454,7 +452,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route(
             "/admin/board/restore",
-            post(handlers::admin::board_restore).layer(DefaultBodyLimit::disable()),
+            post(handlers::admin::board_restore).layer(DefaultBodyLimit::max(512 * 1024 * 1024)),
         )
         // ── Disk-based backup management routes ──────────────────────────────
         .route(
@@ -493,14 +491,16 @@ fn build_router(state: AppState) -> Router {
             header::HeaderName::from_static("referrer-policy"),
             header::HeaderValue::from_static("same-origin"),
         ))
-        // CRIT-1: Add Content-Security-Policy, HSTS, and Permissions-Policy.
-        // CSP restricts script/style/image sources to self, preventing XSS
-        // from loading external payloads or exfiltrating data.
+        // FIX[NEW-H1]: 'unsafe-inline' removed from script-src.  All JavaScript
+        // has been moved to /static/main.js (loaded with 'self') and
+        // /static/theme-init.js.  Inline event handlers (onclick= etc.) have
+        // been replaced with data-* attributes handled by main.js event
+        // delegation, so no inline script execution is required.
         .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
             header::HeaderName::from_static("content-security-policy"),
             header::HeaderValue::from_static(
                 "default-src 'self'; \
-                 script-src 'self' 'unsafe-inline'; \
+                 script-src 'self'; \
                  style-src 'self' 'unsafe-inline'; \
                  img-src 'self' data: blob: https://img.youtube.com; \
                  media-src 'self' blob:; \
