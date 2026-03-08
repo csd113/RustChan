@@ -4,19 +4,36 @@ All notable changes to RustChan will be documented in this file.
 
 ---
 
-## [1.0.11] — 2026-03-06
+## [1.0.12] — 2026-03-07
+
+### 🔄 Changed
+- **Template module split** — the 2,736-line monolithic template file has been reorganized into five focused modules with no changes to the public API (all existing handler code works without modification):
+  - `mod.rs` (392 lines) — shared infrastructure: site name/subtitle statics, base layout, pagination, timestamp formatting, utility helpers
+  - `board.rs` (697 lines) — home page, board index, catalog, search, and archive rendering
+  - `thread.rs` (738 lines) — thread view, post rendering, polls, and post edit form
+  - `admin.rs` (760 lines) — login page, admin panel, mod log, VACUUM results, IP history
+  - `forms.rs` (198 lines) — new thread and reply forms, shared across board and thread pages
 
 ### 🔒 Security Fixes
-
-**High**
-- **Removed inline JavaScript** — all inline `<script>` blocks and `onclick`/`onchange`/`onsubmit` attributes have been extracted into external `.js` files. The Content Security Policy now uses `script-src 'self'` with no `unsafe-inline`, closing a major XSS surface.
-- **Backup upload size cap** — the restore endpoints previously accepted uploads of unlimited size, risking out-of-memory crashes. Both full and board restore routes are now capped at 512 MiB.
-- **Removed inline JavaScript** — all inline `<script>` blocks and `onclick`/`onchange`/`onsubmit` attributes have been extracted into external `.js` files. The Content Security Policy now uses `script-src 'self'` with no `unsafe-inline`, closing a major XSS surface.
-- **Backup upload size cap** — the restore endpoints previously accepted uploads of unlimited size, risking out-of-memory crashes. Both full and board restore routes are now capped at 512 MiB.
 
 **Critical**
 - **PoW bypass on replies** — proof-of-work verification was only enforced on new threads but not on replies. Replies now require a valid PoW nonce when the board has CAPTCHA enabled.
 - **PoW nonce replay** — the same proof-of-work solution could be submitted repeatedly. Used nonces are now tracked in memory and rejected within their 5-minute validity window. Stale entries are automatically pruned.
+
+**High**
+- **Removed inline JavaScript** — all inline `<script>` blocks and `onclick`/`onchange`/`onsubmit` attributes have been extracted into external `.js` files. The Content Security Policy now uses `script-src 'self'` with no `unsafe-inline`, closing a major XSS surface.
+- **Backup upload size cap** — the restore endpoints previously accepted uploads of unlimited size, risking out-of-memory crashes. Both full and board restore routes are now capped at 512 MiB.
+
+### 🐛 Fixes
+- **Trailing slash 404s** — several routes returned 404 when accessed with or without a trailing slash (board index, catalog, archive, thread pages, post editing). Added middleware to normalize trailing slashes so all URL variations resolve correctly. Bookmarks and manually typed URLs now work as expected.
+
+---
+
+## [1.0.11] — 2026-03-06
+
+### 🔒 Security Fixes
+
+**Critical**
 - Added security headers (CSP, HSTS, Permissions-Policy) to block XSS and enforce HTTPS
 - Fixed IP detection behind reverse proxies — bans and rate limits now actually work with nginx
 - Added rate limiting to all read-only pages (60 req/min) to prevent denial-of-service
