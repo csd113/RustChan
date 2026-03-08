@@ -1638,6 +1638,12 @@ pub fn catalog_page(
         ));
     }
 
+    let nav_archive = if board.allow_archive {
+        format!(r#"<a class="board-nav-link" href="/{bs}/archive">[Archive]</a>"#)
+    } else {
+        String::new()
+    };
+
     body.push_str(&format!(
         r#"<div class="board-header catalog-header-row">
   <div class="catalog-header-left board-catalog-header">
@@ -1654,6 +1660,7 @@ pub fn catalog_page(
     </select>
   </div>
 </div>
+<div class="board-nav"><a class="board-nav-link" href="/{bs}/">[Index]</a><a class="board-nav-link active" href="/{bs}/catalog">[Catalog]</a>{nav_archive}</div>
 <div class="post-toggle-bar centered catalog-toggle-bar">
   <button class="post-toggle-btn" data-action="toggle-post-form">[ Start a New Thread ]</button>
 </div>
@@ -1664,6 +1671,7 @@ pub fn catalog_page(
         bs = bs,
         bn = bn,
         desc = escape_html(&board.description),
+        nav_archive = nav_archive,
         form = new_thread_form(&board.short_name, csrf_token, board),
     ));
 
