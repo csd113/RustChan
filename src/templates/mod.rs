@@ -173,7 +173,7 @@ pub(super) fn embed_thumb_from_body(body: &str) -> Option<String> {
         let clean = token.trim_end_matches(['.', ',', ')', ';', '\'']);
         if let Some((embed_type, id)) = crate::utils::sanitize::extract_video_embed(clean) {
             if embed_type == "youtube" {
-                return Some(format!("https://img.youtube.com/vi/{}/mqdefault.jpg", id));
+                return Some(format!("https://img.youtube.com/vi/{}/hqdefault.jpg", id));
             }
         }
     }

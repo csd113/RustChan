@@ -1078,6 +1078,156 @@ document.addEventListener('submit', function (e) {
   }
 });
 
+// ─── YouTube / Streamable embed unfurling ────────────────────────────────────
+// FIX[YT-EMBED]: The previous approach placed buildEmbed() inside an inline
+// <script> block in the Rust thread template.  Inline scripts are blocked by
+// the page's CSP (`script-src 'self'` with no `'unsafe-inline'`), so thumbnails
+// and inline playback were completely broken.
+//
+// The fix:
+//   • The Rust template now emits a hidden <div id="thread-config"> element
+//     carrying board-specific values as data-* attributes (embed-enabled,
+//     draft-key).  No inline script is needed.
+//   • buildEmbed() and the draft-autosave logic live here in main.js (loaded
+//     via <script src="…" defer>, which the CSP allows).
+//
+// Supported YouTube URL formats handled by the Rust backend (sanitize.rs):
+//   https://youtube.com/watch?v=VIDEOID
+//   https://www.youtube.com/watch?v=VIDEOID
+//   https://youtu.be/VIDEOID
+//   https://youtube.com/shorts/VIDEOID
+//   Any of the above with extra query params (&t=, &feature=, etc.)
+//
+// Thumbnail source : https://img.youtube.com/vi/VIDEOID/hqdefault.jpg
+// Embed player     : https://www.youtube.com/embed/VIDEOID  (inline, no redirect)
+
+(function () {
+  var cfg = document.getElementById('thread-config');
+  if (!cfg) return;                          // not a thread page
+  if (cfg.dataset.embedEnabled !== '1') return; // embeds disabled for this board
+
+  function buildEmbed(span) {
+    var type = span.getAttribute('data-embed-type');
+    var id   = span.getAttribute('data-embed-id');
+    var url  = span.getAttribute('data-url') || span.textContent.trim();
+    if (!type || !id) return;
+
+    // Validate: only allow known embed types to prevent arbitrary iframe injection
+    if (type !== 'youtube' && type !== 'streamable') return;
+
+    // Validate YouTube ID format: 11 alphanumeric / dash / underscore chars
+    if (type === 'youtube' && !/^[A-Za-z0-9_-]{11}$/.test(id)) return;
+
+    // ── outer container: matches .file-container webm layout ─────────────
+    var container = document.createElement('div');
+    container.className = 'file-container video-embed-container';
+
+    // ── file-info row (link + close button) ───────────────────────────────
+    var info = document.createElement('div');
+    info.className = 'file-info';
+    var a = document.createElement('a');
+    a.href = url; a.rel = 'nofollow noopener'; a.target = '_blank';
+    a.textContent = url;
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'media-close-btn';
+    closeBtn.innerHTML = '&#x2715; close';
+    closeBtn.style.display = 'none';
+    closeBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      collapseVideoEmbed(closeBtn);
+    });
+    info.appendChild(a);
+    info.appendChild(closeBtn);
+    container.appendChild(info);
+
+    // ── thumbnail preview (styled like webm .media-preview) ───────────────
+    var preview = document.createElement('div');
+    preview.className = 'media-preview';
+    preview.title = 'click to play';
+
+    if (type === 'youtube') {
+      var img = document.createElement('img');
+      img.className = 'thumb';
+      img.loading = 'lazy';
+      img.alt = 'video thumbnail';
+      // hqdefault (480×360) gives a larger, higher-quality thumbnail than
+      // mqdefault (320×180) and is reliably available for all YouTube videos.
+      img.src = 'https://img.youtube.com/vi/' + id + '/hqdefault.jpg';
+      preview.appendChild(img);
+    } else if (type === 'streamable') {
+      var ph = document.createElement('div');
+      ph.className = 'thumb embed-placeholder-thumb';
+      ph.innerHTML = '&#9654; streamable';
+      preview.appendChild(ph);
+    }
+
+    var overlay = document.createElement('div');
+    overlay.className = 'media-expand-overlay';
+    overlay.innerHTML = '&#9654;';
+    preview.appendChild(overlay);
+
+    preview.addEventListener('click', function () {
+      expandVideoEmbed(preview, type, id, container);
+    });
+    container.appendChild(preview);
+
+    // ── move container before the post-body; remove span from body text ───
+    var postBody = span.closest('.post-body');
+    if (postBody && postBody.parentNode) {
+      span.remove();
+      postBody.parentNode.insertBefore(container, postBody);
+    } else {
+      span.replaceWith(container);
+    }
+  }
+
+  function applyEmbeds(root) {
+    root.querySelectorAll('span.video-unfurl[data-embed-type]').forEach(buildEmbed);
+  }
+
+  applyEmbeds(document);
+
+  // Wire into the thread auto-update hook so new replies also get embeds
+  var _origEmbed = window._onNewPostsInserted;
+  window._onNewPostsInserted = function (container) {
+    if (_origEmbed) _origEmbed(container);
+    applyEmbeds(container);
+  };
+})();
+
+// ─── Draft autosave ───────────────────────────────────────────────────────────
+// FIX[YT-EMBED]: Moved from inline <script> in thread.rs (was CSP-blocked) to
+// here.  The draft key is now read from data-draft-key on #thread-config.
+
+(function () {
+  var cfg = document.getElementById('thread-config');
+  if (!cfg) return;
+  var DRAFT_KEY = cfg.dataset.draftKey;
+  if (!DRAFT_KEY) return;
+
+  var ta = document.getElementById('reply-body');
+  if (!ta) return;
+
+  // Restore saved draft on page load
+  try {
+    var saved = localStorage.getItem(DRAFT_KEY);
+    if (saved) { ta.value = saved; }
+  } catch (e) {}
+
+  // Autosave every 3 seconds while the user types
+  setInterval(function () {
+    try { localStorage.setItem(DRAFT_KEY, ta.value); } catch (e) {}
+  }, 3000);
+
+  // Clear draft when the reply form is submitted
+  var form = ta.closest('form');
+  if (form) {
+    form.addEventListener('submit', function () {
+      try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+    });
+  }
+})();
+
 // ─── Report modal backdrop click ──────────────────────────────────────────────
 document.addEventListener('click', function (e) {
   var modal = document.getElementById('report-modal');

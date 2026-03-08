@@ -182,139 +182,27 @@ pub fn thread_page(
         // FIX[NEW-H1]: adminBanDelete moved to /static/main.js
     }
 
-    // FIX[NEW-H1]: Cross-board quotelink script moved to /static/main.js.
-    // NOTE: The video-embed and draft-autosave scripts below remain inline intentionally —
-    // the embed script injects the board-specific `EMBED_ENABLED` flag, and the draft
-    // script injects the per-thread `DRAFT_KEY`. Both require server-side state that
-    // cannot be expressed in a purely static file.
+    // FIX[YT-EMBED]: The previous approach used inline <script> blocks to inject
+    // board-specific values (EMBED_ENABLED, DRAFT_KEY) at render time.  Inline
+    // scripts are blocked by the CSP `script-src 'self'` directive (which
+    // deliberately omits 'unsafe-inline'), so neither buildEmbed nor the draft
+    // autosave ever executed in the browser — breaking YouTube thumbnail display
+    // and inline playback entirely.
+    //
+    // The fix: pass the board-specific values as data-* attributes on a small
+    // config element and let the static main.js read them.  No inline script
+    // execution is required, the CSP remains unchanged, and embeds work again.
 
-    // ── Video embed unfurling (opt-in per board) ────────────────────────────
-    let embed_enabled = if board.allow_video_embeds {
-        "true"
-    } else {
-        "false"
-    };
-    body.push_str(&format!(
-        r#"<script>
-(function() {{
-  var EMBED_ENABLED = {embed_enabled};
-  if (!EMBED_ENABLED) return;
-
-  function buildEmbed(span) {{
-    var type = span.getAttribute('data-embed-type');
-    var id   = span.getAttribute('data-embed-id');
-    var url  = span.getAttribute('data-url') || span.textContent.trim();
-    if (!type || !id) return;
-
-    // ── outer container: matches .file-container webm layout ─────────────
-    var container = document.createElement('div');
-    container.className = 'file-container video-embed-container';
-
-    // ── file-info row (link + close button) ───────────────────────────────
-    var info = document.createElement('div');
-    info.className = 'file-info';
-    var a = document.createElement('a');
-    a.href = url; a.rel = 'nofollow noopener'; a.target = '_blank';
-    a.textContent = url;
-    var closeBtn = document.createElement('button');
-    closeBtn.className = 'media-close-btn';
-    closeBtn.innerHTML = '&#x2715; close';
-    closeBtn.style.display = 'none';
-    closeBtn.addEventListener('click', function(e) {{
-      e.stopPropagation();
-      collapseVideoEmbed(closeBtn);
-    }});
-    info.appendChild(a);
-    info.appendChild(closeBtn);
-    container.appendChild(info);
-
-    // ── thumbnail preview (styled like webm .media-preview) ───────────────
-    var preview = document.createElement('div');
-    preview.className = 'media-preview';
-    preview.title = 'click to play';
-
-    if (type === 'youtube') {{
-      var img = document.createElement('img');
-      img.className = 'thumb';
-      img.loading = 'lazy';
-      img.alt = 'video thumbnail';
-      // Use mqdefault (320×180) — reliable across all videos, no black bars
-      img.src = 'https://img.youtube.com/vi/' + id + '/mqdefault.jpg';
-      preview.appendChild(img);
-    }} else if (type === 'streamable') {{
-      var ph = document.createElement('div');
-      ph.className = 'thumb embed-placeholder-thumb';
-      ph.innerHTML = '&#9654; streamable';
-      preview.appendChild(ph);
-    }}
-
-    var overlay = document.createElement('div');
-    overlay.className = 'media-expand-overlay';
-    overlay.innerHTML = '&#9654;';
-    preview.appendChild(overlay);
-
-    preview.addEventListener('click', function() {{
-      expandVideoEmbed(preview, type, id, container);
-    }});
-    container.appendChild(preview);
-
-    // ── move container before the post-body, remove span from body text ───
-    var postBody = span.closest('.post-body');
-    if (postBody && postBody.parentNode) {{
-      span.remove();
-      postBody.parentNode.insertBefore(container, postBody);
-    }} else {{
-      span.replaceWith(container);
-    }}
-  }}
-
-  function applyEmbeds(root) {{
-    root.querySelectorAll('span.video-unfurl[data-embed-type]').forEach(buildEmbed);
-  }}
-
-  applyEmbeds(document);
-
-  var _origEmbed = window._onNewPostsInserted;
-  window._onNewPostsInserted = function(container) {{
-    if (_origEmbed) _origEmbed(container);
-    applyEmbeds(container);
-  }};
-}})();
-</script>"#,
-        embed_enabled = embed_enabled
-    ));
-
-    // Draft autosave
+    // ── Video embed + draft autosave config (data attributes only) ─────────
+    let embed_enabled_attr = if board.allow_video_embeds { "1" } else { "0" };
     let draft_key = format!("rustchan_draft_{}_{}", board.short_name, thread.id);
-    let draft_key_debug = format!("{:?}", draft_key);
     body.push_str(&format!(
-        r#"<script>
-(function() {{
-  var DRAFT_KEY = {key};
-  var ta = document.getElementById('reply-body');
-  if (!ta) return;
-
-  // Restore draft on load
-  try {{
-    var saved = localStorage.getItem(DRAFT_KEY);
-    if (saved) {{ ta.value = saved; }}
-  }} catch(e) {{}}
-
-  // Autosave every 3 seconds
-  setInterval(function() {{
-    try {{ localStorage.setItem(DRAFT_KEY, ta.value); }} catch(e) {{}}
-  }}, 3000);
-
-  // Clear draft when the reply form is submitted
-  var form = ta.closest('form');
-  if (form) {{
-    form.addEventListener('submit', function() {{
-      try {{ localStorage.removeItem(DRAFT_KEY); }} catch(e) {{}}
-    }});
-  }}
-}})();
-</script>"#,
-        key = draft_key_debug,
+        r#"<div id="thread-config"
+     data-embed-enabled="{embed_enabled}"
+     data-draft-key="{draft_key}"
+     style="display:none" aria-hidden="true"></div>"#,
+        embed_enabled = embed_enabled_attr,
+        draft_key = escape_html(&draft_key),
     ));
 
     base_layout(
