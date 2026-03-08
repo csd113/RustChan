@@ -1144,6 +1144,27 @@ main {
   margin: 0 auto;
 }
 
+/* ── Admin restore flash messages ────────────────────────────────────────── */
+.admin-flash {
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border-radius: 2px;
+  font-size: 0.88rem;
+  border-left: 4px solid;
+  word-break: break-word;
+}
+.admin-flash.flash-ok {
+  background: rgba(0, 255, 65, 0.08);
+  border-color: var(--green-bright, #00ff41);
+  color: var(--green-bright, #00ff41);
+}
+.admin-flash.flash-error {
+  background: rgba(255, 60, 60, 0.1);
+  border-color: #ff4040;
+  color: #ff9090;
+}
+
+
 .admin-panel h1 {
   color: var(--green-bright);
   font-size: 1.1rem;

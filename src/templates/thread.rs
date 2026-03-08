@@ -64,6 +64,7 @@ pub fn thread_page(
 <input type="hidden" name="board" value="{board}">
 <button type="submit" class="admin-toolbar-btn">{lock_lbl}</button>
 </form>
+{archive_btn}
 <form method="POST" action="/admin/thread/delete" style="display:inline">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="hidden" name="thread_id" value="{tid}">
@@ -84,6 +85,26 @@ pub fn thread_page(
             sticky_lbl = sticky_action.1,
             lock_act = lock_action.0,
             lock_lbl = lock_action.1,
+            // Show "Archive Thread" only when the thread is not already archived.
+            archive_btn = if !thread.archived {
+                format!(
+                    r#"<form method="POST" action="/admin/thread/action" style="display:inline">
+<input type="hidden" name="_csrf" value="{csrf}">
+<input type="hidden" name="thread_id" value="{tid}">
+<input type="hidden" name="action" value="archive">
+<input type="hidden" name="board" value="{board}">
+<button type="submit" class="admin-toolbar-btn"
+        data-confirm="Archive this thread? It will be locked and moved to the board archive.">
+  &#128451; Archive Thread
+</button>
+</form>"#,
+                    csrf = escape_html(csrf_token),
+                    tid = thread.id,
+                    board = escape_html(&board.short_name),
+                )
+            } else {
+                String::new()
+            },
         ));
     }
 

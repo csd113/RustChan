@@ -188,16 +188,15 @@ pub fn set_thread_locked(conn: &rusqlite::Connection, thread_id: i64, locked: bo
     Ok(())
 }
 
-/// Move a thread to (or out of) the board archive.
-/// Archiving also locks the thread so no new replies can be posted.
-pub fn set_thread_archived(
-    conn: &rusqlite::Connection,
-    thread_id: i64,
-    archived: bool,
-) -> Result<()> {
+/// Manually archive a single thread.
+///
+/// Sets `archived = 1` and `locked = 1` exactly as the automatic overflow
+/// archiver (`archive_old_threads`) does, so the thread remains readable via
+/// the board archive but no longer accepts new replies.
+pub fn set_thread_archived(conn: &rusqlite::Connection, thread_id: i64) -> Result<()> {
     conn.execute(
-        "UPDATE threads SET archived = ?1, locked = ?1 WHERE id = ?2",
-        params![archived as i32, thread_id],
+        "UPDATE threads SET archived = 1, locked = 1 WHERE id = ?1",
+        params![thread_id],
     )?;
     Ok(())
 }

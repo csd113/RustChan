@@ -38,6 +38,11 @@ static LIVE_SITE_NAME: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(CONFIG.fo
 static LIVE_SITE_SUBTITLE: Lazy<RwLock<String>> =
     Lazy::new(|| RwLock::new("select board to proceed".to_string()));
 
+/// In-memory cache for the admin-configured default theme (empty = terminal).
+/// Updated immediately when admin saves site settings so pages reflect the
+/// change without requiring a server restart or extra DB round-trip per request.
+static LIVE_DEFAULT_THEME: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
+
 /// Call this at startup (after first DB read) and after admin saves a new name.
 pub fn set_live_site_name(name: &str) {
     if let Ok(mut guard) = LIVE_SITE_NAME.write() {
@@ -57,6 +62,22 @@ pub fn set_live_site_subtitle(subtitle: &str) {
             subtitle.to_string()
         };
     }
+}
+
+/// Update the in-memory default theme cache.
+/// Pass an empty string to reset to "terminal" (the built-in default).
+pub fn set_live_default_theme(theme: &str) {
+    if let Ok(mut guard) = LIVE_DEFAULT_THEME.write() {
+        *guard = theme.to_string();
+    }
+}
+
+/// Read the current live default theme slug.
+pub(super) fn live_default_theme() -> String {
+    LIVE_DEFAULT_THEME
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default()
 }
 
 /// Read the current live site name.
@@ -173,7 +194,7 @@ pub(super) fn embed_thumb_from_body(body: &str) -> Option<String> {
         let clean = token.trim_end_matches(['.', ',', ')', ';', '\'']);
         if let Some((embed_type, id)) = crate::utils::sanitize::extract_video_embed(clean) {
             if embed_type == "youtube" {
-                return Some(format!("https://img.youtube.com/vi/{}/hqdefault.jpg", id));
+                return Some(format!("https://img.youtube.com/vi/{}/mqdefault.jpg", id));
             }
         }
     }
@@ -266,9 +287,19 @@ pub(super) fn base_layout(
         String::new()
     };
 
+    let default_theme = live_default_theme();
+    // Only inject the attribute when a non-default theme is configured — no
+    // attribute means "terminal" (the built-in default), matching the
+    // client-side behaviour in theme-init.js.
+    let default_theme_attr = if !default_theme.is_empty() && default_theme != "terminal" {
+        format!(r#" data-default-theme="{}""#, escape_html(&default_theme))
+    } else {
+        String::new()
+    };
+
     format!(
         r#"<!DOCTYPE html>
-<html lang="en">
+<html lang="en"{default_theme_attr}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -325,6 +356,7 @@ pub(super) fn base_layout(
         forum_name = escape_html(&live_site_name()),
         body = body,
         csrf_token = escape_html(csrf_token),
+        default_theme_attr = default_theme_attr,
         collapse_attr = if collapse_greentext {
             " data-collapse-greentext=\"1\""
         } else {
@@ -336,14 +368,21 @@ pub(super) fn base_layout(
 // ─── Standalone error/ban pages (no board context) ────────────────────────────
 
 pub fn ban_page(reason: &str) -> String {
+    let default_theme = live_default_theme();
+    let default_theme_attr = if !default_theme.is_empty() && default_theme != "terminal" {
+        format!(r#" data-default-theme="{}""#, escape_html(&default_theme))
+    } else {
+        String::new()
+    };
     format!(
         r#"<!DOCTYPE html>
-<html lang="en">
+<html lang="en"{default_theme_attr}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>You Are Banned</title>
 <link rel="stylesheet" href="/static/style.css">
+<script src="/static/theme-init.js"></script>
 </head>
 <body>
 <div class="page-box error-page">
@@ -362,19 +401,27 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
 </div>
 </body>
 </html>"#,
+        default_theme_attr = default_theme_attr,
         reason = escape_html(reason),
     )
 }
 
 pub fn error_page(code: u16, message: &str) -> String {
+    let default_theme = live_default_theme();
+    let default_theme_attr = if !default_theme.is_empty() && default_theme != "terminal" {
+        format!(r#" data-default-theme="{}""#, escape_html(&default_theme))
+    } else {
+        String::new()
+    };
     format!(
         r#"<!DOCTYPE html>
-<html lang="en">
+<html lang="en"{default_theme_attr}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Error {code}</title>
 <link rel="stylesheet" href="/static/style.css">
+<script src="/static/theme-init.js"></script>
 </head>
 <body>
 <div class="page-box error-page">
@@ -384,6 +431,7 @@ pub fn error_page(code: u16, message: &str) -> String {
 </div>
 </body>
 </html>"#,
+        default_theme_attr = default_theme_attr,
         code = code,
         message = escape_html(message),
     )

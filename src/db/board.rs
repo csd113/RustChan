@@ -195,8 +195,8 @@ pub async fn create_thread(
     let poll_options = form.poll_options;
     let poll_duration = form.poll_duration_secs;
     let pow_nonce = form.pow_nonce;
-
-    // Extract admin session before spawn_blocking (cookie jar is !Send).
+    // Extract admin session before spawn_blocking so we can skip the per-board
+    // cooldown for admins (the cookie value is !Send and can't cross the boundary).
     let admin_session_id = jar.get("chan_admin_session").map(|c| c.value().to_string());
 
     let board_short_err = board_short.clone();
@@ -219,22 +219,11 @@ pub async fn create_thread(
                 )));
             }
 
-            // Verify admin session — admins bypass both global and per-board rate limits.
+            // Per-board post cooldown — skipped for verified admin sessions.
             let is_admin = admin_session_id
                 .as_deref()
                 .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
                 .unwrap_or(false);
-
-            // Global POST rate limit — checked inline so the error renders on the
-            // board page rather than sending the user to a standalone 429 page.
-            // Admins are fully exempt from this limit on all boards.
-            if !is_admin && crate::middleware::check_post_rate_limit(&client_ip) {
-                return Err(AppError::BadRequest(
-                    "You are posting too fast. Please wait a moment before posting again.".into(),
-                ));
-            }
-
-            // Per-board post cooldown — skipped for verified admin sessions.
             if board.post_cooldown_secs > 0 && !is_admin {
                 let elapsed = db::get_seconds_since_last_post(&conn, board.id, &ip_hash)?;
                 if let Some(secs) = elapsed {

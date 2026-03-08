@@ -215,9 +215,12 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
             templates::set_live_site_name(&name);
             let subtitle = db::get_site_subtitle(&conn);
             templates::set_live_site_subtitle(&subtitle);
+            // Seed the default-theme cache so the first page served already
+            // carries the correct data-default-theme attribute on <html>.
+            let default_theme = db::get_default_user_theme(&conn);
+            templates::set_live_default_theme(&default_theme);
         }
     }
-
     // ── External tool detection ────────────────────────────────────────────────
     // ffmpeg: required for video thumbnails (optional — graceful degradation).
     let ffmpeg_status = detect::detect_ffmpeg(CONFIG.require_ffmpeg);
@@ -442,13 +445,12 @@ fn build_router(state: AppState) -> Router {
             get(handlers::admin::admin_ip_history),
         )
         .route("/admin/backup", get(handlers::admin::admin_backup))
-        // FIX[NEW-H2]: Cap restore upload at 512 MiB instead of disabling the
-        // body-size limit entirely.  The previous DefaultBodyLimit::disable() let
-        // a multi-GB upload exhaust process memory and crash the server.  512 MiB
-        // is generous for any realistic backup zip while bounding OOM exposure.
+        // Admin restore routes have no body-size cap — backups can be multi-GB
+        // and these endpoints require a valid admin session, so there is no
+        // anonymous upload risk.
         .route(
             "/admin/restore",
-            post(handlers::admin::admin_restore).layer(DefaultBodyLimit::max(512 * 1024 * 1024)),
+            post(handlers::admin::admin_restore).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/admin/board/backup/{board}",
@@ -456,7 +458,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route(
             "/admin/board/restore",
-            post(handlers::admin::board_restore).layer(DefaultBodyLimit::max(512 * 1024 * 1024)),
+            post(handlers::admin::board_restore).layer(DefaultBodyLimit::disable()),
         )
         // ── Disk-based backup management routes ──────────────────────────────
         .route(

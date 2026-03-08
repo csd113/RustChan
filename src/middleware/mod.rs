@@ -64,13 +64,17 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Rate limit middleware — applied to ALL routes (GET and POST).
-/// POST requests use the tighter `rate_limit_posts` limit.
+/// Rate limit middleware — applied to GET requests only.
+///
+/// POST rate limiting is intentionally handled inside the individual posting
+/// handlers (`create_thread`, `post_reply`) so that rate-limit errors can be
+/// rendered inline on the board/thread page rather than redirecting the user
+/// to a standalone 429 error page.  Admins are exempt at the handler level too.
+///
 /// GET requests use the looser `rate_limit_gets` limit (CRIT-3: catalog/search DoS).
 pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
-    let is_post = req.method() == axum::http::Method::POST;
-    // Only rate-limit POST and GET; skip HEAD/OPTIONS/etc.
-    if !is_post && req.method() != axum::http::Method::GET {
+    // Only rate-limit GET; skip POST and all other methods.
+    if req.method() != axum::http::Method::GET {
         return next.run(req).await;
     }
 
@@ -80,17 +84,12 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(ip.as_bytes());
-        // Use method as a namespace so GET and POST buckets are independent.
-        h.update(if is_post { b"P" } else { b"G" });
+        h.update(b"G");
         hex::encode(h.finalize())
     };
     let now = now_secs();
     let window = CONFIG.rate_limit_window;
-    let limit = if is_post {
-        CONFIG.rate_limit_posts
-    } else {
-        CONFIG.rate_limit_gets
-    };
+    let limit = CONFIG.rate_limit_gets;
 
     // Check and update rate limit counter
     let blocked = {
@@ -129,6 +128,41 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     }
 
     next.run(req).await
+}
+
+/// Check (and update) the per-IP POST rate limit for the given raw IP string.
+///
+/// Called directly from posting handlers (`create_thread`, `post_reply`) so
+/// that rate-limit errors can be returned as `BadRequest` and rendered inline
+/// on the board/thread page, rather than forcing the user to a standalone
+/// 429 error page.
+///
+/// Returns `true` when the caller should be blocked (too many posts in the
+/// current window), `false` when within limits.  Admin sessions must check
+/// this function and skip it when `is_admin` is true.
+pub fn check_post_rate_limit(ip: &str) -> bool {
+    let ip_key = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(ip.as_bytes());
+        h.update(b"P");
+        hex::encode(h.finalize())
+    };
+    let now = now_secs();
+    let window = CONFIG.rate_limit_window;
+    let limit = CONFIG.rate_limit_posts;
+
+    let mut entry = RATE_TABLE.entry(ip_key).or_insert((0, now));
+    let (count, window_start) = entry.value_mut();
+
+    if now.saturating_sub(*window_start) > window {
+        *count = 1;
+        *window_start = now;
+        false
+    } else {
+        *count += 1;
+        *count > limit
+    }
 }
 
 /// Extract client IP, respecting proxy headers when configured.

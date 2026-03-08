@@ -120,6 +120,9 @@ pub async fn post_reply(
     let del_token_val = form.deletion_token;
     let form_sage = form.sage;
     let pow_nonce = form.pow_nonce; // FIX[NEW-C1]: needed for per-reply PoW check
+                                    // Extract admin session before spawn_blocking so we can skip the per-board
+                                    // cooldown for admins (the cookie value is !Send and can't cross the boundary).
+    let admin_session_id = jar.get("chan_admin_session").map(|c| c.value().to_string());
 
     let board_short_err = board_short.clone();
     let client_ip_err = client_ip.clone(); // CRIT-2: keep for the error re-render path below
@@ -154,8 +157,22 @@ pub async fn post_reply(
                 )));
             }
 
-            // Per-board post cooldown
-            if board.post_cooldown_secs > 0 {
+            // Per-board post cooldown — skipped for verified admin sessions.
+            let is_admin = admin_session_id
+                .as_deref()
+                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
+                .unwrap_or(false);
+
+            // Global POST rate limit — checked inline so the error renders on the
+            // thread page rather than sending the user to a standalone 429 page.
+            // Admins are fully exempt from this limit on all boards.
+            if !is_admin && crate::middleware::check_post_rate_limit(&client_ip) {
+                return Err(AppError::BadRequest(
+                    "You are posting too fast. Please wait a moment before posting again.".into(),
+                ));
+            }
+
+            if board.post_cooldown_secs > 0 && !is_admin {
                 let elapsed = db::get_seconds_since_last_post(&conn, board.id, &ip_hash)?;
                 if let Some(secs) = elapsed {
                     let remaining = board.post_cooldown_secs - secs;

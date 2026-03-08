@@ -55,6 +55,9 @@ pub fn admin_panel_page(
     site_name: &str,
     site_subtitle: &str,
     tor_address: Option<&str>,
+    // Optional one-time flash message shown at the top of the panel.
+    // (is_error, message) — is_error=true → red, false → green.
+    flash: Option<(bool, &str)>,
 ) -> String {
     let mut board_cards = String::new();
     for b in boards {
@@ -355,8 +358,21 @@ pub fn admin_panel_page(
         ));
     }
 
+    let flash_html = match flash {
+        Some((is_error, msg)) => {
+            let cls = if is_error { "flash-error" } else { "flash-ok" };
+            format!(
+                r#"<div class="admin-flash {cls}">{msg}</div>"#,
+                cls = cls,
+                msg = escape_html(msg),
+            )
+        }
+        None => String::new(),
+    };
+
     let body = format!(
         r#"<div class="admin-panel">
+{flash}
 <h1>[ admin panel ]</h1>
 <form method="POST" action="/admin/logout">
 <input type="hidden" name="_csrf" value="{csrf}">
@@ -480,9 +496,9 @@ pub fn admin_panel_page(
 <div style="margin-top:0.5rem;margin-bottom:0.75rem">
 <form method="POST" action="/admin/board/restore" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
 <input type="hidden" name="_csrf" value="{csrf}">
-<input type="file" name="backup_file" accept=".zip" required style="color:var(--text)">
+<input type="file" name="backup_file" accept=".zip,.json" required style="color:var(--text)">
 <button type="submit" class="btn-danger"
-        data-confirm="WARNING: This will wipe and replace the board from the backup zip. Other boards are unaffected. Continue?">&#8635; restore board from local file</button>
+        data-confirm="WARNING: This will wipe and replace the board from the backup. Other boards are unaffected. Continue?">&#8635; restore board from local file</button>
 </form>
 </div>
 <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
@@ -508,6 +524,7 @@ pub fn admin_panel_page(
 {tor_section}
 </div>"#,
         csrf = escape_html(csrf_token),
+        flash = flash_html,
         board_cards = board_cards,
         ban_rows = ban_rows,
         filter_rows = filter_rows,

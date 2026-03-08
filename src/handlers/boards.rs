@@ -73,14 +73,6 @@ pub fn get_site_subtitle(conn: &rusqlite::Connection) -> String {
         .unwrap_or_else(|| "select board to proceed".to_string())
 }
 
-/// Convenience: read the admin-configured default UI theme (empty = "terminal").
-pub fn get_default_user_theme(conn: &rusqlite::Connection) -> String {
-    get_site_setting(conn, "default_theme")
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-}
-
 /// Convenience: read the collapsible-greentext toggle (default: false).
 pub fn get_collapse_greentext(conn: &rusqlite::Connection) -> bool {
     get_site_setting(conn, "collapse_greentext")
@@ -88,6 +80,19 @@ pub fn get_collapse_greentext(conn: &rusqlite::Connection) -> bool {
         .flatten()
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// Return the admin-configured default theme for new visitors.
+///
+/// Returns an empty string when no default has been set (falls back to
+/// "terminal", the built-in default).  The value is validated against the
+/// known theme list before being stored, so any non-empty value returned here
+/// is always a valid theme slug.
+pub fn get_default_user_theme(conn: &rusqlite::Connection) -> String {
+    get_site_setting(conn, "default_user_theme")
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 // ─── Board queries ────────────────────────────────────────────────────────────
