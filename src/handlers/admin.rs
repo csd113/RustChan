@@ -2193,8 +2193,9 @@ pub async fn download_backup(
     };
 
     let path = backup_dir.join(&safe_filename);
-    let bytes =
-        std::fs::read(&path).map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
 
     use axum::http::header;
     let disposition = format!("attachment; filename=\"{}\"", safe_filename);

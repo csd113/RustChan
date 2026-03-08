@@ -230,7 +230,7 @@ pub async fn create_thread(
             if board.post_cooldown_secs > 0 && !is_admin {
                 let elapsed = db::get_seconds_since_last_post(&conn, board.id, &ip_hash)?;
                 if let Some(secs) = elapsed {
-                    let remaining = board.post_cooldown_secs - secs;
+                    let remaining = board.post_cooldown_secs.saturating_sub(secs);
                     if remaining > 0 {
                         return Err(AppError::BadRequest(format!(
                             "Please wait {} more second{} before posting again.",
