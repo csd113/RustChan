@@ -88,6 +88,11 @@ pub fn admin_panel_page(
     Edit window (s)<input type="number" name="edit_window_secs" value="{edit_win}" min="0" max="86400">
   </label>
 </div>
+<div class="board-settings-grid" style="margin-top:0.4rem;">
+  <label title="Minimum seconds a user must wait between posts on this board. 0 = no cooldown.">
+    Post cooldown (s)<input type="number" name="post_cooldown_secs" value="{cooldown}" min="0" max="3600">
+  </label>
+</div>
 <div class="board-settings-actions">
   <button type="submit">save settings</button>
 </div>
@@ -119,6 +124,7 @@ pub fn admin_panel_page(
             maxt = b.max_threads,
             edit_win = b.edit_window_secs,
             edit_win_display = if b.allow_editing { "" } else { "display:none" },
+            cooldown = b.post_cooldown_secs,
             nsfw_ck = checked(b.nsfw),
             img_ck = checked(b.allow_images),
             vid_ck = checked(b.allow_video),

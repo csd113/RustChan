@@ -1806,6 +1806,15 @@ main {
   max-width: 100%;
 }
 
+/* When media is expanded, clear the float so the full-size image/video
+   stacks above the post text instead of widening the float and shoving
+   the text off to the right. */
+.file-container.media-is-expanded {
+  float: none;
+  clear: both;
+  margin-right: 0;
+}
+
 /* ── Markup / post body enhancements ──────────────────────────────────────── */
 
 /* Spoiler text */

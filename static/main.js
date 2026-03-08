@@ -63,8 +63,34 @@ function expandMedia(preview) {
   preview.style.display = 'none';
   expanded.style.display = 'block';
   closeBtn.style.display = 'inline-flex';
+  // Stop floating so expanded media stacks above post text instead of
+  // widening the float and shoving text off to the right.
+  container.classList.add('media-is-expanded');
   if (expanded.tagName === 'VIDEO') {
     expanded.play().catch(function () {});
+  }
+  // Wire click-on-expanded to collapse back to thumbnail (once per element).
+  if (!expanded.dataset.collapseWired) {
+    expanded.dataset.collapseWired = '1';
+    if (expanded.tagName === 'IMG') {
+      // Clicking the full-size image collapses it.
+      expanded.style.cursor = 'zoom-out';
+      expanded.addEventListener('click', function () {
+        var btn = expanded.closest('.file-container').querySelector('.media-close-btn');
+        if (btn) collapseMedia(btn);
+      });
+    } else if (expanded.tagName === 'VIDEO') {
+      // Clicking the video *outside* the native controls bar collapses it.
+      // The controls bar is roughly the bottom 40px of the element.
+      expanded.addEventListener('click', function (e) {
+        var rect = expanded.getBoundingClientRect();
+        var controlsHeight = 40;
+        if (e.clientY < rect.bottom - controlsHeight) {
+          var btn = expanded.closest('.file-container').querySelector('.media-close-btn');
+          if (btn) collapseMedia(btn);
+        }
+      });
+    }
   }
 }
 
@@ -79,6 +105,8 @@ function collapseMedia(btn) {
   expanded.style.display = 'none';
   expanded.style.maxWidth = '';
   expanded.style.maxHeight = '';
+  // Restore float so thumbnail sits beside post text again.
+  container.classList.remove('media-is-expanded');
   preview.style.display = 'block';
   btn.style.display = 'none';
 }

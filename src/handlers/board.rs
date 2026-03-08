@@ -216,6 +216,21 @@ pub async fn create_thread(
                 )));
             }
 
+            // Per-board post cooldown
+            if board.post_cooldown_secs > 0 {
+                let elapsed = db::get_seconds_since_last_post(&conn, board.id, &ip_hash)?;
+                if let Some(secs) = elapsed {
+                    let remaining = board.post_cooldown_secs - secs;
+                    if remaining > 0 {
+                        return Err(AppError::BadRequest(format!(
+                            "Please wait {} more second{} before posting again.",
+                            remaining,
+                            if remaining == 1 { "" } else { "s" }
+                        )));
+                    }
+                }
+            }
+
             // PoW CAPTCHA — verified only when the board has it enabled
             if board.allow_captcha && !verify_pow(&board_short, &pow_nonce) {
                 return Err(AppError::BadRequest(

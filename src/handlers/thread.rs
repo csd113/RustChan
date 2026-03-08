@@ -154,6 +154,21 @@ pub async fn post_reply(
                 )));
             }
 
+            // Per-board post cooldown
+            if board.post_cooldown_secs > 0 {
+                let elapsed = db::get_seconds_since_last_post(&conn, board.id, &ip_hash)?;
+                if let Some(secs) = elapsed {
+                    let remaining = board.post_cooldown_secs - secs;
+                    if remaining > 0 {
+                        return Err(AppError::BadRequest(format!(
+                            "Please wait {} more second{} before posting again.",
+                            remaining,
+                            if remaining == 1 { "" } else { "s" }
+                        )));
+                    }
+                }
+            }
+
             // FIX[NEW-C1]: PoW CAPTCHA check for replies, mirroring create_thread().
             // Previously this check was absent, allowing bots to bypass CAPTCHA on
             // captcha-protected boards by posting replies instead of new threads.

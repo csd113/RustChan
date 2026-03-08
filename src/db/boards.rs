@@ -27,7 +27,8 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         allow_archive: row.get::<_, i32>(13)? != 0,
         allow_video_embeds: row.get::<_, i32>(14)? != 0,
         allow_captcha: row.get::<_, i32>(15)? != 0,
-        created_at: row.get(16)?,
+        post_cooldown_secs: row.get(16)?,
+        created_at: row.get(17)?,
     })
 }
 
@@ -87,7 +88,8 @@ pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                allow_editing, allow_archive, allow_video_embeds, allow_captcha, created_at
+                allow_editing, allow_archive, allow_video_embeds, allow_captcha,
+                post_cooldown_secs, created_at
          FROM boards ORDER BY id ASC",
     )?;
     let boards = stmt
@@ -120,7 +122,8 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                allow_editing, allow_archive, allow_video_embeds, allow_captcha, created_at
+                allow_editing, allow_archive, allow_video_embeds, allow_captcha,
+                post_cooldown_secs, created_at
          FROM boards WHERE short_name = ?1",
     )?;
     Ok(stmt.query_row(params![short], map_board).optional()?)
@@ -200,14 +203,15 @@ pub fn update_board_settings(
     allow_archive: bool,
     allow_video_embeds: bool,
     allow_captcha: bool,
+    post_cooldown_secs: i64,
 ) -> Result<()> {
     conn.execute(
         "UPDATE boards SET name=?1, description=?2, nsfw=?3,
          bump_limit=?4, max_threads=?5,
          allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
          edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-         allow_video_embeds=?13, allow_captcha=?14
-         WHERE id=?15",
+         allow_video_embeds=?13, allow_captcha=?14, post_cooldown_secs=?15
+         WHERE id=?16",
         params![
             name,
             description,
@@ -223,10 +227,30 @@ pub fn update_board_settings(
             allow_archive as i32,
             allow_video_embeds as i32,
             allow_captcha as i32,
+            post_cooldown_secs,
             id,
         ],
     )?;
     Ok(())
+}
+
+/// Returns how many seconds have elapsed since `ip_hash` last posted on `board_id`.
+/// Returns None if they have never posted on this board.
+pub fn get_seconds_since_last_post(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    ip_hash: &str,
+) -> Result<Option<i64>> {
+    let result = conn
+        .query_row(
+            "SELECT unixepoch() - MAX(created_at) FROM posts
+             WHERE board_id = ?1 AND ip_hash = ?2",
+            params![board_id, ip_hash],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(result)
 }
 
 pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>> {
@@ -245,15 +269,9 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>>
 
     let mut candidates = Vec::new();
     for (f, t, a) in rows {
-        if let Some(p) = f {
-            candidates.push(p);
-        }
-        if let Some(p) = t {
-            candidates.push(p);
-        }
-        if let Some(p) = a {
-            candidates.push(p);
-        }
+        if let Some(p) = f { candidates.push(p); }
+        if let Some(p) = t { candidates.push(p); }
+        if let Some(p) = a { candidates.push(p); }
     }
 
     // Cascade deletes threads, posts, polls, etc.
@@ -274,18 +292,15 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
 
     let total_images: i64 = conn.query_row(
         "SELECT COUNT(*) FROM posts WHERE media_type = 'image'",
-        [],
-        |r| r.get(0),
+        [], |r| r.get(0),
     )?;
     let total_videos: i64 = conn.query_row(
         "SELECT COUNT(*) FROM posts WHERE media_type = 'video'",
-        [],
-        |r| r.get(0),
+        [], |r| r.get(0),
     )?;
     let total_audio: i64 = conn.query_row(
         "SELECT COUNT(*) FROM posts WHERE media_type = 'audio'",
-        [],
-        |r| r.get(0),
+        [], |r| r.get(0),
     )?;
     let active_bytes: i64 = conn.query_row(
         "SELECT COALESCE(SUM(file_size), 0) FROM posts WHERE file_path IS NOT NULL AND file_size IS NOT NULL",

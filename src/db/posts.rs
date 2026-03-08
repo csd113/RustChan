@@ -192,15 +192,9 @@ pub fn get_post_on_board(
 pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<String>> {
     let mut candidates = Vec::new();
     if let Some(post) = get_post(conn, post_id)? {
-        if let Some(p) = post.file_path {
-            candidates.push(p);
-        }
-        if let Some(p) = post.thumb_path {
-            candidates.push(p);
-        }
-        if let Some(p) = post.audio_file_path {
-            candidates.push(p);
-        }
+        if let Some(p) = post.file_path  { candidates.push(p); }
+        if let Some(p) = post.thumb_path { candidates.push(p); }
+        if let Some(p) = post.audio_file_path { candidates.push(p); }
     }
     conn.execute("DELETE FROM posts WHERE id = ?1", params![post_id])?;
     Ok(super::paths_safe_to_delete(conn, candidates))
@@ -241,11 +235,7 @@ pub fn edit_post(
     new_body_html: &str,
     edit_window_secs: i64,
 ) -> Result<bool> {
-    let window = if edit_window_secs <= 0 {
-        300
-    } else {
-        edit_window_secs
-    };
+    let window = if edit_window_secs <= 0 { 300 } else { edit_window_secs };
 
     if !verify_deletion_token(conn, post_id, token)? {
         return Ok(false);

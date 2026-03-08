@@ -79,8 +79,9 @@ pub struct Board {
     pub edit_window_secs: i64, // seconds users can edit their posts (0 = use board default 300)
     pub allow_archive: bool,   // when true, overflow threads are archived instead of deleted
     pub allow_video_embeds: bool, // per-board inline video embed unfurling (YouTube/Invidious/Streamable)
-    pub allow_captcha: bool,      // per-board PoW CAPTCHA on new threads only (hashcash-style)
-    pub created_at: i64,          // Unix timestamp
+    pub allow_captcha: bool,       // per-board PoW CAPTCHA on new threads only (hashcash-style)
+    pub post_cooldown_secs: i64,   // seconds a user must wait between posts (0 = disabled)
+    pub created_at: i64,           // Unix timestamp
 }
 
 /// A thread (the OP post + its replies share this record for metadata)

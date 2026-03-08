@@ -189,22 +189,14 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
     let mut stmt = conn
         .prepare("SELECT file_path, thumb_path, audio_file_path FROM posts WHERE thread_id = ?1")?;
     let rows: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
-        .query_map(params![thread_id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?
+        .query_map(params![thread_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
 
     let mut candidates = Vec::new();
     for (f, t, a) in rows {
-        if let Some(p) = f {
-            candidates.push(p);
-        }
-        if let Some(p) = t {
-            candidates.push(p);
-        }
-        if let Some(p) = a {
-            candidates.push(p);
-        }
+        if let Some(p) = f { candidates.push(p); }
+        if let Some(p) = t { candidates.push(p); }
+        if let Some(p) = a { candidates.push(p); }
     }
 
     conn.execute("DELETE FROM threads WHERE id = ?1", params![thread_id])?;
@@ -217,15 +209,18 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
 /// Archived threads are locked and marked read-only instead of deleted, so their
 /// content remains accessible via /{board}/archive.
 /// Returns the count of threads archived (no file deletion occurs).
-pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -> Result<usize> {
+pub fn archive_old_threads(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    max: i64,
+) -> Result<usize> {
     let ids: Vec<i64> = {
         let mut stmt = conn.prepare(
             "SELECT id FROM threads
              WHERE board_id = ?1 AND sticky = 0 AND archived = 0
              ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
         )?;
-        let ids = stmt
-            .query_map(params![board_id, max], |r| r.get(0))?
+        let ids = stmt.query_map(params![board_id, max], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         ids
     };
@@ -256,8 +251,7 @@ pub fn prune_old_threads(
              WHERE board_id = ?1 AND sticky = 0 AND archived = 0
              ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
         )?;
-        let ids = stmt
-            .query_map(params![board_id, max], |r| r.get(0))?
+        let ids = stmt.query_map(params![board_id, max], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         ids
     };
@@ -271,15 +265,9 @@ pub fn prune_old_threads(
             .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
         for (f, t, a) in rows {
-            if let Some(p) = f {
-                candidates.push(p);
-            }
-            if let Some(p) = t {
-                candidates.push(p);
-            }
-            if let Some(p) = a {
-                candidates.push(p);
-            }
+            if let Some(p) = f { candidates.push(p); }
+            if let Some(p) = t { candidates.push(p); }
+            if let Some(p) = a { candidates.push(p); }
         }
         conn.execute("DELETE FROM threads WHERE id = ?1", params![id])?;
     }
@@ -335,7 +323,10 @@ pub fn get_archived_threads_for_board(
 }
 
 /// Count archived threads for a board (used for archive pagination).
-pub fn count_archived_threads_for_board(conn: &rusqlite::Connection, board_id: i64) -> Result<i64> {
+pub fn count_archived_threads_for_board(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COUNT(*) FROM threads WHERE board_id = ?1 AND archived = 1",
         params![board_id],

@@ -48,6 +48,8 @@ use middleware::AppState;
 
 // ─── Embedded static assets ───────────────────────────────────────────────────
 static STYLE_CSS: &str = include_str!("../static/style.css");
+static MAIN_JS: &str = include_str!("../static/main.js");
+static THEME_INIT_JS: &str = include_str!("../static/theme-init.js");
 
 // ─── Global terminal state ─────────────────────────────────────────────────────
 /// Total HTTP requests handled since startup.
@@ -340,6 +342,8 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/static/style.css", get(serve_css))
+        .route("/static/main.js", get(serve_main_js))
+        .route("/static/theme-init.js", get(serve_theme_init_js))
         .route("/", get(handlers::board::index))
         .route("/{board}", get(handlers::board::board_index))
         .route("/{board}", post(handlers::board::create_thread))
@@ -538,6 +542,28 @@ async fn serve_css() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         STYLE_CSS,
+    )
+}
+
+async fn serve_main_js() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        MAIN_JS,
+    )
+}
+
+async fn serve_theme_init_js() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        THEME_INIT_JS,
     )
 }
 

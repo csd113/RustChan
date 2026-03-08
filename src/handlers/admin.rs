@@ -1171,6 +1171,7 @@ pub struct BoardSettingsForm {
     allow_archive: Option<String>,
     allow_video_embeds: Option<String>,
     allow_captcha: Option<String>,
+    post_cooldown_secs: Option<String>,
     _csrf: Option<String>,
 }
 
@@ -1200,6 +1201,12 @@ pub async fn update_board_settings(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(300)
         .clamp(0, 86_400); // 0 = disabled, max 24 h
+    let post_cooldown_secs = form
+        .post_cooldown_secs
+        .as_deref()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+        .clamp(0, 3_600); // 0 = disabled, max 1 hour
 
     // Enforce server-side length limits on free-text fields
     let name = form.name.trim().chars().take(64).collect::<String>();
@@ -1233,6 +1240,7 @@ pub async fn update_board_settings(
                 form.allow_archive.as_deref() == Some("1"),
                 form.allow_video_embeds.as_deref() == Some("1"),
                 form.allow_captcha.as_deref() == Some("1"),
+                post_cooldown_secs,
             )?;
             info!("Admin updated settings for board id={}", board_id);
             Ok(())
@@ -1850,7 +1858,8 @@ pub async fn create_board_backup(
                 .query_row(
                     "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                              allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                             allow_editing, allow_archive, allow_video_embeds, allow_captcha, created_at
+                             allow_editing, allow_archive, allow_video_embeds, allow_captcha,
+                             post_cooldown_secs, created_at
                       FROM boards WHERE short_name = ?1",
                     params![board_short],
                     |r| {
@@ -1871,7 +1880,8 @@ pub async fn create_board_backup(
                             allow_archive: r.get::<_, i64>(13)? != 0,
                             allow_video_embeds: r.get::<_, i64>(14)? != 0,
                             allow_captcha: r.get::<_, i64>(15)? != 0,
-                            created_at: r.get(16)?,
+                            post_cooldown_secs: r.get(16)?,
+                            created_at: r.get(17)?,
                         })
                     },
                 )
@@ -2452,8 +2462,8 @@ pub async fn restore_saved_board_backup(
                      max_threads=?4, bump_limit=?5,
                      allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
                      edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-                     allow_video_embeds=?13, allow_captcha=?14
-                     WHERE id=?15",
+                     allow_video_embeds=?13, allow_captcha=?14, post_cooldown_secs=?15
+                     WHERE id=?16",
                     params![
                         manifest.board.name,
                         manifest.board.description,
@@ -2469,6 +2479,7 @@ pub async fn restore_saved_board_backup(
                         manifest.board.allow_archive as i64,
                         manifest.board.allow_video_embeds as i64,
                         manifest.board.allow_captcha as i64,
+                        manifest.board.post_cooldown_secs,
                         eid,
                     ],
                 )
@@ -2478,8 +2489,9 @@ pub async fn restore_saved_board_backup(
                 conn.execute(
                     "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
                      bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
-                     edit_window_secs, allow_editing, allow_archive, allow_video_embeds, allow_captcha, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                     edit_window_secs, allow_editing, allow_archive, allow_video_embeds, allow_captcha,
+                     post_cooldown_secs, created_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
                     params![
                         manifest.board.short_name,
                         manifest.board.name,
@@ -2496,6 +2508,7 @@ pub async fn restore_saved_board_backup(
                         manifest.board.allow_archive as i64,
                         manifest.board.allow_video_embeds as i64,
                         manifest.board.allow_captcha as i64,
+                        manifest.board.post_cooldown_secs,
                         manifest.board.created_at,
                     ],
                 )
@@ -2718,6 +2731,9 @@ mod board_backup_types {
         /// Added in v1.0.10 — absent in older backups; default to false.
         #[serde(default)]
         pub allow_captcha: bool,
+        /// Added for per-board post cooldowns — absent in older backups; default 0 (disabled).
+        #[serde(default)]
+        pub post_cooldown_secs: i64,
         pub created_at: i64,
     }
 
@@ -2826,7 +2842,8 @@ pub async fn board_backup(
             let board: BoardRow = conn.query_row(
                 "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                         allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                        allow_editing, allow_archive, allow_video_embeds, allow_captcha, created_at
+                        allow_editing, allow_archive, allow_video_embeds, allow_captcha,
+                        post_cooldown_secs, created_at
                  FROM boards WHERE short_name = ?1",
                 params![board_short],
                 |r| Ok(BoardRow {
@@ -2846,7 +2863,8 @@ pub async fn board_backup(
                     allow_archive: r.get::<_, i64>(13)? != 0,
                     allow_video_embeds: r.get::<_, i64>(14)? != 0,
                     allow_captcha: r.get::<_, i64>(15)? != 0,
-                    created_at: r.get(16)?,
+                    post_cooldown_secs: r.get(16)?,
+                    created_at: r.get(17)?,
                 }),
             ).map_err(|_| AppError::NotFound(format!("Board '{}' not found", board_short)))?;
 
@@ -3113,8 +3131,8 @@ pub async fn board_restore(
                      max_threads=?4, bump_limit=?5,
                      allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
                      edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-                     allow_video_embeds=?13, allow_captcha=?14
-                     WHERE id=?15",
+                     allow_video_embeds=?13, allow_captcha=?14, post_cooldown_secs=?15
+                     WHERE id=?16",
                     params![
                         manifest.board.name,
                         manifest.board.description,
@@ -3130,6 +3148,7 @@ pub async fn board_restore(
                         manifest.board.allow_archive as i64,
                         manifest.board.allow_video_embeds as i64,
                         manifest.board.allow_captcha as i64,
+                        manifest.board.post_cooldown_secs,
                         eid,
                     ],
                 )
@@ -3139,8 +3158,9 @@ pub async fn board_restore(
                 conn.execute(
                     "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
                      bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
-                     edit_window_secs, allow_editing, allow_archive, allow_video_embeds, allow_captcha, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                     edit_window_secs, allow_editing, allow_archive, allow_video_embeds, allow_captcha,
+                     post_cooldown_secs, created_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
                     params![
                         manifest.board.short_name,
                         manifest.board.name,
@@ -3157,6 +3177,7 @@ pub async fn board_restore(
                         manifest.board.allow_archive as i64,
                         manifest.board.allow_video_embeds as i64,
                         manifest.board.allow_captcha as i64,
+                        manifest.board.post_cooldown_secs,
                         manifest.board.created_at,
                     ],
                 )

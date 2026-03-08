@@ -356,6 +356,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             status      TEXT NOT NULL DEFAULT 'open',
             created_at  INTEGER NOT NULL DEFAULT (unixepoch())
         )"),
+        (22, "ALTER TABLE boards ADD COLUMN post_cooldown_secs INTEGER NOT NULL DEFAULT 0"),
     ];
 
     let mut highest_applied = current_version;
