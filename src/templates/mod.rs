@@ -1805,17 +1805,14 @@ pub fn archive_page(
     let bn = escape_html(&board.name);
 
     let mut body = format!(
-        r#"<div class="board-header">
-<span class="board-title">/{bs}/  {bn}</span>
-<span class="board-desc">{desc}</span>
+        r#"<div class="board-header board-index-header"><h1>/{bs}/  — {bn}</h1><p class="board-desc">{desc}</p></div>
+<div class="board-nav">
+  <a class="board-nav-link" href="/{bs}/">[Index]</a>
+  <a class="board-nav-link" href="/{bs}/catalog">[Catalog]</a>
+  <a class="board-nav-link active" href="/{bs}/archive">[Archive]</a>
 </div>
 <div class="page-box">
-<h2 class="archive-heading">&#128190; /{bs}/ &mdash; Archive</h2>
-<p class="archive-subtext">These threads have been cycled off the board index and are read-only.
-They are preserved here permanently.</p>
-<a href="/{bs}/" class="catalog-bar-link">[ return to index ]</a>
-&nbsp;|&nbsp;
-<a href="/{bs}/catalog" class="catalog-bar-link">[ catalog ]</a>
+<p class="archive-subtext">Threads cycled off the board index — read-only, preserved permanently.</p>
 </div>"#,
         bs = bs,
         bn = bn,
