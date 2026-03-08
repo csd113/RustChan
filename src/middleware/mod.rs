@@ -3,13 +3,22 @@
 // Two middleware systems:
 //
 // Rate Limiter — In-memory sliding window per IP address.
-//   • Uses DashMap (lock-free concurrent HashMap) to track (count, window_start).
-//   • On each POST request, we check if IP has exceeded CONFIG.rate_limit_posts
-//     within the last CONFIG.rate_limit_window seconds.
-//   • Memory: ~200 bytes per IP entry. 10,000 concurrent IPs = ~2 MiB.
-//   • Resets on restart (acceptable; no persistent attack state needed).
-//   • FIX[MEDIUM-4]: cleanup now also runs on a time-based cadence to prevent
-//     unbounded growth under sustained attacks with rotating IPs.
+//   Applies ONLY to navigational GET requests (board index, catalog, thread,
+//   archive, search).  The following are unconditionally excluded and never
+//   counted against the limit:
+//     • /static/*  — CSS/JS fetched automatically on every page load.
+//     • /boards/*  — media thumbnails; one request per attachment per page.
+//     • /admin*    — admin panel; operators must never be throttled.
+//     • /api/*     — quote-hover preview calls; fired on every hover.
+//     • Any request carrying a chan_admin_session cookie.
+//   The GET limit is purely an anti-scraping / catalog-DoS safeguard.
+//
+//   POST rate limiting does NOT exist at the middleware level.
+//   The ONLY post cooldown mechanism is the per-board post_cooldown_secs
+//   setting (stored in the boards table, configurable via the admin panel).
+//   When post_cooldown_secs = 0 on a board, there is zero cooldown for
+//   posting on that board — no global override, no hidden limit.
+//   Admins bypass the per-board cooldown entirely regardless of the value.
 //
 // CSRF Protection — Double-submit cookie pattern.
 //   • On every page load (GET), we set a "csrf_token" cookie if absent.
@@ -64,17 +73,60 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Rate limit middleware — applied to GET requests only.
+/// Rate limit middleware — applied only to navigational GET requests.
 ///
 /// POST rate limiting is intentionally handled inside the individual posting
 /// handlers (`create_thread`, `post_reply`) so that rate-limit errors can be
 /// rendered inline on the board/thread page rather than redirecting the user
 /// to a standalone 429 error page.  Admins are exempt at the handler level too.
 ///
-/// GET requests use the looser `rate_limit_gets` limit (CRIT-3: catalog/search DoS).
+/// For GET requests, three categories are unconditionally excluded from the
+/// counter so that normal browsing never trips the limit:
+///
+///   • /static/*  — CSS, JS, theme-init.js; fetched automatically per page.
+///   • /boards/*  — media files and thumbnails; one per attachment on the page.
+///   • /admin/*   — admin panel routes; should never be throttled for operators.
+///
+/// Only "navigational" page routes (board index, catalog, thread, archive,
+/// search, …) are counted.  The limit is intended to mitigate automated scraping
+/// of catalog/search endpoints, not to interfere with legitimate browsing.
+///
+/// When the limit IS hit, the response is a lightweight HTML page that
+/// shows an in-page toast notification and then navigates the browser back
+/// to the previous page — matching the "inline" behaviour of the POST
+/// cooldown errors rather than stranding the user on a bare error page.
 pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
-    // Only rate-limit GET; skip POST and all other methods.
+    // Only rate-limit GET; skip POST and all other methods entirely.
     if req.method() != axum::http::Method::GET {
+        return next.run(req).await;
+    }
+
+    // Skip static assets, media files, admin routes, and API endpoints —
+    // these must never be blocked by the GET rate limiter.
+    // /static/*  — CSS, JS fetched automatically on every page load.
+    // /boards/*  — thumbnails and media files, one per attachment per page.
+    // /admin*    — admin panel; operators must never be throttled here.
+    // /api/*     — post-hover preview calls, fired on every quote-link hover.
+    let path = req.uri().path();
+    if path.starts_with("/static/")
+        || path.starts_with("/boards/")
+        || path.starts_with("/admin")
+        || path.starts_with("/api/")
+    {
+        return next.run(req).await;
+    }
+
+    // Skip if the request carries a valid-looking admin session cookie.
+    // We only check presence here (no DB round-trip in middleware); the actual
+    // session validation happens inside admin handlers.  This is sufficient
+    // for rate-limiting purposes since the cookie is HttpOnly+SameSite=Strict.
+    let has_admin_cookie = req
+        .headers()
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("chan_admin_session="))
+        .unwrap_or(false);
+    if has_admin_cookie {
         return next.run(req).await;
     }
 
@@ -108,7 +160,15 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     };
 
     if blocked {
-        return crate::error::AppError::RateLimited.into_response();
+        // Return an in-page toast rather than a bare 429 error page.
+        // The script shows a visible notification then navigates back so the
+        // user stays in context instead of landing on a dead-end error screen.
+        let html = rate_limited_toast_page();
+        return (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            axum::response::Html(html),
+        )
+            .into_response();
     }
 
     // FIX[MEDIUM-4]: Clean old entries when the table grows large OR at least
@@ -130,39 +190,83 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-/// Check (and update) the per-IP POST rate limit for the given raw IP string.
+/// Build a lightweight HTML page that shows an in-page toast notification and
+/// then navigates the browser back to where it came from.
 ///
-/// Called directly from posting handlers (`create_thread`, `post_reply`) so
-/// that rate-limit errors can be returned as `BadRequest` and rendered inline
-/// on the board/thread page, rather than forcing the user to a standalone
-/// 429 error page.
-///
-/// Returns `true` when the caller should be blocked (too many posts in the
-/// current window), `false` when within limits.  Admin sessions must check
-/// this function and skip it when `is_admin` is true.
-pub fn check_post_rate_limit(ip: &str) -> bool {
-    let ip_key = {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(ip.as_bytes());
-        h.update(b"P");
-        hex::encode(h.finalize())
-    };
-    let now = now_secs();
-    let window = CONFIG.rate_limit_window;
-    let limit = CONFIG.rate_limit_posts;
-
-    let mut entry = RATE_TABLE.entry(ip_key).or_insert((0, now));
-    let (count, window_start) = entry.value_mut();
-
-    if now.saturating_sub(*window_start) > window {
-        *count = 1;
-        *window_start = now;
-        false
-    } else {
-        *count += 1;
-        *count > limit
-    }
+/// This is returned instead of the bare `AppError::RateLimited` 429 page so
+/// that the user stays in context (they see the message overlaid on what looks
+/// like their previous page) rather than landing on a dead-end error screen.
+fn rate_limited_toast_page() -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Slow down — {forum_name}</title>
+<style>
+  body {{
+    margin: 0;
+    background: #1a1a1a;
+    font-family: sans-serif;
+  }}
+  .toast {{
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #2a2a2a;
+    border: 2px solid #c00;
+    border-radius: 8px;
+    padding: 28px 36px;
+    text-align: center;
+    color: #eee;
+    box-shadow: 0 4px 24px rgba(0,0,0,.7);
+    max-width: 380px;
+    width: 90vw;
+    z-index: 9999;
+  }}
+  .toast h2 {{
+    margin: 0 0 12px;
+    font-size: 1.2rem;
+    color: #f55;
+  }}
+  .toast p {{
+    margin: 0 0 18px;
+    font-size: 0.95rem;
+    color: #ccc;
+  }}
+  .toast .bar {{
+    height: 4px;
+    background: #c00;
+    border-radius: 2px;
+    animation: shrink 3s linear forwards;
+  }}
+  @keyframes shrink {{
+    from {{ width: 100%; }}
+    to   {{ width: 0%; }}
+  }}
+</style>
+</head>
+<body>
+<div class="toast">
+  <h2>&#9888; Slow down</h2>
+  <p>You are navigating too fast.<br>Taking you back in a moment…</p>
+  <div class="bar"></div>
+</div>
+<script>
+  // Go back as soon as the animation finishes (3 s).
+  setTimeout(function () {{
+    if (document.referrer) {{
+      window.location.href = document.referrer;
+    }} else {{
+      window.history.back();
+    }}
+  }}, 3000);
+</script>
+</body>
+</html>"#,
+        forum_name = crate::config::CONFIG.forum_name
+    )
 }
 
 /// Extract client IP, respecting proxy headers when configured.

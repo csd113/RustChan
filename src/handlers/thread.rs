@@ -157,21 +157,14 @@ pub async fn post_reply(
                 )));
             }
 
-            // Per-board post cooldown — skipped for verified admin sessions.
+            // Per-board post cooldown — the SOLE post rate control.
+            // Verify admin session first; admins bypass the cooldown entirely.
             let is_admin = admin_session_id
                 .as_deref()
                 .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
                 .unwrap_or(false);
 
-            // Global POST rate limit — checked inline so the error renders on the
-            // thread page rather than sending the user to a standalone 429 page.
-            // Admins are fully exempt from this limit on all boards.
-            if !is_admin && crate::middleware::check_post_rate_limit(&client_ip) {
-                return Err(AppError::BadRequest(
-                    "You are posting too fast. Please wait a moment before posting again.".into(),
-                ));
-            }
-
+            // post_cooldown_secs = 0 means no cooldown at all on this board.
             if board.post_cooldown_secs > 0 && !is_admin {
                 let elapsed = db::get_seconds_since_last_post(&conn, board.id, &ip_hash)?;
                 if let Some(secs) = elapsed {
