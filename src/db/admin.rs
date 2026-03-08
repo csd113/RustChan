@@ -60,10 +60,7 @@ pub fn list_admins(conn: &rusqlite::Connection) -> Result<Vec<(i64, String, i64)
 }
 
 /// Retrieve admin username by admin_id (used when building log entries).
-pub fn get_admin_name_by_id(
-    conn: &rusqlite::Connection,
-    admin_id: i64,
-) -> Result<Option<String>> {
+pub fn get_admin_name_by_id(conn: &rusqlite::Connection, admin_id: i64) -> Result<Option<String>> {
     Ok(conn
         .query_row(
             "SELECT username FROM admin_users WHERE id = ?1",
@@ -88,10 +85,7 @@ pub fn create_session(
     Ok(())
 }
 
-pub fn get_session(
-    conn: &rusqlite::Connection,
-    session_id: &str,
-) -> Result<Option<AdminSession>> {
+pub fn get_session(conn: &rusqlite::Connection, session_id: &str) -> Result<Option<AdminSession>> {
     let now = chrono::Utc::now().timestamp();
     let mut stmt = conn.prepare_cached(
         "SELECT id, admin_id, created_at, expires_at FROM admin_sessions
@@ -371,9 +365,7 @@ pub fn file_ban_appeal(conn: &rusqlite::Connection, ip_hash: &str, reason: &str)
 }
 
 /// Return all open ban appeals, newest first.
-pub fn get_open_ban_appeals(
-    conn: &rusqlite::Connection,
-) -> Result<Vec<crate::models::BanAppeal>> {
+pub fn get_open_ban_appeals(conn: &rusqlite::Connection) -> Result<Vec<crate::models::BanAppeal>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, ip_hash, reason, status, created_at
          FROM ban_appeals WHERE status = 'open'
@@ -401,11 +393,7 @@ pub fn dismiss_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64) -> Result
 }
 
 /// Dismiss appeal AND lift the ban for this ip_hash.
-pub fn accept_ban_appeal(
-    conn: &rusqlite::Connection,
-    appeal_id: i64,
-    ip_hash: &str,
-) -> Result<()> {
+pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64, ip_hash: &str) -> Result<()> {
     // Both updates must succeed together.
     let tx = conn
         .unchecked_transaction()

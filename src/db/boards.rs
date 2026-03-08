@@ -269,9 +269,15 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>>
 
     let mut candidates = Vec::new();
     for (f, t, a) in rows {
-        if let Some(p) = f { candidates.push(p); }
-        if let Some(p) = t { candidates.push(p); }
-        if let Some(p) = a { candidates.push(p); }
+        if let Some(p) = f {
+            candidates.push(p);
+        }
+        if let Some(p) = t {
+            candidates.push(p);
+        }
+        if let Some(p) = a {
+            candidates.push(p);
+        }
     }
 
     // Cascade deletes threads, posts, polls, etc.
@@ -292,15 +298,18 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
 
     let total_images: i64 = conn.query_row(
         "SELECT COUNT(*) FROM posts WHERE media_type = 'image'",
-        [], |r| r.get(0),
+        [],
+        |r| r.get(0),
     )?;
     let total_videos: i64 = conn.query_row(
         "SELECT COUNT(*) FROM posts WHERE media_type = 'video'",
-        [], |r| r.get(0),
+        [],
+        |r| r.get(0),
     )?;
     let total_audio: i64 = conn.query_row(
         "SELECT COUNT(*) FROM posts WHERE media_type = 'audio'",
-        [], |r| r.get(0),
+        [],
+        |r| r.get(0),
     )?;
     let active_bytes: i64 = conn.query_row(
         "SELECT COALESCE(SUM(file_size), 0) FROM posts WHERE file_path IS NOT NULL AND file_size IS NOT NULL",

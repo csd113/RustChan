@@ -9,8 +9,8 @@ use crate::models::*;
 use crate::utils::{files::format_file_size, sanitize::escape_html};
 
 use super::{
-    base_layout, compress_modal_script, fmt_ts, fmt_ts_short,
-    report_modal_script, thread_autoupdate_script, TOGGLE_SCRIPT,
+    base_layout, compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script,
+    thread_autoupdate_script, TOGGLE_SCRIPT,
 };
 
 // ─── Thread page ──────────────────────────────────────────────────────────────
