@@ -28,8 +28,9 @@
 use crate::config::CONFIG;
 use axum::{
     extract::Request,
+    http::Uri,
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
 };
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
@@ -204,6 +205,43 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         .zip(b.iter())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y));
     diff == 0
+}
+
+/// Trailing-slash normalization middleware.
+///
+/// Strips a trailing `/` from every path except the root `/` and issues a
+/// 301 Moved Permanently redirect.  This makes routes like
+///   /{board}/catalog/  →  /{board}/catalog
+///   /{board}/thread/5/ →  /{board}/thread/5
+///   /{board}/          →  /{board}
+/// work correctly without 404s, regardless of whether the user typed the
+/// slash, a browser added it, or an old bookmark included it.
+///
+/// Query strings are preserved across the redirect.
+pub async fn normalize_trailing_slash(req: Request, next: Next) -> Response {
+    let uri = req.uri();
+    let path = uri.path();
+
+    // Only act on paths that have a trailing slash and are not just "/".
+    if path.len() > 1 && path.ends_with('/') {
+        let stripped = path.trim_end_matches('/');
+
+        // Rebuild the URI, preserving any query string.
+        let new_path_and_query = match uri.query() {
+            Some(q) => format!("{}?{}", stripped, q),
+            None => stripped.to_string(),
+        };
+
+        // Validate the rebuilt path before redirecting.
+        if new_path_and_query.parse::<Uri>().is_ok() {
+            return Redirect::permanent(&new_path_and_query).into_response();
+        }
+
+        // If URI reconstruction failed for any reason, fall through and let
+        // the router handle the original request normally.
+    }
+
+    next.run(req).await
 }
 
 /// Proxy-aware client IP extractor for use in Axum handler signatures.

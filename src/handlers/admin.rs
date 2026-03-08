@@ -728,7 +728,7 @@ pub async fn admin_delete_post(
             // Return board_name + thread context so we can redirect back to the thread.
             // If the post was an OP, redirect to the board index (thread is gone).
             if is_op {
-                Ok(format!("/{}/", board_name))
+                Ok(format!("/{}", board_name))
             } else {
                 Ok(format!("/{}/thread/{}", board_name, thread_id))
             }
@@ -807,7 +807,7 @@ pub async fn admin_delete_thread(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to(&format!("/{}/", redirect_board)).into_response())
+    Ok(Redirect::to(&format!("/{}", redirect_board)).into_response())
 }
 
 // ─── POST /admin/ban/add ──────────────────────────────────────────────────────
@@ -1003,7 +1003,7 @@ pub async fn admin_ban_and_delete(
 
     // If OP was deleted, the thread is gone — send to board index
     let redirect = if is_op {
-        format!("/{}/", form.board)
+        format!("/{}", form.board)
     } else {
         format!("/{}/thread/{}#p{}", form.board, thread_id, post_id)
     };

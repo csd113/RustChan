@@ -159,10 +159,7 @@ pub fn mod_log_page(
             e.target_type.clone()
         };
         let board_link = if !e.board_short.is_empty() {
-            format!(
-                r#"<a href="/{s}/">{s}</a>"#,
-                s = escape_html(&e.board_short)
-            )
+            format!(r#"<a href="/{s}">{s}</a>"#, s = escape_html(&e.board_short))
         } else {
             String::new()
         };
@@ -510,7 +507,7 @@ pub fn board_page(
 <span class="admin-toolbar-label">&#9632; ADMIN</span>
 <form method="POST" action="/admin/logout" style="display:inline">
 <input type="hidden" name="_csrf" value="{csrf}">
-<input type="hidden" name="return_to" value="/{board}/">
+<input type="hidden" name="return_to" value="/{board}">
 <button type="submit" class="admin-toolbar-btn">logout</button>
 </form>
 </div>"#,
@@ -530,7 +527,7 @@ pub fn board_page(
         };
         body.push_str(&format!(
             r#"<div class="board-header board-index-header"><h1>/{short}/  — {name}</h1><p class="board-desc">{desc}</p></div>
-<div class="board-nav"><a class="board-nav-link active" href="/{short}/">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}</div>"#,
+<div class="board-nav"><a class="board-nav-link active" href="/{short}">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}</div>"#,
         ));
     }
 
@@ -555,7 +552,7 @@ pub fn board_page(
 
     body.push_str(&render_pagination(
         pagination,
-        &format!("/{}/", board.short_name),
+        &format!("/{}", board.short_name),
     ));
 
     body.push_str(TOGGLE_SCRIPT);
@@ -565,7 +562,7 @@ pub fn board_page(
     ));
 
     base_layout(
-        &format!("/{}/", board.short_name),
+        &format!("/{}", board.short_name),
         Some(&board.short_name),
         &body,
         csrf_token,
@@ -629,7 +626,7 @@ fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String
     format!(
         r#"<div class="post-form-container">
 <div class="post-form-title">[ new thread ]</div>
-<form class="post-form" method="POST" action="/{board}/" enctype="multipart/form-data">
+<form class="post-form" method="POST" action="/{board}" enctype="multipart/form-data">
   <input type="hidden" name="_csrf" value="{csrf}">
   <table>
     <tr><td>name</td>
@@ -949,7 +946,7 @@ pub fn thread_page(
     body.push_str(&format!(
         r##"<div class="thread-board-banner board-thread-header">/{s}/ — {bn}</div>
 <div class="board-header thread-nav">
-  <a href="/{s}/">[ Return ]</a>
+  <a href="/{s}">[ Return ]</a>
   <a href="/{s}/catalog">[ Catalog ]</a>
   <a href="#bottom">[ Bottom ]</a>
   <button class="thread-nav-btn" data-action="fetch-updates">[ Update ]</button>
@@ -1660,7 +1657,7 @@ pub fn catalog_page(
     </select>
   </div>
 </div>
-<div class="board-nav"><a class="board-nav-link" href="/{bs}/">[Index]</a><a class="board-nav-link active" href="/{bs}/catalog">[Catalog]</a>{nav_archive}</div>
+<div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link active" href="/{bs}/catalog">[Catalog]</a>{nav_archive}</div>
 <div class="post-toggle-bar centered catalog-toggle-bar">
   <button class="post-toggle-btn" data-action="toggle-post-form">[ Start a New Thread ]</button>
 </div>
@@ -1815,7 +1812,7 @@ pub fn archive_page(
     let mut body = format!(
         r#"<div class="board-header board-index-header"><h1>/{bs}/  — {bn}</h1><p class="board-desc">{desc}</p></div>
 <div class="board-nav">
-  <a class="board-nav-link" href="/{bs}/">[Index]</a>
+  <a class="board-nav-link" href="/{bs}">[Index]</a>
   <a class="board-nav-link" href="/{bs}/catalog">[Catalog]</a>
   <a class="board-nav-link active" href="/{bs}/archive">[Archive]</a>
 </div>

@@ -341,8 +341,8 @@ fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/static/style.css", get(serve_css))
         .route("/", get(handlers::board::index))
-        .route("/{board}/", get(handlers::board::board_index))
-        .route("/{board}/", post(handlers::board::create_thread))
+        .route("/{board}", get(handlers::board::board_index))
+        .route("/{board}", post(handlers::board::create_thread))
         .route("/{board}/catalog", get(handlers::board::catalog))
         .route("/{board}/archive", get(handlers::board::board_archive))
         .route("/{board}/search", get(handlers::board::search))
@@ -479,6 +479,11 @@ fn build_router(state: AppState) -> Router {
         .layer(axum_middleware::from_fn(middleware::rate_limit_middleware))
         .layer(DefaultBodyLimit::max(CONFIG.max_video_size))
         .layer(axum_middleware::from_fn(track_requests))
+        // Normalize trailing slashes before routing: redirect /path/ → /path (301).
+        // Applied last (outermost) so it fires before any other middleware sees the URI.
+        .layer(axum_middleware::from_fn(
+            middleware::normalize_trailing_slash,
+        ))
         .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
             header::HeaderName::from_static("x-content-type-options"),
             header::HeaderValue::from_static("nosniff"),
