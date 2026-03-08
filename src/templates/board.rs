@@ -11,8 +11,8 @@ use crate::models::*;
 use crate::utils::sanitize::escape_html;
 
 use super::{
-    base_layout, compress_modal_script, embed_thumb_from_body, fmt_ts_short, live_site_name,
-    live_site_subtitle, render_pagination, urlencoding_simple, TOGGLE_SCRIPT,
+    base_layout, compress_modal_script, embed_thumb_from_body, fmt_ts, fmt_ts_short,
+    live_site_name, live_site_subtitle, render_pagination, urlencoding_simple, TOGGLE_SCRIPT,
 };
 
 // ─── Site index (board list) ──────────────────────────────────────────────────
@@ -608,8 +608,6 @@ pub fn archive_page(
     boards: &[Board],
     collapse_greentext: bool,
 ) -> String {
-    use super::fmt_ts;
-
     let bs = escape_html(&board.short_name);
     let bn = escape_html(&board.name);
 
@@ -652,7 +650,7 @@ pub fn archive_page(
             };
             let thumb_html = if let Some(thumb) = &t.op_thumb {
                 format!(
-                    r#"<img src="/static/{}" class="archive-thumb" alt="thumb" loading="lazy">"#,
+                    r#"<img src="/boards/{}" class="archive-thumb" alt="thumb" loading="lazy">"#,
                     escape_html(thumb)
                 )
             } else {

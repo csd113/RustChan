@@ -182,7 +182,11 @@ pub fn thread_page(
         // FIX[NEW-H1]: adminBanDelete moved to /static/main.js
     }
 
-    // FIX[NEW-H1]: Cross-board quotelink + video embed + draft scripts moved to /static/main.js
+    // FIX[NEW-H1]: Cross-board quotelink script moved to /static/main.js.
+    // NOTE: The video-embed and draft-autosave scripts below remain inline intentionally —
+    // the embed script injects the board-specific `EMBED_ENABLED` flag, and the draft
+    // script injects the per-thread `DRAFT_KEY`. Both require server-side state that
+    // cannot be expressed in a purely static file.
 
     // ── Video embed unfurling (opt-in per board) ────────────────────────────
     let embed_enabled = if board.allow_video_embeds {
@@ -430,6 +434,13 @@ fn render_poll(
 /// Render a single post as HTML.
 /// `pub` because board.rs uses this for thread-summary preview posts and
 /// search results; all other call-sites are within this module.
+///
+/// # Trust boundary
+/// `post.body_html` is inserted **raw** (unescaped) because it is pre-rendered,
+/// sanitised HTML produced by the markup pipeline before storage. Every other
+/// user-supplied string in this function must continue to pass through
+/// `escape_html()`. Do not change the `body_html` insertion without ensuring
+/// the upstream sanitiser is still in place.
 pub fn render_post(
     post: &Post,
     board_short: &str,

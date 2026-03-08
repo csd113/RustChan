@@ -148,7 +148,10 @@ pub fn create_thread_with_op(
 
     match result {
         Ok(ids) => {
-            conn.execute("COMMIT", [])?;
+            if let Err(e) = conn.execute("COMMIT", []) {
+                let _ = conn.execute("ROLLBACK", []);
+                return Err(anyhow::anyhow!("Transaction commit failed: {}", e));
+            }
             Ok(ids)
         }
         Err(e) => {

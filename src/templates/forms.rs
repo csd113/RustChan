@@ -34,7 +34,6 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
     };
 
     // FIX[NEW-H1]: captcha JS block removed — logic lives in /static/main.js.
-    let captcha_js = String::new();
 
     // Secondary audio input — shown only when the board allows both images and audio.
     let audio_combo_row = if board.allow_images && board.allow_audio {
@@ -121,7 +120,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         audio_combo_row = audio_combo_row,
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
-    ) + &captcha_js
+    )
 }
 
 /// Reply form injected into thread pages.

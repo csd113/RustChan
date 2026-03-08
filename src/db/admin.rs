@@ -466,35 +466,9 @@ pub fn get_posts_by_ip_hash(
     )?;
 
     let rows = stmt.query_map(rusqlite::params![ip_hash, limit, offset], |row| {
-        let media_type_str: Option<String> = row.get(17)?;
-        let media_type = media_type_str
-            .as_deref()
-            .and_then(crate::models::MediaType::from_db_str);
-        let post = crate::models::Post {
-            id: row.get(0)?,
-            thread_id: row.get(1)?,
-            board_id: row.get(2)?,
-            name: row.get(3)?,
-            tripcode: row.get(4)?,
-            subject: row.get(5)?,
-            body: row.get(6)?,
-            body_html: row.get(7)?,
-            ip_hash: row.get(8)?,
-            file_path: row.get(9)?,
-            file_name: row.get(10)?,
-            file_size: row.get(11)?,
-            thumb_path: row.get(12)?,
-            mime_type: row.get(13)?,
-            created_at: row.get(14)?,
-            deletion_token: row.get(15)?,
-            is_op: row.get::<_, i32>(16)? != 0,
-            media_type,
-            audio_file_path: row.get(18)?,
-            audio_file_name: row.get(19)?,
-            audio_file_size: row.get(20)?,
-            audio_mime_type: row.get(21)?,
-            edited_at: row.get(22)?,
-        };
+        // map_post reads columns 0–22 (the 23 canonical post columns).
+        // Column 23 is b.short_name, appended only by this query.
+        let post = super::posts::map_post(row)?;
         let board_short: String = row.get(23)?;
         Ok((post, board_short))
     })?;
@@ -504,12 +478,17 @@ pub fn get_posts_by_ip_hash(
 
 // ─── Database maintenance ─────────────────────────────────────────────────────
 
-/// Run PRAGMA wal_checkpoint(TRUNCATE) and return (log_pages, moved_pages, busy).
+/// Run PRAGMA wal_checkpoint(TRUNCATE) and return (log_pages, checkpointed_pages, busy).
 ///
-/// SQLite's wal_checkpoint pragma returns three columns:
+/// The raw PRAGMA wal_checkpoint pragma returns three columns in this order:
 ///   col 0 — busy:         1 if a checkpoint could not complete due to an active reader/writer
 ///   col 1 — log:          total pages in the WAL file
 ///   col 2 — checkpointed: pages actually written back to the database
+///
+/// This function returns `(log_pages, checkpointed_pages, busy)` — intentionally
+/// reordered so the two informational values come first and the error flag last.
+/// This is NOT the same order as the raw PRAGMA columns; do not destructure
+/// based on PRAGMA documentation without consulting this signature.
 ///
 /// TRUNCATE mode: after a complete checkpoint, the WAL file is truncated to
 /// zero bytes, reclaiming disk space immediately.

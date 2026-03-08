@@ -170,10 +170,12 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
             deletion_token   TEXT NOT NULL,
             is_op            INTEGER NOT NULL DEFAULT 0,
+            media_type       TEXT,
             audio_file_path  TEXT,
             audio_file_name  TEXT,
             audio_file_size  INTEGER,
-            audio_mime_type  TEXT
+            audio_mime_type  TEXT,
+            edited_at        INTEGER
         );
 
         -- File deduplication table (SHA-256 hash → existing file paths)
@@ -437,8 +439,16 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 /// `pub(super)` — visible to all four sub-modules but not to external callers.
 pub(super) fn paths_safe_to_delete(
     conn: &rusqlite::Connection,
-    candidates: Vec<String>,
+    mut candidates: Vec<String>,
 ) -> Vec<String> {
+    // Deduplicate first: when multiple deleted posts share the same file via
+    // the dedup system, the same path can appear in `candidates` more than once.
+    // Without this, the returned Vec can contain duplicates — both pass the
+    // COUNT check after rows are deleted — and the caller would attempt
+    // fs::remove_file on the same path twice, producing a spurious I/O error.
+    candidates.sort_unstable();
+    candidates.dedup();
+
     candidates
         .into_iter()
         .filter(|path| {
