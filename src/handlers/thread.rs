@@ -22,6 +22,7 @@ use crate::{
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
+    http::HeaderMap,
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -35,14 +36,15 @@ pub async fn view_thread(
     Path((board_short, thread_id)): Path<(String, i64)>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
-) -> Result<(CookieJar, Html<String>)> {
+    req_headers: HeaderMap,
+) -> Result<Response> {
     let (jar, csrf) = ensure_csrf(jar);
 
-    let html = tokio::task::spawn_blocking({
+    let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
-        move || -> Result<String> {
+        move || -> Result<(String, String)> {
             let conn = pool.get()?;
 
             let is_admin = jar_session
@@ -60,16 +62,23 @@ pub async fn view_thread(
                 return Err(AppError::NotFound("Thread not found in this board.".into()));
             }
 
+            // ETag derived from the thread's last-bump timestamp AND the
+            // current board-list version.  The board version component ensures
+            // that adding or deleting a board invalidates cached thread pages,
+            // so the nav bar always reflects the current board list rather than
+            // showing stale/deleted boards until the thread receives a reply.
+            let boards_ver = crate::templates::live_boards_version();
+            let etag = format!("\"{}-b{}\"", thread.bumped_at, boards_ver);
+
             let posts = db::get_posts_for_thread(&conn, thread_id)?;
             let all_boards = db::get_all_boards(&conn)?;
 
-            // Compute ip_hash for poll vote status
             let ip_hash =
                 crate::utils::crypto::hash_ip(&client_ip, &crate::config::CONFIG.cookie_secret);
             let poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)?;
 
             let collapse_greentext = db::get_collapse_greentext(&conn);
-            Ok(crate::templates::thread_page(
+            let html = crate::templates::thread_page(
                 &board,
                 &thread,
                 &posts,
@@ -79,13 +88,38 @@ pub async fn view_thread(
                 poll.as_ref(),
                 None,
                 collapse_greentext,
-            ))
+            );
+            Ok((etag, html))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)))
+    let (etag, html) = result;
+
+    // 3.2: Return 304 Not Modified when client's cached copy is still current.
+    let client_etag = req_headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if client_etag == etag {
+        let mut resp = axum::http::Response::builder()
+            .status(axum::http::StatusCode::NOT_MODIFIED)
+            .body(axum::body::Body::empty())
+            .unwrap_or_default();
+        resp.headers_mut().insert(
+            "etag",
+            axum::http::HeaderValue::from_str(&etag)
+                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
+        );
+        return Ok((jar, resp).into_response());
+    }
+
+    let mut resp = Html(html).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
+        resp.headers_mut().insert("etag", v);
+    }
+    Ok((jar, resp).into_response())
 }
 
 // ─── POST /:board/thread/:id — post reply ────────────────────────────────────
@@ -658,10 +692,32 @@ pub async fn thread_updates(
         .await
         .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!(e)))??;
 
+    // Current board-list version + rendered nav links — lets the JS refresh
+    // the nav bar when boards are added or deleted while a thread is open,
+    // without requiring a full page reload.
+    let boards_version = crate::templates::live_boards_version();
+    let boards = crate::templates::live_boards_snapshot();
+    let nav_inner: String = boards
+        .iter()
+        .map(|b| {
+            format!(
+                r#"<a href="/{s}/catalog">{s}</a>"#,
+                s = crate::utils::sanitize::escape_html(&b.short_name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" / ");
+    let nav_html = if nav_inner.is_empty() {
+        String::new()
+    } else {
+        format!("[ {} ]", nav_inner)
+    };
+
     // Build a JSON envelope with new-post HTML plus current thread state.
-    // The client consumes the state fields to keep the nav bar in sync.
+    // boards_version / nav_html let the client keep the nav bar in sync when
+    // boards are added or deleted while the user has a thread open.
     let json = format!(
-        r#"{{"html":{html_json},"last_id":{last_id},"count":{count},"reply_count":{reply_count},"bump_time":{bump_time},"locked":{locked},"sticky":{sticky}}}"#,
+        r#"{{"html":{html_json},"last_id":{last_id},"count":{count},"reply_count":{reply_count},"bump_time":{bump_time},"locked":{locked},"sticky":{sticky},"boards_version":{boards_version},"nav_html":{nav_html_json}}}"#,
         html_json = serde_json::to_string(&html).unwrap_or_else(|_| "\"\"".to_string()),
         last_id = last_id,
         count = count,
@@ -669,6 +725,8 @@ pub async fn thread_updates(
         bump_time = bump_time,
         locked = locked,
         sticky = sticky,
+        boards_version = boards_version,
+        nav_html_json = serde_json::to_string(&nav_html).unwrap_or_else(|_| "\"\"".to_string()),
     );
 
     Ok(([(header::CONTENT_TYPE, "application/json")], json).into_response())

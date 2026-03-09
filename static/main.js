@@ -415,6 +415,9 @@ function closeReportModal() {
   var board = container.dataset.board;
   var threadId = container.dataset.threadId;
   var lastId = parseInt(container.dataset.lastId, 10) || 0;
+  // Track the board-list version last seen so we only touch the DOM when it
+  // actually changes (avoids unnecessary reflow on every poll tick).
+  var lastBoardsVersion = -1;
 
   // Floating new-replies pill
   var pill = document.createElement('div');
@@ -479,6 +482,16 @@ function closeReportModal() {
           lastId = data.last_id;
           if (window._onNewPostsInserted) window._onNewPostsInserted(container);
           showPill(data.count);
+        }
+        // Refresh nav bar if the board list changed since last poll.
+        // boards_version is a monotonic counter incremented server-side
+        // whenever a board is created, deleted, or restored.
+        if (data.boards_version !== undefined && data.boards_version !== lastBoardsVersion) {
+          lastBoardsVersion = data.boards_version;
+          if (data.nav_html !== undefined) {
+            var navEl = document.querySelector('nav.board-list');
+            if (navEl) navEl.innerHTML = data.nav_html;
+          }
         }
         setStatus('updated');
         setTimeout(function () { setStatus(''); }, 2000);
@@ -650,6 +663,25 @@ function closeReportModal() {
     _popupTarget = null;
   }
 
+  // Show an inline "post not found" notice anchored to the clicked quotelink.
+  // Reuses the existing hover popup element so the style is identical to a
+  // real post preview — no new DOM structure needed.
+  function showMissingPostPopup(link, pid) {
+    clearTimeout(_hideTimer);
+    popup.innerHTML =
+      '<div class="missing-post-notice">' +
+      '<span class="missing-post-icon">&#x2715;</span> ' +
+      '<strong>&gt;&gt;' + pid + '</strong> — post not found' +
+      '<span class="missing-post-sub">it may have been deleted</span>' +
+      '</div>';
+    popup.style.display = 'block';
+    _popupTarget = null;
+    positionPopup(link);
+    // Auto-dismiss after 3 s so the user is not left with a stale tooltip.
+    clearTimeout(_hideTimer);
+    _hideTimer = setTimeout(hidePopup, 3000);
+  }
+
   function wireQuotelinks(root) {
     root.querySelectorAll('a.quotelink[data-pid]').forEach(function (link) {
       var pid = link.getAttribute('data-pid');
@@ -657,7 +689,14 @@ function closeReportModal() {
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
       link.addEventListener('click', function (e) {
         var target = document.getElementById('p' + pid);
-        if (!target) return;
+        if (!target) {
+          // Post is not on this page (deleted or in another thread).
+          // Prevent navigation and show an inline error anchored to the link.
+          e.preventDefault();
+          e.stopPropagation();
+          showMissingPostPopup(link, pid);
+          return;
+        }
         e.preventDefault();
         var offset = target.getBoundingClientRect().top + window.pageYOffset - 60;
         window.scrollTo({ top: offset, behavior: 'smooth' });
@@ -677,7 +716,12 @@ function closeReportModal() {
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
       link.addEventListener('click', function (e) {
         var target = document.getElementById('p' + pid);
-        if (!target) return;
+        if (!target) {
+          e.preventDefault();
+          e.stopPropagation();
+          showMissingPostPopup(link, pid);
+          return;
+        }
         e.preventDefault();
         var offset = target.getBoundingClientRect().top + window.pageYOffset - 60;
         window.scrollTo({ top: offset, behavior: 'smooth' });
@@ -813,11 +857,37 @@ function closeReportModal() {
         function navigate(threadId) {
           window.location.href = '/' + board + '/thread/' + threadId + '#p' + pid;
         }
+        function showCbMissingError() {
+          var cbPopup = getCbPopup();
+          if (!cbPopup) return;
+          cbPopup.innerHTML =
+            '<div class="missing-post-notice">' +
+            '<span class="missing-post-icon">&#x2715;</span> ' +
+            '<strong>&gt;&gt;&gt;/' + board + '/' + pid + '</strong> — post not found' +
+            '<span class="missing-post-sub">it may have been deleted</span>' +
+            '</div>';
+          cbPopup.style.display = 'block';
+          positionCbPopup(link, cbPopup);
+          setTimeout(function () { if (cbPopup) cbPopup.style.display = 'none'; }, 3000);
+        }
+        // If we already know the thread ID from a prior hover-preview fetch, navigate directly.
         if (_cbCache[key] && _cbCache[key].thread_id) { navigate(_cbCache[key].thread_id); return; }
+        // If a prior fetch already confirmed the post is gone, show error inline.
+        if (_cbCache[key] && !_cbCache[key].thread_id) { showCbMissingError(); return; }
         fetch('/api/post/' + board + '/' + pid)
           .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
-          .then(function (data) { navigate(data.thread_id || 0); })
-          .catch(function () { navigate(0); });
+          .then(function (data) {
+            if (data.thread_id) {
+              navigate(data.thread_id);
+            } else {
+              // API returned success but no thread_id — post is orphaned/deleted.
+              showCbMissingError();
+            }
+          })
+          .catch(function () {
+            // 404 or network error — post is gone; show error inline.
+            showCbMissingError();
+          });
       });
     });
   }

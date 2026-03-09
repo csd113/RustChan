@@ -7,10 +7,46 @@ pub mod thread;
 // Both create_thread and post_reply parse the same multipart fields.
 // This helper consolidates that duplicated logic into one place.
 
+use crate::config::CONFIG;
 use crate::error::{AppError, Result};
 use crate::middleware::validate_csrf;
 use crate::workers::JobQueue;
 use axum::extract::Multipart;
+
+// ─── Streaming multipart size limit ──────────────────────────────────────────
+//
+// 3.1: The previous implementation called `field.bytes().await` which buffers
+// the entire file in memory before any size check, allowing a malicious client
+// to exhaust server RAM with a multi-GB upload.
+//
+// `read_field_bytes` replaces it with a streaming read that accumulates chunks
+// and aborts — returning HTTP 413 — the moment the running total exceeds the
+// configured limit.  The limit used is the largest allowed media size so that
+// any single field is capped.
+//
+// Text fields (CSRF token, post body, …) are routed through `field.text()`
+// which is bounded by axum's body length limit set in the router layer.
+
+async fn read_field_bytes(
+    mut field: axum::extract::multipart::Field<'_>,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
+        if buf.len() + chunk.len() > max_bytes {
+            return Err(AppError::UploadTooLarge(format!(
+                "File too large. Maximum upload size is {} MiB.",
+                max_bytes / 1024 / 1024
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
 
 /// Parsed fields from a post/thread creation multipart form.
 pub struct PostFormData {
@@ -112,22 +148,17 @@ pub async fn parse_post_multipart(
             }
             Some("file") => {
                 let fname = field.file_name().unwrap_or("upload").to_string();
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| AppError::BadRequest(format!("File read error: {e}")))?;
-                if !bytes.is_empty() {
-                    file = Some((bytes.to_vec(), fname));
+                let max = CONFIG.max_video_size.max(CONFIG.max_audio_size);
+                let data = read_field_bytes(field, max).await?;
+                if !data.is_empty() {
+                    file = Some((data, fname));
                 }
             }
             Some("audio_file") => {
                 let fname = field.file_name().unwrap_or("audio").to_string();
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| AppError::BadRequest(format!("Audio file read error: {e}")))?;
-                if !bytes.is_empty() {
-                    audio_file = Some((bytes.to_vec(), fname));
+                let data = read_field_bytes(field, CONFIG.max_audio_size).await?;
+                if !data.is_empty() {
+                    audio_file = Some((data, fname));
                 }
             }
             _ => {

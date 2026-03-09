@@ -676,6 +676,30 @@ main {
 .quotelink-popup .post { margin: 0; border: none; padding: 0; }
 .quotelink-popup .reply { margin: 0; border: none; }
 
+/* ── Missing-post inline notice (shown when a >>pid target was deleted) ───── */
+.missing-post-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 4px;
+  color: var(--text-dim, #888);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+.missing-post-notice strong {
+  color: var(--text, #ccc);
+}
+.missing-post-icon {
+  color: var(--red, #e05555);
+  font-style: normal;
+  margin-right: 4px;
+}
+.missing-post-sub {
+  font-size: 0.78rem;
+  color: var(--text-dim, #666);
+  margin-left: 18px;
+}
+
 /* ── Highlighted post ──────────────────────────────────────────────────────── */
 .post-highlighted {
   outline: 2px solid var(--green, #00c840) !important;

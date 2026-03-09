@@ -430,6 +430,19 @@ pub async fn admin_panel(
 
             let db_size_bytes = db::get_db_size_bytes(&conn).unwrap_or(0);
 
+            // 1.8: Compute whether the DB file size exceeds the configured
+            // warning threshold. Uses the on-disk file size (via fs::metadata)
+            // rather than SQLite's PRAGMA page_count estimate for accuracy,
+            // falling back to the pragma value if the path is unavailable.
+            let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
+                let file_size = std::fs::metadata(&CONFIG.database_path)
+                    .map(|m| m.len())
+                    .unwrap_or(db_size_bytes as u64);
+                file_size >= CONFIG.db_warn_threshold_bytes
+            } else {
+                false
+            };
+
             // Read the tor onion address from the hostname file if tor is enabled.
             let tor_address: Option<String> = if CONFIG.enable_tor_support {
                 let data_dir = std::path::PathBuf::from(&CONFIG.database_path)
@@ -456,6 +469,7 @@ pub async fn admin_panel(
                 &full_backups,
                 &board_backups_list,
                 db_size_bytes,
+                db_size_warning,
                 &reports,
                 &appeals,
                 &site_name,
@@ -527,6 +541,9 @@ pub async fn create_board(
             require_admin_session_sid(&conn, session_id.as_deref())?;
             db::create_board(&conn, &short, &name, &description, nsfw)?;
             info!("Admin created board /{}/", short);
+            // Refresh live board list so the top bar on any subsequent error
+            // page includes the newly created board.
+            crate::templates::set_live_boards(db::get_all_boards(&conn)?);
             Ok(())
         }
     })
@@ -594,6 +611,9 @@ pub async fn delete_board(
                 form.board_id,
                 paths.len()
             );
+            // Refresh live board list so the top bar immediately stops showing
+            // the deleted board — important because error pages use this cache.
+            crate::templates::set_live_boards(db::get_all_boards(&conn)?);
             Ok(())
         }
     })
@@ -1297,6 +1317,7 @@ pub async fn update_board_settings(
                 post_cooldown_secs,
             )?;
             info!("Admin updated settings for board id={}", board_id);
+            crate::templates::set_live_boards(db::get_all_boards(&conn)?);
             Ok(())
         }
     })
@@ -1726,11 +1747,15 @@ pub async fn admin_restore(
             match db::create_session(&live_conn, &fresh_sid, admin_id, expires_at) {
                 Ok(_) => {
                     info!("Admin restore completed; new session issued for admin_id={}", admin_id);
+                    // Refresh live board list — the restored DB may have
+                    // different boards than what was running before.
+                    if let Ok(boards) = db::get_all_boards(&live_conn) {
+                        crate::templates::set_live_boards(boards);
+                    }
                     Ok(fresh_sid)
                 }
                 Err(e) => {
                     warn!("Restore: could not create new session (admin_id={} may not exist in backup): {}", admin_id, e);
-                    // Return empty string as a sentinel — handler will send to login.
                     Ok(String::new())
                 }
             }
@@ -1764,9 +1789,125 @@ pub async fn admin_restore(
 // 1 KiB zip (a "zip bomb") can expand to gigabytes, exhausting disk or memory.
 // copy_limited() caps the decompressed size of each entry.
 
-/// Maximum bytes to extract from any single zip entry.
-/// Set to 16 GiB — these are admin-only restore endpoints, so individual
-/// entries (large videos, the SQLite DB) can legitimately be several GiB.
+// Maximum bytes to extract from any single zip entry.
+// Set to 16 GiB — these are admin-only restore endpoints, so individual
+// entries (large videos, the SQLite DB) can legitimately be several GiB.
+// ─── Quotelink ID remapping ───────────────────────────────────────────────────
+//
+// When a board backup is restored, posts receive new auto-incremented IDs
+// because other boards' posts already occupy the original IDs in the global
+// `posts` table.  `remap_body_quotelinks` and `remap_body_html_quotelinks`
+// rewrite the raw text and rendered HTML of each restored post so that in-board
+// quotelinks point to the new IDs instead of the now-stale original ones.
+//
+// Design constraints:
+//
+// 1. ONLY same-board links are remapped.  Cross-board references (`>>>/b/N`)
+//    point to other boards whose IDs are unchanged by this restore operation
+//    and must not be altered.
+//
+// 2. `pairs` must be sorted by old-ID string length *descending* before being
+//    passed to these functions.  This prevents a shorter ID (e.g. "10") from
+//    being substituted as a prefix of a longer one ("1000") before the longer
+//    match has a chance to fire.  Example:
+//      pairs = [("1000","2500"), ("100","800"), ("10","50"), ("1","3")]
+//    Processing "1000" before "100" prevents "1000" → "8000" (wrong first).
+//
+// 3. `body` stores the original markdown-like text the user typed.  In-board
+//    quotelinks appear as `>>{old_id}` (e.g. `>>500`).  A regex-free approach
+//    is used: for each (old, new) pair, replace `>>{old}` followed by a
+//    non-digit (or end-of-string) to avoid `>>100` matching inside `>>1000`.
+//
+// 4. `body_html` stores pre-rendered HTML.  In-board quotelinks look like:
+//      <a href="#p{N}" class="quotelink" data-pid="{N}">&gt;&gt;{N}</a>
+//    Cross-board quotelinks look like:
+//      <a href="/board/post/{N}" class="quotelink crosslink" ...>&gt;&gt;&gt;/…</a>
+//    We replace `href="#p{old}"` (exclusively in-board) and
+//    `data-pid="{old}">&gt;&gt;{old}</a>` (display text also exclusive to
+//    in-board links — cross-board display text has `&gt;&gt;&gt;/` prefix).
+
+// Rewrite in-board `>>{old_id}` references in the raw post body.
+// `pairs` must be pre-sorted by old-ID string length descending.
+fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> String {
+    // Avoid cloning when there is nothing to change.
+    if pairs.is_empty() {
+        return body.to_string();
+    }
+    let mut result = body.to_string();
+    for (old, new) in pairs {
+        // Match `>>{old}` only when NOT immediately followed by another digit,
+        // so we don't turn `>>1000` into `>>new_id_for_1000` when processing
+        // the `>>100` entry first.
+        //
+        // Implementation: scan for every occurrence of `>>{old}` in the string
+        // and check the next character.  Replace left-to-right using byte indices
+        // to avoid re-scanning already-replaced sections.
+        let needle = format!(">>{}", old);
+        let mut out = String::with_capacity(result.len());
+        let mut pos = 0;
+        let bytes = result.as_bytes();
+        while pos < bytes.len() {
+            match result[pos..].find(&needle) {
+                None => {
+                    out.push_str(&result[pos..]);
+                    break;
+                }
+                Some(rel) => {
+                    let abs = pos + rel;
+                    let after = abs + needle.len();
+                    // Only replace when the char after the match is not a digit.
+                    let next_is_digit = bytes
+                        .get(after)
+                        .map(|b| b.is_ascii_digit())
+                        .unwrap_or(false);
+                    out.push_str(&result[pos..abs]);
+                    if next_is_digit {
+                        // Not the right match — keep the original text.
+                        out.push_str(&needle);
+                    } else {
+                        out.push_str(">>");
+                        out.push_str(new);
+                    }
+                    pos = after;
+                }
+            }
+        }
+        result = out;
+    }
+    result
+}
+
+/// Rewrite in-board quotelink IDs in pre-rendered `body_html`.
+///
+/// Targets two patterns that are exclusive to same-board quotelinks:
+///   • `href="#p{old}"` — the anchor href
+///   • `data-pid="{old}">&gt;&gt;{old}</a>` — the data attribute + display text
+///
+/// Cross-board links use `href="/board/post/{N}"` and display `&gt;&gt;&gt;/…`
+/// so neither pattern matches them.
+///
+/// `pairs` must be pre-sorted by old-ID string length descending.
+fn remap_body_html_quotelinks(body_html: &str, pairs: &[(String, String)]) -> String {
+    if pairs.is_empty() {
+        return body_html.to_string();
+    }
+    let mut result = body_html.to_string();
+    for (old, new) in pairs {
+        // Pattern 1: href="#p{old}" → href="#p{new}"
+        let old_href = format!("href=\"#p{}\"", old);
+        let new_href = format!("href=\"#p{}\"", new);
+        result = result.replace(&old_href, &new_href);
+
+        // Pattern 2: data-pid="{old}">&gt;&gt;{old}</a>
+        // This uniquely identifies in-board quotelinks: cross-board links have
+        // "&gt;&gt;&gt;/" as their display text, never bare "&gt;&gt;{N}".
+        let old_tail = format!("data-pid=\"{old}\">&gt;&gt;{old}</a>", old = old);
+        let new_tail = format!("data-pid=\"{new}\">&gt;&gt;{new}</a>", new = new);
+        result = result.replace(&old_tail, &new_tail);
+    }
+    result
+}
+
 const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 /// Like `std::io::copy` but returns `InvalidData` if more than `max_bytes`
@@ -3620,6 +3761,20 @@ pub async fn board_restore(
                         thread_id_map.insert(t.id, conn.last_insert_rowid());
                     }
 
+                    // ── Insert posts, recording old → new ID mapping ──────
+                    //
+                    // Board restore cannot reuse original post IDs because
+                    // other boards' posts may already occupy those rows in the
+                    // global `posts` table (SQLite AUTOINCREMENT is site-wide,
+                    // not per-board).  The posts therefore land at new IDs.
+                    //
+                    // `post_id_map` captures every (old_id → new_id) pair so
+                    // that we can fix up in-board quotelink references in
+                    // `body` and `body_html` in the second pass below.
+                    // Without this, `>>500` in a restored post still points to
+                    // old ID 500 which no longer exists — clicks produce 404s
+                    // and hover previews show "Post not found".
+                    let mut post_id_map: HashMap<i64, i64> = HashMap::new();
                     for p in &manifest.posts {
                         let new_tid = *thread_id_map.get(&p.thread_id).ok_or_else(|| {
                             AppError::Internal(anyhow::anyhow!("Post {} refs unknown thread {}", p.id, p.thread_id))
@@ -3637,6 +3792,53 @@ pub async fn board_restore(
                             ],
                         )
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert post {}: {}", p.id, e)))?;
+                        post_id_map.insert(p.id, conn.last_insert_rowid());
+                    }
+
+                    // ── Quotelink fixup pass ──────────────────────────────
+                    //
+                    // If any post IDs changed (which they almost always do
+                    // when restoring into a live DB), rewrite `body` and
+                    // `body_html` for every restored post so that in-board
+                    // quotelinks point at the new IDs.
+                    //
+                    // Only same-board references are remapped.  Cross-board
+                    // links (`>>>/board/N`) point to other boards whose IDs
+                    // are unchanged; they are deliberately left untouched.
+                    let any_changed = post_id_map.iter().any(|(old, new)| old != new);
+                    if any_changed {
+                        // Sort by old-ID string length descending so that
+                        // longer IDs are replaced before any prefix of theirs.
+                        // e.g. replace >>1000 before >>100 before >>10 before >>1.
+                        let mut pairs: Vec<(String, String)> = post_id_map
+                            .iter()
+                            .filter(|(old, new)| old != new)
+                            .map(|(old, new)| (old.to_string(), new.to_string()))
+                            .collect();
+                        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(b.0.cmp(&a.0)));
+
+                        for p in &manifest.posts {
+                            let new_post_id = match post_id_map.get(&p.id) {
+                                Some(&id) => id,
+                                None => continue,
+                            };
+
+                            let new_body      = remap_body_quotelinks(&p.body, &pairs);
+                            let new_body_html = remap_body_html_quotelinks(&p.body_html, &pairs);
+
+                            // Only issue the UPDATE when the text actually
+                            // changed — avoids unnecessary I/O when none of
+                            // the post IDs appear in this post's body.
+                            if new_body != p.body || new_body_html != p.body_html {
+                                conn.execute(
+                                    "UPDATE posts SET body = ?1, body_html = ?2 WHERE id = ?3",
+                                    params![new_body, new_body_html, new_post_id],
+                                )
+                                .map_err(|e| AppError::Internal(anyhow::anyhow!(
+                                    "Fixup quotelinks for post {}: {}", new_post_id, e
+                                )))?;
+                            }
+                        }
                     }
 
                     let mut poll_id_map: HashMap<i64, i64> = HashMap::new();
@@ -3734,6 +3936,11 @@ pub async fn board_restore(
                 }
 
                 info!("Admin board restore completed for /{}/", board_short);
+                // Refresh live board list — board_restore may have created a
+                // board that didn't exist before, so the top bar must update.
+                if let Ok(boards) = db::get_all_boards(&conn) {
+                    crate::templates::set_live_boards(boards);
+                }
                 let safe_short: String = board_short
                     .chars()
                     .filter(|c| c.is_ascii_alphanumeric())

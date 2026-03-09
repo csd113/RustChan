@@ -95,7 +95,7 @@ pub fn init_pool() -> Result<DbPool> {
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA foreign_keys = ON;
-             PRAGMA cache_size = -4096;  -- 4 MiB page cache per connection
+             PRAGMA cache_size = -32000; -- 32 MiB page cache per connection (1.1)
              PRAGMA temp_store = MEMORY;
              PRAGMA mmap_size = 67108864; -- 64 MiB memory-mapped IO
              PRAGMA busy_timeout = 10000; -- 10s: wait instead of instant SQLITE_BUSY",
@@ -372,6 +372,13 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             created_at  INTEGER NOT NULL DEFAULT (unixepoch())
         )"),
         (22, "ALTER TABLE boards ADD COLUMN post_cooldown_secs INTEGER NOT NULL DEFAULT 0"),
+        // 1.2 — Explicit indexes for hot query paths that were previously full-scans.
+        // idx_posts_thread_id: covers get_posts_for_thread and all WHERE thread_id = ?
+        // queries that don't need the composite (thread_id, created_at) ordering index.
+        (23, "CREATE INDEX IF NOT EXISTS idx_posts_thread_id ON posts(thread_id)"),
+        // idx_posts_ip_hash: covers the per-IP admin history page and cooldown checks
+        // which previously scanned every row in the posts table.
+        (24, "CREATE INDEX IF NOT EXISTS idx_posts_ip_hash ON posts(ip_hash)"),
     ];
 
     let mut highest_applied = current_version;

@@ -27,7 +27,7 @@ async-trait = "0.1"
 axum       = { version = "0.8",  features = ["multipart"] }
 axum-extra = { version = "0.12", features = ["cookie"] }
 tower      = "0.5"
-tower-http = { version = "0.6",  features = ["fs", "set-header"] }
+tower-http = { version = "0.6",  features = ["fs", "set-header", "compression-full"] }
 tokio      = { version = "1",    features = ["full"] }
 tokio-util = "0.7"
 
@@ -53,6 +53,11 @@ hex    = "0.4"
 rand_core = { version = "0.6", features = ["getrandom"] }
 
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+
+# EXIF orientation correction: read Orientation tag from JPEG uploads and
+# apply the corresponding rotation before thumbnailing so that photos taken
+# on phones display upright (4.1).
+kamadak-exif = "0.5"
 
 clap = { version = "4", features = ["derive"] }
 

@@ -136,9 +136,14 @@ enum AdminAction {
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
+//
+// 3.5: `#[tokio::main]` does not expose `max_blocking_threads`, so we build
+// the runtime manually.  The blocking thread pool (used by every
+// `spawn_blocking` call — page renders, DB queries, file I/O) defaults to
+// logical CPUs × 4 but can be tuned via `blocking_threads` in settings.toml
+// or the CHAN_BLOCKING_THREADS environment variable.
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     fmt::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -148,13 +153,29 @@ async fn main() -> anyhow::Result<()> {
         .compact()
         .init();
 
+    // CONFIG must be initialised before building the runtime so that
+    // blocking_threads is available.  This is safe because CONFIG is a
+    // Lazy<Config> that initialises itself on first access.
+    let blocking_threads = CONFIG.blocking_threads;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(blocking_threads)
+        .build()
+        .expect("Failed to build Tokio runtime");
+
     let cli = Cli::parse();
 
-    match cli.command {
-        None | Some(Command::Serve { port: None }) => run_server(None).await,
-        Some(Command::Serve { port }) => run_server(port).await,
-        Some(Command::Admin { action }) => run_admin(action),
-    }
+    rt.block_on(async move {
+        match cli.command {
+            None | Some(Command::Serve { port: None }) => run_server(None).await,
+            Some(Command::Serve { port }) => run_server(port).await,
+            Some(Command::Admin { action }) => {
+                run_admin(action)?;
+                Ok(())
+            }
+        }
+    })
 }
 
 // ─── Server mode ─────────────────────────────────────────────────────────────
@@ -270,6 +291,11 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                 default_theme
             };
             templates::set_live_default_theme(&default_theme);
+
+            // Seed the live board list used by error pages and ban pages.
+            if let Ok(boards) = db::get_all_boards(&conn) {
+                templates::set_live_boards(boards);
+            }
         }
     }
     // ── External tool detection ────────────────────────────────────────────────
@@ -377,6 +403,94 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
             crate::handlers::admin::prune_login_fails();
         }
     });
+
+    // 1.6: Scheduled database VACUUM — reclaim disk space from deleted posts
+    // and threads without requiring manual admin intervention.
+    if CONFIG.auto_vacuum_interval_hours > 0 {
+        let bg = pool.clone();
+        let interval_secs = CONFIG.auto_vacuum_interval_hours * 3600;
+        tokio::spawn(async move {
+            // Stagger the first run by half the interval to avoid hammering the
+            // DB immediately at startup alongside WAL checkpoint and session purge.
+            tokio::time::sleep(Duration::from_secs(interval_secs / 2 + 7)).await;
+            let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                iv.tick().await;
+                let bg2 = bg.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(conn) = bg2.get() {
+                        let before = db::get_db_size_bytes(&conn).unwrap_or(0);
+                        match db::run_vacuum(&conn) {
+                            Ok(()) => {
+                                let after = db::get_db_size_bytes(&conn).unwrap_or(0);
+                                let saved = before.saturating_sub(after);
+                                info!(
+                                    "Scheduled VACUUM complete: {} → {} bytes ({} reclaimed)",
+                                    before, after, saved
+                                );
+                            }
+                            Err(e) => tracing::warn!("Scheduled VACUUM failed: {}", e),
+                        }
+                    }
+                })
+                .await
+                .ok();
+            }
+        });
+    }
+
+    // 1.7: Expired poll vote cleanup — purge per-IP vote rows for polls whose
+    // expiry is older than poll_cleanup_interval_hours, preventing the
+    // poll_votes table from growing indefinitely.
+    if CONFIG.poll_cleanup_interval_hours > 0 {
+        let bg = pool.clone();
+        let interval_secs = CONFIG.poll_cleanup_interval_hours * 3600;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(600)).await; // initial delay
+            let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                iv.tick().await;
+                let bg2 = bg.clone();
+                let retention_cutoff_secs = interval_secs as i64;
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(conn) = bg2.get() {
+                        let cutoff = chrono::Utc::now().timestamp() - retention_cutoff_secs;
+                        match db::cleanup_expired_poll_votes(&conn, cutoff) {
+                            Ok(n) if n > 0 => {
+                                info!("Poll vote cleanup: removed {} expired vote row(s)", n)
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!("Poll vote cleanup failed: {}", e),
+                        }
+                    }
+                })
+                .await
+                .ok();
+            }
+        });
+    }
+
+    // 2.6: Waveform/thumbnail cache eviction — keep total size of all thumbs
+    // directories under CONFIG.waveform_cache_max_bytes by deleting the oldest
+    // files when the threshold is exceeded.  Waveform PNGs can be regenerated
+    // by re-enqueueing the AudioWaveform job; image thumbnails can be
+    // regenerated from the originals.  Uses 1-hour intervals.
+    if CONFIG.waveform_cache_max_bytes > 0 {
+        let max_bytes = CONFIG.waveform_cache_max_bytes;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1800)).await; // initial stagger
+            let mut iv = tokio::time::interval(Duration::from_secs(3600));
+            loop {
+                iv.tick().await;
+                let upload_dir = CONFIG.upload_dir.clone();
+                tokio::task::spawn_blocking(move || {
+                    evict_thumb_cache(&upload_dir, max_bytes);
+                })
+                .await
+                .ok();
+            }
+        });
+    }
 
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
@@ -561,6 +675,12 @@ fn build_router(state: AppState) -> Router {
         .layer(axum_middleware::from_fn(middleware::rate_limit_middleware))
         .layer(DefaultBodyLimit::max(CONFIG.max_video_size))
         .layer(axum_middleware::from_fn(track_requests))
+        // 3.3: Gzip/Brotli/Zstd response compression.  HTML pages compress 5–10×
+        // with gzip and even better with Brotli.  tower-http respects the client's
+        // Accept-Encoding header and negotiates the best supported algorithm.
+        // Applied before the trailing-slash normaliser so compressed responses
+        // are served correctly for all paths including redirects.
+        .layer(tower_http::compression::CompressionLayer::new())
         // Normalize trailing slashes before routing: redirect /path/ → /path (301).
         // Applied last (outermost) so it fires before any other middleware sees the URI.
         .layer(axum_middleware::from_fn(
@@ -1472,6 +1592,82 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+// ─── 2.6 Waveform/thumbnail cache eviction ────────────────────────────────────
+
+/// Walk every board's `thumbs/` subdirectory, collect all files with their
+/// modification times, and delete the oldest ones until the total size of
+/// the remaining set is under `max_bytes`.
+///
+/// Only files inside `{upload_dir}/{board}/thumbs/` are considered — original
+/// uploads are never touched.  Deletion is best-effort: individual failures
+/// are logged and skipped rather than aborting the whole pass.
+fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
+    // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
+    let mut files: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();
+    let Ok(boards_iter) = std::fs::read_dir(upload_dir) else {
+        return;
+    };
+    for board_entry in boards_iter.flatten() {
+        let thumbs_dir = board_entry.path().join("thumbs");
+        if !thumbs_dir.is_dir() {
+            continue;
+        }
+        let Ok(thumbs_iter) = std::fs::read_dir(&thumbs_dir) else {
+            continue;
+        };
+        for entry in thumbs_iter.flatten() {
+            let path = entry.path();
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    let mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    files.push((mtime, path, meta.len()));
+                }
+            }
+        }
+    }
+
+    let total: u64 = files.iter().map(|(_, _, sz)| sz).sum();
+    if total <= max_bytes {
+        return; // already within budget
+    }
+
+    // Sort oldest-first so we delete the least-recently-used files first.
+    files.sort_unstable_by_key(|(mtime, _, _)| *mtime);
+
+    let mut remaining = total;
+    let mut deleted = 0u64;
+    let mut deleted_bytes = 0u64;
+    for (_, path, size) in &files {
+        if remaining <= max_bytes {
+            break;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => {
+                remaining = remaining.saturating_sub(*size);
+                deleted += 1;
+                deleted_bytes += size;
+            }
+            Err(e) => {
+                tracing::warn!("evict_thumb_cache: failed to delete {:?}: {}", path, e);
+            }
+        }
+    }
+    if deleted > 0 {
+        info!(
+            "evict_thumb_cache: removed {} file(s) ({} KiB), cache now {} KiB / {} KiB limit",
+            deleted,
+            deleted_bytes / 1024,
+            remaining / 1024,
+            max_bytes / 1024,
+        );
+    }
 }
 
 fn validate_password(p: &str) -> anyhow::Result<()> {

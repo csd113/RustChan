@@ -50,6 +50,7 @@ pub fn admin_panel_page(
     full_backups: &[BackupInfo],
     board_backups: &[BackupInfo],
     db_size_bytes: i64,
+    db_size_warning: bool,
     reports: &[crate::models::ReportWithContext],
     appeals: &[crate::models::BanAppeal],
     site_name: &str,
@@ -372,6 +373,20 @@ pub fn admin_panel_page(
         None => String::new(),
     };
 
+    // 1.8: DB size warning banner — shown when the file exceeds the configured threshold.
+    let db_warn_banner = if db_size_warning {
+        format!(
+            r#"<div class="admin-flash flash-error" style="margin-bottom:0.75rem">
+&#9888; <strong>Database size warning:</strong> The database file has exceeded the configured
+warning threshold ({size}). Consider running <strong>VACUUM</strong> below or archiving
+old boards to prevent query performance degradation.
+</div>"#,
+            size = format_file_size(db_size_bytes),
+        )
+    } else {
+        String::new()
+    };
+
     let body = format!(
         r#"<div class="admin-panel">
 {flash}
@@ -543,7 +558,7 @@ pub fn admin_panel_page(
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// database maintenance</h2>
-<p style="color:var(--text-dim);font-size:0.85rem">
+{db_warn_banner}<p style="color:var(--text-dim);font-size:0.85rem">
   Current database size: <strong>{db_size_str}</strong>.
   Running <strong>VACUUM</strong> rewrites the database file compactly, reclaiming space left after
   bulk deletions (deleted threads, pruned posts, etc.).  This may take a few seconds on large
@@ -584,6 +599,7 @@ pub fn admin_panel_page(
         full_backup_rows = full_backup_rows,
         board_backup_rows = board_backup_rows,
         db_size_str = format_file_size(db_size_bytes),
+        db_warn_banner = db_warn_banner,
         report_rows = report_rows,
         report_badge = report_badge,
         appeal_rows = appeal_rows,

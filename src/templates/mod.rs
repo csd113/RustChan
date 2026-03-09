@@ -20,6 +20,7 @@ use crate::utils::sanitize::escape_html;
 use chrono::{TimeZone, Utc};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub mod admin;
@@ -49,6 +50,48 @@ static LIVE_SITE_SUBTITLE: Lazy<RwLock<Arc<str>>> =
 /// Updated immediately when admin saves site settings so pages reflect the
 /// change without requiring a server restart or extra DB round-trip per request.
 static LIVE_DEFAULT_THEME: Lazy<RwLock<Arc<str>>> = Lazy::new(|| RwLock::new(Arc::from("")));
+
+/// In-memory cache of the current board list, used by standalone pages (error
+/// pages, ban pages) that don't have DB access at render time.  Updated by
+/// every handler that creates, deletes, or restores boards.
+///
+/// Stores a snapshot; stale for at most one request after a board change, but
+/// that one request is itself the mutating POST which redirects anyway.
+static LIVE_BOARDS: Lazy<RwLock<Arc<Vec<crate::models::Board>>>> =
+    Lazy::new(|| RwLock::new(Arc::new(Vec::new())));
+
+/// Monotonically-increasing counter incremented every time the board list
+/// changes.  Included in thread-page ETags so that adding or deleting a board
+/// correctly invalidates cached thread pages (fixing stale nav bars).
+static LIVE_BOARDS_VERSION: AtomicU64 = AtomicU64::new(0);
+
+/// Replace the in-memory board list.  Call after any board create / delete /
+/// restore operation so that error_page() renders the correct top-bar links.
+pub fn set_live_boards(boards: Vec<crate::models::Board>) {
+    *LIVE_BOARDS.write() = Arc::new(boards);
+    // Bump the version so thread-page ETags incorporate board-list changes.
+    // This ensures adding/deleting a board invalidates cached thread pages,
+    // fixing the stale nav bug where deleted boards persisted in the browser
+    // cache until an unrelated reply bumped the thread.
+    LIVE_BOARDS_VERSION.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(super) fn live_boards() -> Arc<Vec<crate::models::Board>> {
+    Arc::clone(&*LIVE_BOARDS.read())
+}
+
+/// Public snapshot of the live board list.  Used by the thread-updates handler
+/// to include current nav HTML in polling responses so the JS can refresh the
+/// nav bar when boards change while a thread is open.
+pub fn live_boards_snapshot() -> Arc<Vec<crate::models::Board>> {
+    Arc::clone(&*LIVE_BOARDS.read())
+}
+
+/// Current board-list version.  Included in thread-page ETags so that board
+/// mutations invalidate cached thread HTML (and thus stale nav bars).
+pub fn live_boards_version() -> u64 {
+    LIVE_BOARDS_VERSION.load(Ordering::Relaxed)
+}
 
 /// Call this at startup (after first DB read) and after admin saves a new name.
 pub fn set_live_site_name(name: &str) {
@@ -414,32 +457,25 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
 }
 
 pub fn error_page(code: u16, message: &str) -> String {
-    let default_theme = live_default_theme();
-    let default_theme_attr = if !default_theme.is_empty() && &*default_theme != "terminal" {
-        format!(r#" data-default-theme="{}""#, escape_html(&default_theme))
-    } else {
-        String::new()
-    };
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en"{default_theme_attr}>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Error {code}</title>
-<link rel="stylesheet" href="/static/style.css">
-<script src="/static/theme-init.js"></script>
-</head>
-<body>
-<div class="page-box error-page">
+    // Use base_layout so the error page has the same header, theme picker,
+    // and board navigation as every other page.  live_boards() is always
+    // up-to-date because every board mutation refreshes the cache.
+    let boards = live_boards();
+    let body = format!(
+        r#"<div class="page-box error-page">
 <h1>error {code}</h1>
 <p>{message}</p>
 <p><a href="/">return home</a></p>
-</div>
-</body>
-</html>"#,
-        default_theme_attr = default_theme_attr,
+</div>"#,
         code = code,
         message = escape_html(message),
+    );
+    base_layout(
+        &format!("Error {code}"),
+        None,
+        &body,
+        "", // no CSRF — error page has no forms that need it
+        &boards,
+        false,
     )
 }

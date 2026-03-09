@@ -265,7 +265,7 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>>
     // Collect every file path that belongs to this board before deletion.
     // The CASCADE on boards→threads→posts handles DB row removal, but the
     // on-disk files must be cleaned up by the caller.
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT p.file_path, p.thumb_path, p.audio_file_path
          FROM posts p
          JOIN threads t ON p.thread_id = t.id

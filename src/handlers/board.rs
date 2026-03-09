@@ -27,6 +27,7 @@ use crate::{
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
+    http::HeaderMap,
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -89,7 +90,8 @@ pub async fn board_index(
     Path(board_short): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
-) -> Result<(CookieJar, Html<String>)> {
+    req_headers: HeaderMap,
+) -> Result<Response> {
     let (jar, csrf) = ensure_csrf(jar);
 
     let page: i64 = params
@@ -98,16 +100,15 @@ pub async fn board_index(
         .unwrap_or(1)
         .max(1);
 
-    let html = tokio::task::spawn_blocking({
+    let (jar, csrf) = (jar, csrf);
+
+    let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
-        // FIX[HIGH-2]: is_admin_session check moved inside spawn_blocking so
-        // the blocking DB call does not stall the Tokio worker thread.
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
-        move || -> Result<String> {
+        move || -> Result<(String, String)> {
             let conn = pool.get()?;
 
-            // Resolve admin status inside the blocking task
             let is_admin = jar_session
                 .as_deref()
                 .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
@@ -120,6 +121,12 @@ pub async fn board_index(
             let pagination = Pagination::new(page, THREADS_PER_PAGE, total);
             let threads =
                 db::get_threads_for_board(&conn, board.id, THREADS_PER_PAGE, pagination.offset())?;
+
+            // 3.2: Derive ETag from the most-recently-bumped thread on this page
+            // combined with the page number.  This is a cheap proxy for "has
+            // anything on this page changed?".
+            let max_bump = threads.iter().map(|t| t.bumped_at).max().unwrap_or(0);
+            let etag = format!("\"{}-{}\"", max_bump, page);
 
             let mut summaries = Vec::with_capacity(threads.len());
             for thread in threads {
@@ -135,7 +142,7 @@ pub async fn board_index(
 
             let all_boards = db::get_all_boards(&conn)?;
             let collapse_greentext = db::get_collapse_greentext(&conn);
-            Ok(templates::board_page(
+            let html = templates::board_page(
                 &board,
                 &summaries,
                 &pagination,
@@ -144,13 +151,38 @@ pub async fn board_index(
                 is_admin,
                 None,
                 collapse_greentext,
-            ))
+            );
+            Ok((etag, html))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)))
+    let (etag, html) = result;
+
+    // 3.2: Return 304 Not Modified when the client's cached version is current.
+    let client_etag = req_headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if client_etag == etag {
+        let mut resp = axum::http::Response::builder()
+            .status(axum::http::StatusCode::NOT_MODIFIED)
+            .body(axum::body::Body::empty())
+            .unwrap_or_default();
+        resp.headers_mut().insert(
+            "etag",
+            axum::http::HeaderValue::from_str(&etag)
+                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
+        );
+        return Ok((jar, resp).into_response());
+    }
+
+    let mut resp = Html(html).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
+        resp.headers_mut().insert("etag", v);
+    }
+    Ok((jar, resp).into_response())
 }
 
 // ─── POST /:board/ — create new thread ───────────────────────────────────────
@@ -805,8 +837,20 @@ pub async fn redirect_to_post(
             Redirect::to(&url).into_response()
         }
         _ => {
-            // Post not found or wrong board — return a plain 404.
-            axum::http::StatusCode::NOT_FOUND.into_response()
+            // Post not found or wrong board — render the error page template
+            // so the user gets a readable message instead of a blank HTTP 404.
+            // This is the fallback path when JavaScript is disabled or when
+            // a user manually navigates to a quotelink URL after a board
+            // restore that assigned new IDs to the restored posts.
+            let html = crate::templates::error_page(
+                404,
+                &format!("Post #{} not found. It may have been deleted or the board was restored from a backup.", post_id),
+            );
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::response::Html(html),
+            )
+                .into_response()
         }
     }
 }

@@ -130,11 +130,14 @@ pub fn create_thread_with_op(
     conn.execute("BEGIN IMMEDIATE", [])?;
 
     let result = (|| -> Result<(i64, i64)> {
-        conn.execute(
-            "INSERT INTO threads (board_id, subject) VALUES (?1, ?2)",
+        // 1.5: Use RETURNING id to retrieve the new thread ID atomically in the
+        // same statement, removing the implicit coupling to connection state that
+        // last_insert_rowid() has (safe here but fragile by design).
+        let thread_id: i64 = conn.query_row(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, ?2) RETURNING id",
             params![board_id, subject],
+            |r| r.get(0),
         )?;
-        let thread_id = conn.last_insert_rowid();
 
         let post_with_thread = super::NewPost {
             thread_id,
@@ -203,8 +206,9 @@ pub fn set_thread_archived(
 }
 
 pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<String>> {
-    let mut stmt = conn
-        .prepare("SELECT file_path, thumb_path, audio_file_path FROM posts WHERE thread_id = ?1")?;
+    let mut stmt = conn.prepare_cached(
+        "SELECT file_path, thumb_path, audio_file_path FROM posts WHERE thread_id = ?1",
+    )?;
     let rows: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
         .query_map(params![thread_id], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -241,7 +245,7 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
 /// now wrapped in a single transaction so the operation is all-or-nothing.
 pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -> Result<usize> {
     let ids: Vec<i64> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT id FROM threads
              WHERE board_id = ?1 AND sticky = 0 AND archived = 0
              ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
@@ -289,7 +293,7 @@ pub fn prune_old_threads(
     max: i64,
 ) -> Result<Vec<String>> {
     let ids: Vec<i64> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT id FROM threads
              WHERE board_id = ?1 AND sticky = 0 AND archived = 0
              ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",

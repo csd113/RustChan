@@ -28,6 +28,7 @@
 use crate::config::CONFIG;
 use crate::db::DbPool;
 use anyhow::Result;
+use dashmap::DashMap;
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -42,10 +43,6 @@ use tracing::{debug, error, info, warn};
 const MAX_ATTEMPTS: i64 = 3;
 // How long a worker sleeps when the queue is empty.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
-// Maximum wall-clock time allowed for a single ffmpeg transcode (#10).
-const FFMPEG_TRANSCODE_TIMEOUT: Duration = Duration::from_secs(120);
-// Maximum wall-clock time allowed for ffmpeg waveform generation (#10).
-const FFMPEG_WAVEFORM_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ─── Job definitions ──────────────────────────────────────────────────────────
 
@@ -105,6 +102,11 @@ pub struct JobQueue {
     pub notify: Arc<Notify>,
     /// Token cancelled at shutdown; workers observe this to exit cleanly.
     pub cancel: CancellationToken,
+    /// 2.2: Set of file_path strings for media jobs currently being processed.
+    /// Workers check this before starting a VideoTranscode or AudioWaveform job
+    /// and skip if the same path is already in flight, preventing redundant
+    /// FFmpeg invocations on client retries or server-restart re-queues.
+    pub in_progress: Arc<DashMap<String, bool>>,
 }
 
 impl JobQueue {
@@ -113,14 +115,37 @@ impl JobQueue {
             pool,
             notify: Arc::new(Notify::new()),
             cancel: CancellationToken::new(),
+            in_progress: Arc::new(DashMap::new()),
         }
     }
 
     /// Persist a job and wake a sleeping worker immediately.
     /// Safe to call from any thread, including inside tokio::task::spawn_blocking.
+    ///
+    /// 2.1: If the number of pending jobs already equals or exceeds
+    /// `CONFIG.job_queue_capacity`, the job is dropped with a warning log
+    /// rather than accepted. This prevents the queue table growing without
+    /// bound under a post flood.
     pub fn enqueue(&self, job: &Job) -> Result<i64> {
         let payload = serde_json::to_string(job)?;
         let conn = self.pool.get()?;
+
+        // Back-pressure: check pending count before inserting.
+        if CONFIG.job_queue_capacity > 0 {
+            let pending = crate::db::pending_job_count(&conn).unwrap_or(0);
+            if pending as u64 >= CONFIG.job_queue_capacity {
+                warn!(
+                    "Job queue at capacity ({}/{}) — dropping {} job",
+                    pending,
+                    CONFIG.job_queue_capacity,
+                    job.type_str(),
+                );
+                // Return a sentinel -1 rather than an error so callers that
+                // fire-and-forget don't bubble up a spurious error.
+                return Ok(-1);
+            }
+        }
+
         let id = crate::db::enqueue_job(&conn, job.type_str(), &payload)?;
         self.notify.notify_one();
         Ok(id)
@@ -204,8 +229,14 @@ async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
                 consecutive_errors = 0; // reset back-off on any successful claim
                 debug!("Worker {}: picked up job #{}", id, job_id);
                 let pool_done = queue.pool.clone();
-                let result =
-                    handle_job(job_id, &payload, ffmpeg_available, queue.pool.clone()).await;
+                let result = handle_job(
+                    job_id,
+                    &payload,
+                    ffmpeg_available,
+                    queue.pool.clone(),
+                    queue.in_progress.clone(),
+                )
+                .await;
                 // FIX[STUCK-RUNNING]: Previously pool_done.get() failures were
                 // silently ignored (if let Ok(c) = ...), leaving the job row
                 // permanently stuck in "running" — claim_next_job only claims
@@ -308,6 +339,7 @@ async fn handle_job(
     payload: &str,
     ffmpeg_available: bool,
     pool: DbPool,
+    in_progress: Arc<DashMap<String, bool>>,
 ) -> Result<()> {
     let job: Job = serde_json::from_str(payload)
         .map_err(|e| anyhow::anyhow!("Cannot deserialise job #{}: {}", job_id, e))?;
@@ -319,13 +351,53 @@ async fn handle_job(
             post_id,
             file_path,
             board_short,
-        } => transcode_video(post_id, file_path, board_short, ffmpeg_available, pool).await,
+        } => {
+            // 2.2: Skip if this file_path is already being processed.
+            if in_progress.contains_key(&file_path) {
+                warn!(
+                    "VideoTranscode: skipping duplicate job for post {} ({}): already in flight",
+                    post_id, file_path
+                );
+                return Ok(());
+            }
+            in_progress.insert(file_path.clone(), true);
+            let result = transcode_video(
+                post_id,
+                file_path.clone(),
+                board_short,
+                ffmpeg_available,
+                pool,
+            )
+            .await;
+            in_progress.remove(&file_path);
+            result
+        }
 
         Job::AudioWaveform {
             post_id,
             file_path,
             board_short,
-        } => generate_waveform(post_id, file_path, board_short, ffmpeg_available, pool).await,
+        } => {
+            // 2.2: Skip if this file_path is already being processed.
+            if in_progress.contains_key(&file_path) {
+                warn!(
+                    "AudioWaveform: skipping duplicate job for post {} ({}): already in flight",
+                    post_id, file_path
+                );
+                return Ok(());
+            }
+            in_progress.insert(file_path.clone(), true);
+            let result = generate_waveform(
+                post_id,
+                file_path.clone(),
+                board_short,
+                ffmpeg_available,
+                pool,
+            )
+            .await;
+            in_progress.remove(&file_path);
+            result
+        }
 
         Job::ThreadPrune {
             board_id,
@@ -347,7 +419,7 @@ async fn handle_job(
 /// Transcode an MP4 upload to WebM (VP9 + Opus), then update the post's
 /// file_path and mime_type. The original MP4 is deleted on success.
 ///
-/// A hard timeout of FFMPEG_TRANSCODE_TIMEOUT is applied (#10).
+/// A hard timeout of CONFIG.ffmpeg_timeout_secs is applied (2.3).
 async fn transcode_video(
     post_id: i64,
     file_path: String,
@@ -363,9 +435,12 @@ async fn transcode_video(
         return Ok(());
     }
 
-    // Wrap the entire blocking transcode in a timeout (#10).
+    let timeout_secs = CONFIG.ffmpeg_timeout_secs;
+    let ffmpeg_timeout = Duration::from_secs(timeout_secs);
+
+    // Wrap the entire blocking transcode in a configurable timeout (2.3).
     match timeout(
-        FFMPEG_TRANSCODE_TIMEOUT,
+        ffmpeg_timeout,
         tokio::task::spawn_blocking(move || {
             transcode_video_inner(post_id, file_path, board_short, pool)
         }),
@@ -377,12 +452,11 @@ async fn transcode_video(
         Err(_elapsed) => {
             warn!(
                 "VideoTranscode: job for post {} timed out after {}s — ffmpeg killed",
-                post_id,
-                FFMPEG_TRANSCODE_TIMEOUT.as_secs()
+                post_id, timeout_secs,
             );
             Err(anyhow::anyhow!(
                 "ffmpeg transcode timed out after {}s",
-                FFMPEG_TRANSCODE_TIMEOUT.as_secs()
+                timeout_secs,
             ))
         }
     }
@@ -530,7 +604,7 @@ fn transcode_video_inner(
 // ─── AudioWaveform ────────────────────────────────────────────────────────────
 
 /// Generate a waveform PNG thumbnail for an audio upload via ffmpeg.
-/// A hard timeout of FFMPEG_WAVEFORM_TIMEOUT is applied (#10).
+/// A hard timeout of CONFIG.ffmpeg_timeout_secs is applied (2.3).
 async fn generate_waveform(
     post_id: i64,
     file_path: String,
@@ -542,8 +616,11 @@ async fn generate_waveform(
         return Ok(());
     }
 
+    let timeout_secs = CONFIG.ffmpeg_timeout_secs;
+    let ffmpeg_timeout = Duration::from_secs(timeout_secs);
+
     match timeout(
-        FFMPEG_WAVEFORM_TIMEOUT,
+        ffmpeg_timeout,
         tokio::task::spawn_blocking(move || {
             generate_waveform_inner(post_id, file_path, board_short, pool)
         }),
@@ -555,12 +632,11 @@ async fn generate_waveform(
         Err(_elapsed) => {
             warn!(
                 "AudioWaveform: job for post {} timed out after {}s",
-                post_id,
-                FFMPEG_WAVEFORM_TIMEOUT.as_secs()
+                post_id, timeout_secs,
             );
             Err(anyhow::anyhow!(
                 "ffmpeg waveform timed out after {}s",
-                FFMPEG_WAVEFORM_TIMEOUT.as_secs()
+                timeout_secs,
             ))
         }
     }
@@ -636,12 +712,18 @@ async fn prune_threads(
 ) -> Result<()> {
     tokio::task::spawn_blocking(move || {
         let conn = pool.get()?;
-        if allow_archive {
+        // 2.5: archive_before_prune acts as a global safety net — when true,
+        // overflow threads are always archived rather than hard-deleted, even
+        // on boards where allow_archive = false.  This closes the silent data
+        // loss gap where a thread could disappear simply because a board hit
+        // its thread limit while the admin had not opted into archiving.
+        let do_archive = allow_archive || CONFIG.archive_before_prune;
+        if do_archive {
             let count = crate::db::archive_old_threads(&conn, board_id, max_threads)?;
             if count > 0 {
                 info!(
-                    "ThreadArchive: moved {} overflow thread(s) to archive in /{}/ (board_id={})",
-                    count, board_short, board_id
+                    "ThreadArchive: moved {} overflow thread(s) to archive in /{}/ (board_id={}, archive_before_prune={})",
+                    count, board_short, board_id, CONFIG.archive_before_prune
                 );
             }
         } else {

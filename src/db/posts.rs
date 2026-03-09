@@ -112,13 +112,18 @@ pub fn get_preview_posts(conn: &rusqlite::Connection, thread_id: i64, n: i64) ->
 ///
 /// `pub(super)` so sibling modules can call it without exposing it externally.
 pub(super) fn create_post_inner(conn: &rusqlite::Connection, p: &super::NewPost) -> Result<i64> {
-    conn.execute(
+    // 1.5: INSERT … RETURNING id returns the new post ID atomically in the same
+    // statement. This removes the implicit reliance on connection-local
+    // last_insert_rowid() state, which is correct only because the connection
+    // is not shared mid-transaction — safe today but fragile by design.
+    let post_id: i64 = conn.query_row(
         "INSERT INTO posts
          (thread_id, board_id, name, tripcode, subject, body, body_html,
           ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
           deletion_token, is_op, media_type,
           audio_file_path, audio_file_name, audio_file_size, audio_mime_type)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+         RETURNING id",
         params![
             p.thread_id,
             p.board_id,
@@ -141,8 +146,9 @@ pub(super) fn create_post_inner(conn: &rusqlite::Connection, p: &super::NewPost)
             p.audio_file_size,
             p.audio_mime_type,
         ],
+        |r| r.get(0),
     )?;
-    Ok(conn.last_insert_rowid())
+    Ok(post_id)
 }
 
 pub fn create_post(conn: &rusqlite::Connection, p: &super::NewPost) -> Result<i64> {
@@ -348,7 +354,7 @@ pub fn search_posts(
     offset: i64,
 ) -> Result<Vec<Post>> {
     let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                 created_at, deletion_token, is_op, media_type,
@@ -564,6 +570,28 @@ pub fn get_poll_context(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?)
+}
+
+// ─── Poll maintenance ─────────────────────────────────────────────────────────
+
+/// Delete vote rows for polls whose `expires_at` is older than the given
+/// retention cutoff (a Unix timestamp). The poll question and options are
+/// preserved for historical display; only the per-IP vote records are pruned.
+///
+/// Returns the number of vote rows deleted.
+pub fn cleanup_expired_poll_votes(
+    conn: &rusqlite::Connection,
+    retention_cutoff: i64,
+) -> Result<usize> {
+    let n = conn.execute(
+        "DELETE FROM poll_votes
+         WHERE poll_id IN (
+             SELECT id FROM polls
+             WHERE expires_at IS NOT NULL AND expires_at < ?1
+         )",
+        params![retention_cutoff],
+    )?;
+    Ok(n)
 }
 
 // ─── Background job queue ─────────────────────────────────────────────────────

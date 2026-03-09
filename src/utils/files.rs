@@ -813,6 +813,58 @@ fn generate_audio_placeholder(output_path: &PathBuf) -> Result<()> {
 
 // ─── Image thumbnail ──────────────────────────────────────────────────────────
 
+/// Read the EXIF Orientation tag from JPEG bytes.
+///
+/// Returns the orientation value (1–8) or 1 (no rotation) if the tag is
+/// absent or unreadable.  Only JPEG files carry reliable EXIF orientation;
+/// PNG/WebP/GIF do not use this tag.
+///
+/// Values follow the EXIF spec:
+///   1 = normal (0°), 2 = flip-H, 3 = 180°, 4 = flip-V,
+///   5 = transpose, 6 = 90° CW, 7 = transverse, 8 = 90° CCW
+fn read_exif_orientation(data: &[u8]) -> u32 {
+    use std::io::Cursor;
+    let Ok(exif) = exif::Reader::new().read_from_container(&mut Cursor::new(data)) else {
+        return 1;
+    };
+    exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+        .and_then(|f| {
+            if let exif::Value::Short(ref v) = f.value {
+                v.first().copied().map(|n| n as u32)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(1)
+}
+
+/// Apply an EXIF orientation transformation to a decoded `DynamicImage`.
+///
+/// This corrects the pixel layout so that thumbnails appear upright regardless
+/// of which way the camera was held when the photo was taken.  The `image`
+/// crate operations used here are pure in-memory pixel transforms — no I/O.
+fn apply_exif_orientation(img: image::DynamicImage, orientation: u32) -> image::DynamicImage {
+    use image::imageops;
+    match orientation {
+        2 => image::DynamicImage::ImageRgba8(imageops::flip_horizontal(&img)),
+        3 => image::DynamicImage::ImageRgba8(imageops::rotate180(&img)),
+        4 => image::DynamicImage::ImageRgba8(imageops::flip_vertical(&img)),
+        5 => {
+            // Transpose = rotate 90° CW then flip horizontally
+            let rot = imageops::rotate90(&img);
+            image::DynamicImage::ImageRgba8(imageops::flip_horizontal(&rot))
+        }
+        6 => image::DynamicImage::ImageRgba8(imageops::rotate90(&img)),
+        7 => {
+            // Transverse = rotate 90° CW then flip vertically
+            let rot = imageops::rotate90(&img);
+            image::DynamicImage::ImageRgba8(imageops::flip_vertical(&rot))
+        }
+        8 => image::DynamicImage::ImageRgba8(imageops::rotate270(&img)),
+        _ => img, // 1 = normal, or unknown value — no transform
+    }
+}
+
 fn generate_image_thumb(
     data: &[u8],
     mime_type: &str,
@@ -829,6 +881,21 @@ fn generate_image_thumb(
 
     let img =
         image::load_from_memory_with_format(data, format).context("Failed to decode image")?;
+
+    // 4.1: EXIF orientation correction — phones store images unrotated and rely
+    // on the Orientation tag to tell viewers which way is up.  We read the tag
+    // before thumbnailing and apply the corresponding pixel transform so that
+    // thumbnails display upright without depending on viewer-side EXIF support.
+    // Only JPEG carries reliable EXIF orientation data.
+    let img = if mime_type == "image/jpeg" {
+        let orientation = read_exif_orientation(data);
+        if orientation > 1 {
+            tracing::debug!("EXIF orientation {} applied to JPEG thumbnail", orientation);
+        }
+        apply_exif_orientation(img, orientation)
+    } else {
+        img
+    };
 
     let (w, h) = img.dimensions();
     let (tw, th) = if w > h {
