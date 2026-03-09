@@ -34,12 +34,37 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Result of probing for a tool at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     Available,
     Missing,
+}
+
+// ─── Global Tor child handle (fix #5: orphan-process cleanup) ─────────────────
+//
+// Stored here so that:
+//   • `kill_tor()` can be called from a graceful-shutdown handler, and
+//   • the panic hook registered inside `detect_tor` can kill the child on panic.
+//
+// Callers should invoke `kill_tor()` during their own shutdown path (e.g. after
+// the HTTP server loop exits).  SIGKILL / abrupt process death is handled by the
+// OS on most platforms once the parent exits, but calling `kill_tor()` ensures
+// clean shutdown even for SIGTERM / normal `std::process::exit` paths.
+static TOR_CHILD: OnceLock<Arc<Mutex<std::process::Child>>> = OnceLock::new();
+
+/// Kill the background Tor process that `detect_tor` launched, if any.
+///
+/// Safe to call multiple times; subsequent calls are no-ops.
+pub fn kill_tor() {
+    if let Some(child) = TOR_CHILD.get() {
+        if let Ok(mut c) = child.lock() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
 }
 
 // ─── ffmpeg ───────────────────────────────────────────────────────────────────
@@ -79,9 +104,17 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
 /// Launches `tor -f <torrc>` as a background process then polls for the
 /// hostname file in a background OS thread.  Returns immediately — the
 /// HTTP server is never blocked.
-pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) {
+///
+/// Returns `ToolStatus::Available` once Tor has been successfully spawned,
+/// or `ToolStatus::Missing` if Tor could not be found or started.
+///
+/// Call `kill_tor()` during graceful shutdown to avoid orphaned processes.
+//
+// Fix #7: function now returns ToolStatus so callers can branch on whether
+//         Tor is actually running.
+pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> ToolStatus {
     if !enable_tor_support {
-        return;
+        return ToolStatus::Missing;
     }
 
     // ── 1. Find the tor binary ────────────────────────────────────────────────
@@ -105,7 +138,7 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) {
 
     let Some(tor_bin) = tor_bin else {
         print_install_instructions(bind_port);
-        return;
+        return ToolStatus::Missing;
     };
 
     println!("[INFO] Tor binary: {}", tor_bin);
@@ -122,7 +155,7 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) {
                 e
             );
             print_torrc_hint(&hs_dir, bind_port);
-            return;
+            return ToolStatus::Missing;
         }
     }
 
@@ -142,14 +175,22 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) {
     }
 
     // ── 3. Write torrc ────────────────────────────────────────────────────────
-    let torrc_path = data_dir.join("torrc");
-
+    //
+    // Fix #6: torrc_path is now derived from the canonicalized data_dir so it
+    //         is always an absolute path, regardless of how RustChan was
+    //         invoked.  Tor is started with an absolute path argument, which
+    //         means it works even when Tor's working directory differs from ours.
+    //
     // Canonical absolute paths avoid problems when Tor's working directory
-    // differs from ours.
+    // differs from ours.  canonicalize() is called after the directories exist.
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let hs_abs = canon(&hs_dir);
     let data_abs = canon(&data_subdir);
+    let torrc_path = canon(data_dir).join("torrc"); // fix #6: absolute torrc path
 
+    // Fix #2: paths are quoted so that a data_dir containing spaces does not
+    //         produce a syntactically invalid torrc (Tor treats unquoted
+    //         whitespace as a value delimiter).
     let torrc = format!(
         "# RustChan — auto-generated torrc  (do not edit while Tor is running)\n\
          \n\
@@ -157,10 +198,10 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) {
          ## SocksPort 0  → do not bind a SOCKS port; avoids conflict with port 9050.\n\
          ## DataDirectory → separate lock file + state from the system Tor.\n\
          SocksPort 0\n\
-         DataDirectory {data}\n\
+         DataDirectory \"{data}\"\n\
          \n\
          ## Hidden service — forwards .onion:80 to the local RustChan port.\n\
-         HiddenServiceDir {hs}\n\
+         HiddenServiceDir \"{hs}\"\n\
          HiddenServicePort 80 127.0.0.1:{port}\n",
         data = data_abs.display(),
         hs = hs_abs.display(),
@@ -174,7 +215,7 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) {
             e
         );
         print_torrc_hint(&hs_dir, bind_port);
-        return;
+        return ToolStatus::Missing;
     }
 
     println!("[INFO] Tor: torrc          → {}", torrc_path.display());
@@ -182,26 +223,60 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) {
     println!("[INFO] Tor: data dir       → {}", data_abs.display());
 
     // ── 4. Spawn Tor ──────────────────────────────────────────────────────────
-    // Pipe stderr so we can capture it if the process dies quickly.
+    // Stderr is piped so we can surface diagnostics if Tor exits early.
     let child = Command::new(tor_bin)
         .arg("-f")
         .arg(&torrc_path)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped()) // captured for diagnostics
+        .stderr(Stdio::piped())
         .spawn();
 
     let mut child = match child {
         Err(e) => {
             println!("[WARN] Tor: failed to start '{}': {}", tor_bin, e);
             print_torrc_hint(&hs_dir, bind_port);
-            return;
+            return ToolStatus::Missing;
         }
         Ok(c) => c,
     };
 
+    // Fix #8: Drain stderr in a dedicated thread to prevent the pipe buffer
+    //         from filling up and blocking Tor.  Without this, a verbose Tor
+    //         (e.g. LogLevel debug) would stall once the OS pipe buffer (~64 KiB)
+    //         fills, causing try_wait() to never see an exit and the 120-second
+    //         poll timeout to fire instead.
+    let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    if let Some(pipe) = child.stderr.take() {
+        let buf = Arc::clone(&stderr_lines);
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            // Cap at 500 lines to bound memory; Tor can be very verbose at
+            // higher log levels.
+            for line in BufReader::new(pipe).lines().map_while(Result::ok).take(500) {
+                buf.lock().expect("stderr buffer mutex poisoned").push(line);
+            }
+        });
+    }
+
+    // Fix #5: Wrap child in Arc<Mutex<>> so it can be shared between:
+    //   • the background monitoring thread (which may call try_wait / kill)
+    //   • the global TOR_CHILD handle (for kill_tor() / panic hook)
+    let child = Arc::new(Mutex::new(child));
+
+    // Store globally so kill_tor() works from any context.
+    let _ = TOR_CHILD.set(Arc::clone(&child));
+
+    // Best-effort cleanup on panic: kill Tor before printing the panic message.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        kill_tor();
+        prev_hook(info);
+    }));
+
+    let pid = child.lock().expect("child process mutex poisoned").id();
     println!(
         "[INFO] Tor: process started (pid {}). Waiting for .onion address…",
-        child.id()
+        pid
     );
 
     // ── 5. Quick health-check + hostname polling (background thread) ──────────
@@ -209,30 +284,29 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) {
     let torrc_display = torrc_path.display().to_string();
     let tor_bin_owned = tor_bin.to_string();
 
+    let child_bg = Arc::clone(&child);
+    let stderr_bg = Arc::clone(&stderr_lines);
+
     std::thread::spawn(move || {
         // Give Tor ~4 seconds to either establish itself or fail fast.
         std::thread::sleep(std::time::Duration::from_secs(4));
 
-        match child.try_wait() {
+        // Fix #4 (early-exit check): use the shared child Arc instead of
+        //         a moved value so the same handle can also be used by
+        //         poll_for_hostname to detect crashes during polling.
+        match child_bg
+            .lock()
+            .expect("child process mutex poisoned")
+            .try_wait()
+        {
             Ok(Some(status)) => {
-                // Process already exited — grab stderr for the operator.
-                let stderr_text = child
-                    .stderr
-                    .take()
-                    .map(|mut r| {
-                        use std::io::Read;
-                        let mut buf = String::new();
-                        let _ = r.read_to_string(&mut buf);
-                        buf
-                    })
-                    .unwrap_or_default();
-
+                // Process already exited — surface stderr for the operator.
+                let lines = stderr_bg.lock().expect("stderr buffer mutex poisoned");
                 println!();
                 println!("[ERR ] Tor: process exited early ({})", status);
-                if !stderr_text.is_empty() {
+                if !lines.is_empty() {
                     println!("────── Tor stderr ──────────────────────────────");
-                    // Limit output to the first 20 lines; Tor can be verbose.
-                    for line in stderr_text.lines().take(20) {
+                    for line in lines.iter().take(20) {
                         println!("  {}", line);
                     }
                     println!("────────────────────────────────────────────────");
@@ -250,41 +324,65 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) {
             }
         }
 
-        poll_for_hostname(&hostname_path, &torrc_display, &tor_bin_owned, bind_port);
+        poll_for_hostname(
+            &hostname_path,
+            &child_bg,
+            &stderr_bg,
+            &torrc_display,
+            &tor_bin_owned,
+            bind_port,
+        );
     });
+
+    ToolStatus::Available
 }
 
 // ─── Hostname polling ─────────────────────────────────────────────────────────
 
-fn poll_for_hostname(hostname_path: &Path, torrc_display: &str, tor_bin: &str, bind_port: u16) {
+fn poll_for_hostname(
+    hostname_path: &Path,
+    // Fix #4: child handle passed in so crashes mid-poll are detected promptly
+    //         instead of waiting for the full 120-second timeout.
+    child: &Arc<Mutex<std::process::Child>>,
+    stderr_lines: &Arc<Mutex<Vec<String>>>,
+    torrc_display: &str,
+    tor_bin: &str,
+    bind_port: u16,
+) {
     const TIMEOUT_SECS: u64 = 120; // v3 onion keys can take ~60–90 s first run
     const POLL_MS: u64 = 500;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(TIMEOUT_SECS);
 
     loop {
+        // Fix #4: check for mid-poll crash every iteration.
+        //         try_lock() is used instead of lock() to be non-blocking;
+        //         if the mutex is momentarily held by the stderr-drain thread
+        //         we simply skip the check this iteration.
+        if let Ok(mut c) = child.try_lock() {
+            if let Ok(Some(status)) = c.try_wait() {
+                let lines = stderr_lines.lock().expect("stderr buffer mutex poisoned");
+                println!();
+                println!("[ERR ] Tor: process crashed during startup ({})", status);
+                if !lines.is_empty() {
+                    println!("────── Tor stderr ──────────────────────────────");
+                    for line in lines.iter().take(20) {
+                        println!("  {}", line);
+                    }
+                    println!("────────────────────────────────────────────────");
+                }
+                println!();
+                print_diagnosis_hints(torrc_display, tor_bin, bind_port);
+                return;
+            }
+        }
+
         if hostname_path.exists() {
             match std::fs::read_to_string(hostname_path) {
                 Ok(raw) => {
                     let onion = raw.trim();
                     if !onion.is_empty() {
-                        // ── success banner ────────────────────────────────
-                        let addr_line = format!("http://{}", onion);
-                        println!();
-                        println!("╔══════════════════════════════════════════════════════╗");
-                        println!("║        TOR ONION SERVICE ACTIVE  ✓                  ║");
-                        println!("╠══════════════════════════════════════════════════════╣");
-                        println!("║  {:<52}║", addr_line);
-                        println!("║                                                      ║");
-                        println!("║  Share this with Tor Browser users.                 ║");
-                        println!("║  Your private key is stored at:                     ║");
-                        println!(
-                            "║    {:<48}║",
-                            hostname_path.parent().unwrap_or(hostname_path).display()
-                        );
-                        println!("║  Back it up — losing it means a new .onion address. ║");
-                        println!("╚══════════════════════════════════════════════════════╝");
-                        println!();
+                        print_onion_banner(onion, hostname_path);
                         return;
                     }
                     // Empty file — Tor is still writing; retry.
@@ -309,6 +407,36 @@ fn poll_for_hostname(hostname_path: &Path, torrc_display: &str, tor_bin: &str, b
 
         std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
     }
+}
+
+// ─── Success banner ───────────────────────────────────────────────────────────
+
+/// Print the .onion address in a bordered banner.
+///
+/// Fix #1: The box is wide enough (inner width = 72) to hold a v3 .onion URL
+///         (`http://` + 56-char address + `.onion` = 69 chars) without overflowing.
+///
+/// Fix #3: The private-key-path line used `{:<48}` with a 4-char indent inside
+///         the old 54-char-wide box, producing a line 2 characters short of the
+///         box edge.  Both field widths have been corrected for the new box size.
+fn print_onion_banner(onion: &str, hostname_path: &Path) {
+    // v3 .onion URL: "http://" (7) + 56-char base32 address + ".onion" (6) = 69 chars.
+    // Box inner width 72 gives 3 chars of right-margin after the longest URL.
+    let addr_line = format!("http://{}", onion);
+    let key_dir = hostname_path.parent().unwrap_or(hostname_path);
+
+    println!();
+    println!("╔════════════════════════════════════════════════════════════════════════╗");
+    println!("║        TOR ONION SERVICE ACTIVE  ✓                                     ║");
+    println!("╠════════════════════════════════════════════════════════════════════════╣");
+    println!("║  {:<70}║", addr_line); // fix #1: {:<70}, 2+70+1 = inner 72
+    println!("║                                                                        ║");
+    println!("║  Share this with Tor Browser users.                                    ║");
+    println!("║  Your private key is stored at:                                        ║");
+    println!("║    {:<68}║", key_dir.display()); // fix #3: {:<68}, 4+68+1 = inner 72
+    println!("║  Back it up — losing it means a new .onion address.                    ║");
+    println!("╚════════════════════════════════════════════════════════════════════════╝");
+    println!();
 }
 
 // ─── Diagnostic helpers ───────────────────────────────────────────────────────

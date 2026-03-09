@@ -83,30 +83,34 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
     {audio_combo_row}
     {edit_token_row}
     {captcha_row}
-    <tr><td colspan="2">
-      <details class="poll-creator">
-        <summary>[ 📊 Add a Poll to this thread ]</summary>
-        <div class="poll-creator-inner">
-          <div class="poll-creator-row">
-            <label>Question<input type="text" name="poll_question" placeholder="What do you think?" maxlength="256"></label>
+        <td colspan="2">
+        <details class="poll-creator">
+          <summary>[ 📊 Add a Poll to this thread ]</summary>
+          <div class="poll-creator-inner">
+            <div class="poll-creator-row">
+              <!-- FIX[F-T1]: maxlength matches server limit of 500 chars (was 256) -->
+              <label>Question<input type="text" name="poll_question" placeholder="What do you think?" maxlength="500"></label>
+            </div>
+            <div id="poll-options-list">
+              <!-- FIX[F-T1]: maxlength matches server limit of 200 chars (was 128) -->
+              <div class="poll-option-row"><input type="text" name="poll_option" placeholder="Option 1" maxlength="200"><button type="button" class="poll-remove-btn" data-action="remove-poll-option" style="display:none">✕</button></div>
+              <div class="poll-option-row"><input type="text" name="poll_option" placeholder="Option 2" maxlength="200"><button type="button" class="poll-remove-btn" data-action="remove-poll-option" style="display:none">✕</button></div>
+            </div>
+            <button type="button" class="poll-add-btn" data-action="add-poll-option">+ Add Option</button>
+            <div class="poll-creator-row poll-duration-row">
+              <label>Duration
+                <input type="number" name="poll_duration_value" value="24" min="1" max="720" class="poll-duration-input">
+                <!-- FIX[F-T2]: Added Days option — server now accepts "days" unit -->
+                <select name="poll_duration_unit" class="poll-duration-unit">
+                  <option value="hours">Hours</option>
+                  <option value="minutes">Minutes</option>
+                  <option value="days">Days</option>
+                </select>
+              </label>
+            </div>
           </div>
-          <div id="poll-options-list">
-            <div class="poll-option-row"><input type="text" name="poll_option" placeholder="Option 1" maxlength="128"><button type="button" class="poll-remove-btn" data-action="remove-poll-option" style="display:none">✕</button></div>
-            <div class="poll-option-row"><input type="text" name="poll_option" placeholder="Option 2" maxlength="128"><button type="button" class="poll-remove-btn" data-action="remove-poll-option" style="display:none">✕</button></div>
-          </div>
-          <button type="button" class="poll-add-btn" data-action="add-poll-option">+ Add Option</button>
-          <div class="poll-creator-row poll-duration-row">
-            <label>Duration
-              <input type="number" name="poll_duration_value" value="24" min="1" max="720" class="poll-duration-input">
-              <select name="poll_duration_unit" class="poll-duration-unit">
-                <option value="hours">Hours</option>
-                <option value="minutes">Minutes</option>
-              </select>
-            </label>
-          </div>
-        </div>
-      </details>
-    </td></tr>
+        </details>
+        </td></tr>
   </table>
 </form>
 </div>

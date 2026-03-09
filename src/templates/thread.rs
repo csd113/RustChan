@@ -280,7 +280,10 @@ fn render_poll(
         } else {
             "poll-open"
         },
-        expires = expires_str,
+        // FIX[T-T2]: escape_html for defensive correctness — expires_str is
+        // derived from integer arithmetic and fmt_ts today, but this guard
+        // ensures any future changes to expires_str can't inject HTML.
+        expires = escape_html(&expires_str),
     );
 
     if show_results {
@@ -525,7 +528,12 @@ pub fn render_post(
     // Edit link + report button (only on thread pages where show_delete=true)
     if show_delete {
         let now = chrono::Utc::now().timestamp();
-        let within_edit_window = edit_window_secs > 0 && now - post.created_at <= edit_window_secs;
+        // FIX[T-T1]: edit_window_secs = 0 means no time restriction (always
+        // editable while allow_editing is true — matches the handler-layer fix).
+        // The previous guard had `> 0 && …` which suppressed the edit link
+        // entirely when the board used the no-limit setting.
+        let within_edit_window = edit_window_secs == 0
+            || (edit_window_secs > 0 && now - post.created_at <= edit_window_secs);
         let edit_link = if within_edit_window {
             format!(
                 r#" <a class="edit-btn" href="/{board}/post/{pid}/edit" title="Edit post">edit</a>"#,

@@ -1039,11 +1039,19 @@ pub async fn admin_ban_and_delete(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
+    // FIX[A1]: form.board is user-supplied; sanitise to alphanumeric only before
+    // embedding in the redirect URL to prevent open-redirect via "//" prefixes.
+    let safe_board: String = form
+        .board
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
     // If OP was deleted, the thread is gone — send to board index
     let redirect = if is_op {
-        format!("/{}", form.board)
+        format!("/{}", safe_board)
     } else {
-        format!("/{}/thread/{}#p{}", form.board, thread_id, post_id)
+        format!("/{}/thread/{}#p{}", safe_board, thread_id, post_id)
     };
     Ok(Redirect::to(&redirect).into_response())
 }
@@ -1522,8 +1530,10 @@ pub async fn admin_restore(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
 
-    // Collect multipart fields (the stream can only be consumed once).
-    let mut zip_data: Option<Vec<u8>> = None;
+    // FIX[A7]: Stream the uploaded zip to a NamedTempFile on disk instead of
+    // buffering the entire upload into a Vec<u8>.  Full-site backups can be
+    // several GiB; loading them entirely into the heap exhausts available memory.
+    let mut zip_tmp: Option<tempfile::NamedTempFile> = None;
     let mut form_csrf: Option<String> = None;
 
     while let Some(field) = multipart
@@ -1541,13 +1551,38 @@ pub async fn admin_restore(
                 );
             }
             Some("backup_file") => {
-                let bytes = field
-                    .bytes()
+                use tokio::io::AsyncWriteExt as _;
+                let tmp = tempfile::NamedTempFile::new()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Tempfile: {}", e)))?;
+                // Clone the underlying fd for async writing; the original
+                // NamedTempFile retains ownership and the delete-on-drop guard.
+                let std_clone = tmp
+                    .as_file()
+                    .try_clone()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Clone fd: {}", e)))?;
+                let async_file = tokio::fs::File::from_std(std_clone);
+                let mut writer = tokio::io::BufWriter::new(async_file);
+                let mut field = field;
+                while let Some(chunk) = field
+                    .chunk()
                     .await
-                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
-                zip_data = Some(bytes.to_vec());
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?
+                {
+                    writer
+                        .write_all(&chunk)
+                        .await
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Write chunk: {}", e)))?;
+                }
+                writer
+                    .flush()
+                    .await
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush: {}", e)))?;
+                zip_tmp = Some(tmp);
             }
-            _ => {}
+            _ => {
+                // Drain unknown fields so the multipart stream advances.
+                let _ = field.bytes().await;
+            }
         }
     }
 
@@ -1558,9 +1593,13 @@ pub async fn admin_restore(
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let zip_bytes =
-        zip_data.ok_or_else(|| AppError::BadRequest("No backup file uploaded.".into()))?;
-    if zip_bytes.is_empty() {
+    let zip_tmp = zip_tmp.ok_or_else(|| AppError::BadRequest("No backup file uploaded.".into()))?;
+    // Determine size without reading into RAM: seeking to end gives the byte count.
+    let zip_size = zip_tmp
+        .as_file()
+        .seek(std::io::SeekFrom::End(0))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek check: {}", e)))?;
+    if zip_size == 0 {
         return Err(AppError::BadRequest(
             "Uploaded backup file is empty.".into(),
         ));
@@ -1579,9 +1618,13 @@ pub async fn admin_restore(
             // in the restored DB once the backup completes.
             let admin_id = require_admin_session_sid(&live_conn, session_id.as_deref())?;
 
-            // ── Parse the zip ─────────────────────────────────────────────
-            let cursor = std::io::Cursor::new(zip_bytes);
-            let mut archive = zip::ZipArchive::new(cursor)
+            // ── Open the on-disk zip (FIX[A7]) ───────────────────────────
+            // reopen() gives a fresh File descriptor seeked to position 0,
+            // so ZipArchive can navigate entries without loading into RAM.
+            let zip_file = zip_tmp
+                .reopen()
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen zip: {}", e)))?;
+            let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
                 .map_err(|e| AppError::BadRequest(format!("Invalid zip: {}", e)))?;
 
             // Quick pre-flight: make sure there is a chan.db entry.
@@ -1700,6 +1743,9 @@ pub async fn admin_restore(
     new_cookie.set_same_site(SameSite::Strict);
     new_cookie.set_path("/");
     new_cookie.set_secure(CONFIG.https_cookies);
+    // FIX[A5]: Set Max-Age so the browser expires the cookie after the configured
+    // session lifetime — matching the behaviour of the normal login handler.
+    new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
     Ok((jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response())
 }
@@ -2488,16 +2534,21 @@ pub async fn restore_saved_full_backup(
     }
 
     let path = full_backup_dir().join(&safe_filename);
-    let zip_bytes =
-        std::fs::read(&path).map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
-
+    // FIX[A3]: Do NOT read the file in the async context before auth is verified.
+    // std::fs::read() blocks the Tokio runtime and an unauthenticated caller could
+    // force the server to read gigabytes off disk before being rejected.  The read
+    // is deferred into spawn_blocking where it runs only after the session check.
     let upload_dir = CONFIG.upload_dir.clone();
 
     let fresh_sid: String = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let mut live_conn = pool.get()?;
+            // Auth check first — only read the (potentially huge) file if valid.
             let admin_id = require_admin_session_sid(&live_conn, session_id.as_deref())?;
+
+            let zip_bytes = std::fs::read(&path)
+                .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
 
             let cursor = std::io::Cursor::new(zip_bytes);
             let mut archive = zip::ZipArchive::new(cursor)
@@ -2608,6 +2659,8 @@ pub async fn restore_saved_full_backup(
     new_cookie.set_same_site(SameSite::Strict);
     new_cookie.set_path("/");
     new_cookie.set_secure(CONFIG.https_cookies);
+    // FIX[A5]: Set Max-Age to match normal login behaviour.
+    new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
     Ok((jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response())
 }
 
@@ -2635,8 +2688,8 @@ pub async fn restore_saved_board_backup(
     }
 
     let path = board_backup_dir().join(&safe_filename);
-    let zip_bytes =
-        std::fs::read(&path).map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
+    // FIX[A4]: Defer the blocking file read until after auth is verified inside
+    // spawn_blocking — mirrors the fix applied to restore_saved_full_backup (A3).
     let upload_dir = CONFIG.upload_dir.clone();
 
     let board_short_result: Result<Result<String>> = tokio::task::spawn_blocking({
@@ -2647,7 +2700,11 @@ pub async fn restore_saved_board_backup(
             use std::collections::HashMap;
 
             let conn = pool.get()?;
+            // Auth check first — only read the file if the session is valid.
             require_admin_session_sid(&conn, session_id.as_deref())?;
+
+            let zip_bytes = std::fs::read(&path)
+                .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
 
             let cursor = std::io::Cursor::new(zip_bytes);
             let mut archive = zip::ZipArchive::new(cursor)
@@ -2680,72 +2737,77 @@ pub async fn restore_saved_board_backup(
                 )
                 .ok();
 
-            let live_board_id: i64 = if let Some(eid) = existing_id {
-                conn.execute("DELETE FROM threads WHERE board_id = ?1", params![eid])
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Clear threads: {}", e)))?;
-                conn.execute(
-                    "UPDATE boards SET name=?1, description=?2, nsfw=?3,
-                     max_threads=?4, bump_limit=?5,
-                     allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
-                     edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-                     allow_video_embeds=?13, allow_captcha=?14, post_cooldown_secs=?15
-                     WHERE id=?16",
-                    params![
-                        manifest.board.name,
-                        manifest.board.description,
-                        manifest.board.nsfw as i64,
-                        manifest.board.max_threads,
-                        manifest.board.bump_limit,
-                        manifest.board.allow_images as i64,
-                        manifest.board.allow_video as i64,
-                        manifest.board.allow_audio as i64,
-                        manifest.board.allow_tripcodes as i64,
-                        manifest.board.edit_window_secs,
-                        manifest.board.allow_editing as i64,
-                        manifest.board.allow_archive as i64,
-                        manifest.board.allow_video_embeds as i64,
-                        manifest.board.allow_captcha as i64,
-                        manifest.board.post_cooldown_secs,
-                        eid,
-                    ],
-                )
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Update board: {}", e)))?;
-                eid
-            } else {
-                conn.execute(
-                    "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
-                     bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
-                     edit_window_secs, allow_editing, allow_archive, allow_video_embeds, allow_captcha,
-                     post_cooldown_secs, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
-                    params![
-                        manifest.board.short_name,
-                        manifest.board.name,
-                        manifest.board.description,
-                        manifest.board.nsfw as i64,
-                        manifest.board.max_threads,
-                        manifest.board.bump_limit,
-                        manifest.board.allow_images as i64,
-                        manifest.board.allow_video as i64,
-                        manifest.board.allow_audio as i64,
-                        manifest.board.allow_tripcodes as i64,
-                        manifest.board.edit_window_secs,
-                        manifest.board.allow_editing as i64,
-                        manifest.board.allow_archive as i64,
-                        manifest.board.allow_video_embeds as i64,
-                        manifest.board.allow_captcha as i64,
-                        manifest.board.post_cooldown_secs,
-                        manifest.board.created_at,
-                    ],
-                )
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert board: {}", e)))?;
-                conn.last_insert_rowid()
-            };
-
+            // FIX[A6]: BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
+            // board row as well as the thread/post/poll inserts.  Previously those
+            // DDL statements ran outside any transaction, so a crash between the
+            // DELETE and the first INSERT left the board with zero threads and no way
+            // to recover without manual intervention.
             conn.execute("BEGIN IMMEDIATE", [])
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Begin tx: {}", e)))?;
 
             let restore_result = (|| -> Result<()> {
+                let live_board_id: i64 = if let Some(eid) = existing_id {
+                    conn.execute("DELETE FROM threads WHERE board_id = ?1", params![eid])
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Clear threads: {}", e)))?;
+                    conn.execute(
+                        "UPDATE boards SET name=?1, description=?2, nsfw=?3,
+                         max_threads=?4, bump_limit=?5,
+                         allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
+                         edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
+                         allow_video_embeds=?13, allow_captcha=?14, post_cooldown_secs=?15
+                         WHERE id=?16",
+                        params![
+                            manifest.board.name,
+                            manifest.board.description,
+                            manifest.board.nsfw as i64,
+                            manifest.board.max_threads,
+                            manifest.board.bump_limit,
+                            manifest.board.allow_images as i64,
+                            manifest.board.allow_video as i64,
+                            manifest.board.allow_audio as i64,
+                            manifest.board.allow_tripcodes as i64,
+                            manifest.board.edit_window_secs,
+                            manifest.board.allow_editing as i64,
+                            manifest.board.allow_archive as i64,
+                            manifest.board.allow_video_embeds as i64,
+                            manifest.board.allow_captcha as i64,
+                            manifest.board.post_cooldown_secs,
+                            eid,
+                        ],
+                    )
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Update board: {}", e)))?;
+                    eid
+                } else {
+                    conn.execute(
+                        "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
+                         bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
+                         edit_window_secs, allow_editing, allow_archive, allow_video_embeds, allow_captcha,
+                         post_cooldown_secs, created_at)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                        params![
+                            manifest.board.short_name,
+                            manifest.board.name,
+                            manifest.board.description,
+                            manifest.board.nsfw as i64,
+                            manifest.board.max_threads,
+                            manifest.board.bump_limit,
+                            manifest.board.allow_images as i64,
+                            manifest.board.allow_video as i64,
+                            manifest.board.allow_audio as i64,
+                            manifest.board.allow_tripcodes as i64,
+                            manifest.board.edit_window_secs,
+                            manifest.board.allow_editing as i64,
+                            manifest.board.allow_archive as i64,
+                            manifest.board.allow_video_embeds as i64,
+                            manifest.board.allow_captcha as i64,
+                            manifest.board.post_cooldown_secs,
+                            manifest.board.created_at,
+                        ],
+                    )
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert board: {}", e)))?;
+                    conn.last_insert_rowid()
+                };
+
                 let mut thread_id_map: HashMap<i64, i64> = HashMap::new();
                 for t in &manifest.threads {
                     conn.execute(
@@ -3466,72 +3528,75 @@ pub async fn board_restore(
                     )
                     .ok();
 
-                let live_board_id: i64 = if let Some(eid) = existing_id {
-                    conn.execute("DELETE FROM threads WHERE board_id = ?1", params![eid])
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Clear threads: {}", e)))?;
-                    conn.execute(
-                        "UPDATE boards SET name=?1, description=?2, nsfw=?3,
-                         max_threads=?4, bump_limit=?5,
-                         allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
-                         edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-                         allow_video_embeds=?13, allow_captcha=?14, post_cooldown_secs=?15
-                         WHERE id=?16",
-                        params![
-                            manifest.board.name,
-                            manifest.board.description,
-                            manifest.board.nsfw as i64,
-                            manifest.board.max_threads,
-                            manifest.board.bump_limit,
-                            manifest.board.allow_images as i64,
-                            manifest.board.allow_video as i64,
-                            manifest.board.allow_audio as i64,
-                            manifest.board.allow_tripcodes as i64,
-                            manifest.board.edit_window_secs,
-                            manifest.board.allow_editing as i64,
-                            manifest.board.allow_archive as i64,
-                            manifest.board.allow_video_embeds as i64,
-                            manifest.board.allow_captcha as i64,
-                            manifest.board.post_cooldown_secs,
-                            eid,
-                        ],
-                    )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Update board: {}", e)))?;
-                    eid
-                } else {
-                    conn.execute(
-                        "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
-                         bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
-                         edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                         allow_captcha, post_cooldown_secs, created_at)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
-                        params![
-                            manifest.board.short_name,
-                            manifest.board.name,
-                            manifest.board.description,
-                            manifest.board.nsfw as i64,
-                            manifest.board.max_threads,
-                            manifest.board.bump_limit,
-                            manifest.board.allow_images as i64,
-                            manifest.board.allow_video as i64,
-                            manifest.board.allow_audio as i64,
-                            manifest.board.allow_tripcodes as i64,
-                            manifest.board.edit_window_secs,
-                            manifest.board.allow_editing as i64,
-                            manifest.board.allow_archive as i64,
-                            manifest.board.allow_video_embeds as i64,
-                            manifest.board.allow_captcha as i64,
-                            manifest.board.post_cooldown_secs,
-                            manifest.board.created_at,
-                        ],
-                    )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert board: {}", e)))?;
-                    conn.last_insert_rowid()
-                };
 
+                // FIX[A6]: BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
+                // board row.  Previously those statements ran outside any transaction.
                 conn.execute("BEGIN IMMEDIATE", [])
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Begin tx: {}", e)))?;
 
                 let restore_result = (|| -> Result<()> {
+                    let live_board_id: i64 = if let Some(eid) = existing_id {
+                        conn.execute("DELETE FROM threads WHERE board_id = ?1", params![eid])
+                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Clear threads: {}", e)))?;
+                        conn.execute(
+                            "UPDATE boards SET name=?1, description=?2, nsfw=?3,
+                             max_threads=?4, bump_limit=?5,
+                             allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
+                             edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
+                             allow_video_embeds=?13, allow_captcha=?14, post_cooldown_secs=?15
+                             WHERE id=?16",
+                            params![
+                                manifest.board.name,
+                                manifest.board.description,
+                                manifest.board.nsfw as i64,
+                                manifest.board.max_threads,
+                                manifest.board.bump_limit,
+                                manifest.board.allow_images as i64,
+                                manifest.board.allow_video as i64,
+                                manifest.board.allow_audio as i64,
+                                manifest.board.allow_tripcodes as i64,
+                                manifest.board.edit_window_secs,
+                                manifest.board.allow_editing as i64,
+                                manifest.board.allow_archive as i64,
+                                manifest.board.allow_video_embeds as i64,
+                                manifest.board.allow_captcha as i64,
+                                manifest.board.post_cooldown_secs,
+                                eid,
+                            ],
+                        )
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Update board: {}", e)))?;
+                        eid
+                    } else {
+                        conn.execute(
+                            "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
+                             bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
+                             edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
+                             allow_captcha, post_cooldown_secs, created_at)
+                             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                            params![
+                                manifest.board.short_name,
+                                manifest.board.name,
+                                manifest.board.description,
+                                manifest.board.nsfw as i64,
+                                manifest.board.max_threads,
+                                manifest.board.bump_limit,
+                                manifest.board.allow_images as i64,
+                                manifest.board.allow_video as i64,
+                                manifest.board.allow_audio as i64,
+                                manifest.board.allow_tripcodes as i64,
+                                manifest.board.edit_window_secs,
+                                manifest.board.allow_editing as i64,
+                                manifest.board.allow_archive as i64,
+                                manifest.board.allow_video_embeds as i64,
+                                manifest.board.allow_captcha as i64,
+                                manifest.board.post_cooldown_secs,
+                                manifest.board.created_at,
+                            ],
+                        )
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert board: {}", e)))?;
+                        conn.last_insert_rowid()
+                    };
+
                     let mut thread_id_map: HashMap<i64, i64> = HashMap::new();
                     for t in &manifest.threads {
                         conn.execute(
@@ -3872,10 +3937,10 @@ pub async fn admin_ip_history(
     let (jar, csrf) = ensure_csrf(jar);
     let csrf_clone = csrf.clone();
 
-    // Sanitise the IP hash: must be a hex string (SHA-256 = 64 chars).
-    // Any other value would produce empty results; we reject it explicitly
-    // to avoid leaking information via crafted paths.
-    if ip_hash.len() > 64 || !ip_hash.chars().all(|c| c.is_ascii_alphanumeric()) {
+    // Sanitise the IP hash: must be exactly a SHA-256 hex string (64 hex chars).
+    // The previous guard used `> 64` which accepted any string of 0–64 chars,
+    // including an empty string.  Require exactly 64.
+    if ip_hash.len() != 64 || !ip_hash.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(AppError::BadRequest("Invalid IP hash.".into()));
     }
 
