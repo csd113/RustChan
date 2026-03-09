@@ -54,6 +54,7 @@ pub fn admin_panel_page(
     appeals: &[crate::models::BanAppeal],
     site_name: &str,
     site_subtitle: &str,
+    default_theme: &str,
     tor_address: Option<&str>,
     // Optional one-time flash message shown at the top of the panel.
     // (is_error, message) — is_error=true → red, false → green.
@@ -379,22 +380,46 @@ pub fn admin_panel_page(
 <button type="submit">logout</button>
 </form>
 
-<section class="admin-section" id="reports">
-<h2>// report inbox{report_badge}</h2>
-<table class="admin-table">
-<thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
-<tbody>{report_rows}</tbody>
-</table>
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // site settings
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<section class="admin-section">
+<h2>// site settings</h2>
+<form method="POST" action="/admin/site/settings">
+<input type="hidden" name="_csrf" value="{csrf}">
+<div class="board-settings-grid" style="margin-bottom:0.75rem">
+  <label>Site name
+    <input type="text" name="site_name" value="{site_name_val}" maxlength="64" placeholder="RustChan"
+           style="font-family:inherit">
+  </label>
+  <label>Home page subtitle
+    <input type="text" name="site_subtitle" value="{site_subtitle_val}" maxlength="128" placeholder="select board to proceed"
+           style="font-family:inherit">
+  </label>
+  <label>Default theme
+    <select name="default_theme" style="font-family:inherit;padding:0.25rem 0.4rem;background:var(--bg-input);color:var(--text);border:1px solid var(--border)">
+      <option value="terminal"{sel_terminal}>Terminal (default dark)</option>
+      <option value="aero"{sel_aero}>Frutiger Aero</option>
+      <option value="dorfic"{sel_dorfic}>DORFic</option>
+      <option value="fluorogrid"{sel_fluorogrid}>FluoroGrid</option>
+      <option value="neoncubicle"{sel_neoncubicle}>NeonCubicle</option>
+      <option value="chanclassic"{sel_chanclassic}>ChanClassic</option>
+    </select>
+  </label>
+</div>
+<div class="board-settings-checks" style="margin-bottom:0.75rem">
+  <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block. Existing posts are not affected — only new posts use the current setting.">
+    <input type="checkbox" name="collapse_greentext" value="1"{collapse_ck}>
+    Collapse long greentext walls (3+ lines) into expandable blocks
+  </label>
+</div>
+<button type="submit">save settings</button>
+</form>
 </section>
 
-<section class="admin-section" id="appeals">
-<h2>// ban appeals{appeal_badge}</h2>
-<table class="admin-table">
-<thead><tr><th>ip (partial)</th><th>appeal message</th><th>filed</th><th>action</th></tr></thead>
-<tbody>{appeal_rows}</tbody>
-</table>
-</section>
-
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // boards
+     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// boards</h2>
 <div class="admin-board-cards">{board_cards}</div>
@@ -409,13 +434,43 @@ pub fn admin_panel_page(
 </form>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // moderation log
+     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
-<h2>// active bans</h2>
+<h2>// moderation log <a href="/admin/mod-log" style="font-size:0.78rem;margin-left:0.6rem;color:var(--text-dim)">[ view full log ]</a></h2>
+<p style="color:var(--text-dim);font-size:0.82rem">All admin actions are recorded in the moderation log. Click <em>view full log</em> to browse the history.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // report inbox
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<section class="admin-section" id="reports">
+<h2>// report inbox{report_badge}</h2>
+<table class="admin-table">
+<thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
+<tbody>{report_rows}</tbody>
+</table>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // moderation (ban appeals + active bans + word filters)
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<section class="admin-section">
+<h2>// moderation</h2>
+
+<h3 id="appeals">Ban appeals{appeal_badge}</h3>
+<table class="admin-table">
+<thead><tr><th>ip (partial)</th><th>appeal message</th><th>filed</th><th>action</th></tr></thead>
+<tbody>{appeal_rows}</tbody>
+</table>
+
+<h3 style="margin-top:1.5rem">Active bans</h3>
 <table class="admin-table">
 <thead><tr><th>ip hash (partial)</th><th>reason</th><th>expires</th><th>action</th></tr></thead>
 <tbody>{ban_rows}</tbody>
 </table>
-<h3>add ban</h3>
+<h4>add ban</h4>
 <form method="POST" action="/admin/ban/add">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="text" name="ip_hash" placeholder="ip hash" required>
@@ -423,15 +478,13 @@ pub fn admin_panel_page(
 <input type="text" name="duration_hours" placeholder="hours (blank=perm)" style="width:120px">
 <button type="submit">ban</button>
 </form>
-</section>
 
-<section class="admin-section">
-<h2>// word filters</h2>
+<h3 style="margin-top:1.5rem">Word filters</h3>
 <table class="admin-table">
 <thead><tr><th>pattern</th><th>replacement</th><th>action</th></tr></thead>
 <tbody>{filter_rows}</tbody>
 </table>
-<h3>add filter</h3>
+<h4>add filter</h4>
 <form method="POST" action="/admin/filter/add">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="text" name="pattern" placeholder="pattern to match" required>
@@ -440,37 +493,11 @@ pub fn admin_panel_page(
 </form>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // full site backup & restore
+     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
-<h2>// site settings</h2>
-<form method="POST" action="/admin/site/settings">
-<input type="hidden" name="_csrf" value="{csrf}">
-<div class="board-settings-grid" style="margin-bottom:0.75rem">
-  <label>Site name
-    <input type="text" name="site_name" value="{site_name_val}" maxlength="64" placeholder="RustChan"
-           style="font-family:inherit">
-  </label>
-  <label>Home page subtitle
-    <input type="text" name="site_subtitle" value="{site_subtitle_val}" maxlength="128" placeholder="select board to proceed"
-           style="font-family:inherit">
-  </label>
-</div>
-<div class="board-settings-checks" style="margin-bottom:0.75rem">
-  <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block. Existing posts are not affected — only new posts use the current setting.">
-    <input type="checkbox" name="collapse_greentext" value="1"{collapse_ck}>
-    Collapse long greentext walls (3+ lines) into expandable blocks
-  </label>
-</div>
-<button type="submit">save settings</button>
-</form>
-</section>
-
-<section class="admin-section">
-<h2>// moderation log <a href="/admin/mod-log" style="font-size:0.78rem;margin-left:0.6rem;color:var(--text-dim)">[ view full log ]</a></h2>
-<p style="color:var(--text-dim);font-size:0.82rem">All admin actions are recorded in the moderation log. Click <em>view full log</em> to browse the history.</p>
-</section>
-
-<section class="admin-section">
-<h2>// backup &amp; restore</h2>
+<h2>// full site backup &amp; restore</h2>
 <p style="color:var(--text-dim);font-size:0.85rem">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/full-backups/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer.</p>
 <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;margin-top:0.75rem;margin-bottom:0.75rem">
 <form method="POST" action="/admin/backup/create">
@@ -490,6 +517,9 @@ pub fn admin_panel_page(
 </table>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // board backup & restore
+     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// board backup &amp; restore</h2>
 <p style="color:var(--text-dim);font-size:0.85rem">Board backups cover a single board. Use <em>save to server</em> on a board card above to store the backup in <code>rustchan-data/board-backups/</code>, or use the table below to download, restore, or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
@@ -507,6 +537,9 @@ pub fn admin_panel_page(
 </table>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // database maintenance
+     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// database maintenance</h2>
 <p style="color:var(--text-dim);font-size:0.85rem">
@@ -521,6 +554,10 @@ pub fn admin_panel_page(
           data-confirm="Run VACUUM? This will briefly block the database while it rebuilds. Continue?">&#x1F9F9; run VACUUM</button>
 </form>
 </section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // active onion address
+     ═══════════════════════════════════════════════════════════════════════════ -->
 {tor_section}
 </div>"#,
         csrf = escape_html(csrf_token),
@@ -538,9 +575,40 @@ pub fn admin_panel_page(
         appeal_badge = appeal_badge,
         site_name_val = escape_html(site_name),
         site_subtitle_val = escape_html(site_subtitle),
+        sel_terminal = if default_theme == "terminal" || default_theme.is_empty() {
+            " selected"
+        } else {
+            ""
+        },
+        sel_aero = if default_theme == "aero" {
+            " selected"
+        } else {
+            ""
+        },
+        sel_dorfic = if default_theme == "dorfic" {
+            " selected"
+        } else {
+            ""
+        },
+        sel_fluorogrid = if default_theme == "fluorogrid" {
+            " selected"
+        } else {
+            ""
+        },
+        sel_neoncubicle = if default_theme == "neoncubicle" {
+            " selected"
+        } else {
+            ""
+        },
+        sel_chanclassic = if default_theme == "chanclassic" {
+            " selected"
+        } else {
+            ""
+        },
         tor_section = match tor_address {
             Some(addr) => format!(
                 r#"<section class="admin-section" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
+<h2>// active onion address</h2>
 <p style="color:var(--text-dim);font-size:0.82rem;margin:0">
   <code style="user-select:all;color:var(--text)">{}</code>
 </p>

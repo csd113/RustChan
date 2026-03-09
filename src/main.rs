@@ -213,11 +213,28 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         if let Ok(conn) = pool.get() {
             let name = db::get_site_name(&conn);
             templates::set_live_site_name(&name);
+
+            // Seed subtitle from settings.toml if not yet configured in DB.
             let subtitle = db::get_site_subtitle(&conn);
+            let subtitle = if subtitle.is_empty() && !CONFIG.initial_site_subtitle.is_empty() {
+                let _ = db::set_site_setting(&conn, "site_subtitle", &CONFIG.initial_site_subtitle);
+                CONFIG.initial_site_subtitle.clone()
+            } else {
+                subtitle
+            };
             templates::set_live_site_subtitle(&subtitle);
-            // Seed the default-theme cache so the first page served already
-            // carries the correct data-default-theme attribute on <html>.
+
+            // Seed default_theme from settings.toml if not yet configured in DB.
             let default_theme = db::get_default_user_theme(&conn);
+            let default_theme = if default_theme.is_empty()
+                && !CONFIG.initial_default_theme.is_empty()
+                && CONFIG.initial_default_theme != "terminal"
+            {
+                let _ = db::set_site_setting(&conn, "default_theme", &CONFIG.initial_default_theme);
+                CONFIG.initial_default_theme.clone()
+            } else {
+                default_theme
+            };
             templates::set_live_default_theme(&default_theme);
         }
     }

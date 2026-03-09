@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "rustchan"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "argon2",

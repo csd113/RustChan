@@ -412,6 +412,7 @@ pub async fn admin_panel(
             let appeals = db::get_open_ban_appeals(&conn)?;
             let site_name = db::get_site_name(&conn);
             let site_subtitle = db::get_site_subtitle(&conn);
+            let default_theme = db::get_default_user_theme(&conn);
 
             // Collect saved backup file lists (read from disk, not DB).
             let full_backups = list_backup_files(&full_backup_dir());
@@ -449,6 +450,7 @@ pub async fn admin_panel(
                 &appeals,
                 &site_name,
                 &site_subtitle,
+                &default_theme,
                 tor_address.as_deref(),
                 flash_ref,
             ))
@@ -3472,6 +3474,9 @@ pub struct SiteSettingsForm {
     pub site_name: Option<String>,
     /// Custom home page subtitle line below the site name.
     pub site_subtitle: Option<String>,
+    /// Default theme served to first-time visitors.
+    /// Valid slugs: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
+    pub default_theme: Option<String>,
 }
 
 pub async fn update_site_settings(
@@ -3527,6 +3532,31 @@ pub async fn update_site_settings(
             db::set_site_setting(&conn, "site_subtitle", &new_subtitle)?;
             crate::templates::set_live_site_subtitle(&new_subtitle);
             info!("Admin updated site subtitle to: {:?}", new_subtitle);
+
+            // Save the default theme slug (validated against allowed values).
+            const VALID_THEMES: &[&str] = &[
+                "terminal",
+                "aero",
+                "dorfic",
+                "fluorogrid",
+                "neoncubicle",
+                "chanclassic",
+            ];
+            let new_theme = form
+                .default_theme
+                .as_deref()
+                .unwrap_or("terminal")
+                .trim()
+                .to_string();
+            let new_theme = if VALID_THEMES.contains(&new_theme.as_str()) {
+                new_theme
+            } else {
+                "terminal".to_string()
+            };
+            db::set_site_setting(&conn, "default_theme", &new_theme)?;
+            crate::templates::set_live_default_theme(&new_theme);
+            info!("Admin updated default theme to: {:?}", new_theme);
+
             Ok(())
         }
     })
