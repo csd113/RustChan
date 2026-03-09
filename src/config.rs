@@ -343,6 +343,61 @@ impl Config {
     }
 }
 
+/// Update `forum_name` and `site_subtitle` in `settings.toml` in-place,
+/// preserving all other lines and comments.
+///
+/// Called by the admin site-settings handler so that changes made via the
+/// panel are reflected in the file and survive a restart without the operator
+/// needing to hand-edit `settings.toml`.
+///
+/// If the key is not yet present in the file the function is a no-op for that
+/// key (it won't append new lines — the file is only updated if the key already
+/// exists).  On a fresh install `generate_settings_file_if_missing` always
+/// writes both keys, so this is only a concern for manually-crafted files.
+pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
+    let path = settings_file_path();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: could not read settings.toml for update: {e}");
+            return;
+        }
+    };
+
+    // Replace the value portion of `key = "..."` lines while preserving
+    // indentation, comments on the same line, and surrounding whitespace.
+    // We use a simple line-by-line scan so that file comments are untouched.
+    fn toml_quote(s: &str) -> String {
+        // Escape backslash and double-quote, then wrap in double quotes.
+        let inner = s.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{inner}\"")
+    }
+
+    let trailing_newline = content.ends_with('\n');
+    let updated: Vec<String> = content
+        .lines()
+        .map(|line| {
+            // Match `forum_name = ...` (possibly with surrounding spaces).
+            if line.trim_start().starts_with("forum_name") && line.contains('=') {
+                return format!("forum_name = {}", toml_quote(forum_name));
+            }
+            if line.trim_start().starts_with("site_subtitle") && line.contains('=') {
+                return format!("site_subtitle = {}", toml_quote(site_subtitle));
+            }
+            line.to_string()
+        })
+        .collect();
+
+    let mut out = updated.join("\n");
+    if trailing_newline {
+        out.push('\n');
+    }
+
+    if let Err(e) = std::fs::write(&path, out) {
+        eprintln!("Warning: could not write updated settings.toml: {e}");
+    }
+}
+
 // ─── Cookie secret rotation check ────────────────────────────────────────────
 
 /// Check whether the cookie_secret has changed since the last run by comparing

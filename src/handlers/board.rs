@@ -17,18 +17,10 @@ use crate::{
     models::*,
     templates,
     utils::{
-        // FIX[LOW-8]: sha256_hex now lives in utils::crypto (deduplicated)
-        crypto::{hash_ip, new_csrf_token, new_deletion_token, sha256_hex, verify_pow},
-        files::save_upload,
+        crypto::{hash_ip, new_csrf_token, new_deletion_token, verify_pow},
         sanitize::{
-            // FIX[MEDIUM-8]: apply_word_filters now runs before escape_html
-            apply_word_filters,
-            escape_html,
-            render_post_body,
-            validate_body,
-            validate_body_with_file,
-            validate_name,
-            validate_subject,
+            apply_word_filters, escape_html, render_post_body, validate_body,
+            validate_body_with_file, validate_name, validate_subject,
         },
         tripcode::parse_name_tripcode,
     },
@@ -201,7 +193,7 @@ pub async fn create_thread(
     // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
     let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
 
-    let board_short_err = board_short.clone();
+    let _board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = state.job_queue.clone();
@@ -282,117 +274,26 @@ pub async fn create_thread(
             let escaped_body = escape_html(&filtered_body);
             let body_html = render_post_body(&escaped_body);
 
-            let uploaded = if let Some((data, fname)) = file_data {
-                // Detect media type from magic bytes to enforce per-board toggles.
-                // We call detect_mime_type here for a quick classification without
-                // doing a full save; the real detection runs again in save_upload.
-                let detected_mime = crate::utils::files::detect_mime_type(&data)
-                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
-                let detected_media = crate::models::MediaType::from_mime(detected_mime)
-                    .ok_or_else(|| AppError::BadRequest("Unsupported file type.".into()))?;
-
-                match detected_media {
-                    crate::models::MediaType::Image if !board.allow_images => {
-                        return Err(AppError::BadRequest(
-                            "Image uploads are disabled on this board.".into(),
-                        ))
-                    }
-                    crate::models::MediaType::Video if !board.allow_video => {
-                        return Err(AppError::BadRequest(
-                            "Video uploads are disabled on this board.".into(),
-                        ))
-                    }
-                    crate::models::MediaType::Audio if !board.allow_audio => {
-                        return Err(AppError::BadRequest(
-                            "Audio uploads are disabled on this board.".into(),
-                        ))
-                    }
-                    _ => {}
-                }
-
-                // SHA-256 deduplication — FIX[LOW-8]: use sha256_hex from crypto module
-                let hash = sha256_hex(&data);
-                if let Some(cached) = db::find_file_by_hash(&conn, &hash)? {
-                    let cached_media = crate::models::MediaType::from_mime(&cached.mime_type)
-                        .unwrap_or(crate::models::MediaType::Image);
-                    Some(crate::utils::files::UploadedFile {
-                        file_path: cached.file_path,
-                        thumb_path: cached.thumb_path,
-                        original_name: crate::utils::sanitize::sanitize_filename(&fname),
-                        mime_type: cached.mime_type,
-                        file_size: data.len() as i64,
-                        media_type: cached_media,
-                        processing_pending: false, // cached = already fully processed
-                    })
-                } else {
-                    let f = save_upload(
-                        &data,
-                        &fname,
-                        &upload_dir,
-                        &board.short_name,
-                        thumb_size,
-                        max_image_size,
-                        max_video_size,
-                        max_audio_size,
-                        ffmpeg_available,
-                    )
-                    .map_err(crate::handlers::classify_upload_error)?;
-                    db::record_file_hash(&conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
-                    Some(f)
-                }
-            } else {
-                None
-            };
+            let uploaded = crate::handlers::process_primary_upload(
+                file_data,
+                &board,
+                &conn,
+                &upload_dir,
+                thumb_size,
+                max_image_size,
+                max_video_size,
+                max_audio_size,
+                ffmpeg_available,
+            )?;
 
             // ── Image+audio combo ─────────────────────────────────────────────
-            // If an audio file was also submitted alongside an image, and the
-            // board permits both, save the audio file using the image's thumb.
-            let audio_uploaded: Option<crate::utils::files::UploadedFile> =
-                if let Some((aud_data, aud_fname)) = audio_file_data {
-                    // Validate that the board allows audio
-                    if !board.allow_audio {
-                        return Err(AppError::BadRequest(
-                            "Audio uploads are disabled on this board.".into(),
-                        ));
-                    }
-                    // The primary file must be an image for the combo to be valid
-                    let primary_is_image = uploaded
-                        .as_ref()
-                        .map(|u| matches!(u.media_type, crate::models::MediaType::Image))
-                        .unwrap_or(false);
-                    if !primary_is_image {
-                        return Err(AppError::BadRequest(
-                            "Audio can only be combined with an image upload.".into(),
-                        ));
-                    }
-                    // Confirm it's actually audio via magic bytes
-                    let aud_mime = crate::utils::files::detect_mime_type(&aud_data)
-                        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-                    let aud_media = crate::models::MediaType::from_mime(aud_mime)
-                        .ok_or_else(|| AppError::BadRequest("Unsupported audio type.".into()))?;
-                    if !matches!(aud_media, crate::models::MediaType::Audio) {
-                        return Err(AppError::BadRequest(
-                            "The audio slot only accepts audio files.".into(),
-                        ));
-                    }
-
-                    let mut aud_file = crate::utils::files::save_audio_with_image_thumb(
-                        &aud_data,
-                        &aud_fname,
-                        &upload_dir,
-                        &board.short_name,
-                        max_audio_size,
-                    )
-                    .map_err(crate::handlers::classify_upload_error)?;
-
-                    // Use the image thumbnail as the audio's thumbnail
-                    if let Some(ref img) = uploaded {
-                        aud_file.thumb_path = img.thumb_path.clone();
-                    }
-                    Some(aud_file)
-                } else {
-                    None
-                };
+            let audio_uploaded = crate::handlers::process_audio_combo(
+                audio_file_data,
+                uploaded.as_ref(),
+                &board,
+                &upload_dir,
+                max_audio_size,
+            )?;
 
             let deletion_token = if del_token_val.trim().is_empty() {
                 new_deletion_token()
@@ -449,40 +350,15 @@ pub async fn create_thread(
             }
 
             // ── Background jobs ───────────────────────────────────────────────
-            // 1. Media post-processing (video transcode / audio waveform)
-            if let Some(ref up) = uploaded {
-                if up.processing_pending {
-                    let job = match up.media_type {
-                        crate::models::MediaType::Video => {
-                            Some(crate::workers::Job::VideoTranscode {
-                                post_id,
-                                file_path: up.file_path.clone(),
-                                board_short: board.short_name.clone(),
-                            })
-                        }
-                        crate::models::MediaType::Audio => {
-                            Some(crate::workers::Job::AudioWaveform {
-                                post_id,
-                                file_path: up.file_path.clone(),
-                                board_short: board.short_name.clone(),
-                            })
-                        }
-                        _ => None,
-                    };
-                    if let Some(j) = job {
-                        if let Err(e) = job_queue.enqueue(&j) {
-                            tracing::warn!("Failed to enqueue media job: {}", e);
-                        }
-                    }
-                }
-            }
-
-            // 2. Spam analysis
-            let _ = job_queue.enqueue(&crate::workers::Job::SpamCheck {
+            // 1 & 2. Media post-processing + spam check (shared helper)
+            crate::handlers::enqueue_post_jobs(
+                &job_queue,
                 post_id,
-                ip_hash: ip_hash.clone(),
-                body_len: body_text.len(),
-            });
+                &ip_hash,
+                body_text.len(),
+                uploaded.as_ref(),
+                &board.short_name,
+            );
 
             // 3. Thread pruning — now async so HTTP response returns immediately.
             let max_threads = board.max_threads;
@@ -500,60 +376,14 @@ pub async fn create_thread(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    // BadRequest → re-render the board index with an inline error banner.
+    // BadRequest → return a lightweight 422 page instead of re-querying the
+    // entire board index (which wastes significant DB and CPU under spam load).
     let redirect_url = match result {
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
-            let html = tokio::task::spawn_blocking({
-                let pool = state.db.clone();
-                let csrf_err = csrf_cookie.clone().unwrap_or_default();
-                let board_short = board_short_err.clone();
-                let msg = msg.clone();
-                move || -> String {
-                    let conn = match pool.get() {
-                        Ok(c) => c,
-                        Err(_) => return String::new(),
-                    };
-                    let board = match db::get_board_by_short(&conn, &board_short) {
-                        Ok(Some(b)) => b,
-                        _ => return String::new(),
-                    };
-                    let all_boards = db::get_all_boards(&conn).unwrap_or_default();
-                    let total = db::count_threads_for_board(&conn, board.id).unwrap_or(0);
-                    let pagination = crate::models::Pagination::new(1, 10, total);
-                    let threads =
-                        db::get_threads_for_board(&conn, board.id, 10, 0).unwrap_or_default();
-                    let summaries: Vec<crate::models::ThreadSummary> = threads
-                        .into_iter()
-                        .map(|t| {
-                            let preview = db::get_preview_posts(&conn, t.id, 3).unwrap_or_default();
-                            let omitted = (t.reply_count - preview.len() as i64).max(0);
-                            crate::models::ThreadSummary {
-                                thread: t,
-                                preview_posts: preview,
-                                omitted,
-                            }
-                        })
-                        .collect();
-                    templates::board_page(
-                        &board,
-                        &summaries,
-                        &pagination,
-                        &csrf_err,
-                        &all_boards,
-                        false,
-                        Some(&msg),
-                        db::get_collapse_greentext(&conn),
-                    )
-                }
-            })
-            .await
-            .unwrap_or_default();
-
-            if !html.is_empty() {
-                return Ok((jar, Html(html)).into_response());
-            }
-            return Err(AppError::BadRequest(msg));
+            let mut resp = Html(templates::error_page(422, &msg)).into_response();
+            *resp.status_mut() = axum::http::StatusCode::UNPROCESSABLE_ENTITY;
+            return Ok(resp);
         }
         Err(e) => return Err(e),
     };
@@ -834,13 +664,20 @@ pub async fn serve_board_media(
     use tower::ServiceExt;
     use tower_http::services::ServeFile;
 
-    // Reject path-traversal attempts.
-    if media_path.contains("..") {
+    // Reject path-traversal attempts and absolute-path escapes.
+    if media_path.contains("..") || media_path.starts_with('/') {
         return StatusCode::BAD_REQUEST.into_response();
     }
 
     let base = PathBuf::from(&CONFIG.upload_dir);
     let target = base.join(&media_path);
+
+    // Verify the resolved path is still inside the upload directory.
+    // This catches any edge cases that slip past the string checks above
+    // (e.g. symlinks, exotic percent-encoding handled by the OS).
+    if !target.starts_with(&base) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
 
     if target.exists() {
         // File present — forward the real request (with Range, ETag, etc.) to

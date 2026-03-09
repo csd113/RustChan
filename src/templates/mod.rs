@@ -19,7 +19,8 @@ use crate::models::*;
 use crate::utils::sanitize::escape_html;
 use chrono::{TimeZone, Utc};
 use once_cell::sync::Lazy;
-use std::sync::RwLock;
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 pub mod admin;
 pub mod board;
@@ -33,66 +34,59 @@ pub use board::*;
 pub use thread::*;
 
 // ─── Live site name (DB-overridable, falls back to CONFIG.forum_name) ─────────
+//
+// parking_lot::RwLock is used instead of std::sync::RwLock for two reasons:
+//  1. It never poisons — no need to handle poisoned-lock errors on the hot path.
+//  2. Arc<str> reduces the per-read allocation to a single atomic increment
+//     instead of a full String::clone(), which matters under high concurrency.
 
-static LIVE_SITE_NAME: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(CONFIG.forum_name.clone()));
-static LIVE_SITE_SUBTITLE: Lazy<RwLock<String>> =
-    Lazy::new(|| RwLock::new("select board to proceed".to_string()));
+static LIVE_SITE_NAME: Lazy<RwLock<Arc<str>>> =
+    Lazy::new(|| RwLock::new(Arc::from(CONFIG.forum_name.as_str())));
+static LIVE_SITE_SUBTITLE: Lazy<RwLock<Arc<str>>> =
+    Lazy::new(|| RwLock::new(Arc::from("select board to proceed")));
 
 /// In-memory cache for the admin-configured default theme (empty = terminal).
 /// Updated immediately when admin saves site settings so pages reflect the
 /// change without requiring a server restart or extra DB round-trip per request.
-static LIVE_DEFAULT_THEME: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
+static LIVE_DEFAULT_THEME: Lazy<RwLock<Arc<str>>> = Lazy::new(|| RwLock::new(Arc::from("")));
 
 /// Call this at startup (after first DB read) and after admin saves a new name.
 pub fn set_live_site_name(name: &str) {
-    if let Ok(mut guard) = LIVE_SITE_NAME.write() {
-        *guard = if name.trim().is_empty() {
-            CONFIG.forum_name.clone()
-        } else {
-            name.to_string()
-        };
-    }
+    let val: Arc<str> = if name.trim().is_empty() {
+        Arc::from(CONFIG.forum_name.as_str())
+    } else {
+        Arc::from(name)
+    };
+    *LIVE_SITE_NAME.write() = val;
 }
 
 pub fn set_live_site_subtitle(subtitle: &str) {
-    if let Ok(mut guard) = LIVE_SITE_SUBTITLE.write() {
-        *guard = if subtitle.trim().is_empty() {
-            "select board to proceed".to_string()
-        } else {
-            subtitle.to_string()
-        };
-    }
+    let val: Arc<str> = if subtitle.trim().is_empty() {
+        Arc::from("select board to proceed")
+    } else {
+        Arc::from(subtitle)
+    };
+    *LIVE_SITE_SUBTITLE.write() = val;
 }
 
 /// Update the in-memory default theme cache.
 /// Pass an empty string to reset to "terminal" (the built-in default).
 pub fn set_live_default_theme(theme: &str) {
-    if let Ok(mut guard) = LIVE_DEFAULT_THEME.write() {
-        *guard = theme.to_string();
-    }
+    *LIVE_DEFAULT_THEME.write() = Arc::from(theme);
 }
 
 /// Read the current live default theme slug.
-pub(super) fn live_default_theme() -> String {
-    LIVE_DEFAULT_THEME
-        .read()
-        .map(|g| g.clone())
-        .unwrap_or_default()
+pub(super) fn live_default_theme() -> Arc<str> {
+    Arc::clone(&*LIVE_DEFAULT_THEME.read())
 }
 
 /// Read the current live site name.
-pub(super) fn live_site_name() -> String {
-    LIVE_SITE_NAME
-        .read()
-        .map(|g| g.clone())
-        .unwrap_or_else(|_| CONFIG.forum_name.clone())
+pub(super) fn live_site_name() -> Arc<str> {
+    Arc::clone(&*LIVE_SITE_NAME.read())
 }
 
-pub(super) fn live_site_subtitle() -> String {
-    LIVE_SITE_SUBTITLE
-        .read()
-        .map(|g| g.clone())
-        .unwrap_or_else(|_| "select board to proceed".to_string())
+pub(super) fn live_site_subtitle() -> Arc<str> {
+    Arc::clone(&*LIVE_SITE_SUBTITLE.read())
 }
 
 // ─── Shared JS injected once per page ────────────────────────────────────────
@@ -261,7 +255,6 @@ pub(super) fn base_layout(
     csrf_token: &str,
     boards: &[Board],
     collapse_greentext: bool,
-    _allow_archive: bool,
 ) -> String {
     let inner_links: String = boards
         .iter()
@@ -295,7 +288,7 @@ pub(super) fn base_layout(
     // Only inject the attribute when a non-default theme is configured — no
     // attribute means "terminal" (the built-in default), matching the
     // client-side behaviour in theme-init.js.
-    let default_theme_attr = if !default_theme.is_empty() && default_theme != "terminal" {
+    let default_theme_attr = if !default_theme.is_empty() && &*default_theme != "terminal" {
         format!(r#" data-default-theme="{}""#, escape_html(&default_theme))
     } else {
         String::new()
@@ -379,7 +372,7 @@ pub(super) fn base_layout(
 // server's CSRF check, making the appeal feature completely non-functional.
 pub fn ban_page(reason: &str, csrf_token: &str) -> String {
     let default_theme = live_default_theme();
-    let default_theme_attr = if !default_theme.is_empty() && default_theme != "terminal" {
+    let default_theme_attr = if !default_theme.is_empty() && &*default_theme != "terminal" {
         format!(r#" data-default-theme="{}""#, escape_html(&default_theme))
     } else {
         String::new()
@@ -422,7 +415,7 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
 
 pub fn error_page(code: u16, message: &str) -> String {
     let default_theme = live_default_theme();
-    let default_theme_attr = if !default_theme.is_empty() && default_theme != "terminal" {
+    let default_theme_attr = if !default_theme.is_empty() && &*default_theme != "terminal" {
         format!(r#" data-default-theme="{}""#, escape_html(&default_theme))
     } else {
         String::new()

@@ -237,7 +237,6 @@ pub fn thread_page(
         csrf_token,
         boards,
         collapse_greentext,
-        board.allow_archive,
     )
 }
 
@@ -661,6 +660,5 @@ pub fn edit_post_page(
         csrf_token,
         boards,
         collapse_greentext,
-        board.allow_archive,
     )
 }

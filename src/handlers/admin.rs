@@ -115,6 +115,14 @@ fn clear_login_fails(ip_key: &str) {
     }
 }
 
+/// Prune all expired entries from ADMIN_LOGIN_FAILS.
+/// Called by a background task every 5 minutes so the map never grows
+/// unbounded during sustained brute-force attacks with no successful logins.
+pub fn prune_login_fails() {
+    let now = login_now_secs();
+    ADMIN_LOGIN_FAILS.retain(|_, (_, ws)| now.saturating_sub(*ws) <= LOGIN_FAIL_WINDOW);
+}
+
 /// Verify admin session. Returns the admin_id if valid.
 /// NOTE: This function performs blocking DB I/O. Only call it from within a
 /// spawn_blocking closure or synchronous (non-async) context.
@@ -3819,6 +3827,11 @@ pub async fn update_site_settings(
             db::set_site_setting(&conn, "site_subtitle", &new_subtitle)?;
             crate::templates::set_live_site_subtitle(&new_subtitle);
             info!("Admin updated site subtitle to: {:?}", new_subtitle);
+
+            // Persist both values back to settings.toml so they survive a
+            // server restart without requiring a manual file edit.
+            crate::config::update_settings_file_site_names(&new_name, &new_subtitle);
+            info!("settings.toml updated with new site_name and site_subtitle");
 
             // Save the default theme slug (validated against allowed values).
             const VALID_THEMES: &[&str] = &[

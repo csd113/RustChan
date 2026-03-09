@@ -1270,6 +1270,7 @@ dependencies = [
  "image",
  "libc",
  "once_cell",
+ "parking_lot",
  "r2d2",
  "r2d2_sqlite",
  "rand_core 0.6.4",

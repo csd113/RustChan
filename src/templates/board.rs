@@ -138,7 +138,6 @@ pub fn index_page(
         csrf_token,
         &all_boards,
         false,
-        false,
     )
 }
 
@@ -232,7 +231,6 @@ pub fn board_page(
         csrf_token,
         boards,
         collapse_greentext,
-        board.allow_archive,
     )
 }
 
@@ -536,7 +534,6 @@ pub fn catalog_page(
         csrf_token,
         boards,
         collapse_greentext,
-        board.allow_archive,
     )
 }
 
@@ -600,7 +597,6 @@ pub fn search_page(
         csrf_token,
         boards,
         collapse_greentext,
-        board.allow_archive,
     )
 }
 
@@ -697,6 +693,5 @@ pub fn archive_page(
         csrf_token,
         boards,
         collapse_greentext,
-        true, // archive page — link is always shown
     )
 }

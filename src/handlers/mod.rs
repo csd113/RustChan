@@ -9,6 +9,7 @@ pub mod thread;
 
 use crate::error::{AppError, Result};
 use crate::middleware::validate_csrf;
+use crate::workers::JobQueue;
 use axum::extract::Multipart;
 
 /// Parsed fields from a post/thread creation multipart form.
@@ -198,4 +199,198 @@ pub fn classify_upload_error(e: anyhow::Error) -> AppError {
     } else {
         AppError::BadRequest(msg)
     }
+}
+
+// ─── Shared media upload processing (R2-2) ───────────────────────────────────
+//
+// create_thread (board.rs) and post_reply (thread.rs) had identical blocks for:
+//   1. Magic-byte mime detection + per-board toggle enforcement
+//   2. SHA-256 deduplication lookup
+//   3. save_upload / save_audio_with_image_thumb
+//   4. record_file_hash
+//   5. Image+audio combo validation
+//   6. Background job enqueueing
+//
+// Both handlers now call these shared functions instead of duplicating the code.
+
+use crate::models::Board;
+
+/// Process the primary file upload for a new post: detect mime type, enforce
+/// per-board media toggles, SHA-256 dedup, save to disk and record hash.
+///
+/// Returns `Ok(None)` when `file_data` is `None` (no file attached).
+/// Must be called from inside a `spawn_blocking` closure.
+pub fn process_primary_upload(
+    file_data: Option<(Vec<u8>, String)>,
+    board: &Board,
+    conn: &rusqlite::Connection,
+    upload_dir: &str,
+    thumb_size: u32,
+    max_image_size: usize,
+    max_video_size: usize,
+    max_audio_size: usize,
+    ffmpeg_available: bool,
+) -> Result<Option<crate::utils::files::UploadedFile>> {
+    let (data, fname) = match file_data {
+        Some(f) => f,
+        None => return Ok(None),
+    };
+
+    // Magic-byte detection for accurate type enforcement.
+    let detected_mime = crate::utils::files::detect_mime_type(&data)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let detected_media = crate::models::MediaType::from_mime(detected_mime)
+        .ok_or_else(|| AppError::BadRequest("Unsupported file type.".into()))?;
+
+    match detected_media {
+        crate::models::MediaType::Image if !board.allow_images => {
+            return Err(AppError::BadRequest(
+                "Image uploads are disabled on this board.".into(),
+            ))
+        }
+        crate::models::MediaType::Video if !board.allow_video => {
+            return Err(AppError::BadRequest(
+                "Video uploads are disabled on this board.".into(),
+            ))
+        }
+        crate::models::MediaType::Audio if !board.allow_audio => {
+            return Err(AppError::BadRequest(
+                "Audio uploads are disabled on this board.".into(),
+            ))
+        }
+        _ => {}
+    }
+
+    // SHA-256 deduplication — serve the cached entry without re-saving.
+    let hash = crate::utils::crypto::sha256_hex(&data);
+    if let Some(cached) = crate::db::find_file_by_hash(conn, &hash)? {
+        let cached_media = crate::models::MediaType::from_mime(&cached.mime_type)
+            .unwrap_or(crate::models::MediaType::Image);
+        return Ok(Some(crate::utils::files::UploadedFile {
+            file_path: cached.file_path,
+            thumb_path: cached.thumb_path,
+            original_name: crate::utils::sanitize::sanitize_filename(&fname),
+            mime_type: cached.mime_type,
+            file_size: data.len() as i64,
+            media_type: cached_media,
+            processing_pending: false,
+        }));
+    }
+
+    let f = crate::utils::files::save_upload(
+        &data,
+        &fname,
+        upload_dir,
+        &board.short_name,
+        thumb_size,
+        max_image_size,
+        max_video_size,
+        max_audio_size,
+        ffmpeg_available,
+    )
+    .map_err(classify_upload_error)?;
+    crate::db::record_file_hash(conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
+    Ok(Some(f))
+}
+
+/// Process the secondary audio file for an image+audio combo upload.
+/// `primary_upload` must already be the processed primary image.
+///
+/// Returns `Ok(None)` when `audio_file_data` is `None`.
+/// Must be called from inside a `spawn_blocking` closure.
+pub fn process_audio_combo(
+    audio_file_data: Option<(Vec<u8>, String)>,
+    primary_upload: Option<&crate::utils::files::UploadedFile>,
+    board: &Board,
+    upload_dir: &str,
+    max_audio_size: usize,
+) -> Result<Option<crate::utils::files::UploadedFile>> {
+    let (aud_data, aud_fname) = match audio_file_data {
+        Some(f) => f,
+        None => return Ok(None),
+    };
+
+    if !board.allow_audio {
+        return Err(AppError::BadRequest(
+            "Audio uploads are disabled on this board.".into(),
+        ));
+    }
+
+    // Audio combo requires the primary file to be an image.
+    let primary_is_image = primary_upload
+        .map(|u| matches!(u.media_type, crate::models::MediaType::Image))
+        .unwrap_or(false);
+    if !primary_is_image {
+        return Err(AppError::BadRequest(
+            "Audio can only be combined with an image upload.".into(),
+        ));
+    }
+
+    // Confirm the secondary file is actually audio.
+    let aud_mime = crate::utils::files::detect_mime_type(&aud_data)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let aud_media = crate::models::MediaType::from_mime(aud_mime)
+        .ok_or_else(|| AppError::BadRequest("Unsupported audio type.".into()))?;
+    if !matches!(aud_media, crate::models::MediaType::Audio) {
+        return Err(AppError::BadRequest(
+            "The audio slot only accepts audio files.".into(),
+        ));
+    }
+
+    let mut aud_file = crate::utils::files::save_audio_with_image_thumb(
+        &aud_data,
+        &aud_fname,
+        upload_dir,
+        &board.short_name,
+        max_audio_size,
+    )
+    .map_err(classify_upload_error)?;
+
+    // Use the image thumbnail as the audio's visual.
+    if let Some(img) = primary_upload {
+        aud_file.thumb_path = img.thumb_path.clone();
+    }
+    Ok(Some(aud_file))
+}
+
+/// Enqueue background media-processing and spam-check jobs for a newly created
+/// post.  Shared by create_thread and post_reply.
+pub fn enqueue_post_jobs(
+    job_queue: &JobQueue,
+    post_id: i64,
+    ip_hash: &str,
+    body_len: usize,
+    uploaded: Option<&crate::utils::files::UploadedFile>,
+    board_short: &str,
+) {
+    // 1. Media post-processing (video transcode / audio waveform)
+    if let Some(up) = uploaded {
+        if up.processing_pending {
+            let job = match up.media_type {
+                crate::models::MediaType::Video => Some(crate::workers::Job::VideoTranscode {
+                    post_id,
+                    file_path: up.file_path.clone(),
+                    board_short: board_short.to_string(),
+                }),
+                crate::models::MediaType::Audio => Some(crate::workers::Job::AudioWaveform {
+                    post_id,
+                    file_path: up.file_path.clone(),
+                    board_short: board_short.to_string(),
+                }),
+                _ => None,
+            };
+            if let Some(j) = job {
+                if let Err(e) = job_queue.enqueue(&j) {
+                    tracing::warn!("Failed to enqueue media job: {}", e);
+                }
+            }
+        }
+    }
+
+    // 2. Spam analysis
+    let _ = job_queue.enqueue(&crate::workers::Job::SpamCheck {
+        post_id,
+        ip_hash: ip_hash.to_string(),
+        body_len,
+    });
 }

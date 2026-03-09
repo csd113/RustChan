@@ -219,16 +219,42 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // Initialise the live site name and subtitle from DB so they're available before any request.
     {
         if let Ok(conn) = pool.get() {
-            let name = db::get_site_name(&conn);
+            // Site name: use DB value if an admin has set one, otherwise seed
+            // from CONFIG.forum_name (settings.toml).  Using get_site_setting
+            // (not get_site_name) lets us distinguish "never set" from "set to
+            // the default", so that editing forum_name in settings.toml and
+            // restarting takes effect when no admin override is in the DB.
+            let name_in_db = db::get_site_setting(&conn, "site_name")
+                .ok()
+                .flatten()
+                .filter(|v| !v.trim().is_empty());
+            let name = if let Some(db_val) = name_in_db {
+                db_val
+            } else {
+                // Seed DB from settings.toml so get_site_name is always consistent.
+                let _ = db::set_site_setting(&conn, "site_name", &CONFIG.forum_name);
+                CONFIG.forum_name.clone()
+            };
             templates::set_live_site_name(&name);
 
             // Seed subtitle from settings.toml if not yet configured in DB.
-            let subtitle = db::get_site_subtitle(&conn);
-            let subtitle = if subtitle.is_empty() && !CONFIG.initial_site_subtitle.is_empty() {
-                let _ = db::set_site_setting(&conn, "site_subtitle", &CONFIG.initial_site_subtitle);
-                CONFIG.initial_site_subtitle.clone()
+            // BUG FIX: get_site_subtitle() always returns a non-empty fallback
+            // string, so we must query the DB key directly to detect "never set".
+            let subtitle_in_db = db::get_site_setting(&conn, "site_subtitle")
+                .ok()
+                .flatten()
+                .filter(|v| !v.trim().is_empty());
+            let subtitle = if let Some(db_val) = subtitle_in_db {
+                db_val
             } else {
-                subtitle
+                // Nothing in DB — seed from CONFIG (settings.toml).
+                let seed = if !CONFIG.initial_site_subtitle.is_empty() {
+                    CONFIG.initial_site_subtitle.clone()
+                } else {
+                    "select board to proceed".to_string()
+                };
+                let _ = db::set_site_setting(&conn, "site_subtitle", &seed);
+                seed
             };
             templates::set_live_site_subtitle(&subtitle);
 
@@ -340,6 +366,18 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         }
     });
 
+    // Background: prune expired entries from ADMIN_LOGIN_FAILS every 5 min.
+    // Prevents unbounded growth under a sustained brute-force attack that
+    // never produces a successful login (which would trigger the existing
+    // opportunistic prune path inside clear_login_fails).
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            iv.tick().await;
+            crate::handlers::admin::prune_login_fails();
+        }
+    });
+
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     info!("Listening on  http://{}", bind_addr);
@@ -373,12 +411,22 @@ fn build_router(state: AppState) -> Router {
         .route("/static/theme-init.js", get(serve_theme_init_js))
         .route("/", get(handlers::board::index))
         .route("/{board}", get(handlers::board::board_index))
-        .route("/{board}", post(handlers::board::create_thread))
+        .route(
+            "/{board}",
+            post(handlers::board::create_thread).layer(DefaultBodyLimit::max(
+                CONFIG.max_video_size.max(CONFIG.max_audio_size),
+            )),
+        )
         .route("/{board}/catalog", get(handlers::board::catalog))
         .route("/{board}/archive", get(handlers::board::board_archive))
         .route("/{board}/search", get(handlers::board::search))
         .route("/{board}/thread/{id}", get(handlers::thread::view_thread))
-        .route("/{board}/thread/{id}", post(handlers::thread::post_reply))
+        .route(
+            "/{board}/thread/{id}",
+            post(handlers::thread::post_reply).layer(DefaultBodyLimit::max(
+                CONFIG.max_video_size.max(CONFIG.max_audio_size),
+            )),
+        )
         .route(
             "/{board}/post/{id}/edit",
             get(handlers::thread::edit_post_get),
