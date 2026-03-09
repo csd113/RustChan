@@ -53,6 +53,58 @@ static RATE_TABLE: Lazy<DashMap<String, (u32, u64)>> = Lazy::new(DashMap::new);
 /// clean on a time basis, not just when the table exceeds a size threshold.
 static LAST_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
 
+// ─── Backup progress tracking ─────────────────────────────────────────────────
+//
+// A single global progress counter is sufficient because only one admin can
+// run a backup at a time, and backups are serialised through spawn_blocking.
+// All fields use Ordering::Relaxed — the JS poller only needs eventual
+// consistency; strict happens-before ordering is not required here.
+
+/// Phase codes stored in BackupProgress::phase.
+pub mod backup_phase {
+    pub const IDLE: u64 = 0;
+    pub const SNAPSHOT_DB: u64 = 1;
+    pub const COUNT_FILES: u64 = 2;
+    pub const COMPRESS: u64 = 3;
+    #[allow(dead_code)]
+    pub const SAVE: u64 = 4;
+    pub const DONE: u64 = 5;
+}
+
+/// Shared atomic progress state for backup operations.
+/// Stored as Arc<BackupProgress> in AppState so admin handlers and the
+/// progress endpoint can both access it without locking.
+pub struct BackupProgress {
+    pub phase: std::sync::atomic::AtomicU64,
+    pub files_done: std::sync::atomic::AtomicU64,
+    pub files_total: std::sync::atomic::AtomicU64,
+    pub bytes_done: std::sync::atomic::AtomicU64,
+    pub bytes_total: std::sync::atomic::AtomicU64,
+}
+
+impl BackupProgress {
+    pub fn new() -> Self {
+        use std::sync::atomic::AtomicU64;
+        Self {
+            phase: AtomicU64::new(backup_phase::IDLE),
+            files_done: AtomicU64::new(0),
+            files_total: AtomicU64::new(0),
+            bytes_done: AtomicU64::new(0),
+            bytes_total: AtomicU64::new(0),
+        }
+    }
+
+    /// Reset all counters and set a new phase.
+    pub fn reset(&self, phase: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.files_done.store(0, Relaxed);
+        self.files_total.store(0, Relaxed);
+        self.bytes_done.store(0, Relaxed);
+        self.bytes_total.store(0, Relaxed);
+        self.phase.store(phase, Relaxed);
+    }
+}
+
 /// Shared state for extracting the DB pool in middleware
 #[derive(Clone)]
 pub struct AppState {
@@ -63,6 +115,8 @@ pub struct AppState {
     /// Background job queue — enqueue CPU-heavy work here instead of blocking
     /// the HTTP request path.
     pub job_queue: std::sync::Arc<crate::workers::JobQueue>,
+    /// Live backup progress counters.  Polled by GET /admin/backup/progress.
+    pub backup_progress: std::sync::Arc<BackupProgress>,
 }
 
 /// Get current Unix timestamp in seconds.

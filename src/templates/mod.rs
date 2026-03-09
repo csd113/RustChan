@@ -344,6 +344,9 @@ pub(super) fn base_layout(
   <button class="tp-option" data-action="set-theme" data-theme="neoncubicle">
     <span class="tp-swatch" style="background:#b03888;"></span>NeonCubicle
   </button>
+  <button class="tp-option" data-action="set-theme" data-theme="chanclassic">
+    <span class="tp-swatch" style="background:#800000;"></span>ChanClassic
+  </button>
 </div>
 
 <input type="hidden" id="csrf_global" value="{csrf_token}">

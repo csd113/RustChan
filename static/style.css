@@ -1654,6 +1654,123 @@ main {
 [data-theme="neoncubicle"] .op,
 [data-theme="neoncubicle"] .reply { border-radius: 6px; }
 
+/* ── ChanClassic ──────────────────────────────────────────────────────────── */
+/* Mimics the classic 4chan layout: tan/beige background, maroon header,      */
+/* blue post-number links, bordered post blocks.                               */
+[data-theme="chanclassic"] {
+  color-scheme: light;
+  --bg:           #ead6b8;
+  --bg-panel:     #f0e0d6;
+  --bg-post:      #f0e0d6;
+  --bg-op:        #f0e0d6;
+  --bg-input:     #ffffff;
+  --border:       #d9bfb7;
+  --border-glow:  #800000;
+  --green:        #800000;
+  --green-dim:    #b05080;
+  --green-bright: #0000ee;
+  --green-pale:   #0000cc;
+  --amber:        #cc6600;
+  --red:          #cc0000;
+  --gray:         #c8b8b0;
+  --gray-light:   #ddd0c8;
+  --text:         #000000;
+  --text-dim:     #707070;
+  --font:         Arial, Helvetica, sans-serif;
+  --font-display: Arial, Helvetica, sans-serif;
+}
+[data-theme="chanclassic"] body {
+  background: #ead6b8;
+}
+[data-theme="chanclassic"] .site-header {
+  background: #800000;
+  border-bottom: 2px solid #5a0000;
+  box-shadow: none;
+}
+[data-theme="chanclassic"] .site-header::before { display: none; }
+[data-theme="chanclassic"] .site-name {
+  color: #ffffff;
+  text-shadow: none;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 1.1rem;
+  font-weight: bold;
+  letter-spacing: 0.04em;
+}
+[data-theme="chanclassic"] .site-header a,
+[data-theme="chanclassic"] .site-header button {
+  color: #ffcccc;
+}
+[data-theme="chanclassic"] .site-subtitle {
+  color: #ffcccc;
+}
+[data-theme="chanclassic"] a { color: #0000ee; text-decoration: underline; }
+[data-theme="chanclassic"] a:hover { color: #cc0000; text-shadow: none; }
+[data-theme="chanclassic"] .op,
+[data-theme="chanclassic"] .reply {
+  background: #f0e0d6;
+  border: 1px solid #d9bfb7;
+  border-radius: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+[data-theme="chanclassic"] .page-box,
+[data-theme="chanclassic"] .post-form-container,
+[data-theme="chanclassic"] .admin-section {
+  background: #f0e0d6;
+  border: 1px solid #d9bfb7;
+  border-radius: 0;
+  backdrop-filter: none;
+}
+/* Post number / quote link */
+[data-theme="chanclassic"] .post-num a,
+[data-theme="chanclassic"] .post-ref { color: #0000ee; }
+/* Greentext */
+[data-theme="chanclassic"] .greentext { color: #789922; }
+/* Poster name */
+[data-theme="chanclassic"] .name { color: #117743; font-weight: bold; }
+/* Subject line */
+[data-theme="chanclassic"] .subject { color: #0f0c5d; font-weight: bold; }
+/* Admin/mod capcode */
+[data-theme="chanclassic"] .capcode { color: #800000; }
+/* Buttons */
+[data-theme="chanclassic"] button,
+[data-theme="chanclassic"] .btn,
+[data-theme="chanclassic"] input[type="submit"] {
+  background: #ead6b8;
+  border: 1px solid #b09080;
+  color: #000000;
+  border-radius: 2px;
+}
+[data-theme="chanclassic"] button:hover {
+  background: #d8c8b0;
+  border-color: #800000;
+  color: #800000;
+  box-shadow: none;
+}
+/* Board header bar */
+[data-theme="chanclassic"] .board-header {
+  border-bottom: 1px solid #d9bfb7;
+}
+/* Thread divider */
+[data-theme="chanclassic"] .thread + .thread { border-top: 1px solid #d9bfb7; }
+/* Catalog items */
+[data-theme="chanclassic"] .catalog-item {
+  border: 1px solid #d9bfb7;
+  border-radius: 0;
+  background: #f0e0d6;
+}
+/* Board list cards */
+[data-theme="chanclassic"] .board-card {
+  border: 1px solid #d9bfb7;
+  border-radius: 0;
+  background: #f0e0d6;
+}
+/* File info */
+[data-theme="chanclassic"] .file-info { color: #707070; font-size: 0.8rem; }
+/* Spoiler text */
+[data-theme="chanclassic"] .spoiler { background: #000; color: #000; }
+[data-theme="chanclassic"] .spoiler:hover { color: #fff; }
+
 /* ── Theme Picker Widget ──────────────────────────────────────────────────── */
 
 #theme-picker-btn {

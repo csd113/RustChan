@@ -50,6 +50,13 @@ fn settings_file_path() -> PathBuf {
 #[derive(Deserialize, Default)]
 struct SettingsFile {
     forum_name: Option<String>,
+    /// Home page subtitle shown below the site name.  Displayed on the index
+    /// page.  Can also be changed later via the admin panel.
+    site_subtitle: Option<String>,
+    /// Default theme served to first-time visitors before they pick one.
+    /// Valid values: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
+    /// (empty string or "terminal" = default dark terminal theme).
+    default_theme: Option<String>,
     port: Option<u16>,
     max_image_size_mb: Option<u32>,
     max_video_size_mb: Option<u32>,
@@ -100,6 +107,16 @@ pub fn generate_settings_file_if_missing() {
 # Name shown in the browser tab, page header, and home page title.
 forum_name = "RustChan"
 
+# Subtitle shown below the site name on the home page.
+# Can also be changed at any time from the admin panel → Site Settings.
+site_subtitle = "select board to proceed"
+
+# Default theme for first-time visitors (before they choose their own).
+# Valid values: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
+# Leave as "terminal" (or empty) for the default dark terminal look.
+# Can also be changed at any time from the admin panel → Site Settings.
+default_theme = "terminal"
+
 # Port the server listens on (binds to 0.0.0.0:<port>).
 port = 8080
 
@@ -148,6 +165,11 @@ pub static CONFIG: Lazy<Config> = Lazy::new(Config::from_env);
 pub struct Config {
     // ── Loaded from settings.toml (env vars still override) ──────────────────
     pub forum_name: String,
+    /// Initial subtitle shown on the home page (seeds the DB on first run).
+    pub initial_site_subtitle: String,
+    /// Initial default theme slug (seeds the DB on first run).
+    /// Valid: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
+    pub initial_default_theme: String,
     #[allow(dead_code)]
     pub port: u16,
     pub max_image_size: usize, // bytes
@@ -192,6 +214,16 @@ impl Config {
             "CHAN_FORUM_NAME",
             s.forum_name.as_deref().unwrap_or("RustChan"),
         );
+        let initial_site_subtitle = env_str(
+            "CHAN_SITE_SUBTITLE",
+            s.site_subtitle
+                .as_deref()
+                .unwrap_or("select board to proceed"),
+        );
+        let initial_default_theme = env_str(
+            "CHAN_DEFAULT_THEME",
+            s.default_theme.as_deref().unwrap_or("terminal"),
+        );
         let port = env_u16("CHAN_PORT", s.port.unwrap_or(8080));
         let max_image_mb = env_u32("CHAN_MAX_IMAGE_MB", s.max_image_size_mb.unwrap_or(8));
         let max_video_mb = env_u32("CHAN_MAX_VIDEO_MB", s.max_video_size_mb.unwrap_or(50));
@@ -225,6 +257,8 @@ impl Config {
 
         Self {
             forum_name,
+            initial_site_subtitle,
+            initial_default_theme,
             port,
             max_image_size: (max_image_mb as usize) * 1024 * 1024,
             max_video_size: (max_video_mb as usize) * 1024 * 1024,

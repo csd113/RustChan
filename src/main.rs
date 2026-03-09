@@ -213,11 +213,28 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         if let Ok(conn) = pool.get() {
             let name = db::get_site_name(&conn);
             templates::set_live_site_name(&name);
+
+            // Seed subtitle from settings.toml if not yet configured in DB.
             let subtitle = db::get_site_subtitle(&conn);
+            let subtitle = if subtitle.is_empty() && !CONFIG.initial_site_subtitle.is_empty() {
+                let _ = db::set_site_setting(&conn, "site_subtitle", &CONFIG.initial_site_subtitle);
+                CONFIG.initial_site_subtitle.clone()
+            } else {
+                subtitle
+            };
             templates::set_live_site_subtitle(&subtitle);
-            // Seed the default-theme cache so the first page served already
-            // carries the correct data-default-theme attribute on <html>.
+
+            // Seed default_theme from settings.toml if not yet configured in DB.
             let default_theme = db::get_default_user_theme(&conn);
+            let default_theme = if default_theme.is_empty()
+                && !CONFIG.initial_default_theme.is_empty()
+                && CONFIG.initial_default_theme != "terminal"
+            {
+                let _ = db::set_site_setting(&conn, "default_theme", &CONFIG.initial_default_theme);
+                CONFIG.initial_default_theme.clone()
+            } else {
+                default_theme
+            };
             templates::set_live_default_theme(&default_theme);
         }
     }
@@ -248,6 +265,7 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
             workers::start_worker_pool(q.clone(), ffmpeg_available);
             q
         },
+        backup_progress: std::sync::Arc::new(middleware::BackupProgress::new()),
     };
     // Keep a reference to the job queue cancel token for graceful shutdown (#7).
     let worker_cancel = state.job_queue.cancel.clone();
@@ -472,6 +490,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/admin/backup/download/{kind}/{filename}",
             get(handlers::admin::download_backup),
+        )
+        .route(
+            "/admin/backup/progress",
+            get(handlers::admin::backup_progress_json),
         )
         .route("/admin/backup/delete", post(handlers::admin::delete_backup))
         .route(

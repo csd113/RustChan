@@ -54,6 +54,7 @@ pub fn admin_panel_page(
     appeals: &[crate::models::BanAppeal],
     site_name: &str,
     site_subtitle: &str,
+    default_theme: &str,
     tor_address: Option<&str>,
     // Optional one-time flash message shown at the top of the panel.
     // (is_error, message) — is_error=true → red, false → green.
@@ -107,10 +108,10 @@ pub fn admin_panel_page(
   <button type="submit" class="btn-danger"
           data-confirm="Delete /{short}/ and ALL its content?">delete board</button>
 </form>
-<a href="/admin/board/backup/{short}" style="display:inline-block;margin-left:0.5rem;margin-top:4px">
+<a href="/admin/board/backup/{short}" class="backup-download-link" data-backup-label="/{short}/ board backup" style="display:inline-block;margin-left:0.5rem;margin-top:4px">
   <button type="button">&#8659; download to computer /{short}/</button>
 </a>
-<form method="POST" action="/admin/board/backup/create" style="display:inline-block;margin-left:0.25rem;margin-top:4px">
+<form method="POST" action="/admin/board/backup/create" class="board-backup-create-form" data-board="{short}" style="display:inline-block;margin-left:0.25rem;margin-top:4px">
   <input type="hidden" name="_csrf" value="{csrf}">
   <input type="hidden" name="board_short" value="{short}">
   <button type="submit">&#128190; save to server /{short}/</button>
@@ -201,7 +202,7 @@ pub fn admin_panel_page(
 <td style="white-space:nowrap">{size}</td>
 <td style="white-space:nowrap">{modified}</td>
 <td style="white-space:nowrap">
-  <a href="/admin/backup/download/full/{fname}" style="margin-right:0.4rem">&#8659; download to computer</a>
+  <a href="/admin/backup/download/full/{fname}" class="backup-download-link" data-backup-label="full backup" style="margin-right:0.4rem">&#8659; download to computer</a>
   <form method="POST" action="/admin/backup/restore-saved" style="display:inline;margin-right:0.4rem">
     <input type="hidden" name="_csrf" value="{csrf}">
     <input type="hidden" name="filename" value="{fname}">
@@ -237,7 +238,7 @@ pub fn admin_panel_page(
 <td style="white-space:nowrap">{size}</td>
 <td style="white-space:nowrap">{modified}</td>
 <td style="white-space:nowrap">
-  <a href="/admin/backup/download/board/{fname}" style="margin-right:0.4rem">&#8659; download to computer</a>
+  <a href="/admin/backup/download/board/{fname}" class="backup-download-link" data-backup-label="board backup" style="margin-right:0.4rem">&#8659; download to computer</a>
   <form method="POST" action="/admin/board/backup/restore-saved" style="display:inline;margin-right:0.4rem">
     <input type="hidden" name="_csrf" value="{csrf}">
     <input type="hidden" name="filename" value="{fname}">
@@ -379,22 +380,46 @@ pub fn admin_panel_page(
 <button type="submit">logout</button>
 </form>
 
-<section class="admin-section" id="reports">
-<h2>// report inbox{report_badge}</h2>
-<table class="admin-table">
-<thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
-<tbody>{report_rows}</tbody>
-</table>
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // site settings
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<section class="admin-section">
+<h2>// site settings</h2>
+<form method="POST" action="/admin/site/settings">
+<input type="hidden" name="_csrf" value="{csrf}">
+<div class="board-settings-grid" style="margin-bottom:0.75rem">
+  <label>Site name
+    <input type="text" name="site_name" value="{site_name_val}" maxlength="64" placeholder="RustChan"
+           style="font-family:inherit">
+  </label>
+  <label>Home page subtitle
+    <input type="text" name="site_subtitle" value="{site_subtitle_val}" maxlength="128" placeholder="select board to proceed"
+           style="font-family:inherit">
+  </label>
+  <label>Default theme
+    <select name="default_theme" style="font-family:inherit;padding:0.25rem 0.4rem;background:var(--bg-input);color:var(--text);border:1px solid var(--border)">
+      <option value="terminal"{sel_terminal}>Terminal (default dark)</option>
+      <option value="aero"{sel_aero}>Frutiger Aero</option>
+      <option value="dorfic"{sel_dorfic}>DORFic</option>
+      <option value="fluorogrid"{sel_fluorogrid}>FluoroGrid</option>
+      <option value="neoncubicle"{sel_neoncubicle}>NeonCubicle</option>
+      <option value="chanclassic"{sel_chanclassic}>ChanClassic</option>
+    </select>
+  </label>
+</div>
+<div class="board-settings-checks" style="margin-bottom:0.75rem">
+  <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block. Existing posts are not affected — only new posts use the current setting.">
+    <input type="checkbox" name="collapse_greentext" value="1"{collapse_ck}>
+    Collapse long greentext walls (3+ lines) into expandable blocks
+  </label>
+</div>
+<button type="submit">save settings</button>
+</form>
 </section>
 
-<section class="admin-section" id="appeals">
-<h2>// ban appeals{appeal_badge}</h2>
-<table class="admin-table">
-<thead><tr><th>ip (partial)</th><th>appeal message</th><th>filed</th><th>action</th></tr></thead>
-<tbody>{appeal_rows}</tbody>
-</table>
-</section>
-
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // boards
+     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// boards</h2>
 <div class="admin-board-cards">{board_cards}</div>
@@ -409,13 +434,43 @@ pub fn admin_panel_page(
 </form>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // moderation log
+     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
-<h2>// active bans</h2>
+<h2>// moderation log <a href="/admin/mod-log" style="font-size:0.78rem;margin-left:0.6rem;color:var(--text-dim)">[ view full log ]</a></h2>
+<p style="color:var(--text-dim);font-size:0.82rem">All admin actions are recorded in the moderation log. Click <em>view full log</em> to browse the history.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // report inbox
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<section class="admin-section" id="reports">
+<h2>// report inbox{report_badge}</h2>
+<table class="admin-table">
+<thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
+<tbody>{report_rows}</tbody>
+</table>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // moderation (ban appeals + active bans + word filters)
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<section class="admin-section">
+<h2>// moderation</h2>
+
+<h3 id="appeals">Ban appeals{appeal_badge}</h3>
+<table class="admin-table">
+<thead><tr><th>ip (partial)</th><th>appeal message</th><th>filed</th><th>action</th></tr></thead>
+<tbody>{appeal_rows}</tbody>
+</table>
+
+<h3 style="margin-top:1.5rem">Active bans</h3>
 <table class="admin-table">
 <thead><tr><th>ip hash (partial)</th><th>reason</th><th>expires</th><th>action</th></tr></thead>
 <tbody>{ban_rows}</tbody>
 </table>
-<h3>add ban</h3>
+<h4>add ban</h4>
 <form method="POST" action="/admin/ban/add">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="text" name="ip_hash" placeholder="ip hash" required>
@@ -423,15 +478,13 @@ pub fn admin_panel_page(
 <input type="text" name="duration_hours" placeholder="hours (blank=perm)" style="width:120px">
 <button type="submit">ban</button>
 </form>
-</section>
 
-<section class="admin-section">
-<h2>// word filters</h2>
+<h3 style="margin-top:1.5rem">Word filters</h3>
 <table class="admin-table">
 <thead><tr><th>pattern</th><th>replacement</th><th>action</th></tr></thead>
 <tbody>{filter_rows}</tbody>
 </table>
-<h3>add filter</h3>
+<h4>add filter</h4>
 <form method="POST" action="/admin/filter/add">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="text" name="pattern" placeholder="pattern to match" required>
@@ -440,42 +493,16 @@ pub fn admin_panel_page(
 </form>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // full site backup & restore
+     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
-<h2>// site settings</h2>
-<form method="POST" action="/admin/site/settings">
-<input type="hidden" name="_csrf" value="{csrf}">
-<div class="board-settings-grid" style="margin-bottom:0.75rem">
-  <label>Site name
-    <input type="text" name="site_name" value="{site_name_val}" maxlength="64" placeholder="RustChan"
-           style="font-family:inherit">
-  </label>
-  <label>Home page subtitle
-    <input type="text" name="site_subtitle" value="{site_subtitle_val}" maxlength="128" placeholder="select board to proceed"
-           style="font-family:inherit">
-  </label>
-</div>
-<div class="board-settings-checks" style="margin-bottom:0.75rem">
-  <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block. Existing posts are not affected — only new posts use the current setting.">
-    <input type="checkbox" name="collapse_greentext" value="1"{collapse_ck}>
-    Collapse long greentext walls (3+ lines) into expandable blocks
-  </label>
-</div>
-<button type="submit">save settings</button>
-</form>
-</section>
-
-<section class="admin-section">
-<h2>// moderation log <a href="/admin/mod-log" style="font-size:0.78rem;margin-left:0.6rem;color:var(--text-dim)">[ view full log ]</a></h2>
-<p style="color:var(--text-dim);font-size:0.82rem">All admin actions are recorded in the moderation log. Click <em>view full log</em> to browse the history.</p>
-</section>
-
-<section class="admin-section">
-<h2>// backup &amp; restore</h2>
+<h2>// full site backup &amp; restore</h2>
 <p style="color:var(--text-dim);font-size:0.85rem">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/full-backups/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer.</p>
 <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;margin-top:0.75rem;margin-bottom:0.75rem">
-<form method="POST" action="/admin/backup/create">
+<form method="POST" action="/admin/backup/create" id="full-backup-create-form">
 <input type="hidden" name="_csrf" value="{csrf}">
-<button type="submit">&#128190; save to server</button>
+<button type="submit" id="full-backup-btn">&#128190; save to server</button>
 </form>
 <form method="POST" action="/admin/restore" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
 <input type="hidden" name="_csrf" value="{csrf}">
@@ -490,6 +517,9 @@ pub fn admin_panel_page(
 </table>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // board backup & restore
+     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// board backup &amp; restore</h2>
 <p style="color:var(--text-dim);font-size:0.85rem">Board backups cover a single board. Use <em>save to server</em> on a board card above to store the backup in <code>rustchan-data/board-backups/</code>, or use the table below to download, restore, or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
@@ -507,6 +537,9 @@ pub fn admin_panel_page(
 </table>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // database maintenance
+     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// database maintenance</h2>
 <p style="color:var(--text-dim);font-size:0.85rem">
@@ -521,7 +554,25 @@ pub fn admin_panel_page(
           data-confirm="Run VACUUM? This will briefly block the database while it rebuilds. Continue?">&#x1F9F9; run VACUUM</button>
 </form>
 </section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // active onion address
+     ═══════════════════════════════════════════════════════════════════════════ -->
 {tor_section}
+</div>
+
+<!-- ── Backup progress modal ─────────────────────────────────────────────── -->
+<div id="backup-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title">
+  <div class="compress-modal-box">
+    <div class="compress-modal-title" id="backup-modal-title">&#128190; Creating Backup…</div>
+    <div class="compress-progress" id="backup-progress-wrap" style="display:block;margin:0.75rem 0">
+      <div class="compress-progress-track"><div class="compress-progress-bar" id="backup-progress-bar" style="width:0%"></div></div>
+      <div class="compress-progress-text" id="backup-progress-text">Starting…</div>
+    </div>
+    <div class="compress-done-actions" id="backup-done-actions" style="display:none">
+      <button class="compress-cancel-btn" data-action="close-backup-modal">&#10003; Done — reload</button>
+    </div>
+  </div>
 </div>"#,
         csrf = escape_html(csrf_token),
         flash = flash_html,
@@ -538,9 +589,40 @@ pub fn admin_panel_page(
         appeal_badge = appeal_badge,
         site_name_val = escape_html(site_name),
         site_subtitle_val = escape_html(site_subtitle),
+        sel_terminal = if default_theme == "terminal" || default_theme.is_empty() {
+            " selected"
+        } else {
+            ""
+        },
+        sel_aero = if default_theme == "aero" {
+            " selected"
+        } else {
+            ""
+        },
+        sel_dorfic = if default_theme == "dorfic" {
+            " selected"
+        } else {
+            ""
+        },
+        sel_fluorogrid = if default_theme == "fluorogrid" {
+            " selected"
+        } else {
+            ""
+        },
+        sel_neoncubicle = if default_theme == "neoncubicle" {
+            " selected"
+        } else {
+            ""
+        },
+        sel_chanclassic = if default_theme == "chanclassic" {
+            " selected"
+        } else {
+            ""
+        },
         tor_section = match tor_address {
             Some(addr) => format!(
                 r#"<section class="admin-section" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
+<h2>// active onion address</h2>
 <p style="color:var(--text-dim);font-size:0.82rem;margin:0">
   <code style="user-select:all;color:var(--text)">{}</code>
 </p>
