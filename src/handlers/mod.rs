@@ -77,7 +77,7 @@ pub async fn parse_post_multipart(
             Some("poll_question") => {
                 let v = field.text().await.unwrap_or_default();
                 // CRIT-8: Enforce server-side length cap on poll question.
-                if v.len() > 500 {
+                if v.chars().count() > 500 {
                     return Err(AppError::BadRequest(
                         "Poll question must be 500 characters or fewer.".into(),
                     ));
@@ -94,7 +94,7 @@ pub async fn parse_post_multipart(
                             "Polls are limited to 20 options.".into(),
                         ));
                     }
-                    if trimmed.len() > 200 {
+                    if trimmed.chars().count() > 200 {
                         return Err(AppError::BadRequest(
                             "Each poll option must be 200 characters or fewer.".into(),
                         ));
@@ -135,15 +135,28 @@ pub async fn parse_post_multipart(
         }
     }
 
-    // Convert duration value + unit → seconds (saturating to prevent overflow)
+    // Convert duration value + unit → seconds (saturating to prevent overflow).
+    // The unit is validated against an explicit allow-list (case-insensitive) so
+    // that a tampered form field does not silently multiply by an arbitrary factor.
     let poll_duration_secs = if !poll_question.trim().is_empty() {
-        poll_duration_value.map(|v| {
-            if poll_duration_unit == "minutes" {
-                v.saturating_mul(60)
-            } else {
-                v.saturating_mul(3600)
+        match poll_duration_value {
+            None => None,
+            Some(v) => {
+                let unit = poll_duration_unit.trim().to_ascii_lowercase();
+                let secs = match unit.as_str() {
+                    "minutes" => v.saturating_mul(60),
+                    "hours" => v.saturating_mul(3600),
+                    "days" => v.saturating_mul(86_400),
+                    other => {
+                        return Err(AppError::BadRequest(format!(
+                            "Invalid poll duration unit '{}'. Use 'minutes', 'hours', or 'days'.",
+                            other
+                        )));
+                    }
+                };
+                Some(secs)
             }
-        })
+        }
     } else {
         None
     };
@@ -175,9 +188,12 @@ pub async fn parse_post_multipart(
 ///   • anything else             → 400 BadRequest
 pub fn classify_upload_error(e: anyhow::Error) -> AppError {
     let msg = e.to_string();
-    if msg.starts_with("File too large") || msg.starts_with("Insufficient disk space") {
+    // Compare lower-cased so minor wording changes in save_upload don't silently
+    // fall through to a generic 400 instead of the correct 413 / 415.
+    let lower = msg.to_ascii_lowercase();
+    if lower.starts_with("file too large") || lower.starts_with("insufficient disk space") {
         AppError::UploadTooLarge(msg)
-    } else if msg.starts_with("File type not allowed") || msg.starts_with("Not an audio file") {
+    } else if lower.starts_with("file type not allowed") || lower.starts_with("not an audio file") {
         AppError::InvalidMediaType(msg)
     } else {
         AppError::BadRequest(msg)

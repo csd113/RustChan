@@ -126,10 +126,18 @@ pub fn purge_expired_sessions(conn: &rusqlite::Connection) -> Result<usize> {
 pub fn is_banned(conn: &rusqlite::Connection, ip_hash: &str) -> Result<Option<String>> {
     let now = chrono::Utc::now().timestamp();
     // A ban with NULL expires_at is permanent.
+    //
+    // FIX[BAN-ORDER]: Previously there was no ORDER BY, so LIMIT 1 returned
+    // whichever row the query planner happened to visit first via the index.
+    // With multiple active bans (e.g. a timed ban and a permanent ban) the
+    // reason shown to the user was non-deterministic across restarts/VACUUM.
+    // We now order by expires_at DESC NULLS FIRST so a permanent ban (NULL)
+    // always surfaces first, and among timed bans the latest-expiring one wins.
     let result: Option<Option<String>> = conn
         .query_row(
             "SELECT reason FROM bans WHERE ip_hash = ?1
              AND (expires_at IS NULL OR expires_at > ?2)
+             ORDER BY expires_at DESC NULLS FIRST
              LIMIT 1",
             params![ip_hash, now],
             |r| r.get(0),
@@ -393,13 +401,18 @@ pub fn dismiss_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64) -> Result
 }
 
 /// Dismiss appeal AND lift the ban for this ip_hash.
+///
+/// FIX[AUDIT]: Previously both dismiss_ban_appeal and accept_ban_appeal set
+/// status='dismissed', making them indistinguishable in the moderation history.
+/// Accepted appeals now correctly set status='accepted' so the audit trail
+/// accurately reflects whether an appeal was denied or granted.
 pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64, ip_hash: &str) -> Result<()> {
     // Both updates must succeed together.
     let tx = conn
         .unchecked_transaction()
         .context("Failed to begin accept-appeal transaction")?;
     tx.execute(
-        "UPDATE ban_appeals SET status='dismissed' WHERE id=?1",
+        "UPDATE ban_appeals SET status='accepted' WHERE id=?1",
         params![appeal_id],
     )?;
     tx.execute("DELETE FROM bans WHERE ip_hash=?1", params![ip_hash])?;

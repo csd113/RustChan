@@ -39,7 +39,7 @@ use axum::{
     extract::Request,
     http::Uri,
     middleware::Next,
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
 };
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
@@ -57,8 +57,11 @@ static LAST_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
 //
 // A single global progress counter is sufficient because only one admin can
 // run a backup at a time, and backups are serialised through spawn_blocking.
-// All fields use Ordering::Relaxed — the JS poller only needs eventual
-// consistency; strict happens-before ordering is not required here.
+// Counter fields (files_done/total, bytes_done/total) use Ordering::Relaxed —
+// the JS poller only needs eventual consistency for those.
+// The `phase` field uses Release/Acquire so that counter zeroes written in
+// `reset()` are guaranteed visible to any reader that subsequently loads the
+// new phase value.
 
 /// Phase codes stored in BackupProgress::phase.
 pub mod backup_phase {
@@ -95,13 +98,20 @@ impl BackupProgress {
     }
 
     /// Reset all counters and set a new phase.
+    ///
+    /// FIX[ORANGE-3]: The previous implementation stored the new phase with
+    /// `Relaxed`, giving no ordering guarantee between the counter-zero stores
+    /// [1-4] and the phase store [5].  A JS poller that loaded the new phase
+    /// could then read stale counter values from the previous run.
+    /// The phase store now uses `Release` so all preceding Relaxed stores are
+    /// guaranteed to be visible to any reader that loads `phase` with `Acquire`.
     pub fn reset(&self, phase: u64) {
-        use std::sync::atomic::Ordering::Relaxed;
+        use std::sync::atomic::Ordering::{Relaxed, Release};
         self.files_done.store(0, Relaxed);
         self.files_total.store(0, Relaxed);
         self.bytes_done.store(0, Relaxed);
         self.bytes_total.store(0, Relaxed);
-        self.phase.store(phase, Relaxed);
+        self.phase.store(phase, Release); // Release: makes counter zeroes visible before new phase
     }
 }
 
@@ -174,11 +184,21 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     // We only check presence here (no DB round-trip in middleware); the actual
     // session validation happens inside admin handlers.  This is sufficient
     // for rate-limiting purposes since the cookie is HttpOnly+SameSite=Strict.
+    //
+    // FIX[RED-1]: The previous bare `.contains("chan_admin_session=")` matched
+    // any substring of the raw Cookie header, allowing two trivial bypasses:
+    //   • `Cookie: x=chan_admin_session=forged`  (value embeds the string)
+    //   • `Cookie: xchan_admin_session=anything` (name is a prefix)
+    // We now split on ';', trim each pair, and require the segment to *start*
+    // with exactly "chan_admin_session=" — an exact cookie-name match.
     let has_admin_cookie = req
         .headers()
         .get(axum::http::header::COOKIE)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.contains("chan_admin_session="))
+        .map(|s| {
+            s.split(';')
+                .any(|pair| pair.trim().starts_with("chan_admin_session="))
+        })
         .unwrap_or(false);
     if has_admin_cookie {
         return next.run(req).await;
@@ -244,6 +264,27 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// Escape the five characters that are special in HTML text/attribute contexts.
+/// Keeps config-sourced strings safe for interpolation into HTML output.
+///
+/// FIX[YELLOW-4]: `CONFIG.forum_name` is operator-supplied and could contain
+/// `<`, `>`, `&`, `"`, or `'`.  Interpolating it raw produces malformed HTML
+/// and, if the value ever reaches a visible element, a direct XSS vector.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Build a lightweight HTML page that shows an in-page toast notification and
 /// then navigates the browser back to where it came from.
 ///
@@ -251,6 +292,9 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
 /// that the user stays in context (they see the message overlaid on what looks
 /// like their previous page) rather than landing on a dead-end error screen.
 fn rate_limited_toast_page() -> String {
+    // FIX[YELLOW-4]: escape before interpolation so special chars in the forum
+    // name never produce malformed HTML (or a future XSS if copied elsewhere).
+    let forum_name_escaped = html_escape(&crate::config::CONFIG.forum_name);
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -319,7 +363,7 @@ fn rate_limited_toast_page() -> String {
 </script>
 </body>
 </html>"#,
-        forum_name = crate::config::CONFIG.forum_name
+        forum_name = forum_name_escaped
     )
 }
 
@@ -402,12 +446,19 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Trailing-slash normalization middleware.
 ///
 /// Strips a trailing `/` from every path except the root `/` and issues a
-/// 301 Moved Permanently redirect.  This makes routes like
+/// 308 Permanent Redirect.  This makes routes like
 ///   /{board}/catalog/  →  /{board}/catalog
 ///   /{board}/thread/5/ →  /{board}/thread/5
 ///   /{board}/          →  /{board}
 /// work correctly without 404s, regardless of whether the user typed the
 /// slash, a browser added it, or an old bookmark included it.
+///
+/// FIX[ORANGE-2]: The previous `Redirect::permanent` issued a 301, which
+/// permits user-agents to reissue the request as GET (RFC 7231 §6.4.2 —
+/// and every major browser does).  A POST to a trailing-slash URL would
+/// silently drop the form body.  We now use 308 Permanent Redirect
+/// (RFC 7538), which explicitly mandates that the method and body are
+/// preserved on redirect.
 ///
 /// Query strings are preserved across the redirect.
 pub async fn normalize_trailing_slash(req: Request, next: Next) -> Response {
@@ -426,7 +477,12 @@ pub async fn normalize_trailing_slash(req: Request, next: Next) -> Response {
 
         // Validate the rebuilt path before redirecting.
         if new_path_and_query.parse::<Uri>().is_ok() {
-            return Redirect::permanent(&new_path_and_query).into_response();
+            // 308 Permanent Redirect: method + body are preserved (RFC 7538).
+            return (
+                axum::http::StatusCode::PERMANENT_REDIRECT,
+                [(axum::http::header::LOCATION, new_path_and_query)],
+            )
+                .into_response();
         }
 
         // If URI reconstruction failed for any reason, fall through and let

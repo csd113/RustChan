@@ -9,7 +9,7 @@
 //   prune_old_threads      → super::paths_safe_to_delete       (file safety)
 
 use crate::models::*;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 
 // ─── Board-index thread listing ───────────────────────────────────────────────
@@ -234,6 +234,11 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
 /// Archived threads are locked and marked read-only instead of deleted, so their
 /// content remains accessible via /{board}/archive.
 /// Returns the count of threads archived (no file deletion occurs).
+///
+/// FIX[ARCHIVE-TXN]: Previously each per-thread UPDATE was auto-committed
+/// individually.  A crash mid-loop left the board partially archived: some
+/// threads invisible from the board index, others still live.  All updates are
+/// now wrapped in a single transaction so the operation is all-or-nothing.
 pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -> Result<usize> {
     let ids: Vec<i64> = {
         let mut stmt = conn.prepare(
@@ -247,12 +252,20 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
         ids
     };
     let count = ids.len();
+    if count == 0 {
+        return Ok(0);
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .context("Failed to begin archive_old_threads transaction")?;
     for id in ids {
-        conn.execute(
+        tx.execute(
             "UPDATE threads SET archived = 1, locked = 1 WHERE id = ?1",
             params![id],
         )?;
     }
+    tx.commit()
+        .context("Failed to commit archive_old_threads transaction")?;
     Ok(count)
 }
 
@@ -262,6 +275,14 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
 /// Returns the on-disk paths that are now safe to delete (i.e. no longer
 /// referenced by any remaining post after the prune). The caller is responsible
 /// for actually removing these files from disk.
+///
+/// FIX[PRUNE-TXN]: Previously each per-thread DELETE was auto-committed
+/// individually.  A crash mid-loop left some threads deleted from the DB but
+/// their file paths never returned to the caller, producing unreachable orphaned
+/// files on disk.  All deletes are now wrapped in a single transaction.
+///
+/// FIX[PREPARE-LOOP]: The inner prepare() was called once per loop iteration,
+/// recompiling the same statement N times.  Replaced with prepare_cached().
 pub fn prune_old_threads(
     conn: &rusqlite::Connection,
     board_id: i64,
@@ -279,13 +300,23 @@ pub fn prune_old_threads(
         ids
     };
 
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .context("Failed to begin prune_old_threads transaction")?;
+
     let mut candidates: Vec<String> = Vec::new();
     for id in &ids {
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare_cached(
             "SELECT file_path, thumb_path, audio_file_path FROM posts WHERE thread_id = ?1",
         )?;
         let rows: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
-            .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .query_map(params![id], |r: &rusqlite::Row| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         for (f, t, a) in rows {
             if let Some(p) = f {
@@ -298,8 +329,11 @@ pub fn prune_old_threads(
                 candidates.push(p);
             }
         }
-        conn.execute("DELETE FROM threads WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM threads WHERE id = ?1", params![id])?;
     }
+
+    tx.commit()
+        .context("Failed to commit prune_old_threads transaction")?;
 
     Ok(super::paths_safe_to_delete(conn, candidates))
 }

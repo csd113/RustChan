@@ -1,5 +1,9 @@
 // models.rs — plain data structs that map 1:1 to database rows.
 // No ORM magic; fields match column names for easy rusqlite mapping.
+//
+// NOTE: When writing rusqlite FromRow impls for wide structs like Board (18+
+// fields), prefer named-column access (`row.get("col")?`) over positional
+// indices to avoid silent mis-binding when columns are reordered.
 
 use serde::{Deserialize, Serialize};
 
@@ -7,6 +11,10 @@ use serde::{Deserialize, Serialize};
 
 /// Classifies an uploaded file as image, video, or audio.
 /// Stored as a TEXT column in posts ("image", "video", "audio").
+///
+/// The serde `rename_all = "lowercase"` representation **must** stay in sync
+/// with `as_str()` / `from_db_str()`.  Add a round-trip unit test whenever a
+/// new variant is introduced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaType {
@@ -58,6 +66,12 @@ impl MediaType {
             "audio" => Some(MediaType::Audio),
             _ => None,
         }
+    }
+}
+
+impl std::fmt::Display for MediaType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -138,17 +152,18 @@ pub struct Post {
 }
 
 /// Admin user record
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
 pub struct AdminUser {
     pub id: i64,
     pub username: String,
+    /// Excluded from Serialize in practice — be careful not to expose this.
     pub password_hash: String,
     pub created_at: i64,
 }
 
 /// Active admin session
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
 pub struct AdminSession {
     pub id: String,
@@ -158,7 +173,7 @@ pub struct AdminSession {
 }
 
 /// A banned IP hash
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Ban {
     pub id: i64,
     pub ip_hash: String,
@@ -169,7 +184,7 @@ pub struct Ban {
 }
 
 /// A word filter rule
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WordFilter {
     pub id: i64,
     pub pattern: String,
@@ -177,14 +192,14 @@ pub struct WordFilter {
 }
 
 /// Board with live thread count, used on the home page
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BoardStats {
     pub board: Board,
     pub thread_count: i64,
 }
 
 /// Summary used on board index: thread + its last few reply counts
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ThreadSummary {
     pub thread: Thread,
     /// Latest N replies (for board index preview)
@@ -194,7 +209,7 @@ pub struct ThreadSummary {
 }
 
 /// Form data for posting a new thread or reply (parsed from multipart)
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Deserialize)]
 #[allow(dead_code)]
 pub struct PostForm {
     pub name: String,
@@ -231,7 +246,7 @@ pub struct LoginForm {
 }
 
 /// A poll attached to a thread's OP
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
 pub struct Poll {
     pub id: i64,
@@ -242,7 +257,7 @@ pub struct Poll {
 }
 
 /// A single poll option with live vote count (joined from poll_votes)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
 pub struct PollOption {
     pub id: i64,
@@ -253,7 +268,7 @@ pub struct PollOption {
 }
 
 /// Full poll data passed to templates
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PollData {
     pub poll: Poll,
     pub options: Vec<PollOption>,
@@ -277,7 +292,7 @@ fn default_page() -> i64 {
 }
 
 /// Pagination helper
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Pagination {
     pub page: i64,
     pub per_page: i64,
@@ -285,32 +300,44 @@ pub struct Pagination {
 }
 
 impl Pagination {
+    /// Create a new Pagination, clamping all values to sane minimums.
+    ///
+    /// - `page` is clamped to >= 1
+    /// - `per_page` is clamped to >= 1 (avoids division by zero)
+    /// - `total` is clamped to >= 0
     pub fn new(page: i64, per_page: i64, total: i64) -> Self {
         Self {
-            page,
-            per_page,
-            total,
+            page: page.max(1),
+            per_page: per_page.max(1),
+            total: total.max(0),
         }
     }
+
+    /// Total number of pages. Always returns at least 1 so templates can
+    /// safely display "page 1 of 1" even on empty result sets.
     pub fn total_pages(&self) -> i64 {
-        if self.per_page <= 0 {
-            return 1;
-        }
-        (self.total.saturating_add(self.per_page - 1)) / self.per_page
+        // per_page is guaranteed >= 1 by new(), but defend against manual
+        // construction just in case.
+        let pp = self.per_page.max(1);
+        let t = self.total.max(0);
+        ((t.saturating_add(pp - 1)) / pp).max(1)
     }
+
     pub fn offset(&self) -> i64 {
-        (self.page - 1).max(0).saturating_mul(self.per_page)
+        (self.page.max(1) - 1).saturating_mul(self.per_page.max(1))
     }
+
     pub fn has_prev(&self) -> bool {
         self.page > 1
     }
+
     pub fn has_next(&self) -> bool {
         self.page < self.total_pages()
     }
 }
 
 /// Aggregate site-wide statistics shown on the home page.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SiteStats {
     /// Total posts ever made
     pub total_posts: i64,
@@ -325,7 +352,7 @@ pub struct SiteStats {
 }
 
 /// A user-filed report against a post
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
 pub struct Report {
     pub id: i64,
@@ -341,7 +368,7 @@ pub struct Report {
 }
 
 /// Report enriched with context from joined tables (used in admin inbox)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ReportWithContext {
     pub report: Report,
     pub board_short: String,
@@ -352,7 +379,7 @@ pub struct ReportWithContext {
 }
 
 /// A single entry in the moderation action log
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
 pub struct ModLogEntry {
     pub id: i64,
@@ -370,7 +397,7 @@ pub struct ModLogEntry {
 }
 
 /// Represents a saved backup file on disk (shown in admin panel).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BackupInfo {
     /// Filename only (no directory path).
     pub filename: String,
@@ -381,7 +408,7 @@ pub struct BackupInfo {
 }
 
 /// A user-submitted ban appeal
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BanAppeal {
     pub id: i64,
     pub ip_hash: String,
@@ -389,4 +416,132 @@ pub struct BanAppeal {
     #[allow(dead_code)]
     pub status: String, // "open" | "dismissed"
     pub created_at: i64,
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── MediaType serde ↔ DB string parity ────────────────────────────────
+
+    #[test]
+    fn media_type_serde_matches_db_str() {
+        for mt in [MediaType::Image, MediaType::Video, MediaType::Audio] {
+            let json =
+                serde_json::to_string(&mt).expect("MediaType always serialises to a JSON string");
+            let json_str = json.trim_matches('"');
+            assert_eq!(
+                mt.as_str(),
+                json_str,
+                "as_str() and serde disagree for {:?}",
+                mt
+            );
+            assert_eq!(
+                MediaType::from_db_str(json_str),
+                Some(mt.clone()),
+                "from_db_str() round-trip failed for {:?}",
+                mt
+            );
+        }
+    }
+
+    #[test]
+    fn media_type_display_matches_as_str() {
+        for mt in [MediaType::Image, MediaType::Video, MediaType::Audio] {
+            assert_eq!(format!("{}", mt), mt.as_str());
+        }
+    }
+
+    #[test]
+    fn media_type_from_mime() {
+        assert_eq!(MediaType::from_mime("image/png"), Some(MediaType::Image));
+        assert_eq!(MediaType::from_mime("video/mp4"), Some(MediaType::Video));
+        assert_eq!(MediaType::from_mime("audio/ogg"), Some(MediaType::Audio));
+        assert_eq!(MediaType::from_mime("application/json"), None);
+    }
+
+    #[test]
+    fn media_type_from_ext() {
+        assert_eq!(MediaType::from_ext("jpg"), Some(MediaType::Image));
+        assert_eq!(MediaType::from_ext("mp4"), Some(MediaType::Video));
+        assert_eq!(MediaType::from_ext("flac"), Some(MediaType::Audio));
+        assert_eq!(MediaType::from_ext("exe"), None);
+    }
+
+    // ── Pagination ────────────────────────────────────────────────────────
+
+    #[test]
+    fn pagination_clamps_inputs() {
+        let p = Pagination::new(0, 0, -5);
+        assert_eq!(p.page, 1);
+        assert_eq!(p.per_page, 1);
+        assert_eq!(p.total, 0);
+    }
+
+    #[test]
+    fn pagination_total_pages_at_least_one() {
+        let p = Pagination::new(1, 10, 0);
+        assert_eq!(p.total_pages(), 1);
+    }
+
+    #[test]
+    fn pagination_total_pages_normal() {
+        assert_eq!(Pagination::new(1, 10, 1).total_pages(), 1);
+        assert_eq!(Pagination::new(1, 10, 10).total_pages(), 1);
+        assert_eq!(Pagination::new(1, 10, 11).total_pages(), 2);
+        assert_eq!(Pagination::new(1, 10, 20).total_pages(), 2);
+        assert_eq!(Pagination::new(1, 10, 21).total_pages(), 3);
+    }
+
+    #[test]
+    fn pagination_offset() {
+        assert_eq!(Pagination::new(1, 10, 100).offset(), 0);
+        assert_eq!(Pagination::new(2, 10, 100).offset(), 10);
+        assert_eq!(Pagination::new(3, 25, 100).offset(), 50);
+    }
+
+    #[test]
+    fn pagination_offset_clamped_for_bad_page() {
+        // Even if someone bypasses new() and manually sets page = -1
+        let p = Pagination {
+            page: -1,
+            per_page: 10,
+            total: 50,
+        };
+        assert_eq!(p.offset(), 0);
+    }
+
+    #[test]
+    fn pagination_has_prev_and_next() {
+        let p = Pagination::new(1, 10, 30);
+        assert!(!p.has_prev());
+        assert!(p.has_next());
+
+        let p = Pagination::new(2, 10, 30);
+        assert!(p.has_prev());
+        assert!(p.has_next());
+
+        let p = Pagination::new(3, 10, 30);
+        assert!(p.has_prev());
+        assert!(!p.has_next());
+    }
+
+    #[test]
+    fn pagination_single_page() {
+        let p = Pagination::new(1, 10, 5);
+        assert!(!p.has_prev());
+        assert!(!p.has_next());
+        assert_eq!(p.total_pages(), 1);
+    }
+
+    #[test]
+    fn pagination_empty_results() {
+        let p = Pagination::new(1, 10, 0);
+        assert!(!p.has_prev());
+        assert!(!p.has_next());
+        assert_eq!(p.total_pages(), 1);
+        assert_eq!(p.offset(), 0);
+    }
 }

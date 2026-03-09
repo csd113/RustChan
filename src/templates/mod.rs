@@ -208,12 +208,16 @@ pub(super) fn render_pagination(p: &Pagination, base_url: &str) -> String {
         return String::new();
     }
     let sep = if base_url.contains('?') { "&" } else { "?" };
+    // FIX[M-T2]: escape base_url once here so every href it appears in is safe,
+    // regardless of what any caller passes.  All current callers pass trusted
+    // values, but this makes the helper defensively correct for future callers.
+    let safe_base = escape_html(base_url);
     let mut html = String::from(r#"<div class="pagination">"#);
 
     if p.has_prev() {
         html.push_str(&format!(
             r#"<a href="{}{sep}page={}">[prev]</a> "#,
-            base_url,
+            safe_base,
             p.page - 1,
             sep = sep
         ));
@@ -222,7 +226,7 @@ pub(super) fn render_pagination(p: &Pagination, base_url: &str) -> String {
     if p.has_next() {
         html.push_str(&format!(
             r#" <a href="{}{sep}page={}">[next]</a>"#,
-            base_url,
+            safe_base,
             p.page + 1,
             sep = sep
         ));
@@ -370,7 +374,10 @@ pub(super) fn base_layout(
 
 // ─── Standalone error/ban pages (no board context) ────────────────────────────
 
-pub fn ban_page(reason: &str) -> String {
+// FIX[M-T1]: ban_page must accept a csrf_token so the appeal form works.
+// Previously the field was always empty and every appeal was rejected by the
+// server's CSRF check, making the appeal feature completely non-functional.
+pub fn ban_page(reason: &str, csrf_token: &str) -> String {
     let default_theme = live_default_theme();
     let default_theme_attr = if !default_theme.is_empty() && default_theme != "terminal" {
         format!(r#" data-default-theme="{}""#, escape_html(&default_theme))
@@ -394,7 +401,7 @@ pub fn ban_page(reason: &str) -> String {
 <p style="margin-top:1.5rem;font-size:0.9rem">if you believe this ban was made in error, you may submit an appeal below.<br>
 appeals are reviewed by site staff. one appeal per 24 hours.</p>
 <form method="POST" action="/appeal" class="appeal-form">
-<input type="hidden" name="_csrf" id="appeal-csrf-field" value="">
+<input type="hidden" name="_csrf" id="appeal-csrf-field" value="{csrf}">
 <textarea name="reason" rows="4" maxlength="512"
   placeholder="Briefly explain why you believe this ban should be lifted…"
   style="width:100%;box-sizing:border-box;margin:0.75rem 0;background:var(--bg-post);color:var(--text);border:1px solid var(--border);padding:0.5rem;resize:vertical"></textarea>
@@ -402,10 +409,14 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
 </form>
 <p style="margin-top:1.5rem"><a href="/">return home</a></p>
 </div>
+<!-- Global CSRF token consumed by main.js for fetch-based requests -->
+<input type="hidden" id="csrf_global" value="{csrf}">
+<script src="/static/main.js" defer></script>
 </body>
 </html>"#,
         default_theme_attr = default_theme_attr,
         reason = escape_html(reason),
+        csrf = escape_html(csrf_token),
     )
 }
 

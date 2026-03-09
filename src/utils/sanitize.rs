@@ -56,8 +56,13 @@ pub fn extract_video_embed(url: &str) -> Option<(&'static str, String)> {
             return Some(("streamable", code));
         }
     }
-    // Invidious — any domain serving /watch?v=ID (11-char YouTube-style ID)
-    if !url.contains("youtube.com") && !url.contains("youtu.be") {
+    // Invidious — any domain serving /watch?v=ID (11-char YouTube-style ID).
+    // FIX[INVIDIOUS]: The previous code matched ANY URL containing ?v= or &v=,
+    // meaning a completely ordinary link like https://example.com/article?v=dQw4w9WgXcQ
+    // would be silently replaced with a YouTube embed widget.  We now require
+    // the URL path to contain "/watch" (case-sensitive, matching real Invidious
+    // instances) before treating the ?v= parameter as a video ID.
+    if !url.contains("youtube.com") && !url.contains("youtu.be") && url.contains("/watch") {
         if let Some(id) = extract_yt_id_from_watch_param(url) {
             return Some(("youtube", id));
         }
@@ -382,9 +387,15 @@ fn render_inline(text: &str) -> String {
             let url = &caps[1];
             let clean_url = url.trim_end_matches(['.', ',', ')', ';', '\'']);
             let trailing = &url[clean_url.len()..];
+            // FIX[XSS]: Escape clean_url in both href and display text.
+            // The embed branch below already calls escape_html(); this branch
+            // was inserting clean_url raw.  Safe today (RE_URL excludes &<>
+            // and input is pre-escaped), but latently dangerous if the call
+            // site ever changes.  Apply escape_html() consistently.
+            let escaped_url = escape_html(clean_url);
             let link = format!(
                 r#"<a href="{}" rel="nofollow noopener" target="_blank">{}</a>{}"#,
-                clean_url, clean_url, trailing
+                escaped_url, escaped_url, trailing
             );
             // Check for supported video embed URLs. Emit only the embed span —
             // the URL becomes a data attribute and the span text, not a hyperlink.
@@ -441,7 +452,12 @@ pub fn validate_body(body: &str) -> Result<&str, String> {
     if trimmed.is_empty() {
         return Err("Post body cannot be empty.".into());
     }
-    if trimmed.len() > 4096 {
+    // FIX[CHARS]: Use .chars().count() rather than .len() (byte count).
+    // A post of 1,366 CJK characters is 4,098 UTF-8 bytes and would be
+    // incorrectly rejected by a byte-length check despite being well within
+    // the 4,096-character limit.  The error message also now correctly says
+    // "characters" because that is what we are measuring.
+    if trimmed.chars().count() > 4096 {
         return Err("Post body exceeds 4096 characters.".into());
     }
     Ok(trimmed)
@@ -452,12 +468,13 @@ pub fn validate_body(body: &str) -> Result<&str, String> {
 /// Rules:
 ///   • If `has_file` is true, an empty body is allowed — the file is enough.
 ///   • If `has_file` is false, the body must not be blank (no empty posts).
-///   • Body length is still capped at 4096 regardless.
+///   • Body length is still capped at 4096 characters regardless.
 ///
 /// Returns the trimmed body (may be empty when a file is present).
 pub fn validate_body_with_file(body: &str, has_file: bool) -> Result<String, String> {
     let trimmed = body.trim();
-    if trimmed.len() > 4096 {
+    // FIX[CHARS]: Same byte-vs-char fix as validate_body above.
+    if trimmed.chars().count() > 4096 {
         return Err("Post body exceeds 4096 characters.".into());
     }
     if trimmed.is_empty() && !has_file {

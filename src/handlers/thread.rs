@@ -123,6 +123,8 @@ pub async fn post_reply(
                                     // Extract admin session before spawn_blocking so we can skip the per-board
                                     // cooldown for admins (the cookie value is !Send and can't cross the boundary).
     let admin_session_id = jar.get("chan_admin_session").map(|c| c.value().to_string());
+    // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
+    let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
 
     let board_short_err = board_short.clone();
     let client_ip_err = client_ip.clone(); // CRIT-2: keep for the error re-render path below
@@ -147,14 +149,14 @@ pub async fn post_reply(
 
             let ip_hash = hash_ip(&client_ip, &cookie_secret);
             if let Some(reason) = db::is_banned(&conn, &ip_hash)? {
-                return Err(AppError::Forbidden(format!(
-                    "You are banned. Reason: {}",
-                    if reason.is_empty() {
+                return Err(AppError::BannedUser {
+                    reason: if reason.is_empty() {
                         "No reason given".to_string()
                     } else {
                         reason
-                    }
-                )));
+                    },
+                    csrf_token: ban_csrf_token,
+                });
             }
 
             // Per-board post cooldown — the SOLE post rate control.
@@ -503,16 +505,15 @@ pub async fn edit_post_get(
                 ));
             }
 
-            let window = if board.edit_window_secs <= 0 {
-                300
-            } else {
-                board.edit_window_secs
-            };
-            let now = chrono::Utc::now().timestamp();
-            if now - post.created_at > window {
-                return Err(AppError::Forbidden(
-                    "The edit window for this post has closed.".into(),
-                ));
+            // edit_window_secs = 0 means no time restriction (always editable while
+            // allow_editing is true).  Any positive value is enforced as a hard deadline.
+            if board.edit_window_secs > 0 {
+                let now = chrono::Utc::now().timestamp();
+                if now - post.created_at > board.edit_window_secs {
+                    return Err(AppError::Forbidden(
+                        "The edit window for this post has closed.".into(),
+                    ));
+                }
             }
 
             let all_boards = db::get_all_boards(&conn)?;
@@ -611,17 +612,19 @@ pub async fn edit_post_post(
                 board.edit_window_secs,
             )?;
 
-            let window = if board.edit_window_secs <= 0 {
-                300
-            } else {
-                board.edit_window_secs
-            };
+            // edit_window_secs = 0 means no time restriction.  A positive value is
+            // enforced; we only distinguish "window closed" vs "wrong token" when a
+            // window is actually configured.
             if !success {
                 let all_boards = db::get_all_boards(&conn)?;
                 let collapse_greentext = db::get_collapse_greentext(&conn);
-                let now = chrono::Utc::now().timestamp();
-                let err_msg = if now - post.created_at > window {
-                    "The edit window for this post has closed."
+                let err_msg = if board.edit_window_secs > 0 {
+                    let now = chrono::Utc::now().timestamp();
+                    if now - post.created_at > board.edit_window_secs {
+                        "The edit window for this post has closed."
+                    } else {
+                        "Incorrect edit token."
+                    }
                 } else {
                     "Incorrect edit token."
                 };
@@ -674,6 +677,11 @@ pub async fn vote_handler(
 
     let cookie_secret = CONFIG.cookie_secret.clone();
     let option_id = form.option_id;
+
+    // Reject non-positive IDs before touching the DB.
+    if option_id <= 0 {
+        return Err(AppError::BadRequest("Invalid poll option.".into()));
+    }
 
     let redirect_url = tokio::task::spawn_blocking({
         let pool = state.db.clone();

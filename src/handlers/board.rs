@@ -198,6 +198,8 @@ pub async fn create_thread(
 
     // Extract admin session before spawn_blocking (cookie jar is !Send).
     let admin_session_id = jar.get("chan_admin_session").map(|c| c.value().to_string());
+    // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
+    let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
 
     let board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
@@ -209,14 +211,14 @@ pub async fn create_thread(
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
             let ip_hash = hash_ip(&client_ip, &cookie_secret);
             if let Some(reason) = db::is_banned(&conn, &ip_hash)? {
-                return Err(AppError::Forbidden(format!(
-                    "You are banned. Reason: {}",
-                    if reason.is_empty() {
+                return Err(AppError::BannedUser {
+                    reason: if reason.is_empty() {
                         "No reason given".to_string()
                     } else {
                         reason
-                    }
-                )));
+                    },
+                    csrf_token: ban_csrf_token,
+                });
             }
 
             // Verify admin session — admins bypass the per-board cooldown entirely.
@@ -436,11 +438,14 @@ pub async fn create_thread(
                 .filter(|o| !o.is_empty())
                 .collect();
             if !q.is_empty() && valid_opts.len() >= 2 {
-                if let Some(secs) = poll_duration {
-                    let secs = secs.clamp(60, 30 * 24 * 3600); // clamp 1 min..30 days
-                    let expires_at = chrono::Utc::now().timestamp() + secs;
-                    db::create_poll(&conn, thread_id, &q, &valid_opts, expires_at)?;
-                }
+                let secs = poll_duration.ok_or_else(|| {
+                    AppError::BadRequest(
+                        "A duration is required when creating a poll.".into(),
+                    )
+                })?;
+                let secs = secs.clamp(60, 30 * 24 * 3600); // clamp 1 min..30 days
+                let expires_at = chrono::Utc::now().timestamp() + secs;
+                db::create_poll(&conn, thread_id, &q, &valid_opts, expires_at)?;
             }
 
             // ── Background jobs ───────────────────────────────────────────────
@@ -762,7 +767,7 @@ pub async fn file_report(
         .collect::<String>();
 
     let post_id = form.post_id;
-    let thread_id = form.thread_id;
+    let _thread_id = form.thread_id;
     let board_raw = form
         .board
         .chars()
@@ -770,9 +775,9 @@ pub async fn file_report(
         .take(8)
         .collect::<String>();
 
-    tokio::task::spawn_blocking({
+    let db_thread_id = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<()> {
+        move || -> Result<i64> {
             let conn = pool.get()?;
             let board = db::get_board_by_short(&conn, &board_raw)?
                 .ok_or_else(|| AppError::NotFound("Board not found.".into()))?;
@@ -784,14 +789,23 @@ pub async fn file_report(
                     "Post does not belong to this board.".into(),
                 ));
             }
-            db::file_report(&conn, post_id, thread_id, board.id, &reason, &ip_hash)?;
-            Ok(())
+            // Use the DB's thread_id for the redirect — not the user-submitted value.
+            let authoritative_thread_id = post.thread_id;
+            db::file_report(
+                &conn,
+                post_id,
+                authoritative_thread_id,
+                board.id,
+                &reason,
+                &ip_hash,
+            )?;
+            Ok(authoritative_thread_id)
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    // Redirect back to the thread the reported post lives in.
+    // Redirect back to the thread using the DB-resolved IDs, not the form values.
     let safe_board = form
         .board
         .chars()
@@ -800,7 +814,7 @@ pub async fn file_report(
         .collect::<String>();
     Ok(Redirect::to(&format!(
         "/{}/thread/{}#p{}",
-        safe_board, form.thread_id, form.post_id
+        safe_board, db_thread_id, form.post_id
     ))
     .into_response())
 }
