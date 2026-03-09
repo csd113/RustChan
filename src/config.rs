@@ -10,17 +10,15 @@
 //
 // SECURITY: The cookie_secret is auto-generated on first run and persisted
 // to settings.toml. It is never left at a well-known default value.
-// FIX[CRITICAL-1]: removed hardcoded default secret; see generate_settings_file_if_missing().
 
 use once_cell::sync::Lazy;
+use rand_core::{OsRng, RngCore};
 use serde::Deserialize;
 use std::env;
 use std::path::PathBuf;
 
 /// Absolute path to the directory the running binary lives in.
 fn binary_dir() -> PathBuf {
-    // FIX[MEDIUM-2]: log a warning when fallback is used so operators
-    // are aware that data may land in an unexpected location.
     match std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
@@ -38,8 +36,8 @@ fn binary_dir() -> PathBuf {
 }
 
 fn settings_file_path() -> PathBuf {
-    // Store settings.toml in rustrustchan-data/ alongside the database.
-    // rustrustchan-data/ is created by run_server before CONFIG is first accessed,
+    // Store settings.toml in rustchan-data/ alongside the database.
+    // rustchan-data/ is created by run_server before CONFIG is first accessed,
     // so this directory always exists by the time settings are read.
     let data_dir = binary_dir().join("rustchan-data");
     data_dir.join("settings.toml")
@@ -50,12 +48,10 @@ fn settings_file_path() -> PathBuf {
 #[derive(Deserialize, Default)]
 struct SettingsFile {
     forum_name: Option<String>,
-    /// Home page subtitle shown below the site name.  Displayed on the index
-    /// page.  Can also be changed later via the admin panel.
+    /// Home page subtitle shown below the site name.
     site_subtitle: Option<String>,
     /// Default theme served to first-time visitors before they pick one.
     /// Valid values: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
-    /// (empty string or "terminal" = default dark terminal theme).
     default_theme: Option<String>,
     port: Option<u16>,
     max_image_size_mb: Option<u32>,
@@ -83,9 +79,9 @@ fn load_settings_file() -> SettingsFile {
 /// Create settings.toml with defaults if it does not exist yet.
 /// Call this once at startup (before CONFIG is accessed for the first time).
 ///
-/// FIX[CRITICAL-1]: A cryptographically random cookie_secret is generated on
-/// first run and written to settings.toml. Subsequent runs load it from the
-/// file. The server never operates with a known/default secret.
+/// A cryptographically random cookie_secret is generated on first run and
+/// written to settings.toml. Subsequent runs load it from the file.
+/// The server never operates with a known/default secret.
 pub fn generate_settings_file_if_missing() {
     let path = settings_file_path();
     if path.exists() {
@@ -93,8 +89,6 @@ pub fn generate_settings_file_if_missing() {
     }
 
     // Generate a random 64-hex-char secret (32 bytes of entropy).
-    // This runs before CONFIG is initialised, so we call OsRng directly.
-    use rand_core::{OsRng, RngCore};
     let mut secret_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut secret_bytes);
     let secret = hex::encode(secret_bytes);
@@ -170,7 +164,7 @@ pub struct Config {
     /// Initial default theme slug (seeds the DB on first run).
     /// Valid: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
     pub initial_default_theme: String,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // read by CLI subcommands and printed at startup
     pub port: u16,
     pub max_image_size: usize, // bytes
     pub max_video_size: usize, // bytes
@@ -187,11 +181,11 @@ pub struct Config {
     pub database_path: String,
     pub upload_dir: String,
     pub thumb_size: u32,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used as default when creating boards via CLI/admin
     pub default_bump_limit: u32,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used as default when creating boards via CLI/admin
     pub max_threads_per_board: u32,
-    /// Maximum GET requests per IP per rate_limit_window (CRIT-3: DoS via catalog/search).
+    /// Maximum GET requests per IP per rate_limit_window.
     pub rate_limit_gets: u32,
     pub rate_limit_window: u64,
     pub cookie_secret: String,
@@ -224,20 +218,21 @@ impl Config {
             "CHAN_DEFAULT_THEME",
             s.default_theme.as_deref().unwrap_or("terminal"),
         );
-        let port = env_u16("CHAN_PORT", s.port.unwrap_or(8080));
-        let max_image_mb = env_u32("CHAN_MAX_IMAGE_MB", s.max_image_size_mb.unwrap_or(8));
-        let max_video_mb = env_u32("CHAN_MAX_VIDEO_MB", s.max_video_size_mb.unwrap_or(50));
-        let max_audio_mb = env_u32("CHAN_MAX_AUDIO_MB", s.max_audio_size_mb.unwrap_or(150));
+        let port: u16 = env_parse("CHAN_PORT", s.port.unwrap_or(8080));
+        let max_image_mb: u32 = env_parse("CHAN_MAX_IMAGE_MB", s.max_image_size_mb.unwrap_or(8));
+        let max_video_mb: u32 = env_parse("CHAN_MAX_VIDEO_MB", s.max_video_size_mb.unwrap_or(50));
+        let max_audio_mb: u32 = env_parse("CHAN_MAX_AUDIO_MB", s.max_audio_size_mb.unwrap_or(150));
 
-        let host = env_str("CHAN_HOST", "0.0.0.0");
-        let bind_addr = env_str("CHAN_BIND", &format!("{host}:{port}"));
+        let bind_addr = env_str(
+            "CHAN_BIND",
+            &format!("{}:{}", env_str("CHAN_HOST", "0.0.0.0"), port),
+        );
 
         let behind_proxy = env_bool("CHAN_BEHIND_PROXY", false);
 
-        // FIX[CRITICAL-1]: Resolve cookie_secret from env > settings.toml.
-        // If neither is set, emit a loud warning. The generate_settings_file_if_missing()
-        // call at startup ensures settings.toml always has a generated secret,
-        // so this fallback should only be reached in abnormal circumstances.
+        // Resolve cookie_secret from env > settings.toml.
+        // generate_settings_file_if_missing() ensures settings.toml always has
+        // a generated secret, so this fallback should only fire in abnormal cases.
         let cookie_secret = if let Ok(v) = env::var("CHAN_COOKIE_SECRET") {
             v
         } else if let Some(v) = s.cookie_secret {
@@ -248,10 +243,10 @@ impl Config {
                  IP hashing is using an empty secret. Run the server once to auto-generate, \
                  or set CHAN_COOKIE_SECRET."
             );
-            // Emit a random in-memory secret so each restart invalidates hashes
+            // Random in-memory secret so each restart invalidates hashes
             // (better than a known empty string, worse than a persisted one).
             let mut b = [0u8; 32];
-            rand_core::OsRng.fill_bytes(&mut b);
+            OsRng.fill_bytes(&mut b);
             hex::encode(b)
         };
 
@@ -270,16 +265,16 @@ impl Config {
             bind_addr,
             database_path: env_str("CHAN_DB", &default_db),
             upload_dir: env_str("CHAN_UPLOADS", &default_uploads),
-            thumb_size: env_u32("CHAN_THUMB_SIZE", 250),
-            default_bump_limit: env_u32("CHAN_BUMP_LIMIT", 500),
-            max_threads_per_board: env_u32("CHAN_MAX_THREADS", 150),
-            rate_limit_gets: env_u32("CHAN_RATE_GETS", 60),
-            rate_limit_window: env_u64("CHAN_RATE_WINDOW", 60),
+            thumb_size: env_parse("CHAN_THUMB_SIZE", 250),
+            default_bump_limit: env_parse("CHAN_BUMP_LIMIT", 500),
+            max_threads_per_board: env_parse("CHAN_MAX_THREADS", 150),
+            rate_limit_gets: env_parse("CHAN_RATE_GETS", 60),
+            rate_limit_window: env_parse("CHAN_RATE_WINDOW", 60),
             cookie_secret,
-            session_duration: env_i64("CHAN_SESSION_SECS", 8 * 3600),
+            session_duration: env_parse("CHAN_SESSION_SECS", 8 * 3600),
             behind_proxy,
             https_cookies: env_bool("CHAN_HTTPS_COOKIES", behind_proxy),
-            wal_checkpoint_interval: env_u64(
+            wal_checkpoint_interval: env_parse(
                 "CHAN_WAL_CHECKPOINT_SECS",
                 s.wal_checkpoint_interval_secs.unwrap_or(3600),
             ),
@@ -327,8 +322,6 @@ impl Config {
             );
         }
 
-        // Port 0 is technically valid (OS assigns one) but almost certainly a
-        // misconfiguration in a server context.
         if self.port == 0 {
             anyhow::bail!("CONFIG ERROR: port must not be 0.");
         }
@@ -336,7 +329,6 @@ impl Config {
         // Verify the upload directory is writable.
         let upload_path = std::path::Path::new(&self.upload_dir);
         if upload_path.exists() {
-            // Try writing a probe file to verify write permission.
             let probe = upload_path.join(".write_probe");
             if std::fs::write(&probe, b"").is_err() {
                 anyhow::bail!(
@@ -351,8 +343,7 @@ impl Config {
     }
 }
 
-// ─── Import needed for OsRng in cookie_secret fallback ───────────────────────
-use rand_core::RngCore as _;
+// ─── Cookie secret rotation check ────────────────────────────────────────────
 
 /// Check whether the cookie_secret has changed since the last run by comparing
 /// a SHA-256 hash stored in the DB against the currently loaded secret.
@@ -379,64 +370,40 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
         )
         .ok();
 
-    match stored {
-        None => {
-            // First run — store the hash silently.
-            let _ = conn.execute(
-                "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                rusqlite::params![KEY, current_hash],
-            );
+    if let Some(ref h) = stored {
+        if h == &current_hash {
+            return; // Secret unchanged — nothing to do.
         }
-        Some(ref h) if h == &current_hash => {
-            // Secret unchanged — nothing to do.
-        }
-        Some(_) => {
-            // Secret has rotated.
-            tracing::warn!(
-                "SECURITY WARNING: cookie_secret has changed since the last run. \
-                 All IP-based bans are now invalid because all IP hashes have changed. \
-                 If this was unintentional, restore the previous cookie_secret from \
-                 settings.toml. If intentional, consider running: \
-                 DELETE FROM bans; DELETE FROM ban_appeals;"
-            );
-            // Update the stored hash so subsequent restarts with the same secret are silent.
-            let _ = conn.execute(
-                "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                rusqlite::params![KEY, current_hash],
-            );
-        }
+        tracing::warn!(
+            "SECURITY WARNING: cookie_secret has changed since the last run. \
+             All IP-based bans are now invalid because all IP hashes have changed. \
+             If this was unintentional, restore the previous cookie_secret from \
+             settings.toml. If intentional, consider running: \
+             DELETE FROM bans; DELETE FROM ban_appeals;"
+        );
     }
+
+    // First run (None) or rotated secret (Some) — store the current hash.
+    let _ = conn.execute(
+        "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![KEY, current_hash],
+    );
 }
+
+// ─── Env helpers ──────────────────────────────────────────────────────────────
 
 fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
-fn env_u16(key: &str, default: u16) -> u16 {
+
+fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
     env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
 }
-fn env_u32(key: &str, default: u32) -> u32 {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-fn env_u64(key: &str, default: u64) -> u64 {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-fn env_i64(key: &str, default: i64) -> i64 {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
+
 fn env_bool(key: &str, default: bool) -> bool {
     env::var(key)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

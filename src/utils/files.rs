@@ -90,9 +90,63 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
         }
     }
 
-    // ── WebM (video or audio-only) ────────────────────────────────────────────
-    if header.starts_with(b"\x1a\x45\xdf\xa3") {
-        return Ok("video/webm");
+    // ── EBML container — distinguish WebM (video or audio-only) from MKV ────
+    //
+    // Both WebM and Matroska (.mkv) start with the same EBML magic bytes
+    // (1A 45 DF A3), so checking only the magic is insufficient — MKV files
+    // containing H.264/HEVC/etc. would be accepted and stored as .webm, then
+    // silently fail to play in any browser.
+    //
+    // The EBML header always begins with the EBML ID (1A 45 DF A3) followed
+    // immediately by the header size (variable-length VINT), then a sequence
+    // of EBML elements.  The DocType element has ID 0x4282.  Its value is the
+    // ASCII string "webm" (browser-compatible) or "matroska" (reject).
+    //
+    // We scan the first 64 bytes for 0x42 0x82, read the 1-byte size that
+    // follows, then compare that many bytes to "webm" or "matroska".
+    // If DocType is absent or unrecognised we reject.
+    //
+    // For audio-only WebM (Opus/Vorbis streams, no video track) the docType
+    // is still "webm", but none of the subsequent EBML Track elements contain
+    // a video codec ID.  We do not probe track types here — that would require
+    // parsing the full Segment element, which can be megabytes in.  Instead we
+    // accept all valid "webm" docType files and rely on the background worker's
+    // ffprobe call to detect audio-only containers and classify them correctly.
+    // To give the handler a usable MIME type up front we return "video/webm"
+    // for now; the worker will update the post's mime_type to "audio/webm" if
+    // ffprobe finds no video stream.  This is safe because both share the same
+    // file extension (.webm) and the browser media element handles both.
+    if data.get(..4) == Some(b"\x1a\x45\xdf\xa3") {
+        // Scan first 64 bytes for DocType element (ID = 0x42 0x82).
+        let scan_len = data.len().min(64);
+        // SAFETY: scan_len = data.len().min(64) so scan_len <= data.len() always holds.
+        let scan = data.get(..scan_len).unwrap_or(data);
+        let mut pos = 4usize;
+        let mut found_doctype: Option<&[u8]> = None;
+        // Use slice patterns so every access goes through bounds-checked .get(),
+        // satisfying clippy::indexing_slicing while keeping the loop readable.
+        while let Some([b0, b1, b2, ..]) = scan.get(pos..) {
+            if *b0 == 0x42 && *b1 == 0x82 {
+                // Next byte is the 1-byte DataSize (short form, bit 7 set -> size = byte & 0x7F).
+                let size_byte = *b2;
+                let value_len = (size_byte & 0x7f) as usize;
+                let value_start = pos + 3;
+                if value_start + value_len <= scan.len() {
+                    found_doctype = scan.get(value_start..value_start + value_len);
+                }
+                break;
+            }
+            pos += 1;
+        }
+        return match found_doctype {
+            Some(b"webm") => Ok("video/webm"), // audio-only WebM also uses docType "webm"
+            Some(b"matroska") => Err(anyhow::anyhow!(
+                "Matroska (.mkv) files are not accepted. Please upload a WebM file instead."
+            )),
+            _ => Err(anyhow::anyhow!(
+                "Unrecognised EBML container. Accepted: WebM (video/webm)."
+            )),
+        };
     }
 
     // ── Image formats ─────────────────────────────────────────────────────────
@@ -133,6 +187,42 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
         "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, MP4, WebM, \
          MP3, OGG, FLAC, WAV, M4A, AAC"
     ))
+}
+
+// ─── Disk-space guard ────────────────────────────────────────────────────────
+
+/// Verify at least `2 × needed_bytes` of free space in `dir` before writing.
+/// Uses `statvfs` on Unix; is a no-op (always Ok) on other platforms so Windows
+/// dev environments still compile and run.
+///
+/// Requiring 2× headroom means a crash mid-rename still leaves the original
+/// temp file and will not fill the volume to 100 %.
+#[cfg(unix)]
+fn check_disk_space(dir: &std::path::Path, needed_bytes: usize) -> Result<()> {
+    unsafe {
+        let dir_bytes = dir.to_string_lossy();
+        if let Ok(path_cstr) = std::ffi::CString::new(dir_bytes.as_bytes()) {
+            let mut stat: libc::statvfs = std::mem::zeroed();
+            if libc::statvfs(path_cstr.as_ptr(), &mut stat) == 0 {
+                #[allow(clippy::unnecessary_cast)]
+                let free_bytes = (stat.f_bavail as u64) * (stat.f_frsize as u64);
+                let needed = (needed_bytes as u64).saturating_mul(2);
+                if free_bytes < needed {
+                    return Err(anyhow::anyhow!(
+                        "Insufficient disk space: need ~{} MiB free, only ~{} MiB available.",
+                        needed / (1024 * 1024),
+                        free_bytes / (1024 * 1024)
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_disk_space(_dir: &std::path::Path, _needed_bytes: usize) -> Result<()> {
+    Ok(())
 }
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
@@ -255,29 +345,9 @@ pub fn save_upload(
 
     let file_path_abs = board_dir.join(&filename);
 
-    // Disk-space pre-check (#14): verify at least 2× the file size is available
+    // Disk-space pre-check: verify at least 2× the file size is available
     // before writing.  Uses statvfs on Unix; skipped on other platforms.
-    #[cfg(unix)]
-    {
-        unsafe {
-            let dir_bytes = board_dir.to_string_lossy();
-            if let Ok(path_cstr) = std::ffi::CString::new(dir_bytes.as_bytes()) {
-                let mut stat: libc::statvfs = std::mem::zeroed();
-                if libc::statvfs(path_cstr.as_ptr(), &mut stat) == 0 {
-                    #[allow(clippy::unnecessary_cast)]
-                    let free_bytes = (stat.f_bavail as u64) * (stat.f_frsize as u64);
-                    let needed = (final_data.len() as u64).saturating_mul(2);
-                    if free_bytes < needed {
-                        return Err(anyhow::anyhow!(
-                            "Insufficient disk space: need ~{} MiB free, only ~{} MiB available.",
-                            needed / (1024 * 1024),
-                            free_bytes / (1024 * 1024)
-                        ));
-                    }
-                }
-            }
-        }
-    }
+    check_disk_space(&board_dir, final_data.len())?;
 
     // Write via a temp file in the same directory, then atomically rename.
     // This guarantees no partial/corrupt file survives a crash or OOM mid-write.
@@ -393,6 +463,11 @@ pub fn save_audio_with_image_thumb(
 
     let board_dir = PathBuf::from(boards_dir).join(board_short);
     std::fs::create_dir_all(&board_dir).context("Failed to create board directory")?;
+
+    // FIX[DISK]: Apply the same 2× disk-space pre-check used by save_upload.
+    // Previously this path skipped the check, so a nearly-full volume could
+    // produce a partial or failed write without a clear error.
+    check_disk_space(&board_dir, audio_data.len())?;
 
     let file_path_abs = board_dir.join(&filename);
     {

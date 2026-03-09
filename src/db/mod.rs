@@ -328,8 +328,21 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         conn.query_row("SELECT version FROM schema_version", [], |r| r.get(0))?;
 
     // Each entry is (introduced_at_version, sql).
-    // SQLite returns SQLITE_ERROR (code 1) for "duplicate column" — we allow
-    // that specific error so re-running against an already-upgraded DB is safe.
+    // ALTER TABLE … ADD COLUMN returns SQLITE_ERROR (code 1) with the message
+    // "duplicate column name: X" when the column already exists — this happens
+    // when the binary is restarted against a DB that was already migrated.
+    // CREATE INDEX … IF NOT EXISTS is already idempotent and never errors.
+    //
+    // FIX[MIGRATION]: The previous guard caught ALL ErrorCode::Unknown errors,
+    // which maps to the generic SQLITE_ERROR (code 1).  That code is also
+    // returned for SQL syntax errors, wrong number of columns, etc.  A typo
+    // in migration SQL (e.g. "ADD COULMN") would be silently swallowed,
+    // marked as applied in schema_version, and the column would never exist.
+    //
+    // We now additionally inspect the error message string to confirm the
+    // error is specifically "duplicate column name" before treating it as
+    // idempotent.  Any other SQLITE_ERROR is propagated so the operator sees
+    // it immediately rather than discovering a missing column at runtime.
     let migrations: &[(i64, &str)] = &[
         (1,  "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
         (2,  "ALTER TABLE boards ADD COLUMN allow_tripcodes INTEGER NOT NULL DEFAULT 1"),
@@ -371,10 +384,20 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
                 tracing::debug!("Applied migration v{}", version);
                 highest_applied = version;
             }
-            Err(rusqlite::Error::SqliteFailure(ref e, _))
-                if e.code == rusqlite::ErrorCode::Unknown =>
+            Err(rusqlite::Error::SqliteFailure(ref e, ref msg))
+                if e.code == rusqlite::ErrorCode::Unknown
+                    && msg
+                        .as_deref()
+                        .map(|m| {
+                            m.contains("duplicate column name") || m.contains("already exists")
+                        })
+                        .unwrap_or(false) =>
             {
-                // SQLITE_ERROR with "duplicate column name" — idempotent, skip.
+                // Idempotent: column already added or index already exists.
+                // Only reached for ALTER TABLE … ADD COLUMN (duplicate column)
+                // and CREATE INDEX (already exists). All other SQLITE_ERROR
+                // values (syntax errors, wrong column counts, etc.) are NOT
+                // caught here and will propagate as real failures.
                 tracing::debug!(
                     "Migration v{} already applied (idempotent), skipping",
                     version

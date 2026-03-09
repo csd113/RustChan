@@ -277,7 +277,8 @@ pub fn admin_panel_page(
         let preview = escape_html(rc.post_preview.trim());
         let reason = escape_html(&rc.report.reason);
         let age = fmt_ts(rc.report.created_at);
-        let ip_short = rc.post_ip_hash.get(..16).unwrap_or(&rc.post_ip_hash);
+        // FIX[A-T2]: ip_short was computed here but immediately discarded with
+        // `let _ = ip_short` — dead code from an unfinished refactor.  Removed.
         report_rows.push_str(&format!(
             r#"<tr>
 <td><a href="/{board}/thread/{tid}#p{pid}" title="view post">/{board}/ No.{pid}</a></td>
@@ -310,7 +311,7 @@ pub fn admin_panel_page(
             rid     = rc.report.id,
             ip_hash = escape_html(&rc.post_ip_hash),
         ));
-        let _ = ip_short; // suppress unused warning
+        let _ = (); // (ip_short dead-code removed — see FIX[A-T2] above)
     }
 
     // ── Ban appeals ───────────────────────────────────────────────────────────
@@ -783,7 +784,11 @@ pub fn admin_ip_history_page(
             ""
         };
         let body_preview: String = post.body.chars().take(120).collect();
-        let body_preview = if post.body.len() > 120 {
+        // FIX[A-T1]: test character count, not byte count.  post.body.len()
+        // measures UTF-8 bytes so multi-byte characters (emoji, CJK, …) can
+        // cause the ellipsis to be added even when nothing was truncated, or
+        // omitted even when content was.
+        let body_preview = if post.body.chars().count() > 120 {
             format!("{}…", escape_html(&body_preview))
         } else {
             escape_html(&body_preview)

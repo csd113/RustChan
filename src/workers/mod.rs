@@ -141,9 +141,23 @@ impl JobQueue {
 // ─── Worker pool startup ──────────────────────────────────────────────────────
 
 /// Spawn the background worker pool. Call exactly once at server startup.
-/// Returns a vec of JoinHandles so the caller can await them during shutdown.
+///
+/// Returns a vec of JoinHandles, one per worker, so the caller can await all
+/// of them during graceful shutdown after cancelling `queue.cancel`.  Without
+/// holding these handles the caller has no way to know when in-progress jobs
+/// have actually finished — the process could exit mid-transcode, leaving DB
+/// rows permanently stuck in `"running"` state and partially-written files on
+/// disk.
+///
+/// Typical shutdown sequence:
+///   queue.cancel.cancel();
+///   for h in handles { h.await.ok(); }
+///
 /// Workers are pure async Tokio tasks — they do not consume OS threads at rest.
-pub fn start_worker_pool(queue: Arc<JobQueue>, ffmpeg_available: bool) {
+pub fn start_worker_pool(
+    queue: Arc<JobQueue>,
+    ffmpeg_available: bool,
+) -> Vec<tokio::task::JoinHandle<()>> {
     let n = std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(2)
@@ -151,12 +165,14 @@ pub fn start_worker_pool(queue: Arc<JobQueue>, ffmpeg_available: bool) {
 
     info!("Background worker pool: {} worker(s) online", n);
 
-    for idx in 0..n {
-        let q = queue.clone();
-        tokio::spawn(async move {
-            worker_loop(idx, q, ffmpeg_available).await;
-        });
-    }
+    (0..n)
+        .map(|idx| {
+            let q = queue.clone();
+            tokio::spawn(async move {
+                worker_loop(idx, q, ffmpeg_available).await;
+            })
+        })
+        .collect()
 }
 
 // ─── Worker loop ─────────────────────────────────────────────────────────────
@@ -190,21 +206,48 @@ async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
                 let pool_done = queue.pool.clone();
                 let result =
                     handle_job(job_id, &payload, ffmpeg_available, queue.pool.clone()).await;
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(c) = pool_done.get() {
-                        match result {
-                            Ok(()) => {
-                                let _ = crate::db::complete_job(&c, job_id);
-                                debug!("Worker {}: job #{} completed", id, job_id);
-                            }
-                            Err(ref e) => {
-                                warn!("Worker {}: job #{} failed — {}", id, job_id, e);
-                                let _ = crate::db::fail_job(&c, job_id, &e.to_string());
-                            }
+                // FIX[STUCK-RUNNING]: Previously pool_done.get() failures were
+                // silently ignored (if let Ok(c) = ...), leaving the job row
+                // permanently stuck in "running" — claim_next_job only claims
+                // "pending" rows, so it would never be retried or cleaned up.
+                // We now propagate the error into the back-off path so the
+                // worker retries acquiring a connection, and we log explicitly
+                // so operators can see pool exhaustion events.
+                let db_result = tokio::task::spawn_blocking(move || -> Result<()> {
+                    let c = pool_done.get().map_err(anyhow::Error::from)?;
+                    match result {
+                        Ok(()) => {
+                            crate::db::complete_job(&c, job_id)?;
+                        }
+                        Err(ref e) => {
+                            warn!("Worker {}: job #{} failed — {}", id, job_id, e);
+                            crate::db::fail_job(&c, job_id, &e.to_string())?;
                         }
                     }
+                    Ok(())
                 })
                 .await;
+                match db_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        error!(
+                            "Worker {}: failed to update completion status for job #{}: {}",
+                            id, job_id, e
+                        );
+                        let delay = backoff_duration(consecutive_errors);
+                        consecutive_errors = consecutive_errors.saturating_add(1);
+                        tokio::select! {
+                            _ = sleep(delay) => {}
+                            _ = queue.cancel.cancelled() => { return; }
+                        }
+                    }
+                    Err(join_err) => {
+                        error!(
+                            "Worker {}: spawn_blocking panicked during job #{} completion: {}",
+                            id, job_id, join_err
+                        );
+                    }
+                }
             }
             Ok(Ok(None)) => {
                 consecutive_errors = 0; // queue empty is not an error
@@ -425,20 +468,50 @@ fn transcode_video_inner(
     let webm_abs = board_dir.join(&webm_name);
     let webm_rel = format!("{}/{}", board_short, webm_name);
 
-    std::fs::write(&webm_abs, &webm_bytes)?;
+    // FIX[ATOMIC-WRITE]: For AV1 WebM inputs, src and webm_abs resolve to the
+    // same path (same stem, same .webm extension).  A direct fs::write would
+    // overwrite the source in-place; a crash or disk-full mid-write permanently
+    // corrupts the only copy of the file with no recovery path.
+    //
+    // We write to a uniquely named temp file in the same directory first, then
+    // atomically rename it into place.  The rename is POSIX-atomic on the same
+    // filesystem, so readers always see either the old file or the new file —
+    // never a partial write.  If anything fails before the rename, the source
+    // file is untouched and the job can be retried.
+    {
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new_in(&board_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to create temp file for WebM output: {}", e))?;
+        tmp.write_all(&webm_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to write WebM transcode output: {}", e))?;
+        tmp.persist(&webm_abs)
+            .map_err(|e| anyhow::anyhow!("Failed to atomically rename WebM output: {}", e))?;
+    }
 
     let conn = pool.get()?;
 
-    let updated =
-        crate::db::update_all_posts_file_path(&conn, &file_path, &webm_rel, "video/webm")?;
-    if updated == 0 {
-        crate::db::update_post_file_info(&conn, post_id, &webm_rel, "video/webm")?;
-    }
+    // FIX[LEAK]: If any DB call below fails we must clean up the WebM we just
+    // wrote, otherwise it leaks on disk across all retry attempts.  We record
+    // the path and remove it in the error branch via a guard closure.
+    let db_result = (|| -> Result<()> {
+        let updated =
+            crate::db::update_all_posts_file_path(&conn, &file_path, &webm_rel, "video/webm")?;
+        if updated == 0 {
+            crate::db::update_post_file_info(&conn, post_id, &webm_rel, "video/webm")?;
+        }
 
-    let thumb_path = crate::db::get_post_thumb_path(&conn, post_id)?.unwrap_or_default();
-    let webm_sha256 = crate::utils::crypto::sha256_hex(&webm_bytes);
-    crate::db::delete_file_hash_by_path(&conn, &file_path)?;
-    crate::db::record_file_hash(&conn, &webm_sha256, &webm_rel, &thumb_path, "video/webm")?;
+        let thumb_path = crate::db::get_post_thumb_path(&conn, post_id)?.unwrap_or_default();
+        let webm_sha256 = crate::utils::crypto::sha256_hex(&webm_bytes);
+        crate::db::delete_file_hash_by_path(&conn, &file_path)?;
+        crate::db::record_file_hash(&conn, &webm_sha256, &webm_rel, &thumb_path, "video/webm")?;
+        Ok(())
+    })();
+
+    if let Err(e) = db_result {
+        // Remove the WebM we wrote so it doesn't accumulate across retries.
+        let _ = std::fs::remove_file(&webm_abs);
+        return Err(e);
+    }
 
     if ext != "webm" {
         let _ = std::fs::remove_file(&src);
@@ -530,6 +603,23 @@ fn generate_waveform_inner(
 
     let conn = pool.get()?;
     crate::db::update_post_thumb_path(&conn, post_id, &png_rel)?;
+
+    // FIX[DEDUP-STALE]: The file_hashes dedup table was not updated after the
+    // waveform PNG was generated, so it still held the SVG placeholder path as
+    // thumb_path.  Any future post uploading the same audio file and hitting the
+    // dedup cache via find_file_by_hash would receive the stale SVG path instead
+    // of the waveform PNG.  We now update the dedup record so that all future
+    // dedup hits for this audio file correctly inherit the waveform thumbnail.
+    //
+    // We compute the SHA-256 of the audio data we already have in memory to
+    // identify the dedup row without a separate DB lookup, then refresh its
+    // thumb_path via a targeted UPDATE.  An audio file may have been uploaded
+    // on a different board, so we match by file content (sha256) not by path.
+    let audio_sha256 = crate::utils::crypto::sha256_hex(&data);
+    let _ = conn.execute(
+        "UPDATE file_hashes SET thumb_path = ?1 WHERE sha256 = ?2",
+        rusqlite::params![png_rel, audio_sha256],
+    );
 
     info!("AudioWaveform done: post {} → {}", post_id, png_rel);
     Ok(())

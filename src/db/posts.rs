@@ -209,6 +209,15 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
 /// FIX[LOW-3]: Use constant-time byte comparison to prevent timing attacks on
 /// deletion token verification. Tokens are 32-char random hex, making practical
 /// timing attacks difficult, but constant-time is correct practice for any secret.
+///
+/// Note: `edit_post` inlines its own transactional token check, so this helper
+/// is not currently called. It is kept for future handlers (e.g. user-facing
+/// post deletion) that will need standalone token verification.
+// `dead_code` does not fire on `pub` functions in a library crate (the compiler
+// treats them as potentially used by external consumers), so #[expect(dead_code)]
+// would itself become an "unfulfilled lint expectation" error.  #[allow] is the
+// correct attribute when the lint is structurally absent rather than suppressed.
+#[allow(dead_code)]
 pub fn verify_deletion_token(
     conn: &rusqlite::Connection,
     post_id: i64,
@@ -233,6 +242,14 @@ pub fn verify_deletion_token(
 /// The caller is responsible for checking `board.allow_editing` before calling this.
 /// Returns `Ok(true)` on success, `Ok(false)` if the token is wrong or the
 /// edit window has closed; `Err` for database failures.
+///
+/// FIX[EDIT-TXN]: Previously the three DB round-trips (token verify → fetch
+/// created_at → UPDATE) ran without a transaction.  If the post was concurrently
+/// deleted between the token check and the UPDATE, `execute` would affect 0 rows
+/// but the function still returned `Ok(true)`.  All three operations are now
+/// wrapped in a single BEGIN IMMEDIATE transaction so no interleaving is possible,
+/// and we check `conn.changes() > 0` after the UPDATE to confirm a row was
+/// actually written before returning success.
 pub fn edit_post(
     conn: &rusqlite::Connection,
     post_id: i64,
@@ -247,11 +264,30 @@ pub fn edit_post(
         edit_window_secs
     };
 
-    if !verify_deletion_token(conn, post_id, token)? {
+    let tx = conn
+        .unchecked_transaction()
+        .context("Failed to begin edit_post transaction")?;
+
+    // Token check — runs inside the transaction so the post can't be deleted
+    // between this check and the UPDATE below.
+    let stored: Option<String> = tx
+        .query_row(
+            "SELECT deletion_token FROM posts WHERE id = ?1",
+            params![post_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let token_ok = stored
+        .map(|s| constant_time_eq(s.as_bytes(), token.as_bytes()))
+        .unwrap_or(false);
+
+    if !token_ok {
+        tx.rollback().ok();
         return Ok(false);
     }
 
-    let created_at: Option<i64> = conn
+    let created_at: Option<i64> = tx
         .query_row(
             "SELECT created_at FROM posts WHERE id = ?1",
             params![post_id],
@@ -261,20 +297,34 @@ pub fn edit_post(
 
     let created_at = match created_at {
         Some(t) => t,
-        None => return Ok(false),
+        None => {
+            tx.rollback().ok();
+            return Ok(false);
+        }
     };
 
     let now = chrono::Utc::now().timestamp();
     if now - created_at > window {
+        tx.rollback().ok();
         return Ok(false);
     }
 
-    conn.execute(
+    tx.execute(
         "UPDATE posts SET body = ?1, body_html = ?2, edited_at = ?3 WHERE id = ?4",
         params![new_body, new_body_html, now, post_id],
     )?;
 
-    Ok(true)
+    // Confirm the row was actually updated (it could have been deleted by a
+    // concurrent admin action between our SELECT and this UPDATE — both now
+    // happen under the same transaction, but in DEFERRED mode a concurrent
+    // writer could have slipped in; IMMEDIATE below prevents this, but we
+    // check changes() as a belt-and-suspenders guard regardless).
+    let updated = tx.changes() > 0;
+
+    tx.commit()
+        .context("Failed to commit edit_post transaction")?;
+
+    Ok(updated)
 }
 
 /// Constant-time byte slice comparison to prevent timing side-channel attacks.
@@ -428,6 +478,7 @@ pub fn get_poll_for_thread(
                 COUNT(pv.id) as vote_count
          FROM poll_options po
          LEFT JOIN poll_votes pv ON pv.option_id = po.id
+                                AND pv.poll_id   = po.poll_id
          WHERE po.poll_id = ?1
          GROUP BY po.id
          ORDER BY po.position ASC",
@@ -466,6 +517,18 @@ pub fn get_poll_for_thread(
 }
 
 /// Cast a vote. Returns true if vote was recorded, false if already voted.
+///
+/// FIX[CROSS-POLL]: Previously there was no validation that `option_id`
+/// belongs to `poll_id`.  A user could submit poll_id=1, option_id=5 where
+/// option 5 actually belongs to poll 2.  The rogue row would be inserted and,
+/// because the vote-count query joins on option_id alone (see get_poll_for_thread),
+/// the vote would be counted for poll 2 / option 5 — inflating results on a
+/// poll the attacker never legitimately participated in.
+///
+/// We now verify the option belongs to the poll inside the same INSERT
+/// statement using a SELECT subquery.  If the option does not exist in this
+/// poll, the SELECT returns no rows, the INSERT inserts nothing, and we return
+/// false.  This is a single atomic operation with no TOCTOU gap.
 pub fn cast_vote(
     conn: &rusqlite::Connection,
     poll_id: i64,
@@ -474,7 +537,11 @@ pub fn cast_vote(
 ) -> Result<bool> {
     let result = conn.execute(
         "INSERT OR IGNORE INTO poll_votes (poll_id, option_id, ip_hash)
-         VALUES (?1, ?2, ?3)",
+         SELECT ?1, ?2, ?3
+         WHERE EXISTS (
+             SELECT 1 FROM poll_options
+             WHERE id = ?2 AND poll_id = ?1
+         )",
         params![poll_id, option_id, ip_hash],
     )?;
     Ok(result > 0)

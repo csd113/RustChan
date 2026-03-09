@@ -213,9 +213,10 @@ pub fn board_page(
         ));
     }
 
+    // FIX[B-T2]: escape_html on board.short_name before embedding in the URL.
     body.push_str(&render_pagination(
         pagination,
-        &format!("/{}", board.short_name),
+        &format!("/{}", escape_html(&board.short_name)),
     ));
 
     body.push_str(TOGGLE_SCRIPT);
@@ -307,10 +308,15 @@ fn render_thread_summary(
     }
 
     if let Some(body) = &t.op_body {
-        let truncated = if body.len() > 300 {
+        // FIX[B-T1]: Count and slice by character, not by byte.
+        // body[..300] panics on any post whose 300th byte falls inside a
+        // multi-byte codepoint (emoji, CJK, Arabic, etc.).
+        let char_count = body.chars().count();
+        let truncated = if char_count > 300 {
+            let safe: String = body.chars().take(300).collect();
             format!(
                 r#"{} <a href="/{b}/thread/{tid}">…[Read more]</a>"#,
-                escape_html(&body[..300]),
+                escape_html(&safe),
                 b = escape_html(board_short),
                 tid = t.id,
             )
@@ -580,7 +586,7 @@ pub fn search_page(
             pagination,
             &format!(
                 "/{}/search?q={}",
-                board.short_name,
+                escape_html(&board.short_name),
                 urlencoding_simple(query)
             ),
         ));
@@ -677,9 +683,10 @@ pub fn archive_page(
             ));
         }
         body.push_str("</div>");
+        // FIX[B-T2]: escape before embedding in pagination URL.
         body.push_str(&render_pagination(
             pagination,
-            &format!("/{}/archive", board.short_name),
+            &format!("/{}/archive", escape_html(&board.short_name)),
         ));
     }
 

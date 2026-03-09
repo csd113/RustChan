@@ -140,7 +140,23 @@ pub fn pow_challenge(board_short: &str, unix_ts: i64) -> String {
 /// FIX[NEW-C2]: Each (board, nonce) pair is recorded in SEEN_NONCES after its
 /// first successful verification and rejected on any subsequent call within the
 /// same window, closing the replay attack vector.
+///
+/// FIX[RACE]: The previous implementation used a separate contains_key() check
+/// followed by insert(), which is not atomic even with DashMap — two concurrent
+/// requests carrying the same solved nonce could both pass the check before
+/// either inserted, allowing replay under concurrent load.  The fix uses the
+/// entry API so the check and claim are performed in a single lock acquisition:
+/// entry().or_insert_with() returns a reference to the existing value if the
+/// key was already present, or inserts and returns the new value.  We
+/// distinguish "newly inserted by us" from "already existed" by comparing the
+/// stored timestamp; if it equals `now` we inserted it, otherwise it was
+/// already there.  A cleaner approach is to use a dedicated atomic flag, but
+/// the timestamp comparison is sufficient here because `now` is captured once
+/// before the entry call and any pre-existing entry will have a strictly
+/// earlier timestamp (same-second collisions are handled by the equality check
+/// being in our favour: we set the value so it is always == now when we win).
 pub fn verify_pow(board_short: &str, nonce: &str) -> bool {
+    use dashmap::mapref::entry::Entry;
     use sha2::{Digest, Sha256};
     let now = chrono::Utc::now().timestamp();
     let now_minutes = now / 60;
@@ -148,21 +164,25 @@ pub fn verify_pow(board_short: &str, nonce: &str) -> bool {
     // Prune stale entries to bound memory usage.
     SEEN_NONCES.retain(|_, ts| now - *ts < POW_WINDOW_SECS);
 
-    // Check whether this (board, nonce) pair has already been accepted.
-    let cache_key = format!("{}:{}", board_short, nonce);
-    if SEEN_NONCES.contains_key(&cache_key) {
-        return false; // FIX[NEW-C2]: replay rejected
-    }
-
     // Try current minute and the 4 prior minutes.
+    let cache_key = format!("{}:{}", board_short, nonce);
     for delta in 0i64..=4 {
         let challenge = pow_challenge(board_short, (now_minutes - delta) * 60);
         let input = format!("{}:{}", challenge, nonce);
         let hash = Sha256::digest(input.as_bytes());
         if leading_zero_bits(&hash) >= POW_DIFFICULTY {
-            // Record this nonce as consumed.
-            SEEN_NONCES.insert(cache_key, now);
-            return true;
+            // Atomically claim this nonce.  entry() acquires the shard lock for
+            // the duration of the call, so no other thread can slip in between
+            // the existence check and the insertion.
+            match SEEN_NONCES.entry(cache_key) {
+                Entry::Vacant(e) => {
+                    e.insert(now);
+                    return true; // FIX[RACE]: we claimed it atomically
+                }
+                Entry::Occupied(_) => {
+                    return false; // already consumed — replay rejected
+                }
+            }
         }
     }
     false

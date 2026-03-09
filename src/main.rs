@@ -175,11 +175,19 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // clear error rather than discovering misconfiguration at runtime (#8).
     CONFIG.validate()?;
 
-    let data_dir = std::path::Path::new(&CONFIG.database_path)
-        .parent()
-        .unwrap_or(std::path::Path::new("."));
+    // Fix #9: Path::parent() on a bare filename (e.g. "rustchan.db") returns
+    // Some("") rather than None, so the old `unwrap_or(".")` never fired and
+    // `create_dir_all("")` would fail with NotFound.  Treat an empty-string
+    // parent the same as a missing one.
+    let data_dir: std::path::PathBuf = {
+        let p = std::path::Path::new(&CONFIG.database_path);
+        match p.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => std::path::PathBuf::from("."),
+        }
+    };
 
-    std::fs::create_dir_all(data_dir)?;
+    std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&CONFIG.upload_dir)?;
 
     print_banner();
@@ -245,16 +253,15 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
 
     // Tor: create hidden-service directory + torrc, launch tor as a background
     // process, and poll for the hostname file (all non-blocking).
-    // rsplit(':').next() finds the last colon-delimited segment, which is always
-    // the port regardless of whether the host part is IPv4 ("0.0.0.0:8080") or
-    // IPv6 ("[::1]:8080").
-    let bind_port = CONFIG
-        .bind_addr
-        .rsplit(':')
-        .next()
-        .and_then(|p| p.parse::<u16>().ok())
+    // Fix #1: derive bind_port from `bind_addr` (which already incorporates
+    // port_override) rather than CONFIG.bind_addr.  Previously, starting with
+    // `--port 9000` would still pass 8080 to Tor's HiddenServicePort.
+    // rsplit_once(':') handles both IPv4 ("0.0.0.0:9000") and IPv6 ("[::1]:9000").
+    let bind_port = bind_addr
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
         .unwrap_or(8080);
-    detect::detect_tor(CONFIG.enable_tor_support, bind_port, data_dir);
+    detect::detect_tor(CONFIG.enable_tor_support, bind_port, &data_dir);
     println!();
 
     let state = AppState {
@@ -314,11 +321,10 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                         }
                         Err(e) => tracing::warn!("WAL checkpoint failed: {}", e),
                     }
-                    // PRAGMA optimize updates internal statistics used by the
-                    // query planner. It is cheap and idempotent (#18).
-                    if let Ok(conn) = bg.get() {
-                        let _ = conn.execute_batch("PRAGMA optimize;");
-                    }
+                    // Fix #7: reuse `conn` instead of calling bg.get() again.
+                    // A second acquire while the first is still alive deadlocks
+                    // with a pool size of 1.
+                    let _ = conn.execute_batch("PRAGMA optimize;");
                 }
             }
         });
@@ -546,16 +552,43 @@ fn build_router(state: AppState) -> Router {
             ),
         ))
         .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-            header::HeaderName::from_static("strict-transport-security"),
-            header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
-        ))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
             header::HeaderName::from_static("permissions-policy"),
             header::HeaderValue::from_static(
                 "geolocation=(), camera=(), microphone=(), payment=()",
             ),
         ))
+        // Fix #8: HSTS (RFC 6797 §7.2) MUST only be sent over HTTPS.
+        // Sending it over plain HTTP (localhost dev, Tor .onion) is incorrect
+        // and can cause Tor-aware clients to misbehave.  The middleware below
+        // checks both the request scheme and the X-Forwarded-Proto header
+        // (set by TLS-terminating proxies) before adding the header.
+        .layer(axum_middleware::from_fn(hsts_middleware))
         .with_state(state)
+}
+
+/// Middleware that adds `Strict-Transport-Security` only when the connection
+/// is confirmed to be HTTPS (RFC 6797 §7.2).  Checks both the URI scheme
+/// (set by some reverse proxies) and the `X-Forwarded-Proto` header.
+async fn hsts_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_https = req.uri().scheme_str() == Some("https")
+        || req
+            .headers()
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("https"))
+            .unwrap_or(false);
+
+    let mut resp = next.run(req).await;
+    if is_https {
+        resp.headers_mut().insert(
+            header::HeaderName::from_static("strict-transport-security"),
+            header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        );
+    }
+    resp
 }
 
 async fn serve_css() -> impl IntoResponse {
@@ -677,7 +710,9 @@ fn first_run_check(pool: &db::DbPool) -> anyhow::Result<()> {
         println!("║           FIRST RUN — SETUP REQUIRED                 ║");
         println!("╠══════════════════════════════════════════════════════╣");
         println!("║  No boards or admin accounts found.                  ║");
-        println!("║  Create your first admin and boards: ║");
+        // Fix #2: original line was only 40 display-columns wide (missing 16 spaces),
+        // breaking the box alignment.  Padded to the correct inner width of 54.
+        println!("║  Create your first admin and boards:                 ║");
         println!("║                                                      ║");
         println!("║  rustchan-cli admin create-admin admin mypassword    ║");
         println!("║  rustchan-cli admin create-board b Random \"Anything\" ║");
@@ -777,7 +812,10 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
     // Upload progress bar — shown only while uploads are active
     let active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed).max(0) as u64;
     if active_uploads > 0 {
-        let tick = SPINNER_TICK.load(Ordering::Relaxed);
+        // Fix #5: SPINNER_TICK was read but never written anywhere, so the
+        // spinner was permanently frozen on frame 0 ("⠋").  Increment it here,
+        // inside the only branch that actually displays the spinner.
+        let tick = SPINNER_TICK.fetch_add(1, Ordering::Relaxed);
         let spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let spin = spinners
             .get((tick as usize) % spinners.len())
@@ -832,9 +870,13 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
     }
 }
 
-/// Read the process RSS (resident set size) from /proc/self/status on Linux.
-/// Returns 0 on non-Linux platforms or if the file cannot be read.
-/// No additional dependencies needed — /proc/self/status is always present.
+/// Read the process RSS (resident set size) in KiB.
+///
+/// * Linux  — parsed from `/proc/self/status` (VmRSS field, already in KiB).
+/// * macOS  — Fix #11: spawns `ps -o rss= -p <pid>` (output is KiB on macOS).
+///   Previously this returned 0 on macOS, showing a misleading
+///   `mem: 0 KiB RSS` in the terminal stats display.
+/// * Other  — returns 0 rather than showing a misleading value.
 fn process_rss_kb() -> u64 {
     #[cfg(target_os = "linux")]
     {
@@ -848,6 +890,20 @@ fn process_rss_kb() -> u64 {
                         .unwrap_or(0);
                     return kb;
                 }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // `ps -o rss=` outputs the RSS in KiB on macOS (no header when '=' suffix used).
+        let pid = std::process::id().to_string();
+        if let Ok(out) = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if let Ok(kb) = s.trim().parse::<u64>() {
+                return kb;
             }
         }
     }
@@ -888,9 +944,12 @@ fn walkdir_size(path: &std::path::Path) -> u64 {
     entries
         .flatten()
         .map(|e| {
-            let p = e.path();
-            if p.is_dir() {
-                walkdir_size(&p)
+            // Fix #10: use file_type() from the DirEntry (does NOT follow
+            // symlinks) instead of Path::is_dir() (which does).  A symlink
+            // loop via is_dir() causes unbounded recursion and a stack overflow.
+            let is_real_dir = e.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+            if is_real_dir {
+                walkdir_size(&e.path())
             } else {
                 e.metadata().map(|m| m.len()).unwrap_or(0)
             }
@@ -901,24 +960,45 @@ fn walkdir_size(path: &std::path::Path) -> u64 {
 // ─── Startup banner ──────────────────────────────────────────────────────────
 
 fn print_banner() {
+    // Fix #3: All dynamic values (forum_name, bind_addr, paths, MiB sizes) are
+    // padded/truncated to exactly fill the fixed inner width, so the right-hand
+    // │ character is always aligned regardless of the actual value length.
+    const INNER: usize = 53;
+
+    // Truncate `s` to `width` chars, then right-pad with spaces to `width`.
+    let cell = |s: String, width: usize| -> String {
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() >= width {
+            chars
+                .get(..width)
+                .map(|s| s.iter().collect())
+                .unwrap_or_else(|| s.clone())
+        } else {
+            format!("{}{}", s, " ".repeat(width - chars.len()))
+        }
+    };
+
+    let title = cell(
+        format!("{} v{}", CONFIG.forum_name, env!("CARGO_PKG_VERSION")),
+        INNER - 2, // 2 leading spaces in "│  <title>│"
+    );
+    let bind = cell(CONFIG.bind_addr.clone(), INNER - 10); // "│  Bind    <val>│"
+    let db = cell(CONFIG.database_path.clone(), INNER - 10); // "│  DB      <val>│"
+    let upl = cell(CONFIG.upload_dir.clone(), INNER - 10); // "│  Uploads <val>│"
+    let img_mib = CONFIG.max_image_size / 1024 / 1024;
+    let vid_mib = CONFIG.max_video_size / 1024 / 1024;
+    let limits = cell(
+        format!("Images {} MiB max  │  Videos {} MiB max", img_mib, vid_mib),
+        INNER - 4, // "│  <val>  │"
+    );
+
     println!("┌─────────────────────────────────────────────────────┐");
-    println!(
-        "│           {} v{}                    │",
-        CONFIG.forum_name,
-        env!("CARGO_PKG_VERSION")
-    );
+    println!("│  {}│", title);
     println!("├─────────────────────────────────────────────────────┤");
-    println!(
-        "│  Bind    {}                              │",
-        &CONFIG.bind_addr
-    );
-    println!("│  DB      {}  │", &CONFIG.database_path);
-    println!("│  Uploads {}  │", &CONFIG.upload_dir);
-    println!(
-        "│  Images  {} MiB max  │  Videos  {} MiB max  │",
-        CONFIG.max_image_size / 1024 / 1024,
-        CONFIG.max_video_size / 1024 / 1024
-    );
+    println!("│  Bind    {}│", bind);
+    println!("│  DB      {}│", db);
+    println!("│  Uploads {}│", upl);
+    println!("│  {}  │", limits);
     println!("└─────────────────────────────────────────────────────┘");
 }
 
@@ -936,6 +1016,18 @@ fn spawn_keyboard_handler(pool: db::DbPool, start_time: Instant) {
         let handle = stdin.lock();
         let mut reader = BufReader::new(handle);
 
+        // Fix #4: TermStats must persist across keypresses so that
+        // prev_req_count/prev_post_count/prev_thread_count reflect the values
+        // at the *previous* 's' press, not zero.  Initializing inside the
+        // match arm made every post/thread appear as "+N new" and reported the
+        // lifetime-average req/s instead of the current rate.
+        let mut persistent_stats = TermStats {
+            prev_req_count: REQUEST_COUNT.load(Ordering::Relaxed),
+            prev_post_count: 0,
+            prev_thread_count: 0,
+            last_tick: Instant::now(),
+        };
+
         loop {
             let mut line = String::new();
             match reader.read_line(&mut line) {
@@ -946,14 +1038,7 @@ fn spawn_keyboard_handler(pool: db::DbPool, start_time: Instant) {
             let cmd = line.trim().to_lowercase();
             match cmd.as_str() {
                 "s" => {
-                    // Snapshot stats without advancing the background state
-                    let mut snap = TermStats {
-                        prev_req_count: 0,
-                        prev_post_count: 0,
-                        prev_thread_count: 0,
-                        last_tick: start_time,
-                    };
-                    print_stats(&pool, start_time, &mut snap);
+                    print_stats(&pool, start_time, &mut persistent_stats);
                 }
                 "l" => kb_list_boards(&pool),
                 "c" => kb_create_board(&pool, &mut reader),
@@ -1036,6 +1121,16 @@ fn kb_create_board(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
     let nsfw_raw = prompt("NSFW board? [y/N]:");
     let nsfw = matches!(nsfw_raw.to_lowercase().as_str(), "y" | "yes");
 
+    // Fix #6: prompt for media flags and call create_board_with_media_flags so
+    // boards created from the console have the same capabilities as those
+    // created via `rustchan-cli admin create-board`.
+    let no_images_raw = prompt("Disable images? [y/N]:");
+    let no_videos_raw = prompt("Disable video?  [y/N]:");
+    let no_audio_raw = prompt("Disable audio?  [y/N]:");
+    let allow_images = !matches!(no_images_raw.to_lowercase().as_str(), "y" | "yes");
+    let allow_video = !matches!(no_videos_raw.to_lowercase().as_str(), "y" | "yes");
+    let allow_audio = !matches!(no_audio_raw.to_lowercase().as_str(), "y" | "yes");
+
     let short_lc = short.to_lowercase();
     if !short_lc.chars().all(|c| c.is_ascii_alphanumeric())
         || short_lc.is_empty()
@@ -1049,13 +1144,25 @@ fn kb_create_board(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
         println!("  \x1b[31m[err]\x1b[0m Could not get DB connection.");
         return;
     };
-    match db::create_board(&conn, &short_lc, &name, &desc, nsfw) {
+    match db::create_board_with_media_flags(
+        &conn,
+        &short_lc,
+        &name,
+        &desc,
+        nsfw,
+        allow_images,
+        allow_video,
+        allow_audio,
+    ) {
         Ok(id) => println!(
-            "  \x1b[32m✓\x1b[0m Board /{}/  — {}{}  created (id={}).",
+            "  \x1b[32m✓\x1b[0m Board /{}/  — {}{}  created (id={}).  images:{} video:{} audio:{}",
             short_lc,
             name,
             if nsfw { " [NSFW]" } else { "" },
-            id
+            id,
+            if allow_images { "yes" } else { "no" },
+            if allow_video { "yes" } else { "no" },
+            if allow_audio { "yes" } else { "no" },
         ),
         Err(e) => println!("  \x1b[31m[err]\x1b[0m {}", e),
     }

@@ -34,6 +34,11 @@ pub enum AppError {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
+    /// 403 — user is banned; carries the ban reason and their CSRF token so the
+    /// appeal form can be rendered with a valid token (fixes FIX[M-T1]).
+    #[error("You are banned. Reason: {reason}")]
+    BannedUser { reason: String, csrf_token: String },
+
     /// 413 — upload body too large
     #[error("Upload too large: {0}")]
     UploadTooLarge(String),
@@ -83,6 +88,10 @@ impl IntoResponse for AppError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
+            AppError::BannedUser { reason, csrf_token } => {
+                let html = crate::templates::ban_page(reason, csrf_token);
+                return (StatusCode::FORBIDDEN, Html(html)).into_response();
+            }
             AppError::UploadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
             AppError::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg.clone()),
             AppError::RateLimited => (
@@ -101,15 +110,6 @@ impl IntoResponse for AppError {
                 )
             }
         };
-
-        // Render a richer ban page with an appeal form instead of the generic error page
-        if status == StatusCode::FORBIDDEN && message.starts_with("You are banned") {
-            let reason = message
-                .strip_prefix("You are banned. Reason: ")
-                .unwrap_or(&message);
-            let html = crate::templates::ban_page(reason);
-            return (status, Html(html)).into_response();
-        }
 
         let html = crate::templates::error_page(status.as_u16(), &message);
         (status, Html(html)).into_response()
