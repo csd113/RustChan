@@ -2043,7 +2043,7 @@ pub async fn create_board_backup(
             let poll_votes: Vec<PollVoteRow> = {
                 let mut s = conn
                     .prepare(
-                        "SELECT pv.id, pv.poll_id, pv.option_id, pv.ip_hash, pv.created_at
+                        "SELECT pv.id, pv.poll_id, pv.option_id, pv.ip_hash
                          FROM poll_votes pv
                          JOIN polls p ON p.id = pv.poll_id
                          JOIN threads t ON t.id = p.thread_id
@@ -2057,7 +2057,6 @@ pub async fn create_board_backup(
                             poll_id: r.get(1)?,
                             option_id: r.get(2)?,
                             ip_hash: r.get(3)?,
-                            created_at: r.get(4)?,
                         })
                     })
                     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
@@ -2646,8 +2645,8 @@ pub async fn restore_saved_board_backup(
                     })?;
                     conn.execute(
                         "INSERT OR IGNORE INTO poll_votes
-                         (poll_id, option_id, ip_hash, created_at) VALUES (?1,?2,?3,?4)",
-                        params![new_pid, new_oid, v.ip_hash, v.created_at],
+                         (poll_id, option_id, ip_hash) VALUES (?1,?2,?3)",
+                        params![new_pid, new_oid, v.ip_hash],
                     )
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert vote: {}", e)))?;
                 }
@@ -2867,7 +2866,6 @@ mod board_backup_types {
         pub poll_id: i64,
         pub option_id: i64,
         pub ip_hash: String,
-        pub created_at: i64,
     }
     #[derive(Serialize, Deserialize)]
     pub struct FileHashRow {
@@ -3011,7 +3009,7 @@ pub async fn board_backup(
             // ── Poll votes ────────────────────────────────────────────────
             let poll_votes: Vec<PollVoteRow> = {
                 let mut s = conn.prepare(
-                    "SELECT pv.id, pv.poll_id, pv.option_id, pv.ip_hash, pv.created_at
+                    "SELECT pv.id, pv.poll_id, pv.option_id, pv.ip_hash
                      FROM poll_votes pv
                      JOIN polls p ON p.id = pv.poll_id
                      JOIN threads t ON t.id = p.thread_id
@@ -3019,7 +3017,7 @@ pub async fn board_backup(
                 ).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
                 let rows = s.query_map(params![board_id], |r| Ok(PollVoteRow {
                     id: r.get(0)?, poll_id: r.get(1)?, option_id: r.get(2)?,
-                    ip_hash: r.get(3)?, created_at: r.get(4)?,
+                    ip_hash: r.get(3)?,
                 })).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
                 .collect::<std::result::Result<Vec<_>,_>>()
                 .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?; rows
@@ -3380,8 +3378,8 @@ pub async fn board_restore(
                         })?;
                         conn.execute(
                             "INSERT OR IGNORE INTO poll_votes
-                             (poll_id, option_id, ip_hash, created_at) VALUES (?1,?2,?3,?4)",
-                            params![new_pid, new_oid, v.ip_hash, v.created_at],
+                             (poll_id, option_id, ip_hash) VALUES (?1,?2,?3)",
+                            params![new_pid, new_oid, v.ip_hash],
                         )
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert vote {}: {}", v.id, e)))?;
                     }
