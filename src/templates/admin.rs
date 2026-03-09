@@ -108,10 +108,10 @@ pub fn admin_panel_page(
   <button type="submit" class="btn-danger"
           data-confirm="Delete /{short}/ and ALL its content?">delete board</button>
 </form>
-<a href="/admin/board/backup/{short}" style="display:inline-block;margin-left:0.5rem;margin-top:4px">
+<a href="/admin/board/backup/{short}" class="backup-download-link" data-backup-label="/{short}/ board backup" style="display:inline-block;margin-left:0.5rem;margin-top:4px">
   <button type="button">&#8659; download to computer /{short}/</button>
 </a>
-<form method="POST" action="/admin/board/backup/create" style="display:inline-block;margin-left:0.25rem;margin-top:4px">
+<form method="POST" action="/admin/board/backup/create" class="board-backup-create-form" data-board="{short}" style="display:inline-block;margin-left:0.25rem;margin-top:4px">
   <input type="hidden" name="_csrf" value="{csrf}">
   <input type="hidden" name="board_short" value="{short}">
   <button type="submit">&#128190; save to server /{short}/</button>
@@ -202,7 +202,7 @@ pub fn admin_panel_page(
 <td style="white-space:nowrap">{size}</td>
 <td style="white-space:nowrap">{modified}</td>
 <td style="white-space:nowrap">
-  <a href="/admin/backup/download/full/{fname}" style="margin-right:0.4rem">&#8659; download to computer</a>
+  <a href="/admin/backup/download/full/{fname}" class="backup-download-link" data-backup-label="full backup" style="margin-right:0.4rem">&#8659; download to computer</a>
   <form method="POST" action="/admin/backup/restore-saved" style="display:inline;margin-right:0.4rem">
     <input type="hidden" name="_csrf" value="{csrf}">
     <input type="hidden" name="filename" value="{fname}">
@@ -238,7 +238,7 @@ pub fn admin_panel_page(
 <td style="white-space:nowrap">{size}</td>
 <td style="white-space:nowrap">{modified}</td>
 <td style="white-space:nowrap">
-  <a href="/admin/backup/download/board/{fname}" style="margin-right:0.4rem">&#8659; download to computer</a>
+  <a href="/admin/backup/download/board/{fname}" class="backup-download-link" data-backup-label="board backup" style="margin-right:0.4rem">&#8659; download to computer</a>
   <form method="POST" action="/admin/board/backup/restore-saved" style="display:inline;margin-right:0.4rem">
     <input type="hidden" name="_csrf" value="{csrf}">
     <input type="hidden" name="filename" value="{fname}">
@@ -500,9 +500,9 @@ pub fn admin_panel_page(
 <h2>// full site backup &amp; restore</h2>
 <p style="color:var(--text-dim);font-size:0.85rem">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/full-backups/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer.</p>
 <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;margin-top:0.75rem;margin-bottom:0.75rem">
-<form method="POST" action="/admin/backup/create">
+<form method="POST" action="/admin/backup/create" id="full-backup-create-form">
 <input type="hidden" name="_csrf" value="{csrf}">
-<button type="submit">&#128190; save to server</button>
+<button type="submit" id="full-backup-btn">&#128190; save to server</button>
 </form>
 <form method="POST" action="/admin/restore" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
 <input type="hidden" name="_csrf" value="{csrf}">
@@ -559,6 +559,20 @@ pub fn admin_panel_page(
      // active onion address
      ═══════════════════════════════════════════════════════════════════════════ -->
 {tor_section}
+</div>
+
+<!-- ── Backup progress modal ─────────────────────────────────────────────── -->
+<div id="backup-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title">
+  <div class="compress-modal-box">
+    <div class="compress-modal-title" id="backup-modal-title">&#128190; Creating Backup…</div>
+    <div class="compress-progress" id="backup-progress-wrap" style="display:block;margin:0.75rem 0">
+      <div class="compress-progress-track"><div class="compress-progress-bar" id="backup-progress-bar" style="width:0%"></div></div>
+      <div class="compress-progress-text" id="backup-progress-text">Starting…</div>
+    </div>
+    <div class="compress-done-actions" id="backup-done-actions" style="display:none">
+      <button class="compress-cancel-btn" data-action="close-backup-modal">&#10003; Done — reload</button>
+    </div>
+  </div>
 </div>"#,
         csrf = escape_html(csrf_token),
         flash = flash_html,

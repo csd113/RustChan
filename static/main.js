@@ -338,7 +338,8 @@ function closeReportModal() {
 // ─── Theme picker ─────────────────────────────────────────────────────────────
 
 (function () {
-  var THEMES = ['terminal', 'aero', 'dorfic', 'fluorogrid', 'neoncubicle'];
+  // Must match VALID_THEMES in src/handlers/admin.rs
+  var THEMES = ['terminal', 'aero', 'dorfic', 'fluorogrid', 'neoncubicle', 'chanclassic'];
 
   function applyTheme(t) {
     if (t === 'terminal') {
@@ -346,8 +347,9 @@ function closeReportModal() {
     } else {
       document.documentElement.setAttribute('data-theme', t);
     }
-    document.querySelectorAll('.tp-option').forEach(function (el, i) {
-      el.classList.toggle('active', THEMES[i] === t);
+    // Match by data-theme attribute so order in DOM doesn't matter.
+    document.querySelectorAll('.tp-option').forEach(function (el) {
+      el.classList.toggle('active', el.dataset.theme === t);
     });
   }
 
@@ -375,10 +377,18 @@ function closeReportModal() {
     }
   });
 
-  try {
-    var saved = localStorage.getItem('rustchan_theme');
-    if (saved && THEMES.indexOf(saved) !== -1) { applyTheme(saved); }
-  } catch (e) {}
+  // Priority: personal localStorage preference > server-configured default.
+  // The server injects data-default-theme on <html> when the admin picks a
+  // non-terminal default.  New visitors (no localStorage) should see that
+  // theme instead of always falling back to terminal.
+  (function () {
+    var active = null;
+    try { active = localStorage.getItem('rustchan_theme'); } catch (e) {}
+    if (!active || THEMES.indexOf(active) === -1) {
+      active = document.documentElement.getAttribute('data-default-theme') || 'terminal';
+    }
+    if (active && THEMES.indexOf(active) !== -1) { applyTheme(active); }
+  }());
 })();
 
 // ─── Collapse greentext blocks ────────────────────────────────────────────────
@@ -1251,3 +1261,191 @@ document.querySelectorAll('input[type="file"][data-onchange-check-size]').forEac
     window.checkFileSize && window.checkFileSize(inp);
   });
 });
+
+// ─── Admin backup progress bar ────────────────────────────────────────────────
+//
+// Covers two flows:
+//
+//   A) "Save to server" forms — POST via fetch(), modal shows live progress,
+//      "Done — reload" button appears when the fetch resolves.
+//
+//   B) "Download to computer" links — GET triggers a file download.  We show
+//      the modal with live progress while the server builds the zip, then
+//      dismiss it automatically once phase=DONE is reported.  The actual
+//      download still happens natively in the browser (iframe trick).
+//
+// Note: all handlers here are CSP-safe (no inline onclick/onX attributes).
+// The "Done — reload" button uses data-action="close-backup-modal" and is
+// dispatched by the existing global click handler below.
+//
+// Phase codes (mirror middleware::backup_phase in Rust):
+//   0=idle  1=snapshot_db  2=count_files  3=compress  4=save  5=done
+(function () {
+  var _pollTimer = null;
+  var _downloadMode = false;  // true when modal is showing for a download
+
+  var PHASE_LABELS = [
+    'Idle',
+    'Snapshotting database\u2026',
+    'Counting files\u2026',
+    'Compressing files\u2026',
+    'Saving\u2026',
+    'Done!',
+  ];
+
+  function showBackupModal(title) {
+    var modal = document.getElementById('backup-modal');
+    var titleEl = document.getElementById('backup-modal-title');
+    var done = document.getElementById('backup-done-actions');
+    if (!modal) return;
+    if (titleEl) titleEl.textContent = title || '\uD83D\uDCBE Creating Backup\u2026';
+    if (done) done.style.display = 'none';
+    _setBkProgress(0, 'Starting\u2026');
+    modal.style.display = 'flex';
+  }
+
+  function hideBackupModal() {
+    var modal = document.getElementById('backup-modal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  function showDoneButton() {
+    var done = document.getElementById('backup-done-actions');
+    if (done) done.style.display = 'flex';
+  }
+
+  function _setBkProgress(pct, text) {
+    var bar = document.getElementById('backup-progress-bar');
+    var txt = document.getElementById('backup-progress-text');
+    if (bar) bar.style.width = Math.min(100, Math.max(0, pct)) + '%';
+    if (txt) txt.textContent = text;
+  }
+
+  function _startPolling(onDone) {
+    if (_pollTimer) return;
+    _pollTimer = setInterval(function () {
+      fetch('/admin/backup/progress', { credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          var phase = data.phase || 0;
+          var label = PHASE_LABELS[phase] || 'Working\u2026';
+          var pct = 0;
+          if (data.files_total > 0) {
+            pct = Math.min(98, Math.round((data.files_done / data.files_total) * 100));
+          } else if (phase === 1) { pct = 5; }
+            else if (phase === 2) { pct = 10; }
+          var detail = data.files_total > 0
+            ? ' (' + data.files_done + '/' + data.files_total + ' files)'
+            : '';
+          _setBkProgress(pct, label + detail);
+
+          // In download mode the fetch resolves as soon as the response headers
+          // arrive (streaming body).  Poll phase instead to know when done.
+          if (_downloadMode && phase === 5) {
+            _stopPolling();
+            _setBkProgress(100, '\u2713 Download ready!');
+            // Auto-dismiss after 1.5 s — the file is already downloading.
+            setTimeout(hideBackupModal, 1500);
+            if (onDone) onDone();
+          }
+        })
+        .catch(function () { /* ignore transient poll errors */ });
+    }, 500);
+  }
+
+  function _stopPolling() {
+    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+  }
+
+  // ── Flow A: "Save to server" forms ──────────────────────────────────────────
+
+  function _submitBackupForm(form, title) {
+    _downloadMode = false;
+    showBackupModal(title);
+    _startPolling(null);
+
+    // URLSearchParams → application/x-www-form-urlencoded, required by Axum's Form<>.
+    var params = new URLSearchParams(new FormData(form));
+    fetch(form.action, { method: 'POST', body: params, credentials: 'same-origin' })
+      .then(function (resp) {
+        _stopPolling();
+        if (resp.ok || resp.redirected) {
+          _setBkProgress(100, '\u2713 Backup saved to server!');
+        } else {
+          _setBkProgress(0, 'Server returned an error (' + resp.status + ')');
+        }
+        showDoneButton();
+      })
+      .catch(function (err) {
+        _stopPolling();
+        _setBkProgress(0, 'Error: ' + (err.message || 'backup failed'));
+        showDoneButton();
+      });
+  }
+
+  // ── Flow B: "Download to computer" links ────────────────────────────────────
+
+  function _triggerDownload(url, label) {
+    _downloadMode = true;
+    showBackupModal('\uD83D\uDCBE Preparing ' + (label || 'backup') + '\u2026');
+    _startPolling(null);
+
+    // Trigger the file download without navigating away.
+    // A hidden <a download>.click() makes a standard GET request and the
+    // browser saves the response as a file — no page navigation occurs.
+    // We cannot use an <iframe> here because the page's CSP frame-src policy
+    // only permits YouTube and Streamable origins, not 'self', so an iframe
+    // pointing at /admin/backup/... would be silently blocked and the GET
+    // would never fire (leaving the progress bar stuck on "Idle").
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = '';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      if (a.parentNode) a.parentNode.removeChild(a);
+    }, 5000);
+  }
+
+  // ── Wiring ───────────────────────────────────────────────────────────────────
+
+  document.addEventListener('DOMContentLoaded', function () {
+    // Flow A — full-site "save to server"
+    var fullForm = document.getElementById('full-backup-create-form');
+    if (fullForm) {
+      fullForm.addEventListener('submit', function (e) {
+        e.preventDefault();
+        _submitBackupForm(fullForm, '\uD83D\uDCBE Creating Full Backup\u2026');
+      });
+    }
+
+    // Flow A — per-board "save to server"
+    document.querySelectorAll('.board-backup-create-form').forEach(function (form) {
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var board = form.dataset.board || '';
+        _submitBackupForm(form, '\uD83D\uDCBE Backing up /' + board + '/\u2026');
+      });
+    });
+
+    // Flow B — all "download to computer" links
+    document.querySelectorAll('a.backup-download-link').forEach(function (link) {
+      link.addEventListener('click', function (e) {
+        e.preventDefault();
+        var label = link.dataset.backupLabel || 'backup';
+        _triggerDownload(link.href, label);
+      });
+    });
+  });
+
+  // ── "Done — reload" button (CSP-safe, no inline onclick) ────────────────────
+  // Registered here rather than in the global data-action handler so it lives
+  // in the same closure and can call hideBackupModal() + reload.
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('[data-action="close-backup-modal"]')) {
+      hideBackupModal();
+      window.location.reload();
+    }
+  });
+})();

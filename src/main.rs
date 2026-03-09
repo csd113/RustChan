@@ -265,6 +265,7 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
             workers::start_worker_pool(q.clone(), ffmpeg_available);
             q
         },
+        backup_progress: std::sync::Arc::new(middleware::BackupProgress::new()),
     };
     // Keep a reference to the job queue cancel token for graceful shutdown (#7).
     let worker_cancel = state.job_queue.cancel.clone();
@@ -489,6 +490,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/admin/backup/download/{kind}/{filename}",
             get(handlers::admin::download_backup),
+        )
+        .route(
+            "/admin/backup/progress",
+            get(handlers::admin::backup_progress_json),
         )
         .route("/admin/backup/delete", post(handlers::admin::delete_backup))
         .route(

@@ -33,10 +33,12 @@ use chrono::Utc;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
+use std::io::{Seek, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use time;
+use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
 const SESSION_COOKIE: &str = "chan_admin_session";
@@ -1291,80 +1293,116 @@ pub async fn update_board_settings(
 // ─── GET /admin/backup ────────────────────────────────────────────────────────
 
 /// Stream a full zip backup of the database + all uploaded files.
-/// The WAL is checkpointed first so the backup contains a consistent snapshot.
+///
+/// MEM-FIX: The zip is built to a NamedTempFile on disk (not a Vec<u8> in
+/// RAM), so peak heap usage is O(compression-buffer) not O(zip-size).
+/// The response body is streamed from disk in 64 KiB chunks via ReaderStream.
 pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-
     let upload_dir = CONFIG.upload_dir.clone();
+    let progress = state.backup_progress.clone();
 
-    let (zip_bytes, filename) = tokio::task::spawn_blocking({
+    let (tmp_path, filename, file_size) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<(Vec<u8>, String)> {
+        move || -> Result<(PathBuf, String, u64)> {
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
 
-            // Use VACUUM INTO to create an atomic, defragmented, WAL-free
-            // snapshot of the database.  Unlike checkpoint + read-file, this
-            // is safe even if other connections are actively writing — SQLite
-            // holds a read lock for the duration and produces a consistent
-            // single-file copy with no sidecar files.
+            progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
+
             let temp_dir = std::env::temp_dir();
             let tmp_id = uuid::Uuid::new_v4().to_string().replace('-', "");
             let temp_db = temp_dir.join(format!("chan_backup_{}.db", tmp_id));
             let temp_db_str = temp_db
                 .to_str()
                 .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path is non-UTF-8")))?
-                .replace('\'', "''"); // SQL-escape single quotes in path (just in case)
+                .replace('\'', "''");
 
             conn.execute_batch(&format!("VACUUM INTO '{}'", temp_db_str))
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO failed: {}", e)))?;
-
-            // We no longer need the live connection.
             drop(conn);
 
-            let db_data = std::fs::read(&temp_db)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Read vacuum snapshot: {}", e)))?;
-            let _ = std::fs::remove_file(&temp_db);
+            // Count files for progress bar before compressing.
+            progress.reset(crate::middleware::backup_phase::COUNT_FILES);
+            let uploads_base = std::path::Path::new(&upload_dir);
+            let file_count = count_files_in_dir(uploads_base);
+            // +1 for chan.db
+            progress
+                .files_total
+                .store(file_count + 1, Ordering::Relaxed);
 
-            // Build the zip in memory.
-            let buf = std::io::Cursor::new(Vec::<u8>::new());
-            let mut zip = zip::ZipWriter::new(buf);
-            // zip 2+: SimpleFileOptions replaces the old generic FileOptions.
-            let opts = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
-
-            // ── Database snapshot ──────────────────────────────────────────
+            // MEM-FIX: write zip directly to a NamedTempFile instead of Vec<u8>.
+            let zip_tmp = tempfile::NamedTempFile::new()
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp zip: {}", e)))?;
             {
-                use std::io::Write;
+                let out_file =
+                    std::io::BufWriter::new(zip_tmp.as_file().try_clone().map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Clone temp file handle: {}", e))
+                    })?);
+                let mut zip = zip::ZipWriter::new(out_file);
+                let opts = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated);
+
+                progress.reset(crate::middleware::backup_phase::COMPRESS);
+                progress
+                    .files_total
+                    .store(file_count + 1, Ordering::Relaxed);
+
+                // ── Database snapshot (streamed, not read into RAM) ────────
                 zip.start_file("chan.db", opts)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip DB entry: {}", e)))?;
-                zip.write_all(&db_data)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Write DB to zip: {}", e)))?;
+                let mut db_src = std::fs::File::open(&temp_db)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open DB snapshot: {}", e)))?;
+                let copied = std::io::copy(&mut db_src, &mut zip)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Stream DB to zip: {}", e)))?;
+                drop(db_src);
+                let _ = std::fs::remove_file(&temp_db);
+                progress.files_done.fetch_add(1, Ordering::Relaxed);
+                progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
+
+                // ── Upload files (streamed file-by-file via io::copy) ──────
+                if uploads_base.exists() {
+                    add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
+                }
+
+                zip.finish()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
             }
 
-            // ── Upload files ──────────────────────────────────────────────
-            let uploads_base = std::path::Path::new(&upload_dir);
-            if uploads_base.exists() {
-                add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts)?;
-            }
+            let file_size = zip_tmp.as_file().metadata().map(|m| m.len()).unwrap_or(0);
 
-            let cursor = zip
-                .finish()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
-            let bytes = cursor.into_inner();
+            // Persist the temp file (prevents auto-delete on drop).
+            // We delete it manually in the background after serving.
+            let (_, tmp_path_obj) = zip_tmp.into_parts();
+            let final_path = tmp_path_obj
+                .keep()
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Persist temp zip: {}", e)))?;
 
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
             let fname = format!("rustchan-backup-{}.zip", ts);
-            info!(
-                "Admin downloaded backup ({} bytes, {} upload bytes included)",
-                bytes.len(),
-                db_data.len()
-            );
-            Ok((bytes, fname))
+            info!("Admin downloaded full backup ({} bytes on disk)", file_size);
+            progress
+                .phase
+                .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
+            Ok((final_path, fname, file_size))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    // MEM-FIX: Stream the zip file from disk in chunks — never load it all into heap.
+    let file = tokio::fs::File::open(&tmp_path)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Open backup for streaming: {}", e)))?;
+    let stream = ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
+
+    // Schedule temp-file cleanup after a generous window so even slow clients finish.
+    let cleanup_path = tmp_path;
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+        let _ = tokio::fs::remove_file(cleanup_path).await;
+    });
 
     use axum::http::header;
     let disposition = format!("attachment; filename=\"{}\"", filename);
@@ -1372,19 +1410,48 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
         [
             (header::CONTENT_TYPE, "application/zip".to_string()),
             (header::CONTENT_DISPOSITION, disposition),
+            (header::CONTENT_LENGTH, file_size.to_string()),
         ],
-        zip_bytes,
+        body,
     )
         .into_response())
 }
 
+/// Count regular files (not directories) under `dir` recursively.
+/// Used to initialise the progress bar's files_total before compression starts.
+fn count_files_in_dir(dir: &std::path::Path) -> u64 {
+    if !dir.is_dir() {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries.flatten().fold(0u64, |acc, entry| {
+        let p = entry.path();
+        if p.is_dir() {
+            acc + count_files_in_dir(&p)
+        } else if p.is_file() {
+            acc + 1
+        } else {
+            acc
+        }
+    })
+}
+
 /// Recursively add every file under `dir` into the zip as `uploads/{rel_path}`.
-fn add_dir_to_zip(
-    zip: &mut zip::ZipWriter<std::io::Cursor<Vec<u8>>>,
+///
+/// MEM-FIX: Uses std::io::copy with the zip writer directly, streaming each
+/// file through a kernel buffer (~8 KiB) instead of reading the whole file
+/// into a Vec<u8> first.  Peak RAM per file = io::copy's 8 KiB stack buffer.
+///
+/// Progress tracking: increments progress.files_done and progress.bytes_done
+/// after each file is written to the zip.
+fn add_dir_to_zip<W: Write + Seek>(
+    zip: &mut zip::ZipWriter<W>,
     base: &std::path::Path,
     dir: &std::path::Path,
-    // zip 2+: SimpleFileOptions replaces the old generic FileOptions.
     opts: zip::write::SimpleFileOptions,
+    progress: &crate::middleware::BackupProgress,
 ) -> Result<()> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("read_dir {}: {}", dir.display(), e)))?;
@@ -1396,23 +1463,25 @@ fn add_dir_to_zip(
         let relative = path
             .strip_prefix(base)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("strip_prefix: {}", e)))?;
-        // Normalise to forward-slashes so the zip is portable.
         let rel_str = relative.to_string_lossy().replace('\\', "/");
         let zip_path = format!("uploads/{}", rel_str);
 
         if path.is_dir() {
             zip.add_directory(&zip_path, opts)
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("zip dir: {}", e)))?;
-            add_dir_to_zip(zip, base, &path, opts)?;
+            add_dir_to_zip(zip, base, &path, opts, progress)?;
         } else if path.is_file() {
-            use std::io::Write;
-            let data = std::fs::read(&path).map_err(|e| {
-                AppError::Internal(anyhow::anyhow!("read {}: {}", path.display(), e))
+            // MEM-FIX: open file, stream through io::copy — no Vec<u8> allocation.
+            let mut src = std::fs::File::open(&path).map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("open {}: {}", path.display(), e))
             })?;
             zip.start_file(&zip_path, opts)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("zip file: {}", e)))?;
-            zip.write_all(&data)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("write zip: {}", e)))?;
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("zip file entry: {}", e)))?;
+            let copied = std::io::copy(&mut src, zip).map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("copy {} to zip: {}", path.display(), e))
+            })?;
+            progress.files_done.fetch_add(1, Ordering::Relaxed);
+            progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
         }
     }
     Ok(())
@@ -1773,6 +1842,11 @@ fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
 // ─── POST /admin/backup/create ────────────────────────────────────────────────
 
 /// Create a full backup and save it to rustchan-data/full-backups/.
+///
+/// MEM-FIX: The zip is written directly to the final destination file via a
+/// BufWriter, so peak RAM usage is O(compression-buffer) not O(zip-size).
+/// A `.tmp` suffix is used during writing; the file is renamed on success so
+/// the backup list never shows a partial/corrupt zip.
 pub async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1782,12 +1856,15 @@ pub async fn create_full_backup(
     check_csrf_jar(&jar, form._csrf.as_deref())?;
 
     let upload_dir = CONFIG.upload_dir.clone();
+    let progress = state.backup_progress.clone();
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
+
+            progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
 
             // VACUUM INTO for a consistent snapshot.
             let temp_dir = std::env::temp_dir();
@@ -1802,48 +1879,77 @@ pub async fn create_full_backup(
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {}", e)))?;
             drop(conn);
 
-            let db_data = std::fs::read(&temp_db)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Read snapshot: {}", e)))?;
-            let _ = std::fs::remove_file(&temp_db);
-
-            // Build zip in memory.
-            let buf = std::io::Cursor::new(Vec::<u8>::new());
-            let mut zip = zip::ZipWriter::new(buf);
-            let opts = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
-
-            {
-                use std::io::Write;
-                zip.start_file("chan.db", opts)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip DB: {}", e)))?;
-                zip.write_all(&db_data)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Write DB zip: {}", e)))?;
-            }
-
+            // Count files for progress bar before compressing.
+            progress.reset(crate::middleware::backup_phase::COUNT_FILES);
             let uploads_base = std::path::Path::new(&upload_dir);
-            if uploads_base.exists() {
-                add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts)?;
-            }
+            let file_count = count_files_in_dir(uploads_base);
+            progress
+                .files_total
+                .store(file_count + 1, Ordering::Relaxed);
 
-            let cursor = zip
-                .finish()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
-            let bytes = cursor.into_inner();
-
-            // Write to full-backups/.
+            // MEM-FIX: write zip directly to a .tmp file on disk, not a Vec<u8>.
             let backup_dir = full_backup_dir();
             std::fs::create_dir_all(&backup_dir).map_err(|e| {
                 AppError::Internal(anyhow::anyhow!("Create full-backups dir: {}", e))
             })?;
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
             let fname = format!("rustchan-backup-{}.zip", ts);
-            std::fs::write(backup_dir.join(&fname), &bytes)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Write backup file: {}", e)))?;
-            info!(
-                "Admin created full backup: {} ({} bytes)",
-                fname,
-                bytes.len()
-            );
+            let final_path = backup_dir.join(&fname);
+            let tmp_path = backup_dir.join(format!("{}.tmp", fname));
+
+            {
+                let out_file =
+                    std::io::BufWriter::new(std::fs::File::create(&tmp_path).map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Create zip tmp: {}", e))
+                    })?);
+                let mut zip = zip::ZipWriter::new(out_file);
+                let opts = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated);
+
+                progress.reset(crate::middleware::backup_phase::COMPRESS);
+                progress
+                    .files_total
+                    .store(file_count + 1, Ordering::Relaxed);
+
+                // ── Database snapshot (streamed, not read into RAM) ────────
+                zip.start_file("chan.db", opts)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip DB: {}", e)))?;
+                let mut db_src = std::fs::File::open(&temp_db)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open DB snapshot: {}", e)))?;
+                let copied = std::io::copy(&mut db_src, &mut zip)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Stream DB to zip: {}", e)))?;
+                drop(db_src);
+                let _ = std::fs::remove_file(&temp_db);
+                progress.files_done.fetch_add(1, Ordering::Relaxed);
+                progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
+
+                // ── Upload files (streamed via io::copy) ───────────────────
+                if uploads_base.exists() {
+                    add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
+                }
+
+                let writer = zip
+                    .finish()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
+                // Flush the BufWriter so the OS buffer is committed to disk.
+                writer
+                    .into_inner()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush zip writer: {}", e)))?
+                    .sync_all()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {}", e)))?;
+            }
+
+            // Atomic rename: only becomes visible in the list when complete.
+            std::fs::rename(&tmp_path, &final_path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                AppError::Internal(anyhow::anyhow!("Rename backup: {}", e))
+            })?;
+
+            let size = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
+            info!("Admin created full backup: {} ({} bytes)", fname, size);
+            progress
+                .phase
+                .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
             Ok(())
         }
     })
@@ -1881,6 +1987,7 @@ pub async fn create_board_backup(
     }
 
     let upload_dir = CONFIG.upload_dir.clone();
+    let progress = state.backup_progress.clone();
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -1890,8 +1997,7 @@ pub async fn create_board_backup(
 
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
-
-            // Re-use the same data-extraction logic as board_backup.
+            progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
             let board: BoardRow = conn
                 .query_row(
                     "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
@@ -2103,45 +2209,62 @@ pub async fn create_board_backup(
             let manifest_json = serde_json::to_vec_pretty(&manifest)
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON: {}", e)))?;
 
-            let buf = std::io::Cursor::new(Vec::<u8>::new());
-            let mut zip = zip::ZipWriter::new(buf);
-            let opts = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
-
-            {
-                use std::io::Write;
-                zip.start_file("board.json", opts)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip manifest: {}", e)))?;
-                zip.write_all(&manifest_json)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Write manifest: {}", e)))?;
-            }
-
-            let uploads_base = std::path::Path::new(&upload_dir);
-            let board_upload_path = uploads_base.join(&board_short);
-            if board_upload_path.exists() {
-                add_dir_to_zip(&mut zip, uploads_base, &board_upload_path, opts)?;
-            }
-
-            let cursor = zip
-                .finish()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
-            let bytes = cursor.into_inner();
-
-            // Write to board-backups/.
+            // MEM-FIX: write zip directly to a .tmp file on disk, not a Vec<u8>.
             let backup_dir = board_backup_dir();
             std::fs::create_dir_all(&backup_dir).map_err(|e| {
                 AppError::Internal(anyhow::anyhow!("Create board-backups dir: {}", e))
             })?;
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
             let fname = format!("rustchan-board-{}-{}.zip", board_short, ts);
-            std::fs::write(backup_dir.join(&fname), &bytes).map_err(|e| {
-                AppError::Internal(anyhow::anyhow!("Write board backup: {}", e))
+            let final_path = backup_dir.join(&fname);
+            let tmp_path = backup_dir.join(format!("{}.tmp", fname));
+
+            let uploads_base = std::path::Path::new(&upload_dir);
+            let board_upload_path = uploads_base.join(&board_short);
+            let file_count = count_files_in_dir(&board_upload_path);
+            progress.reset(crate::middleware::backup_phase::COMPRESS);
+            // +1 for board.json manifest
+            progress.files_total.store(file_count + 1, Ordering::Relaxed);
+
+            {
+                let out_file = std::io::BufWriter::new(
+                    std::fs::File::create(&tmp_path).map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Create zip tmp: {}", e))
+                    })?,
+                );
+                let mut zip = zip::ZipWriter::new(out_file);
+                let opts = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated);
+
+                zip.start_file("board.json", opts)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip manifest: {}", e)))?;
+                zip.write_all(&manifest_json)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Write manifest: {}", e)))?;
+                progress.files_done.fetch_add(1, Ordering::Relaxed);
+                progress.bytes_done.fetch_add(manifest_json.len() as u64, Ordering::Relaxed);
+
+                if board_upload_path.exists() {
+                    add_dir_to_zip(&mut zip, uploads_base, &board_upload_path, opts, &progress)?;
+                }
+
+                let writer = zip
+                    .finish()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
+                writer
+                    .into_inner()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush zip writer: {}", e)))?
+                    .sync_all()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {}", e)))?;
+            }
+
+            std::fs::rename(&tmp_path, &final_path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                AppError::Internal(anyhow::anyhow!("Rename board backup: {}", e))
             })?;
-            info!(
-                "Admin created board backup: {} ({} bytes)",
-                fname,
-                bytes.len()
-            );
+
+            let size = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
+            info!("Admin created board backup: {} ({} bytes)", fname, size);
+            progress.phase.store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
             Ok(())
         }
     })
@@ -2154,6 +2277,15 @@ pub async fn create_board_backup(
 // ─── GET /admin/backup/download/{kind}/{filename} ────────────────────────────
 
 /// Download a saved backup file.  `kind` must be "full" or "board".
+///
+/// MEM-FIX (original bug): The old implementation used `tokio::fs::read()`
+/// which loaded the entire file into a Vec<u8> before beginning the HTTP
+/// response.  For a 5 GiB backup on a slow connection that means 5 GiB of
+/// heap held for the entire download duration.
+///
+/// The fix: open a tokio::fs::File and wrap it in a ReaderStream so Axum
+/// sends the data in 64 KiB chunks pulled directly from the OS page cache.
+/// Peak heap = one 64 KiB chunk; the rest stays on disk.
 pub async fn download_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -2194,9 +2326,19 @@ pub async fn download_backup(
     };
 
     let path = backup_dir.join(&safe_filename);
-    let bytes = tokio::fs::read(&path)
+
+    // Get file size for Content-Length (so the browser shows a progress bar).
+    let file_size = tokio::fs::metadata(&path)
+        .await
+        .map_err(|_| AppError::NotFound("Backup file not found.".into()))?
+        .len();
+
+    // MEM-FIX: stream the file in 64 KiB chunks instead of loading it all.
+    let file = tokio::fs::File::open(&path)
         .await
         .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
+    let stream = ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
 
     use axum::http::header;
     let disposition = format!("attachment; filename=\"{}\"", safe_filename);
@@ -2204,8 +2346,54 @@ pub async fn download_backup(
         [
             (header::CONTENT_TYPE, "application/zip".to_string()),
             (header::CONTENT_DISPOSITION, disposition),
+            (header::CONTENT_LENGTH, file_size.to_string()),
         ],
-        bytes,
+        body,
+    )
+        .into_response())
+}
+
+// ─── GET /admin/backup/progress ──────────────────────────────────────────────
+
+/// Return current backup progress as JSON.  Polled by the admin panel JS.
+///
+/// Response: { phase: u64, files_done: u64, files_total: u64,
+///              bytes_done: u64, bytes_total: u64 }
+///
+/// phase codes: 0=idle, 1=snapshot_db, 2=count_files, 3=compress, 4=save, 5=done
+///
+/// Auth is required to prevent any guest from watching backup progress.
+pub async fn backup_progress_json(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    use std::sync::atomic::Ordering::Relaxed;
+    let p = &state.backup_progress;
+    let json = format!(
+        r#"{{"phase":{},"files_done":{},"files_total":{},"bytes_done":{},"bytes_total":{}}}"#,
+        p.phase.load(Relaxed),
+        p.files_done.load(Relaxed),
+        p.files_total.load(Relaxed),
+        p.bytes_done.load(Relaxed),
+        p.bytes_total.load(Relaxed),
+    );
+
+    use axum::http::header;
+    Ok((
+        [(header::CONTENT_TYPE, "application/json".to_string())],
+        json,
     )
         .into_response())
 }
@@ -2889,6 +3077,9 @@ mod board_backup_types {
 }
 
 /// Stream a board-level backup zip: manifest JSON + that board's upload files.
+///
+/// MEM-FIX: Same approach as admin_backup — build zip into a NamedTempFile on
+/// disk, then stream the result in 64 KiB chunks.
 pub async fn board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -2896,17 +3087,18 @@ pub async fn board_backup(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
     let upload_dir = CONFIG.upload_dir.clone();
+    let progress = state.backup_progress.clone();
 
-    let (zip_bytes, filename) = tokio::task::spawn_blocking({
+    let (tmp_path, filename, file_size) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<(Vec<u8>, String)> {
+        move || -> Result<(PathBuf, String, u64)> {
             use board_backup_types::*;
             use rusqlite::params;
 
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
 
-            // ── Board row ─────────────────────────────────────────────────
+            progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
             let board: BoardRow = conn.query_row(
                 "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                         allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
@@ -3044,41 +3236,72 @@ pub async fn board_backup(
                 version: 1, board, threads, posts, polls,
                 poll_options, poll_votes, file_hashes,
             };
+
+            // ── Build zip to NamedTempFile (MEM-FIX) ─────────────────────
             let manifest_json = serde_json::to_vec_pretty(&manifest)
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON serialise: {}", e)))?;
 
-            // ── Build zip ─────────────────────────────────────────────────
-            let buf = std::io::Cursor::new(Vec::<u8>::new());
-            let mut zip = zip::ZipWriter::new(buf);
-            let opts = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
+            let uploads_base = std::path::Path::new(&upload_dir);
+            let board_upload_path = uploads_base.join(&board_short);
+            let file_count = count_files_in_dir(&board_upload_path);
+            progress.reset(crate::middleware::backup_phase::COMPRESS);
+            progress.files_total.store(file_count + 1, Ordering::Relaxed);
 
+            let zip_tmp = tempfile::NamedTempFile::new()
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp zip: {}", e)))?;
             {
-                use std::io::Write;
+                let out_file = std::io::BufWriter::new(
+                    zip_tmp.as_file().try_clone().map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Clone temp file handle: {}", e))
+                    })?,
+                );
+                let mut zip = zip::ZipWriter::new(out_file);
+                let opts = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated);
+
                 zip.start_file("board.json", opts)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip manifest: {}", e)))?;
                 zip.write_all(&manifest_json)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Write manifest: {}", e)))?;
+                progress.files_done.fetch_add(1, Ordering::Relaxed);
+                progress.bytes_done.fetch_add(manifest_json.len() as u64, Ordering::Relaxed);
+
+                if board_upload_path.exists() {
+                    add_dir_to_zip(&mut zip, uploads_base, &board_upload_path, opts, &progress)?;
+                }
+
+                zip.finish()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
             }
 
-            let uploads_base = std::path::Path::new(&upload_dir);
-            let board_upload_path = uploads_base.join(&board_short);
-            if board_upload_path.exists() {
-                add_dir_to_zip(&mut zip, uploads_base, &board_upload_path, opts)?;
-            }
+            let file_size = zip_tmp.as_file().metadata().map(|m| m.len()).unwrap_or(0);
 
-            let cursor = zip.finish()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
-            let bytes = cursor.into_inner();
+            let (_, tmp_path_obj) = zip_tmp.into_parts();
+            let final_path = tmp_path_obj.keep().map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("Persist temp zip: {}", e))
+            })?;
 
             let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
             let fname = format!("rustchan-board-{}-{}.zip", board_short, ts);
-            info!("Admin downloaded board backup for /{}/  ({} bytes)", board_short, bytes.len());
-            Ok((bytes, fname))
+            info!("Admin downloaded board backup for /{}/  ({} bytes on disk)", board_short, file_size);
+            progress.phase.store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
+            Ok((final_path, fname, file_size))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let file = tokio::fs::File::open(&tmp_path).await.map_err(|e| {
+        AppError::Internal(anyhow::anyhow!("Open board backup for streaming: {}", e))
+    })?;
+    let stream = ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
+
+    let cleanup_path = tmp_path;
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+        let _ = tokio::fs::remove_file(cleanup_path).await;
+    });
 
     use axum::http::header;
     let disposition = format!("attachment; filename=\"{}\"", filename);
@@ -3086,8 +3309,9 @@ pub async fn board_backup(
         [
             (header::CONTENT_TYPE, "application/zip".to_string()),
             (header::CONTENT_DISPOSITION, disposition),
+            (header::CONTENT_LENGTH, file_size.to_string()),
         ],
-        zip_bytes,
+        body,
     )
         .into_response())
 }
