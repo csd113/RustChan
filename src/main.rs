@@ -1057,12 +1057,8 @@ fn print_keyboard_help() {
     println!();
     println!("  \x1b[36m╔══ Admin Console ════════════════════════════════╗\x1b[0m");
     println!("  \x1b[36m║\x1b[0m  [s] show stats now    [l] list boards          \x1b[36m║\x1b[0m");
-    println!(
-        "  \x1b[36m║\x1b[0m  [c] create board      [d] delete thread         \x1b[36m║\x1b[0m"
-    );
-    println!(
-        "  \x1b[36m║\x1b[0m  [h] help              [q] quit hint             \x1b[36m║\x1b[0m"
-    );
+    println!("  \x1b[36m║\x1b[0m  [c] create board      [d] delete thread        \x1b[36m║\x1b[0m");
+    println!("  \x1b[36m║\x1b[0m  [h] help              [q] quit hint            \x1b[36m║\x1b[0m");
     println!("  \x1b[36m╚═════════════════════════════════════════════════╝\x1b[0m");
     println!();
 }
