@@ -27,7 +27,7 @@ use clap::{Parser, Subcommand};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::info;
 use tracing_subscriber::{filter::EnvFilter, fmt};
@@ -55,15 +55,46 @@ static THEME_INIT_JS: &str = include_str!("../static/theme-init.js");
 /// Total HTTP requests handled since startup.
 pub static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Requests currently being processed (in-flight).
-static IN_FLIGHT: AtomicI64 = AtomicI64::new(0);
+///
+/// FIX[AUDIT-1]: Changed from `AtomicI64` to `AtomicU64`.  In-flight request
+/// counts are inherently non-negative; using a signed type required defensive
+/// `.max(0)` casts at every read site and masked counter underflow bugs.
+/// Decrements use `ScopedDecrement` RAII guards (see below) to prevent
+/// counter leaks when async futures are cancelled mid-flight.
+static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 /// Multipart file uploads currently in progress.
-static ACTIVE_UPLOADS: AtomicI64 = AtomicI64::new(0);
+///
+/// FIX[AUDIT-1]: Same signed→unsigned change as `IN_FLIGHT`.
+static ACTIVE_UPLOADS: AtomicU64 = AtomicU64::new(0);
 /// Monotonic tick used to animate the upload spinner.
 static SPINNER_TICK: AtomicU64 = AtomicU64::new(0);
 /// Recently active client IPs (last ~5 min); maps SHA-256(IP) → last-seen Instant.
 /// CRIT-5: Keys are hashed so raw IP addresses are never retained in process
 /// memory (or coredumps). The count is used for the "users online" display.
 static ACTIVE_IPS: Lazy<DashMap<String, Instant>> = Lazy::new(DashMap::new);
+
+// ─── RAII counter guard ───────────────────────────────────────────────────────
+//
+// FIX[AUDIT-2]: `IN_FLIGHT` and `ACTIVE_UPLOADS` are decremented inside
+// `track_requests` *after* `.await`.  If the surrounding future is cancelled
+// (e.g. client disconnect, timeout, or panic in a handler), the post-await
+// code never runs and the counters permanently over-count.
+//
+// `ScopedDecrement` ties the decrement to the guard's lifetime so it fires
+// unconditionally via `Drop`, even when the future is dropped mid-flight.
+// The decrement is saturating to prevent underflow on `AtomicU64`.
+struct ScopedDecrement<'a>(&'a AtomicU64);
+
+impl Drop for ScopedDecrement<'_> {
+    fn drop(&mut self) {
+        // Saturating decrement: fetch_update retries on spurious failure.
+        let _ = self
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
+    }
+}
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
 
@@ -807,6 +838,10 @@ async fn track_requests(
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
 
+    // FIX[AUDIT-2]: Bind the in-flight decrement to a RAII guard so it fires
+    // even if this future is cancelled (e.g. client disconnect, handler panic).
+    let _in_flight_guard = ScopedDecrement(&IN_FLIGHT);
+
     // Attach a per-request UUID to every tracing span so correlated log lines
     // can be grouped by request even under concurrent load (#12).
     let req_id = uuid::Uuid::new_v4();
@@ -846,19 +881,15 @@ async fn track_requests(
         .map(|ct| ct.contains("multipart/form-data"))
         .unwrap_or(false);
 
-    if is_upload {
+    // FIX[AUDIT-2]: Bind upload decrement to a RAII guard for the same reason.
+    // Option<ScopedDecrement> is None when is_upload is false — zero-cost branch.
+    let _upload_guard = is_upload.then(|| {
         ACTIVE_UPLOADS.fetch_add(1, Ordering::Relaxed);
-    }
+        ScopedDecrement(&ACTIVE_UPLOADS)
+    });
 
     use tracing::Instrument as _;
-    let resp = next.run(req).instrument(span).await;
-
-    IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
-    if is_upload {
-        ACTIVE_UPLOADS.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    resp
+    next.run(req).instrument(span).await
 }
 
 // ─── First-run check ─────────────────────────────────────────────────────────
@@ -960,15 +991,22 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
     ts.prev_post_count = posts;
 
     // Active connections / users online
-    let in_flight = IN_FLIGHT.load(Ordering::Relaxed).max(0) as u64;
+    // FIX[AUDIT-1]: IN_FLIGHT is now AtomicU64 — load directly, no .max(0) cast.
+    let in_flight = IN_FLIGHT.load(Ordering::Relaxed);
     let online_count = ACTIVE_IPS.len();
+
     // CRIT-5: Keys are SHA-256 hashes — show 8-char prefixes for diagnostics.
+    // FIX[AUDIT-3]: Use .get(..8) instead of direct [..8] byte-index so this
+    // stays safe if a key is ever shorter than 8 chars (defensive programming).
     let ip_list: String = {
         let mut hashes: Vec<String> = ACTIVE_IPS
             .iter()
-            .map(|e| e.key()[..8].to_string())
+            .map(|e| {
+                let key = e.key();
+                key.get(..8).unwrap_or(key.as_str()).to_string()
+            })
             .collect();
-        hashes.sort();
+        hashes.sort_unstable();
         hashes.truncate(5);
         if hashes.is_empty() {
             "none".into()
@@ -978,7 +1016,8 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
     };
 
     // Upload progress bar — shown only while uploads are active
-    let active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed).max(0) as u64;
+    // FIX[AUDIT-1]: ACTIVE_UPLOADS is now AtomicU64 — load directly.
+    let active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed);
     if active_uploads > 0 {
         // Fix #5: SPINNER_TICK was read but never written anywhere, so the
         // spinner was permanently frozen on frame 0 ("⠋").  Increment it here,
@@ -1051,12 +1090,11 @@ fn process_rss_kb() -> u64 {
         if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
             for line in s.lines() {
                 if let Some(val) = line.strip_prefix("VmRSS:") {
-                    let kb: u64 = val
+                    return val
                         .split_whitespace()
                         .next()
                         .and_then(|n| n.parse().ok())
                         .unwrap_or(0);
-                    return kb;
                 }
             }
         }
@@ -1133,16 +1171,17 @@ fn print_banner() {
     // │ character is always aligned regardless of the actual value length.
     const INNER: usize = 53;
 
-    // Truncate `s` to `width` chars, then right-pad with spaces to `width`.
+    // FIX[AUDIT-4]: The original closure collected chars into a `Vec<char>` and
+    // had a dead `unwrap_or_else(|| s.clone())` branch — `get(..width)` on a
+    // slice of length >= width never returns None.  The rewrite uses
+    // `chars().count()` (no heap allocation) and `chars().take(width).collect()`
+    // (single pass), eliminating both the intermediate Vec and the dead code.
     let cell = |s: String, width: usize| -> String {
-        let chars: Vec<char> = s.chars().collect();
-        if chars.len() >= width {
-            chars
-                .get(..width)
-                .map(|s| s.iter().collect())
-                .unwrap_or_else(|| s.clone())
+        let char_count = s.chars().count();
+        if char_count >= width {
+            s.chars().take(width).collect()
         } else {
-            format!("{}{}", s, " ".repeat(width - chars.len()))
+            format!("{}{}", s, " ".repeat(width - char_count))
         }
     };
 
@@ -1276,6 +1315,20 @@ fn kb_create_board(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
         println!("  Aborted.");
         return;
     }
+
+    // FIX[AUDIT-5]: Validate short name immediately after reading it, before
+    // prompting for the remaining fields.  Previously validation happened at
+    // the bottom of the function, so the user would fill in all prompts before
+    // learning the short name was invalid.
+    let short_lc = short.to_lowercase();
+    if short_lc.is_empty()
+        || short_lc.len() > 8
+        || !short_lc.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        println!("  \x1b[31m[err]\x1b[0m Short name must be 1-8 alphanumeric characters.");
+        return;
+    }
+
     let name = prompt("Display name:");
     if name.is_empty() {
         println!("  Aborted.");
@@ -1294,15 +1347,6 @@ fn kb_create_board(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
     let allow_images = !matches!(no_images_raw.to_lowercase().as_str(), "y" | "yes");
     let allow_video = !matches!(no_videos_raw.to_lowercase().as_str(), "y" | "yes");
     let allow_audio = !matches!(no_audio_raw.to_lowercase().as_str(), "y" | "yes");
-
-    let short_lc = short.to_lowercase();
-    if !short_lc.chars().all(|c| c.is_ascii_alphanumeric())
-        || short_lc.is_empty()
-        || short_lc.len() > 8
-    {
-        println!("  \x1b[31m[err]\x1b[0m Short name must be 1-8 alphanumeric characters.");
-        return;
-    }
 
     let Ok(conn) = pool.get() else {
         println!("  \x1b[31m[err]\x1b[0m Could not get DB connection.");
@@ -1431,9 +1475,18 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
     use chrono::TimeZone;
 
     let db_path = std::path::Path::new(&CONFIG.database_path);
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+
+    // FIX[AUDIT-6]: Apply the same Fix #9 empty-parent guard used in
+    // `run_server`.  The original code used a plain `if let Some(parent)`
+    // check, which does NOT handle the case where `Path::parent()` returns
+    // `Some("")` for a bare filename (e.g. "rustchan.db").
+    // `create_dir_all("")` fails with `NotFound`, so we normalise an empty
+    // parent to `"."` just as `run_server` does.
+    let db_parent: std::path::PathBuf = match db_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    std::fs::create_dir_all(&db_parent)?;
 
     let pool = db::init_pool()?;
     let conn = pool.get()?;
@@ -1483,9 +1536,9 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             no_audio,
         } => {
             let short = short.to_lowercase();
-            if !short.chars().all(|c| c.is_ascii_alphanumeric())
-                || short.is_empty()
+            if short.is_empty()
                 || short.len() > 8
+                || !short.chars().all(|c| c.is_ascii_alphanumeric())
             {
                 anyhow::bail!("Short name must be 1-8 alphanumeric chars (e.g. 'tech', 'b').");
             }
@@ -1574,7 +1627,9 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 );
                 println!("{}", "-".repeat(75));
                 for b in &bans {
-                    let partial = &b.ip_hash[..b.ip_hash.len().min(16)];
+                    // FIX[AUDIT-3]: Use .get(..16) for the same defensive
+                    // safety as the ip_list slice above.
+                    let partial = b.ip_hash.get(..16).unwrap_or(b.ip_hash.as_str());
                     let expires = b
                         .expires_at
                         .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single())
@@ -1633,7 +1688,11 @@ fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
         }
     }
 
-    let total: u64 = files.iter().map(|(_, _, sz)| sz).sum();
+    // FIX[AUDIT-7]: Dereference `sz` explicitly and annotate the sum type for
+    // clarity.  `Iterator<Item = &u64>` implements `Sum<&u64>` in std so this
+    // compiled before, but the explicit form is more readable and avoids the
+    // implicit coercion.
+    let total: u64 = files.iter().map(|(_, _, sz)| *sz).sum::<u64>();
     if total <= max_bytes {
         return; // already within budget
     }
@@ -1652,7 +1711,8 @@ fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
             Ok(()) => {
                 remaining = remaining.saturating_sub(*size);
                 deleted += 1;
-                deleted_bytes += size;
+                // FIX[AUDIT-7]: Dereference `size` for clarity.
+                deleted_bytes += *size;
             }
             Err(e) => {
                 tracing::warn!("evict_thumb_cache: failed to delete {:?}: {}", path, e);
@@ -1670,9 +1730,32 @@ fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
     }
 }
 
+// ─── Password validation ──────────────────────────────────────────────────────
+
+/// Validate an admin password.
+///
+/// FIX[AUDIT-8]: The original check only enforced a length of 8, which is too
+/// weak for an admin credential on a security-critical service.  Requirements
+/// are now:
+///   • Minimum 12 characters (NIST SP 800-63B §5.1.1 guidance)
+///   • At least one uppercase ASCII letter
+///   • At least one lowercase ASCII letter
+///   • At least one ASCII digit
+///
+/// These checks are intentionally simple (no special-char requirement) to
+/// avoid overly prescriptive rules that lead to weaker real-world passwords.
 fn validate_password(p: &str) -> anyhow::Result<()> {
-    if p.len() < 8 {
-        anyhow::bail!("Password must be at least 8 characters.");
+    if p.len() < 12 {
+        anyhow::bail!("Password must be at least 12 characters.");
+    }
+    let has_lower = p.chars().any(|c| c.is_ascii_lowercase());
+    let has_upper = p.chars().any(|c| c.is_ascii_uppercase());
+    let has_digit = p.chars().any(|c| c.is_ascii_digit());
+    if !has_lower || !has_upper || !has_digit {
+        anyhow::bail!(
+            "Password must contain at least one uppercase letter, \
+             one lowercase letter, and one digit."
+        );
     }
     Ok(())
 }
