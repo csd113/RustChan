@@ -659,7 +659,7 @@ pub async fn thread_updates(
 
                 // Fetch posts newer than `since`, ordered oldest-first so they
                 // render in the correct chronological order when appended.
-                let posts = db::get_new_posts_since(&conn, thread_id, since)?;
+                let posts = db::get_new_posts_since(&conn, thread_id, since, 100)?;
                 let last_id = posts.iter().map(|p| p.id).max().unwrap_or(since);
                 let count = posts.len();
 
