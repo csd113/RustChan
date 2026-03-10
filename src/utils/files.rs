@@ -1142,3 +1142,218 @@ pub fn gen_waveform_png(
 ) -> anyhow::Result<()> {
     ffmpeg_audio_waveform(data, output_path, width, height)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── format_file_size ─────────────────────────────────────────────────────
+
+    #[test]
+    fn format_bytes_exact() {
+        assert_eq!(format_file_size(0), "0 B");
+        assert_eq!(format_file_size(1), "1 B");
+        assert_eq!(format_file_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_kib_boundary() {
+        assert_eq!(format_file_size(1024), "1.0 KiB");
+        assert_eq!(format_file_size(1536), "1.5 KiB");
+        assert_eq!(format_file_size(1024 * 1024 - 1), "1024.0 KiB");
+    }
+
+    #[test]
+    fn format_mib() {
+        assert_eq!(format_file_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_file_size(1024 * 1024 * 2), "2.0 MiB");
+    }
+
+    // ── mime_to_ext ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn mime_to_ext_known_types() {
+        assert_eq!(mime_to_ext("image/jpeg"), "jpg");
+        assert_eq!(mime_to_ext("image/png"), "png");
+        assert_eq!(mime_to_ext("image/gif"), "gif");
+        assert_eq!(mime_to_ext("image/webp"), "webp");
+        assert_eq!(mime_to_ext("video/mp4"), "mp4");
+        assert_eq!(mime_to_ext("video/webm"), "webm");
+        assert_eq!(mime_to_ext("audio/webm"), "webm");
+        assert_eq!(mime_to_ext("audio/mpeg"), "mp3");
+        assert_eq!(mime_to_ext("audio/ogg"), "ogg");
+        assert_eq!(mime_to_ext("audio/flac"), "flac");
+        assert_eq!(mime_to_ext("audio/wav"), "wav");
+        assert_eq!(mime_to_ext("audio/mp4"), "m4a");
+        assert_eq!(mime_to_ext("audio/aac"), "aac");
+    }
+
+    #[test]
+    fn mime_to_ext_unknown_falls_back_to_bin() {
+        assert_eq!(mime_to_ext("application/octet-stream"), "bin");
+        assert_eq!(mime_to_ext(""), "bin");
+        assert_eq!(mime_to_ext("text/plain"), "bin");
+    }
+
+    // ── detect_mime_type ─────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_empty_is_error() {
+        assert!(detect_mime_type(b"").is_err());
+    }
+
+    #[test]
+    fn detect_jpeg() {
+        let header = b"\xff\xd8\xff\xe0rest of file";
+        assert_eq!(detect_mime_type(header).expect("jpeg"), "image/jpeg");
+    }
+
+    #[test]
+    fn detect_png() {
+        let header = b"\x89PNG\r\n\x1a\nrest";
+        assert_eq!(detect_mime_type(header).expect("png"), "image/png");
+    }
+
+    #[test]
+    fn detect_gif() {
+        let header = b"GIF89arest";
+        assert_eq!(detect_mime_type(header).expect("gif"), "image/gif");
+    }
+
+    #[test]
+    fn detect_webp() {
+        // RIFF....WEBP — built as a literal to avoid indexing_slicing lint
+        let data: &[u8] = b"RIFF\x00\x00\x00\x00WEBPrest";
+        assert_eq!(detect_mime_type(data).expect("webp"), "image/webp");
+    }
+
+    #[test]
+    fn detect_wav() {
+        let data: &[u8] = b"RIFF\x00\x00\x00\x00WAVErest";
+        assert_eq!(detect_mime_type(data).expect("wav"), "audio/wav");
+    }
+
+    #[test]
+    fn detect_riff_unknown_subtype_is_error() {
+        let data: &[u8] = b"RIFF\x00\x00\x00\x00BLAH";
+        assert!(detect_mime_type(data).is_err());
+    }
+
+    #[test]
+    fn detect_mp3_id3() {
+        let header = b"ID3\x03\x00\x00rest";
+        assert_eq!(detect_mime_type(header).expect("mp3 id3"), "audio/mpeg");
+    }
+
+    #[test]
+    fn detect_mp3_raw_sync() {
+        // 0xFF 0xFB = raw MP3 frame sync
+        let header = b"\xff\xfbrest";
+        assert_eq!(detect_mime_type(header).expect("mp3 sync"), "audio/mpeg");
+    }
+
+    #[test]
+    fn detect_aac() {
+        // 0xFF 0xF1 = AAC ADTS sync word
+        let header = b"\xff\xf1rest";
+        assert_eq!(detect_mime_type(header).expect("aac"), "audio/aac");
+    }
+
+    #[test]
+    fn detect_ogg() {
+        let header = b"OggS\x00rest";
+        assert_eq!(detect_mime_type(header).expect("ogg"), "audio/ogg");
+    }
+
+    #[test]
+    fn detect_flac() {
+        let header = b"fLaCrest";
+        assert_eq!(detect_mime_type(header).expect("flac"), "audio/flac");
+    }
+
+    #[test]
+    fn detect_mp4_ftyp() {
+        // 4 bytes padding, "ftyp", "isom" brand — all as a literal
+        let data: &[u8] = b"\x00\x00\x00\x00ftypismores";
+        assert_eq!(detect_mime_type(data).expect("mp4"), "video/mp4");
+    }
+
+    #[test]
+    fn detect_m4a_ftyp() {
+        let data: &[u8] = b"\x00\x00\x00\x00ftypM4A res";
+        assert_eq!(detect_mime_type(data).expect("m4a"), "audio/mp4");
+    }
+
+    #[test]
+    fn detect_m4a_ftyp_lowercase() {
+        let data: &[u8] = b"\x00\x00\x00\x00ftypm4a res";
+        assert_eq!(detect_mime_type(data).expect("m4a lower"), "audio/mp4");
+    }
+
+    #[test]
+    fn detect_webm_doctype() {
+        // Minimal EBML: magic(4) + 6 padding bytes + DocType ID(2) + size(1) + "webm"(4)
+        // Positions: magic=0..4, padding=4..10, 0x42=10, 0x82=11, 0x84=12, "webm"=13..17
+        // Built as a concat of fixed-size byte arrays to avoid indexing_slicing.
+        let data: &[u8] = b"\x1a\x45\xdf\xa3\x00\x00\x00\x00\x00\x00\x42\x82\x84webm\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        assert_eq!(detect_mime_type(data).expect("webm"), "video/webm");
+    }
+
+    #[test]
+    fn detect_mkv_doctype_rejected() {
+        // Same layout but DocType = "matroska" (8 bytes), size field = 0x88
+        let data: &[u8] = b"\x1a\x45\xdf\xa3\x00\x00\x00\x00\x00\x00\x42\x82\x88matroska\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        let err = detect_mime_type(data)
+            .expect_err("mkv should be rejected")
+            .to_string();
+        assert!(err.contains("Matroska") || err.contains("matroska"));
+    }
+
+    #[test]
+    fn detect_unknown_returns_error() {
+        assert!(detect_mime_type(b"\x00\x00\x00\x00unknown").is_err());
+    }
+
+    // ── apply_exif_orientation ───────────────────────────────────────────────
+
+    #[test]
+    fn exif_orientation_1_is_noop() {
+        let img = image::DynamicImage::new_rgba8(4, 6);
+        let out = apply_exif_orientation(img, 1);
+        assert_eq!(out.width(), 4);
+        assert_eq!(out.height(), 6);
+    }
+
+    #[test]
+    fn exif_orientation_3_rotates_180() {
+        // 180° rotation keeps dimensions unchanged
+        let img = image::DynamicImage::new_rgba8(4, 6);
+        let out = apply_exif_orientation(img, 3);
+        assert_eq!(out.width(), 4);
+        assert_eq!(out.height(), 6);
+    }
+
+    #[test]
+    fn exif_orientation_6_rotates_90cw_swaps_dims() {
+        let img = image::DynamicImage::new_rgba8(4, 6);
+        let out = apply_exif_orientation(img, 6);
+        assert_eq!(out.width(), 6);
+        assert_eq!(out.height(), 4);
+    }
+
+    #[test]
+    fn exif_orientation_8_rotates_90ccw_swaps_dims() {
+        let img = image::DynamicImage::new_rgba8(4, 6);
+        let out = apply_exif_orientation(img, 8);
+        assert_eq!(out.width(), 6);
+        assert_eq!(out.height(), 4);
+    }
+
+    #[test]
+    fn exif_orientation_unknown_value_is_noop() {
+        let img = image::DynamicImage::new_rgba8(4, 6);
+        let out = apply_exif_orientation(img, 99);
+        assert_eq!(out.width(), 4);
+        assert_eq!(out.height(), 6);
+    }
+}

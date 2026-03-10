@@ -539,3 +539,95 @@ where
         Ok(Self(ip))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── validate_csrf ────────────────────────────────────────────────────────
+
+    #[test]
+    fn csrf_matching_tokens_pass() {
+        assert!(validate_csrf(Some("abc123"), "abc123"));
+    }
+
+    #[test]
+    fn csrf_mismatched_tokens_fail() {
+        assert!(!validate_csrf(Some("abc123"), "abc124"));
+    }
+
+    #[test]
+    fn csrf_missing_cookie_fails() {
+        assert!(!validate_csrf(None, "abc123"));
+    }
+
+    #[test]
+    fn csrf_empty_cookie_fails() {
+        assert!(!validate_csrf(Some(""), "abc123"));
+    }
+
+    #[test]
+    fn csrf_empty_form_token_fails() {
+        assert!(!validate_csrf(Some("abc123"), ""));
+    }
+
+    #[test]
+    fn csrf_both_empty_fails() {
+        assert!(!validate_csrf(Some(""), ""));
+    }
+
+    // ── constant_time_eq ─────────────────────────────────────────────────────
+
+    #[test]
+    fn constant_time_eq_equal_slices() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_slices() {
+        assert!(!constant_time_eq(b"hello", b"world"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+    }
+
+    #[test]
+    fn constant_time_eq_empty_slices() {
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_one_byte_off() {
+        // Differs only in the last byte — must still return false
+        assert!(!constant_time_eq(b"token_a", b"token_b"));
+    }
+
+    // ── BackupProgress ───────────────────────────────────────────────────────
+
+    #[test]
+    fn backup_progress_initial_phase_is_idle() {
+        use std::sync::atomic::Ordering::Acquire;
+        let bp = BackupProgress::new();
+        assert_eq!(bp.phase.load(Acquire), backup_phase::IDLE);
+    }
+
+    #[test]
+    fn backup_progress_reset_clears_counters() {
+        use std::sync::atomic::Ordering::{Acquire, Relaxed};
+        let bp = BackupProgress::new();
+        bp.files_done.store(10, Relaxed);
+        bp.files_total.store(20, Relaxed);
+        bp.bytes_done.store(1024, Relaxed);
+        bp.bytes_total.store(2048, Relaxed);
+
+        bp.reset(backup_phase::COMPRESS);
+
+        assert_eq!(bp.phase.load(Acquire), backup_phase::COMPRESS);
+        assert_eq!(bp.files_done.load(Relaxed), 0);
+        assert_eq!(bp.files_total.load(Relaxed), 0);
+        assert_eq!(bp.bytes_done.load(Relaxed), 0);
+        assert_eq!(bp.bytes_total.load(Relaxed), 0);
+    }
+}

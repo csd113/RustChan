@@ -4477,3 +4477,84 @@ pub async fn mod_log_page(
 
     Ok((jar, Html(html)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── login_ip_key ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn ip_key_is_hex_sha256() {
+        let key = login_ip_key("127.0.0.1");
+        // SHA-256 produces 32 bytes = 64 hex chars
+        assert_eq!(key.len(), 64);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn ip_key_same_ip_same_key() {
+        assert_eq!(login_ip_key("192.168.1.1"), login_ip_key("192.168.1.1"));
+    }
+
+    #[test]
+    fn ip_key_different_ips_different_keys() {
+        assert_ne!(login_ip_key("192.168.1.1"), login_ip_key("192.168.1.2"));
+    }
+
+    #[test]
+    fn ip_key_hides_raw_ip() {
+        // The raw IP should not appear anywhere in the hash output
+        let key = login_ip_key("10.0.0.1");
+        assert!(!key.contains("10.0.0.1"));
+    }
+
+    // ── is_login_locked ──────────────────────────────────────────────────────
+
+    #[test]
+    fn fresh_ip_is_not_locked() {
+        let key = login_ip_key("test-fresh-ip-not-in-map");
+        assert!(!is_login_locked(&key));
+    }
+
+    #[test]
+    fn locked_after_exceeding_fail_limit() {
+        // Use a unique key so parallel tests don't interfere
+        let key = login_ip_key("test-lock-unique-99887766");
+        // Clean up any residue from a previous run
+        ADMIN_LOGIN_FAILS.remove(&key);
+
+        let now = login_now_secs();
+        // Insert exactly LOGIN_FAIL_LIMIT failures within the window
+        ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT, now));
+        assert!(is_login_locked(&key));
+
+        // Cleanup
+        ADMIN_LOGIN_FAILS.remove(&key);
+    }
+
+    #[test]
+    fn not_locked_below_fail_limit() {
+        let key = login_ip_key("test-below-limit-11223344");
+        ADMIN_LOGIN_FAILS.remove(&key);
+
+        let now = login_now_secs();
+        ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT - 1, now));
+        assert!(!is_login_locked(&key));
+
+        ADMIN_LOGIN_FAILS.remove(&key);
+    }
+
+    #[test]
+    fn expired_window_is_not_locked() {
+        let key = login_ip_key("test-expired-window-55667788");
+        ADMIN_LOGIN_FAILS.remove(&key);
+
+        // window_start far in the past, beyond LOGIN_FAIL_WINDOW
+        let old_ts = login_now_secs().saturating_sub(LOGIN_FAIL_WINDOW + 60);
+        ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT + 10, old_ts));
+        assert!(!is_login_locked(&key));
+
+        ADMIN_LOGIN_FAILS.remove(&key);
+    }
+}
