@@ -14,7 +14,7 @@ use crate::{
     error::{AppError, Result},
     handlers::parse_post_multipart,
     middleware::{validate_csrf, AppState},
-    models::*,
+    models::{Pagination, SearchQuery, ThreadSummary},
     templates,
     utils::{
         crypto::{hash_ip, new_csrf_token, new_deletion_token, verify_pow},
@@ -27,7 +27,7 @@ use crate::{
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
-    http::HeaderMap,
+    http::{header, HeaderMap},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -45,13 +45,13 @@ pub async fn index(
 ) -> Result<(CookieJar, Html<String>)> {
     let (jar, csrf) = ensure_csrf(jar);
 
-    let (board_stats, site_stats) = tokio::task::spawn_blocking({
+    let (board_stats, site_data) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<(Vec<crate::models::BoardStats>, crate::models::SiteStats)> {
             let conn = pool.get()?;
             let boards = db::get_all_boards_with_stats(&conn)?;
-            let stats = db::get_site_stats(&conn).unwrap_or_default();
-            Ok((boards, stats))
+            let site_data = db::get_site_stats(&conn).unwrap_or_default();
+            Ok((boards, site_data))
         }
     })
     .await
@@ -61,8 +61,10 @@ pub async fn index(
     let onion_address: Option<String> = if crate::config::CONFIG.enable_tor_support {
         let data_dir = std::path::PathBuf::from(&crate::config::CONFIG.database_path)
             .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+            .map_or_else(
+                || std::path::PathBuf::from("."),
+                std::path::Path::to_path_buf,
+            );
         let hostname_path = data_dir.join("tor_hidden_service").join("hostname");
         std::fs::read_to_string(&hostname_path)
             .ok()
@@ -76,7 +78,7 @@ pub async fn index(
         jar,
         Html(templates::index_page(
             &board_stats,
-            &site_stats,
+            &site_data,
             &csrf,
             onion_address.as_deref(),
         )),
@@ -100,8 +102,6 @@ pub async fn board_index(
         .unwrap_or(1)
         .max(1);
 
-    let (jar, csrf) = (jar, csrf);
-
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
@@ -111,8 +111,7 @@ pub async fn board_index(
 
             let is_admin = jar_session
                 .as_deref()
-                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
-                .unwrap_or(false);
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
 
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
@@ -126,13 +125,13 @@ pub async fn board_index(
             // combined with the page number.  This is a cheap proxy for "has
             // anything on this page changed?".
             let max_bump = threads.iter().map(|t| t.bumped_at).max().unwrap_or(0);
-            let etag = format!("\"{}-{}\"", max_bump, page);
+            let etag = format!("\"{max_bump}-{page}\"");
 
             let mut summaries = Vec::with_capacity(threads.len());
             for thread in threads {
                 let total_replies = thread.reply_count;
                 let preview = db::get_preview_posts(&conn, thread.id, PREVIEW_REPLIES)?;
-                let omitted = (total_replies - preview.len() as i64).max(0);
+                let omitted = (total_replies - i64::try_from(preview.len()).unwrap_or(0)).max(0);
                 summaries.push(ThreadSummary {
                     thread,
                     preview_posts: preview,
@@ -187,6 +186,7 @@ pub async fn board_index(
 
 // ─── POST /:board/ — create new thread ───────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 pub async fn create_thread(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
@@ -248,8 +248,7 @@ pub async fn create_thread(
             // Verify admin session — admins bypass the per-board cooldown entirely.
             let is_admin = admin_session_id
                 .as_deref()
-                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
-                .unwrap_or(false);
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
 
             // Per-board post cooldown — the SOLE post rate control.
             // post_cooldown_secs = 0 means no cooldown at all; admins always bypass it.
@@ -258,11 +257,7 @@ pub async fn create_thread(
                 if let Some(secs) = elapsed {
                     let remaining = board.post_cooldown_secs.saturating_sub(secs);
                     if remaining > 0 {
-                        return Err(AppError::BadRequest(format!(
-                            "Please wait {} more second{} before posting again.",
-                            remaining,
-                            if remaining == 1 { "" } else { "s" }
-                        )));
+                        return Err(AppError::BadRequest(format!("Please wait {remaining} more second{} before posting again.", if remaining == 1 { "" } else { "s" })));
                     }
                 }
             }
@@ -401,8 +396,8 @@ pub async fn create_thread(
                 allow_archive: board.allow_archive,
             });
 
-            info!("New thread {} created in /{}/", thread_id, board.short_name);
-            Ok(format!("/{}/thread/{}", board.short_name, thread_id))
+            info!("New thread {thread_id} created in /{}/", board.short_name);
+            Ok(format!("/{}/thread/{thread_id}", board.short_name))
         }
     })
     .await
@@ -440,8 +435,7 @@ pub async fn catalog(
             let conn = pool.get()?;
             let is_admin = jar_session
                 .as_deref()
-                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
-                .unwrap_or(false);
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
             let threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
@@ -471,8 +465,8 @@ pub async fn board_archive(
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
-    let (jar, csrf) = ensure_csrf(jar);
     const ARCHIVE_PER_PAGE: i64 = 20;
+    let (jar, csrf) = ensure_csrf(jar);
 
     let page: i64 = params
         .get("page")
@@ -529,8 +523,8 @@ pub async fn search(
     Query(q): Query<SearchQuery>,
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
-    let (jar, csrf) = ensure_csrf(jar);
     const SEARCH_PER_PAGE: i64 = 20;
+    let (jar, csrf) = ensure_csrf(jar);
 
     // Cap query length to prevent excessively large LIKE pattern scans.
     let query_str: String = q.q.trim().chars().take(256).collect();
@@ -575,7 +569,7 @@ pub async fn search(
 
 // ─── CSRF cookie helper ───────────────────────────────────────────────────────
 
-/// Ensure the CSRF token cookie is set. Returns (updated_jar, token_string).
+/// Ensure the CSRF token cookie is set. Returns (`updated_jar`, `token_string`).
 pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
     if let Some(cookie) = jar.get("csrf_token") {
         let token = cookie.value().to_string();
@@ -601,10 +595,11 @@ pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
 #[derive(serde::Deserialize)]
 pub struct ReportForm {
     pub post_id: i64,
+    #[allow(dead_code)]
     pub thread_id: i64,
     pub board: String,
     pub reason: Option<String>,
-    pub _csrf: Option<String>,
+    pub csrf: Option<String>,
 }
 
 pub async fn file_report(
@@ -614,7 +609,7 @@ pub async fn file_report(
     Form(form): Form<ReportForm>,
 ) -> Result<Response> {
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form._csrf.as_deref().unwrap_or("")) {
+    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
@@ -629,19 +624,19 @@ pub async fn file_report(
         .collect::<String>();
 
     let post_id = form.post_id;
-    let _thread_id = form.thread_id;
     let board_raw = form
         .board
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .take(8)
         .collect::<String>();
 
+    let board_raw_closure = board_raw.clone();
     let db_thread_id = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<i64> {
             let conn = pool.get()?;
-            let board = db::get_board_by_short(&conn, &board_raw)?
+            let board = db::get_board_by_short(&conn, &board_raw_closure)?
                 .ok_or_else(|| AppError::NotFound("Board not found.".into()))?;
             // Verify post exists and belongs to this board to prevent spoofed reports.
             let post = db::get_post(&conn, post_id)?
@@ -667,16 +662,11 @@ pub async fn file_report(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    // Redirect back to the thread using the DB-resolved IDs, not the form values.
-    let safe_board = form
-        .board
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .take(8)
-        .collect::<String>();
+    // Redirect back to the thread using the DB-resolved IDs.
+    // `board_raw` is already sanitised to alphanumeric earlier in this handler.
     Ok(Redirect::to(&format!(
-        "/{}/thread/{}#p{}",
-        safe_board, db_thread_id, form.post_id
+        "/{board_raw}/thread/{db_thread_id}#p{}",
+        form.post_id
     ))
     .into_response())
 }
@@ -718,16 +708,19 @@ pub async fn serve_board_media(
         // the request headers caused it to receive 200 instead of 206 and
         // refuse playback on videos it tried to stream in chunks.
         let req = req.map(|_| axum::body::Body::empty());
-        match ServeFile::new(&target).oneshot(req).await {
-            Ok(resp) => resp.map(axum::body::Body::new).into_response(),
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        }
-    } else if media_path.ends_with(".mp4") {
+        ServeFile::new(&target).oneshot(req).await.map_or_else(
+            |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            |resp| resp.map(axum::body::Body::new).into_response(),
+        )
+    } else if std::path::Path::new(&media_path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+    {
         // MP4 was transcoded away — redirect permanently to the .webm sibling.
         let webm_path_str = format!("{}.webm", &media_path[..media_path.len() - 4]);
         let webm_abs = base.join(&webm_path_str);
         if webm_abs.exists() {
-            Redirect::permanent(&format!("/boards/{}", webm_path_str)).into_response()
+            Redirect::permanent(&format!("/boards/{webm_path_str}")).into_response()
         } else {
             StatusCode::NOT_FOUND.into_response()
         }
@@ -756,8 +749,6 @@ pub async fn api_post_preview(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
 ) -> impl axum::response::IntoResponse {
-    use axum::http::header;
-
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> crate::error::Result<Option<(String, i64)>> {
@@ -772,11 +763,14 @@ pub async fn api_post_preview(
                     let html = crate::templates::render_post(
                         &p,
                         &board_short,
-                        "",    // no CSRF needed — preview is read-only
-                        false, // no delete controls
-                        false, // not admin
-                        true,  // show media thumbnail
-                        0,     // no edit window
+                        "",
+                        crate::templates::thread::RenderPostOpts {
+                            show_delete: false,
+                            is_admin: false,
+                            show_media: true,
+                            allow_editing: false, // no edit link in read-only preview
+                        },
+                        0, // no edit window
                     );
                     Ok(Some((html, thread_id)))
                 }
@@ -831,27 +825,24 @@ pub async fn redirect_to_post(
     })
     .await;
 
-    match result {
-        Ok(Ok(Some(thread_id))) => {
-            let url = format!("/{}/thread/{}#p{}", board_short_for_url, thread_id, post_id);
-            Redirect::to(&url).into_response()
-        }
-        _ => {
-            // Post not found or wrong board — render the error page template
-            // so the user gets a readable message instead of a blank HTTP 404.
-            // This is the fallback path when JavaScript is disabled or when
-            // a user manually navigates to a quotelink URL after a board
-            // restore that assigned new IDs to the restored posts.
-            let html = crate::templates::error_page(
-                404,
-                &format!("Post #{} not found. It may have been deleted or the board was restored from a backup.", post_id),
-            );
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                axum::response::Html(html),
-            )
-                .into_response()
-        }
+    if let Ok(Ok(Some(thread_id))) = result {
+        let url = format!("/{board_short_for_url}/thread/{thread_id}#p{post_id}");
+        Redirect::to(&url).into_response()
+    } else {
+        // Post not found or wrong board — render the error page template
+        // so the user gets a readable message instead of a blank HTTP 404.
+        // This is the fallback path when JavaScript is disabled or when
+        // a user manually navigates to a quotelink URL after a board
+        // restore that assigned new IDs to the restored posts.
+        let html = crate::templates::error_page(
+            404,
+            &format!("Post #{post_id} not found. It may have been deleted or the board was restored from a backup."),
+        );
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::response::Html(html),
+        )
+            .into_response()
     }
 }
 
@@ -862,7 +853,7 @@ pub async fn redirect_to_post(
 #[derive(serde::Deserialize)]
 pub struct AppealForm {
     pub reason: String,
-    pub _csrf: Option<String>,
+    pub csrf: Option<String>,
 }
 
 pub async fn submit_appeal(
@@ -874,10 +865,8 @@ pub async fn submit_appeal(
     use axum::response::Html;
 
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(
-        csrf_cookie.as_deref(),
-        form._csrf.as_deref().unwrap_or(""),
-    ) {
+    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
+    {
         return Html(crate::templates::error_page(403, "CSRF token mismatch.")).into_response();
     }
 

@@ -31,17 +31,17 @@
 //   MED-17   prune_old_threads: N per-thread file-path queries replaced with
 //              a single JOIN query
 
-use crate::models::*;
+use crate::models::Thread;
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
 /// Map a thread row. Column layout (must match every SELECT that calls this):
-///   0  t.id           4  t.bumped_at    8  op.body       12 op.tripcode
-///   1  t.board_id     5  t.locked       9  op.file_path  13 op.id (op_id)
-///   2  t.subject      6  t.sticky       10 op.thumb_path 14 t.archived
-///   3  t.created_at   7  t.reply_count  11 op.name       15 image_count
+///   0  t.id           4  `t.bumped_at`    8  op.body       12 op.tripcode
+///   1  `t.board_id`     5  t.locked       9  `op.file_path`  13 op.id (`op_id`)
+///   2  t.subject      6  t.sticky       10 `op.thumb_path` 14 t.archived
+///   3  `t.created_at`   7  `t.reply_count`  11 op.name       15 `image_count`
 ///
 /// FIX[MED-9]: Extracted from three copy-pasted closures into a single helper,
 /// eliminating the risk of the three copies diverging.
@@ -68,10 +68,10 @@ fn map_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
 
 // ─── File-path collection helper ──────────────────────────────────────────────
 
-/// Collect all file paths (file_path, thumb_path, audio_file_path) for every
+/// Collect all file paths (`file_path`, `thumb_path`, `audio_file_path`) for every
 /// post in the given set of thread ids. Returns a flat Vec of non-null paths.
 ///
-/// FIX[LOW-11]: Extracted from delete_thread and prune_old_threads to eliminate
+/// FIX[LOW-11]: Extracted from `delete_thread` and `prune_old_threads` to eliminate
 ///   copy-pasted collection loops.
 /// FIX[MED-17]: Uses a single JOIN query instead of one query per thread.
 ///
@@ -95,8 +95,7 @@ fn collect_thread_file_paths(
         .join(", ");
     let sql = format!(
         "SELECT file_path, thumb_path, audio_file_path
-         FROM posts WHERE thread_id IN ({})",
-        placeholders
+         FROM posts WHERE thread_id IN ({placeholders})"
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -140,6 +139,9 @@ const THREAD_SELECT: &str = "
 
 /// Get paginated threads for a board with OP preview data.
 /// Sticky threads float to the top, then sorted by most recent bump.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_threads_for_board(
     conn: &rusqlite::Connection,
     board_id: i64,
@@ -160,6 +162,8 @@ pub fn get_threads_for_board(
     Ok(threads)
 }
 
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn count_threads_for_board(conn: &rusqlite::Connection, board_id: i64) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COUNT(*) FROM threads WHERE board_id = ?1 AND archived = 0",
@@ -168,6 +172,8 @@ pub fn count_threads_for_board(conn: &rusqlite::Connection, board_id: i64) -> Re
     )?)
 }
 
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<Thread>> {
     let sql = format!(
         "{THREAD_SELECT}
@@ -183,15 +189,18 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
 /// Create a thread AND its OP post atomically in a single transaction.
 ///
 /// The invariant guaranteed here: every thread row has exactly one corresponding
-/// post with is_op=1. The previous design used two separate DB calls with no
+/// post with `is_op=1`. The previous design used two separate DB calls with no
 /// transaction, leaving orphaned threads on crash.
 ///
 /// FIX[MED-4]: Replaced the raw `conn.execute("BEGIN IMMEDIATE", [])?` /
-/// `conn.execute("COMMIT", [])` pattern with execute_batch calls that keep the
+/// `conn.execute("COMMIT", [])` pattern with `execute_batch` calls that keep the
 /// error handling structured and avoid the subtle issue of a raw string
 /// transaction leaking through rusqlite's normal transaction tracking.
 ///
-/// Returns (thread_id, post_id).
+/// Returns (`thread_id`, `post_id`).
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn create_thread_with_op(
     conn: &rusqlite::Connection,
     board_id: i64,
@@ -241,13 +250,16 @@ pub fn create_thread_with_op(
 
 /// Bump a thread's `bumped_at` timestamp and increment `reply_count`.
 ///
-/// Note (MED-6): bump_thread is called from the route handler after
-/// create_post returns, not inside the same transaction as the post insert.
-/// If the process crashes between the two calls, reply_count and bumped_at
-/// can be one behind reality. A full fix would require moving bump_thread
-/// into create_post_inner, which would change the API surface. Accepted as
-/// a known minor inconsistency; the reply_count column is advisory and a
+/// Note (MED-6): `bump_thread` is called from the route handler after
+/// `create_post` returns, not inside the same transaction as the post insert.
+/// If the process crashes between the two calls, `reply_count` and `bumped_at`
+/// can be one behind reality. A full fix would require moving `bump_thread`
+/// into `create_post_inner`, which would change the API surface. Accepted as
+/// a known minor inconsistency; the `reply_count` column is advisory and a
 /// board reload corrects the displayed count.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn bump_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<()> {
     conn.execute(
         "UPDATE threads SET bumped_at = unixepoch(), reply_count = reply_count + 1
@@ -257,18 +269,22 @@ pub fn bump_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn set_thread_sticky(conn: &rusqlite::Connection, thread_id: i64, sticky: bool) -> Result<()> {
     conn.execute(
         "UPDATE threads SET sticky = ?1 WHERE id = ?2",
-        params![sticky as i32, thread_id],
+        params![i32::from(sticky), thread_id],
     )?;
     Ok(())
 }
 
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn set_thread_locked(conn: &rusqlite::Connection, thread_id: i64, locked: bool) -> Result<()> {
     conn.execute(
         "UPDATE threads SET locked = ?1 WHERE id = ?2",
-        params![locked as i32, thread_id],
+        params![i32::from(locked), thread_id],
     )?;
     Ok(())
 }
@@ -282,7 +298,10 @@ pub fn set_thread_locked(conn: &rusqlite::Connection, thread_id: i64, locked: bo
 ///
 /// The new logic: archiving always locks the thread; unarchiving only restores
 /// the archived flag and leaves locked untouched. Callers that want to unlock
-/// a thread after unarchiving should call set_thread_locked separately.
+/// a thread after unarchiving should call `set_thread_locked` separately.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn set_thread_archived(
     conn: &rusqlite::Connection,
     thread_id: i64,
@@ -293,7 +312,7 @@ pub fn set_thread_archived(
          SET archived = ?1,
              locked   = CASE WHEN ?1 = 1 THEN 1 ELSE locked END
          WHERE id = ?2",
-        params![archived as i32, thread_id],
+        params![i32::from(archived), thread_id],
     )?;
     Ok(())
 }
@@ -309,8 +328,11 @@ pub fn set_thread_archived(
 /// The full sequence is now atomic:
 ///   1. Collect file paths (while posts still exist)
 ///   2. DELETE the thread (CASCADE removes posts)
-///   3. paths_safe_to_delete inside the transaction sees the post-delete state
+///   3. `paths_safe_to_delete` inside the transaction sees the post-delete state
 ///   4. COMMIT
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<String>> {
     let tx = conn
         .unchecked_transaction()
@@ -335,10 +357,11 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
 
 // ─── Archive / prune ──────────────────────────────────────────────────────────
 
-/// Archive oldest non-sticky threads that exceed the board's max_threads limit.
+/// Archive oldest non-sticky threads that exceed the board's `max_threads` limit.
+///
 /// Archived threads are locked and marked read-only; their content remains
-/// accessible via /{board}/archive.
-/// Returns the count of threads archived (no file deletion occurs).
+/// accessible via `/{board}/archive`. Returns the count of threads archived
+/// (no file deletion occurs).
 ///
 /// FIX[HIGH-3]: The ID collection query is now inside the same transaction as
 /// the UPDATEs, closing the TOCTOU race where a concurrent bump could change
@@ -350,6 +373,9 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
 /// Note: LIMIT -1 OFFSET ? is a SQLite-specific idiom for "skip the first
 /// max rows, return everything else". It is not standard SQL. The LIMIT -1
 /// means "no upper bound on the result set after the offset is applied".
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -> Result<usize> {
     let tx = conn
         .unchecked_transaction()
@@ -381,10 +407,7 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
         .map(|(i, _)| format!("?{}", i + 1))
         .collect::<Vec<_>>()
         .join(", ");
-    let sql = format!(
-        "UPDATE threads SET archived = 1, locked = 1 WHERE id IN ({})",
-        placeholders
-    );
+    let sql = format!("UPDATE threads SET archived = 1, locked = 1 WHERE id IN ({placeholders})");
     tx.execute(&sql, rusqlite::params_from_iter(&ids))
         .context("Failed to bulk archive threads")?;
 
@@ -393,7 +416,7 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
     Ok(count)
 }
 
-/// Hard-delete oldest non-sticky, non-archived threads that exceed max_threads.
+/// Hard-delete oldest non-sticky, non-archived threads that exceed `max_threads`.
 /// Used when a board has archiving disabled — threads are permanently removed.
 ///
 /// Returns the on-disk paths that are now safe to delete (i.e. no longer
@@ -402,20 +425,23 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
 ///
 /// FIX[HIGH-3]: ID collection query is now inside the transaction (see above).
 ///
-/// FIX[HIGH-2]: paths_safe_to_delete is called INSIDE the transaction before
+/// FIX[HIGH-2]: `paths_safe_to_delete` is called INSIDE the transaction before
 /// COMMIT so it sees the post-delete state atomically. Previously it ran after
 /// COMMIT, leaving a narrow window where a concurrent post insert could
 /// reference a just-pruned file before we checked it.
 ///
-/// FIX[MED-5]: prepare_cached is now used OUTSIDE the loop (was documented as
-/// fixed but the prepare_cached call was still inside the loop).
+/// FIX[MED-5]: `prepare_cached` is now used OUTSIDE the loop (was documented as
+/// fixed but the `prepare_cached` call was still inside the loop).
 ///
 /// FIX[MED-13]: Replaced the N per-row DELETE loop with a single bulk DELETE.
 ///
 /// FIX[MED-17]: File-path collection is now a single JOIN query instead of
 /// one query per thread id.
 ///
-/// Note: LIMIT -1 OFFSET ? is a SQLite-specific idiom — see archive_old_threads.
+/// Note: LIMIT -1 OFFSET ? is a SQLite-specific idiom — see `archive_old_threads`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn prune_old_threads(
     conn: &rusqlite::Connection,
     board_id: i64,
@@ -454,7 +480,7 @@ pub fn prune_old_threads(
         .map(|(i, _)| format!("?{}", i + 1))
         .collect::<Vec<_>>()
         .join(", ");
-    let sql = format!("DELETE FROM threads WHERE id IN ({})", placeholders);
+    let sql = format!("DELETE FROM threads WHERE id IN ({placeholders})");
     tx.execute(&sql, rusqlite::params_from_iter(&ids))
         .context("Failed to bulk delete pruned threads")?;
 
@@ -470,6 +496,10 @@ pub fn prune_old_threads(
 
 // ─── Archive listing ──────────────────────────────────────────────────────────
 
+/// Get paginated archived threads for a board.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_archived_threads_for_board(
     conn: &rusqlite::Connection,
     board_id: i64,
@@ -491,6 +521,9 @@ pub fn get_archived_threads_for_board(
 }
 
 /// Count archived threads for a board (used for archive pagination).
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn count_archived_threads_for_board(conn: &rusqlite::Connection, board_id: i64) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COUNT(*) FROM threads WHERE board_id = ?1 AND archived = 1",

@@ -15,13 +15,14 @@
 //   forms.rs  — new_thread_form, reply_form
 
 use crate::config::CONFIG;
-use crate::models::*;
+use crate::models::{Board, Pagination};
 use crate::utils::sanitize::escape_html;
 use chrono::{TimeZone, Utc};
-use once_cell::sync::Lazy;
 use parking_lot::RwLock;
+use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 pub mod admin;
 pub mod board;
@@ -41,15 +42,16 @@ pub use thread::*;
 //  2. Arc<str> reduces the per-read allocation to a single atomic increment
 //     instead of a full String::clone(), which matters under high concurrency.
 
-static LIVE_SITE_NAME: Lazy<RwLock<Arc<str>>> =
-    Lazy::new(|| RwLock::new(Arc::from(CONFIG.forum_name.as_str())));
-static LIVE_SITE_SUBTITLE: Lazy<RwLock<Arc<str>>> =
-    Lazy::new(|| RwLock::new(Arc::from("select board to proceed")));
+static LIVE_SITE_NAME: LazyLock<RwLock<Arc<str>>> =
+    LazyLock::new(|| RwLock::new(Arc::from(CONFIG.forum_name.as_str())));
+static LIVE_SITE_SUBTITLE: LazyLock<RwLock<Arc<str>>> =
+    LazyLock::new(|| RwLock::new(Arc::from("select board to proceed")));
 
 /// In-memory cache for the admin-configured default theme (empty = terminal).
 /// Updated immediately when admin saves site settings so pages reflect the
 /// change without requiring a server restart or extra DB round-trip per request.
-static LIVE_DEFAULT_THEME: Lazy<RwLock<Arc<str>>> = Lazy::new(|| RwLock::new(Arc::from("")));
+static LIVE_DEFAULT_THEME: LazyLock<RwLock<Arc<str>>> =
+    LazyLock::new(|| RwLock::new(Arc::from("")));
 
 /// In-memory cache of the current board list, used by standalone pages (error
 /// pages, ban pages) that don't have DB access at render time.  Updated by
@@ -57,16 +59,16 @@ static LIVE_DEFAULT_THEME: Lazy<RwLock<Arc<str>>> = Lazy::new(|| RwLock::new(Arc
 ///
 /// Stores a snapshot; stale for at most one request after a board change, but
 /// that one request is itself the mutating POST which redirects anyway.
-static LIVE_BOARDS: Lazy<RwLock<Arc<Vec<crate::models::Board>>>> =
-    Lazy::new(|| RwLock::new(Arc::new(Vec::new())));
+static LIVE_BOARDS: LazyLock<RwLock<Arc<Vec<crate::models::Board>>>> =
+    LazyLock::new(|| RwLock::new(Arc::new(Vec::new())));
 
 /// Monotonically-increasing counter incremented every time the board list
-/// changes.  Included in thread-page ETags so that adding or deleting a board
+/// changes.  Included in thread-page `ETags` so that adding or deleting a board
 /// correctly invalidates cached thread pages (fixing stale nav bars).
 static LIVE_BOARDS_VERSION: AtomicU64 = AtomicU64::new(0);
 
 /// Replace the in-memory board list.  Call after any board create / delete /
-/// restore operation so that error_page() renders the correct top-bar links.
+/// restore operation so that `error_page()` renders the correct top-bar links.
 pub fn set_live_boards(boards: Vec<crate::models::Board>) {
     *LIVE_BOARDS.write() = Arc::new(boards);
     // Bump the version so thread-page ETags incorporate board-list changes.
@@ -76,18 +78,20 @@ pub fn set_live_boards(boards: Vec<crate::models::Board>) {
     LIVE_BOARDS_VERSION.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(super) fn live_boards() -> Arc<Vec<crate::models::Board>> {
+pub fn live_boards() -> Arc<Vec<crate::models::Board>> {
     Arc::clone(&*LIVE_BOARDS.read())
 }
 
-/// Public snapshot of the live board list.  Used by the thread-updates handler
-/// to include current nav HTML in polling responses so the JS can refresh the
-/// nav bar when boards change while a thread is open.
+/// Public snapshot of the live board list.
+///
+/// Used by the thread-updates handler to include current nav HTML in polling
+/// responses so the JS can refresh the nav bar when boards change while a
+/// thread is open.
 pub fn live_boards_snapshot() -> Arc<Vec<crate::models::Board>> {
     Arc::clone(&*LIVE_BOARDS.read())
 }
 
-/// Current board-list version.  Included in thread-page ETags so that board
+/// Current board-list version.  Included in thread-page `ETags` so that board
 /// mutations invalidate cached thread HTML (and thus stale nav bars).
 pub fn live_boards_version() -> u64 {
     LIVE_BOARDS_VERSION.load(Ordering::Relaxed)
@@ -119,16 +123,16 @@ pub fn set_live_default_theme(theme: &str) {
 }
 
 /// Read the current live default theme slug.
-pub(super) fn live_default_theme() -> Arc<str> {
+pub fn live_default_theme() -> Arc<str> {
     Arc::clone(&*LIVE_DEFAULT_THEME.read())
 }
 
 /// Read the current live site name.
-pub(super) fn live_site_name() -> Arc<str> {
+pub fn live_site_name() -> Arc<str> {
     Arc::clone(&*LIVE_SITE_NAME.read())
 }
 
-pub(super) fn live_site_subtitle() -> Arc<str> {
+pub fn live_site_subtitle() -> Arc<str> {
     Arc::clone(&*LIVE_SITE_SUBTITLE.read())
 }
 
@@ -136,19 +140,20 @@ pub(super) fn live_site_subtitle() -> Arc<str> {
 
 // FIX[NEW-H1]: All JavaScript has been moved to /static/main.js.
 // Kept as an empty constant to avoid touching every call-site.
-pub(super) const TOGGLE_SCRIPT: &str = "";
+pub const TOGGLE_SCRIPT: &str = "";
 
 // ─── Auto-compress modal ──────────────────────────────────────────────────────
 
 /// Returns the compress-modal overlay HTML.
 /// Dynamic size limits are embedded as data-max-image / data-max-video attributes
 /// on the modal element and read by main.js at runtime (FIX[NEW-H1]).
-pub(super) fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> String {
+#[must_use]
+pub fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> String {
     format!(
         r#"
 <!-- Auto-compress modal — shared by new-thread and reply forms on this page -->
 <div id="compress-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="compress-modal-title"
-     data-max-image="{max_image}" data-max-video="{max_video}">
+     data-max-image="{max_image_bytes}" data-max-video="{max_video_bytes}">
   <div class="compress-modal-box">
     <div class="compress-modal-title" id="compress-modal-title">&#9888; File Too Large</div>
     <div class="compress-modal-info" id="compress-info"></div>
@@ -165,8 +170,6 @@ pub(super) fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usi
     </div>
   </div>
 </div>"#,
-        max_image = max_image_bytes,
-        max_video = max_video_bytes,
     )
 }
 
@@ -174,7 +177,8 @@ pub(super) fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usi
 
 /// Returns the report overlay HTML. Injected once per thread page.
 // FIX[NEW-H1]: JS functions live in /static/main.js.
-pub(super) fn report_modal_script() -> &'static str {
+#[must_use]
+pub const fn report_modal_script() -> &'static str {
     r#"
 <div id="report-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true">
   <div class="compress-modal-box">
@@ -202,20 +206,23 @@ pub(super) fn report_modal_script() -> &'static str {
 // ─── Thread auto-update script ────────────────────────────────────────────────
 
 // FIX[NEW-H1]: All auto-update logic lives in /static/main.js.
-pub(super) fn thread_autoupdate_script() -> &'static str {
+#[must_use]
+pub const fn thread_autoupdate_script() -> &'static str {
     ""
 }
 
 // ─── Timestamp helpers ────────────────────────────────────────────────────────
 
-pub(super) fn fmt_ts(ts: i64) -> String {
+#[must_use]
+pub fn fmt_ts(ts: i64) -> String {
     match Utc.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         _ => "unknown".to_string(),
     }
 }
 
-pub(super) fn fmt_ts_short(ts: i64) -> String {
+#[must_use]
+pub fn fmt_ts_short(ts: i64) -> String {
     match Utc.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%m/%d/%y(%a)%H:%M:%S").to_string(),
         _ => "?".to_string(),
@@ -226,12 +233,13 @@ pub(super) fn fmt_ts_short(ts: i64) -> String {
 
 /// Scan raw post body text for a video embed URL and return its thumbnail URL.
 /// Used by catalog and board-index summaries when the OP has no uploaded file.
-pub(super) fn embed_thumb_from_body(body: &str) -> Option<String> {
+#[must_use]
+pub fn embed_thumb_from_body(body: &str) -> Option<String> {
     for token in body.split_whitespace() {
         let clean = token.trim_end_matches(['.', ',', ')', ';', '\'']);
         if let Some((embed_type, id)) = crate::utils::sanitize::extract_video_embed(clean) {
             if embed_type == "youtube" {
-                return Some(format!("https://img.youtube.com/vi/{}/mqdefault.jpg", id));
+                return Some(format!("https://img.youtube.com/vi/{id}/mqdefault.jpg"));
             }
         }
     }
@@ -240,7 +248,8 @@ pub(super) fn embed_thumb_from_body(body: &str) -> Option<String> {
 
 // ─── Pagination helper ────────────────────────────────────────────────────────
 
-pub(super) fn render_pagination(p: &Pagination, base_url: &str) -> String {
+#[must_use]
+pub fn render_pagination(p: &Pagination, base_url: &str) -> String {
     if p.total_pages() <= 1 {
         return String::new();
     }
@@ -252,21 +261,23 @@ pub(super) fn render_pagination(p: &Pagination, base_url: &str) -> String {
     let mut html = String::from(r#"<div class="pagination">"#);
 
     if p.has_prev() {
-        html.push_str(&format!(
+        let _ = write!(
+            html,
             r#"<a href="{}{sep}page={}">[prev]</a> "#,
             safe_base,
             p.page - 1,
             sep = sep
-        ));
+        );
     }
-    html.push_str(&format!("page {} / {}", p.page, p.total_pages()));
+    let _ = write!(html, "page {} / {}", p.page, p.total_pages());
     if p.has_next() {
-        html.push_str(&format!(
+        let _ = write!(
+            html,
             r#" <a href="{}{sep}page={}">[next]</a>"#,
             safe_base,
             p.page + 1,
             sep = sep
-        ));
+        );
     }
 
     html.push_str("</div>");
@@ -275,15 +286,18 @@ pub(super) fn render_pagination(p: &Pagination, base_url: &str) -> String {
 
 // FIX[LOW-9]: Encode each UTF-8 *byte*, not each Unicode codepoint.
 // RFC 3986 percent-encoding operates on bytes.
-pub(super) fn urlencoding_simple(s: &str) -> String {
+#[must_use]
+pub fn urlencoding_simple(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for &byte in s.as_bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
+                out.push(byte as char);
             }
             b' ' => out.push('+'),
-            b => out.push_str(&format!("%{:02X}", b)),
+            b => {
+                let _ = write!(out, "%{b:02X}");
+            }
         }
     }
     out
@@ -291,7 +305,7 @@ pub(super) fn urlencoding_simple(s: &str) -> String {
 
 // ─── Base layout ─────────────────────────────────────────────────────────────
 
-pub(super) fn base_layout(
+pub fn base_layout(
     title: &str,
     board_short: Option<&str>,
     body: &str,
@@ -312,10 +326,10 @@ pub(super) fn base_layout(
     let board_links = if inner_links.is_empty() {
         String::new()
     } else {
-        format!("[ {} ]", inner_links)
+        format!("[ {inner_links} ]")
     };
 
-    let search_bar = if let Some(b) = board_short {
+    let search_bar = board_short.map_or_else(String::new, |b| {
         format!(
             r#"<form class="search-form" method="GET" action="/{b}/search">
 <input type="text" name="q" placeholder="search /{b}/…" maxlength="64">
@@ -323,9 +337,7 @@ pub(super) fn base_layout(
 </form>"#,
             b = escape_html(b)
         )
-    } else {
-        String::new()
-    };
+    });
 
     let default_theme = live_default_theme();
     // Only inject the attribute when a non-default theme is configured — no
@@ -413,6 +425,7 @@ pub(super) fn base_layout(
 // FIX[M-T1]: ban_page must accept a csrf_token so the appeal form works.
 // Previously the field was always empty and every appeal was rejected by the
 // server's CSRF check, making the appeal feature completely non-functional.
+#[must_use]
 pub fn ban_page(reason: &str, csrf_token: &str) -> String {
     let default_theme = live_default_theme();
     let default_theme_attr = if !default_theme.is_empty() && &*default_theme != "terminal" {
@@ -456,6 +469,7 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
     )
 }
 
+#[must_use]
 pub fn error_page(code: u16, message: &str) -> String {
     // Use base_layout so the error page has the same header, theme picker,
     // and board navigation as every other page.  live_boards() is always

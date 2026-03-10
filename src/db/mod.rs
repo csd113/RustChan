@@ -67,7 +67,7 @@ pub type DbPool = Pool<SqliteConnectionManager>;
 
 /// Data needed to insert a new post.
 /// `Clone` is derived so `create_thread_with_op` can rebind fields without
-/// requiring the caller to construct two separate NewPost values.
+/// requiring the caller to construct two separate `NewPost` values.
 #[derive(Clone)]
 pub struct NewPost {
     pub thread_id: i64,
@@ -106,9 +106,12 @@ pub struct CachedFile {
 /// Create the connection pool and run schema migrations.
 ///
 /// Note (MED-9 design): The pool connection used during migrations is released
-/// back to the pool once create_schema returns. For large migrations this means
+/// back to the pool once `create_schema` returns. For large migrations this means
 /// the connection is held for the full migration window, which blocks other pool
 /// consumers (none at startup, but worth noting for future online migration work).
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn init_pool() -> Result<DbPool> {
     let db_path = &CONFIG.database_path;
 
@@ -155,6 +158,7 @@ pub fn init_pool() -> Result<DbPool> {
 
 // ─── Schema creation & migrations ────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
     // FIX[MED-6]: Use execute_batch for all DDL so it runs in a single
     // implicit transaction and is idempotent on re-run.
@@ -428,17 +432,14 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         }
         let apply_result = conn.execute_batch(sql);
         match apply_result {
-            Ok(_) => {
-                tracing::debug!("Applied migration v{}", version);
+            Ok(()) => {
+                tracing::debug!("Applied migration v{version}");
             }
             Err(rusqlite::Error::SqliteFailure(ref e, ref msg))
                 if e.code == rusqlite::ErrorCode::Unknown
-                    && msg
-                        .as_deref()
-                        .map(|m| {
-                            m.contains("duplicate column name") || m.contains("already exists")
-                        })
-                        .unwrap_or(false) =>
+                    && msg.as_deref().is_some_and(|m| {
+                        m.contains("duplicate column name") || m.contains("already exists")
+                    }) =>
             {
                 // Idempotent: column already added or index already exists.
                 // Only reached for ALTER TABLE … ADD COLUMN (duplicate column)
@@ -449,17 +450,11 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
                 // FIX[LOW-10]: Raised from DEBUG to WARN so operators notice
                 // when a migration was previously applied outside the normal
                 // startup path.
-                tracing::warn!(
-                    "Migration v{} already applied (idempotent), skipping",
-                    version
-                );
+                tracing::warn!("Migration v{version} already applied (idempotent), skipping");
             }
             Err(e) => {
                 return Err(anyhow::anyhow!(
-                    "Migration v{} failed: {} — SQL: {}",
-                    version,
-                    e,
-                    sql
+                    "Migration v{version} failed: {e} — SQL: {sql}"
                 ));
             }
         }
@@ -472,12 +467,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             "UPDATE schema_version SET version = ?1",
             rusqlite::params![version],
         )
-        .with_context(|| {
-            format!(
-                "Failed to update schema_version after migration v{}",
-                version
-            )
-        })?;
+        .with_context(|| format!("Failed to update schema_version after migration v{version}"))?;
     }
 
     // ─── One-time media_type backfill ────────────────────────────────────────
@@ -529,7 +519,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 /// return only those paths that are no longer referenced by *any* remaining post.
 ///
 /// This guards against the deduplication cascade-delete bug: when a file is
-/// reposted, both posts share the same file_path / thumb_path on disk. Without
+/// reposted, both posts share the same `file_path` / `thumb_path` on disk. Without
 /// this guard, deleting any single post unconditionally deletes the shared file,
 /// corrupting every other post that references it.
 ///
@@ -538,11 +528,11 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 /// the same transaction as their DELETE so no concurrent insert can slip in
 /// between the delete and the reference check.
 ///
-/// Also purges the corresponding file_hashes rows for files that have no
+/// Also purges the corresponding `file_hashes` rows for files that have no
 /// remaining references, so the dedup table never points at deleted files.
 ///
-/// Note (MED-4 / file_hashes deletion safety): When deleting a file_hashes
-/// row, we verify that neither the file_path nor the thumb_path in that row
+/// Note (MED-4 / `file_hashes` deletion safety): When deleting a `file_hashes`
+/// row, we verify that neither the `file_path` nor the `thumb_path` in that row
 /// is still referenced by any post before removing it. This prevents removing
 /// a dedup entry whose partner path is still live.
 ///
@@ -556,11 +546,8 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 /// with a single batch query using a VALUES clause. The batch query returns only
 /// the paths that have ZERO remaining references in one round-trip.
 ///
-/// FIX[LOW-14]: Replaced sort+dedup with a HashSet for O(1) deduplication.
-pub(super) fn paths_safe_to_delete(
-    conn: &rusqlite::Connection,
-    candidates: Vec<String>,
-) -> Vec<String> {
+/// FIX[LOW-14]: Replaced sort+dedup with a `HashSet` for O(1) deduplication.
+pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>) -> Vec<String> {
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -592,22 +579,20 @@ pub(super) fn paths_safe_to_delete(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT v.p FROM (VALUES {}) AS v(p)
+        "SELECT v.p FROM (VALUES {placeholders}) AS v(p)
          WHERE NOT EXISTS (
              SELECT 1 FROM posts
              WHERE file_path = v.p OR thumb_path = v.p OR audio_file_path = v.p
-         )",
-        placeholders
+         )"
     );
 
-    let mut stmt = match conn.prepare(&sql) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(), // on prepare error, assume all still in use — safer to leak
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new(); // on prepare error, assume all still in use — safer to leak
     };
 
     let safe: Vec<String> = match stmt.query_map(rusqlite::params_from_iter(&unique), |r| r.get(0))
     {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
         Err(_) => return Vec::new(),
     };
 

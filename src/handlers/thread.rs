@@ -31,6 +31,7 @@ use tracing::info;
 
 // ─── GET /:board/thread/:id ───────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 pub async fn view_thread(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
@@ -49,14 +50,13 @@ pub async fn view_thread(
 
             let is_admin = jar_session
                 .as_deref()
-                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
-                .unwrap_or(false);
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
 
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
 
             let thread = db::get_thread(&conn, thread_id)?
-                .ok_or_else(|| AppError::NotFound(format!("Thread {} not found", thread_id)))?;
+                .ok_or_else(|| AppError::NotFound(format!("Thread {thread_id} not found")))?;
 
             if thread.board_id != board.id {
                 return Err(AppError::NotFound("Thread not found in this board.".into()));
@@ -68,14 +68,14 @@ pub async fn view_thread(
             // so the nav bar always reflects the current board list rather than
             // showing stale/deleted boards until the thread receives a reply.
             let boards_ver = crate::templates::live_boards_version();
-            let etag = format!("\"{}-b{}\"", thread.bumped_at, boards_ver);
+            let etag = format!("\"{}-b{boards_ver}\"", thread.bumped_at);
 
             let posts = db::get_posts_for_thread(&conn, thread_id)?;
             let all_boards = db::get_all_boards(&conn)?;
 
             let ip_hash =
                 crate::utils::crypto::hash_ip(&client_ip, &crate::config::CONFIG.cookie_secret);
-            let poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)?;
+            let thread_poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)?;
 
             let collapse_greentext = db::get_collapse_greentext(&conn);
             let html = crate::templates::thread_page(
@@ -85,7 +85,7 @@ pub async fn view_thread(
                 &csrf_clone,
                 &all_boards,
                 is_admin,
-                poll.as_ref(),
+                thread_poll.as_ref(),
                 None,
                 collapse_greentext,
             );
@@ -124,6 +124,7 @@ pub async fn view_thread(
 
 // ─── POST /:board/thread/:id — post reply ────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 pub async fn post_reply(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
@@ -195,8 +196,7 @@ pub async fn post_reply(
             // Verify admin session first; admins bypass the cooldown entirely.
             let is_admin = admin_session_id
                 .as_deref()
-                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
-                .unwrap_or(false);
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
 
             // post_cooldown_secs = 0 means no cooldown at all on this board.
             if board.post_cooldown_secs > 0 && !is_admin {
@@ -204,11 +204,7 @@ pub async fn post_reply(
                 if let Some(secs) = elapsed {
                     let remaining = board.post_cooldown_secs.saturating_sub(secs);
                     if remaining > 0 {
-                        return Err(AppError::BadRequest(format!(
-                            "Please wait {} more second{} before posting again.",
-                            remaining,
-                            if remaining == 1 { "" } else { "s" }
-                        )));
+                        return Err(AppError::BadRequest(format!("Please wait {remaining} more second{} before posting again.", if remaining == 1 { "" } else { "s" })));
                     }
                 }
             }
@@ -324,14 +320,8 @@ pub async fn post_reply(
                 &board.short_name,
             );
 
-            info!(
-                "Reply {} posted in thread {} on /{}/",
-                post_id, thread_id, board.short_name
-            );
-            Ok(format!(
-                "/{}/thread/{}#p{}",
-                board.short_name, thread_id, post_id
-            ))
+            info!("Reply {post_id} posted in thread {thread_id} on /{}/", board.short_name);
+            Ok(format!("/{}/thread/{thread_id}#p{post_id}", board.short_name))
         }
     })
     .await
@@ -425,7 +415,7 @@ pub async fn edit_post_get(
 
 #[derive(Deserialize)]
 pub struct EditForm {
-    pub _csrf: Option<String>,
+    pub csrf: Option<String>,
     pub deletion_token: String,
     pub body: String,
 }
@@ -445,7 +435,7 @@ pub async fn edit_post_post(
     Form(form): Form<EditForm>,
 ) -> Result<Response> {
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form._csrf.as_deref().unwrap_or("")) {
+    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
@@ -525,10 +515,10 @@ pub async fn edit_post_post(
                 return Ok(EditOutcome::ErrorPage(html));
             }
 
-            info!("Post {} edited on /{}/", post_id, board.short_name);
+            info!("Post {post_id} edited on /{}/", board.short_name);
             Ok(EditOutcome::Redirect(format!(
-                "/{}/thread/{}#p{}",
-                board.short_name, post.thread_id, post_id
+                "/{}/thread/{}#p{post_id}",
+                board.short_name, post.thread_id
             )))
         }
     })
@@ -545,7 +535,7 @@ pub async fn edit_post_post(
 
 #[derive(Deserialize)]
 pub struct VoteForm {
-    pub _csrf: Option<String>,
+    pub csrf: Option<String>,
     pub option_id: i64,
 }
 
@@ -556,7 +546,7 @@ pub async fn vote_handler(
     Form(form): Form<VoteForm>,
 ) -> Result<Response> {
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form._csrf.as_deref().unwrap_or("")) {
+    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
@@ -600,12 +590,10 @@ pub async fn vote_handler(
 
             db::cast_vote(&conn, poll_id, option_id, &ip_hash)?;
             info!(
-                "Vote cast on poll {} option {} by {}",
-                poll_id,
-                option_id,
+                "Vote cast on poll {poll_id} option {option_id} by {}",
                 &ip_hash[..8]
             );
-            Ok(format!("/{}/thread/{}#poll", board_short, thread_id))
+            Ok(format!("/{board_short}/thread/{thread_id}#poll"))
         }
     })
     .await
@@ -671,10 +659,13 @@ pub async fn thread_updates(
                         post,
                         &board_short,
                         "",
-                        false,
-                        false,
-                        true,
-                        0, // no edit link in auto-appended HTML; reload restores it
+                        crate::templates::thread::RenderPostOpts {
+                            show_delete: false,
+                            is_admin: false,
+                            show_media: true,
+                            allow_editing: false, // no edit link in auto-appended HTML; reload restores it
+                        },
+                        0,
                     ));
                 }
 
@@ -710,7 +701,7 @@ pub async fn thread_updates(
     let nav_html = if nav_inner.is_empty() {
         String::new()
     } else {
-        format!("[ {} ]", nav_inner)
+        format!("[ {nav_inner} ]")
     };
 
     // Build a JSON envelope with new-post HTML plus current thread state.

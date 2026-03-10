@@ -21,7 +21,7 @@
 //   LOW-12   .context() added on key operations
 //   LOW-13   Note: unixepoch() requires SQLite ≥ 3.38.0 (2022-02-22)
 
-use crate::models::*;
+use crate::models::Board;
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 
@@ -54,8 +54,11 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
 
 /// Read a site-wide setting by key. Returns None if the key has never been set.
 ///
-/// FIX[MED-9]: Switched to prepare_cached — convenience helpers (get_site_name,
-/// get_site_subtitle, etc.) call this on every page render.
+/// FIX[MED-9]: Switched to `prepare_cached` — convenience helpers (`get_site_name`,
+/// `get_site_subtitle`, etc.) call this on every page render.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_site_setting(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare_cached("SELECT value FROM site_settings WHERE key = ?1")?;
     let result = stmt
@@ -65,6 +68,9 @@ pub fn get_site_setting(conn: &rusqlite::Connection, key: &str) -> Result<Option
 }
 
 /// Write (upsert) a site-wide setting.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn set_site_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
@@ -75,7 +81,7 @@ pub fn set_site_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> 
     Ok(())
 }
 
-/// Returns the admin-configured site name, or falls back to CONFIG.forum_name.
+/// Returns the admin-configured site name, or falls back to `CONFIG.forum_name`.
 pub fn get_site_name(conn: &rusqlite::Connection) -> String {
     get_site_setting(conn, "site_name")
         .ok()
@@ -105,12 +111,13 @@ pub fn get_collapse_greentext(conn: &rusqlite::Connection) -> bool {
     get_site_setting(conn, "collapse_greentext")
         .ok()
         .flatten()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 // ─── Board queries ────────────────────────────────────────────────────────────
 
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
@@ -125,10 +132,13 @@ pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     Ok(boards)
 }
 
-/// Like get_all_boards but also returns live thread count for each board.
+/// Like `get_all_boards` but also returns live thread count for each board.
 ///
 /// FIX[HIGH-1]: Previously issued one COUNT(*) query per board (N+1). Replaced
 /// with a single LEFT JOIN query that computes all counts in one pass.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_all_boards_with_stats(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<crate::models::BoardStats>> {
@@ -156,6 +166,8 @@ pub fn get_all_boards_with_stats(
     Ok(out)
 }
 
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Option<Board>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
@@ -167,7 +179,10 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
     Ok(stmt.query_row(params![short], map_board).optional()?)
 }
 
-/// FIX[MED-4]: INSERT … RETURNING id replaces execute + last_insert_rowid().
+/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn create_board(
     conn: &rusqlite::Connection,
     short: &str,
@@ -180,7 +195,7 @@ pub fn create_board(
         .query_row(
             "INSERT INTO boards (short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
              VALUES (?1, ?2, ?3, ?4, 1, 1, 0) RETURNING id",
-            params![short, name, description, nsfw as i32],
+            params![short, name, description, i32::from(nsfw)],
             |r| r.get(0),
         )
         .context("Failed to create board")?;
@@ -190,8 +205,11 @@ pub fn create_board(
 /// Create a board with explicit per-media-type toggles.
 /// Used by the CLI `--no-images / --no-videos / --no-audio` flags.
 ///
-/// FIX[MED-4]: INSERT … RETURNING id replaces execute + last_insert_rowid().
-#[allow(clippy::too_many_arguments)]
+/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub fn create_board_with_media_flags(
     conn: &rusqlite::Connection,
     short: &str,
@@ -207,8 +225,8 @@ pub fn create_board_with_media_flags(
             "INSERT INTO boards (short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id",
             params![
-                short, name, description, nsfw as i32,
-                allow_images as i32, allow_video as i32, allow_audio as i32,
+                short, name, description, i32::from(nsfw),
+                i32::from(allow_images), i32::from(allow_video), i32::from(allow_audio),
             ],
             |r| r.get(0),
         )
@@ -218,6 +236,9 @@ pub fn create_board_with_media_flags(
 
 /// FIX[MED-5]: Added rows-affected check — silently succeeding when the board
 /// id doesn't exist made update errors invisible.
+///
+/// # Errors
+/// Returns an error if the database operation fails or the board id is not found.
 #[allow(dead_code)]
 pub fn update_board(
     conn: &rusqlite::Connection,
@@ -229,11 +250,11 @@ pub fn update_board(
     let n = conn
         .execute(
             "UPDATE boards SET name=?1, description=?2, nsfw=?3 WHERE id=?4",
-            params![name, description, nsfw as i32, id],
+            params![name, description, i32::from(nsfw), id],
         )
         .context("Failed to update board")?;
     if n == 0 {
-        anyhow::bail!("Board id {} not found", id);
+        anyhow::bail!("Board id {id} not found");
     }
     Ok(())
 }
@@ -241,7 +262,10 @@ pub fn update_board(
 /// Update all per-board settings from the admin panel.
 ///
 /// FIX[MED-5]: Added rows-affected check.
-#[allow(clippy::too_many_arguments)]
+///
+/// # Errors
+/// Returns an error if the database operation fails or the board id is not found.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub fn update_board_settings(
     conn: &rusqlite::Connection,
     id: i64,
@@ -272,25 +296,25 @@ pub fn update_board_settings(
             params![
                 name,
                 description,
-                nsfw as i32,
+                i32::from(nsfw),
                 bump_limit,
                 max_threads,
-                allow_images as i32,
-                allow_video as i32,
-                allow_audio as i32,
-                allow_tripcodes as i32,
+                i32::from(allow_images),
+                i32::from(allow_video),
+                i32::from(allow_audio),
+                i32::from(allow_tripcodes),
                 edit_window_secs,
-                allow_editing as i32,
-                allow_archive as i32,
-                allow_video_embeds as i32,
-                allow_captcha as i32,
+                i32::from(allow_editing),
+                i32::from(allow_archive),
+                i32::from(allow_video_embeds),
+                i32::from(allow_captcha),
                 post_cooldown_secs,
                 id,
             ],
         )
         .context("Failed to update board settings")?;
     if n == 0 {
-        anyhow::bail!("Board id {} not found", id);
+        anyhow::bail!("Board id {id} not found");
     }
     Ok(())
 }
@@ -298,10 +322,13 @@ pub fn update_board_settings(
 /// Returns how many seconds have elapsed since `ip_hash` last posted on `board_id`.
 /// Returns None if they have never posted on this board.
 ///
-/// FIX[MED-10]: Switched to prepare_cached — this is on the hot path (called
+/// FIX[MED-10]: Switched to `prepare_cached` — this is on the hot path (called
 /// for every post submission when a cooldown is configured).
 ///
-/// Note: unixepoch() requires SQLite ≥ 3.38.0 (2022-02-22).
+/// Note: `unixepoch()` requires `SQLite` ≥ 3.38.0 (2022-02-22).
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_seconds_since_last_post(
     conn: &rusqlite::Connection,
     board_id: i64,
@@ -325,11 +352,14 @@ pub fn get_seconds_since_last_post(
 /// guard, so a concurrent insert could race between the SELECT and the DELETE.
 ///
 /// FIX[MED-7]: Replaced the three-way join (posts → threads → boards) with a
-/// direct query on posts.board_id. Posts already carry board_id so the threads
+/// direct query on `posts.board_id`. Posts already carry `board_id` so the threads
 /// join was both unnecessary and could hide orphaned posts.
 ///
 /// FIX[MED-8]: Added an affected-rows check so callers see an error when
 /// trying to delete a board that doesn't exist.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>> {
     let tx = conn
         .unchecked_transaction()
@@ -367,7 +397,7 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>>
         .context("Failed to delete board")?;
     if n == 0 {
         tx.rollback().ok();
-        anyhow::bail!("Board id {} not found", id);
+        anyhow::bail!("Board id {id} not found");
     }
 
     // paths_safe_to_delete runs inside the transaction so it sees the post-delete
@@ -385,12 +415,15 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>>
 /// Gather aggregate site-wide statistics for the home page.
 ///
 /// FIX[HIGH-2]: Previously issued five separate full-table scans (one COUNT(*)
-/// overall, three filtered COUNTs by media_type, one SUM). All five are now
+/// overall, three filtered COUNTs by `media_type`, one SUM). All five are now
 /// computed in a single aggregate pass over the posts table.
 ///
-/// FIX[HIGH-3]: active_bytes now sums both file_size and audio_file_size so
+/// FIX[HIGH-3]: `active_bytes` now sums both `file_size` and `audio_file_size` so
 /// image+audio combo posts are fully accounted for. The previous query only
-/// summed file_size and silently under-reported disk usage.
+/// summed `file_size` and silently under-reported disk usage.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::SiteStats> {
     conn.query_row(
         "SELECT

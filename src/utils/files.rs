@@ -6,7 +6,9 @@
 //   3. Validate file size using per-type limits
 //   4. Generate random filename (UUID-based, prevents path traversal)
 //   5. If JPEG: re-encode through the `image` crate to strip all EXIF metadata
-//   6. If video and ffmpeg is available: transcode MP4 → WebM (VP9/Opus)
+//      NOTE: EXIF Orientation tag is read from the ORIGINAL bytes BEFORE
+//      stripping so that thumbnails are still rendered upright.
+//   6. If video and ffmpeg is available: mark pending for background transcoding
 //   7. Write to boards directory
 //   8. Generate thumbnail / placeholder
 //      • Images  → scaled with the `image` crate
@@ -24,10 +26,11 @@
 //   • We keep the original filename only for display purposes.
 //   • ffmpeg is called with an explicit argument array (not via shell).
 //   • Audio files that fail magic-byte detection are rejected.
+//   • delete_file validates the relative path to prevent directory traversal.
 
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, GenericImageView, ImageFormat};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 // ─── Output type ─────────────────────────────────────────────────────────────
@@ -43,13 +46,13 @@ pub struct UploadedFile {
     pub mime_type: String,
     /// File size in bytes
     pub file_size: i64,
-    /// Explicit media category derived from mime_type
+    /// Explicit media category derived from `mime_type`
     pub media_type: crate::models::MediaType,
     /// True when the file needs async background processing:
-    ///   • Video (MP4) → VideoTranscode job (MP4 → WebM via ffmpeg)
-    ///   • Audio       → AudioWaveform job  (waveform PNG via ffmpeg)
+    ///   • Video (MP4) → `VideoTranscode` job (MP4 → `WebM` via ffmpeg)
+    ///   • Audio       → `AudioWaveform` job  (waveform PNG via ffmpeg)
     /// The handler must enqueue the appropriate Job after the post is inserted
-    /// so that the post_id is available. Always false for cached/dedup hits.
+    /// so that the `post_id` is available. Always false for cached/dedup hits.
     pub processing_pending: bool,
 }
 
@@ -60,11 +63,13 @@ pub struct UploadedFile {
 ///
 /// We check magic bytes rather than trusting the user-supplied Content-Type
 /// header.  This prevents executables disguised as media from being served.
+///
+/// # Errors
+/// Returns an error if the data is empty or the file type is not on the allowlist.
 pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     if data.is_empty() {
         return Err(anyhow::anyhow!("File is empty."));
     }
-    // Use .get() for all slice access — no panics, bounds proven by the len checks.
     let header = data.get(..data.len().min(12)).unwrap_or(data);
 
     // ── MP4 / M4A disambiguation ──────────────────────────────────────────────
@@ -79,15 +84,13 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
 
     // ── RIFF container — disambiguate WebP vs WAV ────────────────────────────
     if header.starts_with(b"RIFF") {
-        match data.get(8..12) {
-            Some(b"WEBP") => return Ok("image/webp"),
-            Some(b"WAVE") => return Ok("audio/wav"),
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "RIFF container with unknown subtype. Accepted: WebP, WAV"
-                ))
-            }
-        }
+        return match data.get(8..12) {
+            Some(b"WEBP") => Ok("image/webp"),
+            Some(b"WAVE") => Ok("audio/wav"),
+            _ => Err(anyhow::anyhow!(
+                "RIFF container with unknown subtype. Accepted: WebP, WAV"
+            )),
+        };
     }
 
     // ── EBML container — distinguish WebM (video or audio-only) from MKV ────
@@ -119,7 +122,6 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     if data.get(..4) == Some(b"\x1a\x45\xdf\xa3") {
         // Scan first 64 bytes for DocType element (ID = 0x42 0x82).
         let scan_len = data.len().min(64);
-        // SAFETY: scan_len = data.len().min(64) so scan_len <= data.len() always holds.
         let scan = data.get(..scan_len).unwrap_or(data);
         let mut pos = 4usize;
         let mut found_doctype: Option<&[u8]> = None;
@@ -128,8 +130,7 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
         while let Some([b0, b1, b2, ..]) = scan.get(pos..) {
             if *b0 == 0x42 && *b1 == 0x82 {
                 // Next byte is the 1-byte DataSize (short form, bit 7 set -> size = byte & 0x7F).
-                let size_byte = *b2;
-                let value_len = (size_byte & 0x7f) as usize;
+                let value_len = (*b2 & 0x7f) as usize;
                 let value_start = pos + 3;
                 if value_start + value_len <= scan.len() {
                     found_doctype = scan.get(value_start..value_start + value_len);
@@ -160,15 +161,9 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
         return Ok("image/gif");
     }
 
-    // ── Audio formats ─────────────────────────────────────────────────────────
+    // ── Audio: ID3-tagged MP3 ─────────────────────────────────────────────────
     if header.starts_with(b"ID3") {
         return Ok("audio/mpeg");
-    }
-    // Raw MP3 frame sync (no ID3 header): FF FB/F3/F2
-    if let (Some(&0xff), Some(&b1)) = (data.first(), data.get(1)) {
-        if b1 == 0xfb || b1 == 0xf3 || b1 == 0xf2 {
-            return Ok("audio/mpeg");
-        }
     }
     if header.starts_with(b"OggS") {
         return Ok("audio/ogg");
@@ -176,9 +171,19 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     if header.starts_with(b"fLaC") {
         return Ok("audio/flac");
     }
-    // AAC ADTS sync word: FF F0–FE (not FF FF, and not the MP3 bytes above)
+
+    // ── Audio: sync-word detection (0xFF prefix) ──────────────────────────────
+    // MP3 and AAC ADTS both start with 0xFF.  Merge both checks into a single
+    // `if let` block to avoid redundant pattern-matching overhead and clearly
+    // express that the two detections are mutually exclusive branches.
     if let (Some(&0xff), Some(&b1)) = (data.first(), data.get(1)) {
-        if (b1 & 0xf0 == 0xf0) && b1 != 0xff {
+        // Raw MP3 frame sync: FF FB / FF F3 / FF F2
+        if b1 == 0xfb || b1 == 0xf3 || b1 == 0xf2 {
+            return Ok("audio/mpeg");
+        }
+        // AAC ADTS sync word: FF F0–FF FE (high nibble = 0xF, not 0xFF itself).
+        // The MP3 bytes above are already handled, so only true ADTS words reach here.
+        if b1 & 0xf0 == 0xf0 && b1 != 0xff {
             return Ok("audio/aac");
         }
     }
@@ -198,14 +203,14 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
 /// Requiring 2× headroom means a crash mid-rename still leaves the original
 /// temp file and will not fill the volume to 100 %.
 #[cfg(unix)]
-fn check_disk_space(dir: &std::path::Path, needed_bytes: usize) -> Result<()> {
+fn check_disk_space(dir: &Path, needed_bytes: usize) -> Result<()> {
     unsafe {
         let dir_bytes = dir.to_string_lossy();
         if let Ok(path_cstr) = std::ffi::CString::new(dir_bytes.as_bytes()) {
             let mut stat: libc::statvfs = std::mem::zeroed();
-            if libc::statvfs(path_cstr.as_ptr(), &mut stat) == 0 {
+            if libc::statvfs(path_cstr.as_ptr(), &raw mut stat) == 0 {
                 #[allow(clippy::unnecessary_cast)]
-                let free_bytes = (stat.f_bavail as u64) * (stat.f_frsize as u64);
+                let free_bytes = u64::from(stat.f_bavail) * stat.f_frsize;
                 let needed = (needed_bytes as u64).saturating_mul(2);
                 if free_bytes < needed {
                     return Err(anyhow::anyhow!(
@@ -221,7 +226,7 @@ fn check_disk_space(dir: &std::path::Path, needed_bytes: usize) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn check_disk_space(_dir: &std::path::Path, _needed_bytes: usize) -> Result<()> {
+fn check_disk_space(_dir: &Path, _needed_bytes: usize) -> Result<()> {
     Ok(())
 }
 
@@ -233,11 +238,13 @@ fn check_disk_space(_dir: &std::path::Path, _needed_bytes: usize) -> Result<()> 
 /// under `{boards_dir}/{board_short}/thumbs/`.
 /// The returned paths are relative to `boards_dir` (e.g. `"b/abc123.webm"`).
 ///
-/// When `ffmpeg_available` is true, uploaded MP4 files are transcoded to WebM
-/// (VP9 video + Opus audio) before being saved.  Already-WebM uploads are kept
-/// as-is.  If transcoding fails, the original file is saved as a fallback.
-/// Audio files never require ffmpeg; they always receive an SVG placeholder.
-#[allow(clippy::too_many_arguments)]
+/// When `ffmpeg_available` is true, uploaded MP4/WebM files are flagged for
+/// background transcoding.  Audio files receive an SVG placeholder immediately;
+/// the waveform PNG is generated by the background worker.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// # Errors
+/// Returns an error if the file type is unsupported, too large, disk space is
+/// insufficient, or any I/O operation fails.
 pub fn save_upload(
     data: &[u8],
     original_filename: &str,
@@ -256,7 +263,7 @@ pub fn save_upload(
     // Detect MIME type first so we can apply the correct size limit.
     let mime_type = detect_mime_type(data)?;
     let media_type = crate::models::MediaType::from_mime(mime_type)
-        .ok_or_else(|| anyhow::anyhow!("Could not classify detected MIME type: {}", mime_type))?;
+        .ok_or_else(|| anyhow::anyhow!("Could not classify detected MIME type: {mime_type}"))?;
 
     let max_size = match media_type {
         crate::models::MediaType::Video => max_video_size,
@@ -276,7 +283,20 @@ pub fn save_upload(
         ));
     }
 
-    let file_id = Uuid::new_v4().to_string().replace('-', "");
+    // FIX[BUG]: Read the EXIF orientation from the ORIGINAL bytes BEFORE EXIF
+    // stripping.  strip_jpeg_exif() re-encodes the JPEG, discarding all metadata
+    // including the Orientation tag.  If we read orientation from the stripped
+    // bytes (as the previous code did) we always get orientation=1 (no rotation)
+    // and phone photos appear sideways in thumbnails.
+    let jpeg_orientation = if mime_type == "image/jpeg" {
+        read_exif_orientation(data)
+    } else {
+        1
+    };
+
+    // Use `Uuid::simple()` to produce a 32-char hex string directly, avoiding the
+    // intermediate hyphenated string and the extra allocation of `.replace('-', "")`.
+    let file_id = Uuid::new_v4().simple().to_string();
 
     // ── JPEG EXIF stripping ───────────────────────────────────────────────────
     // Re-encoding a JPEG through the `image` crate produces a clean output with
@@ -304,11 +324,7 @@ pub fn save_upload(
     };
 
     // Use the EXIF-stripped bytes when available, otherwise the original.
-    let data: &[u8] = if let Some(ref stripped) = stripped_jpeg {
-        stripped.as_slice()
-    } else {
-        data
-    };
+    let data: &[u8] = stripped_jpeg.as_deref().unwrap_or(data);
 
     // ── Async processing flag ─────────────────────────────────────────────────
     // Heavy CPU work (MP4→WebM transcoding, audio waveform) is deferred to the
@@ -317,17 +333,17 @@ pub fn save_upload(
     //   • Audio       + ffmpeg → use SVG placeholder now; worker adds PNG waveform.
     // The handler enqueues the correct Job after db::create_post gives it post_id.
     let processing_pending = ffmpeg_available
-        && match media_type {
+        && matches!(
+            media_type,
             // MP4 always needs transcoding to WebM.
             // WebM is flagged pending so the worker can probe the codec and
             // transcode AV1 → VP9 when necessary.  VP8/VP9 WebM files are
             // detected and skipped cheaply inside the worker.
-            crate::models::MediaType::Video => {
-                mime_type == "video/mp4" || mime_type == "video/webm"
-            }
-            crate::models::MediaType::Audio => true,
-            _ => false,
-        };
+            crate::models::MediaType::Video | crate::models::MediaType::Audio
+        )
+        && (media_type != crate::models::MediaType::Video
+            || mime_type == "video/mp4"
+            || mime_type == "video/webm");
 
     // Always save the original bytes — no inline transcoding.
     let (final_data, final_mime): (&[u8], &'static str) = (data, mime_type);
@@ -336,18 +352,18 @@ pub fn save_upload(
     let file_size = i64::try_from(final_data.len()).context("File size overflows i64")?;
 
     let ext = mime_to_ext(final_mime);
-    let filename = format!("{}.{}", file_id, ext);
+    let filename = format!("{file_id}.{ext}");
 
     // Ensure per-board directories exist: boards_dir/{board_short}/ and thumbs/
-    let board_dir = PathBuf::from(boards_dir).join(board_short);
-    let thumbs_dir = board_dir.join("thumbs");
+    let dest_dir = PathBuf::from(boards_dir).join(board_short);
+    let thumbs_dir = dest_dir.join("thumbs");
     std::fs::create_dir_all(&thumbs_dir).context("Failed to create board thumbs directory")?;
 
-    let file_path_abs = board_dir.join(&filename);
+    let file_path_abs = dest_dir.join(&filename);
 
     // Disk-space pre-check: verify at least 2× the file size is available
     // before writing.  Uses statvfs on Unix; skipped on other platforms.
-    check_disk_space(&board_dir, final_data.len())?;
+    check_disk_space(&dest_dir, final_data.len())?;
 
     // Write via a temp file in the same directory, then atomically rename.
     // This guarantees no partial/corrupt file survives a crash or OOM mid-write.
@@ -355,7 +371,7 @@ pub fn save_upload(
     // directory, ensuring the rename is always on the same filesystem (POSIX atomic).
     {
         use std::io::Write as _;
-        let mut tmp = tempfile::NamedTempFile::new_in(&board_dir)
+        let mut tmp = tempfile::NamedTempFile::new_in(&dest_dir)
             .context("Failed to create temp file for upload")?;
         tmp.write_all(final_data)
             .context("Failed to write upload data to temp file")?;
@@ -364,8 +380,8 @@ pub fn save_upload(
     }
 
     // Paths relative to boards_dir (e.g. "b/abc123.webm", "b/thumbs/abc123.jpg")
-    let rel_file = format!("{}/{}", board_short, filename);
-    let board_dir_str = board_dir.to_string_lossy().into_owned();
+    let rel_file = format!("{board_short}/{filename}");
+    let board_dir_str = dest_dir.to_string_lossy().into_owned();
 
     // Generate thumbnail / placeholder based on media type.
     let thumb_rel = match media_type {
@@ -385,7 +401,7 @@ pub fn save_upload(
             // When ffmpeg is available the background worker will generate a
             // waveform PNG and update this post's thumb_path.  For now write
             // the SVG placeholder so the post is immediately renderable.
-            let svg_rel = format!("{}/thumbs/{}.svg", board_short, file_id);
+            let svg_rel = format!("{board_short}/thumbs/{file_id}.svg");
             let svg_path = PathBuf::from(boards_dir).join(&svg_rel);
             if let Err(e) = generate_audio_placeholder(&svg_path) {
                 tracing::warn!("Failed to write audio SVG placeholder: {}", e);
@@ -399,9 +415,11 @@ pub fn save_upload(
                 "image/webp" => "webp",
                 _ => "jpg",
             };
-            let thumb_rel_name = format!("{}/thumbs/{}.{}", board_short, file_id, thumb_ext);
+            let thumb_rel_name = format!("{board_short}/thumbs/{file_id}.{thumb_ext}");
             let thumb_abs = PathBuf::from(boards_dir).join(&thumb_rel_name);
-            generate_image_thumb(data, mime_type, &thumb_abs, thumb_size)
+            // Pass the pre-read orientation so the thumbnail reflects the
+            // camera's physical orientation even after EXIF has been stripped.
+            generate_image_thumb(data, mime_type, &thumb_abs, thumb_size, jpeg_orientation)
                 .context("Failed to generate image thumbnail")?;
             thumb_rel_name
         }
@@ -427,6 +445,9 @@ pub fn save_upload(
 /// thumbnail.  No ffmpeg waveform is generated for this case.
 ///
 /// Returns an `UploadedFile` whose `thumb_path` is set to `image_thumb_rel`.
+///
+/// # Errors
+/// Returns an error if the audio is empty, unsupported type, too large, or any I/O fails.
 #[allow(clippy::too_many_arguments)]
 pub fn save_audio_with_image_thumb(
     audio_data: &[u8],
@@ -441,12 +462,11 @@ pub fn save_audio_with_image_thumb(
 
     let mime_type = detect_mime_type(audio_data)?;
     let media_type = crate::models::MediaType::from_mime(mime_type)
-        .ok_or_else(|| anyhow::anyhow!("Not an audio file: {}", mime_type))?;
+        .ok_or_else(|| anyhow::anyhow!("Not an audio file: {mime_type}"))?;
 
     if !matches!(media_type, crate::models::MediaType::Audio) {
         return Err(anyhow::anyhow!(
-            "Expected an audio file for the audio slot; got {}",
-            mime_type
+            "Expected an audio file for the audio slot; got {mime_type}"
         ));
     }
 
@@ -457,22 +477,20 @@ pub fn save_audio_with_image_thumb(
         ));
     }
 
-    let file_id = Uuid::new_v4().to_string().replace('-', "");
+    let file_id = Uuid::new_v4().simple().to_string();
     let ext = mime_to_ext(mime_type);
-    let filename = format!("{}.{}", file_id, ext);
+    let filename = format!("{file_id}.{ext}");
 
-    let board_dir = PathBuf::from(boards_dir).join(board_short);
-    std::fs::create_dir_all(&board_dir).context("Failed to create board directory")?;
+    let dest_dir = PathBuf::from(boards_dir).join(board_short);
+    std::fs::create_dir_all(&dest_dir).context("Failed to create board directory")?;
 
-    // FIX[DISK]: Apply the same 2× disk-space pre-check used by save_upload.
-    // Previously this path skipped the check, so a nearly-full volume could
-    // produce a partial or failed write without a clear error.
-    check_disk_space(&board_dir, audio_data.len())?;
+    // Apply the same 2× disk-space pre-check used by save_upload.
+    check_disk_space(&dest_dir, audio_data.len())?;
 
-    let file_path_abs = board_dir.join(&filename);
+    let file_path_abs = dest_dir.join(&filename);
     {
         use std::io::Write as _;
-        let mut tmp = tempfile::NamedTempFile::new_in(&board_dir)
+        let mut tmp = tempfile::NamedTempFile::new_in(&dest_dir)
             .context("Failed to create temp file for audio upload")?;
         tmp.write_all(audio_data)
             .context("Failed to write audio data to temp file")?;
@@ -480,7 +498,7 @@ pub fn save_audio_with_image_thumb(
             .context("Failed to atomically rename audio temp file")?;
     }
 
-    let rel_file = format!("{}/{}", board_short, filename);
+    let rel_file = format!("{board_short}/{filename}");
     let file_size = i64::try_from(audio_data.len()).context("File size overflows i64")?;
 
     // The thumb_path is intentionally left empty here; the caller sets it to
@@ -501,14 +519,16 @@ pub fn save_audio_with_image_thumb(
 /// Re-encode a JPEG through the `image` crate, stripping all metadata.
 ///
 /// The `image` crate's JPEG encoder writes a clean JFIF stream with no EXIF,
-/// XMP, or IPTC segments — only the pixel data and ICC colour profile are
-/// written (and only when the crate chooses to include a profile, which for
-/// basic re-encodes it does not).  This is the most reliable stripping approach
-/// available without pulling in a separate EXIF library.
+/// XMP, or IPTC segments — only the pixel data is retained.  This is the most
+/// reliable stripping approach available without pulling in a separate EXIF library.
 ///
-/// Quality is set to 90 (the `image` crate's default for JPEG output), which
-/// is indistinguishable from the original for display purposes but slightly
-/// changes the file byte-for-byte.
+/// NOTE: The `image` crate uses a default JPEG quality of 75.  This produces a
+/// file that is visually indistinguishable from the original for display purposes
+/// but changes the file byte-for-byte.
+///
+/// IMPORTANT: Callers must read the EXIF Orientation tag from the ORIGINAL bytes
+/// BEFORE calling this function if they intend to honour camera orientation —
+/// the re-encoded output will contain no EXIF data at all.
 fn strip_jpeg_exif(data: &[u8]) -> Result<Vec<u8>> {
     use std::io::Cursor;
     let img = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
@@ -529,34 +549,45 @@ fn strip_jpeg_exif(data: &[u8]) -> Result<Vec<u8>> {
 /// beyond its amplitude envelope.
 ///
 /// Security: arguments are passed as an explicit array — no shell invocation.
+///
+/// Temp files: the input is written via `tempfile::NamedTempFile` so it is
+/// automatically deleted on drop even if the function returns early.
 fn ffmpeg_audio_waveform(
     audio_data: &[u8],
-    output_path: &PathBuf,
+    output_path: &Path,
     width: u32,
     height: u32,
 ) -> Result<()> {
+    use std::io::Write as _;
     use std::process::Command;
 
-    let temp_dir = std::env::temp_dir();
-    let tmp_id = Uuid::new_v4().to_string().replace('-', "");
-    let temp_in = temp_dir.join(format!("chan_aud_{}.tmp", tmp_id));
-    let temp_out = temp_dir.join(format!("chan_wav_{}.png", tmp_id));
-
-    std::fs::write(&temp_in, audio_data).context("Failed to write temp audio for waveform")?;
+    // Auto-cleaned temp input (deleted when `temp_in` is dropped).
+    let mut temp_in = tempfile::Builder::new()
+        .prefix("chan_aud_")
+        .suffix(".tmp")
+        .tempfile()
+        .context("Failed to create temp audio input file")?;
+    temp_in
+        .write_all(audio_data)
+        .context("Failed to write temp audio for waveform")?;
+    temp_in.flush().context("Failed to flush temp audio file")?;
 
     let temp_in_str = temp_in
+        .path()
         .to_str()
         .context("Temp audio path contains non-UTF-8 characters")?;
+
+    // Output uses a UUID-named path; cleaned up manually after rename.
+    let temp_dir = std::env::temp_dir();
+    let tmp_id = Uuid::new_v4().simple().to_string();
+    let temp_out = temp_dir.join(format!("chan_wav_{tmp_id}.png"));
     let temp_out_str = temp_out
         .to_str()
         .context("Temp waveform output path contains non-UTF-8 characters")?;
 
     // showwavespic: renders the entire file as a single static image.
-    // split_channels=0 → mono composite, colours=white|#00c840 for the terminal theme.
-    let vf = format!(
-        "showwavespic=s={}x{}:colors=#00c840|#007020:split_channels=0",
-        width, height
-    );
+    // split_channels=0 → mono composite.
+    let vf = format!("showwavespic=s={width}x{height}:colors=#00c840|#007020:split_channels=0");
 
     let output = Command::new("ffmpeg")
         .args([
@@ -573,7 +604,8 @@ fn ffmpeg_audio_waveform(
         ])
         .output();
 
-    let _ = std::fs::remove_file(&temp_in);
+    // `temp_in` (NamedTempFile) is dropped here, auto-deleting the input file.
+    drop(temp_in);
 
     let out = output.context("ffmpeg not found or failed to spawn")?;
 
@@ -592,16 +624,17 @@ fn ffmpeg_audio_waveform(
 
 // ─── Video transcoding ───────────────────────────────────────────────────────
 
-/// Transcode any video file to WebM (VP9 + Opus) using ffmpeg.
+/// Transcode any video file to `WebM` (VP9 + Opus) using ffmpeg.
 ///
-/// Returns the transcoded WebM bytes on success, or an error on failure.
+/// Returns the transcoded `WebM` bytes on success, or an error on failure.
 /// The caller is responsible for falling back to the original data on error.
 ///
 /// Encoding settings:
 ///   VP9  — `-deadline good -cpu-used 4` for a good quality/speed balance.
-///           CRF 33 with unconstrained average bitrate (`-b:v 0`) but a
-///           peak bitrate cap (`-maxrate 2M -bufsize 4M`) to prevent large
-///           bitrate spikes on complex scenes that cause player stalling.
+///           CRF 33 with unconstrained average bitrate (`-b:v 0`) — pure CRF
+///           mode is the correct libvpx-vp9 approach; combining `-b:v 0` with
+///           `-maxrate` / `-bufsize` is not supported by the encoder and causes
+///           exit-234 "Rate control parameters set without a bitrate".
 ///           `-row-mt 1` enables row-based multithreading (significant speedup
 ///           on multi-core hosts, no quality cost).
 ///           `-tile-columns 2` improves both encode parallelism and decode
@@ -609,24 +642,34 @@ fn ffmpeg_audio_waveform(
 ///   Opus — `-b:a 96k` — transparent quality for speech and music.
 ///
 /// Security: all arguments passed as separate array elements — no shell.
+///
+/// Temp files: the input is written via `tempfile::NamedTempFile` so it is
+/// automatically deleted on drop even if the function returns early.
 fn ffmpeg_transcode_webm(video_data: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Write as _;
     use std::process::Command;
 
+    // Auto-cleaned temp input.
+    let mut temp_in = tempfile::Builder::new()
+        .prefix("chan_in_")
+        .suffix(".tmp")
+        .tempfile()
+        .context("Failed to create temp video input file")?;
+    temp_in
+        .write_all(video_data)
+        .context("Failed to write temp video for transcoding")?;
+    temp_in.flush().context("Failed to flush temp video file")?;
+
+    let in_str = temp_in
+        .path()
+        .to_str()
+        .context("Temp input path is non-UTF-8")?;
+
     let temp_dir = std::env::temp_dir();
-    let tmp_id = Uuid::new_v4().to_string().replace('-', "");
-    let temp_in = temp_dir.join(format!("chan_in_{}.tmp", tmp_id));
-    let temp_out = temp_dir.join(format!("chan_out_{}.webm", tmp_id));
-
-    std::fs::write(&temp_in, video_data).context("Failed to write temp video for transcoding")?;
-
-    let in_str = temp_in.to_str().context("Temp input path is non-UTF-8")?;
+    let tmp_id = Uuid::new_v4().simple().to_string();
+    let temp_out = temp_dir.join(format!("chan_out_{tmp_id}.webm"));
     let out_str = temp_out.to_str().context("Temp output path is non-UTF-8")?;
 
-    // VP9 CRF mode: `-b:v 0` means "unconstrained bitrate, let CRF drive quality".
-    // `-maxrate` / `-bufsize` cannot be combined with `-b:v 0` in libvpx-vp9 —
-    // the encoder treats that as "constrained quality" and requires a real
-    // target bitrate, producing exit-234 / "Rate control parameters set without
-    // a bitrate".  Pure CRF (`-b:v 0 -crf 33`) is the correct mode here.
     let output = Command::new("ffmpeg")
         .args([
             "-loglevel",
@@ -658,8 +701,8 @@ fn ffmpeg_transcode_webm(video_data: &[u8]) -> Result<Vec<u8>> {
         ])
         .output();
 
-    // Always clean up the temp input.
-    let _ = std::fs::remove_file(&temp_in);
+    // Drop the NamedTempFile to auto-delete the input.
+    drop(temp_in);
 
     let out = output.context("ffmpeg not found or failed to spawn")?;
 
@@ -691,8 +734,8 @@ fn generate_video_thumb(
 ) -> (String, PathBuf) {
     // Only attempt ffmpeg if it was detected at startup.
     if ffmpeg_available {
-        let jpg_rel = format!("{}/thumbs/{}.jpg", board_short, file_id);
-        let jpg_path = PathBuf::from(board_dir).join(format!("thumbs/{}.jpg", file_id));
+        let jpg_rel = format!("{board_short}/thumbs/{file_id}.jpg");
+        let jpg_path = PathBuf::from(board_dir).join(format!("thumbs/{file_id}.jpg"));
 
         match ffmpeg_first_frame(video_data, &jpg_path, thumb_size) {
             Ok(()) => {
@@ -711,8 +754,8 @@ fn generate_video_thumb(
     }
 
     // Fall back to SVG placeholder
-    let svg_rel = format!("{}/thumbs/{}.svg", board_short, file_id);
-    let svg_path = PathBuf::from(board_dir).join(format!("thumbs/{}.svg", file_id));
+    let svg_rel = format!("{board_short}/thumbs/{file_id}.svg");
+    let svg_path = PathBuf::from(board_dir).join(format!("thumbs/{file_id}.svg"));
     if let Err(e) = generate_video_placeholder(&svg_path) {
         tracing::error!("Failed to write video SVG placeholder: {}", e);
     }
@@ -724,29 +767,38 @@ fn generate_video_thumb(
 /// Security: all arguments are passed as separate array elements — no shell
 /// invocation, no injection surface.
 ///
-/// The video bytes are written to a temp file, ffmpeg runs on that file,
-/// the JPEG output is moved to `output_path`, and the temp file is cleaned up.
-fn ffmpeg_first_frame(video_data: &[u8], output_path: &PathBuf, thumb_size: u32) -> Result<()> {
+/// The video bytes are written to a temp file via `tempfile::NamedTempFile`
+/// (auto-deleted on drop), ffmpeg runs on that file, the JPEG output is moved
+/// to `output_path`, and the temp file is cleaned up.
+fn ffmpeg_first_frame(video_data: &[u8], output_path: &Path, thumb_size: u32) -> Result<()> {
+    use std::io::Write as _;
     use std::process::Command;
 
-    let temp_dir = std::env::temp_dir();
-    let tmp_id = Uuid::new_v4().to_string().replace('-', "");
-    let temp_in = temp_dir.join(format!("chan_vid_{}.tmp", tmp_id));
-    let temp_out = temp_dir.join(format!("chan_thm_{}.jpg", tmp_id));
+    // Auto-cleaned temp input.
+    let mut temp_in = tempfile::Builder::new()
+        .prefix("chan_vid_")
+        .suffix(".tmp")
+        .tempfile()
+        .context("Failed to create temp video input file")?;
+    temp_in
+        .write_all(video_data)
+        .context("Failed to write temp video for ffmpeg")?;
+    temp_in.flush().context("Failed to flush temp video file")?;
 
-    std::fs::write(&temp_in, video_data).context("Failed to write temp video for ffmpeg")?;
-
-    // FIX[MEDIUM-5]: Use context() to propagate errors if the temp path is
-    // non-UTF-8, instead of silently passing "" as the ffmpeg -i argument.
     let temp_in_str = temp_in
+        .path()
         .to_str()
         .context("Temp video path contains non-UTF-8 characters")?;
+
+    let temp_dir = std::env::temp_dir();
+    let tmp_id = Uuid::new_v4().simple().to_string();
+    let temp_out = temp_dir.join(format!("chan_thm_{tmp_id}.jpg"));
     let temp_out_str = temp_out
         .to_str()
         .context("Temp output path contains non-UTF-8 characters")?;
 
     // scale=W:-2 : scale width to thumb_size, height to nearest even number
-    let vf = format!("scale={}:-2", thumb_size);
+    let vf = format!("scale={thumb_size}:-2");
 
     // No shell invocation — explicit argument array only.
     let output = Command::new("ffmpeg")
@@ -766,8 +818,8 @@ fn ffmpeg_first_frame(video_data: &[u8], output_path: &PathBuf, thumb_size: u32)
         ])
         .output();
 
-    // Always remove the temp input regardless of ffmpeg result
-    let _ = std::fs::remove_file(&temp_in);
+    // Drop NamedTempFile — auto-deletes the temp input regardless of outcome.
+    drop(temp_in);
 
     let out = output.context("ffmpeg not found or failed to spawn")?;
 
@@ -785,7 +837,7 @@ fn ffmpeg_first_frame(video_data: &[u8], output_path: &PathBuf, thumb_size: u32)
 }
 
 /// Minimal SVG play-button fallback (used when ffmpeg is unavailable).
-fn generate_video_placeholder(output_path: &PathBuf) -> Result<()> {
+fn generate_video_placeholder(output_path: &Path) -> Result<()> {
     let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="250" height="250" viewBox="0 0 250 250">
   <rect width="250" height="250" fill="#0a0f0a"/>
   <circle cx="125" cy="125" r="60" fill="#0d120d" stroke="#00c840" stroke-width="2"/>
@@ -800,7 +852,7 @@ fn generate_video_placeholder(output_path: &PathBuf) -> Result<()> {
 
 /// SVG music-note placeholder written for every audio upload.
 /// No real thumbnail is generated for audio files.
-fn generate_audio_placeholder(output_path: &PathBuf) -> Result<()> {
+fn generate_audio_placeholder(output_path: &Path) -> Result<()> {
     let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="250" height="250" viewBox="0 0 250 250">
   <rect width="250" height="250" fill="#0a0f0a"/>
   <circle cx="125" cy="125" r="60" fill="#0d120d" stroke="#00c840" stroke-width="2"/>
@@ -822,6 +874,9 @@ fn generate_audio_placeholder(output_path: &PathBuf) -> Result<()> {
 /// Values follow the EXIF spec:
 ///   1 = normal (0°), 2 = flip-H, 3 = 180°, 4 = flip-V,
 ///   5 = transpose, 6 = 90° CW, 7 = transverse, 8 = 90° CCW
+///
+/// NOTE: This must be called on the ORIGINAL bytes before any EXIF-stripping
+/// re-encode.  Once EXIF has been stripped, this function will always return 1.
 fn read_exif_orientation(data: &[u8]) -> u32 {
     use std::io::Cursor;
     let Ok(exif) = exif::Reader::new().read_from_container(&mut Cursor::new(data)) else {
@@ -830,7 +885,7 @@ fn read_exif_orientation(data: &[u8]) -> u32 {
     exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
         .and_then(|f| {
             if let exif::Value::Short(ref v) = f.value {
-                v.first().copied().map(|n| n as u32)
+                v.first().copied().map(u32::from)
             } else {
                 None
             }
@@ -865,11 +920,17 @@ fn apply_exif_orientation(img: image::DynamicImage, orientation: u32) -> image::
     }
 }
 
+/// Generate a scaled thumbnail for an image file.
+///
+/// `exif_orientation` must be pre-read from the ORIGINAL (pre-strip) bytes so
+/// that JPEG thumbnails are oriented correctly even after EXIF has been removed
+/// from the stored file.  Pass `1` for non-JPEG formats.
 fn generate_image_thumb(
     data: &[u8],
     mime_type: &str,
-    output_path: &PathBuf,
+    output_path: &Path,
     max_dim: u32,
+    exif_orientation: u32,
 ) -> Result<()> {
     let format = match mime_type {
         "image/jpeg" => ImageFormat::Jpeg,
@@ -882,22 +943,22 @@ fn generate_image_thumb(
     let img =
         image::load_from_memory_with_format(data, format).context("Failed to decode image")?;
 
-    // 4.1: EXIF orientation correction — phones store images unrotated and rely
-    // on the Orientation tag to tell viewers which way is up.  We read the tag
-    // before thumbnailing and apply the corresponding pixel transform so that
-    // thumbnails display upright without depending on viewer-side EXIF support.
-    // Only JPEG carries reliable EXIF orientation data.
-    let img = if mime_type == "image/jpeg" {
-        let orientation = read_exif_orientation(data);
-        if orientation > 1 {
-            tracing::debug!("EXIF orientation {} applied to JPEG thumbnail", orientation);
-        }
-        apply_exif_orientation(img, orientation)
+    // Apply EXIF orientation using the value read from the original bytes before
+    // EXIF stripping.  Only JPEG carries reliable orientation data; for other
+    // formats exif_orientation will always be 1 (no-op).
+    let img = if exif_orientation > 1 {
+        tracing::debug!("EXIF orientation {} applied to thumbnail", exif_orientation);
+        apply_exif_orientation(img, exif_orientation)
     } else {
         img
     };
 
     let (w, h) = img.dimensions();
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     let (tw, th) = if w > h {
         let r = max_dim as f32 / w as f32;
         (max_dim, (h as f32 * r) as u32)
@@ -936,7 +997,7 @@ fn mime_to_ext(mime: &str) -> &'static str {
         "image/gif" => "gif",
         "image/webp" => "webp",
         "video/mp4" => "mp4",
-        "video/webm" => "webm",
+        "video/webm" | "audio/webm" => "webm",
         // Audio formats
         "audio/mpeg" => "mp3",
         "audio/ogg" => "ogg",
@@ -944,7 +1005,6 @@ fn mime_to_ext(mime: &str) -> &'static str {
         "audio/wav" => "wav",
         "audio/mp4" => "m4a",
         "audio/aac" => "aac",
-        "audio/webm" => "webm",
         _ => "bin",
     }
 }
@@ -956,6 +1016,8 @@ fn mime_to_ext(mime: &str) -> &'static str {
 /// `"vp8"`, `"h264"`).
 ///
 /// Security: arguments are passed as a separate array — no shell invocation.
+/// `file_path` must be a path we control (UUID-based); it is never derived
+/// from user input.
 fn ffprobe_video_codec(file_path: &str) -> Result<String> {
     use std::process::Command;
 
@@ -988,8 +1050,7 @@ fn ffprobe_video_codec(file_path: &str) -> Result<String> {
 
     if codec.is_empty() {
         return Err(anyhow::anyhow!(
-            "ffprobe returned no codec for: {}",
-            file_path
+            "ffprobe returned no codec for: {file_path}"
         ));
     }
 
@@ -997,23 +1058,59 @@ fn ffprobe_video_codec(file_path: &str) -> Result<String> {
 }
 
 /// Probe the video codec of a file on disk.
+///
 /// Returns the codec name in lower-case (e.g. `"av1"`, `"vp9"`, `"vp8"`).
-/// Called by the VideoTranscode background worker to decide whether a WebM
+/// Called by the `VideoTranscode` background worker to decide whether a `WebM`
 /// upload needs AV1 → VP9 re-encoding.
+///
+/// # Errors
+/// Returns an error if ffprobe cannot be run or returns no codec.
 pub fn probe_video_codec(file_path: &str) -> anyhow::Result<String> {
     ffprobe_video_codec(file_path)
 }
 
 /// Delete a file from the filesystem, ignoring not-found errors.
+///
+/// # Security
+///
+/// `relative_path` is validated to prevent directory traversal: absolute paths
+/// and paths containing `..` components are rejected with a warning log.  Only
+/// simple relative paths (e.g. `"b/abc123.webm"`) are accepted.
 pub fn delete_file(boards_dir: &str, relative_path: &str) {
-    let full_path = PathBuf::from(boards_dir).join(relative_path);
+    let rel = std::path::Path::new(relative_path);
+
+    // Reject absolute paths: PathBuf::join on an absolute path replaces the
+    // entire base, allowing deletion of arbitrary files outside boards_dir.
+    if rel.is_absolute() {
+        tracing::warn!(
+            "delete_file: rejected absolute path (potential traversal): {:?}",
+            relative_path
+        );
+        return;
+    }
+
+    // Reject any `..` components that could escape the boards directory.
+    if rel
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        tracing::warn!(
+            "delete_file: rejected path with '..' component (potential traversal): {:?}",
+            relative_path
+        );
+        return;
+    }
+
+    let full_path = PathBuf::from(boards_dir).join(rel);
     let _ = std::fs::remove_file(full_path);
 }
 
 /// Format file size as human-readable string.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
 pub fn format_file_size(bytes: i64) -> String {
     if bytes < 1024 {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     } else if bytes < 1024 * 1024 {
         format!("{:.1} KiB", bytes as f64 / 1024.0)
     } else {
@@ -1023,17 +1120,23 @@ pub fn format_file_size(bytes: i64) -> String {
 
 // ─── Public wrappers used by background workers ───────────────────────────────
 
-/// Transcode any video (typically MP4) to WebM (VP9 + Opus) via ffmpeg.
-/// Called by the VideoTranscode background worker.
+/// Transcode any video (typically MP4) to `WebM` (VP9 + Opus) via ffmpeg.
+/// Called by the `VideoTranscode` background worker.
+///
+/// # Errors
+/// Returns an error if ffmpeg cannot be run or transcoding fails.
 pub fn transcode_to_webm(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     ffmpeg_transcode_webm(data)
 }
 
 /// Generate a waveform PNG for an audio file via ffmpeg.
-/// Called by the AudioWaveform background worker.
+/// Called by the `AudioWaveform` background worker.
+///
+/// # Errors
+/// Returns an error if ffmpeg cannot be run or waveform generation fails.
 pub fn gen_waveform_png(
     data: &[u8],
-    output_path: &std::path::PathBuf,
+    output_path: &Path,
     width: u32,
     height: u32,
 ) -> anyhow::Result<()> {

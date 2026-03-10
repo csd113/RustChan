@@ -27,9 +27,9 @@ use argon2::{
     Algorithm, Argon2, Params, Version,
 };
 use dashmap::DashMap;
-use once_cell::sync::Lazy;
 use rand_core::RngCore;
 use sha2::{Digest, Sha256};
+use std::sync::LazyLock;
 
 /// Maximum allowed nonce length in characters.
 /// A legitimate nonce is a numeric string from the JS solver; anything longer
@@ -42,6 +42,9 @@ const MAX_BOARD_SHORT_LEN: usize = 32;
 /// Hash an admin password using Argon2id.
 ///
 /// Parameters: `t_cost=2`, `m_cost=64 MiB`, `p_cost=2`.
+///
+/// # Errors
+/// Returns an error if Argon2 parameter construction or hashing fails.
 pub fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let params =
@@ -56,8 +59,10 @@ pub fn hash_password(password: &str) -> Result<String> {
 
 /// Verify a password against an Argon2id hash (PHC string format).
 ///
-/// Returns `Ok(true)` on match, `Ok(false)` on mismatch, `Err` if the stored
-/// hash string is malformed.
+/// Returns `Ok(true)` on match, `Ok(false)` on mismatch.
+///
+/// # Errors
+/// Returns an error if the stored hash string is malformed.
 pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
     let parsed =
         PasswordHash::new(hash).map_err(|e| anyhow::anyhow!("Invalid password hash: {e}"))?;
@@ -128,7 +133,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 // The client finds a nonce such that SHA-256(challenge + ":" + nonce) has at
 // least POW_DIFFICULTY leading zero bits.
 
-/// Number of leading zero bits required for a valid PoW solution.
+/// Number of leading zero bits required for a valid `PoW` solution.
 /// ~1 M average iterations; ~50–200 ms in browser JS.
 pub const POW_DIFFICULTY: u32 = 20;
 
@@ -137,12 +142,12 @@ pub const POW_DIFFICULTY: u32 = 20;
 /// Maps `"board_short:nonce"` → unix timestamp (seconds) of first acceptance.
 /// Entries older than [`POW_WINDOW_SECS`] are pruned on every call to
 /// [`verify_pow`] so memory usage is bounded by the rate of legitimate solves.
-static SEEN_NONCES: Lazy<DashMap<String, i64>> = Lazy::new(DashMap::new);
+static SEEN_NONCES: LazyLock<DashMap<String, i64>> = LazyLock::new(DashMap::new);
 
-/// PoW validity window in seconds (5 minutes).
+/// `PoW` validity window in seconds (5 minutes).
 const POW_WINDOW_SECS: i64 = 300;
 
-/// Number of past minutes (inclusive of current) to accept PoW solutions for.
+/// Number of past minutes (inclusive of current) to accept `PoW` solutions for.
 const POW_GRACE_MINUTES: i64 = 5;
 
 /// Build the expected challenge string for the given board and time.
@@ -167,7 +172,7 @@ fn is_valid_nonce(s: &str) -> bool {
     !s.is_empty() && s.len() <= MAX_NONCE_LEN && s.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
-/// Verify a submitted PoW nonce.
+/// Verify a submitted `PoW` nonce.
 ///
 /// Accepts solutions for the current minute and up to
 /// [`POW_GRACE_MINUTES`] − 1 prior minutes (grace window covering clock skew
