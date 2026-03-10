@@ -7,13 +7,15 @@
 //   admin_vacuum_result_page — post-VACUUM feedback
 //   admin_ip_history_page   — posts by IP hash
 
-use crate::models::*;
+use crate::models::{BackupInfo, Ban, Board, WordFilter};
 use crate::utils::{files::format_file_size, sanitize::escape_html};
+use std::fmt::Write;
 
 use super::{base_layout, fmt_ts, fmt_ts_short, render_pagination};
 
 // ─── Admin login ──────────────────────────────────────────────────────────────
 
+#[must_use]
 pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board]) -> String {
     let err_html = error
         .map(|e| format!(r#"<div class="error">{}</div>"#, escape_html(e)))
@@ -35,12 +37,12 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
         err = err_html,
         csrf = escape_html(csrf_token),
     );
-    base_layout("admin login", None, &body, csrf_token, boards, false, false)
+    base_layout("admin login", None, &body, csrf_token, boards, false)
 }
 
 // ─── Admin panel ──────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn admin_panel_page(
     boards: &[Board],
     bans: &[Ban],
@@ -50,6 +52,7 @@ pub fn admin_panel_page(
     full_backups: &[BackupInfo],
     board_backups: &[BackupInfo],
     db_size_bytes: i64,
+    db_size_warning: bool,
     reports: &[crate::models::ReportWithContext],
     appeals: &[crate::models::BanAppeal],
     site_name: &str,
@@ -63,7 +66,8 @@ pub fn admin_panel_page(
     let mut board_cards = String::new();
     for b in boards {
         let checked = |v: bool| if v { " checked" } else { "" };
-        board_cards.push_str(&format!(
+        let _ = write!(
+            board_cards,
             r#"<details class="board-settings-card">
 <summary>/{short}/ — {name} {nsfw_tag}</summary>
 <form method="POST" action="/admin/board/settings" class="board-settings-form">
@@ -119,7 +123,11 @@ pub fn admin_panel_page(
 </details>"#,
             short = escape_html(&b.short_name),
             name = escape_html(&b.name),
-            nsfw_tag = if b.nsfw { r#"<span class="tag nsfw-tag">NSFW</span>"# } else { "" },
+            nsfw_tag = if b.nsfw {
+                r#"<span class="tag nsfw-tag">NSFW</span>"#
+            } else {
+                ""
+            },
             csrf = escape_html(csrf_token),
             id = b.id,
             name_raw = escape_html(&b.name),
@@ -137,17 +145,17 @@ pub fn admin_panel_page(
             archive_ck = checked(b.allow_archive),
             edit_ck = checked(b.allow_editing),
             embeds_ck = checked(b.allow_video_embeds),
-            captcha_ck = checked(b.allow_captcha),
-        ));
+            captcha_ck = checked(b.allow_captcha)
+        );
     }
 
     let mut ban_rows = String::new();
     for ban in bans {
         let expires = ban
             .expires_at
-            .map(fmt_ts)
-            .unwrap_or_else(|| "permanent".to_string());
-        ban_rows.push_str(&format!(
+            .map_or_else(|| "permanent".to_string(), fmt_ts);
+        let _ = write!(
+            ban_rows,
             r#"<tr>
 <td class="ip-hash">{}</td><td>{}</td><td>{}</td>
 <td>
@@ -163,13 +171,14 @@ pub fn admin_panel_page(
             escape_html(ban.reason.as_deref().unwrap_or("")),
             escape_html(&expires),
             csrf = escape_html(csrf_token),
-            id = ban.id,
-        ));
+            id = ban.id
+        );
     }
 
     let mut filter_rows = String::new();
     for f in filters {
-        filter_rows.push_str(&format!(
+        let _ = write!(
+            filter_rows,
             r#"<tr>
 <td>{}</td><td>{}</td>
 <td>
@@ -183,8 +192,8 @@ pub fn admin_panel_page(
             escape_html(&f.pattern),
             escape_html(&f.replacement),
             csrf = escape_html(csrf_token),
-            id = f.id,
-        ));
+            id = f.id
+        );
     }
 
     // ── Full backup file list ─────────────────────────────────────────────────
@@ -195,8 +204,9 @@ pub fn admin_panel_page(
         );
     }
     for bf in full_backups {
-        let size_fmt = format_file_size(bf.size_bytes as i64);
-        full_backup_rows.push_str(&format!(
+        let size_fmt = format_file_size(bf.size_bytes.cast_signed());
+        let _ = write!(
+            full_backup_rows,
             r#"<tr>
 <td style="word-break:break-all">{fname}</td>
 <td style="white-space:nowrap">{size}</td>
@@ -219,8 +229,8 @@ pub fn admin_panel_page(
             fname = escape_html(&bf.filename),
             size = size_fmt,
             modified = escape_html(&bf.modified),
-            csrf = escape_html(csrf_token),
-        ));
+            csrf = escape_html(csrf_token)
+        );
     }
 
     // ── Board backup file list ────────────────────────────────────────────────
@@ -231,8 +241,9 @@ pub fn admin_panel_page(
         );
     }
     for bf in board_backups {
-        let size_fmt = format_file_size(bf.size_bytes as i64);
-        board_backup_rows.push_str(&format!(
+        let size_fmt = format_file_size(bf.size_bytes.cast_signed());
+        let _ = write!(
+            board_backup_rows,
             r#"<tr>
 <td style="word-break:break-all">{fname}</td>
 <td style="white-space:nowrap">{size}</td>
@@ -255,14 +266,14 @@ pub fn admin_panel_page(
             fname = escape_html(&bf.filename),
             size = size_fmt,
             modified = escape_html(&bf.modified),
-            csrf = escape_html(csrf_token),
-        ));
+            csrf = escape_html(csrf_token)
+        );
     }
 
     // ── Report inbox ──────────────────────────────────────────────────────────
     let report_count = reports.len();
     let report_badge = if report_count > 0 {
-        format!(r#" <span class="report-badge">{}</span>"#, report_count)
+        format!(r#" <span class="report-badge">{report_count}</span>"#)
     } else {
         String::new()
     };
@@ -279,7 +290,8 @@ pub fn admin_panel_page(
         let age = fmt_ts(rc.report.created_at);
         // FIX[A-T2]: ip_short was computed here but immediately discarded with
         // `let _ = ip_short` — dead code from an unfinished refactor.  Removed.
-        report_rows.push_str(&format!(
+        let _ = write!(
+            report_rows,
             r#"<tr>
 <td><a href="/{board}/thread/{tid}#p{pid}" title="view post">/{board}/ No.{pid}</a></td>
 <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{preview}">{preview}</td>
@@ -301,24 +313,23 @@ pub fn admin_panel_page(
   </form>
 </td>
 </tr>"#,
-            board   = escape_html(&rc.board_short),
-            tid     = rc.report.thread_id,
-            pid     = rc.report.post_id,
+            board = escape_html(&rc.board_short),
+            tid = rc.report.thread_id,
+            pid = rc.report.post_id,
             preview = preview,
-            reason  = reason,
-            age     = escape_html(&age),
-            csrf    = escape_html(csrf_token),
-            rid     = rc.report.id,
-            ip_hash = escape_html(&rc.post_ip_hash),
-        ));
-        let _ = (); // (ip_short dead-code removed — see FIX[A-T2] above)
+            reason = reason,
+            age = escape_html(&age),
+            csrf = escape_html(csrf_token),
+            rid = rc.report.id,
+            ip_hash = escape_html(&rc.post_ip_hash)
+        );
     }
 
     // ── Ban appeals ───────────────────────────────────────────────────────────
-    let appeal_badge = if !appeals.is_empty() {
-        format!(r#" <span class="report-badge">{}</span>"#, appeals.len())
-    } else {
+    let appeal_badge = if appeals.is_empty() {
         String::new()
+    } else {
+        format!(r#" <span class="report-badge">{}</span>"#, appeals.len())
     };
 
     let mut appeal_rows = String::new();
@@ -331,7 +342,8 @@ pub fn admin_panel_page(
         let reason = escape_html(a.reason.trim());
         let age = fmt_ts(a.created_at);
         let ip_short = a.ip_hash.get(..16).unwrap_or(&a.ip_hash);
-        appeal_rows.push_str(&format!(
+        let _ = write!(
+            appeal_rows,
             r#"<tr>
 <td style="font-size:0.78rem;font-family:monospace">{ip_short}…</td>
 <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{reason}">{reason}</td>
@@ -352,12 +364,12 @@ pub fn admin_panel_page(
 </td>
 </tr>"#,
             ip_short = ip_short,
-            reason   = reason,
-            age      = escape_html(&age),
-            csrf     = escape_html(csrf_token),
-            aid      = a.id,
-            ip_hash  = escape_html(&a.ip_hash),
-        ));
+            reason = reason,
+            age = escape_html(&age),
+            csrf = escape_html(csrf_token),
+            aid = a.id,
+            ip_hash = escape_html(&a.ip_hash)
+        );
     }
 
     let flash_html = match flash {
@@ -370,6 +382,20 @@ pub fn admin_panel_page(
             )
         }
         None => String::new(),
+    };
+
+    // 1.8: DB size warning banner — shown when the file exceeds the configured threshold.
+    let db_warn_banner = if db_size_warning {
+        format!(
+            r#"<div class="admin-flash flash-error" style="margin-bottom:0.75rem">
+&#9888; <strong>Database size warning:</strong> The database file has exceeded the configured
+warning threshold ({size}). Consider running <strong>VACUUM</strong> below or archiving
+old boards to prevent query performance degradation.
+</div>"#,
+            size = format_file_size(db_size_bytes),
+        )
+    } else {
+        String::new()
     };
 
     let body = format!(
@@ -543,7 +569,7 @@ pub fn admin_panel_page(
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// database maintenance</h2>
-<p style="color:var(--text-dim);font-size:0.85rem">
+{db_warn_banner}<p style="color:var(--text-dim);font-size:0.85rem">
   Current database size: <strong>{db_size_str}</strong>.
   Running <strong>VACUUM</strong> rewrites the database file compactly, reclaiming space left after
   bulk deletions (deleted threads, pruned posts, etc.).  This may take a few seconds on large
@@ -584,6 +610,7 @@ pub fn admin_panel_page(
         full_backup_rows = full_backup_rows,
         board_backup_rows = board_backup_rows,
         db_size_str = format_file_size(db_size_bytes),
+        db_warn_banner = db_warn_banner,
         report_rows = report_rows,
         report_badge = report_badge,
         appeal_rows = appeal_rows,
@@ -620,25 +647,23 @@ pub fn admin_panel_page(
         } else {
             ""
         },
-        tor_section = match tor_address {
-            Some(addr) => format!(
-                r#"<section class="admin-section" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
+        tor_section = tor_address.map_or_else(String::new, |addr| format!(
+            r#"<section class="admin-section" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
 <h2>// active onion address</h2>
 <p style="color:var(--text-dim);font-size:0.82rem;margin:0">
   <code style="user-select:all;color:var(--text)">{}</code>
 </p>
 </section>"#,
-                escape_html(addr)
-            ),
-            None => String::new(),
-        },
+            escape_html(addr)
+        )),
     );
 
-    base_layout("admin panel", None, &body, csrf_token, boards, false, false)
+    base_layout("admin panel", None, &body, csrf_token, boards, false)
 }
 
 // ─── Moderation log ───────────────────────────────────────────────────────────
 
+#[must_use]
 pub fn mod_log_page(
     entries: &[crate::models::ModLogEntry],
     pagination: &crate::models::Pagination,
@@ -650,17 +675,17 @@ pub fn mod_log_page(
         rows.push_str(r#"<tr><td colspan="6" style="color:var(--text-dim);text-align:center">no entries yet</td></tr>"#);
     }
     for e in entries {
-        let target = if let Some(id) = e.target_id {
-            format!("{} #{}", e.target_type, id)
-        } else {
-            e.target_type.clone()
-        };
-        let board_link = if !e.board_short.is_empty() {
-            format!(r#"<a href="/{s}">{s}</a>"#, s = escape_html(&e.board_short))
-        } else {
+        let target = e.target_id.map_or_else(
+            || e.target_type.clone(),
+            |id| format!("{} #{id}", e.target_type),
+        );
+        let board_link = if e.board_short.is_empty() {
             String::new()
+        } else {
+            format!(r#"<a href="/{s}">{s}</a>"#, s = escape_html(&e.board_short))
         };
-        rows.push_str(&format!(
+        let _ = write!(
+            rows,
             r#"<tr>
 <td style="white-space:nowrap;font-size:0.78rem">{time}</td>
 <td><strong>{admin}</strong></td>
@@ -670,13 +695,13 @@ pub fn mod_log_page(
 <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.8rem"
     title="{detail}">{detail}</td>
 </tr>"#,
-            time   = escape_html(&fmt_ts(e.created_at)),
-            admin  = escape_html(&e.admin_name),
+            time = escape_html(&fmt_ts(e.created_at)),
+            admin = escape_html(&e.admin_name),
             action = escape_html(&e.action),
             target = escape_html(&target),
-            board  = board_link,
-            detail = escape_html(&e.detail),
-        ));
+            board = board_link,
+            detail = escape_html(&e.detail)
+        );
     }
 
     let pagination_html = render_pagination(pagination, "/admin/mod-log");
@@ -701,21 +726,19 @@ pub fn mod_log_page(
         pagination = pagination_html,
     );
 
-    base_layout(
-        "mod log — admin",
-        None,
-        &body,
-        csrf_token,
-        boards,
-        false,
-        false,
-    )
+    base_layout("mod log — admin", None, &body, csrf_token, boards, false)
 }
 
 // ─── VACUUM result ────────────────────────────────────────────────────────────
 
+#[must_use]
 pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &str) -> String {
     let saved = size_before.saturating_sub(size_after);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     let pct = if size_before > 0 {
         (saved as f64 / size_before as f64 * 100.0) as u64
     } else {
@@ -745,11 +768,12 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
         pct = pct,
     );
 
-    base_layout("VACUUM result", None, &body, csrf_token, &[], false, false)
+    base_layout("VACUUM result", None, &body, csrf_token, &[], false)
 }
 
 // ─── IP history ───────────────────────────────────────────────────────────────
 
+#[must_use]
 pub fn admin_ip_history_page(
     ip_hash: &str,
     posts_with_boards: &[(crate::models::Post, String)],
@@ -807,7 +831,8 @@ pub fn admin_ip_history_page(
             board = escape_html(board_short),
         );
 
-        rows.push_str(&format!(
+        let _ = write!(
+            rows,
             r#"<tr>
 <td style="white-space:nowrap;font-size:0.8rem">{time}</td>
 <td>{link}{op}</td>
@@ -820,8 +845,8 @@ pub fn admin_ip_history_page(
             op = op_badge,
             media = media_badge,
             body = body_preview,
-            del = del_form,
-        ));
+            del = del_form
+        );
     }
 
     let pag_html = render_pagination(pagination, &format!("/admin/ip/{}", escape_html(ip_hash)));
@@ -861,7 +886,6 @@ pub fn admin_ip_history_page(
         &body,
         csrf_token,
         all_boards,
-        false,
         false,
     )
 }

@@ -12,8 +12,7 @@ use crate::{
     handlers::{board::ensure_csrf, parse_post_multipart},
     middleware::{validate_csrf, AppState},
     utils::{
-        crypto::{hash_ip, new_deletion_token, sha256_hex, verify_pow},
-        files::save_upload,
+        crypto::{hash_ip, new_deletion_token, verify_pow},
         sanitize::{
             apply_word_filters, escape_html, render_post_body, validate_body,
             validate_body_with_file, validate_name,
@@ -23,6 +22,7 @@ use crate::{
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
+    http::HeaderMap,
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -31,66 +31,100 @@ use tracing::info;
 
 // ─── GET /:board/thread/:id ───────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 pub async fn view_thread(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
-) -> Result<(CookieJar, Html<String>)> {
+    req_headers: HeaderMap,
+) -> Result<Response> {
     let (jar, csrf) = ensure_csrf(jar);
 
-    let html = tokio::task::spawn_blocking({
+    let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
-        move || -> Result<String> {
+        move || -> Result<(String, String)> {
             let conn = pool.get()?;
 
             let is_admin = jar_session
                 .as_deref()
-                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
-                .unwrap_or(false);
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
 
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
 
             let thread = db::get_thread(&conn, thread_id)?
-                .ok_or_else(|| AppError::NotFound(format!("Thread {} not found", thread_id)))?;
+                .ok_or_else(|| AppError::NotFound(format!("Thread {thread_id} not found")))?;
 
             if thread.board_id != board.id {
                 return Err(AppError::NotFound("Thread not found in this board.".into()));
             }
 
+            // ETag derived from the thread's last-bump timestamp AND the
+            // current board-list version.  The board version component ensures
+            // that adding or deleting a board invalidates cached thread pages,
+            // so the nav bar always reflects the current board list rather than
+            // showing stale/deleted boards until the thread receives a reply.
+            let boards_ver = crate::templates::live_boards_version();
+            let etag = format!("\"{}-b{boards_ver}\"", thread.bumped_at);
+
             let posts = db::get_posts_for_thread(&conn, thread_id)?;
             let all_boards = db::get_all_boards(&conn)?;
 
-            // Compute ip_hash for poll vote status
             let ip_hash =
                 crate::utils::crypto::hash_ip(&client_ip, &crate::config::CONFIG.cookie_secret);
-            let poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)?;
+            let thread_poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)?;
 
             let collapse_greentext = db::get_collapse_greentext(&conn);
-            Ok(crate::templates::thread_page(
+            let html = crate::templates::thread_page(
                 &board,
                 &thread,
                 &posts,
                 &csrf_clone,
                 &all_boards,
                 is_admin,
-                poll.as_ref(),
+                thread_poll.as_ref(),
                 None,
                 collapse_greentext,
-            ))
+            );
+            Ok((etag, html))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)))
+    let (etag, html) = result;
+
+    // 3.2: Return 304 Not Modified when client's cached copy is still current.
+    let client_etag = req_headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if client_etag == etag {
+        let mut resp = axum::http::Response::builder()
+            .status(axum::http::StatusCode::NOT_MODIFIED)
+            .body(axum::body::Body::empty())
+            .unwrap_or_default();
+        resp.headers_mut().insert(
+            "etag",
+            axum::http::HeaderValue::from_str(&etag)
+                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
+        );
+        return Ok((jar, resp).into_response());
+    }
+
+    let mut resp = Html(html).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
+        resp.headers_mut().insert("etag", v);
+    }
+    Ok((jar, resp).into_response())
 }
 
 // ─── POST /:board/thread/:id — post reply ────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 pub async fn post_reply(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
@@ -126,8 +160,7 @@ pub async fn post_reply(
     // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
     let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
 
-    let board_short_err = board_short.clone();
-    let client_ip_err = client_ip.clone(); // CRIT-2: keep for the error re-render path below
+    let _board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = state.job_queue.clone();
@@ -163,8 +196,7 @@ pub async fn post_reply(
             // Verify admin session first; admins bypass the cooldown entirely.
             let is_admin = admin_session_id
                 .as_deref()
-                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
-                .unwrap_or(false);
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
 
             // post_cooldown_secs = 0 means no cooldown at all on this board.
             if board.post_cooldown_secs > 0 && !is_admin {
@@ -172,11 +204,7 @@ pub async fn post_reply(
                 if let Some(secs) = elapsed {
                     let remaining = board.post_cooldown_secs.saturating_sub(secs);
                     if remaining > 0 {
-                        return Err(AppError::BadRequest(format!(
-                            "Please wait {} more second{} before posting again.",
-                            remaining,
-                            if remaining == 1 { "" } else { "s" }
-                        )));
+                        return Err(AppError::BadRequest(format!("Please wait {remaining} more second{} before posting again.", if remaining == 1 { "" } else { "s" })));
                     }
                 }
             }
@@ -220,107 +248,26 @@ pub async fn post_reply(
             let escaped_body = escape_html(&filtered_body);
             let body_html = render_post_body(&escaped_body);
 
-            let uploaded = if let Some((data, fname)) = file_data {
-                // Enforce per-board media type toggles using magic-byte detection.
-                let detected_mime = crate::utils::files::detect_mime_type(&data)
-                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
-                let detected_media = crate::models::MediaType::from_mime(detected_mime)
-                    .ok_or_else(|| AppError::BadRequest("Unsupported file type.".into()))?;
-
-                match detected_media {
-                    crate::models::MediaType::Image if !board.allow_images => {
-                        return Err(AppError::BadRequest(
-                            "Image uploads are disabled on this board.".into(),
-                        ))
-                    }
-                    crate::models::MediaType::Video if !board.allow_video => {
-                        return Err(AppError::BadRequest(
-                            "Video uploads are disabled on this board.".into(),
-                        ))
-                    }
-                    crate::models::MediaType::Audio if !board.allow_audio => {
-                        return Err(AppError::BadRequest(
-                            "Audio uploads are disabled on this board.".into(),
-                        ))
-                    }
-                    _ => {}
-                }
-
-                // SHA-256 deduplication — FIX[LOW-8]: use sha256_hex from crypto module
-                let hash = sha256_hex(&data);
-                if let Some(cached) = db::find_file_by_hash(&conn, &hash)? {
-                    let cached_media = crate::models::MediaType::from_mime(&cached.mime_type)
-                        .unwrap_or(crate::models::MediaType::Image);
-                    Some(crate::utils::files::UploadedFile {
-                        file_path: cached.file_path,
-                        thumb_path: cached.thumb_path,
-                        original_name: crate::utils::sanitize::sanitize_filename(&fname),
-                        mime_type: cached.mime_type,
-                        file_size: data.len() as i64,
-                        media_type: cached_media,
-                        processing_pending: false,
-                    })
-                } else {
-                    let f = save_upload(
-                        &data,
-                        &fname,
-                        &upload_dir,
-                        &board.short_name,
-                        thumb_size,
-                        max_image_size,
-                        max_video_size,
-                        max_audio_size,
-                        ffmpeg_available,
-                    )
-                    .map_err(crate::handlers::classify_upload_error)?;
-                    db::record_file_hash(&conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
-                    Some(f)
-                }
-            } else {
-                None
-            };
+            let uploaded = crate::handlers::process_primary_upload(
+                file_data,
+                &board,
+                &conn,
+                &upload_dir,
+                thumb_size,
+                max_image_size,
+                max_video_size,
+                max_audio_size,
+                ffmpeg_available,
+            )?;
 
             // ── Image+audio combo ─────────────────────────────────────────────
-            let audio_uploaded: Option<crate::utils::files::UploadedFile> =
-                if let Some((aud_data, aud_fname)) = audio_file_data {
-                    if !board.allow_audio {
-                        return Err(AppError::BadRequest(
-                            "Audio uploads are disabled on this board.".into(),
-                        ));
-                    }
-                    let primary_is_image = uploaded
-                        .as_ref()
-                        .map(|u| matches!(u.media_type, crate::models::MediaType::Image))
-                        .unwrap_or(false);
-                    if !primary_is_image {
-                        return Err(AppError::BadRequest(
-                            "Audio can only be combined with an image upload.".into(),
-                        ));
-                    }
-                    let aud_mime = crate::utils::files::detect_mime_type(&aud_data)
-                        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-                    let aud_media = crate::models::MediaType::from_mime(aud_mime)
-                        .ok_or_else(|| AppError::BadRequest("Unsupported audio type.".into()))?;
-                    if !matches!(aud_media, crate::models::MediaType::Audio) {
-                        return Err(AppError::BadRequest(
-                            "The audio slot only accepts audio files.".into(),
-                        ));
-                    }
-                    let mut aud_file = crate::utils::files::save_audio_with_image_thumb(
-                        &aud_data,
-                        &aud_fname,
-                        &upload_dir,
-                        &board.short_name,
-                        max_audio_size,
-                    )
-                    .map_err(crate::handlers::classify_upload_error)?;
-                    if let Some(ref img) = uploaded {
-                        aud_file.thumb_path = img.thumb_path.clone();
-                    }
-                    Some(aud_file)
-                } else {
-                    None
-                };
+            let audio_uploaded = crate::handlers::process_audio_combo(
+                audio_file_data,
+                uploaded.as_ref(),
+                &board,
+                &upload_dir,
+                max_audio_size,
+            )?;
 
             let deletion_token = if del_token_val.trim().is_empty() {
                 new_deletion_token()
@@ -364,103 +311,31 @@ pub async fn post_reply(
                 )?;
             }
 
-            // ── Background jobs ───────────────────────────────────────────────
-            if let Some(ref up) = uploaded {
-                if up.processing_pending {
-                    let job = match up.media_type {
-                        crate::models::MediaType::Video => {
-                            Some(crate::workers::Job::VideoTranscode {
-                                post_id,
-                                file_path: up.file_path.clone(),
-                                board_short: board.short_name.clone(),
-                            })
-                        }
-                        crate::models::MediaType::Audio => {
-                            Some(crate::workers::Job::AudioWaveform {
-                                post_id,
-                                file_path: up.file_path.clone(),
-                                board_short: board.short_name.clone(),
-                            })
-                        }
-                        _ => None,
-                    };
-                    if let Some(j) = job {
-                        if let Err(e) = job_queue.enqueue(&j) {
-                            tracing::warn!("Failed to enqueue media job for reply: {}", e);
-                        }
-                    }
-                }
-            }
-            let _ = job_queue.enqueue(&crate::workers::Job::SpamCheck {
+            crate::handlers::enqueue_post_jobs(
+                &job_queue,
                 post_id,
-                ip_hash: ip_hash.clone(),
-                body_len: body_text.len(),
-            });
-
-            info!(
-                "Reply {} posted in thread {} on /{}/",
-                post_id, thread_id, board.short_name
+                &ip_hash,
+                body_text.len(),
+                uploaded.as_ref(),
+                &board.short_name,
             );
-            Ok(format!(
-                "/{}/thread/{}#p{}",
-                board.short_name, thread_id, post_id
-            ))
+
+            info!("Reply {post_id} posted in thread {thread_id} on /{}/", board.short_name);
+            Ok(format!("/{}/thread/{thread_id}#p{post_id}", board.short_name))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    // BadRequest → re-render the thread page with an inline error banner.
+    // BadRequest → return a lightweight 422 page instead of re-querying the
+    // entire thread (which wastes significant DB and CPU under spam load).
     let redirect_url = match result {
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
-            let html = tokio::task::spawn_blocking({
-                let pool = state.db.clone();
-                let csrf_err = csrf_cookie.clone().unwrap_or_default();
-                let board_short = board_short_err.clone();
-                let msg = msg.clone();
-                move || -> String {
-                    let conn = match pool.get() {
-                        Ok(c) => c,
-                        Err(_) => return String::new(),
-                    };
-                    let board = match db::get_board_by_short(&conn, &board_short) {
-                        Ok(Some(b)) => b,
-                        _ => return String::new(),
-                    };
-                    let thread = match db::get_thread(&conn, thread_id) {
-                        Ok(Some(t)) => t,
-                        _ => return String::new(),
-                    };
-                    let posts = db::get_posts_for_thread(&conn, thread_id).unwrap_or_default();
-                    let all_boards = db::get_all_boards(&conn).unwrap_or_default();
-                    let ip_hash = crate::utils::crypto::hash_ip(
-                        &client_ip_err,
-                        &crate::config::CONFIG.cookie_secret,
-                    );
-                    let poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)
-                        .ok()
-                        .flatten();
-                    crate::templates::thread_page(
-                        &board,
-                        &thread,
-                        &posts,
-                        &csrf_err,
-                        &all_boards,
-                        false,
-                        poll.as_ref(),
-                        Some(&msg),
-                        db::get_collapse_greentext(&conn),
-                    )
-                }
-            })
-            .await
-            .unwrap_or_default();
-
-            if !html.is_empty() {
-                return Ok((jar, Html(html)).into_response());
-            }
-            return Err(AppError::BadRequest(msg));
+            let mut resp =
+                axum::response::Html(crate::templates::error_page(422, &msg)).into_response();
+            *resp.status_mut() = axum::http::StatusCode::UNPROCESSABLE_ENTITY;
+            return Ok(resp);
         }
         Err(e) => return Err(e),
     };
@@ -540,7 +415,7 @@ pub async fn edit_post_get(
 
 #[derive(Deserialize)]
 pub struct EditForm {
-    pub _csrf: Option<String>,
+    pub csrf: Option<String>,
     pub deletion_token: String,
     pub body: String,
 }
@@ -560,7 +435,7 @@ pub async fn edit_post_post(
     Form(form): Form<EditForm>,
 ) -> Result<Response> {
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form._csrf.as_deref().unwrap_or("")) {
+    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
@@ -640,10 +515,10 @@ pub async fn edit_post_post(
                 return Ok(EditOutcome::ErrorPage(html));
             }
 
-            info!("Post {} edited on /{}/", post_id, board.short_name);
+            info!("Post {post_id} edited on /{}/", board.short_name);
             Ok(EditOutcome::Redirect(format!(
-                "/{}/thread/{}#p{}",
-                board.short_name, post.thread_id, post_id
+                "/{}/thread/{}#p{post_id}",
+                board.short_name, post.thread_id
             )))
         }
     })
@@ -660,7 +535,7 @@ pub async fn edit_post_post(
 
 #[derive(Deserialize)]
 pub struct VoteForm {
-    pub _csrf: Option<String>,
+    pub csrf: Option<String>,
     pub option_id: i64,
 }
 
@@ -671,7 +546,7 @@ pub async fn vote_handler(
     Form(form): Form<VoteForm>,
 ) -> Result<Response> {
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form._csrf.as_deref().unwrap_or("")) {
+    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
@@ -715,12 +590,10 @@ pub async fn vote_handler(
 
             db::cast_vote(&conn, poll_id, option_id, &ip_hash)?;
             info!(
-                "Vote cast on poll {} option {} by {}",
-                poll_id,
-                option_id,
+                "Vote cast on poll {poll_id} option {option_id} by {}",
                 &ip_hash[..8]
             );
-            Ok(format!("/{}/thread/{}#poll", board_short, thread_id))
+            Ok(format!("/{board_short}/thread/{thread_id}#poll"))
         }
     })
     .await
@@ -774,7 +647,7 @@ pub async fn thread_updates(
 
                 // Fetch posts newer than `since`, ordered oldest-first so they
                 // render in the correct chronological order when appended.
-                let posts = db::get_new_posts_since(&conn, thread_id, since)?;
+                let posts = db::get_new_posts_since(&conn, thread_id, since, 100)?;
                 let last_id = posts.iter().map(|p| p.id).max().unwrap_or(since);
                 let count = posts.len();
 
@@ -786,10 +659,13 @@ pub async fn thread_updates(
                         post,
                         &board_short,
                         "",
-                        false,
-                        false,
-                        true,
-                        0, // no edit link in auto-appended HTML; reload restores it
+                        crate::templates::thread::RenderPostOpts {
+                            show_delete: false,
+                            is_admin: false,
+                            show_media: true,
+                            allow_editing: false, // no edit link in auto-appended HTML; reload restores it
+                        },
+                        0,
                     ));
                 }
 
@@ -807,10 +683,32 @@ pub async fn thread_updates(
         .await
         .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!(e)))??;
 
+    // Current board-list version + rendered nav links — lets the JS refresh
+    // the nav bar when boards are added or deleted while a thread is open,
+    // without requiring a full page reload.
+    let boards_version = crate::templates::live_boards_version();
+    let boards = crate::templates::live_boards_snapshot();
+    let nav_inner: String = boards
+        .iter()
+        .map(|b| {
+            format!(
+                r#"<a href="/{s}/catalog">{s}</a>"#,
+                s = crate::utils::sanitize::escape_html(&b.short_name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" / ");
+    let nav_html = if nav_inner.is_empty() {
+        String::new()
+    } else {
+        format!("[ {nav_inner} ]")
+    };
+
     // Build a JSON envelope with new-post HTML plus current thread state.
-    // The client consumes the state fields to keep the nav bar in sync.
+    // boards_version / nav_html let the client keep the nav bar in sync when
+    // boards are added or deleted while the user has a thread open.
     let json = format!(
-        r#"{{"html":{html_json},"last_id":{last_id},"count":{count},"reply_count":{reply_count},"bump_time":{bump_time},"locked":{locked},"sticky":{sticky}}}"#,
+        r#"{{"html":{html_json},"last_id":{last_id},"count":{count},"reply_count":{reply_count},"bump_time":{bump_time},"locked":{locked},"sticky":{sticky},"boards_version":{boards_version},"nav_html":{nav_html_json}}}"#,
         html_json = serde_json::to_string(&html).unwrap_or_else(|_| "\"\"".to_string()),
         last_id = last_id,
         count = count,
@@ -818,6 +716,8 @@ pub async fn thread_updates(
         bump_time = bump_time,
         locked = locked,
         sticky = sticky,
+        boards_version = boards_version,
+        nav_html_json = serde_json::to_string(&nav_html).unwrap_or_else(|_| "\"\"".to_string()),
     );
 
     Ok(([(header::CONTENT_TYPE, "application/json")], json).into_response())

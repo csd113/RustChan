@@ -16,33 +16,37 @@
 //
 // Word filters: applied on raw text BEFORE HTML escaping.
 
-use once_cell::sync::Lazy;
 use rand_core::{OsRng, RngCore};
 use regex::Regex;
+use std::sync::LazyLock;
 
-static RE_REPLY: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"&gt;&gt;(\d+)").expect("RE_REPLY is valid"));
-static RE_CROSSLINK: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)?").expect("RE_CROSSLINK is valid"));
-static RE_URL: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").expect("RE_URL is valid"));
-static RE_BOLD: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("RE_BOLD is valid"));
-static RE_ITALIC: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"__([^_]+)__").expect("RE_ITALIC is valid"));
-static RE_SPOILER: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\[spoiler\]([\s\S]*?)\[/spoiler\]").expect("RE_SPOILER is valid"));
-static RE_DICE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\[dice (\d{1,2})d(\d{1,3})\]").expect("RE_DICE is valid"));
+static RE_REPLY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"&gt;&gt;(\d+)").expect("RE_REPLY is valid"));
+static RE_CROSSLINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)?").expect("RE_CROSSLINK is valid")
+});
+static RE_URL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").expect("RE_URL is valid"));
+static RE_BOLD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("RE_BOLD is valid"));
+static RE_ITALIC: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"__([^_]+)__").expect("RE_ITALIC is valid"));
+static RE_SPOILER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[spoiler\]([\s\S]*?)\[/spoiler\]").expect("RE_SPOILER is valid")
+});
+static RE_DICE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[dice (\d{1,2})d(\d{1,3})\]").expect("RE_DICE is valid"));
 
 // ─── Video embed URL detection ────────────────────────────────────────────────
 // These extract a canonical video ID from supported platforms so the client-side
 // embed script can build the appropriate iframe/thumbnail without a server round-trip.
 
-/// Try to extract a (embed_type, video_id) pair from a URL.
-/// Supports YouTube (youtube.com and youtu.be), any Invidious instance
+/// Try to extract a (`embed_type`, `video_id`) pair from a URL.
+///
+/// Supports `YouTube` (youtube.com and youtu.be), any Invidious instance
 /// (detected by the `/watch?v=` path), and Streamable.
 /// Returns None for all other URLs.
+#[must_use]
 pub fn extract_video_embed(url: &str) -> Option<(&'static str, String)> {
     // YouTube — youtube.com/watch?v=ID or youtu.be/ID or youtube.com/shorts/ID
     if url.contains("youtube.com") || url.contains("youtu.be") {
@@ -133,7 +137,7 @@ fn extract_streamable_id(url: &str) -> Option<String> {
 }
 
 /// Unicode die-face characters for d6 results (⚀–⚅, value 1–6).
-fn d6_face(n: u32) -> char {
+const fn d6_face(n: u32) -> char {
     match n {
         1 => '⚀',
         2 => '⚁',
@@ -159,8 +163,8 @@ fn roll_dice(count: u32, sides: u32) -> (Vec<u32>, u32) {
     (rolls, sum)
 }
 
-/// Replace [dice NdM] tags in HTML-escaped post text with their rolled results.
-/// Called once per post at creation time — the result is stored in body_html so
+/// Replace [dice `NdM`] tags in HTML-escaped post text with their rolled results.
+/// Called once per post at creation time — the result is stored in `body_html` so
 /// the same rolls are shown to every reader forever.
 fn apply_dice(text: &str) -> String {
     RE_DICE
@@ -176,7 +180,7 @@ fn apply_dice(text: &str) -> String {
                     if sides == 6 {
                         d6_face(r).to_string()
                     } else {
-                        format!("【{}】", r)
+                        format!("【{r}】")
                     }
                 })
                 .collect();
@@ -225,23 +229,46 @@ fn apply_emoji(text: &str) -> String {
         (":uwu:", "🥺"),
         (":owo:", "👁️👄👁️"),
     ];
+    // Early-exit if no colon is present — avoids all string allocations for posts
+    // that contain no emoji shortcodes (the common case).
+    if !text.contains(':') {
+        return text.to_string();
+    }
     let mut out = text.to_string();
     for (code, emoji) in CODES {
-        out = out.replace(code, emoji);
+        // Skip the replace call entirely when the shortcode is absent, avoiding
+        // an allocation for each of the 26 patterns on every post render.
+        if out.contains(code) {
+            out = out.replace(code, emoji);
+        }
     }
     out
 }
 
 /// Escape HTML special characters to prevent XSS.
+///
+/// Single-pass implementation: builds the output in one scan without any
+/// intermediate allocations, unlike the chained `.replace()` approach which
+/// produces up to five heap-allocated intermediates per call.
+#[must_use]
 pub fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;")
+    // Pre-allocate with a small headroom for the most common entities.
+    let mut out = String::with_capacity(s.len() + s.len() / 8);
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Apply word filters to raw (unescaped) text.
+#[must_use]
 pub fn apply_word_filters(text: &str, filters: &[(String, String)]) -> String {
     let mut result = text.to_string();
     for (pattern, replacement) in filters {
@@ -254,13 +281,13 @@ pub fn apply_word_filters(text: &str, filters: &[(String, String)]) -> String {
 
 /// Maximum post body length accepted by the sanitizer pipeline.
 /// Input longer than this is rejected before any regex runs, preventing
-/// theoretical ReDoS on deeply-nested or pathological patterns.
+/// theoretical `ReDoS` on deeply-nested or pathological patterns.
 const MAX_BODY_BYTES: usize = 32 * 1024; // 32 KiB
 
 /// Convert plain escaped post body into HTML with imageboard markup.
 /// Input: HTML-escaped user text.  Output: HTML with markup applied.
 ///
-/// Returns an error if the input exceeds MAX_BODY_BYTES to prevent DoS
+/// Returns an error notice if the input exceeds `MAX_BODY_BYTES` to prevent `DoS`
 /// via extremely large inputs through the regex pipeline.
 ///
 /// When 3 or more consecutive greentext lines appear they are wrapped in a
@@ -268,6 +295,7 @@ const MAX_BODY_BYTES: usize = 32 * 1024; // 32 KiB
 /// panel can enable "collapse greentext walls", which is handled purely on
 /// the client side (JS removes the `open` attribute when the page-level
 /// `data-collapse-greentext` attribute is present on `<body>`).
+#[must_use]
 pub fn render_post_body(escaped: &str) -> String {
     // Hard length guard before touching any regex. Must be enforced here
     // (not only at the HTTP layer) because the sanitizer is also called
@@ -307,30 +335,32 @@ pub fn render_post_body(escaped: &str) -> String {
             // 3+ consecutive greentext lines → collapsible block, open by default.
             // The `open` attribute keeps it expanded; the admin "collapse walls"
             // setting removes it client-side via JS without changing stored HTML.
+            #[allow(clippy::items_after_statements)]
             if group.len() >= 3 {
                 let count = group.len();
-                html.push_str(&format!(
-                    "<details open class=\"greentext-block\"><summary class=\"quote\">&gt; {} lines</summary>",
-                    count
-                ));
+                use std::fmt::Write as _;
+                let _ = write!(html, "<details open class=\"greentext-block\"><summary class=\"quote\">&gt; {count} lines</summary>");
                 for ql in &group {
-                    html.push_str(&format!(
+                    let _ = write!(
+                        html,
                         "<span class=\"quote\">{}</span><br>",
                         render_inline(ql)
-                    ));
+                    );
                 }
                 html.push_str("</details>");
             } else {
+                use std::fmt::Write as _;
                 for ql in &group {
-                    html.push_str(&format!(
+                    let _ = write!(
+                        html,
                         "<span class=\"quote\">{}</span><br>",
                         render_inline(ql)
-                    ));
+                    );
                 }
             }
             i = j;
         } else {
-            html.push_str(&render_line(line));
+            html.push_str(&render_inline(line));
             html.push_str("<br>");
             i += 1;
         }
@@ -344,10 +374,7 @@ pub fn render_post_body(escaped: &str) -> String {
     html
 }
 
-fn render_line(line: &str) -> String {
-    render_inline(line)
-}
-
+/// Apply all inline markup transformations to a single line of HTML-escaped text.
 fn render_inline(text: &str) -> String {
     let mut result = text.to_string();
 
@@ -357,17 +384,15 @@ fn render_inline(text: &str) -> String {
     result = RE_CROSSLINK
         .replace_all(&result, |caps: &regex::Captures| {
             let board = &caps[1];
-            match caps.get(2) {
-                Some(pid) => {
+            caps.get(2).map_or_else(
+                || format!(r#"<a href="/{board}" class="quotelink crosslink">&gt;&gt;&gt;/{board}/</a>"#),
+                |pid| {
                     let pid = pid.as_str();
                     format!(
                         r#"<a href="/{board}/post/{pid}" class="quotelink crosslink" data-crossboard="{board}" data-pid="{pid}">&gt;&gt;&gt;/{board}/{pid}</a>"#,
                     )
-                }
-                None => {
-                    format!(r#"<a href="/{board}" class="quotelink crosslink">&gt;&gt;&gt;/{board}/</a>"#)
-                }
-            }
+                },
+            )
         })
         .into_owned();
 
@@ -387,15 +412,12 @@ fn render_inline(text: &str) -> String {
             let url = &caps[1];
             let clean_url = url.trim_end_matches(['.', ',', ')', ';', '\'']);
             let trailing = &url[clean_url.len()..];
-            // FIX[XSS]: Escape clean_url in both href and display text.
-            // The embed branch below already calls escape_html(); this branch
-            // was inserting clean_url raw.  Safe today (RE_URL excludes &<>
-            // and input is pre-escaped), but latently dangerous if the call
-            // site ever changes.  Apply escape_html() consistently.
+            // Escape clean_url in both href and display text.
+            // RE_URL excludes & < > so escaping is safe today, but applying
+            // escape_html() consistently guards against future call-site changes.
             let escaped_url = escape_html(clean_url);
             let link = format!(
-                r#"<a href="{}" rel="nofollow noopener" target="_blank">{}</a>{}"#,
-                escaped_url, escaped_url, trailing
+                r#"<a href="{escaped_url}" rel="nofollow noopener" target="_blank">{escaped_url}</a>{trailing}"#
             );
             // Check for supported video embed URLs. Emit only the embed span —
             // the URL becomes a data attribute and the span text, not a hyperlink.
@@ -441,22 +463,25 @@ fn render_inline(text: &str) -> String {
 }
 
 /// Sanitize a file name: keep only safe characters.
+#[must_use]
 pub fn sanitize_filename(name: &str) -> String {
     let name = name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'], "_");
     name.chars().take(100).collect()
 }
 
 /// Validate and truncate post body.
+///
+/// # Errors
+/// Returns `Err` if the body is empty or exceeds 4096 characters.
 pub fn validate_body(body: &str) -> Result<&str, String> {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return Err("Post body cannot be empty.".into());
     }
-    // FIX[CHARS]: Use .chars().count() rather than .len() (byte count).
-    // A post of 1,366 CJK characters is 4,098 UTF-8 bytes and would be
-    // incorrectly rejected by a byte-length check despite being well within
-    // the 4,096-character limit.  The error message also now correctly says
-    // "characters" because that is what we are measuring.
+    // Use .chars().count() rather than .len() (byte count) so that multi-byte
+    // characters (e.g. CJK) are measured correctly.  A post of 1,366 CJK
+    // characters is 4,098 UTF-8 bytes and would be wrongly rejected by a
+    // byte-length check despite being well within the 4,096-character limit.
     if trimmed.chars().count() > 4096 {
         return Err("Post body exceeds 4096 characters.".into());
     }
@@ -471,9 +496,11 @@ pub fn validate_body(body: &str) -> Result<&str, String> {
 ///   • Body length is still capped at 4096 characters regardless.
 ///
 /// Returns the trimmed body (may be empty when a file is present).
+///
+/// # Errors
+/// Returns `Err` if the body exceeds 4096 characters, or if it is empty and no file is present.
 pub fn validate_body_with_file(body: &str, has_file: bool) -> Result<String, String> {
     let trimmed = body.trim();
-    // FIX[CHARS]: Same byte-vs-char fix as validate_body above.
     if trimmed.chars().count() > 4096 {
         return Err("Post body exceeds 4096 characters.".into());
     }
@@ -484,6 +511,7 @@ pub fn validate_body_with_file(body: &str, has_file: bool) -> Result<String, Str
 }
 
 /// Validate and truncate a name field.
+#[must_use]
 pub fn validate_name(name: &str) -> String {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -494,6 +522,7 @@ pub fn validate_name(name: &str) -> String {
 }
 
 /// Validate and truncate subject field.
+#[must_use]
 pub fn validate_subject(subject: &str) -> Option<String> {
     let trimmed = subject.trim();
     if trimmed.is_empty() {
@@ -514,6 +543,20 @@ mod tests {
             "&lt;script&gt;alert(1)&lt;/script&gt;"
         );
         assert_eq!(escape_html("a & b"), "a &amp; b");
+    }
+
+    #[test]
+    fn test_escape_html_single_pass_idempotent() {
+        // Verify the single-pass implementation handles all five entities correctly.
+        let input = r#"<>"'&"#;
+        let escaped = escape_html(input);
+        assert_eq!(escaped, "&lt;&gt;&quot;&#x27;&amp;");
+        // Escaping the already-escaped string must not corrupt the entities.
+        let double = escape_html(&escaped);
+        assert!(
+            double.contains("&amp;amp;"),
+            "& in entity must be escaped again"
+        );
     }
 
     #[test]
@@ -586,6 +629,14 @@ mod tests {
     }
 
     #[test]
+    fn test_emoji_no_colon_fast_path() {
+        // Input with no colon must not trigger any replace calls.
+        let input = "plain text without any colons";
+        let result = apply_emoji(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
     fn test_crosspost_link() {
         let escaped = escape_html(">>>/tech/42");
         let html = render_post_body(&escaped);
@@ -632,7 +683,7 @@ mod tests {
     #[test]
     fn test_sanitize_filename_multibyte() {
         let cjk: String = "日".repeat(50);
-        let long_name = format!("{}.jpg", cjk);
+        let long_name = format!("{cjk}.jpg");
         let result = sanitize_filename(&long_name);
         assert!(result.chars().count() <= 100);
     }
@@ -790,7 +841,7 @@ mod tests {
     fn test_long_greentext_chain_collapsible() {
         // 100 consecutive greentext lines should produce exactly one <details> block
         let raw = (0..100)
-            .map(|i| format!(">line {}", i))
+            .map(|i| format!(">line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let escaped = escape_html(&raw);

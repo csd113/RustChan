@@ -9,6 +9,7 @@ use crate::models::Board;
 use crate::utils::sanitize::escape_html;
 
 /// New-thread submission form. Embedded on board index and catalog pages.
+#[allow(clippy::too_many_lines)]
 pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String {
     let image_mb = CONFIG.max_image_size / 1024 / 1024;
     let video_mb = CONFIG.max_video_size / 1024 / 1024;
@@ -41,7 +42,6 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
             r#"    <tr><td>audio<br><span style="font-size:0.65rem;color:var(--text-dim)">(+ image)</span></td>
         <td><input type="file" name="audio_file" accept="audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
             <span style="font-size:0.72rem;color:var(--text-dim)">optional audio alongside image · max {audio_mb} MiB</span></td></tr>"#,
-            audio_mb = audio_mb,
         )
     } else {
         String::new()
@@ -143,15 +143,15 @@ pub(super) fn reply_form(
     let mut hint_parts: Vec<String> = Vec::new();
     if board.allow_images {
         accept_parts.push("image/jpeg,image/png,image/gif,image/webp");
-        hint_parts.push(format!("jpg/png/gif/webp · max {} MiB", image_mb));
+        hint_parts.push(format!("jpg/png/gif/webp · max {image_mb} MiB"));
     }
     if board.allow_video {
         accept_parts.push("video/mp4,video/webm");
-        hint_parts.push(format!("mp4/webm · max {} MiB", video_mb));
+        hint_parts.push(format!("mp4/webm · max {video_mb} MiB"));
     }
     if board.allow_audio {
         accept_parts.push("audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac");
-        hint_parts.push(format!("mp3/ogg/flac/wav/m4a · max {} MiB", audio_mb));
+        hint_parts.push(format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB"));
     }
     let file_accept = accept_parts.join(",");
     let file_hint = hint_parts.join(" &nbsp;|&nbsp; ");
@@ -162,7 +162,6 @@ pub(super) fn reply_form(
             r#"    <tr><td>audio<br><span style="font-size:0.65rem;color:var(--text-dim)">(+ image)</span></td>
         <td><input type="file" name="audio_file" accept="audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
             <span style="font-size:0.72rem;color:var(--text-dim)">optional audio alongside image · max {audio_mb} MiB</span></td></tr>"#,
-            audio_mb = audio_mb,
         )
     } else {
         String::new()

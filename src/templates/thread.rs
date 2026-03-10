@@ -5,8 +5,9 @@
 //   render_post  — single post HTML (also used by board.rs for index previews)
 //   render_poll  — poll widget (private, embedded in thread_page)
 
-use crate::models::*;
+use crate::models::{Board, Post, Thread};
 use crate::utils::{files::format_file_size, sanitize::escape_html};
+use std::fmt::Write;
 
 use super::{
     base_layout, compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script,
@@ -15,6 +16,8 @@ use super::{
 
 // ─── Thread page ──────────────────────────────────────────────────────────────
 
+#[must_use]
+#[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 pub fn thread_page(
     board: &Board,
@@ -30,10 +33,11 @@ pub fn thread_page(
     let mut body = String::new();
 
     if let Some(msg) = error {
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             r#"<div class="post-error-banner">&#9888; {}</div>"#,
             escape_html(msg)
-        ));
+        );
     }
 
     if is_admin {
@@ -47,7 +51,8 @@ pub fn thread_page(
         } else {
             ("lock", "&#128274; Lock")
         };
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             r#"<div class="admin-toolbar">
 <span class="admin-toolbar-label">&#9632; ADMIN</span>
 <form method="POST" action="/admin/thread/action" style="display:inline">
@@ -86,7 +91,9 @@ pub fn thread_page(
             lock_act = lock_action.0,
             lock_lbl = lock_action.1,
             // Show "Archive Thread" only when the thread is not already archived.
-            archive_btn = if !thread.archived {
+            archive_btn = if thread.archived {
+                String::new()
+            } else {
                 format!(
                     r#"<form method="POST" action="/admin/thread/action" style="display:inline">
 <input type="hidden" name="_csrf" value="{csrf}">
@@ -102,10 +109,8 @@ pub fn thread_page(
                     tid = thread.id,
                     board = escape_html(&board.short_name),
                 )
-            } else {
-                String::new()
-            },
-        ));
+            }
+        );
     }
 
     let locked_notice = if thread.locked {
@@ -114,7 +119,8 @@ pub fn thread_page(
         ""
     };
 
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         r##"<div class="thread-board-banner board-thread-header">/{s}/ — {bn}</div>
 <div class="board-header thread-nav">
   <a href="/{s}">[ Return ]</a>
@@ -131,8 +137,8 @@ pub fn thread_page(
 "##,
         s = escape_html(&board.short_name),
         bn = escape_html(&board.name),
-        rc = thread.reply_count,
-    ));
+        rc = thread.reply_count
+    );
     body.push_str(locked_notice);
 
     if let Some(pd) = poll {
@@ -140,20 +146,24 @@ pub fn thread_page(
     }
 
     let last_post_id = posts.iter().map(|p| p.id).max().unwrap_or(0);
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         r#"<div id="thread-posts" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}">"#,
-        tid   = thread.id,
+        tid = thread.id,
         board = escape_html(&board.short_name),
-        last  = last_post_id,
-    ));
+        last = last_post_id
+    );
     for post in posts {
         body.push_str(&render_post(
             post,
             &board.short_name,
             csrf_token,
-            true,
-            is_admin,
-            true,
+            RenderPostOpts {
+                show_delete: true,
+                is_admin,
+                show_media: true,
+                allow_editing: board.allow_editing,
+            },
             board.edit_window_secs,
         ));
     }
@@ -163,12 +173,13 @@ pub fn thread_page(
 
     if !thread.locked {
         let form_html = super::forms::reply_form(&board.short_name, thread.id, csrf_token, board);
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             r#"<div class="post-toggle-bar reply">
   <button class="post-toggle-btn" data-action="toggle-post-form">[ Reply ]</button>
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
-  {form}
+  {form_html}
 </div>
 
 <!-- Mobile sticky reply drawer — visible only on small screens via CSS -->
@@ -181,11 +192,10 @@ pub fn thread_page(
     <button class="mobile-drawer-close" data-action="toggle-mobile-drawer">✕</button>
   </div>
   <div class="mobile-drawer-body">
-    {form}
+    {form_html}
   </div>
-</div>"#,
-            form = form_html,
-        ));
+</div>"#
+        );
     }
 
     body.push_str(TOGGLE_SCRIPT);
@@ -217,14 +227,15 @@ pub fn thread_page(
     // ── Video embed + draft autosave config (data attributes only) ─────────
     let embed_enabled_attr = if board.allow_video_embeds { "1" } else { "0" };
     let draft_key = format!("rustchan_draft_{}_{}", board.short_name, thread.id);
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         r#"<div id="thread-config"
      data-embed-enabled="{embed_enabled}"
      data-draft-key="{draft_key}"
      style="display:none" aria-hidden="true"></div>"#,
         embed_enabled = embed_enabled_attr,
-        draft_key = escape_html(&draft_key),
-    ));
+        draft_key = escape_html(&draft_key)
+    );
 
     base_layout(
         &format!(
@@ -237,7 +248,6 @@ pub fn thread_page(
         csrf_token,
         boards,
         collapse_greentext,
-        board.allow_archive,
     )
 }
 
@@ -290,9 +300,11 @@ fn render_poll(
         let total = pd.total_votes.max(1);
         html.push_str(r#"<div class="poll-results">"#);
         for opt in &pd.options {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
             let pct = (opt.vote_count as f64 / total as f64 * 100.0).round() as i64;
             let is_voted = pd.user_voted_option == Some(opt.id);
-            html.push_str(&format!(
+            let _ = write!(
+                html,
                 r#"<div class="poll-option-result{voted}">
   <div class="poll-option-label">
     {check}<span class="poll-opt-text">{text}</span>
@@ -304,33 +316,36 @@ fn render_poll(
                 check = if is_voted { "✓ " } else { "" },
                 text = escape_html(&opt.text),
                 votes = opt.vote_count,
-                pct = pct,
-            ));
+                pct = pct
+            );
         }
-        html.push_str(&format!(
+        let _ = write!(
+            html,
             r#"<div class="poll-total">{} total vote{}</div></div>"#,
             pd.total_votes,
-            if pd.total_votes == 1 { "" } else { "s" },
-        ));
+            if pd.total_votes == 1 { "" } else { "s" }
+        );
     } else {
-        html.push_str(&format!(
+        let _ = write!(
+            html,
             r#"<form class="poll-vote-form" method="POST" action="/vote">
 <input type="hidden" name="_csrf"     value="{csrf}">
 <input type="hidden" name="thread_id" value="{tid}">
 <input type="hidden" name="board"     value="{board}">"#,
             csrf = escape_html(csrf_token),
             tid = thread_id,
-            board = escape_html(board_short),
-        ));
+            board = escape_html(board_short)
+        );
         for opt in &pd.options {
-            html.push_str(&format!(
+            let _ = write!(
+                html,
                 r#"<label class="poll-vote-option">
   <input type="radio" name="option_id" value="{id}" required>
   <span class="poll-opt-text">{text}</span>
 </label>"#,
                 id = opt.id,
-                text = escape_html(&opt.text),
-            ));
+                text = escape_html(&opt.text)
+            );
         }
         html.push_str(
             r#"<button type="submit" class="poll-vote-btn">[ Cast Vote ]</button></form>"#,
@@ -343,6 +358,16 @@ fn render_poll(
 
 // ─── Single post renderer ─────────────────────────────────────────────────────
 
+/// Options that control which controls are rendered for a post.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Default)]
+pub struct RenderPostOpts {
+    pub show_delete: bool,
+    pub is_admin: bool,
+    pub show_media: bool,
+    pub allow_editing: bool,
+}
+
 /// Render a single post as HTML.
 /// `pub` because board.rs uses this for thread-summary preview posts and
 /// search results; all other call-sites are within this module.
@@ -353,15 +378,20 @@ fn render_poll(
 /// user-supplied string in this function must continue to pass through
 /// `escape_html()`. Do not change the `body_html` insertion without ensuring
 /// the upstream sanitiser is still in place.
+#[allow(clippy::too_many_lines)]
 pub fn render_post(
     post: &Post,
     board_short: &str,
     csrf_token: &str,
-    show_delete: bool,
-    is_admin: bool,
-    show_media: bool,
+    opts: RenderPostOpts,
     edit_window_secs: i64,
 ) -> String {
+    let RenderPostOpts {
+        show_delete,
+        is_admin,
+        show_media,
+        allow_editing,
+    } = opts;
     let tripcode_html = post
         .tripcode
         .as_ref()
@@ -399,10 +429,11 @@ pub fn render_post(
     );
 
     if let Some(subject) = &post.subject {
-        html.push_str(&format!(
+        let _ = write!(
+            html,
             r#"<div class="subject"><strong>{}</strong></div>"#,
             escape_html(subject)
-        ));
+        );
     }
 
     // Image / Video / Audio
@@ -418,18 +449,17 @@ pub fn render_post(
                 || post
                     .mime_type
                     .as_deref()
-                    .map(|m| m.starts_with("audio/"))
-                    .unwrap_or(false);
+                    .is_some_and(|m| m.starts_with("audio/"));
             let is_video = !is_audio
                 && (matches!(&post.media_type, Some(crate::models::MediaType::Video))
                     || post
                         .mime_type
                         .as_deref()
-                        .map(|m| m.starts_with("video/"))
-                        .unwrap_or(false));
+                        .is_some_and(|m| m.starts_with("video/")));
 
             if is_audio {
-                html.push_str(&format!(
+                let _ = write!(
+                    html,
                     r#"<div class="file-container audio-container">
 <div class="file-info">
   <a href="/boards/{f}">{orig}</a> ({sz})
@@ -446,10 +476,11 @@ pub fn render_post(
                     th = escape_html(thumb),
                     orig = escape_html(name_str),
                     sz = escape_html(&size_str),
-                    mime = escape_html(mime),
-                ));
+                    mime = escape_html(mime)
+                );
             } else if is_video {
-                html.push_str(&format!(
+                let _ = write!(
+                    html,
                     r#"<div class="file-container">
 <div class="file-info">
   <a href="/boards/{f}">{orig}</a> ({sz})
@@ -467,11 +498,12 @@ pub fn render_post(
                     th = escape_html(thumb),
                     orig = escape_html(name_str),
                     sz = escape_html(&size_str),
-                    mime = escape_html(mime),
-                ));
+                    mime = escape_html(mime)
+                );
             } else {
                 // Image
-                html.push_str(&format!(
+                let _ = write!(
+                    html,
                     r#"<div class="file-container">
 <div class="file-info">
   <a href="/boards/{f}">{orig}</a> ({sz})
@@ -487,8 +519,8 @@ pub fn render_post(
                     f = escape_html(file),
                     th = escape_html(thumb),
                     orig = escape_html(name_str),
-                    sz = escape_html(&size_str),
-                ));
+                    sz = escape_html(&size_str)
+                );
             }
         }
     }
@@ -501,7 +533,8 @@ pub fn render_post(
                 .audio_file_size
                 .map(format_file_size)
                 .unwrap_or_default();
-            html.push_str(&format!(
+            let _ = write!(
+                html,
                 r#"<div class="file-container audio-container audio-combo">
 <div class="file-info">
   <a href="/boards/{f}">{orig}</a> ({sz})
@@ -514,16 +547,13 @@ pub fn render_post(
                 f = escape_html(aud_file),
                 orig = escape_html(aud_name),
                 sz = escape_html(&aud_size),
-                mime = escape_html(aud_mime),
-            ));
+                mime = escape_html(aud_mime)
+            );
         }
     }
 
     // Post body (pre-rendered, sanitised HTML)
-    html.push_str(&format!(
-        r#"<div class="post-body">{}</div>"#,
-        post.body_html
-    ));
+    let _ = write!(html, r#"<div class="post-body">{}</div>"#, post.body_html);
 
     // Edit link + report button (only on thread pages where show_delete=true)
     if show_delete {
@@ -534,7 +564,7 @@ pub fn render_post(
         // entirely when the board used the no-limit setting.
         let within_edit_window = edit_window_secs == 0
             || (edit_window_secs > 0 && now - post.created_at <= edit_window_secs);
-        let edit_link = if within_edit_window {
+        let edit_link = if allow_editing && within_edit_window {
             format!(
                 r#" <a class="edit-btn" href="/{board}/post/{pid}/edit" title="Edit post">edit</a>"#,
                 board = escape_html(board_short),
@@ -553,17 +583,17 @@ pub fn render_post(
             csrf = escape_html(csrf_token),
         );
 
-        html.push_str(&format!(
-            r#"<div class="post-controls">{edit_link}{report_btn}</div>"#,
-            edit_link = edit_link,
-            report_btn = report_btn,
-        ));
+        let _ = write!(
+            html,
+            r#"<div class="post-controls">{edit_link}{report_btn}</div>"#
+        );
     }
 
     // Admin delete button + IP history link
     if is_admin {
         let is_op_val = if post.is_op { "1" } else { "0" };
-        html.push_str(&format!(
+        let _ = write!(
+            html,
             r#"<div class="post-controls admin-post-controls">
 <form method="POST" action="/admin/post/delete">
 <input type="hidden" name="_csrf"   value="{csrf}">
@@ -586,13 +616,13 @@ pub fn render_post(
 </form>
 <a class="admin-ip-link" href="/admin/ip/{ip_hash}" title="View all posts from this IP hash">&#x1F50D; ip</a>
 </div>"#,
-            csrf    = escape_html(csrf_token),
-            pid     = post.id,
-            board   = escape_html(board_short),
+            csrf = escape_html(csrf_token),
+            pid = post.id,
+            board = escape_html(board_short),
             ip_hash = escape_html(&post.ip_hash),
-            tid     = post.thread_id,
-            is_op   = is_op_val,
-        ));
+            tid = post.thread_id,
+            is_op = is_op_val
+        );
     }
 
     html.push_str("</div>\n");
@@ -601,6 +631,7 @@ pub fn render_post(
 
 // ─── Edit post page ───────────────────────────────────────────────────────────
 
+#[must_use]
 pub fn edit_post_page(
     board: &Board,
     post: &Post,
@@ -661,6 +692,5 @@ pub fn edit_post_page(
         csrf_token,
         boards,
         collapse_greentext,
-        board.allow_archive,
     )
 }

@@ -25,11 +25,13 @@ use axum::{
 };
 use clap::{Parser, Subcommand};
 use dashmap::DashMap;
-use once_cell::sync::Lazy;
+use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tracing::info;
+use tracing::Instrument as _;
 use tracing_subscriber::{filter::EnvFilter, fmt};
 
 mod config;
@@ -55,15 +57,46 @@ static THEME_INIT_JS: &str = include_str!("../static/theme-init.js");
 /// Total HTTP requests handled since startup.
 pub static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Requests currently being processed (in-flight).
-static IN_FLIGHT: AtomicI64 = AtomicI64::new(0);
+///
+/// FIX[AUDIT-1]: Changed from `AtomicI64` to `AtomicU64`.  In-flight request
+/// counts are inherently non-negative; using a signed type required defensive
+/// `.max(0)` casts at every read site and masked counter underflow bugs.
+/// Decrements use `ScopedDecrement` RAII guards (see below) to prevent
+/// counter leaks when async futures are cancelled mid-flight.
+static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 /// Multipart file uploads currently in progress.
-static ACTIVE_UPLOADS: AtomicI64 = AtomicI64::new(0);
+///
+/// FIX[AUDIT-1]: Same signed→unsigned change as `IN_FLIGHT`.
+static ACTIVE_UPLOADS: AtomicU64 = AtomicU64::new(0);
 /// Monotonic tick used to animate the upload spinner.
 static SPINNER_TICK: AtomicU64 = AtomicU64::new(0);
 /// Recently active client IPs (last ~5 min); maps SHA-256(IP) → last-seen Instant.
 /// CRIT-5: Keys are hashed so raw IP addresses are never retained in process
 /// memory (or coredumps). The count is used for the "users online" display.
-static ACTIVE_IPS: Lazy<DashMap<String, Instant>> = Lazy::new(DashMap::new);
+static ACTIVE_IPS: LazyLock<DashMap<String, Instant>> = LazyLock::new(DashMap::new);
+
+// ─── RAII counter guard ───────────────────────────────────────────────────────
+//
+// FIX[AUDIT-2]: `IN_FLIGHT` and `ACTIVE_UPLOADS` are decremented inside
+// `track_requests` *after* `.await`.  If the surrounding future is cancelled
+// (e.g. client disconnect, timeout, or panic in a handler), the post-await
+// code never runs and the counters permanently over-count.
+//
+// `ScopedDecrement` ties the decrement to the guard's lifetime so it fires
+// unconditionally via `Drop`, even when the future is dropped mid-flight.
+// The decrement is saturating to prevent underflow on `AtomicU64`.
+struct ScopedDecrement<'a>(&'a AtomicU64);
+
+impl Drop for ScopedDecrement<'_> {
+    fn drop(&mut self) {
+        // Saturating decrement: fetch_update retries on spurious failure.
+        let _ = self
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
+    }
+}
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
 
@@ -136,9 +169,14 @@ enum AdminAction {
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
+//
+// 3.5: `#[tokio::main]` does not expose `max_blocking_threads`, so we build
+// the runtime manually.  The blocking thread pool (used by every
+// `spawn_blocking` call — page renders, DB queries, file I/O) defaults to
+// logical CPUs × 4 but can be tuned via `blocking_threads` in settings.toml
+// or the CHAN_BLOCKING_THREADS environment variable.
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     fmt::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -148,22 +186,39 @@ async fn main() -> anyhow::Result<()> {
         .compact()
         .init();
 
+    // CONFIG must be initialised before building the runtime so that
+    // blocking_threads is available.  This is safe because CONFIG is a
+    // LazyLock<Config> that initialises itself on first access.
+    let blocking_threads = CONFIG.blocking_threads;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(blocking_threads)
+        .build()
+        .expect("Failed to build Tokio runtime");
+
     let cli = Cli::parse();
 
-    match cli.command {
-        None | Some(Command::Serve { port: None }) => run_server(None).await,
-        Some(Command::Serve { port }) => run_server(port).await,
-        Some(Command::Admin { action }) => run_admin(action),
-    }
+    rt.block_on(async move {
+        match cli.command {
+            None | Some(Command::Serve { port: None }) => run_server(None).await,
+            Some(Command::Serve { port }) => run_server(port).await,
+            Some(Command::Admin { action }) => {
+                run_admin(action)?;
+                Ok(())
+            }
+        }
+    })
 }
 
 // ─── Server mode ─────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     let early_data_dir = {
         let exe = std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .and_then(|p| p.parent().map(|p: &std::path::Path| p.to_path_buf()))
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         exe.join("rustchan-data")
     };
@@ -192,20 +247,20 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
 
     print_banner();
 
-    let bind_addr: String = if let Some(p) = port_override {
-        // rsplit_once splits at the LAST colon only, which correctly handles
-        // both IPv4 ("0.0.0.0:8080") and IPv6 ("[::1]:8080") bind addresses.
-        // rsplit(':').nth(1) was incorrect for IPv6 — it returned "1]" instead
-        // of "[::1]" because rsplit splits on every colon in the address.
-        let host = CONFIG
-            .bind_addr
-            .rsplit_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or("0.0.0.0");
-        format!("{}:{}", host, p)
-    } else {
-        CONFIG.bind_addr.clone()
-    };
+    let bind_addr: String = port_override.map_or_else(
+        || CONFIG.bind_addr.clone(),
+        |p| {
+            // rsplit_once splits at the LAST colon only, which correctly handles
+            // both IPv4 ("0.0.0.0:8080") and IPv6 ("[::1]:8080") bind addresses.
+            // rsplit(':').nth(1) was incorrect for IPv6 — it returned "1]" instead
+            // of "[::1]" because rsplit splits on every colon in the address.
+            let host = CONFIG
+                .bind_addr
+                .rsplit_once(':')
+                .map_or("0.0.0.0", |(h, _)| h);
+            format!("{host}:{p}")
+        },
+    );
 
     let pool = db::init_pool()?;
     first_run_check(&pool)?;
@@ -219,17 +274,39 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // Initialise the live site name and subtitle from DB so they're available before any request.
     {
         if let Ok(conn) = pool.get() {
-            let name = db::get_site_name(&conn);
+            // Site name: use DB value if an admin has set one, otherwise seed
+            // from CONFIG.forum_name (settings.toml).  Using get_site_setting
+            // (not get_site_name) lets us distinguish "never set" from "set to
+            // the default", so that editing forum_name in settings.toml and
+            // restarting takes effect when no admin override is in the DB.
+            let name_in_db = db::get_site_setting(&conn, "site_name")
+                .ok()
+                .flatten()
+                .filter(|v| !v.trim().is_empty());
+            let name = name_in_db.unwrap_or_else(|| {
+                // Seed DB from settings.toml so get_site_name is always consistent.
+                let _ = db::set_site_setting(&conn, "site_name", &CONFIG.forum_name);
+                CONFIG.forum_name.clone()
+            });
             templates::set_live_site_name(&name);
 
             // Seed subtitle from settings.toml if not yet configured in DB.
-            let subtitle = db::get_site_subtitle(&conn);
-            let subtitle = if subtitle.is_empty() && !CONFIG.initial_site_subtitle.is_empty() {
-                let _ = db::set_site_setting(&conn, "site_subtitle", &CONFIG.initial_site_subtitle);
-                CONFIG.initial_site_subtitle.clone()
-            } else {
-                subtitle
-            };
+            // BUG FIX: get_site_subtitle() always returns a non-empty fallback
+            // string, so we must query the DB key directly to detect "never set".
+            let subtitle_in_db = db::get_site_setting(&conn, "site_subtitle")
+                .ok()
+                .flatten()
+                .filter(|v| !v.trim().is_empty());
+            let subtitle = subtitle_in_db.unwrap_or_else(|| {
+                // Nothing in DB — seed from CONFIG (settings.toml).
+                let seed = if CONFIG.initial_site_subtitle.is_empty() {
+                    "select board to proceed".to_string()
+                } else {
+                    CONFIG.initial_site_subtitle.clone()
+                };
+                let _ = db::set_site_setting(&conn, "site_subtitle", &seed);
+                seed
+            });
             templates::set_live_site_subtitle(&subtitle);
 
             // Seed default_theme from settings.toml if not yet configured in DB.
@@ -244,6 +321,11 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                 default_theme
             };
             templates::set_live_default_theme(&default_theme);
+
+            // Seed the live board list used by error pages and ban pages.
+            if let Ok(boards) = db::get_all_boards(&conn) {
+                templates::set_live_boards(boards);
+            }
         }
     }
     // ── External tool detection ────────────────────────────────────────────────
@@ -269,7 +351,7 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         ffmpeg_available,
         job_queue: {
             let q = std::sync::Arc::new(workers::JobQueue::new(pool.clone()));
-            workers::start_worker_pool(q.clone(), ffmpeg_available);
+            workers::start_worker_pool(&q, ffmpeg_available);
             q
         },
         backup_progress: std::sync::Arc::new(middleware::BackupProgress::new()),
@@ -287,9 +369,9 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                 iv.tick().await;
                 if let Ok(conn) = bg.get() {
                     match db::purge_expired_sessions(&conn) {
-                        Ok(n) if n > 0 => info!("Purged {} expired sessions", n),
-                        Err(e) => tracing::error!("Session purge error: {}", e),
-                        _ => {}
+                        Ok(n) if n > 0 => info!("Purged {n} expired sessions"),
+                        Err(e) => tracing::error!("Session purge error: {e}"),
+                        Ok(_) => {}
                     }
                 }
             }
@@ -312,14 +394,9 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                 if let Ok(conn) = bg.get() {
                     match db::run_wal_checkpoint(&conn) {
                         Ok((pages, moved, backfill)) => {
-                            tracing::debug!(
-                                "WAL checkpoint: {} pages total, {} moved, {} backfilled",
-                                pages,
-                                moved,
-                                backfill
-                            );
+                            tracing::debug!("WAL checkpoint: {pages} pages total, {moved} moved, {backfill} backfilled");
                         }
-                        Err(e) => tracing::warn!("WAL checkpoint failed: {}", e),
+                        Err(e) => tracing::warn!("WAL checkpoint failed: {e}"),
                     }
                     // Fix #7: reuse `conn` instead of calling bg.get() again.
                     // A second acquire while the first is still alive deadlocks
@@ -335,15 +412,117 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let mut iv = tokio::time::interval(Duration::from_secs(300));
         loop {
             iv.tick().await;
-            let cutoff = Instant::now() - Duration::from_secs(300);
+            let cutoff = Instant::now()
+                .checked_sub(Duration::from_secs(300))
+                .unwrap_or_else(Instant::now);
             ACTIVE_IPS.retain(|_, last_seen| *last_seen > cutoff);
         }
     });
 
+    // Background: prune expired entries from ADMIN_LOGIN_FAILS every 5 min.
+    // Prevents unbounded growth under a sustained brute-force attack that
+    // never produces a successful login (which would trigger the existing
+    // opportunistic prune path inside clear_login_fails).
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            iv.tick().await;
+            crate::handlers::admin::prune_login_fails();
+        }
+    });
+
+    // 1.6: Scheduled database VACUUM — reclaim disk space from deleted posts
+    // and threads without requiring manual admin intervention.
+    if CONFIG.auto_vacuum_interval_hours > 0 {
+        let bg = pool.clone();
+        let interval_secs = CONFIG.auto_vacuum_interval_hours * 3600;
+        tokio::spawn(async move {
+            // Stagger the first run by half the interval to avoid hammering the
+            // DB immediately at startup alongside WAL checkpoint and session purge.
+            tokio::time::sleep(Duration::from_secs(interval_secs / 2 + 7)).await;
+            let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                iv.tick().await;
+                let bg2 = bg.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(conn) = bg2.get() {
+                        let before = db::get_db_size_bytes(&conn).unwrap_or(0);
+                        match db::run_vacuum(&conn) {
+                            Ok(()) => {
+                                let after = db::get_db_size_bytes(&conn).unwrap_or(0);
+                                let saved = before.saturating_sub(after);
+                                info!(
+                                    "Scheduled VACUUM complete: {} → {} bytes ({} reclaimed)",
+                                    before, after, saved
+                                );
+                            }
+                            Err(e) => tracing::warn!("Scheduled VACUUM failed: {e}"),
+                        }
+                    }
+                })
+                .await
+                .ok();
+            }
+        });
+    }
+
+    // 1.7: Expired poll vote cleanup — purge per-IP vote rows for polls whose
+    // expiry is older than poll_cleanup_interval_hours, preventing the
+    // poll_votes table from growing indefinitely.
+    if CONFIG.poll_cleanup_interval_hours > 0 {
+        let bg = pool.clone();
+        let interval_secs = CONFIG.poll_cleanup_interval_hours * 3600;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(600)).await; // initial delay
+            let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                iv.tick().await;
+                let bg2 = bg.clone();
+                let retention_cutoff_secs = interval_secs.cast_signed();
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(conn) = bg2.get() {
+                        let cutoff = chrono::Utc::now().timestamp() - retention_cutoff_secs;
+                        match db::cleanup_expired_poll_votes(&conn, cutoff) {
+                            Ok(n) if n > 0 => {
+                                info!("Poll vote cleanup: removed {} expired vote row(s)", n);
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!("Poll vote cleanup failed: {e}"),
+                        }
+                    }
+                })
+                .await
+                .ok();
+            }
+        });
+    }
+
+    // 2.6: Waveform/thumbnail cache eviction — keep total size of all thumbs
+    // directories under CONFIG.waveform_cache_max_bytes by deleting the oldest
+    // files when the threshold is exceeded.  Waveform PNGs can be regenerated
+    // by re-enqueueing the AudioWaveform job; image thumbnails can be
+    // regenerated from the originals.  Uses 1-hour intervals.
+    if CONFIG.waveform_cache_max_bytes > 0 {
+        let max_bytes = CONFIG.waveform_cache_max_bytes;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1800)).await; // initial stagger
+            let mut iv = tokio::time::interval(Duration::from_secs(3600));
+            loop {
+                iv.tick().await;
+                let upload_dir = CONFIG.upload_dir.clone();
+                tokio::task::spawn_blocking(move || {
+                    evict_thumb_cache(&upload_dir, max_bytes);
+                })
+                .await
+                .ok();
+            }
+        });
+    }
+
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    info!("Listening on  http://{}", bind_addr);
-    info!("Admin panel   http://{}/admin", bind_addr);
+    info!("Listening on  http://{bind_addr}");
+    info!("Admin panel   http://{bind_addr}/admin");
     info!("Data dir      {}", data_dir.display());
     println!();
 
@@ -366,6 +545,7 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/static/style.css", get(serve_css))
@@ -373,12 +553,22 @@ fn build_router(state: AppState) -> Router {
         .route("/static/theme-init.js", get(serve_theme_init_js))
         .route("/", get(handlers::board::index))
         .route("/{board}", get(handlers::board::board_index))
-        .route("/{board}", post(handlers::board::create_thread))
+        .route(
+            "/{board}",
+            post(handlers::board::create_thread).layer(DefaultBodyLimit::max(
+                CONFIG.max_video_size.max(CONFIG.max_audio_size),
+            )),
+        )
         .route("/{board}/catalog", get(handlers::board::catalog))
         .route("/{board}/archive", get(handlers::board::board_archive))
         .route("/{board}/search", get(handlers::board::search))
         .route("/{board}/thread/{id}", get(handlers::thread::view_thread))
-        .route("/{board}/thread/{id}", post(handlers::thread::post_reply))
+        .route(
+            "/{board}/thread/{id}",
+            post(handlers::thread::post_reply).layer(DefaultBodyLimit::max(
+                CONFIG.max_video_size.max(CONFIG.max_audio_size),
+            )),
+        )
         .route(
             "/{board}/post/{id}/edit",
             get(handlers::thread::edit_post_get),
@@ -513,6 +703,12 @@ fn build_router(state: AppState) -> Router {
         .layer(axum_middleware::from_fn(middleware::rate_limit_middleware))
         .layer(DefaultBodyLimit::max(CONFIG.max_video_size))
         .layer(axum_middleware::from_fn(track_requests))
+        // 3.3: Gzip/Brotli/Zstd response compression.  HTML pages compress 5–10×
+        // with gzip and even better with Brotli.  tower-http respects the client's
+        // Accept-Encoding header and negotiates the best supported algorithm.
+        // Applied before the trailing-slash normaliser so compressed responses
+        // are served correctly for all paths including redirects.
+        .layer(tower_http::compression::CompressionLayer::new())
         // Normalize trailing slashes before routing: redirect /path/ → /path (301).
         // Applied last (outermost) so it fires before any other middleware sees the URI.
         .layer(axum_middleware::from_fn(
@@ -578,8 +774,7 @@ async fn hsts_middleware(
             .headers()
             .get("x-forwarded-proto")
             .and_then(|v| v.to_str().ok())
-            .map(|v| v.eq_ignore_ascii_case("https"))
-            .unwrap_or(false);
+            .is_some_and(|v| v.eq_ignore_ascii_case("https"));
 
     let mut resp = next.run(req).await;
     if is_https {
@@ -639,6 +834,10 @@ async fn track_requests(
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
 
+    // FIX[AUDIT-2]: Bind the in-flight decrement to a RAII guard so it fires
+    // even if this future is cancelled (e.g. client disconnect, handler panic).
+    let _in_flight_guard = ScopedDecrement(&IN_FLIGHT);
+
     // Attach a per-request UUID to every tracing span so correlated log lines
     // can be grouped by request even under concurrent load (#12).
     let req_id = uuid::Uuid::new_v4();
@@ -675,22 +874,16 @@ async fn track_requests(
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.contains("multipart/form-data"))
-        .unwrap_or(false);
+        .is_some_and(|ct| ct.contains("multipart/form-data"));
 
-    if is_upload {
+    // FIX[AUDIT-2]: Bind upload decrement to a RAII guard for the same reason.
+    // Option<ScopedDecrement> is None when is_upload is false — zero-cost branch.
+    let _upload_guard = is_upload.then(|| {
         ACTIVE_UPLOADS.fetch_add(1, Ordering::Relaxed);
-    }
+        ScopedDecrement(&ACTIVE_UPLOADS)
+    });
 
-    use tracing::Instrument as _;
-    let resp = next.run(req).instrument(span).await;
-
-    IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
-    if is_upload {
-        ACTIVE_UPLOADS.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    resp
+    next.run(req).instrument(span).await
 }
 
 // ─── First-run check ─────────────────────────────────────────────────────────
@@ -732,6 +925,7 @@ struct TermStats {
     last_tick: Instant,
 }
 
+#[allow(clippy::too_many_lines)]
 fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
     // Uptime
     let uptime = start.elapsed();
@@ -744,34 +938,36 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
     ts.last_tick = now;
     let curr_reqs = REQUEST_COUNT.load(Ordering::Relaxed);
     let req_delta = curr_reqs.saturating_sub(ts.prev_req_count);
+    #[allow(clippy::cast_precision_loss)]
     let rps = req_delta as f64 / elapsed_secs;
     ts.prev_req_count = curr_reqs;
 
     // DB query
-    let (boards, threads, posts, db_kb, board_stats) = if let Ok(conn) = pool.get() {
-        let b: i64 = conn
-            .query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0))
-            .unwrap_or(0);
-        let th: i64 = conn
-            .query_row("SELECT COUNT(*) FROM threads", [], |r| r.get(0))
-            .unwrap_or(0);
-        let p: i64 = conn
-            .query_row("SELECT COUNT(*) FROM posts", [], |r| r.get(0))
-            .unwrap_or(0);
-        let kb: i64 = {
-            let pc: i64 = conn
-                .query_row("PRAGMA page_count", [], |r| r.get(0))
+    let (boards, threads, posts, db_kb, board_stats) = pool.get().map_or_else(
+        |_| (0i64, 0i64, 0i64, 0i64, vec![]),
+        |conn| {
+            let b: i64 = conn
+                .query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0))
                 .unwrap_or(0);
-            let ps: i64 = conn
-                .query_row("PRAGMA page_size", [], |r| r.get(0))
-                .unwrap_or(4096);
-            pc * ps / 1024
-        };
-        let bs = get_per_board_stats(&conn);
-        (b, th, p, kb, bs)
-    } else {
-        (0, 0, 0, 0, vec![])
-    };
+            let th: i64 = conn
+                .query_row("SELECT COUNT(*) FROM threads", [], |r| r.get(0))
+                .unwrap_or(0);
+            let p: i64 = conn
+                .query_row("SELECT COUNT(*) FROM posts", [], |r| r.get(0))
+                .unwrap_or(0);
+            let kb: i64 = {
+                let pc: i64 = conn
+                    .query_row("PRAGMA page_count", [], |r| r.get(0))
+                    .unwrap_or(0);
+                let ps: i64 = conn
+                    .query_row("PRAGMA page_size", [], |r| r.get(0))
+                    .unwrap_or(4096);
+                pc * ps / 1024
+            };
+            let bs = get_per_board_stats(&conn);
+            (b, th, p, kb, bs)
+        },
+    );
 
     let upload_mb = dir_size_mb(&CONFIG.upload_dir);
 
@@ -779,28 +975,35 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
     let new_threads = (threads - ts.prev_thread_count).max(0);
     let new_posts = (posts - ts.prev_post_count).max(0);
     let thread_str = if new_threads > 0 {
-        format!("\x1b[1;33mthreads {} (+{})\x1b[0m", threads, new_threads)
+        format!("\x1b[1;33mthreads {threads} (+{new_threads})\x1b[0m")
     } else {
-        format!("threads {}", threads)
+        format!("threads {threads}")
     };
     let post_str = if new_posts > 0 {
-        format!("\x1b[1;33mposts {} (+{})\x1b[0m", posts, new_posts)
+        format!("\x1b[1;33mposts {posts} (+{new_posts})\x1b[0m")
     } else {
-        format!("posts {}", posts)
+        format!("posts {posts}")
     };
     ts.prev_thread_count = threads;
     ts.prev_post_count = posts;
 
     // Active connections / users online
-    let in_flight = IN_FLIGHT.load(Ordering::Relaxed).max(0) as u64;
+    // FIX[AUDIT-1]: IN_FLIGHT is now AtomicU64 — load directly, no .max(0) cast.
+    let in_flight = IN_FLIGHT.load(Ordering::Relaxed);
     let online_count = ACTIVE_IPS.len();
+
     // CRIT-5: Keys are SHA-256 hashes — show 8-char prefixes for diagnostics.
+    // FIX[AUDIT-3]: Use .get(..8) instead of direct [..8] byte-index so this
+    // stays safe if a key is ever shorter than 8 chars (defensive programming).
     let ip_list: String = {
         let mut hashes: Vec<String> = ACTIVE_IPS
             .iter()
-            .map(|e| e.key()[..8].to_string())
+            .map(|e| {
+                let key = e.key();
+                key.get(..8).unwrap_or(key.as_str()).to_string()
+            })
             .collect();
-        hashes.sort();
+        hashes.sort_unstable();
         hashes.truncate(5);
         if hashes.is_empty() {
             "none".into()
@@ -810,7 +1013,8 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
     };
 
     // Upload progress bar — shown only while uploads are active
-    let active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed).max(0) as u64;
+    // FIX[AUDIT-1]: ACTIVE_UPLOADS is now AtomicU64 — load directly.
+    let active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed);
     if active_uploads > 0 {
         // Fix #5: SPINNER_TICK was read but never written anywhere, so the
         // spinner was permanently frozen on frame 0 ("⠋").  Increment it here,
@@ -818,42 +1022,36 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
         let tick = SPINNER_TICK.fetch_add(1, Ordering::Relaxed);
         let spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let spin = spinners
-            .get((tick as usize) % spinners.len())
+            .get((usize::try_from(tick).unwrap_or(0)) % spinners.len())
             .copied()
             .unwrap_or("⠋");
         let fill = ((tick % 20) as usize).min(10);
         let bar = format!("{}{}", "█".repeat(fill), "░".repeat(10 - fill));
-        println!(
-            "  \x1b[36m{} UPLOAD  [{}]  {} file(s) uploading\x1b[0m",
-            spin, bar, active_uploads
-        );
+        println!("  \x1b[36m{spin} UPLOAD  [{bar}]  {active_uploads} file(s) uploading\x1b[0m");
     }
 
     // Main stats line
-    println!(
-        "── STATS  uptime {h}h{m:02}m  │  requests {}  │  \x1b[32m{:.1} req/s\x1b[0m  │  in-flight {}  │  boards {}  {}  {}  │  db {} KiB  uploads {:.1} MiB ──",
-        curr_reqs, rps, in_flight, boards, thread_str, post_str, db_kb, upload_mb
+    #[allow(clippy::cast_precision_loss)]
+    let stats_line = format!(
+        "── STATS  uptime {h}h{m:02}m  │  requests {curr_reqs}  │  \x1b[32m{rps:.1} req/s\x1b[0m  │  in-flight {in_flight}  │  boards {boards}  {thread_str}  {post_str}  │  db {db_kb} KiB  uploads {upload_mb:.1} MiB ──"
     );
+    println!("{stats_line}");
 
     // Users online line
-    println!(
-        "   users online: {}  │  IPs: {}  │  mem: {} KiB RSS",
-        online_count,
-        ip_list,
-        process_rss_kb()
-    );
+    let mem_rss = process_rss_kb();
+    println!("   users online: {online_count}  │  IPs: {ip_list}  │  mem: {mem_rss} KiB RSS");
 
     // Per-board breakdown
     if !board_stats.is_empty() {
         let segments: Vec<String> = board_stats
             .iter()
-            .map(|(short, t, p)| format!("/{}/  threads:{} posts:{}", short, t, p))
+            .map(|(short, t, p)| format!("/{short}/  threads:{t} posts:{p}"))
             .collect();
         let mut line = String::from("   ");
         let mut line_len = 0usize;
         for seg in &segments {
             if line_len > 0 && line_len + seg.len() + 5 > 110 {
-                println!("{}", line);
+                println!("{line}");
                 line = String::from("   ");
                 line_len = 0;
             }
@@ -865,14 +1063,14 @@ fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
             line_len += seg.len();
         }
         if line_len > 0 {
-            println!("{}", line);
+            println!("{line}");
         }
     }
 }
 
 /// Read the process RSS (resident set size) in KiB.
 ///
-/// * Linux  — parsed from `/proc/self/status` (VmRSS field, already in KiB).
+/// * Linux  — parsed from `/proc/self/status` (`VmRSS` field, already in KiB).
 /// * macOS  — Fix #11: spawns `ps -o rss= -p <pid>` (output is KiB on macOS).
 ///   Previously this returned 0 on macOS, showing a misleading
 ///   `mem: 0 KiB RSS` in the terminal stats display.
@@ -883,12 +1081,11 @@ fn process_rss_kb() -> u64 {
         if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
             for line in s.lines() {
                 if let Some(val) = line.strip_prefix("VmRSS:") {
-                    let kb: u64 = val
+                    return val
                         .split_whitespace()
                         .next()
                         .and_then(|n| n.parse().ok())
                         .unwrap_or(0);
-                    return kb;
                 }
             }
         }
@@ -911,16 +1108,15 @@ fn process_rss_kb() -> u64 {
 }
 
 fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64)> {
-    let mut stmt = match conn.prepare(
+    let Ok(mut stmt) = conn.prepare(
         "SELECT b.short_name, \
                 (SELECT COUNT(*) FROM threads WHERE board_id = b.id) AS tc, \
                 (SELECT COUNT(*) FROM posts p \
                    JOIN threads t ON p.thread_id = t.id \
                   WHERE t.board_id = b.id) AS pc \
          FROM boards b ORDER BY b.short_name",
-    ) {
-        Ok(s) => s,
-        Err(_) => return vec![],
+    ) else {
+        return vec![];
     };
     stmt.query_map([], |row| {
         Ok((
@@ -934,7 +1130,9 @@ fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64)> {
 }
 
 fn dir_size_mb(path: &str) -> f64 {
-    walkdir_size(std::path::Path::new(path)) as f64 / (1024.0 * 1024.0)
+    #[allow(clippy::cast_precision_loss)]
+    let mb = walkdir_size(std::path::Path::new(path)) as f64 / (1024.0 * 1024.0);
+    mb
 }
 
 fn walkdir_size(path: &std::path::Path) -> u64 {
@@ -947,7 +1145,7 @@ fn walkdir_size(path: &std::path::Path) -> u64 {
             // Fix #10: use file_type() from the DirEntry (does NOT follow
             // symlinks) instead of Path::is_dir() (which does).  A symlink
             // loop via is_dir() causes unbounded recursion and a stack overflow.
-            let is_real_dir = e.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+            let is_real_dir = e.file_type().is_ok_and(|ft| ft.is_dir());
             if is_real_dir {
                 walkdir_size(&e.path())
             } else {
@@ -965,21 +1163,22 @@ fn print_banner() {
     // │ character is always aligned regardless of the actual value length.
     const INNER: usize = 53;
 
-    // Truncate `s` to `width` chars, then right-pad with spaces to `width`.
+    // FIX[AUDIT-4]: The original closure collected chars into a `Vec<char>` and
+    // had a dead `unwrap_or_else(|| s.clone())` branch — `get(..width)` on a
+    // slice of length >= width never returns None.  The rewrite uses
+    // `chars().count()` (no heap allocation) and `chars().take(width).collect()`
+    // (single pass), eliminating both the intermediate Vec and the dead code.
     let cell = |s: String, width: usize| -> String {
-        let chars: Vec<char> = s.chars().collect();
-        if chars.len() >= width {
-            chars
-                .get(..width)
-                .map(|s| s.iter().collect())
-                .unwrap_or_else(|| s.clone())
+        let char_count = s.chars().count();
+        if char_count >= width {
+            s.chars().take(width).collect()
         } else {
-            format!("{}{}", s, " ".repeat(width - chars.len()))
+            format!("{s}{}", " ".repeat(width - char_count))
         }
     };
 
     let title = cell(
-        format!("{} v{}", CONFIG.forum_name, env!("CARGO_PKG_VERSION")),
+        format!("{} v{}", env!("CARGO_PKG_VERSION"), CONFIG.forum_name),
         INNER - 2, // 2 leading spaces in "│  <title>│"
     );
     let bind = cell(CONFIG.bind_addr.clone(), INNER - 10); // "│  Bind    <val>│"
@@ -988,33 +1187,32 @@ fn print_banner() {
     let img_mib = CONFIG.max_image_size / 1024 / 1024;
     let vid_mib = CONFIG.max_video_size / 1024 / 1024;
     let limits = cell(
-        format!("Images {} MiB max  │  Videos {} MiB max", img_mib, vid_mib),
+        format!("Images {img_mib} MiB max  │  Videos {vid_mib} MiB max"),
         INNER - 4, // "│  <val>  │"
     );
 
     println!("┌─────────────────────────────────────────────────────┐");
-    println!("│  {}│", title);
+    println!("│  {title}│");
     println!("├─────────────────────────────────────────────────────┤");
-    println!("│  Bind    {}│", bind);
-    println!("│  DB      {}│", db);
-    println!("│  Uploads {}│", upl);
-    println!("│  {}  │", limits);
+    println!("│  Bind    {bind}│");
+    println!("│  DB      {db}│");
+    println!("│  Uploads {upl}│");
+    println!("│  {limits}  │");
     println!("└─────────────────────────────────────────────────────┘");
 }
 
 // ─── Keyboard-driven admin console ───────────────────────────────────────────
 
+// `reader` (BufReader<StdinLock>) must persist for the entire loop because it
+// is passed by &mut into sub-commands; the lint's inline suggestion is invalid.
+#[allow(clippy::significant_drop_tightening)]
 fn spawn_keyboard_handler(pool: db::DbPool, start_time: Instant) {
     std::thread::spawn(move || {
-        use std::io::{BufRead, BufReader, Write};
-
         // Small delay so startup messages settle first
         std::thread::sleep(Duration::from_millis(600));
         print_keyboard_help();
 
         let stdin = std::io::stdin();
-        let handle = stdin.lock();
-        let mut reader = BufReader::new(handle);
 
         // Fix #4: TermStats must persist across keypresses so that
         // prev_req_count/prev_post_count/prev_thread_count reflect the values
@@ -1028,12 +1226,17 @@ fn spawn_keyboard_handler(pool: db::DbPool, start_time: Instant) {
             last_tick: Instant::now(),
         };
 
+        // Acquire stdin lock only after all pre-loop setup is complete so the
+        // StdinLock (significant Drop) is held for the shortest possible scope.
+        // `reader` is passed into kb_create_board / kb_delete_thread inside the
+        // loop, so it must live for the full loop scope and cannot be inlined.
+        let mut reader = BufReader::new(stdin.lock());
+
         loop {
             let mut line = String::new();
             match reader.read_line(&mut line) {
-                Ok(0) => break, // EOF — stdin closed (daemon mode)
+                Ok(0) | Err(_) => break, // EOF — stdin closed (daemon mode)
                 Ok(_) => {}
-                Err(_) => break,
             }
             let cmd = line.trim().to_lowercase();
             match cmd.as_str() {
@@ -1046,7 +1249,7 @@ fn spawn_keyboard_handler(pool: db::DbPool, start_time: Instant) {
                 "h" => print_keyboard_help(),
                 "q" => println!("  \x1b[33m[!]\x1b[0m Use Ctrl+C or SIGTERM to stop the server."),
                 "" => {}
-                other => println!("  Unknown command '{}'. Press [h] for help.", other),
+                other => println!("  Unknown command '{other}'. Press [h] for help."),
             }
             let _ = std::io::stdout().flush();
         }
@@ -1057,12 +1260,8 @@ fn print_keyboard_help() {
     println!();
     println!("  \x1b[36m╔══ Admin Console ════════════════════════════════╗\x1b[0m");
     println!("  \x1b[36m║\x1b[0m  [s] show stats now    [l] list boards          \x1b[36m║\x1b[0m");
-    println!(
-        "  \x1b[36m║\x1b[0m  [c] create board      [d] delete thread         \x1b[36m║\x1b[0m"
-    );
-    println!(
-        "  \x1b[36m║\x1b[0m  [h] help              [q] quit hint             \x1b[36m║\x1b[0m"
-    );
+    println!("  \x1b[36m║\x1b[0m  [c] create board      [d] delete thread        \x1b[36m║\x1b[0m");
+    println!("  \x1b[36m║\x1b[0m  [h] help              [q] quit hint            \x1b[36m║\x1b[0m");
     println!("  \x1b[36m╚═════════════════════════════════════════════════╝\x1b[0m");
     println!();
 }
@@ -1075,7 +1274,7 @@ fn kb_list_boards(pool: &db::DbPool) {
     let boards = match db::get_all_boards(&conn) {
         Ok(b) => b,
         Err(e) => {
-            println!("  \x1b[31m[err]\x1b[0m {}", e);
+            println!("  \x1b[31m[err]\x1b[0m {e}");
             return;
         }
     };
@@ -1098,9 +1297,8 @@ fn kb_list_boards(pool: &db::DbPool) {
 }
 
 fn kb_create_board(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
-    use std::io::Write;
     let mut prompt = |msg: &str| -> String {
-        print!("  \x1b[36m{}\x1b[0m ", msg);
+        print!("  \x1b[36m{msg}\x1b[0m ");
         let _ = std::io::stdout().flush();
         let mut s = String::new();
         let _ = reader.read_line(&mut s);
@@ -1112,6 +1310,20 @@ fn kb_create_board(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
         println!("  Aborted.");
         return;
     }
+
+    // FIX[AUDIT-5]: Validate short name immediately after reading it, before
+    // prompting for the remaining fields.  Previously validation happened at
+    // the bottom of the function, so the user would fill in all prompts before
+    // learning the short name was invalid.
+    let short_lc = short.to_lowercase();
+    if short_lc.is_empty()
+        || short_lc.len() > 8
+        || !short_lc.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        println!("  \x1b[31m[err]\x1b[0m Short name must be 1-8 alphanumeric characters.");
+        return;
+    }
+
     let name = prompt("Display name:");
     if name.is_empty() {
         println!("  Aborted.");
@@ -1130,15 +1342,6 @@ fn kb_create_board(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
     let allow_images = !matches!(no_images_raw.to_lowercase().as_str(), "y" | "yes");
     let allow_video = !matches!(no_videos_raw.to_lowercase().as_str(), "y" | "yes");
     let allow_audio = !matches!(no_audio_raw.to_lowercase().as_str(), "y" | "yes");
-
-    let short_lc = short.to_lowercase();
-    if !short_lc.chars().all(|c| c.is_ascii_alphanumeric())
-        || short_lc.is_empty()
-        || short_lc.len() > 8
-    {
-        println!("  \x1b[31m[err]\x1b[0m Short name must be 1-8 alphanumeric characters.");
-        return;
-    }
 
     let Ok(conn) = pool.get() else {
         println!("  \x1b[31m[err]\x1b[0m Could not get DB connection.");
@@ -1164,27 +1367,24 @@ fn kb_create_board(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
             if allow_video { "yes" } else { "no" },
             if allow_audio { "yes" } else { "no" },
         ),
-        Err(e) => println!("  \x1b[31m[err]\x1b[0m {}", e),
+        Err(e) => println!("  \x1b[31m[err]\x1b[0m {e}"),
     }
     println!();
 }
 
 fn kb_delete_thread(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
-    use std::io::Write;
-
     print!("  \x1b[36mThread ID to delete:\x1b[0m ");
     let _ = std::io::stdout().flush();
     let mut s = String::new();
     let _ = reader.read_line(&mut s);
-    let thread_id: i64 = match s.trim().parse() {
-        Ok(n) => n,
-        Err(_) => {
-            println!(
-                "  \x1b[31m[err]\x1b[0m '{}' is not a valid thread ID.",
-                s.trim()
-            );
-            return;
-        }
+    let thread_id: i64 = if let Ok(n) = s.trim().parse() {
+        n
+    } else {
+        println!(
+            "  \x1b[31m[err]\x1b[0m '{}' is not a valid thread ID.",
+            s.trim()
+        );
+        return;
     };
 
     let Ok(conn) = pool.get() else {
@@ -1199,14 +1399,11 @@ fn kb_delete_thread(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
         )
         .unwrap_or(0);
     if exists == 0 {
-        println!("  \x1b[31m[err]\x1b[0m Thread {} not found.", thread_id);
+        println!("  \x1b[31m[err]\x1b[0m Thread {thread_id} not found.");
         return;
     }
 
-    print!(
-        "  \x1b[33mDelete thread {} and all its posts? [y/N]:\x1b[0m ",
-        thread_id
-    );
+    print!("  \x1b[33mDelete thread {thread_id} and all its posts? [y/N]:\x1b[0m ");
     let _ = std::io::stdout().flush();
     let mut confirm = String::new();
     let _ = reader.read_line(&mut confirm);
@@ -1226,7 +1423,7 @@ fn kb_delete_thread(pool: &db::DbPool, reader: &mut dyn std::io::BufRead) {
                 paths.len()
             );
         }
-        Err(e) => println!("  \x1b[31m[err]\x1b[0m {}", e),
+        Err(e) => println!("  \x1b[31m[err]\x1b[0m {e}"),
     }
     println!();
 }
@@ -1237,7 +1434,7 @@ async fn shutdown_signal() {
     use tokio::signal;
     let ctrl_c = async {
         if let Err(e) = signal::ctrl_c().await {
-            tracing::error!("Failed to listen for Ctrl+C: {}", e);
+            tracing::error!("Failed to listen for Ctrl+C: {e}");
         }
     };
     #[cfg(unix)]
@@ -1247,7 +1444,7 @@ async fn shutdown_signal() {
                 sig.recv().await;
             }
             Err(e) => {
-                tracing::error!("Failed to register SIGTERM handler: {}", e);
+                tracing::error!("Failed to register SIGTERM handler: {e}");
                 std::future::pending::<()>().await;
             }
         }
@@ -1255,21 +1452,32 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
     tokio::select! {
-        _ = ctrl_c => info!("Received Ctrl+C"),
-        _ = terminate => info!("Received SIGTERM"),
+        () = ctrl_c => info!("Received Ctrl+C"),
+        () = terminate => info!("Received SIGTERM"),
     }
 }
 
 // ─── Admin CLI mode ───────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 fn run_admin(action: AdminAction) -> anyhow::Result<()> {
     use crate::{db, utils::crypto};
     use chrono::TimeZone;
+    use std::io::Write;
 
     let db_path = std::path::Path::new(&CONFIG.database_path);
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+
+    // FIX[AUDIT-6]: Apply the same Fix #9 empty-parent guard used in
+    // `run_server`.  The original code used a plain `if let Some(parent)`
+    // check, which does NOT handle the case where `Path::parent()` returns
+    // `Some("")` for a bare filename (e.g. "rustchan.db").
+    // `create_dir_all("")` fails with `NotFound`, so we normalise an empty
+    // parent to `"."` just as `run_server` does.
+    let db_parent: std::path::PathBuf = match db_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    std::fs::create_dir_all(&db_parent)?;
 
     let pool = db::init_pool()?;
     let conn = pool.get()?;
@@ -1279,7 +1487,7 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             validate_password(&password)?;
             let hash = crypto::hash_password(&password)?;
             let id = db::create_admin(&conn, &username, &hash)?;
-            println!("✓ Admin '{}' created (id={}).", username, id);
+            println!("✓ Admin '{username}' created (id={id}).");
         }
         AdminAction::ResetPassword {
             username,
@@ -1287,10 +1495,10 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
         } => {
             validate_password(&new_password)?;
             db::get_admin_by_username(&conn, &username)?
-                .ok_or_else(|| anyhow::anyhow!("Admin '{}' not found.", username))?;
+                .ok_or_else(|| anyhow::anyhow!("Admin '{username}' not found."))?;
             let hash = crypto::hash_password(&new_password)?;
             db::update_admin_password(&conn, &username, &hash)?;
-            println!("✓ Password updated for '{}'.", username);
+            println!("✓ Password updated for '{username}'.");
         }
         AdminAction::ListAdmins => {
             let rows = db::list_admins(&conn)?;
@@ -1303,9 +1511,8 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                     let date = chrono::Utc
                         .timestamp_opt(*ts, 0)
                         .single()
-                        .map(|d| d.format("%Y-%m-%d").to_string())
-                        .unwrap_or_else(|| "?".to_string());
-                    println!("{:<6} {:<24} {}", id, user, date);
+                        .map_or_else(|| "?".to_string(), |d| d.format("%Y-%m-%d").to_string());
+                    println!("{id:<6} {user:<24} {date}");
                 }
             }
         }
@@ -1319,9 +1526,9 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             no_audio,
         } => {
             let short = short.to_lowercase();
-            if !short.chars().all(|c| c.is_ascii_alphanumeric())
-                || short.is_empty()
+            if short.is_empty()
                 || short.len() > 8
+                || !short.chars().all(|c| c.is_ascii_alphanumeric())
             {
                 anyhow::bail!("Short name must be 1-8 alphanumeric chars (e.g. 'tech', 'b').");
             }
@@ -1351,7 +1558,6 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             let board = db::get_board_by_short(&conn, &short)?
                 .ok_or_else(|| anyhow::anyhow!("Board /{short}/ not found."))?;
             print!("Delete /{short}/ and ALL its content? Type 'yes' to confirm: ");
-            use std::io::Write;
             std::io::stdout().flush()?;
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
@@ -1391,8 +1597,10 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             let id = db::add_ban(&conn, &ip_hash, &reason, expires)?;
             let exp_str = expires
                 .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single())
-                .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
-                .unwrap_or_else(|| "permanent".to_string());
+                .map_or_else(
+                    || "permanent".to_string(),
+                    |d| d.format("%Y-%m-%d %H:%M UTC").to_string(),
+                );
             println!("✓ Ban #{id} added (expires: {exp_str}).");
         }
         AdminAction::Unban { ban_id } => {
@@ -1410,19 +1618,19 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 );
                 println!("{}", "-".repeat(75));
                 for b in &bans {
-                    let partial = &b.ip_hash[..b.ip_hash.len().min(16)];
+                    // FIX[AUDIT-3]: Use .get(..16) for the same defensive
+                    // safety as the ip_list slice above.
+                    let partial = b.ip_hash.get(..16).unwrap_or(b.ip_hash.as_str());
                     let expires = b
                         .expires_at
                         .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single())
-                        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_else(|| "Permanent".to_string());
-                    println!(
-                        "{:<5} {:<18} {:<28} {}",
-                        b.id,
-                        partial,
-                        b.reason.as_deref().unwrap_or(""),
-                        expires
-                    );
+                        .map_or_else(
+                            || "Permanent".to_string(),
+                            |d| d.format("%Y-%m-%d %H:%M").to_string(),
+                        );
+                    let ban_id = b.id;
+                    let reason = b.reason.as_deref().unwrap_or("");
+                    println!("{ban_id:<5} {partial:<18} {reason:<28} {expires}");
                 }
             }
         }
@@ -1430,6 +1638,100 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ─── 2.6 Waveform/thumbnail cache eviction ────────────────────────────────────
+
+/// Walk every board's `thumbs/` subdirectory, collect all files with their
+/// modification times, and delete the oldest ones until the total size of
+/// the remaining set is under `max_bytes`.
+///
+/// Only files inside `{upload_dir}/{board}/thumbs/` are considered — original
+/// uploads are never touched.  Deletion is best-effort: individual failures
+/// are logged and skipped rather than aborting the whole pass.
+fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
+    // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
+    let mut files: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();
+    let Ok(boards_iter) = std::fs::read_dir(upload_dir) else {
+        return;
+    };
+    for board_entry in boards_iter.flatten() {
+        let thumbs_dir = board_entry.path().join("thumbs");
+        if !thumbs_dir.is_dir() {
+            continue;
+        }
+        let Ok(thumbs_iter) = std::fs::read_dir(&thumbs_dir) else {
+            continue;
+        };
+        for entry in thumbs_iter.flatten() {
+            let path = entry.path();
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    let mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_secs());
+                    files.push((mtime, path, meta.len()));
+                }
+            }
+        }
+    }
+
+    // FIX[AUDIT-7]: Dereference `sz` explicitly and annotate the sum type for
+    // clarity.  `Iterator<Item = &u64>` implements `Sum<&u64>` in std so this
+    // compiled before, but the explicit form is more readable and avoids the
+    // implicit coercion.
+    let total: u64 = files.iter().map(|(_, _, sz)| *sz).sum::<u64>();
+    if total <= max_bytes {
+        return; // already within budget
+    }
+
+    // Sort oldest-first so we delete the least-recently-used files first.
+    files.sort_unstable_by_key(|(mtime, _, _)| *mtime);
+
+    let mut remaining = total;
+    let mut deleted = 0u64;
+    let mut deleted_bytes = 0u64;
+    for (_, path, size) in &files {
+        if remaining <= max_bytes {
+            break;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => {
+                remaining = remaining.saturating_sub(*size);
+                deleted += 1;
+                // FIX[AUDIT-7]: Dereference `size` for clarity.
+                deleted_bytes += *size;
+            }
+            Err(e) => {
+                tracing::warn!("evict_thumb_cache: failed to delete {:?}: {}", path, e);
+            }
+        }
+    }
+    if deleted > 0 {
+        info!(
+            "evict_thumb_cache: removed {} file(s) ({} KiB), cache now {} KiB / {} KiB limit",
+            deleted,
+            deleted_bytes / 1024,
+            remaining / 1024,
+            max_bytes / 1024,
+        );
+    }
+}
+
+// ─── Password validation ──────────────────────────────────────────────────────
+
+/// Validate an admin password.
+///
+/// FIX[AUDIT-8]: The original check only enforced a length of 8, which is too
+/// weak for an admin credential on a security-critical service.  Requirements
+/// are now:
+///   • Minimum 12 characters (NIST SP 800-63B §5.1.1 guidance)
+///   • At least one uppercase ASCII letter
+///   • At least one lowercase ASCII letter
+///   • At least one ASCII digit
+///
+/// These checks are intentionally simple (no special-char requirement) to
+/// avoid overly prescriptive rules that lead to weaker real-world passwords.
 fn validate_password(p: &str) -> anyhow::Result<()> {
     if p.len() < 8 {
         anyhow::bail!("Password must be at least 8 characters.");

@@ -68,41 +68,41 @@ impl From<rusqlite::Error> for AppError {
             if fe.code == rusqlite::ErrorCode::DatabaseBusy
                 || fe.code == rusqlite::ErrorCode::DatabaseLocked
             {
-                return AppError::DbBusy;
+                return Self::DbBusy;
             }
         }
-        AppError::Internal(anyhow::Error::new(e))
+        Self::Internal(anyhow::Error::new(e))
     }
 }
 
 // Allow ? operator on r2d2::Error
 impl From<r2d2::Error> for AppError {
     fn from(e: r2d2::Error) -> Self {
-        AppError::Internal(anyhow::Error::new(e))
+        Self::Internal(anyhow::Error::new(e))
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
-            AppError::BannedUser { reason, csrf_token } => {
+            Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
+            Self::BannedUser { reason, csrf_token } => {
                 let html = crate::templates::ban_page(reason, csrf_token);
                 return (StatusCode::FORBIDDEN, Html(html)).into_response();
             }
-            AppError::UploadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
-            AppError::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg.clone()),
-            AppError::RateLimited => (
+            Self::UploadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
+            Self::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg.clone()),
+            Self::RateLimited => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "You are posting too fast. Slow down.".to_string(),
             ),
-            AppError::DbBusy => (
+            Self::DbBusy => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "The server is temporarily busy. Please try again in a moment.".to_string(),
             ),
-            AppError::Internal(e) => {
+            Self::Internal(e) => {
                 error!("Internal error: {:?}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,

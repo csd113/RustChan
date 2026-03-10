@@ -26,18 +26,22 @@ use crate::{
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
+    http::header,
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::Utc;
 use dashmap::DashMap;
-use once_cell::sync::Lazy;
+use rusqlite::backup::Backup;
+use rusqlite::params;
 use serde::Deserialize;
 use std::io::{Seek, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use time;
+use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
@@ -54,8 +58,8 @@ const SESSION_COOKIE: &str = "chan_admin_session";
 const LOGIN_FAIL_LIMIT: u32 = 5;
 const LOGIN_FAIL_WINDOW: u64 = 900; // 15 minutes
 
-/// ip_hash → (fail_count, window_start_secs)
-static ADMIN_LOGIN_FAILS: Lazy<DashMap<String, (u32, u64)>> = Lazy::new(DashMap::new);
+/// `ip_hash` → (`fail_count`, `window_start_secs`)
+static ADMIN_LOGIN_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
 static LOGIN_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
 
 fn login_now_secs() -> u64 {
@@ -87,17 +91,19 @@ fn is_login_locked(ip_key: &str) -> bool {
 /// Record a failed login attempt; returns the new failure count.
 fn record_login_fail(ip_key: &str) -> u32 {
     let now = login_now_secs();
-    let mut entry = ADMIN_LOGIN_FAILS
+    let mut binding = ADMIN_LOGIN_FAILS
         .entry(ip_key.to_string())
         .or_insert((0, now));
-    let (count, window_start) = entry.value_mut();
+    let (count, window_start) = binding.value_mut();
     if now.saturating_sub(*window_start) > LOGIN_FAIL_WINDOW {
         *count = 1;
         *window_start = now;
     } else {
         *count += 1;
     }
-    *count
+    let result = *count;
+    drop(binding);
+    result
 }
 
 /// Clear failure counter after a successful login.
@@ -115,9 +121,17 @@ fn clear_login_fails(ip_key: &str) {
     }
 }
 
-/// Verify admin session. Returns the admin_id if valid.
+/// Prune all expired entries from `ADMIN_LOGIN_FAILS`.
+/// Called by a background task every 5 minutes so the map never grows
+/// unbounded during sustained brute-force attacks with no successful logins.
+pub fn prune_login_fails() {
+    let now = login_now_secs();
+    ADMIN_LOGIN_FAILS.retain(|_, (_, ws)| now.saturating_sub(*ws) <= LOGIN_FAIL_WINDOW);
+}
+
+/// Verify admin session. Returns the `admin_id` if valid.
 /// NOTE: This function performs blocking DB I/O. Only call it from within a
-/// spawn_blocking closure or synchronous (non-async) context.
+/// `spawn_blocking` closure or synchronous (non-async) context.
 #[allow(dead_code)]
 fn require_admin_sync(jar: &CookieJar, pool: &DbPool) -> Result<i64> {
     let session_id = jar
@@ -134,7 +148,7 @@ fn require_admin_sync(jar: &CookieJar, pool: &DbPool) -> Result<i64> {
 
 /// Public helper — returns true if the jar contains a valid admin session.
 /// Used by other handlers to conditionally show admin controls.
-/// FIX[HIGH-2]/[HIGH-3]: Callers must invoke this from inside spawn_blocking.
+/// FIX[HIGH-2]/[HIGH-3]: Callers must invoke this from inside `spawn_blocking`.
 #[allow(dead_code)]
 pub fn is_admin_session(jar: &CookieJar, pool: &DbPool) -> bool {
     require_admin_sync(jar, pool).is_ok()
@@ -150,8 +164,7 @@ pub async fn admin_index(State(state): State<AppState>, jar: CookieJar) -> Resul
             let conn = pool.get()?;
             let logged_in = session_id
                 .as_deref()
-                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
-                .unwrap_or(false);
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
             let boards = db::get_all_boards(&conn)?;
             Ok((logged_in, boards))
         }
@@ -173,9 +186,11 @@ pub async fn admin_index(State(state): State<AppState>, jar: CookieJar) -> Resul
 pub struct LoginForm {
     username: String,
     password: String,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -194,10 +209,8 @@ pub async fn admin_login(
 
     // CSRF check
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(
-        csrf_cookie.as_deref(),
-        form._csrf.as_deref().unwrap_or(""),
-    ) {
+    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
+    {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
@@ -300,7 +313,7 @@ pub async fn admin_login(
             // configured session lifetime instead of persisting it indefinitely.
             cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
-            info!("Admin {} logged in", admin_id);
+            info!("Admin {admin_id} logged in");
             Ok((jar.add(cookie), Redirect::to("/admin/panel")).into_response())
         }
     }
@@ -310,7 +323,8 @@ pub async fn admin_login(
 
 #[derive(Deserialize)]
 pub struct CsrfOnly {
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
     return_to: Option<String>,
 }
 
@@ -321,10 +335,8 @@ pub async fn admin_logout(
 ) -> Result<Response> {
     // Verify CSRF to prevent forced-logout attacks
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(
-        csrf_cookie.as_deref(),
-        form._csrf.as_deref().unwrap_or(""),
-    ) {
+    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
+    {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
@@ -367,11 +379,11 @@ pub async fn admin_logout(
 /// All fields are optional — missing = no flash message.
 #[derive(Deserialize, Default)]
 pub struct AdminPanelQuery {
-    /// Set by board_restore on success: the short_name of the restored board.
+    /// Set by `board_restore` on success: the `short_name` of the restored board.
     pub board_restored: Option<String>,
-    /// Set by board_restore / restore_saved_board_backup on failure.
+    /// Set by `board_restore` / `restore_saved_board_backup` on failure.
     pub restore_error: Option<String>,
-    /// Set by update_site_settings on success.
+    /// Set by `update_site_settings` on success.
     pub settings_saved: Option<String>,
 }
 
@@ -387,7 +399,7 @@ pub async fn admin_panel(
 
     // Build the flash message from query params before entering spawn_blocking.
     let flash: Option<(bool, String)> = if let Some(err) = params.restore_error {
-        Some((true, format!("Restore failed: {}", err)))
+        Some((true, format!("Restore failed: {err}")))
     } else if let Some(board) = params.board_restored {
         Some((false, format!("Board /{board}/ restored successfully.")))
     } else if params.settings_saved.is_some() {
@@ -422,12 +434,26 @@ pub async fn admin_panel(
 
             let db_size_bytes = db::get_db_size_bytes(&conn).unwrap_or(0);
 
+            // 1.8: Compute whether the DB file size exceeds the configured
+            // warning threshold. Uses the on-disk file size (via fs::metadata)
+            // rather than SQLite's PRAGMA page_count estimate for accuracy,
+            // falling back to the pragma value if the path is unavailable.
+            let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
+                let file_size = std::fs::metadata(&CONFIG.database_path)
+                    .map_or_else(|_| db_size_bytes.cast_unsigned(), |m| m.len());
+                file_size >= CONFIG.db_warn_threshold_bytes
+            } else {
+                false
+            };
+
             // Read the tor onion address from the hostname file if tor is enabled.
             let tor_address: Option<String> = if CONFIG.enable_tor_support {
                 let data_dir = std::path::PathBuf::from(&CONFIG.database_path)
                     .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    .map_or_else(
+                        || std::path::PathBuf::from("."),
+                        std::path::Path::to_path_buf,
+                    );
                 let hostname_path = data_dir.join("tor_hidden_service").join("hostname");
                 std::fs::read_to_string(&hostname_path)
                     .ok()
@@ -448,6 +474,7 @@ pub async fn admin_panel(
                 &full_backups,
                 &board_backups_list,
                 db_size_bytes,
+                db_size_warning,
                 &reports,
                 &appeals,
                 &site_name,
@@ -472,7 +499,8 @@ pub struct CreateBoardForm {
     name: String,
     description: String,
     nsfw: Option<String>,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn create_board(
@@ -483,10 +511,8 @@ pub async fn create_board(
     // FIX[HIGH-3]: auth + DB write in spawn_blocking
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(
-        csrf_cookie.as_deref(),
-        form._csrf.as_deref().unwrap_or(""),
-    ) {
+    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
+    {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
@@ -495,7 +521,7 @@ pub async fn create_board(
         .trim()
         .to_lowercase()
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .take(8)
         .collect::<String>();
 
@@ -518,7 +544,10 @@ pub async fn create_board(
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
             db::create_board(&conn, &short, &name, &description, nsfw)?;
-            info!("Admin created board /{}/", short);
+            info!("Admin created board /{short}/");
+            // Refresh live board list so the top bar on any subsequent error
+            // page includes the newly created board.
+            crate::templates::set_live_boards(db::get_all_boards(&conn)?);
             Ok(())
         }
     })
@@ -533,7 +562,8 @@ pub async fn create_board(
 #[derive(Deserialize)]
 pub struct BoardIdForm {
     board_id: i64,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn delete_board(
@@ -542,7 +572,7 @@ pub async fn delete_board(
     Form(form): Form<BoardIdForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let upload_dir = CONFIG.upload_dir.clone();
 
@@ -586,6 +616,9 @@ pub async fn delete_board(
                 form.board_id,
                 paths.len()
             );
+            // Refresh live board list so the top bar immediately stops showing
+            // the deleted board — important because error pages use this cache.
+            crate::templates::set_live_boards(db::get_all_boards(&conn)?);
             Ok(())
         }
     })
@@ -602,7 +635,8 @@ pub struct ThreadActionForm {
     thread_id: i64,
     board: String,
     action: String, // "sticky", "unsticky", "lock", "unlock"
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn thread_action(
@@ -611,7 +645,7 @@ pub async fn thread_action(
     Form(form): Form<ThreadActionForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     // Validate action before spawning to give early error
     match form.action.as_str() {
@@ -646,7 +680,7 @@ pub async fn thread_action(
                 &board_for_log,
                 "",
             );
-            info!("Admin {} thread {}", action, thread_id);
+            info!("Admin {action} thread {thread_id}");
             Ok(())
         }
     })
@@ -671,7 +705,7 @@ pub async fn thread_action(
             let safe: String = form
                 .board
                 .chars()
-                .filter(|c| c.is_ascii_alphanumeric())
+                .filter(char::is_ascii_alphanumeric)
                 .take(8)
                 .collect();
             Ok(safe)
@@ -681,9 +715,9 @@ pub async fn thread_action(
         // After archiving, send to the board archive; for all other actions
         // stay on the thread.
         if form.action == "archive" {
-            format!("/{}/archive", board_name)
+            format!("/{board_name}/archive")
         } else {
-            format!("/{}/thread/{}", board_name, form.thread_id)
+            format!("/{board_name}/thread/{}", form.thread_id)
         }
     };
 
@@ -696,7 +730,8 @@ pub async fn thread_action(
 pub struct AdminDeletePostForm {
     post_id: i64,
     board: String,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn admin_delete_post(
@@ -705,7 +740,7 @@ pub async fn admin_delete_post(
     Form(form): Form<AdminDeletePostForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let upload_dir = CONFIG.upload_dir.clone();
     let post_id = form.post_id;
@@ -725,14 +760,16 @@ pub async fn admin_delete_post(
             let board_name = db::get_all_boards(&conn)?
                 .into_iter()
                 .find(|b| b.id == post.board_id)
-                .map(|b| b.short_name)
-                .unwrap_or_else(|| {
-                    form.board
-                        .chars()
-                        .filter(|c| c.is_ascii_alphanumeric())
-                        .take(8)
-                        .collect()
-                });
+                .map_or_else(
+                    || {
+                        form.board
+                            .chars()
+                            .filter(char::is_ascii_alphanumeric)
+                            .take(8)
+                            .collect()
+                    },
+                    |b| b.short_name,
+                );
 
             let thread_id = post.thread_id;
             let is_op = post.is_op;
@@ -762,13 +799,13 @@ pub async fn admin_delete_post(
                 &board_name,
                 &post.body.chars().take(80).collect::<String>(),
             );
-            info!("Admin deleted post {}", post_id);
+            info!("Admin deleted post {post_id}");
             // Return board_name + thread context so we can redirect back to the thread.
             // If the post was an OP, redirect to the board index (thread is gone).
             if is_op {
-                Ok(format!("/{}", board_name))
+                Ok(format!("/{board_name}"))
             } else {
-                Ok(format!("/{}/thread/{}", board_name, thread_id))
+                Ok(format!("/{board_name}/thread/{thread_id}"))
             }
         }
     })
@@ -784,7 +821,8 @@ pub async fn admin_delete_post(
 pub struct AdminDeleteThreadForm {
     thread_id: i64,
     board: String,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn admin_delete_thread(
@@ -793,7 +831,7 @@ pub async fn admin_delete_thread(
     Form(form): Form<AdminDeleteThreadForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let upload_dir = CONFIG.upload_dir.clone();
     let thread_id = form.thread_id;
@@ -818,7 +856,7 @@ pub async fn admin_delete_thread(
                 .unwrap_or_else(|| {
                     form.board
                         .chars()
-                        .filter(|c| c.is_ascii_alphanumeric())
+                        .filter(char::is_ascii_alphanumeric)
                         .take(8)
                         .collect()
                 });
@@ -838,14 +876,14 @@ pub async fn admin_delete_thread(
                 &board_name,
                 "",
             );
-            info!("Admin deleted thread {}", thread_id);
+            info!("Admin deleted thread {thread_id}");
             Ok(board_name)
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to(&format!("/{}", redirect_board)).into_response())
+    Ok(Redirect::to(&format!("/{redirect_board}")).into_response())
 }
 
 // ─── POST /admin/ban/add ──────────────────────────────────────────────────────
@@ -855,7 +893,8 @@ pub struct AddBanForm {
     ip_hash: String,
     reason: String,
     duration_hours: Option<i64>,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn add_ban(
@@ -864,7 +903,7 @@ pub async fn add_ban(
     Form(form): Form<AddBanForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let expires_at = form
         .duration_hours
@@ -892,7 +931,7 @@ pub async fn add_ban(
                 "",
                 &format!("ip_hash={}… reason={}", &ip_hash_log, form.reason),
             );
-            info!("Admin added ban for ip_hash {}…", ip_hash_log);
+            info!("Admin added ban for ip_hash {ip_hash_log}…");
             Ok(())
         }
     })
@@ -907,7 +946,8 @@ pub async fn add_ban(
 #[derive(Deserialize)]
 pub struct BanIdForm {
     ban_id: i64,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn remove_ban(
@@ -916,7 +956,7 @@ pub async fn remove_ban(
     Form(form): Form<BanIdForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -947,7 +987,8 @@ pub struct BanDeleteForm {
     is_op: Option<String>,
     reason: Option<String>,
     duration_hours: Option<i64>,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn admin_ban_and_delete(
@@ -956,7 +997,7 @@ pub async fn admin_ban_and_delete(
     Form(form): Form<BanDeleteForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let reason = form
         .reason
@@ -983,6 +1024,13 @@ pub async fn admin_ban_and_delete(
             let (admin_id, admin_name) =
                 require_admin_session_with_name(&conn, session_id.as_deref())?;
 
+            // Validate ip_hash: must be a well-formed SHA-256 hex string (64 hex
+            // chars).  The value comes from a form field in the post toolbar; a
+            // confused or tampered submission should be rejected cleanly.
+            if form.ip_hash.len() != 64 || !form.ip_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(AppError::BadRequest("Invalid IP hash format.".into()));
+            }
+
             // Ban first so the IP cannot re-post before the delete lands
             db::add_ban(&conn, &form.ip_hash, &reason, expires_at)?;
             let _ = db::log_mod_action(
@@ -993,7 +1041,7 @@ pub async fn admin_ban_and_delete(
                 "ban",
                 None,
                 &board_short,
-                &format!("inline ban — ip_hash={}… reason={}", &ip_hash_log, reason),
+                &format!("inline ban — ip_hash={reason}… reason={}", &ip_hash_log),
             );
 
             // Delete post (or whole thread if OP)
@@ -1029,10 +1077,7 @@ pub async fn admin_ban_and_delete(
                 );
             }
 
-            info!(
-                "Admin ban+delete: post={} ip_hash={}… board={}",
-                post_id, ip_hash_log, board_short
-            );
+            info!("Admin ban+delete: post={post_id} ip_hash={ip_hash_log}… board={board_short}");
             Ok(())
         }
     })
@@ -1044,14 +1089,14 @@ pub async fn admin_ban_and_delete(
     let safe_board: String = form
         .board
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .take(8)
         .collect();
     // If OP was deleted, the thread is gone — send to board index
     let redirect = if is_op {
-        format!("/{}", safe_board)
+        format!("/{safe_board}")
     } else {
-        format!("/{}/thread/{}#p{}", safe_board, thread_id, post_id)
+        format!("/{safe_board}/thread/{thread_id}#p{post_id}")
     };
     Ok(Redirect::to(&redirect).into_response())
 }
@@ -1062,7 +1107,8 @@ pub async fn admin_ban_and_delete(
 pub struct AppealActionForm {
     appeal_id: i64,
     ip_hash: Option<String>,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn dismiss_appeal(
@@ -1071,7 +1117,7 @@ pub async fn dismiss_appeal(
     Form(form): Form<AppealActionForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -1096,7 +1142,7 @@ pub async fn accept_appeal(
     Form(form): Form<AppealActionForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -1129,7 +1175,8 @@ pub async fn accept_appeal(
 pub struct AddFilterForm {
     pattern: String,
     replacement: String,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn add_filter(
@@ -1138,7 +1185,7 @@ pub async fn add_filter(
     Form(form): Form<AddFilterForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     if form.pattern.trim().is_empty() {
         return Err(AppError::BadRequest("Pattern cannot be empty.".into()));
@@ -1172,7 +1219,8 @@ pub async fn add_filter(
 #[derive(Deserialize)]
 pub struct FilterIdForm {
     filter_id: i64,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn remove_filter(
@@ -1181,7 +1229,7 @@ pub async fn remove_filter(
     Form(form): Form<FilterIdForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -1218,7 +1266,8 @@ pub struct BoardSettingsForm {
     allow_video_embeds: Option<String>,
     allow_captcha: Option<String>,
     post_cooldown_secs: Option<String>,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn update_board_settings(
@@ -1227,7 +1276,7 @@ pub async fn update_board_settings(
     Form(form): Form<BoardSettingsForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let bump_limit = form
         .bump_limit
@@ -1288,7 +1337,8 @@ pub async fn update_board_settings(
                 form.allow_captcha.as_deref() == Some("1"),
                 post_cooldown_secs,
             )?;
-            info!("Admin updated settings for board id={}", board_id);
+            info!("Admin updated settings for board id={board_id}");
+            crate::templates::set_live_boards(db::get_all_boards(&conn)?);
             Ok(())
         }
     })
@@ -1302,9 +1352,9 @@ pub async fn update_board_settings(
 
 /// Stream a full zip backup of the database + all uploaded files.
 ///
-/// MEM-FIX: The zip is built to a NamedTempFile on disk (not a Vec<u8> in
+/// MEM-FIX: The zip is built to a `NamedTempFile` on disk (not a Vec<u8> in
 /// RAM), so peak heap usage is O(compression-buffer) not O(zip-size).
-/// The response body is streamed from disk in 64 KiB chunks via ReaderStream.
+/// The response body is streamed from disk in 64 KiB chunks via `ReaderStream`.
 pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
     let upload_dir = CONFIG.upload_dir.clone();
@@ -1319,15 +1369,15 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
 
             let temp_dir = std::env::temp_dir();
-            let tmp_id = uuid::Uuid::new_v4().to_string().replace('-', "");
-            let temp_db = temp_dir.join(format!("chan_backup_{}.db", tmp_id));
+            let tmp_id = uuid::Uuid::new_v4().simple().to_string();
+            let temp_db = temp_dir.join(format!("chan_backup_{tmp_id}.db"));
             let temp_db_str = temp_db
                 .to_str()
                 .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path is non-UTF-8")))?
                 .replace('\'', "''");
 
-            conn.execute_batch(&format!("VACUUM INTO '{}'", temp_db_str))
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO failed: {}", e)))?;
+            conn.execute_batch(&format!("VACUUM INTO '{temp_db_str}'"))
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO failed: {e}")))?;
             drop(conn);
 
             // Count files for progress bar before compressing.
@@ -1341,11 +1391,11 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 
             // MEM-FIX: write zip directly to a NamedTempFile instead of Vec<u8>.
             let zip_tmp = tempfile::NamedTempFile::new()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp zip: {}", e)))?;
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp zip: {e}")))?;
             {
                 let out_file =
                     std::io::BufWriter::new(zip_tmp.as_file().try_clone().map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("Clone temp file handle: {}", e))
+                        AppError::Internal(anyhow::anyhow!("Clone temp file handle: {e}"))
                     })?);
                 let mut zip = zip::ZipWriter::new(out_file);
                 let opts = zip::write::SimpleFileOptions::default()
@@ -1358,11 +1408,11 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 
                 // ── Database snapshot (streamed, not read into RAM) ────────
                 zip.start_file("chan.db", opts)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip DB entry: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip DB entry: {e}")))?;
                 let mut db_src = std::fs::File::open(&temp_db)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open DB snapshot: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open DB snapshot: {e}")))?;
                 let copied = std::io::copy(&mut db_src, &mut zip)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Stream DB to zip: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Stream DB to zip: {e}")))?;
                 drop(db_src);
                 let _ = std::fs::remove_file(&temp_db);
                 progress.files_done.fetch_add(1, Ordering::Relaxed);
@@ -1373,8 +1423,16 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                     add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
                 }
 
-                zip.finish()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
+                // Flush the BufWriter explicitly so I/O errors are not
+                // silently swallowed by the implicit Drop-flush.
+                let writer = zip
+                    .finish()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {e}")))?;
+                writer
+                    .into_inner()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush zip writer: {e}")))?
+                    .sync_all()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {e}")))?;
             }
 
             let file_size = zip_tmp.as_file().metadata().map(|m| m.len()).unwrap_or(0);
@@ -1384,10 +1442,10 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             let (_, tmp_path_obj) = zip_tmp.into_parts();
             let final_path = tmp_path_obj
                 .keep()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Persist temp zip: {}", e)))?;
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Persist temp zip: {e}")))?;
 
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
-            let fname = format!("rustchan-backup-{}.zip", ts);
+            let fname = format!("rustchan-backup-{ts}.zip");
             info!("Admin downloaded full backup ({} bytes on disk)", file_size);
             progress
                 .phase
@@ -1401,7 +1459,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
     // MEM-FIX: Stream the zip file from disk in chunks — never load it all into heap.
     let file = tokio::fs::File::open(&tmp_path)
         .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Open backup for streaming: {}", e)))?;
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Open backup for streaming: {e}")))?;
     let stream = ReaderStream::new(file);
     let body = axum::body::Body::from_stream(stream);
 
@@ -1412,8 +1470,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
         let _ = tokio::fs::remove_file(cleanup_path).await;
     });
 
-    use axum::http::header;
-    let disposition = format!("attachment; filename=\"{}\"", filename);
+    let disposition = format!("attachment; filename=\"{filename}\"");
     Ok((
         [
             (header::CONTENT_TYPE, "application/zip".to_string()),
@@ -1426,7 +1483,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 }
 
 /// Count regular files (not directories) under `dir` recursively.
-/// Used to initialise the progress bar's files_total before compression starts.
+/// Used to initialise the progress bar's `files_total` before compression starts.
 fn count_files_in_dir(dir: &std::path::Path) -> u64 {
     if !dir.is_dir() {
         return 0;
@@ -1448,11 +1505,11 @@ fn count_files_in_dir(dir: &std::path::Path) -> u64 {
 
 /// Recursively add every file under `dir` into the zip as `uploads/{rel_path}`.
 ///
-/// MEM-FIX: Uses std::io::copy with the zip writer directly, streaming each
+/// MEM-FIX: Uses `std::io::copy` with the zip writer directly, streaming each
 /// file through a kernel buffer (~8 KiB) instead of reading the whole file
-/// into a Vec<u8> first.  Peak RAM per file = io::copy's 8 KiB stack buffer.
+/// into a Vec<u8> first.  Peak RAM per file = `io::copy`'s 8 KiB stack buffer.
 ///
-/// Progress tracking: increments progress.files_done and progress.bytes_done
+/// Progress tracking: increments `progress.files_done` and `progress.bytes_done`
 /// after each file is written to the zip.
 fn add_dir_to_zip<W: Write + Seek>(
     zip: &mut zip::ZipWriter<W>,
@@ -1465,18 +1522,18 @@ fn add_dir_to_zip<W: Write + Seek>(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("read_dir {}: {}", dir.display(), e)))?;
 
     for entry in entries {
-        let entry = entry.map_err(|e| AppError::Internal(anyhow::anyhow!("dir entry: {}", e)))?;
+        let entry = entry.map_err(|e| AppError::Internal(anyhow::anyhow!("dir entry: {e}")))?;
         let path = entry.path();
 
         let relative = path
             .strip_prefix(base)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("strip_prefix: {}", e)))?;
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("strip_prefix: {e}")))?;
         let rel_str = relative.to_string_lossy().replace('\\', "/");
-        let zip_path = format!("uploads/{}", rel_str);
+        let zip_path = format!("uploads/{rel_str}");
 
         if path.is_dir() {
             zip.add_directory(&zip_path, opts)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("zip dir: {}", e)))?;
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("zip dir: {e}")))?;
             add_dir_to_zip(zip, base, &path, opts, progress)?;
         } else if path.is_file() {
             // MEM-FIX: open file, stream through io::copy — no Vec<u8> allocation.
@@ -1484,7 +1541,7 @@ fn add_dir_to_zip<W: Write + Seek>(
                 AppError::Internal(anyhow::anyhow!("open {}: {}", path.display(), e))
             })?;
             zip.start_file(&zip_path, opts)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("zip file entry: {}", e)))?;
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("zip file entry: {e}")))?;
             let copied = std::io::copy(&mut src, zip).map_err(|e| {
                 AppError::Internal(anyhow::anyhow!("copy {} to zip: {}", path.display(), e))
             })?;
@@ -1499,19 +1556,19 @@ fn add_dir_to_zip<W: Write + Seek>(
 
 /// Replace the live database with the contents of a backup zip.
 ///
-/// Design — why we use SQLite's backup API instead of swapping files:
+/// Design — why we use `SQLite`'s backup API instead of swapping files:
 ///
-///   The r2d2 pool keeps up to 8 SQLite connections open permanently.  On
+///   The r2d2 pool keeps up to 8 `SQLite` connections open permanently.  On
 ///   Linux, renaming a new file over chan.db does NOT update the connections
 ///   already open — they still hold file descriptors to the old inode.  File-
 ///   swapping therefore leaves the pool reading stale data until the process
 ///   restarts, and deleting the WAL while live connections are active can
 ///   corrupt the database.
 ///
-///   `rusqlite::backup::Backup` wraps SQLite's sqlite3_backup_init() API,
+///   `rusqlite::backup::Backup` wraps `SQLite`'s `sqlite3_backup_init()` API,
 ///   which copies data directly into the destination connection's live file —
 ///   through the WAL, through the same file descriptors, safely.  After
-///   run_to_completion() returns, every connection in the pool immediately
+///   `run_to_completion()` returns, every connection in the pool immediately
 ///   sees the restored data.  No file swapping, no WAL deletion, no restart
 ///   required.
 ///
@@ -1523,6 +1580,7 @@ fn add_dir_to_zip<W: Write + Seek>(
 ///     is silently ignored.
 ///   • The uploaded DB is written to a temp file then opened read-only as the
 ///     backup source; it is deleted on success or failure.
+#[allow(clippy::too_many_lines)]
 pub async fn admin_restore(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1539,7 +1597,7 @@ pub async fn admin_restore(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::BadRequest(format!("Multipart error: {}", e)))?
+        .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
     {
         match field.name() {
             Some("_csrf") => {
@@ -1551,15 +1609,14 @@ pub async fn admin_restore(
                 );
             }
             Some("backup_file") => {
-                use tokio::io::AsyncWriteExt as _;
                 let tmp = tempfile::NamedTempFile::new()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Tempfile: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Tempfile: {e}")))?;
                 // Clone the underlying fd for async writing; the original
                 // NamedTempFile retains ownership and the delete-on-drop guard.
                 let std_clone = tmp
                     .as_file()
                     .try_clone()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Clone fd: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Clone fd: {e}")))?;
                 let async_file = tokio::fs::File::from_std(std_clone);
                 let mut writer = tokio::io::BufWriter::new(async_file);
                 let mut field = field;
@@ -1571,12 +1628,12 @@ pub async fn admin_restore(
                     writer
                         .write_all(&chunk)
                         .await
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Write chunk: {}", e)))?;
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Write chunk: {e}")))?;
                 }
                 writer
                     .flush()
                     .await
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush: {e}")))?;
                 zip_tmp = Some(tmp);
             }
             _ => {
@@ -1598,7 +1655,7 @@ pub async fn admin_restore(
     let zip_size = zip_tmp
         .as_file()
         .seek(std::io::SeekFrom::End(0))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek check: {}", e)))?;
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek check: {e}")))?;
     if zip_size == 0 {
         return Err(AppError::BadRequest(
             "Uploaded backup file is empty.".into(),
@@ -1623,9 +1680,9 @@ pub async fn admin_restore(
             // so ZipArchive can navigate entries without loading into RAM.
             let zip_file = zip_tmp
                 .reopen()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen zip: {}", e)))?;
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen zip: {e}")))?;
             let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
-                .map_err(|e| AppError::BadRequest(format!("Invalid zip: {}", e)))?;
+                .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
 
             // Quick pre-flight: make sure there is a chan.db entry.
             // file_names() is a stable iterator available in zip 2+ and zip 8+.
@@ -1638,26 +1695,26 @@ pub async fn admin_restore(
 
             // ── Single-pass extraction ────────────────────────────────────
             let temp_dir = std::env::temp_dir();
-            let tmp_id = uuid::Uuid::new_v4().to_string().replace('-', "");
-            let temp_db = temp_dir.join(format!("chan_restore_{}.db", tmp_id));
+            let tmp_id = uuid::Uuid::new_v4().simple().to_string();
+            let temp_db = temp_dir.join(format!("chan_restore_{tmp_id}.db"));
             let mut db_extracted = false;
 
             for i in 0..archive.len() {
                 let mut entry = archive.by_index(i)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip read [{}]: {}", i, e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip read [{i}]: {e}")))?;
                 let name = entry.name().to_string();
 
                 // Security: skip any path-traversal attempts.
                 if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
-                    warn!("Restore: skipping suspicious zip entry '{}'", name);
+                    warn!("Restore: skipping suspicious zip entry '{name}'");
                     continue;
                 }
 
                 if name == "chan.db" {
                     let mut out = std::fs::File::create(&temp_db)
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp DB: {}", e)))?;
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp DB: {e}")))?;
                     copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp DB: {}", e)))?;
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp DB: {e}")))?;
                     db_extracted = true;
 
                 } else if let Some(rel) = name.strip_prefix("uploads/") {
@@ -1670,7 +1727,7 @@ pub async fn admin_restore(
                     } else {
                         if let Some(parent) = target.parent() {
                             std::fs::create_dir_all(parent)
-                                .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir parent: {}", e)))?;
+                                .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir parent: {e}")))?;
                         }
                         let mut out = std::fs::File::create(&target)
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("Create {}: {}", target.display(), e)))?;
@@ -1690,12 +1747,11 @@ pub async fn admin_restore(
             // ── SQLite backup API: copy temp DB → live DB ─────────────────
             let backup_result = (|| -> Result<()> {
                 let src = rusqlite::Connection::open(&temp_db)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open backup source: {}", e)))?;
-                use rusqlite::backup::Backup;
-                let backup = Backup::new(&src, &mut live_conn)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup init: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open backup source: {e}")))?;
+                                let backup = Backup::new(&src, &mut live_conn)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup init: {e}")))?;
                 backup.run_to_completion(100, std::time::Duration::from_millis(0), None)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup copy: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup copy: {e}")))?;
                 Ok(())
             })();
 
@@ -1716,13 +1772,17 @@ pub async fn admin_restore(
             let fresh_sid = new_session_id();
             let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
             match db::create_session(&live_conn, &fresh_sid, admin_id, expires_at) {
-                Ok(_) => {
-                    info!("Admin restore completed; new session issued for admin_id={}", admin_id);
+                Ok(()) => {
+                    info!("Admin restore completed; new session issued for admin_id={admin_id}");
+                    // Refresh live board list — the restored DB may have
+                    // different boards than what was running before.
+                    if let Ok(boards) = db::get_all_boards(&live_conn) {
+                        crate::templates::set_live_boards(boards);
+                    }
                     Ok(fresh_sid)
                 }
                 Err(e) => {
                     warn!("Restore: could not create new session (admin_id={} may not exist in backup): {}", admin_id, e);
-                    // Return empty string as a sentinel — handler will send to login.
                     Ok(String::new())
                 }
             }
@@ -1756,9 +1816,122 @@ pub async fn admin_restore(
 // 1 KiB zip (a "zip bomb") can expand to gigabytes, exhausting disk or memory.
 // copy_limited() caps the decompressed size of each entry.
 
-/// Maximum bytes to extract from any single zip entry.
-/// Set to 16 GiB — these are admin-only restore endpoints, so individual
-/// entries (large videos, the SQLite DB) can legitimately be several GiB.
+// Maximum bytes to extract from any single zip entry.
+// Set to 16 GiB — these are admin-only restore endpoints, so individual
+// entries (large videos, the SQLite DB) can legitimately be several GiB.
+// ─── Quotelink ID remapping ───────────────────────────────────────────────────
+//
+// When a board backup is restored, posts receive new auto-incremented IDs
+// because other boards' posts already occupy the original IDs in the global
+// `posts` table.  `remap_body_quotelinks` and `remap_body_html_quotelinks`
+// rewrite the raw text and rendered HTML of each restored post so that in-board
+// quotelinks point to the new IDs instead of the now-stale original ones.
+//
+// Design constraints:
+//
+// 1. ONLY same-board links are remapped.  Cross-board references (`>>>/b/N`)
+//    point to other boards whose IDs are unchanged by this restore operation
+//    and must not be altered.
+//
+// 2. `pairs` must be sorted by old-ID string length *descending* before being
+//    passed to these functions.  This prevents a shorter ID (e.g. "10") from
+//    being substituted as a prefix of a longer one ("1000") before the longer
+//    match has a chance to fire.  Example:
+//      pairs = [("1000","2500"), ("100","800"), ("10","50"), ("1","3")]
+//    Processing "1000" before "100" prevents "1000" → "8000" (wrong first).
+//
+// 3. `body` stores the original markdown-like text the user typed.  In-board
+//    quotelinks appear as `>>{old_id}` (e.g. `>>500`).  A regex-free approach
+//    is used: for each (old, new) pair, replace `>>{old}` followed by a
+//    non-digit (or end-of-string) to avoid `>>100` matching inside `>>1000`.
+//
+// 4. `body_html` stores pre-rendered HTML.  In-board quotelinks look like:
+//      <a href="#p{N}" class="quotelink" data-pid="{N}">&gt;&gt;{N}</a>
+//    Cross-board quotelinks look like:
+//      <a href="/board/post/{N}" class="quotelink crosslink" ...>&gt;&gt;&gt;/…</a>
+//    We replace `href="#p{old}"` (exclusively in-board) and
+//    `data-pid="{old}">&gt;&gt;{old}</a>` (display text also exclusive to
+//    in-board links — cross-board display text has `&gt;&gt;&gt;/` prefix).
+
+// Rewrite in-board `>>{old_id}` references in the raw post body.
+// `pairs` must be pre-sorted by old-ID string length descending.
+fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> String {
+    // Avoid cloning when there is nothing to change.
+    if pairs.is_empty() {
+        return body.to_string();
+    }
+    let mut result = body.to_string();
+    for (old, new) in pairs {
+        // Match `>>{old}` only when NOT immediately followed by another digit,
+        // so we don't turn `>>1000` into `>>new_id_for_1000` when processing
+        // the `>>100` entry first.
+        //
+        // Implementation: scan for every occurrence of `>>{old}` in the string
+        // and check the next character.  Replace left-to-right using byte indices
+        // to avoid re-scanning already-replaced sections.
+        let needle = format!(">>{old}");
+        let mut out = String::with_capacity(result.len());
+        let mut pos = 0;
+        let bytes = result.as_bytes();
+        while pos < bytes.len() {
+            match result[pos..].find(&needle) {
+                None => {
+                    out.push_str(&result[pos..]);
+                    break;
+                }
+                Some(rel) => {
+                    let abs = pos + rel;
+                    let after = abs + needle.len();
+                    // Only replace when the char after the match is not a digit.
+                    let next_is_digit = bytes.get(after).is_some_and(u8::is_ascii_digit);
+                    out.push_str(&result[pos..abs]);
+                    if next_is_digit {
+                        // Not the right match — keep the original text.
+                        out.push_str(&needle);
+                    } else {
+                        out.push_str(">>");
+                        out.push_str(new);
+                    }
+                    pos = after;
+                }
+            }
+        }
+        result = out;
+    }
+    result
+}
+
+/// Rewrite in-board quotelink IDs in pre-rendered `body_html`.
+///
+/// Targets two patterns that are exclusive to same-board quotelinks:
+///   • `href="#p{old}"` — the anchor href
+///   • `data-pid="{old}">&gt;&gt;{old}</a>` — the data attribute + display text
+///
+/// Cross-board links use `href="/board/post/{N}"` and display `&gt;&gt;&gt;/…`
+/// so neither pattern matches them.
+///
+/// `pairs` must be pre-sorted by old-ID string length descending.
+fn remap_body_html_quotelinks(body_html: &str, pairs: &[(String, String)]) -> String {
+    if pairs.is_empty() {
+        return body_html.to_string();
+    }
+    let mut result = body_html.to_string();
+    for (old, new) in pairs {
+        // Pattern 1: href="#p{old}" → href="#p{new}"
+        let old_href = format!("href=\"#p{old}\"");
+        let new_href = format!("href=\"#p{new}\"");
+        result = result.replace(&old_href, &new_href);
+
+        // Pattern 2: data-pid="{old}">&gt;&gt;{old}</a>
+        // This uniquely identifies in-board quotelinks: cross-board links have
+        // "&gt;&gt;&gt;/" as their display text, never bare "&gt;&gt;{N}".
+        let old_tail = format!("data-pid=\"{old}\">&gt;&gt;{old}</a>");
+        let new_tail = format!("data-pid=\"{new}\">&gt;&gt;{new}</a>");
+        result = result.replace(&old_tail, &new_tail);
+    }
+    result
+}
+
 const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 /// Like `std::io::copy` but returns `InvalidData` if more than `max_bytes`
@@ -1769,7 +1942,7 @@ fn copy_limited<R: std::io::Read, W: std::io::Write>(
     writer: &mut W,
     max_bytes: u64,
 ) -> std::io::Result<u64> {
-    let mut buf = [0u8; 65536];
+    let mut buf = vec![0u8; 65536];
     let mut total: u64 = 0;
     loop {
         let n = reader.read(&mut buf)?;
@@ -1797,7 +1970,7 @@ fn copy_limited<R: std::io::Read, W: std::io::Write>(
 
 /// Check CSRF using the cookie jar. Returns error on mismatch.
 /// Verify admin session and also return the admin's username.
-/// For use inside spawn_blocking closures.
+/// For use inside `spawn_blocking` closures.
 fn require_admin_session_with_name(
     conn: &rusqlite::Connection,
     session_id: Option<&str>,
@@ -1809,15 +1982,15 @@ fn require_admin_session_with_name(
 
 fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
     let cookie_token = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(cookie_token.as_deref(), form_token.unwrap_or("")) {
-        Err(AppError::Forbidden("CSRF token mismatch.".into()))
-    } else {
+    if crate::middleware::validate_csrf(cookie_token.as_deref(), form_token.unwrap_or("")) {
         Ok(())
+    } else {
+        Err(AppError::Forbidden("CSRF token mismatch.".into()))
     }
 }
 
 /// Verify admin session from a session ID string.
-/// For use inside spawn_blocking closures where we have an open connection.
+/// For use inside `spawn_blocking` closures where we have an open connection.
 fn require_admin_session_sid(conn: &rusqlite::Connection, session_id: Option<&str>) -> Result<i64> {
     let sid = session_id.ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
     let session = db::get_session(conn, sid)?
@@ -1831,8 +2004,7 @@ fn require_admin_session_sid(conn: &rusqlite::Connection, session_id: Option<&st
 fn db_dir() -> PathBuf {
     PathBuf::from(&CONFIG.database_path)
         .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
+        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf)
 }
 
 /// rustchan-data/full-backups/
@@ -1857,7 +2029,7 @@ fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
             if let (Some(name), Ok(meta)) = (
                 path.file_name()
                     .and_then(|n| n.to_str())
-                    .map(|s| s.to_string()),
+                    .map(ToString::to_string),
                 std::fs::metadata(&path),
             ) {
                 let modified = meta
@@ -1865,7 +2037,7 @@ fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| {
-                        let secs = d.as_secs() as i64;
+                        let secs = d.as_secs().cast_signed();
                         #[allow(deprecated)]
                         chrono::DateTime::<Utc>::from_timestamp(secs, 0)
                             .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
@@ -1890,7 +2062,7 @@ fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
 /// Create a full backup and save it to rustchan-data/full-backups/.
 ///
 /// MEM-FIX: The zip is written directly to the final destination file via a
-/// BufWriter, so peak RAM usage is O(compression-buffer) not O(zip-size).
+/// `BufWriter`, so peak RAM usage is O(compression-buffer) not O(zip-size).
 /// A `.tmp` suffix is used during writing; the file is renamed on success so
 /// the backup list never shows a partial/corrupt zip.
 pub async fn create_full_backup(
@@ -1899,7 +2071,7 @@ pub async fn create_full_backup(
     Form(form): Form<CsrfOnly>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let upload_dir = CONFIG.upload_dir.clone();
     let progress = state.backup_progress.clone();
@@ -1914,15 +2086,15 @@ pub async fn create_full_backup(
 
             // VACUUM INTO for a consistent snapshot.
             let temp_dir = std::env::temp_dir();
-            let tmp_id = uuid::Uuid::new_v4().to_string().replace('-', "");
-            let temp_db = temp_dir.join(format!("chan_backup_{}.db", tmp_id));
+            let tmp_id = uuid::Uuid::new_v4().simple().to_string();
+            let temp_db = temp_dir.join(format!("chan_backup_{tmp_id}.db"));
             let temp_db_str = temp_db
                 .to_str()
                 .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path non-UTF-8")))?
                 .replace('\'', "''");
 
-            conn.execute_batch(&format!("VACUUM INTO '{}'", temp_db_str))
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {}", e)))?;
+            conn.execute_batch(&format!("VACUUM INTO '{temp_db_str}'"))
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {e}")))?;
             drop(conn);
 
             // Count files for progress bar before compressing.
@@ -1935,19 +2107,18 @@ pub async fn create_full_backup(
 
             // MEM-FIX: write zip directly to a .tmp file on disk, not a Vec<u8>.
             let backup_dir = full_backup_dir();
-            std::fs::create_dir_all(&backup_dir).map_err(|e| {
-                AppError::Internal(anyhow::anyhow!("Create full-backups dir: {}", e))
-            })?;
+            std::fs::create_dir_all(&backup_dir)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create full-backups dir: {e}")))?;
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
-            let fname = format!("rustchan-backup-{}.zip", ts);
+            let fname = format!("rustchan-backup-{ts}.zip");
             let final_path = backup_dir.join(&fname);
-            let tmp_path = backup_dir.join(format!("{}.tmp", fname));
+            let tmp_path = backup_dir.join(format!("{fname}.tmp"));
 
             {
-                let out_file =
-                    std::io::BufWriter::new(std::fs::File::create(&tmp_path).map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("Create zip tmp: {}", e))
-                    })?);
+                let out_file = std::io::BufWriter::new(
+                    std::fs::File::create(&tmp_path)
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Create zip tmp: {e}")))?,
+                );
                 let mut zip = zip::ZipWriter::new(out_file);
                 let opts = zip::write::SimpleFileOptions::default()
                     .compression_method(zip::CompressionMethod::Deflated);
@@ -1959,11 +2130,11 @@ pub async fn create_full_backup(
 
                 // ── Database snapshot (streamed, not read into RAM) ────────
                 zip.start_file("chan.db", opts)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip DB: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip DB: {e}")))?;
                 let mut db_src = std::fs::File::open(&temp_db)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open DB snapshot: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open DB snapshot: {e}")))?;
                 let copied = std::io::copy(&mut db_src, &mut zip)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Stream DB to zip: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Stream DB to zip: {e}")))?;
                 drop(db_src);
                 let _ = std::fs::remove_file(&temp_db);
                 progress.files_done.fetch_add(1, Ordering::Relaxed);
@@ -1976,19 +2147,19 @@ pub async fn create_full_backup(
 
                 let writer = zip
                     .finish()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {e}")))?;
                 // Flush the BufWriter so the OS buffer is committed to disk.
                 writer
                     .into_inner()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush zip writer: {}", e)))?
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush zip writer: {e}")))?
                     .sync_all()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {e}")))?;
             }
 
             // Atomic rename: only becomes visible in the list when complete.
             std::fs::rename(&tmp_path, &final_path).map_err(|e| {
                 let _ = std::fs::remove_file(&tmp_path);
-                AppError::Internal(anyhow::anyhow!("Rename backup: {}", e))
+                AppError::Internal(anyhow::anyhow!("Rename backup: {e}"))
             })?;
 
             let size = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
@@ -2010,22 +2181,24 @@ pub async fn create_full_backup(
 #[derive(Deserialize)]
 pub struct BoardBackupCreateForm {
     board_short: String,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 /// Create a board backup and save it to rustchan-data/board-backups/.
+#[allow(clippy::too_many_lines)]
 pub async fn create_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     Form(form): Form<BoardBackupCreateForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let board_short = form
         .board_short
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .take(8)
         .collect::<String>();
     if board_short.is_empty() {
@@ -2038,8 +2211,7 @@ pub async fn create_board_backup(
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
-            use board_backup_types::*;
-            use rusqlite::params;
+    use board_backup_types::{BoardRow, ThreadRow, PostRow, PollRow, PollOptionRow, PollVoteRow, FileHashRow, BoardBackupManifest};
 
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
@@ -2075,7 +2247,7 @@ pub async fn create_board_backup(
                         })
                     },
                 )
-                .map_err(|_| AppError::NotFound(format!("Board '{}' not found", board_short)))?;
+                .map_err(|_| AppError::NotFound(format!("Board '{board_short}' not found")))?;
 
             let board_id = board.id;
 
@@ -2253,17 +2425,17 @@ pub async fn create_board_backup(
                 file_hashes,
             };
             let manifest_json = serde_json::to_vec_pretty(&manifest)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON: {}", e)))?;
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON: {e}")))?;
 
             // MEM-FIX: write zip directly to a .tmp file on disk, not a Vec<u8>.
             let backup_dir = board_backup_dir();
             std::fs::create_dir_all(&backup_dir).map_err(|e| {
-                AppError::Internal(anyhow::anyhow!("Create board-backups dir: {}", e))
+                AppError::Internal(anyhow::anyhow!("Create board-backups dir: {e}"))
             })?;
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
-            let fname = format!("rustchan-board-{}-{}.zip", board_short, ts);
+            let fname = format!("rustchan-board-{board_short}-{ts}.zip");
             let final_path = backup_dir.join(&fname);
-            let tmp_path = backup_dir.join(format!("{}.tmp", fname));
+            let tmp_path = backup_dir.join(format!("{fname}.tmp"));
 
             let uploads_base = std::path::Path::new(&upload_dir);
             let board_upload_path = uploads_base.join(&board_short);
@@ -2275,7 +2447,7 @@ pub async fn create_board_backup(
             {
                 let out_file = std::io::BufWriter::new(
                     std::fs::File::create(&tmp_path).map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("Create zip tmp: {}", e))
+                        AppError::Internal(anyhow::anyhow!("Create zip tmp: {e}"))
                     })?,
                 );
                 let mut zip = zip::ZipWriter::new(out_file);
@@ -2283,9 +2455,9 @@ pub async fn create_board_backup(
                     .compression_method(zip::CompressionMethod::Deflated);
 
                 zip.start_file("board.json", opts)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip manifest: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip manifest: {e}")))?;
                 zip.write_all(&manifest_json)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Write manifest: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Write manifest: {e}")))?;
                 progress.files_done.fetch_add(1, Ordering::Relaxed);
                 progress.bytes_done.fetch_add(manifest_json.len() as u64, Ordering::Relaxed);
 
@@ -2295,17 +2467,17 @@ pub async fn create_board_backup(
 
                 let writer = zip
                     .finish()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {e}")))?;
                 writer
                     .into_inner()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush zip writer: {}", e)))?
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush zip writer: {e}")))?
                     .sync_all()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {e}")))?;
             }
 
             std::fs::rename(&tmp_path, &final_path).map_err(|e| {
                 let _ = std::fs::remove_file(&tmp_path);
-                AppError::Internal(anyhow::anyhow!("Rename board backup: {}", e))
+                AppError::Internal(anyhow::anyhow!("Rename board backup: {e}"))
             })?;
 
             let size = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
@@ -2329,7 +2501,7 @@ pub async fn create_board_backup(
 /// response.  For a 5 GiB backup on a slow connection that means 5 GiB of
 /// heap held for the entire download duration.
 ///
-/// The fix: open a tokio::fs::File and wrap it in a ReaderStream so Axum
+/// The fix: open a `tokio::fs::File` and wrap it in a `ReaderStream` so Axum
 /// sends the data in 64 KiB chunks pulled directly from the OS page cache.
 /// Peak heap = one 64 KiB chunk; the rest stays on disk.
 pub async fn download_backup(
@@ -2359,7 +2531,10 @@ pub async fn download_backup(
     if safe_filename != filename || safe_filename.contains("..") {
         return Err(AppError::BadRequest("Invalid filename.".into()));
     }
-    if !safe_filename.ends_with(".zip") {
+    if !std::path::Path::new(&safe_filename)
+        .extension()
+        .is_some_and(|e: &std::ffi::OsStr| e.eq_ignore_ascii_case("zip"))
+    {
         return Err(AppError::BadRequest(
             "Only .zip files can be downloaded.".into(),
         ));
@@ -2386,8 +2561,7 @@ pub async fn download_backup(
     let stream = ReaderStream::new(file);
     let body = axum::body::Body::from_stream(stream);
 
-    use axum::http::header;
-    let disposition = format!("attachment; filename=\"{}\"", safe_filename);
+    let disposition = format!("attachment; filename=\"{safe_filename}\"");
     Ok((
         [
             (header::CONTENT_TYPE, "application/zip".to_string()),
@@ -2403,10 +2577,10 @@ pub async fn download_backup(
 
 /// Return current backup progress as JSON.  Polled by the admin panel JS.
 ///
-/// Response: { phase: u64, files_done: u64, files_total: u64,
-///              bytes_done: u64, bytes_total: u64 }
+/// Response: { phase: u64, `files_done`: u64, `files_total`: u64,
+///              `bytes_done`: u64, `bytes_total`: u64 }
 ///
-/// phase codes: 0=idle, 1=snapshot_db, 2=count_files, 3=compress, 4=save, 5=done
+/// phase codes: `0=idle`, `1=snapshot_db`, `2=count_files`, `3=compress`, `4=save`, `5=done`
 ///
 /// Auth is required to prevent any guest from watching backup progress.
 pub async fn backup_progress_json(
@@ -2425,18 +2599,16 @@ pub async fn backup_progress_json(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    use std::sync::atomic::Ordering::Relaxed;
     let p = &state.backup_progress;
     let json = format!(
         r#"{{"phase":{},"files_done":{},"files_total":{},"bytes_done":{},"bytes_total":{}}}"#,
-        p.phase.load(Relaxed),
-        p.files_done.load(Relaxed),
-        p.files_total.load(Relaxed),
-        p.bytes_done.load(Relaxed),
-        p.bytes_total.load(Relaxed),
+        p.phase.load(Ordering::Relaxed),
+        p.files_done.load(Ordering::Relaxed),
+        p.files_total.load(Ordering::Relaxed),
+        p.bytes_done.load(Ordering::Relaxed),
+        p.bytes_total.load(Ordering::Relaxed),
     );
 
-    use axum::http::header;
     Ok((
         [(header::CONTENT_TYPE, "application/json".to_string())],
         json,
@@ -2450,7 +2622,8 @@ pub async fn backup_progress_json(
 pub struct DeleteBackupForm {
     kind: String, // "full" or "board"
     filename: String,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 /// Delete a saved backup file from disk.
@@ -2460,7 +2633,7 @@ pub async fn delete_backup(
     Form(form): Form<DeleteBackupForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     // Validate filename.
     let safe_filename: String = form
@@ -2471,7 +2644,10 @@ pub async fn delete_backup(
     if safe_filename != form.filename || safe_filename.contains("..") {
         return Err(AppError::BadRequest("Invalid filename.".into()));
     }
-    if !safe_filename.ends_with(".zip") {
+    if !std::path::Path::new(&safe_filename)
+        .extension()
+        .is_some_and(|e: &std::ffi::OsStr| e.eq_ignore_ascii_case("zip"))
+    {
         return Err(AppError::BadRequest(
             "Only .zip files can be deleted.".into(),
         ));
@@ -2492,8 +2668,8 @@ pub async fn delete_backup(
             let path = backup_dir.join(&safe_filename);
             if path.exists() {
                 std::fs::remove_file(&path)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {}", e)))?;
-                info!("Admin deleted backup file: {}", safe_filename);
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {e}")))?;
+                info!("Admin deleted backup file: {safe_filename}");
             }
             Ok(())
         }
@@ -2509,17 +2685,19 @@ pub async fn delete_backup(
 #[derive(Deserialize)]
 pub struct RestoreSavedForm {
     filename: String,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 /// Restore a full backup from a saved file in full-backups/.
+#[allow(clippy::too_many_lines)]
 pub async fn restore_saved_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let safe_filename: String = form
         .filename
@@ -2528,7 +2706,9 @@ pub async fn restore_saved_full_backup(
         .collect();
     if safe_filename != form.filename
         || safe_filename.contains("..")
-        || !safe_filename.ends_with(".zip")
+        || !std::path::Path::new(&safe_filename)
+            .extension()
+            .is_some_and(|e: &std::ffi::OsStr| e.eq_ignore_ascii_case("zip"))
     {
         return Err(AppError::BadRequest("Invalid filename.".into()));
     }
@@ -2547,12 +2727,14 @@ pub async fn restore_saved_full_backup(
             // Auth check first — only read the (potentially huge) file if valid.
             let admin_id = require_admin_session_sid(&live_conn, session_id.as_deref())?;
 
-            let zip_bytes = std::fs::read(&path)
+            // MEM-FIX: open the zip as a seekable BufReader<File> instead of
+            // reading the whole file into a Vec<u8>.  The FIX[A3] comment above
+            // correctly deferred the read to after auth, but std::fs::read still
+            // loaded the entire zip into heap.  A 5 GiB backup would exhaust RAM.
+            let zip_file = std::fs::File::open(&path)
                 .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
-
-            let cursor = std::io::Cursor::new(zip_bytes);
-            let mut archive = zip::ZipArchive::new(cursor)
-                .map_err(|e| AppError::BadRequest(format!("Invalid zip: {}", e)))?;
+            let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
+                .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
 
             let has_db = archive.file_names().any(|n| n == "chan.db");
             if !has_db {
@@ -2562,25 +2744,24 @@ pub async fn restore_saved_full_backup(
             }
 
             let temp_dir = std::env::temp_dir();
-            let tmp_id = uuid::Uuid::new_v4().to_string().replace('-', "");
-            let temp_db = temp_dir.join(format!("chan_restore_{}.db", tmp_id));
+            let tmp_id = uuid::Uuid::new_v4().simple().to_string();
+            let temp_db = temp_dir.join(format!("chan_restore_{tmp_id}.db"));
             let mut db_extracted = false;
 
             for i in 0..archive.len() {
                 let mut entry = archive
                     .by_index(i)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{}]: {}", i, e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
                 let name = entry.name().to_string();
                 if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
-                    warn!("Restore-saved: skipping suspicious entry '{}'", name);
+                    warn!("Restore-saved: skipping suspicious entry '{name}'");
                     continue;
                 }
                 if name == "chan.db" {
-                    let mut out = std::fs::File::create(&temp_db).map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("Create temp DB: {}", e))
-                    })?;
+                    let mut out = std::fs::File::create(&temp_db)
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp DB: {e}")))?;
                     copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp DB: {}", e)))?;
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp DB: {e}")))?;
                     db_extracted = true;
                 } else if let Some(rel) = name.strip_prefix("uploads/") {
                     if rel.is_empty() {
@@ -2589,11 +2770,11 @@ pub async fn restore_saved_full_backup(
                     let target = PathBuf::from(&upload_dir).join(rel);
                     if entry.is_dir() {
                         std::fs::create_dir_all(&target)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {}", e)))?;
+                            .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {e}")))?;
                     } else {
                         if let Some(parent) = target.parent() {
                             std::fs::create_dir_all(parent).map_err(|e| {
-                                AppError::Internal(anyhow::anyhow!("mkdir parent: {}", e))
+                                AppError::Internal(anyhow::anyhow!("mkdir parent: {e}"))
                             })?;
                         }
                         let mut out = std::fs::File::create(&target).map_err(|e| {
@@ -2617,13 +2798,12 @@ pub async fn restore_saved_full_backup(
 
             let backup_result = (|| -> Result<()> {
                 let src = rusqlite::Connection::open(&temp_db)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open source: {}", e)))?;
-                use rusqlite::backup::Backup;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open source: {e}")))?;
                 let backup = Backup::new(&src, &mut live_conn)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup init: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup init: {e}")))?;
                 backup
                     .run_to_completion(100, std::time::Duration::from_millis(0), None)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup copy: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup copy: {e}")))?;
                 Ok(())
             })();
             let _ = std::fs::remove_file(&temp_db);
@@ -2632,15 +2812,12 @@ pub async fn restore_saved_full_backup(
             let fresh_sid = new_session_id();
             let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
             match db::create_session(&live_conn, &fresh_sid, admin_id, expires_at) {
-                Ok(_) => {
-                    info!(
-                        "Admin restore-saved completed; new session for admin_id={}",
-                        admin_id
-                    );
+                Ok(()) => {
+                    info!("Admin restore-saved completed; new session for admin_id={admin_id}");
                     Ok(fresh_sid)
                 }
                 Err(e) => {
-                    warn!("Restore-saved: could not create session: {}", e);
+                    warn!("Restore-saved: could not create session: {e}");
                     Ok(String::new())
                 }
             }
@@ -2667,13 +2844,31 @@ pub async fn restore_saved_full_backup(
 // ─── POST /admin/board/backup/restore-saved ───────────────────────────────────
 
 /// Restore a board backup from a saved file in board-backups/.
+#[allow(clippy::too_many_lines)]
 pub async fn restore_saved_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
+    fn encode_q(s: &str) -> String {
+        const fn nibble(n: u8) -> char {
+            match n {
+                0..=9 => (b'0' + n) as char,
+                _ => (b'A' + n - 10) as char,
+            }
+        }
+        s.bytes()
+            .flat_map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    vec![b as char]
+                }
+                b' ' => vec!['+'],
+                b => vec!['%', nibble(b >> 4), nibble(b & 0xf)],
+            })
+            .collect()
+    }
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let safe_filename: String = form
         .filename
@@ -2682,7 +2877,9 @@ pub async fn restore_saved_board_backup(
         .collect();
     if safe_filename != form.filename
         || safe_filename.contains("..")
-        || !safe_filename.ends_with(".zip")
+        || !std::path::Path::new(&safe_filename)
+            .extension()
+            .is_some_and(|e: &std::ffi::OsStr| e.eq_ignore_ascii_case("zip"))
     {
         return Err(AppError::BadRequest("Invalid filename.".into()));
     }
@@ -2695,20 +2892,19 @@ pub async fn restore_saved_board_backup(
     let board_short_result: Result<Result<String>> = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
-            use board_backup_types::*;
-            use rusqlite::params;
-            use std::collections::HashMap;
+    use board_backup_types::BoardBackupManifest;
+                        use std::collections::HashMap;
 
             let conn = pool.get()?;
             // Auth check first — only read the file if the session is valid.
             require_admin_session_sid(&conn, session_id.as_deref())?;
 
-            let zip_bytes = std::fs::read(&path)
+            // MEM-FIX: open the zip as BufReader<File> instead of loading the
+            // entire file into a Vec<u8>.  Board backups can be hundreds of MB.
+            let zip_file = std::fs::File::open(&path)
                 .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
-
-            let cursor = std::io::Cursor::new(zip_bytes);
-            let mut archive = zip::ZipArchive::new(cursor)
-                .map_err(|e| AppError::BadRequest(format!("Invalid zip: {}", e)))?;
+            let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
+                .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
 
             if !archive.file_names().any(|n| n == "board.json") {
                 return Err(AppError::BadRequest(
@@ -2719,12 +2915,12 @@ pub async fn restore_saved_board_backup(
             let manifest: BoardBackupManifest = {
                 let mut entry = archive
                     .by_name("board.json")
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Read board.json: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Read board.json: {e}")))?;
                 let mut buf = Vec::new();
                 std::io::Read::read_to_end(&mut entry, &mut buf)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Read bytes: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Read bytes: {e}")))?;
                 serde_json::from_slice(&buf)
-                    .map_err(|e| AppError::BadRequest(format!("Invalid board.json: {}", e)))?
+                    .map_err(|e| AppError::BadRequest(format!("Invalid board.json: {e}")))?
             };
 
             let board_short = manifest.board.short_name.clone();
@@ -2743,12 +2939,12 @@ pub async fn restore_saved_board_backup(
             // DELETE and the first INSERT left the board with zero threads and no way
             // to recover without manual intervention.
             conn.execute("BEGIN IMMEDIATE", [])
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Begin tx: {}", e)))?;
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Begin tx: {e}")))?;
 
             let restore_result = (|| -> Result<()> {
                 let live_board_id: i64 = if let Some(eid) = existing_id {
                     conn.execute("DELETE FROM threads WHERE board_id = ?1", params![eid])
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Clear threads: {}", e)))?;
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Clear threads: {e}")))?;
                     conn.execute(
                         "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                          max_threads=?4, bump_limit=?5,
@@ -2759,23 +2955,23 @@ pub async fn restore_saved_board_backup(
                         params![
                             manifest.board.name,
                             manifest.board.description,
-                            manifest.board.nsfw as i64,
+                            i64::from(manifest.board.nsfw),
                             manifest.board.max_threads,
                             manifest.board.bump_limit,
-                            manifest.board.allow_images as i64,
-                            manifest.board.allow_video as i64,
-                            manifest.board.allow_audio as i64,
-                            manifest.board.allow_tripcodes as i64,
+                            i64::from(manifest.board.allow_images),
+                            i64::from(manifest.board.allow_video),
+                            i64::from(manifest.board.allow_audio),
+                            i64::from(manifest.board.allow_tripcodes),
                             manifest.board.edit_window_secs,
-                            manifest.board.allow_editing as i64,
-                            manifest.board.allow_archive as i64,
-                            manifest.board.allow_video_embeds as i64,
-                            manifest.board.allow_captcha as i64,
+                            i64::from(manifest.board.allow_editing),
+                            i64::from(manifest.board.allow_archive),
+                            i64::from(manifest.board.allow_video_embeds),
+                            i64::from(manifest.board.allow_captcha),
                             manifest.board.post_cooldown_secs,
                             eid,
                         ],
                     )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Update board: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Update board: {e}")))?;
                     eid
                 } else {
                     conn.execute(
@@ -2788,23 +2984,23 @@ pub async fn restore_saved_board_backup(
                             manifest.board.short_name,
                             manifest.board.name,
                             manifest.board.description,
-                            manifest.board.nsfw as i64,
+                            i64::from(manifest.board.nsfw),
                             manifest.board.max_threads,
                             manifest.board.bump_limit,
-                            manifest.board.allow_images as i64,
-                            manifest.board.allow_video as i64,
-                            manifest.board.allow_audio as i64,
-                            manifest.board.allow_tripcodes as i64,
+                            i64::from(manifest.board.allow_images),
+                            i64::from(manifest.board.allow_video),
+                            i64::from(manifest.board.allow_audio),
+                            i64::from(manifest.board.allow_tripcodes),
                             manifest.board.edit_window_secs,
-                            manifest.board.allow_editing as i64,
-                            manifest.board.allow_archive as i64,
-                            manifest.board.allow_video_embeds as i64,
-                            manifest.board.allow_captcha as i64,
+                            i64::from(manifest.board.allow_editing),
+                            i64::from(manifest.board.allow_archive),
+                            i64::from(manifest.board.allow_video_embeds),
+                            i64::from(manifest.board.allow_captcha),
                             manifest.board.post_cooldown_secs,
                             manifest.board.created_at,
                         ],
                     )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert board: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert board: {e}")))?;
                     conn.last_insert_rowid()
                 };
 
@@ -2818,12 +3014,12 @@ pub async fn restore_saved_board_backup(
                             t.subject,
                             t.created_at,
                             t.bumped_at,
-                            t.locked as i64,
-                            t.sticky as i64,
+                            i64::from(t.locked),
+                            i64::from(t.sticky),
                             t.reply_count,
                         ],
                     )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert thread: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert thread: {e}")))?;
                     thread_id_map.insert(t.id, conn.last_insert_rowid());
                 }
 
@@ -2853,10 +3049,10 @@ pub async fn restore_saved_board_backup(
                             p.media_type,
                             p.created_at,
                             p.deletion_token,
-                            p.is_op as i64,
+                            i64::from(p.is_op),
                         ],
                     )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert post: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert post: {e}")))?;
                 }
 
                 let mut poll_id_map: HashMap<i64, i64> = HashMap::new();
@@ -2869,36 +3065,36 @@ pub async fn restore_saved_board_backup(
                          VALUES (?1,?2,?3,?4)",
                         params![new_tid, p.question, p.expires_at, p.created_at],
                     )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert poll: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert poll: {e}")))?;
                     poll_id_map.insert(p.id, conn.last_insert_rowid());
                 }
 
                 let mut option_id_map: HashMap<i64, i64> = HashMap::new();
                 for o in &manifest.poll_options {
-                    let new_pid = *poll_id_map.get(&o.poll_id).ok_or_else(|| {
+                    let new_poll_id = *poll_id_map.get(&o.poll_id).ok_or_else(|| {
                         AppError::Internal(anyhow::anyhow!("Unknown poll {}", o.poll_id))
                     })?;
                     conn.execute(
                         "INSERT INTO poll_options (poll_id, text, position) VALUES (?1,?2,?3)",
-                        params![new_pid, o.text, o.position],
+                        params![new_poll_id, o.text, o.position],
                     )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert option: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert option: {e}")))?;
                     option_id_map.insert(o.id, conn.last_insert_rowid());
                 }
 
                 for v in &manifest.poll_votes {
-                    let new_pid = *poll_id_map.get(&v.poll_id).ok_or_else(|| {
+                    let new_poll_id = *poll_id_map.get(&v.poll_id).ok_or_else(|| {
                         AppError::Internal(anyhow::anyhow!("Unknown poll {}", v.poll_id))
                     })?;
-                    let new_oid = *option_id_map.get(&v.option_id).ok_or_else(|| {
+                    let new_option_id = *option_id_map.get(&v.option_id).ok_or_else(|| {
                         AppError::Internal(anyhow::anyhow!("Unknown option {}", v.option_id))
                     })?;
                     conn.execute(
                         "INSERT OR IGNORE INTO poll_votes
                          (poll_id, option_id, ip_hash) VALUES (?1,?2,?3)",
-                        params![new_pid, new_oid, v.ip_hash],
+                        params![new_poll_id, new_option_id, v.ip_hash],
                     )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert vote: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert vote: {e}")))?;
                 }
 
                 for fh in &manifest.file_hashes {
@@ -2914,7 +3110,7 @@ pub async fn restore_saved_board_backup(
                             fh.created_at,
                         ],
                     )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert file_hash: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert file_hash: {e}")))?;
                 }
                 Ok(())
             })();
@@ -2922,7 +3118,7 @@ pub async fn restore_saved_board_backup(
             match restore_result {
                 Ok(()) => {
                     conn.execute("COMMIT", [])
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit: {}", e)))?;
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit: {e}")))?;
                 }
                 Err(e) => {
                     let _ = conn.execute("ROLLBACK", []);
@@ -2934,10 +3130,10 @@ pub async fn restore_saved_board_backup(
             for i in 0..archive.len() {
                 let mut entry = archive
                     .by_index(i)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{}]: {}", i, e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
                 let name = entry.name().to_string();
                 if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
-                    warn!("Board restore-saved: skipping suspicious entry '{}'", name);
+                    warn!("Board restore-saved: skipping suspicious entry '{name}'");
                     continue;
                 }
                 if let Some(rel) = name.strip_prefix("uploads/") {
@@ -2947,25 +3143,25 @@ pub async fn restore_saved_board_backup(
                     let target = PathBuf::from(&upload_dir).join(rel);
                     if entry.is_dir() {
                         std::fs::create_dir_all(&target)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {}", e)))?;
+                            .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {e}")))?;
                     } else {
                         if let Some(p) = target.parent() {
                             std::fs::create_dir_all(p).map_err(|e| {
-                                AppError::Internal(anyhow::anyhow!("mkdir parent: {}", e))
+                                AppError::Internal(anyhow::anyhow!("mkdir parent: {e}"))
                             })?;
                         }
                         let mut out = std::fs::File::create(&target)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Create: {}", e)))?;
+                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Create: {e}")))?;
                         copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write: {}", e)))?;
+                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write: {e}")))?;
                     }
                 }
             }
 
-            info!("Admin board restore-saved completed for /{}/", board_short);
+            info!("Admin board restore-saved completed for /{board_short}/");
             let safe_short: String = board_short
                 .chars()
-                .filter(|c| c.is_ascii_alphanumeric())
+                .filter(char::is_ascii_alphanumeric)
                 .take(8)
                 .collect();
             Ok(safe_short)
@@ -2974,36 +3170,17 @@ pub async fn restore_saved_board_backup(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)));
 
-    fn encode_q(s: &str) -> String {
-        fn nibble(n: u8) -> char {
-            match n {
-                0..=9 => (b'0' + n) as char,
-                _ => (b'A' + n - 10) as char,
-            }
-        }
-        s.bytes()
-            .flat_map(|b| match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    vec![b as char]
-                }
-                b' ' => vec!['+'],
-                b => vec!['%', nibble(b >> 4), nibble(b & 0xf)],
-            })
-            .collect()
-    }
     match board_short_result {
-        Ok(Ok(board_short)) => Ok(Redirect::to(&format!(
-            "/admin/panel?board_restored={}",
-            board_short
-        ))
-        .into_response()),
+        Ok(Ok(board_short)) => {
+            Ok(Redirect::to(&format!("/admin/panel?board_restored={board_short}")).into_response())
+        }
         Ok(Err(app_err)) => {
             let msg = encode_q(&app_err.to_string());
-            Ok(Redirect::to(&format!("/admin/panel?restore_error={}", msg)).into_response())
+            Ok(Redirect::to(&format!("/admin/panel?restore_error={msg}")).into_response())
         }
         Err(join_err) => {
             let msg = encode_q(&join_err.to_string());
-            Ok(Redirect::to(&format!("/admin/panel?restore_error={}", msg)).into_response())
+            Ok(Redirect::to(&format!("/admin/panel?restore_error={msg}")).into_response())
         }
     }
 }
@@ -3015,6 +3192,7 @@ mod board_backup_types {
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
+    #[allow(clippy::struct_excessive_bools)]
     pub struct BoardRow {
         pub id: i64,
         pub short_name: String,
@@ -3056,11 +3234,11 @@ mod board_backup_types {
         pub created_at: i64,
     }
 
-    fn default_true() -> bool {
+    const fn default_true() -> bool {
         true
     }
 
-    fn default_edit_window_secs() -> i64 {
+    const fn default_edit_window_secs() -> i64 {
         300
     }
     #[derive(Serialize, Deserialize)]
@@ -3140,8 +3318,9 @@ mod board_backup_types {
 
 /// Stream a board-level backup zip: manifest JSON + that board's upload files.
 ///
-/// MEM-FIX: Same approach as admin_backup — build zip into a NamedTempFile on
+/// MEM-FIX: Same approach as `admin_backup` — build zip into a `NamedTempFile` on
 /// disk, then stream the result in 64 KiB chunks.
+#[allow(clippy::too_many_lines)]
 pub async fn board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -3154,8 +3333,7 @@ pub async fn board_backup(
     let (tmp_path, filename, file_size) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<(PathBuf, String, u64)> {
-            use board_backup_types::*;
-            use rusqlite::params;
+    use board_backup_types::{BoardRow, ThreadRow, PostRow, PollRow, PollOptionRow, PollVoteRow, FileHashRow, BoardBackupManifest};
 
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
@@ -3188,7 +3366,7 @@ pub async fn board_backup(
                     post_cooldown_secs: r.get(16)?,
                     created_at: r.get(17)?,
                 }),
-            ).map_err(|_| AppError::NotFound(format!("Board '{}' not found", board_short)))?;
+            ).map_err(|_| AppError::NotFound(format!("Board '{board_short}' not found")))?;
 
             let board_id = board.id;
 
@@ -3301,7 +3479,7 @@ pub async fn board_backup(
 
             // ── Build zip to NamedTempFile (MEM-FIX) ─────────────────────
             let manifest_json = serde_json::to_vec_pretty(&manifest)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON serialise: {}", e)))?;
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON serialise: {e}")))?;
 
             let uploads_base = std::path::Path::new(&upload_dir);
             let board_upload_path = uploads_base.join(&board_short);
@@ -3310,11 +3488,11 @@ pub async fn board_backup(
             progress.files_total.store(file_count + 1, Ordering::Relaxed);
 
             let zip_tmp = tempfile::NamedTempFile::new()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp zip: {}", e)))?;
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp zip: {e}")))?;
             {
                 let out_file = std::io::BufWriter::new(
                     zip_tmp.as_file().try_clone().map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("Clone temp file handle: {}", e))
+                        AppError::Internal(anyhow::anyhow!("Clone temp file handle: {e}"))
                     })?,
                 );
                 let mut zip = zip::ZipWriter::new(out_file);
@@ -3322,9 +3500,9 @@ pub async fn board_backup(
                     .compression_method(zip::CompressionMethod::Deflated);
 
                 zip.start_file("board.json", opts)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip manifest: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip manifest: {e}")))?;
                 zip.write_all(&manifest_json)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Write manifest: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Write manifest: {e}")))?;
                 progress.files_done.fetch_add(1, Ordering::Relaxed);
                 progress.bytes_done.fetch_add(manifest_json.len() as u64, Ordering::Relaxed);
 
@@ -3332,19 +3510,27 @@ pub async fn board_backup(
                     add_dir_to_zip(&mut zip, uploads_base, &board_upload_path, opts, &progress)?;
                 }
 
-                zip.finish()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {}", e)))?;
+                // Flush the BufWriter explicitly so I/O errors are not
+                // silently swallowed by the implicit Drop-flush.
+                let writer = zip
+                    .finish()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {e}")))?;
+                writer
+                    .into_inner()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush zip writer: {e}")))?
+                    .sync_all()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {e}")))?;
             }
 
             let file_size = zip_tmp.as_file().metadata().map(|m| m.len()).unwrap_or(0);
 
             let (_, tmp_path_obj) = zip_tmp.into_parts();
             let final_path = tmp_path_obj.keep().map_err(|e| {
-                AppError::Internal(anyhow::anyhow!("Persist temp zip: {}", e))
+                AppError::Internal(anyhow::anyhow!("Persist temp zip: {e}"))
             })?;
 
             let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-            let fname = format!("rustchan-board-{}-{}.zip", board_short, ts);
+            let fname = format!("rustchan-board-{board_short}-{ts}.zip");
             info!("Admin downloaded board backup for /{}/  ({} bytes on disk)", board_short, file_size);
             progress.phase.store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
             Ok((final_path, fname, file_size))
@@ -3353,9 +3539,9 @@ pub async fn board_backup(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let file = tokio::fs::File::open(&tmp_path).await.map_err(|e| {
-        AppError::Internal(anyhow::anyhow!("Open board backup for streaming: {}", e))
-    })?;
+    let file = tokio::fs::File::open(&tmp_path)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Open board backup for streaming: {e}")))?;
     let stream = ReaderStream::new(file);
     let body = axum::body::Body::from_stream(stream);
 
@@ -3365,8 +3551,7 @@ pub async fn board_backup(
         let _ = tokio::fs::remove_file(cleanup_path).await;
     });
 
-    use axum::http::header;
-    let disposition = format!("attachment; filename=\"{}\"", filename);
+    let disposition = format!("attachment; filename=\"{filename}\"");
     Ok((
         [
             (header::CONTENT_TYPE, "application/zip".to_string()),
@@ -3383,12 +3568,13 @@ pub async fn board_backup(
 /// Returns `Response` (not `Result<Response>`) so ALL errors — including
 /// CSRF failures and multipart parse errors — redirect to the admin panel
 /// with a flash message instead of producing a blank crash page.
+#[allow(clippy::too_many_lines)]
 pub async fn board_restore(
     State(state): State<AppState>,
     jar: CookieJar,
     mut multipart: Multipart,
 ) -> Response {
-    fn nibble(n: u8) -> char {
+    const fn nibble(n: u8) -> char {
         match n {
             0..=9 => (b'0' + n) as char,
             _ => (b'A' + n - 10) as char,
@@ -3399,7 +3585,7 @@ pub async fn board_restore(
         for b in s.bytes() {
             match b {
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    out.push(b as char)
+                    out.push(b as char);
                 }
                 b' ' => out.push('+'),
                 b => {
@@ -3418,13 +3604,16 @@ pub async fn board_restore(
         let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
         let upload_dir = CONFIG.upload_dir.clone();
 
-        let mut zip_data: Option<Vec<u8>> = None;
+        // MEM-FIX: stream the uploaded file to a NamedTempFile on disk instead
+        // of buffering the entire zip into a Vec<u8>.  Board backups can be
+        // hundreds of MB for active boards with many uploads.
+        let mut zip_tmp: Option<tempfile::NamedTempFile> = None;
         let mut form_csrf: Option<String> = None;
 
         while let Some(field) = multipart
             .next_field()
             .await
-            .map_err(|e| AppError::BadRequest(format!("Multipart error: {}", e)))?
+            .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
         {
             match field.name() {
                 Some("_csrf") => {
@@ -3436,11 +3625,32 @@ pub async fn board_restore(
                     );
                 }
                 Some("backup_file") => {
-                    let bytes = field
-                        .bytes()
+                    let tmp = tempfile::NamedTempFile::new()
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Tempfile: {e}")))?;
+                    // Clone the underlying fd for async writing; the original
+                    // NamedTempFile retains ownership and the delete-on-drop guard.
+                    let std_clone = tmp
+                        .as_file()
+                        .try_clone()
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Clone fd: {e}")))?;
+                    let async_file = tokio::fs::File::from_std(std_clone);
+                    let mut writer = tokio::io::BufWriter::new(async_file);
+                    let mut field = field;
+                    while let Some(chunk) = field
+                        .chunk()
                         .await
-                        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-                    zip_data = Some(bytes.to_vec());
+                        .map_err(|e| AppError::BadRequest(e.to_string()))?
+                    {
+                        writer
+                            .write_all(&chunk)
+                            .await
+                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write chunk: {e}")))?;
+                    }
+                    writer
+                        .flush()
+                        .await
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush: {e}")))?;
+                    zip_tmp = Some(tmp);
                 }
                 _ => {}
             }
@@ -3454,67 +3664,105 @@ pub async fn board_restore(
             return Err(AppError::Forbidden("CSRF token mismatch.".into()));
         }
 
-        let file_bytes = match zip_data {
-            None => return Err(AppError::BadRequest("No backup file uploaded.".into())),
-            Some(b) if b.is_empty() => {
-                return Err(AppError::BadRequest("Uploaded backup file is empty.".into()))
-            }
-            Some(b) => b,
-        };
+        let zip_tmp =
+            zip_tmp.ok_or_else(|| AppError::BadRequest("No backup file uploaded.".into()))?;
+        // Determine size without reading into RAM.
+        let file_size = zip_tmp
+            .as_file()
+            .seek(std::io::SeekFrom::End(0))
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek check: {e}")))?;
+        if file_size == 0 {
+            return Err(AppError::BadRequest(
+                "Uploaded backup file is empty.".into(),
+            ));
+        }
 
         tokio::task::spawn_blocking({
             let pool = state.db.clone();
             move || -> Result<String> {
-                use board_backup_types::*;
-                use rusqlite::params;
+                use board_backup_types::BoardBackupManifest;
                 use std::collections::HashMap;
+                use std::io::Read;
 
                 let conn = pool.get()?;
                 require_admin_session_sid(&conn, session_id.as_deref())?;
 
-                // Detect format: ZIP magic bytes or raw JSON (skipping optional BOM)
-                let is_zip = file_bytes.starts_with(b"PK\x03\x04");
-                let json_lead = if file_bytes.starts_with(b"\xef\xbb\xbf") {
-                    file_bytes.get(3).copied()
+                // Detect format from the first four bytes (ZIP magic or JSON '{').
+                let mut magic = [0u8; 4];
+                let mut probe = zip_tmp
+                    .reopen()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen: {e}")))?;
+                let n = probe.read(&mut magic).unwrap_or(0);
+                drop(probe);
+
+                let is_zip = n >= 4
+                    && magic[0] == b'P'
+                    && magic[1] == b'K'
+                    && magic[2] == 0x03
+                    && magic[3] == 0x04;
+                // Skip optional UTF-8 BOM (EF BB BF) before the JSON '{'.
+                let is_json = if n >= 3 && magic[0] == 0xef && magic[1] == 0xbb && magic[2] == 0xbf
+                {
+                    n >= 4 && magic[3] == b'{'
                 } else {
-                    file_bytes.first().copied()
+                    n >= 1 && magic[0] == b'{'
                 };
-                let is_json = json_lead == Some(b'{');
 
                 if !is_zip && !is_json {
                     return Err(AppError::BadRequest(
-                        "Unrecognized format. Upload a .zip board backup or a raw board.json file.".into(),
+                        "Unrecognized format. Upload a .zip board backup or a raw board.json file."
+                            .into(),
                     ));
                 }
 
+                // We need two re-openings: one for the manifest (BufReader<File>)
+                // and one for the archive used during file extraction.  Both derive
+                // independent file descriptors from the same NamedTempFile so the
+                // underlying bytes are always available.
                 let (manifest, mut archive_opt): (
                     BoardBackupManifest,
-                    Option<zip::ZipArchive<std::io::Cursor<Vec<u8>>>>,
+                    Option<zip::ZipArchive<std::io::BufReader<std::fs::File>>>,
                 ) = if is_zip {
-                    let cursor = std::io::Cursor::new(file_bytes);
-                    let mut archive = zip::ZipArchive::new(cursor)
-                        .map_err(|e| AppError::BadRequest(format!("Invalid zip: {}", e)))?;
+                    let f = zip_tmp
+                        .reopen()
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen zip: {e}")))?;
+                    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(f))
+                        .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
                     if !archive.file_names().any(|n| n == "board.json") {
                         return Err(AppError::BadRequest(
-                            "Invalid board backup: zip must contain 'board.json'.                              (Did you upload a full-site backup instead?)".into(),
+                            "Invalid board backup: zip must contain 'board.json'. \
+                             (Did you upload a full-site backup instead?)"
+                                .into(),
                         ));
                     }
                     let manifest: BoardBackupManifest = {
                         let mut entry = archive.by_name("board.json").map_err(|e| {
-                            AppError::Internal(anyhow::anyhow!("Read board.json: {}", e))
+                            AppError::Internal(anyhow::anyhow!("Read board.json: {e}"))
                         })?;
                         let mut buf = Vec::new();
-                        std::io::Read::read_to_end(&mut entry, &mut buf).map_err(|e| {
-                            AppError::Internal(anyhow::anyhow!("Read bytes: {}", e))
-                        })?;
-                        serde_json::from_slice(&buf).map_err(|e| {
-                            AppError::BadRequest(format!("Invalid board.json: {}", e))
-                        })?
+                        entry
+                            .read_to_end(&mut buf)
+                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Read bytes: {e}")))?;
+                        serde_json::from_slice(&buf)
+                            .map_err(|e| AppError::BadRequest(format!("Invalid board.json: {e}")))?
                     };
-                    (manifest, Some(archive))
+                    // Re-open a fresh archive for file extraction in the second pass.
+                    let f2 = zip_tmp
+                        .reopen()
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen zip (2): {e}")))?;
+                    let archive2 = zip::ZipArchive::new(std::io::BufReader::new(f2))
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen archive: {e}")))?;
+                    (manifest, Some(archive2))
                 } else {
-                    let manifest: BoardBackupManifest = serde_json::from_slice(&file_bytes)
-                        .map_err(|e| AppError::BadRequest(format!("Invalid board.json: {}", e)))?;
+                    // Raw board.json — read fully (manifests are small).
+                    let mut f = zip_tmp
+                        .reopen()
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen json: {e}")))?;
+                    let mut buf = Vec::new();
+                    f.read_to_end(&mut buf)
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Read json: {e}")))?;
+                    let manifest: BoardBackupManifest = serde_json::from_slice(&buf)
+                        .map_err(|e| AppError::BadRequest(format!("Invalid board.json: {e}")))?;
                     (manifest, None)
                 };
 
@@ -3528,16 +3776,17 @@ pub async fn board_restore(
                     )
                     .ok();
 
-
                 // FIX[A6]: BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
                 // board row.  Previously those statements ran outside any transaction.
                 conn.execute("BEGIN IMMEDIATE", [])
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Begin tx: {}", e)))?;
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Begin tx: {e}")))?;
 
                 let restore_result = (|| -> Result<()> {
                     let live_board_id: i64 = if let Some(eid) = existing_id {
                         conn.execute("DELETE FROM threads WHERE board_id = ?1", params![eid])
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Clear threads: {}", e)))?;
+                            .map_err(|e| {
+                                AppError::Internal(anyhow::anyhow!("Clear threads: {e}"))
+                            })?;
                         conn.execute(
                             "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                              max_threads=?4, bump_limit=?5,
@@ -3548,23 +3797,23 @@ pub async fn board_restore(
                             params![
                                 manifest.board.name,
                                 manifest.board.description,
-                                manifest.board.nsfw as i64,
+                                i64::from(manifest.board.nsfw),
                                 manifest.board.max_threads,
                                 manifest.board.bump_limit,
-                                manifest.board.allow_images as i64,
-                                manifest.board.allow_video as i64,
-                                manifest.board.allow_audio as i64,
-                                manifest.board.allow_tripcodes as i64,
+                                i64::from(manifest.board.allow_images),
+                                i64::from(manifest.board.allow_video),
+                                i64::from(manifest.board.allow_audio),
+                                i64::from(manifest.board.allow_tripcodes),
                                 manifest.board.edit_window_secs,
-                                manifest.board.allow_editing as i64,
-                                manifest.board.allow_archive as i64,
-                                manifest.board.allow_video_embeds as i64,
-                                manifest.board.allow_captcha as i64,
+                                i64::from(manifest.board.allow_editing),
+                                i64::from(manifest.board.allow_archive),
+                                i64::from(manifest.board.allow_video_embeds),
+                                i64::from(manifest.board.allow_captcha),
                                 manifest.board.post_cooldown_secs,
                                 eid,
                             ],
                         )
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Update board: {}", e)))?;
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Update board: {e}")))?;
                         eid
                     } else {
                         conn.execute(
@@ -3577,23 +3826,23 @@ pub async fn board_restore(
                                 manifest.board.short_name,
                                 manifest.board.name,
                                 manifest.board.description,
-                                manifest.board.nsfw as i64,
+                                i64::from(manifest.board.nsfw),
                                 manifest.board.max_threads,
                                 manifest.board.bump_limit,
-                                manifest.board.allow_images as i64,
-                                manifest.board.allow_video as i64,
-                                manifest.board.allow_audio as i64,
-                                manifest.board.allow_tripcodes as i64,
+                                i64::from(manifest.board.allow_images),
+                                i64::from(manifest.board.allow_video),
+                                i64::from(manifest.board.allow_audio),
+                                i64::from(manifest.board.allow_tripcodes),
                                 manifest.board.edit_window_secs,
-                                manifest.board.allow_editing as i64,
-                                manifest.board.allow_archive as i64,
-                                manifest.board.allow_video_embeds as i64,
-                                manifest.board.allow_captcha as i64,
+                                i64::from(manifest.board.allow_editing),
+                                i64::from(manifest.board.allow_archive),
+                                i64::from(manifest.board.allow_video_embeds),
+                                i64::from(manifest.board.allow_captcha),
                                 manifest.board.post_cooldown_secs,
                                 manifest.board.created_at,
                             ],
                         )
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert board: {}", e)))?;
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert board: {e}")))?;
                         conn.last_insert_rowid()
                     };
 
@@ -3604,17 +3853,42 @@ pub async fn board_restore(
                              locked, sticky, reply_count)
                              VALUES (?1,?2,?3,?4,?5,?6,?7)",
                             params![
-                                live_board_id, t.subject, t.created_at, t.bumped_at,
-                                t.locked as i64, t.sticky as i64, t.reply_count,
+                                live_board_id,
+                                t.subject,
+                                t.created_at,
+                                t.bumped_at,
+                                i64::from(t.locked),
+                                i64::from(t.sticky),
+                                t.reply_count,
                             ],
                         )
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert thread {}: {}", t.id, e)))?;
+                        .map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Insert thread {}: {e}", t.id))
+                        })?;
                         thread_id_map.insert(t.id, conn.last_insert_rowid());
                     }
 
+                    // ── Insert posts, recording old → new ID mapping ──────
+                    //
+                    // Board restore cannot reuse original post IDs because
+                    // other boards' posts may already occupy those rows in the
+                    // global `posts` table (SQLite AUTOINCREMENT is site-wide,
+                    // not per-board).  The posts therefore land at new IDs.
+                    //
+                    // `post_id_map` captures every (old_id → new_id) pair so
+                    // that we can fix up in-board quotelink references in
+                    // `body` and `body_html` in the second pass below.
+                    // Without this, `>>500` in a restored post still points to
+                    // old ID 500 which no longer exists — clicks produce 404s
+                    // and hover previews show "Post not found".
+                    let mut post_id_map: HashMap<i64, i64> = HashMap::new();
                     for p in &manifest.posts {
                         let new_tid = *thread_id_map.get(&p.thread_id).ok_or_else(|| {
-                            AppError::Internal(anyhow::anyhow!("Post {} refs unknown thread {}", p.id, p.thread_id))
+                            AppError::Internal(anyhow::anyhow!(
+                                "Post {} refs unknown thread {}",
+                                p.id,
+                                p.thread_id
+                            ))
                         })?;
                         conn.execute(
                             "INSERT INTO posts (thread_id, board_id, name, tripcode, subject,
@@ -3622,55 +3896,140 @@ pub async fn board_restore(
                              thumb_path, mime_type, media_type, created_at, deletion_token, is_op)
                              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
                             params![
-                                new_tid, live_board_id, p.name, p.tripcode, p.subject,
-                                p.body, p.body_html, p.ip_hash, p.file_path, p.file_name,
-                                p.file_size, p.thumb_path, p.mime_type, p.media_type,
-                                p.created_at, p.deletion_token, p.is_op as i64,
+                                new_tid,
+                                live_board_id,
+                                p.name,
+                                p.tripcode,
+                                p.subject,
+                                p.body,
+                                p.body_html,
+                                p.ip_hash,
+                                p.file_path,
+                                p.file_name,
+                                p.file_size,
+                                p.thumb_path,
+                                p.mime_type,
+                                p.media_type,
+                                p.created_at,
+                                p.deletion_token,
+                                i64::from(p.is_op),
                             ],
                         )
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert post {}: {}", p.id, e)))?;
+                        .map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Insert post {}: {e}", p.id))
+                        })?;
+                        post_id_map.insert(p.id, conn.last_insert_rowid());
+                    }
+
+                    // ── Quotelink fixup pass ──────────────────────────────
+                    //
+                    // If any post IDs changed (which they almost always do
+                    // when restoring into a live DB), rewrite `body` and
+                    // `body_html` for every restored post so that in-board
+                    // quotelinks point at the new IDs.
+                    //
+                    // Only same-board references are remapped.  Cross-board
+                    // links (`>>>/board/N`) point to other boards whose IDs
+                    // are unchanged; they are deliberately left untouched.
+                    let any_changed = post_id_map.iter().any(|(old, new)| old != new);
+                    if any_changed {
+                        // Sort by old-ID string length descending so that
+                        // longer IDs are replaced before any prefix of theirs.
+                        // e.g. replace >>1000 before >>100 before >>10 before >>1.
+                        let mut pairs: Vec<(String, String)> = post_id_map
+                            .iter()
+                            .filter(|(old, new)| old != new)
+                            .map(|(old, new)| (old.to_string(), new.to_string()))
+                            .collect();
+                        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(b.0.cmp(&a.0)));
+
+                        for p in &manifest.posts {
+                            let Some(&new_post_id) = post_id_map.get(&p.id) else {
+                                continue;
+                            };
+
+                            let new_body = remap_body_quotelinks(&p.body, &pairs);
+                            let new_body_html = remap_body_html_quotelinks(&p.body_html, &pairs);
+
+                            // Only issue the UPDATE when the text actually
+                            // changed — avoids unnecessary I/O when none of
+                            // the post IDs appear in this post's body.
+                            if new_body != p.body || new_body_html != p.body_html {
+                                conn.execute(
+                                    "UPDATE posts SET body = ?1, body_html = ?2 WHERE id = ?3",
+                                    params![new_body, new_body_html, new_post_id],
+                                )
+                                .map_err(|e| {
+                                    AppError::Internal(anyhow::anyhow!(
+                                        "Fixup quotelinks for post {new_post_id}: {e}"
+                                    ))
+                                })?;
+                            }
+                        }
                     }
 
                     let mut poll_id_map: HashMap<i64, i64> = HashMap::new();
                     for p in &manifest.polls {
                         let new_tid = *thread_id_map.get(&p.thread_id).ok_or_else(|| {
-                            AppError::Internal(anyhow::anyhow!("Poll {} refs unknown thread {}", p.id, p.thread_id))
+                            AppError::Internal(anyhow::anyhow!(
+                                "Poll {} refs unknown thread {}",
+                                p.id,
+                                p.thread_id
+                            ))
                         })?;
                         conn.execute(
                             "INSERT INTO polls (thread_id, question, expires_at, created_at)
                              VALUES (?1,?2,?3,?4)",
                             params![new_tid, p.question, p.expires_at, p.created_at],
                         )
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert poll {}: {}", p.id, e)))?;
+                        .map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Insert poll {}: {e}", p.id))
+                        })?;
                         poll_id_map.insert(p.id, conn.last_insert_rowid());
                     }
 
                     let mut option_id_map: HashMap<i64, i64> = HashMap::new();
                     for o in &manifest.poll_options {
-                        let new_pid = *poll_id_map.get(&o.poll_id).ok_or_else(|| {
-                            AppError::Internal(anyhow::anyhow!("Option {} refs unknown poll {}", o.id, o.poll_id))
+                        let new_poll_id = *poll_id_map.get(&o.poll_id).ok_or_else(|| {
+                            AppError::Internal(anyhow::anyhow!(
+                                "Option {} refs unknown poll {}",
+                                o.id,
+                                o.poll_id
+                            ))
                         })?;
                         conn.execute(
                             "INSERT INTO poll_options (poll_id, text, position) VALUES (?1,?2,?3)",
-                            params![new_pid, o.text, o.position],
+                            params![new_poll_id, o.text, o.position],
                         )
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert option {}: {}", o.id, e)))?;
+                        .map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Insert option {}: {e}", o.id))
+                        })?;
                         option_id_map.insert(o.id, conn.last_insert_rowid());
                     }
 
                     for v in &manifest.poll_votes {
-                        let new_pid = *poll_id_map.get(&v.poll_id).ok_or_else(|| {
-                            AppError::Internal(anyhow::anyhow!("Vote {} refs unknown poll {}", v.id, v.poll_id))
+                        let new_poll_id = *poll_id_map.get(&v.poll_id).ok_or_else(|| {
+                            AppError::Internal(anyhow::anyhow!(
+                                "Vote {} refs unknown poll {}",
+                                v.id,
+                                v.poll_id
+                            ))
                         })?;
-                        let new_oid = *option_id_map.get(&v.option_id).ok_or_else(|| {
-                            AppError::Internal(anyhow::anyhow!("Vote {} refs unknown option {}", v.id, v.option_id))
+                        let new_option_id = *option_id_map.get(&v.option_id).ok_or_else(|| {
+                            AppError::Internal(anyhow::anyhow!(
+                                "Vote {} refs unknown option {}",
+                                v.id,
+                                v.option_id
+                            ))
                         })?;
                         conn.execute(
                             "INSERT OR IGNORE INTO poll_votes
                              (poll_id, option_id, ip_hash) VALUES (?1,?2,?3)",
-                            params![new_pid, new_oid, v.ip_hash],
+                            params![new_poll_id, new_option_id, v.ip_hash],
                         )
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert vote {}: {}", v.id, e)))?;
+                        .map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Insert vote {}: {e}", v.id))
+                        })?;
                     }
 
                     for fh in &manifest.file_hashes {
@@ -3678,9 +4037,17 @@ pub async fn board_restore(
                             "INSERT OR IGNORE INTO file_hashes
                              (sha256, file_path, thumb_path, mime_type, created_at)
                              VALUES (?1,?2,?3,?4,?5)",
-                            params![fh.sha256, fh.file_path, fh.thumb_path, fh.mime_type, fh.created_at],
+                            params![
+                                fh.sha256,
+                                fh.file_path,
+                                fh.thumb_path,
+                                fh.mime_type,
+                                fh.created_at
+                            ],
                         )
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert file_hash: {}", e)))?;
+                        .map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Insert file_hash: {e}"))
+                        })?;
                     }
                     Ok(())
                 })();
@@ -3688,7 +4055,7 @@ pub async fn board_restore(
                 match restore_result {
                     Ok(()) => {
                         conn.execute("COMMIT", [])
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit tx: {}", e)))?;
+                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit tx: {e}")))?;
                     }
                     Err(e) => {
                         let _ = conn.execute("ROLLBACK", []);
@@ -3698,49 +4065,62 @@ pub async fn board_restore(
 
                 if let Some(ref mut archive) = archive_opt {
                     for i in 0..archive.len() {
-                        let mut entry = archive.by_index(i)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{}]: {}", i, e)))?;
+                        let mut entry = archive
+                            .by_index(i)
+                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
                         let name = entry.name().to_string();
-                        if name.contains("..") || name.starts_with('/') || name.starts_with('\\'){ 
-                            warn!("Board restore: skipping suspicious entry '{}'", name);
+                        if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
+                            warn!("Board restore: skipping suspicious entry '{name}'");
                             continue;
                         }
                         if let Some(rel) = name.strip_prefix("uploads/") {
-                            if rel.is_empty() { continue; }
+                            if rel.is_empty() {
+                                continue;
+                            }
                             let target = PathBuf::from(&upload_dir).join(rel);
                             if entry.is_dir() {
-                                std::fs::create_dir_all(&target)
-                                    .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {}", e)))?;
+                                std::fs::create_dir_all(&target).map_err(|e| {
+                                    AppError::Internal(anyhow::anyhow!("mkdir: {e}"))
+                                })?;
                             } else {
                                 if let Some(p) = target.parent() {
-                                    std::fs::create_dir_all(p)
-                                        .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir parent: {}", e)))?;
+                                    std::fs::create_dir_all(p).map_err(|e| {
+                                        AppError::Internal(anyhow::anyhow!("mkdir parent: {e}"))
+                                    })?;
                                 }
-                                let mut out = std::fs::File::create(&target)
-                                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Create file: {}", e)))?;
-                                copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-                                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Write file: {}", e)))?;
+                                let mut out = std::fs::File::create(&target).map_err(|e| {
+                                    AppError::Internal(anyhow::anyhow!("Create file: {e}"))
+                                })?;
+                                copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(
+                                    |e| AppError::Internal(anyhow::anyhow!("Write file: {e}")),
+                                )?;
                             }
                         }
                     }
                 }
 
-                info!("Admin board restore completed for /{}/", board_short);
+                info!("Admin board restore completed for /{board_short}/");
+                // Refresh live board list — board_restore may have created a
+                // board that didn't exist before, so the top bar must update.
+                if let Ok(boards) = db::get_all_boards(&conn) {
+                    crate::templates::set_live_boards(boards);
+                }
                 let safe_short: String = board_short
                     .chars()
-                    .filter(|c| c.is_ascii_alphanumeric())
+                    .filter(char::is_ascii_alphanumeric)
                     .take(8)
                     .collect();
                 Ok(safe_short)
             }
         })
         .await
-        .unwrap_or_else(|e| Err(AppError::Internal(anyhow::anyhow!("Task panicked: {}", e))))
-    }.await;
+        .unwrap_or_else(|e| Err(AppError::Internal(anyhow::anyhow!("Task panicked: {e}"))))
+    }
+    .await;
 
     match result {
         Ok(board_short) => {
-            Redirect::to(&format!("/admin/panel?board_restored={}", board_short)).into_response()
+            Redirect::to(&format!("/admin/panel?board_restored={board_short}")).into_response()
         }
         Err(e) => Redirect::to(&format!(
             "/admin/panel?restore_error={}",
@@ -3754,10 +4134,11 @@ pub async fn board_restore(
 
 #[derive(Deserialize)]
 pub struct SiteSettingsForm {
-    pub _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
     /// Checkbox: present = "1", absent = not submitted (treat as false)
     pub collapse_greentext: Option<String>,
-    /// Custom site name (replaces [ RustChan ] on home page and footer).
+    /// Custom site name (replaces [ `RustChan` ] on home page and footer).
     pub site_name: Option<String>,
     /// Custom home page subtitle line below the site name.
     pub site_subtitle: Option<String>,
@@ -3773,16 +4154,22 @@ pub async fn update_site_settings(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(
-        csrf_cookie.as_deref(),
-        form._csrf.as_deref().unwrap_or(""),
-    ) {
+    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
+    {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
+            const VALID_THEMES: &[&str] = &[
+                "terminal",
+                "aero",
+                "dorfic",
+                "fluorogrid",
+                "neoncubicle",
+                "chanclassic",
+            ];
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
             let val = if form.collapse_greentext.as_deref() == Some("1") {
@@ -3791,7 +4178,7 @@ pub async fn update_site_settings(
                 "0"
             };
             db::set_site_setting(&conn, "collapse_greentext", val)?;
-            info!("Admin updated site setting: collapse_greentext={}", val);
+            info!("Admin updated site setting: collapse_greentext={val}");
 
             // Save the custom site name (trimmed, max 64 chars).
             let new_name = form
@@ -3820,15 +4207,12 @@ pub async fn update_site_settings(
             crate::templates::set_live_site_subtitle(&new_subtitle);
             info!("Admin updated site subtitle to: {:?}", new_subtitle);
 
+            // Persist both values back to settings.toml so they survive a
+            // server restart without requiring a manual file edit.
+            crate::config::update_settings_file_site_names(&new_name, &new_subtitle);
+            info!("settings.toml updated with new site_name and site_subtitle");
+
             // Save the default theme slug (validated against allowed values).
-            const VALID_THEMES: &[&str] = &[
-                "terminal",
-                "aero",
-                "dorfic",
-                "fluorogrid",
-                "neoncubicle",
-                "chanclassic",
-            ];
             let new_theme = form
                 .default_theme
                 .as_deref()
@@ -3860,7 +4244,8 @@ pub async fn update_site_settings(
 
 #[derive(Deserialize)]
 pub struct VacuumForm {
-    pub _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
 }
 
 pub async fn admin_vacuum(
@@ -3870,10 +4255,8 @@ pub async fn admin_vacuum(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(
-        csrf_cookie.as_deref(),
-        form._csrf.as_deref().unwrap_or(""),
-    ) {
+    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
+    {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
@@ -3923,7 +4306,7 @@ pub struct IpHistoryQuery {
     pub page: i64,
 }
 
-fn default_page() -> i64 {
+const fn default_page() -> i64 {
     1
 }
 
@@ -3949,10 +4332,10 @@ pub async fn admin_ip_history(
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
+            const PER_PAGE: i64 = 25;
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
 
-            const PER_PAGE: i64 = 25;
             let total = db::count_posts_by_ip_hash(&conn, &ip_hash)?;
             let pagination = crate::models::Pagination::new(page, PER_PAGE, total);
             let posts_with_boards =
@@ -3983,7 +4366,8 @@ pub struct ResolveReportForm {
     /// Optional: also ban the reported post's author
     ban_ip_hash: Option<String>,
     ban_reason: Option<String>,
-    _csrf: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 pub async fn resolve_report(
@@ -3992,7 +4376,7 @@ pub async fn resolve_report(
     Form(form): Form<ResolveReportForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form._csrf.as_deref())?;
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -4005,7 +4389,13 @@ pub async fn resolve_report(
 
             // Optionally ban the reporter's target while resolving.
             if let Some(ref ip) = form.ban_ip_hash {
-                if !ip.trim().is_empty() {
+                let ip = ip.trim();
+                if !ip.is_empty() {
+                    // Validate the ip_hash is a well-formed SHA-256 hex string
+                    // (64 hex chars) before inserting — guards against form tampering.
+                    if ip.len() != 64 || !ip.chars().all(|c| c.is_ascii_hexdigit()) {
+                        return Err(AppError::BadRequest("Invalid IP hash format.".into()));
+                    }
                     let reason = form.ban_reason.as_deref().unwrap_or("Reported content");
                     db::add_ban(&conn, ip, reason, None)?; // permanent ban
                     let _ = db::log_mod_action(
@@ -4016,7 +4406,7 @@ pub async fn resolve_report(
                         "ban",
                         None,
                         "",
-                        &format!("via report {} — {}", form.report_id, reason),
+                        &format!("via report {} — {reason}", form.report_id),
                     );
                 }
             }
@@ -4049,7 +4439,7 @@ pub struct ModLogQuery {
     page: i64,
 }
 
-fn default_mod_log_page() -> i64 {
+const fn default_mod_log_page() -> i64 {
     1
 }
 
@@ -4066,10 +4456,10 @@ pub async fn mod_log_page(
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
+            const PER_PAGE: i64 = 50;
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
 
-            const PER_PAGE: i64 = 50;
             let total = db::count_mod_log(&conn)?;
             let pagination = crate::models::Pagination::new(page, PER_PAGE, total);
             let entries = db::get_mod_log(&conn, PER_PAGE, pagination.offset())?;
@@ -4086,4 +4476,85 @@ pub async fn mod_log_page(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok((jar, Html(html)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── login_ip_key ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn ip_key_is_hex_sha256() {
+        let key = login_ip_key("127.0.0.1");
+        // SHA-256 produces 32 bytes = 64 hex chars
+        assert_eq!(key.len(), 64);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn ip_key_same_ip_same_key() {
+        assert_eq!(login_ip_key("192.168.1.1"), login_ip_key("192.168.1.1"));
+    }
+
+    #[test]
+    fn ip_key_different_ips_different_keys() {
+        assert_ne!(login_ip_key("192.168.1.1"), login_ip_key("192.168.1.2"));
+    }
+
+    #[test]
+    fn ip_key_hides_raw_ip() {
+        // The raw IP should not appear anywhere in the hash output
+        let key = login_ip_key("10.0.0.1");
+        assert!(!key.contains("10.0.0.1"));
+    }
+
+    // ── is_login_locked ──────────────────────────────────────────────────────
+
+    #[test]
+    fn fresh_ip_is_not_locked() {
+        let key = login_ip_key("test-fresh-ip-not-in-map");
+        assert!(!is_login_locked(&key));
+    }
+
+    #[test]
+    fn locked_after_exceeding_fail_limit() {
+        // Use a unique key so parallel tests don't interfere
+        let key = login_ip_key("test-lock-unique-99887766");
+        // Clean up any residue from a previous run
+        ADMIN_LOGIN_FAILS.remove(&key);
+
+        let now = login_now_secs();
+        // Insert exactly LOGIN_FAIL_LIMIT failures within the window
+        ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT, now));
+        assert!(is_login_locked(&key));
+
+        // Cleanup
+        ADMIN_LOGIN_FAILS.remove(&key);
+    }
+
+    #[test]
+    fn not_locked_below_fail_limit() {
+        let key = login_ip_key("test-below-limit-11223344");
+        ADMIN_LOGIN_FAILS.remove(&key);
+
+        let now = login_now_secs();
+        ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT - 1, now));
+        assert!(!is_login_locked(&key));
+
+        ADMIN_LOGIN_FAILS.remove(&key);
+    }
+
+    #[test]
+    fn expired_window_is_not_locked() {
+        let key = login_ip_key("test-expired-window-55667788");
+        ADMIN_LOGIN_FAILS.remove(&key);
+
+        // window_start far in the past, beyond LOGIN_FAIL_WINDOW
+        let old_ts = login_now_secs().saturating_sub(LOGIN_FAIL_WINDOW + 60);
+        ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT + 10, old_ts));
+        assert!(!is_login_locked(&key));
+
+        ADMIN_LOGIN_FAILS.remove(&key);
+    }
 }

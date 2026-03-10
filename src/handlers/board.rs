@@ -14,27 +14,20 @@ use crate::{
     error::{AppError, Result},
     handlers::parse_post_multipart,
     middleware::{validate_csrf, AppState},
-    models::*,
+    models::{Pagination, SearchQuery, ThreadSummary},
     templates,
     utils::{
-        // FIX[LOW-8]: sha256_hex now lives in utils::crypto (deduplicated)
-        crypto::{hash_ip, new_csrf_token, new_deletion_token, sha256_hex, verify_pow},
-        files::save_upload,
+        crypto::{hash_ip, new_csrf_token, new_deletion_token, verify_pow},
         sanitize::{
-            // FIX[MEDIUM-8]: apply_word_filters now runs before escape_html
-            apply_word_filters,
-            escape_html,
-            render_post_body,
-            validate_body,
-            validate_body_with_file,
-            validate_name,
-            validate_subject,
+            apply_word_filters, escape_html, render_post_body, validate_body,
+            validate_body_with_file, validate_name, validate_subject,
         },
         tripcode::parse_name_tripcode,
     },
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
+    http::{header, HeaderMap},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -52,13 +45,13 @@ pub async fn index(
 ) -> Result<(CookieJar, Html<String>)> {
     let (jar, csrf) = ensure_csrf(jar);
 
-    let (board_stats, site_stats) = tokio::task::spawn_blocking({
+    let (board_stats, site_data) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<(Vec<crate::models::BoardStats>, crate::models::SiteStats)> {
             let conn = pool.get()?;
             let boards = db::get_all_boards_with_stats(&conn)?;
-            let stats = db::get_site_stats(&conn).unwrap_or_default();
-            Ok((boards, stats))
+            let site_data = db::get_site_stats(&conn).unwrap_or_default();
+            Ok((boards, site_data))
         }
     })
     .await
@@ -68,8 +61,10 @@ pub async fn index(
     let onion_address: Option<String> = if crate::config::CONFIG.enable_tor_support {
         let data_dir = std::path::PathBuf::from(&crate::config::CONFIG.database_path)
             .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+            .map_or_else(
+                || std::path::PathBuf::from("."),
+                std::path::Path::to_path_buf,
+            );
         let hostname_path = data_dir.join("tor_hidden_service").join("hostname");
         std::fs::read_to_string(&hostname_path)
             .ok()
@@ -83,7 +78,7 @@ pub async fn index(
         jar,
         Html(templates::index_page(
             &board_stats,
-            &site_stats,
+            &site_data,
             &csrf,
             onion_address.as_deref(),
         )),
@@ -97,7 +92,8 @@ pub async fn board_index(
     Path(board_short): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
-) -> Result<(CookieJar, Html<String>)> {
+    req_headers: HeaderMap,
+) -> Result<Response> {
     let (jar, csrf) = ensure_csrf(jar);
 
     let page: i64 = params
@@ -106,20 +102,16 @@ pub async fn board_index(
         .unwrap_or(1)
         .max(1);
 
-    let html = tokio::task::spawn_blocking({
+    let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
-        // FIX[HIGH-2]: is_admin_session check moved inside spawn_blocking so
-        // the blocking DB call does not stall the Tokio worker thread.
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
-        move || -> Result<String> {
+        move || -> Result<(String, String)> {
             let conn = pool.get()?;
 
-            // Resolve admin status inside the blocking task
             let is_admin = jar_session
                 .as_deref()
-                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
-                .unwrap_or(false);
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
 
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
@@ -129,11 +121,17 @@ pub async fn board_index(
             let threads =
                 db::get_threads_for_board(&conn, board.id, THREADS_PER_PAGE, pagination.offset())?;
 
+            // 3.2: Derive ETag from the most-recently-bumped thread on this page
+            // combined with the page number.  This is a cheap proxy for "has
+            // anything on this page changed?".
+            let max_bump = threads.iter().map(|t| t.bumped_at).max().unwrap_or(0);
+            let etag = format!("\"{max_bump}-{page}\"");
+
             let mut summaries = Vec::with_capacity(threads.len());
             for thread in threads {
                 let total_replies = thread.reply_count;
                 let preview = db::get_preview_posts(&conn, thread.id, PREVIEW_REPLIES)?;
-                let omitted = (total_replies - preview.len() as i64).max(0);
+                let omitted = (total_replies - i64::try_from(preview.len()).unwrap_or(0)).max(0);
                 summaries.push(ThreadSummary {
                     thread,
                     preview_posts: preview,
@@ -143,7 +141,7 @@ pub async fn board_index(
 
             let all_boards = db::get_all_boards(&conn)?;
             let collapse_greentext = db::get_collapse_greentext(&conn);
-            Ok(templates::board_page(
+            let html = templates::board_page(
                 &board,
                 &summaries,
                 &pagination,
@@ -152,17 +150,43 @@ pub async fn board_index(
                 is_admin,
                 None,
                 collapse_greentext,
-            ))
+            );
+            Ok((etag, html))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)))
+    let (etag, html) = result;
+
+    // 3.2: Return 304 Not Modified when the client's cached version is current.
+    let client_etag = req_headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if client_etag == etag {
+        let mut resp = axum::http::Response::builder()
+            .status(axum::http::StatusCode::NOT_MODIFIED)
+            .body(axum::body::Body::empty())
+            .unwrap_or_default();
+        resp.headers_mut().insert(
+            "etag",
+            axum::http::HeaderValue::from_str(&etag)
+                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
+        );
+        return Ok((jar, resp).into_response());
+    }
+
+    let mut resp = Html(html).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
+        resp.headers_mut().insert("etag", v);
+    }
+    Ok((jar, resp).into_response())
 }
 
 // ─── POST /:board/ — create new thread ───────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 pub async fn create_thread(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
@@ -201,7 +225,7 @@ pub async fn create_thread(
     // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
     let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
 
-    let board_short_err = board_short.clone();
+    let _board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = state.job_queue.clone();
@@ -224,8 +248,7 @@ pub async fn create_thread(
             // Verify admin session — admins bypass the per-board cooldown entirely.
             let is_admin = admin_session_id
                 .as_deref()
-                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
-                .unwrap_or(false);
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
 
             // Per-board post cooldown — the SOLE post rate control.
             // post_cooldown_secs = 0 means no cooldown at all; admins always bypass it.
@@ -234,11 +257,7 @@ pub async fn create_thread(
                 if let Some(secs) = elapsed {
                     let remaining = board.post_cooldown_secs.saturating_sub(secs);
                     if remaining > 0 {
-                        return Err(AppError::BadRequest(format!(
-                            "Please wait {} more second{} before posting again.",
-                            remaining,
-                            if remaining == 1 { "" } else { "s" }
-                        )));
+                        return Err(AppError::BadRequest(format!("Please wait {remaining} more second{} before posting again.", if remaining == 1 { "" } else { "s" })));
                     }
                 }
             }
@@ -282,117 +301,26 @@ pub async fn create_thread(
             let escaped_body = escape_html(&filtered_body);
             let body_html = render_post_body(&escaped_body);
 
-            let uploaded = if let Some((data, fname)) = file_data {
-                // Detect media type from magic bytes to enforce per-board toggles.
-                // We call detect_mime_type here for a quick classification without
-                // doing a full save; the real detection runs again in save_upload.
-                let detected_mime = crate::utils::files::detect_mime_type(&data)
-                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
-                let detected_media = crate::models::MediaType::from_mime(detected_mime)
-                    .ok_or_else(|| AppError::BadRequest("Unsupported file type.".into()))?;
-
-                match detected_media {
-                    crate::models::MediaType::Image if !board.allow_images => {
-                        return Err(AppError::BadRequest(
-                            "Image uploads are disabled on this board.".into(),
-                        ))
-                    }
-                    crate::models::MediaType::Video if !board.allow_video => {
-                        return Err(AppError::BadRequest(
-                            "Video uploads are disabled on this board.".into(),
-                        ))
-                    }
-                    crate::models::MediaType::Audio if !board.allow_audio => {
-                        return Err(AppError::BadRequest(
-                            "Audio uploads are disabled on this board.".into(),
-                        ))
-                    }
-                    _ => {}
-                }
-
-                // SHA-256 deduplication — FIX[LOW-8]: use sha256_hex from crypto module
-                let hash = sha256_hex(&data);
-                if let Some(cached) = db::find_file_by_hash(&conn, &hash)? {
-                    let cached_media = crate::models::MediaType::from_mime(&cached.mime_type)
-                        .unwrap_or(crate::models::MediaType::Image);
-                    Some(crate::utils::files::UploadedFile {
-                        file_path: cached.file_path,
-                        thumb_path: cached.thumb_path,
-                        original_name: crate::utils::sanitize::sanitize_filename(&fname),
-                        mime_type: cached.mime_type,
-                        file_size: data.len() as i64,
-                        media_type: cached_media,
-                        processing_pending: false, // cached = already fully processed
-                    })
-                } else {
-                    let f = save_upload(
-                        &data,
-                        &fname,
-                        &upload_dir,
-                        &board.short_name,
-                        thumb_size,
-                        max_image_size,
-                        max_video_size,
-                        max_audio_size,
-                        ffmpeg_available,
-                    )
-                    .map_err(crate::handlers::classify_upload_error)?;
-                    db::record_file_hash(&conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
-                    Some(f)
-                }
-            } else {
-                None
-            };
+            let uploaded = crate::handlers::process_primary_upload(
+                file_data,
+                &board,
+                &conn,
+                &upload_dir,
+                thumb_size,
+                max_image_size,
+                max_video_size,
+                max_audio_size,
+                ffmpeg_available,
+            )?;
 
             // ── Image+audio combo ─────────────────────────────────────────────
-            // If an audio file was also submitted alongside an image, and the
-            // board permits both, save the audio file using the image's thumb.
-            let audio_uploaded: Option<crate::utils::files::UploadedFile> =
-                if let Some((aud_data, aud_fname)) = audio_file_data {
-                    // Validate that the board allows audio
-                    if !board.allow_audio {
-                        return Err(AppError::BadRequest(
-                            "Audio uploads are disabled on this board.".into(),
-                        ));
-                    }
-                    // The primary file must be an image for the combo to be valid
-                    let primary_is_image = uploaded
-                        .as_ref()
-                        .map(|u| matches!(u.media_type, crate::models::MediaType::Image))
-                        .unwrap_or(false);
-                    if !primary_is_image {
-                        return Err(AppError::BadRequest(
-                            "Audio can only be combined with an image upload.".into(),
-                        ));
-                    }
-                    // Confirm it's actually audio via magic bytes
-                    let aud_mime = crate::utils::files::detect_mime_type(&aud_data)
-                        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-                    let aud_media = crate::models::MediaType::from_mime(aud_mime)
-                        .ok_or_else(|| AppError::BadRequest("Unsupported audio type.".into()))?;
-                    if !matches!(aud_media, crate::models::MediaType::Audio) {
-                        return Err(AppError::BadRequest(
-                            "The audio slot only accepts audio files.".into(),
-                        ));
-                    }
-
-                    let mut aud_file = crate::utils::files::save_audio_with_image_thumb(
-                        &aud_data,
-                        &aud_fname,
-                        &upload_dir,
-                        &board.short_name,
-                        max_audio_size,
-                    )
-                    .map_err(crate::handlers::classify_upload_error)?;
-
-                    // Use the image thumbnail as the audio's thumbnail
-                    if let Some(ref img) = uploaded {
-                        aud_file.thumb_path = img.thumb_path.clone();
-                    }
-                    Some(aud_file)
-                } else {
-                    None
-                };
+            let audio_uploaded = crate::handlers::process_audio_combo(
+                audio_file_data,
+                uploaded.as_ref(),
+                &board,
+                &upload_dir,
+                max_audio_size,
+            )?;
 
             let deletion_token = if del_token_val.trim().is_empty() {
                 new_deletion_token()
@@ -449,40 +377,15 @@ pub async fn create_thread(
             }
 
             // ── Background jobs ───────────────────────────────────────────────
-            // 1. Media post-processing (video transcode / audio waveform)
-            if let Some(ref up) = uploaded {
-                if up.processing_pending {
-                    let job = match up.media_type {
-                        crate::models::MediaType::Video => {
-                            Some(crate::workers::Job::VideoTranscode {
-                                post_id,
-                                file_path: up.file_path.clone(),
-                                board_short: board.short_name.clone(),
-                            })
-                        }
-                        crate::models::MediaType::Audio => {
-                            Some(crate::workers::Job::AudioWaveform {
-                                post_id,
-                                file_path: up.file_path.clone(),
-                                board_short: board.short_name.clone(),
-                            })
-                        }
-                        _ => None,
-                    };
-                    if let Some(j) = job {
-                        if let Err(e) = job_queue.enqueue(&j) {
-                            tracing::warn!("Failed to enqueue media job: {}", e);
-                        }
-                    }
-                }
-            }
-
-            // 2. Spam analysis
-            let _ = job_queue.enqueue(&crate::workers::Job::SpamCheck {
+            // 1 & 2. Media post-processing + spam check (shared helper)
+            crate::handlers::enqueue_post_jobs(
+                &job_queue,
                 post_id,
-                ip_hash: ip_hash.clone(),
-                body_len: body_text.len(),
-            });
+                &ip_hash,
+                body_text.len(),
+                uploaded.as_ref(),
+                &board.short_name,
+            );
 
             // 3. Thread pruning — now async so HTTP response returns immediately.
             let max_threads = board.max_threads;
@@ -493,67 +396,21 @@ pub async fn create_thread(
                 allow_archive: board.allow_archive,
             });
 
-            info!("New thread {} created in /{}/", thread_id, board.short_name);
-            Ok(format!("/{}/thread/{}", board.short_name, thread_id))
+            info!("New thread {thread_id} created in /{}/", board.short_name);
+            Ok(format!("/{}/thread/{thread_id}", board.short_name))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    // BadRequest → re-render the board index with an inline error banner.
+    // BadRequest → return a lightweight 422 page instead of re-querying the
+    // entire board index (which wastes significant DB and CPU under spam load).
     let redirect_url = match result {
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
-            let html = tokio::task::spawn_blocking({
-                let pool = state.db.clone();
-                let csrf_err = csrf_cookie.clone().unwrap_or_default();
-                let board_short = board_short_err.clone();
-                let msg = msg.clone();
-                move || -> String {
-                    let conn = match pool.get() {
-                        Ok(c) => c,
-                        Err(_) => return String::new(),
-                    };
-                    let board = match db::get_board_by_short(&conn, &board_short) {
-                        Ok(Some(b)) => b,
-                        _ => return String::new(),
-                    };
-                    let all_boards = db::get_all_boards(&conn).unwrap_or_default();
-                    let total = db::count_threads_for_board(&conn, board.id).unwrap_or(0);
-                    let pagination = crate::models::Pagination::new(1, 10, total);
-                    let threads =
-                        db::get_threads_for_board(&conn, board.id, 10, 0).unwrap_or_default();
-                    let summaries: Vec<crate::models::ThreadSummary> = threads
-                        .into_iter()
-                        .map(|t| {
-                            let preview = db::get_preview_posts(&conn, t.id, 3).unwrap_or_default();
-                            let omitted = (t.reply_count - preview.len() as i64).max(0);
-                            crate::models::ThreadSummary {
-                                thread: t,
-                                preview_posts: preview,
-                                omitted,
-                            }
-                        })
-                        .collect();
-                    templates::board_page(
-                        &board,
-                        &summaries,
-                        &pagination,
-                        &csrf_err,
-                        &all_boards,
-                        false,
-                        Some(&msg),
-                        db::get_collapse_greentext(&conn),
-                    )
-                }
-            })
-            .await
-            .unwrap_or_default();
-
-            if !html.is_empty() {
-                return Ok((jar, Html(html)).into_response());
-            }
-            return Err(AppError::BadRequest(msg));
+            let mut resp = Html(templates::error_page(422, &msg)).into_response();
+            *resp.status_mut() = axum::http::StatusCode::UNPROCESSABLE_ENTITY;
+            return Ok(resp);
         }
         Err(e) => return Err(e),
     };
@@ -578,8 +435,7 @@ pub async fn catalog(
             let conn = pool.get()?;
             let is_admin = jar_session
                 .as_deref()
-                .map(|sid| db::get_session(&conn, sid).ok().flatten().is_some())
-                .unwrap_or(false);
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
             let threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
@@ -609,8 +465,8 @@ pub async fn board_archive(
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
-    let (jar, csrf) = ensure_csrf(jar);
     const ARCHIVE_PER_PAGE: i64 = 20;
+    let (jar, csrf) = ensure_csrf(jar);
 
     let page: i64 = params
         .get("page")
@@ -667,8 +523,8 @@ pub async fn search(
     Query(q): Query<SearchQuery>,
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
-    let (jar, csrf) = ensure_csrf(jar);
     const SEARCH_PER_PAGE: i64 = 20;
+    let (jar, csrf) = ensure_csrf(jar);
 
     // Cap query length to prevent excessively large LIKE pattern scans.
     let query_str: String = q.q.trim().chars().take(256).collect();
@@ -713,7 +569,7 @@ pub async fn search(
 
 // ─── CSRF cookie helper ───────────────────────────────────────────────────────
 
-/// Ensure the CSRF token cookie is set. Returns (updated_jar, token_string).
+/// Ensure the CSRF token cookie is set. Returns (`updated_jar`, `token_string`).
 pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
     if let Some(cookie) = jar.get("csrf_token") {
         let token = cookie.value().to_string();
@@ -739,10 +595,11 @@ pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
 #[derive(serde::Deserialize)]
 pub struct ReportForm {
     pub post_id: i64,
+    #[allow(dead_code)]
     pub thread_id: i64,
     pub board: String,
     pub reason: Option<String>,
-    pub _csrf: Option<String>,
+    pub csrf: Option<String>,
 }
 
 pub async fn file_report(
@@ -752,7 +609,7 @@ pub async fn file_report(
     Form(form): Form<ReportForm>,
 ) -> Result<Response> {
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form._csrf.as_deref().unwrap_or("")) {
+    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
@@ -767,19 +624,19 @@ pub async fn file_report(
         .collect::<String>();
 
     let post_id = form.post_id;
-    let _thread_id = form.thread_id;
     let board_raw = form
         .board
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .take(8)
         .collect::<String>();
 
+    let board_raw_closure = board_raw.clone();
     let db_thread_id = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<i64> {
             let conn = pool.get()?;
-            let board = db::get_board_by_short(&conn, &board_raw)?
+            let board = db::get_board_by_short(&conn, &board_raw_closure)?
                 .ok_or_else(|| AppError::NotFound("Board not found.".into()))?;
             // Verify post exists and belongs to this board to prevent spoofed reports.
             let post = db::get_post(&conn, post_id)?
@@ -805,16 +662,11 @@ pub async fn file_report(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    // Redirect back to the thread using the DB-resolved IDs, not the form values.
-    let safe_board = form
-        .board
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .take(8)
-        .collect::<String>();
+    // Redirect back to the thread using the DB-resolved IDs.
+    // `board_raw` is already sanitised to alphanumeric earlier in this handler.
     Ok(Redirect::to(&format!(
-        "/{}/thread/{}#p{}",
-        safe_board, db_thread_id, form.post_id
+        "/{board_raw}/thread/{db_thread_id}#p{}",
+        form.post_id
     ))
     .into_response())
 }
@@ -834,13 +686,20 @@ pub async fn serve_board_media(
     use tower::ServiceExt;
     use tower_http::services::ServeFile;
 
-    // Reject path-traversal attempts.
-    if media_path.contains("..") {
+    // Reject path-traversal attempts and absolute-path escapes.
+    if media_path.contains("..") || media_path.starts_with('/') {
         return StatusCode::BAD_REQUEST.into_response();
     }
 
     let base = PathBuf::from(&CONFIG.upload_dir);
     let target = base.join(&media_path);
+
+    // Verify the resolved path is still inside the upload directory.
+    // This catches any edge cases that slip past the string checks above
+    // (e.g. symlinks, exotic percent-encoding handled by the OS).
+    if !target.starts_with(&base) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
 
     if target.exists() {
         // File present — forward the real request (with Range, ETag, etc.) to
@@ -849,16 +708,19 @@ pub async fn serve_board_media(
         // the request headers caused it to receive 200 instead of 206 and
         // refuse playback on videos it tried to stream in chunks.
         let req = req.map(|_| axum::body::Body::empty());
-        match ServeFile::new(&target).oneshot(req).await {
-            Ok(resp) => resp.map(axum::body::Body::new).into_response(),
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        }
-    } else if media_path.ends_with(".mp4") {
+        ServeFile::new(&target).oneshot(req).await.map_or_else(
+            |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            |resp| resp.map(axum::body::Body::new).into_response(),
+        )
+    } else if std::path::Path::new(&media_path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+    {
         // MP4 was transcoded away — redirect permanently to the .webm sibling.
         let webm_path_str = format!("{}.webm", &media_path[..media_path.len() - 4]);
         let webm_abs = base.join(&webm_path_str);
         if webm_abs.exists() {
-            Redirect::permanent(&format!("/boards/{}", webm_path_str)).into_response()
+            Redirect::permanent(&format!("/boards/{webm_path_str}")).into_response()
         } else {
             StatusCode::NOT_FOUND.into_response()
         }
@@ -887,8 +749,6 @@ pub async fn api_post_preview(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
 ) -> impl axum::response::IntoResponse {
-    use axum::http::header;
-
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> crate::error::Result<Option<(String, i64)>> {
@@ -903,11 +763,14 @@ pub async fn api_post_preview(
                     let html = crate::templates::render_post(
                         &p,
                         &board_short,
-                        "",    // no CSRF needed — preview is read-only
-                        false, // no delete controls
-                        false, // not admin
-                        true,  // show media thumbnail
-                        0,     // no edit window
+                        "",
+                        crate::templates::thread::RenderPostOpts {
+                            show_delete: false,
+                            is_admin: false,
+                            show_media: true,
+                            allow_editing: false, // no edit link in read-only preview
+                        },
+                        0, // no edit window
                     );
                     Ok(Some((html, thread_id)))
                 }
@@ -962,15 +825,24 @@ pub async fn redirect_to_post(
     })
     .await;
 
-    match result {
-        Ok(Ok(Some(thread_id))) => {
-            let url = format!("/{}/thread/{}#p{}", board_short_for_url, thread_id, post_id);
-            Redirect::to(&url).into_response()
-        }
-        _ => {
-            // Post not found or wrong board — return a plain 404.
-            axum::http::StatusCode::NOT_FOUND.into_response()
-        }
+    if let Ok(Ok(Some(thread_id))) = result {
+        let url = format!("/{board_short_for_url}/thread/{thread_id}#p{post_id}");
+        Redirect::to(&url).into_response()
+    } else {
+        // Post not found or wrong board — render the error page template
+        // so the user gets a readable message instead of a blank HTTP 404.
+        // This is the fallback path when JavaScript is disabled or when
+        // a user manually navigates to a quotelink URL after a board
+        // restore that assigned new IDs to the restored posts.
+        let html = crate::templates::error_page(
+            404,
+            &format!("Post #{post_id} not found. It may have been deleted or the board was restored from a backup."),
+        );
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::response::Html(html),
+        )
+            .into_response()
     }
 }
 
@@ -981,7 +853,7 @@ pub async fn redirect_to_post(
 #[derive(serde::Deserialize)]
 pub struct AppealForm {
     pub reason: String,
-    pub _csrf: Option<String>,
+    pub csrf: Option<String>,
 }
 
 pub async fn submit_appeal(
@@ -993,10 +865,8 @@ pub async fn submit_appeal(
     use axum::response::Html;
 
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(
-        csrf_cookie.as_deref(),
-        form._csrf.as_deref().unwrap_or(""),
-    ) {
+    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
+    {
         return Html(crate::templates::error_page(403, "CSRF token mismatch.")).into_response();
     }
 

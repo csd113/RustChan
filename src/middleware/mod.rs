@@ -42,12 +42,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use dashmap::DashMap;
-use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Global rate limit table: ip_key → (request_count, window_start_secs)
-static RATE_TABLE: Lazy<DashMap<String, (u32, u64)>> = Lazy::new(DashMap::new);
+/// Global rate limit table: `ip_key` → (`request_count`, `window_start_secs`)
+static RATE_TABLE: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
 
 /// FIX[MEDIUM-4]: Track the last time we ran a full cleanup so we can also
 /// clean on a time basis, not just when the table exceeds a size threshold.
@@ -63,7 +63,7 @@ static LAST_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
 // `reset()` are guaranteed visible to any reader that subsequently loads the
 // new phase value.
 
-/// Phase codes stored in BackupProgress::phase.
+/// Phase codes stored in `BackupProgress::phase`.
 pub mod backup_phase {
     pub const IDLE: u64 = 0;
     pub const SNAPSHOT_DB: u64 = 1;
@@ -75,7 +75,7 @@ pub mod backup_phase {
 }
 
 /// Shared atomic progress state for backup operations.
-/// Stored as Arc<BackupProgress> in AppState so admin handlers and the
+/// Stored as Arc<BackupProgress> in `AppState` so admin handlers and the
 /// progress endpoint can both access it without locking.
 pub struct BackupProgress {
     pub phase: std::sync::atomic::AtomicU64,
@@ -86,7 +86,7 @@ pub struct BackupProgress {
 }
 
 impl BackupProgress {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         use std::sync::atomic::AtomicU64;
         Self {
             phase: AtomicU64::new(backup_phase::IDLE),
@@ -119,7 +119,7 @@ impl BackupProgress {
 #[derive(Clone)]
 pub struct AppState {
     pub db: crate::db::DbPool,
-    /// True when ffmpeg was detected at startup (set by detect::detect_ffmpeg).
+    /// True when ffmpeg was detected at startup (set by `detect::detect_ffmpeg`).
     /// Passed to file handling to enable/disable video thumbnail generation.
     pub ffmpeg_available: bool,
     /// Background job queue — enqueue CPU-heavy work here instead of blocking
@@ -195,11 +195,10 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
         .headers()
         .get(axum::http::header::COOKIE)
         .and_then(|v| v.to_str().ok())
-        .map(|s| {
+        .is_some_and(|s| {
             s.split(';')
                 .any(|pair| pair.trim().starts_with("chan_admin_session="))
-        })
-        .unwrap_or(false);
+        });
     if has_admin_cookie {
         return next.run(req).await;
     }
@@ -219,10 +218,9 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
 
     // Check and update rate limit counter
     let blocked = {
-        let mut entry = RATE_TABLE.entry(ip_key.clone()).or_insert((0, now));
-        let (count, window_start) = entry.value_mut();
-
-        if now.saturating_sub(*window_start) > window {
+        let mut binding = RATE_TABLE.entry(ip_key.clone()).or_insert((0, now));
+        let (count, window_start) = binding.value_mut();
+        let result = if now.saturating_sub(*window_start) > window {
             // Window has expired, reset
             *count = 1;
             *window_start = now;
@@ -230,7 +228,9 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
         } else {
             *count += 1;
             *count > limit
-        }
+        };
+        drop(binding);
+        result
     };
 
     if blocked {
@@ -300,7 +300,7 @@ fn rate_limited_toast_page() -> String {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Slow down — {forum_name}</title>
+<title>Slow down — {forum_name_escaped}</title>
 <style>
   body {{
     margin: 0;
@@ -362,15 +362,14 @@ fn rate_limited_toast_page() -> String {
   }}, 3000);
 </script>
 </body>
-</html>"#,
-        forum_name = forum_name_escaped
+</html>"#
     )
 }
 
 /// Extract client IP, respecting proxy headers when configured.
 ///
-/// FIX[HIGH-1]: When behind_proxy=true, we now prefer X-Real-IP (set by nginx
-/// to $remote_addr — the actual TCP peer — and not modifiable by the client).
+/// FIX[HIGH-1]: When `behind_proxy=true`, we now prefer X-Real-IP (set by nginx
+/// to `$remote_addr` — the actual TCP peer — and not modifiable by the client).
 /// We explicitly do NOT use the leftmost X-Forwarded-For entry because it is
 /// client-supplied and trivially forgeable, enabling rate-limit and ban bypass.
 ///
@@ -406,8 +405,7 @@ pub fn extract_ip(req: &Request) -> String {
     // Direct connection IP (not behind proxy, or proxy headers absent)
     req.extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .map_or_else(|| "unknown".to_string(), |ci| ci.0.ip().to_string())
 }
 
 /// Validate CSRF token from a form against the cookie.
@@ -470,10 +468,9 @@ pub async fn normalize_trailing_slash(req: Request, next: Next) -> Response {
         let stripped = path.trim_end_matches('/');
 
         // Rebuild the URI, preserving any query string.
-        let new_path_and_query = match uri.query() {
-            Some(q) => format!("{}?{}", stripped, q),
-            None => stripped.to_string(),
-        };
+        let new_path_and_query = uri
+            .query()
+            .map_or_else(|| stripped.to_string(), |q| format!("{stripped}?{q}"));
 
         // Validate the rebuilt path before redirecting.
         if new_path_and_query.parse::<Uri>().is_ok() {
@@ -519,7 +516,7 @@ where
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                return Ok(ClientIp(val.to_string()));
+                return Ok(Self(val.to_string()));
             }
             // Fall back to rightmost X-Forwarded-For entry (added by the
             // trusted proxy, not by the client).
@@ -531,15 +528,106 @@ where
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                return Ok(ClientIp(val.to_string()));
+                return Ok(Self(val.to_string()));
             }
         }
         // Direct connection (or proxy headers absent).
         let ip = parts
             .extensions
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|ci| ci.0.ip().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        Ok(ClientIp(ip))
+            .map_or_else(|| "unknown".to_string(), |ci| ci.0.ip().to_string());
+        Ok(Self(ip))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── validate_csrf ────────────────────────────────────────────────────────
+
+    #[test]
+    fn csrf_matching_tokens_pass() {
+        assert!(validate_csrf(Some("abc123"), "abc123"));
+    }
+
+    #[test]
+    fn csrf_mismatched_tokens_fail() {
+        assert!(!validate_csrf(Some("abc123"), "abc124"));
+    }
+
+    #[test]
+    fn csrf_missing_cookie_fails() {
+        assert!(!validate_csrf(None, "abc123"));
+    }
+
+    #[test]
+    fn csrf_empty_cookie_fails() {
+        assert!(!validate_csrf(Some(""), "abc123"));
+    }
+
+    #[test]
+    fn csrf_empty_form_token_fails() {
+        assert!(!validate_csrf(Some("abc123"), ""));
+    }
+
+    #[test]
+    fn csrf_both_empty_fails() {
+        assert!(!validate_csrf(Some(""), ""));
+    }
+
+    // ── constant_time_eq ─────────────────────────────────────────────────────
+
+    #[test]
+    fn constant_time_eq_equal_slices() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_slices() {
+        assert!(!constant_time_eq(b"hello", b"world"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+    }
+
+    #[test]
+    fn constant_time_eq_empty_slices() {
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_one_byte_off() {
+        // Differs only in the last byte — must still return false
+        assert!(!constant_time_eq(b"token_a", b"token_b"));
+    }
+
+    // ── BackupProgress ───────────────────────────────────────────────────────
+
+    #[test]
+    fn backup_progress_initial_phase_is_idle() {
+        use std::sync::atomic::Ordering::Acquire;
+        let bp = BackupProgress::new();
+        assert_eq!(bp.phase.load(Acquire), backup_phase::IDLE);
+    }
+
+    #[test]
+    fn backup_progress_reset_clears_counters() {
+        use std::sync::atomic::Ordering::{Acquire, Relaxed};
+        let bp = BackupProgress::new();
+        bp.files_done.store(10, Relaxed);
+        bp.files_total.store(20, Relaxed);
+        bp.bytes_done.store(1024, Relaxed);
+        bp.bytes_total.store(2048, Relaxed);
+
+        bp.reset(backup_phase::COMPRESS);
+
+        assert_eq!(bp.phase.load(Acquire), backup_phase::COMPRESS);
+        assert_eq!(bp.files_done.load(Relaxed), 0);
+        assert_eq!(bp.files_total.load(Relaxed), 0);
+        assert_eq!(bp.bytes_done.load(Relaxed), 0);
+        assert_eq!(bp.bytes_total.load(Relaxed), 0);
     }
 }

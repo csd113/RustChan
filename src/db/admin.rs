@@ -3,13 +3,33 @@
 // Covers: admin user & session management, bans, word filters, user reports,
 // moderation log, ban appeals, IP history, WAL checkpoint, VACUUM, DB size,
 // and the list_admins helper used by CLI tooling.
+//
+// FIX summary (from audit):
+//   HIGH-1   is_banned: switched to prepare_cached (hot path on every post submission)
+//   HIGH-2   get_word_filters: switched to prepare_cached (hot path on every post submission)
+//   HIGH-3   get_posts_by_ip_hash: removed unnecessary threads join; posts already carries board_id
+//   MED-4    create_admin, add_ban, add_word_filter, file_report, file_ban_appeal:
+//              INSERT … RETURNING id replaces execute + last_insert_rowid()
+//   MED-5    update_admin_password, remove_ban, resolve_report, dismiss_ban_appeal:
+//              added rows-affected checks so missing targets surface as errors
+//   MED-6    accept_ban_appeal: status='accepted' (was duplicating 'dismissed')
+//              already correct; doc comment clarified
+//   MED-7    file_report: added has_reported_post guard to prevent spam reports
+//   MED-8    has_recent_appeal / file_ban_appeal TOCTOU: documented; full fix
+//              requires a schema-level UNIQUE constraint
+//   LOW-9    Remaining bare prepare → prepare_cached throughout
+//   LOW-10   Added .context() on key operations
+//   LOW-11   get_db_size_bytes: added doc comment noting WAL file not included
+//   LOW-12   is_banned NULLS FIRST: added doc comment for SQLite ≥ 3.30.0 requirement
 
-use crate::models::*;
+use crate::models::{AdminSession, AdminUser, Ban, WordFilter};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 
 // ─── Admin user queries ───────────────────────────────────────────────────────
 
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_admin_by_username(
     conn: &rusqlite::Connection,
     username: &str,
@@ -29,37 +49,62 @@ pub fn get_admin_by_username(
         .optional()?)
 }
 
+/// FIX[MED-4]: Replaced execute + `last_insert_rowid()` with INSERT … RETURNING id
+/// to retrieve the new row id atomically in the same statement.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn create_admin(conn: &rusqlite::Connection, username: &str, hash: &str) -> Result<i64> {
-    conn.execute(
-        "INSERT INTO admin_users (username, password_hash) VALUES (?1, ?2)",
-        params![username, hash],
-    )?;
-    Ok(conn.last_insert_rowid())
+    let id: i64 = conn
+        .query_row(
+            "INSERT INTO admin_users (username, password_hash) VALUES (?1, ?2) RETURNING id",
+            params![username, hash],
+            |r| r.get(0),
+        )
+        .context("Failed to create admin user")?;
+    Ok(id)
 }
 
+/// FIX[MED-5]: Added rows-affected check — silently succeeding when the target
+/// username doesn't exist made password-reset errors invisible to the operator.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn update_admin_password(
     conn: &rusqlite::Connection,
     username: &str,
     hash: &str,
 ) -> Result<()> {
-    conn.execute(
-        "UPDATE admin_users SET password_hash = ?1 WHERE username = ?2",
-        params![hash, username],
-    )?;
+    let n = conn
+        .execute(
+            "UPDATE admin_users SET password_hash = ?1 WHERE username = ?2",
+            params![hash, username],
+        )
+        .context("Failed to update admin password")?;
+    if n == 0 {
+        anyhow::bail!("Admin user '{username}' not found");
+    }
     Ok(())
 }
 
 /// List all admin users (for CLI tooling).
+/// FIX[LOW-9]: Switched from bare prepare to `prepare_cached`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn list_admins(conn: &rusqlite::Connection) -> Result<Vec<(i64, String, i64)>> {
     let mut stmt =
-        conn.prepare("SELECT id, username, created_at FROM admin_users ORDER BY id ASC")?;
+        conn.prepare_cached("SELECT id, username, created_at FROM admin_users ORDER BY id ASC")?;
     let rows = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<Vec<(i64, String, i64)>>>()?;
     Ok(rows)
 }
 
-/// Retrieve admin username by admin_id (used when building log entries).
+/// Retrieve admin username by `admin_id` (used when building log entries).
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_admin_name_by_id(conn: &rusqlite::Connection, admin_id: i64) -> Result<Option<String>> {
     Ok(conn
         .query_row(
@@ -72,6 +117,8 @@ pub fn get_admin_name_by_id(conn: &rusqlite::Connection, admin_id: i64) -> Resul
 
 // ─── Session queries ──────────────────────────────────────────────────────────
 
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn create_session(
     conn: &rusqlite::Connection,
     session_id: &str,
@@ -81,10 +128,13 @@ pub fn create_session(
     conn.execute(
         "INSERT INTO admin_sessions (id, admin_id, expires_at) VALUES (?1, ?2, ?3)",
         params![session_id, admin_id, expires_at],
-    )?;
+    )
+    .context("Failed to create admin session")?;
     Ok(())
 }
 
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_session(conn: &rusqlite::Connection, session_id: &str) -> Result<Option<AdminSession>> {
     let now = chrono::Utc::now().timestamp();
     let mut stmt = conn.prepare_cached(
@@ -103,6 +153,8 @@ pub fn get_session(conn: &rusqlite::Connection, session_id: &str) -> Result<Opti
         .optional()?)
 }
 
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn delete_session(conn: &rusqlite::Connection, session_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM admin_sessions WHERE id = ?1",
@@ -112,6 +164,9 @@ pub fn delete_session(conn: &rusqlite::Connection, session_id: &str) -> Result<(
 }
 
 /// Clean up expired sessions (called periodically).
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn purge_expired_sessions(conn: &rusqlite::Connection) -> Result<usize> {
     let now = chrono::Utc::now().timestamp();
     let n = conn.execute(
@@ -123,50 +178,74 @@ pub fn purge_expired_sessions(conn: &rusqlite::Connection) -> Result<usize> {
 
 // ─── Ban queries ──────────────────────────────────────────────────────────────
 
+/// Check whether `ip_hash` is currently banned. Returns the ban reason if so.
+///
+/// FIX[HIGH-1]: Switched to `prepare_cached` — this is called on every post
+/// submission and was recompiling the statement on every call.
+///
+/// FIX[BAN-ORDER]: ORDER BY `expires_at` DESC NULLS FIRST ensures a permanent
+/// ban (NULL `expires_at`) always surfaces before any timed ban.
+///
+/// Note: NULLS FIRST requires `SQLite` ≥ 3.30.0 (released 2019-10-04).
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn is_banned(conn: &rusqlite::Connection, ip_hash: &str) -> Result<Option<String>> {
     let now = chrono::Utc::now().timestamp();
-    // A ban with NULL expires_at is permanent.
-    //
-    // FIX[BAN-ORDER]: Previously there was no ORDER BY, so LIMIT 1 returned
-    // whichever row the query planner happened to visit first via the index.
-    // With multiple active bans (e.g. a timed ban and a permanent ban) the
-    // reason shown to the user was non-deterministic across restarts/VACUUM.
-    // We now order by expires_at DESC NULLS FIRST so a permanent ban (NULL)
-    // always surfaces first, and among timed bans the latest-expiring one wins.
-    let result: Option<Option<String>> = conn
-        .query_row(
-            "SELECT reason FROM bans WHERE ip_hash = ?1
-             AND (expires_at IS NULL OR expires_at > ?2)
-             ORDER BY expires_at DESC NULLS FIRST
-             LIMIT 1",
-            params![ip_hash, now],
-            |r| r.get(0),
-        )
+    let mut stmt = conn.prepare_cached(
+        "SELECT reason FROM bans WHERE ip_hash = ?1
+         AND (expires_at IS NULL OR expires_at > ?2)
+         ORDER BY expires_at DESC NULLS FIRST
+         LIMIT 1",
+    )?;
+    let result: Option<Option<String>> = stmt
+        .query_row(params![ip_hash, now], |r| r.get(0))
         .optional()?;
-    // Flatten: None = not banned; Some(r) = banned (r may be empty if no reason set)
-    Ok(result.map(|r| r.unwrap_or_default()))
+    // Flatten: None = not banned; Some(r) = banned (r may be None if no reason was set)
+    Ok(result.map(Option::unwrap_or_default))
 }
 
+/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn add_ban(
     conn: &rusqlite::Connection,
     ip_hash: &str,
     reason: &str,
     expires_at: Option<i64>,
 ) -> Result<i64> {
-    conn.execute(
-        "INSERT INTO bans (ip_hash, reason, expires_at) VALUES (?1, ?2, ?3)",
-        params![ip_hash, reason, expires_at],
-    )?;
-    Ok(conn.last_insert_rowid())
+    let id: i64 = conn
+        .query_row(
+            "INSERT INTO bans (ip_hash, reason, expires_at) VALUES (?1, ?2, ?3) RETURNING id",
+            params![ip_hash, reason, expires_at],
+            |r| r.get(0),
+        )
+        .context("Failed to insert ban")?;
+    Ok(id)
 }
 
+/// FIX[MED-5]: Returns an error when the target ban row does not exist,
+/// making double-removes and stale ban-ids visible rather than silently succeeding.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn remove_ban(conn: &rusqlite::Connection, id: i64) -> Result<()> {
-    conn.execute("DELETE FROM bans WHERE id = ?1", params![id])?;
+    let n = conn
+        .execute("DELETE FROM bans WHERE id = ?1", params![id])
+        .context("Failed to remove ban")?;
+    if n == 0 {
+        anyhow::bail!("Ban id {id} not found");
+    }
     Ok(())
 }
 
+/// FIX[LOW-9]: Switched from bare prepare to `prepare_cached`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn list_bans(conn: &rusqlite::Connection) -> Result<Vec<Ban>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, ip_hash, reason, expires_at, created_at FROM bans ORDER BY created_at DESC",
     )?;
     let bans = stmt
@@ -185,8 +264,13 @@ pub fn list_bans(conn: &rusqlite::Connection) -> Result<Vec<Ban>> {
 
 // ─── Word filter queries ──────────────────────────────────────────────────────
 
+/// FIX[HIGH-2]: Switched to `prepare_cached` — called on every post submission
+/// to apply word filters; recompiling the statement every time was wasteful.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_word_filters(conn: &rusqlite::Connection) -> Result<Vec<WordFilter>> {
-    let mut stmt = conn.prepare("SELECT id, pattern, replacement FROM word_filters")?;
+    let mut stmt = conn.prepare_cached("SELECT id, pattern, replacement FROM word_filters")?;
     let filters = stmt
         .query_map([], |r| {
             Ok(WordFilter {
@@ -199,18 +283,27 @@ pub fn get_word_filters(conn: &rusqlite::Connection) -> Result<Vec<WordFilter>> 
     Ok(filters)
 }
 
+/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn add_word_filter(
     conn: &rusqlite::Connection,
     pattern: &str,
     replacement: &str,
 ) -> Result<i64> {
-    conn.execute(
-        "INSERT INTO word_filters (pattern, replacement) VALUES (?1, ?2)",
-        params![pattern, replacement],
-    )?;
-    Ok(conn.last_insert_rowid())
+    let id: i64 = conn
+        .query_row(
+            "INSERT INTO word_filters (pattern, replacement) VALUES (?1, ?2) RETURNING id",
+            params![pattern, replacement],
+            |r| r.get(0),
+        )
+        .context("Failed to insert word filter")?;
+    Ok(id)
 }
 
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn remove_word_filter(conn: &rusqlite::Connection, id: i64) -> Result<()> {
     conn.execute("DELETE FROM word_filters WHERE id = ?1", params![id])?;
     Ok(())
@@ -218,7 +311,39 @@ pub fn remove_word_filter(conn: &rusqlite::Connection, id: i64) -> Result<()> {
 
 // ─── Reports ──────────────────────────────────────────────────────────────────
 
+/// Guard helper: returns true if `reporter_hash` has already filed a report
+/// against `post_id` that is still open.
+///
+/// FIX[MED-7]: Prevents a user from spamming the report queue with duplicate
+/// reports on the same post. Called inside `file_report` before the INSERT.
+///
+/// Note: There is a TOCTOU race between `has_reported_post` and the INSERT in
+/// `file_report` (two concurrent requests can both pass the check). A full fix
+/// would require a schema-level `UNIQUE(post_id, reporter_hash)` constraint, but
+/// that would block re-reporting after a resolved report. The guard here is
+/// sufficient to prevent accidental spam; deliberate concurrent abuse is
+/// extremely unlikely in practice.
+fn has_reported_post(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    reporter_hash: &str,
+) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM reports
+         WHERE post_id = ?1 AND reporter_hash = ?2 AND status = 'open'",
+        params![post_id, reporter_hash],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 /// File a new report against a post. Returns the new report id.
+///
+/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+/// FIX[MED-7]: Duplicate-report guard added via `has_reported_post`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn file_report(
     conn: &rusqlite::Connection,
     post_id: i64,
@@ -227,19 +352,29 @@ pub fn file_report(
     reason: &str,
     reporter_hash: &str,
 ) -> Result<i64> {
-    conn.execute(
-        "INSERT INTO reports (post_id, thread_id, board_id, reason, reporter_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![post_id, thread_id, board_id, reason, reporter_hash],
-    )?;
-    Ok(conn.last_insert_rowid())
+    if has_reported_post(conn, post_id, reporter_hash)? {
+        anyhow::bail!("Already reported post {post_id}");
+    }
+    let id: i64 = conn
+        .query_row(
+            "INSERT INTO reports (post_id, thread_id, board_id, reason, reporter_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+            params![post_id, thread_id, board_id, reason, reporter_hash],
+            |r| r.get(0),
+        )
+        .context("Failed to insert report")?;
+    Ok(id)
 }
 
 /// Return all open reports enriched with board name and post preview.
+/// FIX[LOW-9]: Switched from bare prepare to `prepare_cached`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_open_reports(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<crate::models::ReportWithContext>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT r.id, r.post_id, r.thread_id, r.board_id, r.reason,
                 r.reporter_hash, r.status, r.created_at, r.resolved_at, r.resolved_by,
                 b.short_name, p.body, p.ip_hash
@@ -278,16 +413,28 @@ pub fn get_open_reports(
 }
 
 /// Resolve a report (mark it closed).
+/// FIX[MED-5]: Added rows-affected check.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn resolve_report(conn: &rusqlite::Connection, report_id: i64, admin_id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE reports SET status='resolved', resolved_at=unixepoch(), resolved_by=?1
-         WHERE id = ?2",
-        params![admin_id, report_id],
-    )?;
+    let n = conn
+        .execute(
+            "UPDATE reports SET status='resolved', resolved_at=unixepoch(), resolved_by=?1
+             WHERE id = ?2",
+            params![admin_id, report_id],
+        )
+        .context("Failed to resolve report")?;
+    if n == 0 {
+        anyhow::bail!("Report id {report_id} not found");
+    }
     Ok(())
 }
 
 /// Count of currently open (unresolved) reports.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 #[allow(dead_code)]
 pub fn open_report_count(conn: &rusqlite::Connection) -> Result<i64> {
     Ok(conn.query_row(
@@ -300,6 +447,9 @@ pub fn open_report_count(conn: &rusqlite::Connection) -> Result<i64> {
 // ─── Moderation log ───────────────────────────────────────────────────────────
 
 /// Append one entry to the moderation action log.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn log_mod_action(
     conn: &rusqlite::Connection,
     admin_id: i64,
@@ -328,12 +478,16 @@ pub fn log_mod_action(
 }
 
 /// Retrieve a page of mod log entries, newest first.
+/// FIX[LOW-9]: Switched from bare prepare to `prepare_cached`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_mod_log(
     conn: &rusqlite::Connection,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<crate::models::ModLogEntry>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, admin_id, admin_name, action, target_type, target_id,
                 board_short, detail, created_at
          FROM mod_log
@@ -356,7 +510,10 @@ pub fn get_mod_log(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Total count of mod_log entries (for pagination).
+/// Total count of `mod_log` entries (for pagination).
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn count_mod_log(conn: &rusqlite::Connection) -> Result<i64> {
     Ok(conn.query_row("SELECT COUNT(*) FROM mod_log", [], |r| r.get(0))?)
 }
@@ -364,15 +521,32 @@ pub fn count_mod_log(conn: &rusqlite::Connection) -> Result<i64> {
 // ─── Ban appeals ──────────────────────────────────────────────────────────────
 
 /// Insert a new ban appeal. Returns the new appeal id.
+///
+/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+///
+/// Note (TOCTOU): `has_recent_appeal` and `file_ban_appeal` have a race — two
+/// concurrent requests from the same IP can both pass the check and both
+/// insert appeals. A full fix requires a schema-level UNIQUE(`ip_hash`) or a
+/// time-windowed partial unique index. The guard is retained as a best-effort
+/// spam deterrent for the common (non-concurrent) case.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn file_ban_appeal(conn: &rusqlite::Connection, ip_hash: &str, reason: &str) -> Result<i64> {
-    conn.execute(
-        "INSERT INTO ban_appeals (ip_hash, reason) VALUES (?1, ?2)",
-        params![ip_hash, reason],
-    )?;
-    Ok(conn.last_insert_rowid())
+    let id: i64 = conn
+        .query_row(
+            "INSERT INTO ban_appeals (ip_hash, reason) VALUES (?1, ?2) RETURNING id",
+            params![ip_hash, reason],
+            |r| r.get(0),
+        )
+        .context("Failed to insert ban appeal")?;
+    Ok(id)
 }
 
 /// Return all open ban appeals, newest first.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_open_ban_appeals(conn: &rusqlite::Connection) -> Result<Vec<crate::models::BanAppeal>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, ip_hash, reason, status, created_at
@@ -392,36 +566,57 @@ pub fn get_open_ban_appeals(conn: &rusqlite::Connection) -> Result<Vec<crate::mo
 }
 
 /// Dismiss a ban appeal (mark it closed without unbanning).
+/// FIX[MED-5]: Added rows-affected check.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn dismiss_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE ban_appeals SET status='dismissed' WHERE id=?1",
-        params![appeal_id],
-    )?;
+    let n = conn
+        .execute(
+            "UPDATE ban_appeals SET status='dismissed' WHERE id=?1",
+            params![appeal_id],
+        )
+        .context("Failed to dismiss ban appeal")?;
+    if n == 0 {
+        anyhow::bail!("Ban appeal id {appeal_id} not found");
+    }
     Ok(())
 }
 
-/// Dismiss appeal AND lift the ban for this ip_hash.
+/// Dismiss appeal AND lift the ban for this `ip_hash`.
 ///
-/// FIX[AUDIT]: Previously both dismiss_ban_appeal and accept_ban_appeal set
-/// status='dismissed', making them indistinguishable in the moderation history.
-/// Accepted appeals now correctly set status='accepted' so the audit trail
-/// accurately reflects whether an appeal was denied or granted.
+/// FIX[MED-6]: Accepted appeals now set status='accepted' (not 'dismissed')
+/// so the moderation history accurately distinguishes denied vs granted appeals.
+/// The valid status values for `BanAppeal` are: "open" | "dismissed" | "accepted".
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64, ip_hash: &str) -> Result<()> {
     // Both updates must succeed together.
     let tx = conn
         .unchecked_transaction()
         .context("Failed to begin accept-appeal transaction")?;
-    tx.execute(
-        "UPDATE ban_appeals SET status='accepted' WHERE id=?1",
-        params![appeal_id],
-    )?;
-    tx.execute("DELETE FROM bans WHERE ip_hash=?1", params![ip_hash])?;
+    let n = tx
+        .execute(
+            "UPDATE ban_appeals SET status='accepted' WHERE id=?1",
+            params![appeal_id],
+        )
+        .context("Failed to accept ban appeal")?;
+    if n == 0 {
+        tx.rollback().ok();
+        anyhow::bail!("Ban appeal id {appeal_id} not found");
+    }
+    tx.execute("DELETE FROM bans WHERE ip_hash=?1", params![ip_hash])
+        .context("Failed to lift ban during appeal acceptance")?;
     tx.commit()
         .context("Failed to commit accept-appeal transaction")?;
     Ok(())
 }
 
 /// Count of currently open ban appeals.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 #[allow(dead_code)]
 pub fn open_appeal_count(conn: &rusqlite::Connection) -> Result<i64> {
     Ok(conn.query_row(
@@ -431,8 +626,13 @@ pub fn open_appeal_count(conn: &rusqlite::Connection) -> Result<i64> {
     )?)
 }
 
-/// Check if an appeal has already been filed from this ip_hash (any status)
+/// Check if an appeal has already been filed from this `ip_hash` (any status)
 /// within the last 24 hours, to prevent spam.
+///
+/// Note (TOCTOU): see `file_ban_appeal` for the concurrency caveat.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn has_recent_appeal(conn: &rusqlite::Connection, ip_hash: &str) -> Result<bool> {
     let cutoff = chrono::Utc::now().timestamp() - 86400;
     let count: i64 = conn.query_row(
@@ -446,6 +646,9 @@ pub fn has_recent_appeal(conn: &rusqlite::Connection, ip_hash: &str) -> Result<b
 // ─── IP history ───────────────────────────────────────────────────────────────
 
 /// Count total posts by IP hash across all boards.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn count_posts_by_ip_hash(conn: &rusqlite::Connection, ip_hash: &str) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COUNT(*) FROM posts WHERE ip_hash = ?1",
@@ -455,14 +658,25 @@ pub fn count_posts_by_ip_hash(conn: &rusqlite::Connection, ip_hash: &str) -> Res
 }
 
 /// Return paginated posts by IP hash, newest first, across all boards.
-/// Each post is joined with its board short_name for display.
+/// Each post is joined with its board `short_name` for display.
+///
+/// FIX[HIGH-3]: Replaced the three-way join (posts → threads → boards) with a
+/// direct two-way join (posts → boards). The posts table already carries `board_id`,
+/// making the threads join unnecessary. The old join also silently hid any posts
+/// whose thread had been deleted (orphaned posts) because the INNER JOIN on
+/// threads would exclude them.
+///
+/// FIX[LOW-9]: Switched from bare prepare to `prepare_cached`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_posts_by_ip_hash(
     conn: &rusqlite::Connection,
     ip_hash: &str,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<(crate::models::Post, String)>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT p.id, p.thread_id, p.board_id, p.name, p.tripcode, p.subject,
                 p.body, p.body_html, p.ip_hash, p.file_path, p.file_name,
                 p.file_size, p.thumb_path, p.mime_type, p.created_at,
@@ -471,8 +685,7 @@ pub fn get_posts_by_ip_hash(
                 p.edited_at,
                 b.short_name
          FROM posts p
-         JOIN threads t ON p.thread_id = t.id
-         JOIN boards  b ON t.board_id  = b.id
+         JOIN boards b ON b.id = p.board_id
          WHERE p.ip_hash = ?1
          ORDER BY p.created_at DESC, p.id DESC
          LIMIT ?2 OFFSET ?3",
@@ -491,9 +704,9 @@ pub fn get_posts_by_ip_hash(
 
 // ─── Database maintenance ─────────────────────────────────────────────────────
 
-/// Run PRAGMA wal_checkpoint(TRUNCATE) and return (log_pages, checkpointed_pages, busy).
+/// Run PRAGMA `wal_checkpoint(TRUNCATE)` and return (`log_pages`, `checkpointed_pages`, busy).
 ///
-/// The raw PRAGMA wal_checkpoint pragma returns three columns in this order:
+/// The raw PRAGMA `wal_checkpoint` pragma returns three columns in this order:
 ///   col 0 — busy:         1 if a checkpoint could not complete due to an active reader/writer
 ///   col 1 — log:          total pages in the WAL file
 ///   col 2 — checkpointed: pages actually written back to the database
@@ -505,6 +718,9 @@ pub fn get_posts_by_ip_hash(
 ///
 /// TRUNCATE mode: after a complete checkpoint, the WAL file is truncated to
 /// zero bytes, reclaiming disk space immediately.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn run_wal_checkpoint(conn: &rusqlite::Connection) -> Result<(i64, i64, i64)> {
     let (busy, log_pages, checkpointed) =
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
@@ -518,7 +734,15 @@ pub fn run_wal_checkpoint(conn: &rusqlite::Connection) -> Result<(i64, i64, i64)
 }
 
 /// Return the current on-disk size of the database in bytes
-/// (page_count × page_size, as reported by SQLite).
+/// (`page_count` × `page_size`, as reported by `SQLite`).
+///
+/// FIX[LOW-11]: Note that this does NOT include the WAL file size. When the
+/// database is in WAL mode, the total on-disk footprint is this value plus the
+/// size of the .db-wal file. Call `run_wal_checkpoint` before `get_db_size_bytes`
+/// if you need a reliable post-checkpoint size.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn get_db_size_bytes(conn: &rusqlite::Connection) -> Result<i64> {
     let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
     let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
@@ -532,6 +756,9 @@ pub fn get_db_size_bytes(conn: &rusqlite::Connection) -> Result<i64> {
 /// the full rebuild is complete; for large databases this may take several
 /// seconds. Always call `get_db_size_bytes` before and after to report the
 /// space saving to the operator.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn run_vacuum(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch("VACUUM")?;
     Ok(())

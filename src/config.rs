@@ -11,28 +11,25 @@
 // SECURITY: The cookie_secret is auto-generated on first run and persisted
 // to settings.toml. It is never left at a well-known default value.
 
-use once_cell::sync::Lazy;
 use rand_core::{OsRng, RngCore};
 use serde::Deserialize;
 use std::env;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 /// Absolute path to the directory the running binary lives in.
 fn binary_dir() -> PathBuf {
-    match std::env::current_exe()
+    std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-    {
-        Some(dir) => dir,
-        None => {
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| {
             eprintln!(
                 "Warning: could not determine binary directory; \
                  using current working directory for data storage. \
                  Set CHAN_DB and CHAN_UPLOADS env vars to override."
             );
             PathBuf::from(".")
-        }
-    }
+        })
 }
 
 fn settings_file_path() -> PathBuf {
@@ -60,9 +57,36 @@ struct SettingsFile {
     cookie_secret: Option<String>,
     enable_tor_support: Option<bool>,
     require_ffmpeg: Option<bool>,
-    /// How often to run PRAGMA wal_checkpoint(TRUNCATE), in seconds.
+    /// How often to run PRAGMA `wal_checkpoint(TRUNCATE)`, in seconds.
     /// Set to 0 to disable. Default: 3600 (hourly).
     wal_checkpoint_interval_secs: Option<u64>,
+    /// How often to run VACUUM to reclaim disk space, in hours.
+    /// Set to 0 to disable. Default: 24 (daily).
+    auto_vacuum_interval_hours: Option<u64>,
+    /// How often to purge vote records for expired polls, in hours.
+    /// Set to 0 to disable. Default: 72 (every 3 days).
+    poll_cleanup_interval_hours: Option<u64>,
+    /// Database file size (MB) above which a warning banner is shown in the
+    /// admin panel. Set to 0 to disable. Default: 2048 (2 GiB).
+    db_warn_threshold_mb: Option<u64>,
+    /// Maximum number of pending jobs in the background job queue.
+    /// When this limit is reached, new jobs are dropped (with a warning) rather
+    /// than accepted. Default: 1000.
+    job_queue_capacity: Option<u64>,
+    /// Maximum seconds to allow a single `FFmpeg` transcode or waveform job to
+    /// run before it is killed. Default: 120.
+    ffmpeg_timeout_secs: Option<u64>,
+    /// When true, overflow threads are always archived rather than hard-deleted,
+    /// even on boards with `allow_archive` = false. Default: true.
+    archive_before_prune: Option<bool>,
+    /// Maximum total size (MiB) of all thumbnail/waveform cache files across all
+    /// boards. A background task evicts the oldest files when exceeded.
+    /// Set to 0 to disable. Default: 200.
+    waveform_cache_max_mb: Option<u64>,
+    /// Number of threads in Tokio's blocking pool (`spawn_blocking`).
+    /// Defaults to logical CPUs × 4. Increase if DB/render latency is a bottleneck
+    /// under load.
+    blocking_threads: Option<usize>,
 }
 
 fn load_settings_file() -> SettingsFile {
@@ -79,7 +103,7 @@ fn load_settings_file() -> SettingsFile {
 /// Create settings.toml with defaults if it does not exist yet.
 /// Call this once at startup (before CONFIG is accessed for the first time).
 ///
-/// A cryptographically random cookie_secret is generated on first run and
+/// A cryptographically random `cookie_secret` is generated on first run and
 /// written to settings.toml. Subsequent runs load it from the file.
 /// The server never operates with a known/default secret.
 pub fn generate_settings_file_if_missing() {
@@ -138,6 +162,46 @@ require_ffmpeg = false
 # Set to 0 to disable. Default: 3600 (hourly).
 wal_checkpoint_interval_secs = 3600
 
+# How often (in hours) to run VACUUM automatically to reclaim disk space
+# freed by deleted posts and threads. Set to 0 to disable. Default: 24.
+auto_vacuum_interval_hours = 24
+
+# How often (in hours) to purge vote records for polls that have expired.
+# The poll question and options are kept for display; only per-IP vote rows
+# are deleted. Set to 0 to disable. Default: 72.
+poll_cleanup_interval_hours = 72
+
+# Database file size (MiB) above which a warning banner appears in the admin
+# panel. Set to 0 to disable. Default: 2048 (2 GiB).
+db_warn_threshold_mb = 2048
+
+# Maximum number of pending background jobs (video transcode, waveform, etc.)
+# allowed in the queue at once. When this limit is reached, new jobs are
+# silently dropped (with a warning log) rather than accepted. Default: 1000.
+job_queue_capacity = 1000
+
+# Maximum seconds a single FFmpeg transcode or waveform job may run before
+# it is killed. Prevents pathological media files from stalling the worker
+# pool indefinitely. Default: 120.
+ffmpeg_timeout_secs = 120
+
+# When true, threads that would be hard-deleted by the prune worker are instead
+# moved to the archive table, even on boards where archiving is disabled. This
+# acts as a global safety net against silent data loss when a board hits its
+# thread limit. Default: true.
+archive_before_prune = true
+
+# Maximum total size (MiB) of all thumbnail/waveform cache files across all
+# boards. A background task periodically evicts the oldest files when the
+# total exceeds this value. Set to 0 to disable. Default: 200.
+waveform_cache_max_mb = 200
+
+# Number of threads in Tokio's blocking pool (spawn_blocking). Every page
+# render and DB write goes through this pool; sizing it to CPUs × 4 prevents
+# it from becoming a bottleneck under concurrent load.
+# Default: logical CPUs × 4 (auto-detected at startup; leave 0 for auto).
+blocking_threads = 0
+
 # Secret key for IP hashing.
 # AUTO-GENERATED on first run — do NOT change after your first post,
 # or all existing IP hashes become invalid (bans will stop working).
@@ -147,15 +211,16 @@ cookie_secret = "{secret}"
     );
 
     match std::fs::write(&path, content) {
-        Ok(_) => println!("Created  settings.toml  ({})", path.display()),
+        Ok(()) => println!("Created  settings.toml  ({})", path.display()),
         Err(e) => eprintln!("Warning: could not write settings.toml: {e}"),
     }
 }
 
 // ─── Runtime config ───────────────────────────────────────────────────────────
 
-pub static CONFIG: Lazy<Config> = Lazy::new(Config::from_env);
+pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     // ── Loaded from settings.toml (env vars still override) ──────────────────
     pub forum_name: String,
@@ -185,7 +250,7 @@ pub struct Config {
     pub default_bump_limit: u32,
     #[allow(dead_code)] // used as default when creating boards via CLI/admin
     pub max_threads_per_board: u32,
-    /// Maximum GET requests per IP per rate_limit_window.
+    /// Maximum GET requests per IP per `rate_limit_window`.
     pub rate_limit_gets: u32,
     pub rate_limit_window: u64,
     pub cookie_secret: String,
@@ -194,9 +259,29 @@ pub struct Config {
     pub https_cookies: bool,
     /// Interval in seconds between WAL checkpoint runs. 0 = disabled.
     pub wal_checkpoint_interval: u64,
+    /// Interval in hours between automatic VACUUM runs. 0 = disabled.
+    pub auto_vacuum_interval_hours: u64,
+    /// Interval in hours between expired poll vote cleanup runs. 0 = disabled.
+    pub poll_cleanup_interval_hours: u64,
+    /// DB file size threshold in bytes above which admin panel shows a warning.
+    /// 0 = disabled.
+    pub db_warn_threshold_bytes: u64,
+    /// Maximum number of pending jobs before new ones are dropped.
+    pub job_queue_capacity: u64,
+    /// Maximum seconds a single `FFmpeg` job may run before being killed.
+    pub ffmpeg_timeout_secs: u64,
+    /// When true, threads are always archived (never hard-deleted) on prune,
+    /// overriding individual board settings.
+    pub archive_before_prune: bool,
+    /// Total thumbnail/waveform cache size limit in bytes. 0 = disabled.
+    pub waveform_cache_max_bytes: u64,
+    /// Number of threads in Tokio's blocking pool. Default: logical CPUs × 4.
+    pub blocking_threads: usize,
 }
 
 impl Config {
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn from_env() -> Self {
         let s = load_settings_file();
         let data_dir = binary_dir().join("rustchan-data");
@@ -278,13 +363,68 @@ impl Config {
                 "CHAN_WAL_CHECKPOINT_SECS",
                 s.wal_checkpoint_interval_secs.unwrap_or(3600),
             ),
+            auto_vacuum_interval_hours: env_parse(
+                "CHAN_AUTO_VACUUM_HOURS",
+                s.auto_vacuum_interval_hours.unwrap_or(24),
+            ),
+            poll_cleanup_interval_hours: env_parse(
+                "CHAN_POLL_CLEANUP_HOURS",
+                s.poll_cleanup_interval_hours.unwrap_or(72),
+            ),
+            db_warn_threshold_bytes: {
+                let mb = env_parse::<u64>(
+                    "CHAN_DB_WARN_THRESHOLD_MB",
+                    s.db_warn_threshold_mb.unwrap_or(2048),
+                );
+                mb * 1024 * 1024
+            },
+            job_queue_capacity: env_parse(
+                "CHAN_JOB_QUEUE_CAPACITY",
+                s.job_queue_capacity.unwrap_or(1000),
+            ),
+            ffmpeg_timeout_secs: env_parse(
+                "CHAN_FFMPEG_TIMEOUT_SECS",
+                s.ffmpeg_timeout_secs.unwrap_or(120),
+            ),
+            archive_before_prune: env_bool(
+                "CHAN_ARCHIVE_BEFORE_PRUNE",
+                s.archive_before_prune.unwrap_or(true),
+            ),
+            waveform_cache_max_bytes: {
+                let mb = env_parse::<u64>(
+                    "CHAN_WAVEFORM_CACHE_MAX_MB",
+                    s.waveform_cache_max_mb.unwrap_or(200),
+                );
+                mb * 1024 * 1024
+            },
+            blocking_threads: {
+                let cpus = std::thread::available_parallelism()
+                    .map(std::num::NonZero::get)
+                    .unwrap_or(4);
+                let configured =
+                    env_parse("CHAN_BLOCKING_THREADS", s.blocking_threads.unwrap_or(0));
+                if configured == 0 {
+                    cpus * 4
+                } else {
+                    configured
+                }
+            },
         }
     }
 
     /// Validate critical configuration values and abort with a clear error
     /// message if any are out of range.  Called once at startup so operators
     /// catch misconfiguration immediately rather than discovering it at runtime.
+    ///
+    /// # Errors
+    /// Returns an error if any configuration value is out of an acceptable range,
+    /// or if the upload directory is not writable.
     pub fn validate(&self) -> anyhow::Result<()> {
+        const MIB: usize = 1024 * 1024;
+        const MAX_IMAGE_MIB: usize = 100;
+        const MAX_VIDEO_MIB: usize = 2048;
+        const MAX_AUDIO_MIB: usize = 512;
+
         // cookie_secret is hex-encoded: 64 hex chars = 32 bytes of entropy.
         if self.cookie_secret.len() < 64 {
             anyhow::bail!(
@@ -294,11 +434,6 @@ impl Config {
                 self.cookie_secret.len()
             );
         }
-
-        const MIB: usize = 1024 * 1024;
-        const MAX_IMAGE_MIB: usize = 100;
-        const MAX_VIDEO_MIB: usize = 2048;
-        const MAX_AUDIO_MIB: usize = 512;
 
         if self.max_image_size < MIB || self.max_image_size > MAX_IMAGE_MIB * MIB {
             anyhow::bail!(
@@ -343,9 +478,65 @@ impl Config {
     }
 }
 
+/// Update `forum_name` and `site_subtitle` in `settings.toml` in-place,
+/// preserving all other lines and comments.
+///
+/// Called by the admin site-settings handler so that changes made via the
+/// panel are reflected in the file and survive a restart without the operator
+/// needing to hand-edit `settings.toml`.
+///
+/// If the key is not yet present in the file the function is a no-op for that
+/// key (it won't append new lines — the file is only updated if the key already
+/// exists).  On a fresh install `generate_settings_file_if_missing` always
+/// writes both keys, so this is only a concern for manually-crafted files.
+pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
+    // Escape backslash and double-quote, then wrap in double quotes.
+    fn toml_quote(s: &str) -> String {
+        let inner = s.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{inner}\"")
+    }
+
+    let path = settings_file_path();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: could not read settings.toml for update: {e}");
+            return;
+        }
+    };
+
+    // Replace the value portion of `key = "..."` lines while preserving
+    // indentation, comments on the same line, and surrounding whitespace.
+    // We use a simple line-by-line scan so that file comments are untouched.
+
+    let trailing_newline = content.ends_with('\n');
+    let updated: Vec<String> = content
+        .lines()
+        .map(|line| {
+            // Match `forum_name = ...` (possibly with surrounding spaces).
+            if line.trim_start().starts_with("forum_name") && line.contains('=') {
+                return format!("forum_name = {}", toml_quote(forum_name));
+            }
+            if line.trim_start().starts_with("site_subtitle") && line.contains('=') {
+                return format!("site_subtitle = {}", toml_quote(site_subtitle));
+            }
+            line.to_string()
+        })
+        .collect();
+
+    let mut out = updated.join("\n");
+    if trailing_newline {
+        out.push('\n');
+    }
+
+    if let Err(e) = std::fs::write(&path, out) {
+        eprintln!("Warning: could not write updated settings.toml: {e}");
+    }
+}
+
 // ─── Cookie secret rotation check ────────────────────────────────────────────
 
-/// Check whether the cookie_secret has changed since the last run by comparing
+/// Check whether the `cookie_secret` has changed since the last run by comparing
 /// a SHA-256 hash stored in the DB against the currently loaded secret.
 ///
 /// Called once at startup after the DB pool is ready.
@@ -353,14 +544,13 @@ impl Config {
 /// On first run (no stored hash), silently stores the current hash and returns.
 pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
     use sha2::{Digest, Sha256};
+    const KEY: &str = "cookie_secret_hash";
 
     let current_hash = {
         let mut h = Sha256::new();
         h.update(CONFIG.cookie_secret.as_bytes());
         hex::encode(h.finalize())
     };
-
-    const KEY: &str = "cookie_secret_hash";
 
     let stored = conn
         .query_row(

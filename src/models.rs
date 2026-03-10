@@ -24,46 +24,50 @@ pub enum MediaType {
 }
 
 impl MediaType {
-    /// Infer MediaType from a MIME type string.
+    /// Infer `MediaType` from a MIME type string.
+    #[must_use]
     pub fn from_mime(mime: &str) -> Option<Self> {
         if mime.starts_with("image/") {
-            Some(MediaType::Image)
+            Some(Self::Image)
         } else if mime.starts_with("video/") {
-            Some(MediaType::Video)
+            Some(Self::Video)
         } else if mime.starts_with("audio/") {
-            Some(MediaType::Audio)
+            Some(Self::Audio)
         } else {
             None
         }
     }
 
-    /// Infer MediaType from a file extension (lowercase, no dot).
+    /// Infer `MediaType` from a file extension (lowercase, no dot).
     /// Used during the backfill migration for pre-existing posts.
+    #[must_use]
     #[allow(dead_code)]
     pub fn from_ext(ext: &str) -> Option<Self> {
         match ext {
-            "jpg" | "jpeg" | "png" | "gif" | "webp" => Some(MediaType::Image),
-            "mp4" | "webm" => Some(MediaType::Video),
-            "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "opus" => Some(MediaType::Audio),
+            "jpg" | "jpeg" | "png" | "gif" | "webp" => Some(Self::Image),
+            "mp4" | "webm" => Some(Self::Video),
+            "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "opus" => Some(Self::Audio),
             _ => None,
         }
     }
 
     /// Serialise to the TEXT value stored in the database.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            MediaType::Image => "image",
-            MediaType::Video => "video",
-            MediaType::Audio => "audio",
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
         }
     }
 
     /// Deserialise from the TEXT value stored in the database.
+    #[must_use]
     pub fn from_db_str(s: &str) -> Option<Self> {
         match s {
-            "image" => Some(MediaType::Image),
-            "video" => Some(MediaType::Video),
-            "audio" => Some(MediaType::Audio),
+            "image" => Some(Self::Image),
+            "video" => Some(Self::Video),
+            "audio" => Some(Self::Audio),
             _ => None,
         }
     }
@@ -77,6 +81,7 @@ impl std::fmt::Display for MediaType {
 
 /// A board, e.g. /tech/ — Technology
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Board {
     pub id: i64,
     pub short_name: String, // "tech" (no slashes)
@@ -256,7 +261,7 @@ pub struct Poll {
     pub created_at: i64,
 }
 
-/// A single poll option with live vote count (joined from poll_votes)
+/// A single poll option with live vote count (joined from `poll_votes`)
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
 pub struct PollOption {
@@ -273,9 +278,9 @@ pub struct PollData {
     pub poll: Poll,
     pub options: Vec<PollOption>,
     pub total_votes: i64,
-    /// Which option_id this user voted for, if any
+    /// Which `option_id` this user voted for, if any
     pub user_voted_option: Option<i64>,
-    /// true when expires_at <= now
+    /// true when `expires_at` <= now
     pub is_expired: bool,
 }
 
@@ -287,7 +292,7 @@ pub struct SearchQuery {
     pub page: i64,
 }
 
-fn default_page() -> i64 {
+const fn default_page() -> i64 {
     1
 }
 
@@ -305,6 +310,7 @@ impl Pagination {
     /// - `page` is clamped to >= 1
     /// - `per_page` is clamped to >= 1 (avoids division by zero)
     /// - `total` is clamped to >= 0
+    #[must_use]
     pub fn new(page: i64, per_page: i64, total: i64) -> Self {
         Self {
             page: page.max(1),
@@ -315,6 +321,7 @@ impl Pagination {
 
     /// Total number of pages. Always returns at least 1 so templates can
     /// safely display "page 1 of 1" even on empty result sets.
+    #[must_use]
     pub fn total_pages(&self) -> i64 {
         // per_page is guaranteed >= 1 by new(), but defend against manual
         // construction just in case.
@@ -323,14 +330,17 @@ impl Pagination {
         ((t.saturating_add(pp - 1)) / pp).max(1)
     }
 
+    #[must_use]
     pub fn offset(&self) -> i64 {
         (self.page.max(1) - 1).saturating_mul(self.per_page.max(1))
     }
 
-    pub fn has_prev(&self) -> bool {
+    #[must_use]
+    pub const fn has_prev(&self) -> bool {
         self.page > 1
     }
 
+    #[must_use]
     pub fn has_next(&self) -> bool {
         self.page < self.total_pages()
     }
@@ -385,7 +395,7 @@ pub struct ModLogEntry {
     pub id: i64,
     pub admin_id: i64,
     pub admin_name: String,
-    /// E.g. "delete_post", "ban", "sticky", "lock", "resolve_report"
+    /// E.g. "`delete_post`", "ban", "sticky", "lock", "`resolve_report`"
     pub action: String,
     /// "post" | "thread" | "board" | "ban" | "report"
     pub target_type: String,
@@ -435,14 +445,12 @@ mod tests {
             assert_eq!(
                 mt.as_str(),
                 json_str,
-                "as_str() and serde disagree for {:?}",
-                mt
+                "as_str() and serde disagree for {mt:?}"
             );
             assert_eq!(
                 MediaType::from_db_str(json_str),
                 Some(mt.clone()),
-                "from_db_str() round-trip failed for {:?}",
-                mt
+                "from_db_str() round-trip failed for {mt:?}"
             );
         }
     }
@@ -450,7 +458,7 @@ mod tests {
     #[test]
     fn media_type_display_matches_as_str() {
         for mt in [MediaType::Image, MediaType::Video, MediaType::Audio] {
-            assert_eq!(format!("{}", mt), mt.as_str());
+            assert_eq!(format!("{mt}"), mt.as_str());
         }
     }
 

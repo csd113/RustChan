@@ -97,8 +97,8 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
 /// Set up and launch a Tor hidden-service instance.
 ///
 /// Creates inside `data_dir`:
-///   tor_data/           — Tor's DataDirectory (lock file, keys, etc.)
-///   tor_hidden_service/ — HiddenServiceDir  (private key + hostname)
+///   `tor_data`/           — Tor's `DataDirectory` (lock file, keys, etc.)
+///   `tor_hidden_service`/ — `HiddenServiceDir`  (private key + hostname)
 ///   torrc               — auto-generated config
 ///
 /// Launches `tor -f <torrc>` as a background process then polls for the
@@ -112,6 +112,7 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
 //
 // Fix #7: function now returns ToolStatus so callers can branch on whether
 //         Tor is actually running.
+#[allow(clippy::too_many_lines)]
 pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> ToolStatus {
     if !enable_tor_support {
         return ToolStatus::Missing;
@@ -141,7 +142,7 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> 
         return ToolStatus::Missing;
     };
 
-    println!("[INFO] Tor binary: {}", tor_bin);
+    println!("[INFO] Tor binary: {tor_bin}");
 
     // ── 2. Create directories ─────────────────────────────────────────────────
     let hs_dir = data_dir.join("tor_hidden_service");
@@ -233,7 +234,7 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> 
 
     let mut child = match child {
         Err(e) => {
-            println!("[WARN] Tor: failed to start '{}': {}", tor_bin, e);
+            println!("[WARN] Tor: failed to start '{tor_bin}': {e}");
             print_torrc_hint(&hs_dir, bind_port);
             return ToolStatus::Missing;
         }
@@ -274,10 +275,7 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> 
     }));
 
     let pid = child.lock().expect("child process mutex poisoned").id();
-    println!(
-        "[INFO] Tor: process started (pid {}). Waiting for .onion address…",
-        pid
-    );
+    println!("[INFO] Tor: process started (pid {pid}). Waiting for .onion address…");
 
     // ── 5. Quick health-check + hostname polling (background thread) ──────────
     let hostname_path = hs_abs.join("hostname");
@@ -294,23 +292,24 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> 
         // Fix #4 (early-exit check): use the shared child Arc instead of
         //         a moved value so the same handle can also be used by
         //         poll_for_hostname to detect crashes during polling.
-        match child_bg
+        let try_wait_result = child_bg
             .lock()
             .expect("child process mutex poisoned")
-            .try_wait()
-        {
+            .try_wait();
+        match try_wait_result {
             Ok(Some(status)) => {
                 // Process already exited — surface stderr for the operator.
                 let lines = stderr_bg.lock().expect("stderr buffer mutex poisoned");
                 println!();
-                println!("[ERR ] Tor: process exited early ({})", status);
+                println!("[ERR ] Tor: process exited early ({status})");
                 if !lines.is_empty() {
                     println!("────── Tor stderr ──────────────────────────────");
                     for line in lines.iter().take(20) {
-                        println!("  {}", line);
+                        println!("  {line}");
                     }
                     println!("────────────────────────────────────────────────");
                 }
+                drop(lines);
                 println!();
                 print_diagnosis_hints(&torrc_display, &tor_bin_owned, bind_port);
                 return;
@@ -319,7 +318,7 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> 
                 // Still running — good.
             }
             Err(e) => {
-                println!("[WARN] Tor: could not query process status: {}", e);
+                println!("[WARN] Tor: could not query process status: {e}");
                 // Continue to poll for the hostname file anyway.
             }
         }
@@ -363,14 +362,15 @@ fn poll_for_hostname(
             if let Ok(Some(status)) = c.try_wait() {
                 let lines = stderr_lines.lock().expect("stderr buffer mutex poisoned");
                 println!();
-                println!("[ERR ] Tor: process crashed during startup ({})", status);
+                println!("[ERR ] Tor: process crashed during startup ({status})");
                 if !lines.is_empty() {
                     println!("────── Tor stderr ──────────────────────────────");
                     for line in lines.iter().take(20) {
-                        println!("  {}", line);
+                        println!("  {line}");
                     }
                     println!("────────────────────────────────────────────────");
                 }
+                drop(lines);
                 println!();
                 print_diagnosis_hints(torrc_display, tor_bin, bind_port);
                 return;
@@ -388,17 +388,14 @@ fn poll_for_hostname(
                     // Empty file — Tor is still writing; retry.
                 }
                 Err(e) => {
-                    println!("[WARN] Tor: hostname unreadable: {}", e);
+                    println!("[WARN] Tor: hostname unreadable: {e}");
                 }
             }
         }
 
         if std::time::Instant::now() >= deadline {
             println!();
-            println!(
-                "[WARN] Tor: timed out after {}s waiting for hostname file.",
-                TIMEOUT_SECS
-            );
+            println!("[WARN] Tor: timed out after {TIMEOUT_SECS}s waiting for hostname file.");
             println!("       Expected at: {}", hostname_path.display());
             println!();
             print_diagnosis_hints(torrc_display, tor_bin, bind_port);
@@ -422,14 +419,14 @@ fn poll_for_hostname(
 fn print_onion_banner(onion: &str, hostname_path: &Path) {
     // v3 .onion URL: "http://" (7) + 56-char base32 address + ".onion" (6) = 69 chars.
     // Box inner width 72 gives 3 chars of right-margin after the longest URL.
-    let addr_line = format!("http://{}", onion);
+    let addr_line = format!("http://{onion}");
     let key_dir = hostname_path.parent().unwrap_or(hostname_path);
 
     println!();
     println!("╔════════════════════════════════════════════════════════════════════════╗");
     println!("║        TOR ONION SERVICE ACTIVE  ✓                                     ║");
     println!("╠════════════════════════════════════════════════════════════════════════╣");
-    println!("║  {:<70}║", addr_line); // fix #1: {:<70}, 2+70+1 = inner 72
+    println!("║  {addr_line:<70}║"); // fix #1: {:<70}, 2+70+1 = inner 72
     println!("║                                                                        ║");
     println!("║  Share this with Tor Browser users.                                    ║");
     println!("║  Your private key is stored at:                                        ║");
@@ -458,7 +455,7 @@ fn print_install_instructions(bind_port: u16) {
     println!("  Then add to your torrc:");
     println!("    SocksPort 0");
     println!("    HiddenServiceDir /path/to/tor_hidden_service/");
-    println!("    HiddenServicePort 80 127.0.0.1:{}", bind_port);
+    println!("    HiddenServicePort 80 127.0.0.1:{bind_port}");
     println!();
 }
 
@@ -467,7 +464,7 @@ fn print_diagnosis_hints(torrc_path: &str, tor_bin: &str, bind_port: u16) {
     println!("  ── Troubleshooting ─────────────────────────────────────────────────────");
     println!();
     println!("  1. Run Tor manually to see live error output:");
-    println!("       {} -f {}", tor_bin, torrc_path);
+    println!("       {tor_bin} -f {torrc_path}");
     println!();
     println!("  2. Common causes:");
     println!();
@@ -500,7 +497,7 @@ fn print_diagnosis_hints(torrc_path: &str, tor_bin: &str, bind_port: u16) {
     println!("  3. If Tor works but you want to manage it yourself:");
     println!("       Set  enable_tor_support = false  in settings.toml");
     println!("       and add to your own torrc:");
-    println!("         HiddenServicePort 80 127.0.0.1:{}", bind_port);
+    println!("         HiddenServicePort 80 127.0.0.1:{bind_port}");
     println!("  ────────────────────────────────────────────────────────────────────────");
     println!();
 }
@@ -511,7 +508,7 @@ fn print_torrc_hint(hs_dir: &Path, bind_port: u16) {
     println!("         SocksPort 0");
     println!("         DataDirectory /var/lib/tor/rustchan-data/");
     println!("         HiddenServiceDir {}", hs_dir.display());
-    println!("         HiddenServicePort 80 127.0.0.1:{}", bind_port);
+    println!("         HiddenServicePort 80 127.0.0.1:{bind_port}");
     println!(
         "       Your .onion address will appear in: {}/hostname",
         hs_dir.display()

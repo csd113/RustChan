@@ -7,9 +7,46 @@ pub mod thread;
 // Both create_thread and post_reply parse the same multipart fields.
 // This helper consolidates that duplicated logic into one place.
 
+use crate::config::CONFIG;
 use crate::error::{AppError, Result};
 use crate::middleware::validate_csrf;
+use crate::workers::JobQueue;
 use axum::extract::Multipart;
+
+// ─── Streaming multipart size limit ──────────────────────────────────────────
+//
+// 3.1: The previous implementation called `field.bytes().await` which buffers
+// the entire file in memory before any size check, allowing a malicious client
+// to exhaust server RAM with a multi-GB upload.
+//
+// `read_field_bytes` replaces it with a streaming read that accumulates chunks
+// and aborts — returning HTTP 413 — the moment the running total exceeds the
+// configured limit.  The limit used is the largest allowed media size so that
+// any single field is capped.
+//
+// Text fields (CSRF token, post body, …) are routed through `field.text()`
+// which is bounded by axum's body length limit set in the router layer.
+
+async fn read_field_bytes(
+    mut field: axum::extract::multipart::Field<'_>,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
+        if buf.len() + chunk.len() > max_bytes {
+            return Err(AppError::UploadTooLarge(format!(
+                "File too large. Maximum upload size is {} MiB.",
+                max_bytes / 1024 / 1024
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
 
 /// Parsed fields from a post/thread creation multipart form.
 pub struct PostFormData {
@@ -29,12 +66,13 @@ pub struct PostFormData {
     pub poll_duration_secs: Option<i64>,
     /// Sage — when true the reply must not bump the thread.
     pub sage: bool,
-    /// PoW CAPTCHA nonce — submitted by the thread-creation form when enabled.
+    /// `PoW` CAPTCHA nonce — submitted by the thread-creation form when enabled.
     pub pow_nonce: String,
 }
 
 /// Drain all fields from a multipart form into [`PostFormData`].
 /// `csrf_cookie` is the value from the browser cookie for CSRF verification.
+#[allow(clippy::too_many_lines)]
 pub async fn parse_post_multipart(
     mut multipart: Multipart,
     csrf_cookie: Option<&str>,
@@ -111,22 +149,17 @@ pub async fn parse_post_multipart(
             }
             Some("file") => {
                 let fname = field.file_name().unwrap_or("upload").to_string();
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| AppError::BadRequest(format!("File read error: {e}")))?;
-                if !bytes.is_empty() {
-                    file = Some((bytes.to_vec(), fname));
+                let max = CONFIG.max_video_size.max(CONFIG.max_audio_size);
+                let data = read_field_bytes(field, max).await?;
+                if !data.is_empty() {
+                    file = Some((data, fname));
                 }
             }
             Some("audio_file") => {
                 let fname = field.file_name().unwrap_or("audio").to_string();
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| AppError::BadRequest(format!("Audio file read error: {e}")))?;
-                if !bytes.is_empty() {
-                    audio_file = Some((bytes.to_vec(), fname));
+                let data = read_field_bytes(field, CONFIG.max_audio_size).await?;
+                if !data.is_empty() {
+                    audio_file = Some((data, fname));
                 }
             }
             _ => {
@@ -138,7 +171,9 @@ pub async fn parse_post_multipart(
     // Convert duration value + unit → seconds (saturating to prevent overflow).
     // The unit is validated against an explicit allow-list (case-insensitive) so
     // that a tampered form field does not silently multiply by an arbitrary factor.
-    let poll_duration_secs = if !poll_question.trim().is_empty() {
+    let poll_duration_secs = if poll_question.trim().is_empty() {
+        None
+    } else {
         match poll_duration_value {
             None => None,
             Some(v) => {
@@ -148,17 +183,12 @@ pub async fn parse_post_multipart(
                     "hours" => v.saturating_mul(3600),
                     "days" => v.saturating_mul(86_400),
                     other => {
-                        return Err(AppError::BadRequest(format!(
-                            "Invalid poll duration unit '{}'. Use 'minutes', 'hours', or 'days'.",
-                            other
-                        )));
+                        return Err(AppError::BadRequest(format!("Invalid poll duration unit '{other}'. Use 'minutes', 'hours', or 'days'.")));
                     }
                 };
                 Some(secs)
             }
         }
-    } else {
-        None
     };
 
     Ok(PostFormData {
@@ -181,12 +211,12 @@ pub async fn parse_post_multipart(
 
 /// Convert an anyhow error from `save_upload` into the most appropriate
 /// `AppError` variant, giving clients accurate HTTP status codes:
-///   • "File too large"          → 413 UploadTooLarge
-///   • "Insufficient disk space" → 413 UploadTooLarge
-///   • "File type not allowed"   → 415 InvalidMediaType
-///   • "Not an audio file"       → 415 InvalidMediaType
-///   • anything else             → 400 BadRequest
-pub fn classify_upload_error(e: anyhow::Error) -> AppError {
+///   • "File too large"          → 413 `UploadTooLarge`
+///   • "Insufficient disk space" → 413 `UploadTooLarge`
+///   • "File type not allowed"   → 415 `InvalidMediaType`
+///   • "Not an audio file"       → 415 `InvalidMediaType`
+///   • anything else             → 400 `BadRequest`
+pub fn classify_upload_error(e: &anyhow::Error) -> AppError {
     let msg = e.to_string();
     // Compare lower-cased so minor wording changes in save_upload don't silently
     // fall through to a generic 400 instead of the correct 413 / 415.
@@ -198,4 +228,195 @@ pub fn classify_upload_error(e: anyhow::Error) -> AppError {
     } else {
         AppError::BadRequest(msg)
     }
+}
+
+// ─── Shared media upload processing (R2-2) ───────────────────────────────────
+//
+// create_thread (board.rs) and post_reply (thread.rs) had identical blocks for:
+//   1. Magic-byte mime detection + per-board toggle enforcement
+//   2. SHA-256 deduplication lookup
+//   3. save_upload / save_audio_with_image_thumb
+//   4. record_file_hash
+//   5. Image+audio combo validation
+//   6. Background job enqueueing
+//
+// Both handlers now call these shared functions instead of duplicating the code.
+
+use crate::models::Board;
+
+/// Process the primary file upload for a new post: detect mime type, enforce
+/// per-board media toggles, SHA-256 dedup, save to disk and record hash.
+///
+/// Returns `Ok(None)` when `file_data` is `None` (no file attached).
+/// Must be called from inside a `spawn_blocking` closure.
+pub fn process_primary_upload(
+    file_data: Option<(Vec<u8>, String)>,
+    board: &Board,
+    conn: &rusqlite::Connection,
+    upload_dir: &str,
+    thumb_size: u32,
+    max_image_size: usize,
+    max_video_size: usize,
+    max_audio_size: usize,
+    ffmpeg_available: bool,
+) -> Result<Option<crate::utils::files::UploadedFile>> {
+    let Some((data, fname)) = file_data else {
+        return Ok(None);
+    };
+    let detected_mime = crate::utils::files::detect_mime_type(&data)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let detected_media = crate::models::MediaType::from_mime(detected_mime)
+        .ok_or_else(|| AppError::BadRequest("Unsupported file type.".into()))?;
+
+    match detected_media {
+        crate::models::MediaType::Image if !board.allow_images => {
+            return Err(AppError::BadRequest(
+                "Image uploads are disabled on this board.".into(),
+            ))
+        }
+        crate::models::MediaType::Video if !board.allow_video => {
+            return Err(AppError::BadRequest(
+                "Video uploads are disabled on this board.".into(),
+            ))
+        }
+        crate::models::MediaType::Audio if !board.allow_audio => {
+            return Err(AppError::BadRequest(
+                "Audio uploads are disabled on this board.".into(),
+            ))
+        }
+        crate::models::MediaType::Image
+        | crate::models::MediaType::Video
+        | crate::models::MediaType::Audio => {}
+    }
+
+    // SHA-256 deduplication — serve the cached entry without re-saving.
+    let hash = crate::utils::crypto::sha256_hex(&data);
+    if let Some(cached) = crate::db::find_file_by_hash(conn, &hash)? {
+        let cached_media = crate::models::MediaType::from_mime(&cached.mime_type)
+            .unwrap_or(crate::models::MediaType::Image);
+        return Ok(Some(crate::utils::files::UploadedFile {
+            file_path: cached.file_path,
+            thumb_path: cached.thumb_path,
+            original_name: crate::utils::sanitize::sanitize_filename(&fname),
+            mime_type: cached.mime_type,
+            file_size: i64::try_from(data.len()).unwrap_or(0),
+            media_type: cached_media,
+            processing_pending: false,
+        }));
+    }
+
+    let f = crate::utils::files::save_upload(
+        &data,
+        &fname,
+        upload_dir,
+        &board.short_name,
+        thumb_size,
+        max_image_size,
+        max_video_size,
+        max_audio_size,
+        ffmpeg_available,
+    )
+    .map_err(|e| classify_upload_error(&e))?;
+    crate::db::record_file_hash(conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
+    Ok(Some(f))
+}
+
+/// Process the secondary audio file for an image+audio combo upload.
+/// `primary_upload` must already be the processed primary image.
+///
+/// Returns `Ok(None)` when `audio_file_data` is `None`.
+/// Must be called from inside a `spawn_blocking` closure.
+pub fn process_audio_combo(
+    audio_file_data: Option<(Vec<u8>, String)>,
+    primary_upload: Option<&crate::utils::files::UploadedFile>,
+    board: &Board,
+    upload_dir: &str,
+    max_audio_size: usize,
+) -> Result<Option<crate::utils::files::UploadedFile>> {
+    let Some((aud_data, aud_fname)) = audio_file_data else {
+        return Ok(None);
+    };
+
+    if !board.allow_audio {
+        return Err(AppError::BadRequest(
+            "Audio uploads are disabled on this board.".into(),
+        ));
+    }
+
+    // Audio combo requires the primary file to be an image.
+    let primary_is_image =
+        primary_upload.is_some_and(|u| matches!(u.media_type, crate::models::MediaType::Image));
+    if !primary_is_image {
+        return Err(AppError::BadRequest(
+            "Audio can only be combined with an image upload.".into(),
+        ));
+    }
+
+    // Confirm the secondary file is actually audio.
+    let aud_mime = crate::utils::files::detect_mime_type(&aud_data)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let aud_media = crate::models::MediaType::from_mime(aud_mime)
+        .ok_or_else(|| AppError::BadRequest("Unsupported audio type.".into()))?;
+    if !matches!(aud_media, crate::models::MediaType::Audio) {
+        return Err(AppError::BadRequest(
+            "The audio slot only accepts audio files.".into(),
+        ));
+    }
+
+    let mut aud_file = crate::utils::files::save_audio_with_image_thumb(
+        &aud_data,
+        &aud_fname,
+        upload_dir,
+        &board.short_name,
+        max_audio_size,
+    )
+    .map_err(|e| classify_upload_error(&e))?;
+
+    // Use the image thumbnail as the audio's visual.
+    if let Some(img) = primary_upload {
+        aud_file.thumb_path.clone_from(&img.thumb_path);
+    }
+    Ok(Some(aud_file))
+}
+
+/// Enqueue background media-processing and spam-check jobs for a newly created
+/// post.  Shared by `create_thread` and `post_reply`.
+pub fn enqueue_post_jobs(
+    job_queue: &JobQueue,
+    post_id: i64,
+    ip_hash: &str,
+    body_len: usize,
+    uploaded: Option<&crate::utils::files::UploadedFile>,
+    board_short: &str,
+) {
+    // 1. Media post-processing (video transcode / audio waveform)
+    if let Some(up) = uploaded {
+        if up.processing_pending {
+            let job = match up.media_type {
+                crate::models::MediaType::Video => Some(crate::workers::Job::VideoTranscode {
+                    post_id,
+                    file_path: up.file_path.clone(),
+                    board_short: board_short.to_string(),
+                }),
+                crate::models::MediaType::Audio => Some(crate::workers::Job::AudioWaveform {
+                    post_id,
+                    file_path: up.file_path.clone(),
+                    board_short: board_short.to_string(),
+                }),
+                crate::models::MediaType::Image => None,
+            };
+            if let Some(j) = job {
+                if let Err(e) = job_queue.enqueue(&j) {
+                    tracing::warn!("Failed to enqueue media job: {e}");
+                }
+            }
+        }
+    }
+
+    // 2. Spam analysis
+    let _ = job_queue.enqueue(&crate::workers::Job::SpamCheck {
+        post_id,
+        ip_hash: ip_hash.to_string(),
+        body_len,
+    });
 }

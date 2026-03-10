@@ -7,8 +7,9 @@
 //   archive_page     — archived threads list
 //   search_page      — search results
 
-use crate::models::*;
+use crate::models::{Board, Pagination, Post, Thread, ThreadSummary};
 use crate::utils::sanitize::escape_html;
+use std::fmt::Write;
 
 use super::{
     base_layout, compress_modal_script, embed_thumb_from_body, fmt_ts, fmt_ts_short,
@@ -17,6 +18,41 @@ use super::{
 
 // ─── Site index (board list) ──────────────────────────────────────────────────
 
+fn board_cards(list: &[&crate::models::BoardStats]) -> String {
+    let mut out = String::new();
+    for s in list {
+        let b = &s.board;
+        let nsfw_badge = if b.nsfw {
+            r#"<span class="nsfw-badge">NSFW</span>"#
+        } else {
+            ""
+        };
+        let thread_word = if s.thread_count == 1 {
+            "thread"
+        } else {
+            "threads"
+        };
+        let _ = write!(
+            out,
+            r#"<a class="board-card" href="/{sh}/catalog">
+  <div class="board-card-short">/{sh}/</div>
+  <div class="board-card-name">{n}{nsfw}</div>
+  <div class="board-card-desc">{d}</div>
+  <div class="board-card-stats">{tc} {tw}</div>
+</a>"#,
+            sh = escape_html(&b.short_name),
+            n = escape_html(&b.name),
+            nsfw = nsfw_badge,
+            d = escape_html(&b.description),
+            tc = s.thread_count,
+            tw = thread_word,
+        );
+    }
+    out
+}
+
+#[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn index_page(
     board_stats: &[crate::models::BoardStats],
     site_stats: &crate::models::SiteStats,
@@ -30,54 +66,22 @@ pub fn index_page(
     let nsfw: Vec<&crate::models::BoardStats> =
         board_stats.iter().filter(|s| s.board.nsfw).collect();
 
-    fn board_cards(list: &[&crate::models::BoardStats]) -> String {
-        list.iter()
-            .map(|s| {
-                let b = &s.board;
-                let nsfw_badge = if b.nsfw {
-                    r#"<span class="nsfw-badge">NSFW</span>"#
-                } else {
-                    ""
-                };
-                let thread_word = if s.thread_count == 1 {
-                    "thread"
-                } else {
-                    "threads"
-                };
-                format!(
-                    r#"<a class="board-card" href="/{sh}/catalog">
-  <div class="board-card-short">/{sh}/</div>
-  <div class="board-card-name">{n}{nsfw}</div>
-  <div class="board-card-desc">{d}</div>
-  <div class="board-card-stats">{tc} {tw}</div>
-</a>"#,
-                    sh = escape_html(&b.short_name),
-                    n = escape_html(&b.name),
-                    nsfw = nsfw_badge,
-                    d = escape_html(&b.description),
-                    tc = s.thread_count,
-                    tw = thread_word,
-                )
-            })
-            .collect()
-    }
-
-    let sfw_sec = if !sfw.is_empty() {
+    let sfw_sec = if sfw.is_empty() {
+        String::new()
+    } else {
         format!(
             "<div class=\"index-section\"><h2 class=\"index-section-title\">// Boards</h2><div class=\"board-cards\">{}</div></div>",
             board_cards(&sfw)
         )
-    } else {
-        String::new()
     };
 
-    let nsfw_sec = if !nsfw.is_empty() {
+    let nsfw_sec = if nsfw.is_empty() {
+        String::new()
+    } else {
         format!(
             "<div class=\"index-section\"><h2 class=\"index-section-title\">// Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2><div class=\"board-cards\">{}</div></div>",
             board_cards(&nsfw)
         )
-    } else {
-        String::new()
     };
 
     let empty = if board_stats.is_empty() {
@@ -86,6 +90,7 @@ pub fn index_page(
         ""
     };
 
+    #[allow(clippy::cast_precision_loss)]
     let active_gb = site_stats.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let stats_sec = format!(
         r#"<div class="index-section index-stats-section">
@@ -105,16 +110,14 @@ pub fn index_page(
         gb = active_gb,
     );
 
-    let onion_html = if let Some(addr) = onion_address {
+    let onion_html = onion_address.map_or_else(String::new, |addr| {
         format!(
             r#"<div class="index-section index-onion-section">
 <p class="index-onion"><code class="onion-addr">{}</code></p>
 </div>"#,
             escape_html(addr)
         )
-    } else {
-        String::new()
-    };
+    });
 
     let body = format!(
         r#"<div class="index-hero">
@@ -138,12 +141,13 @@ pub fn index_page(
         csrf_token,
         &all_boards,
         false,
-        false,
     )
 }
 
 // ─── Board index ──────────────────────────────────────────────────────────────
 
+#[must_use]
+#[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 pub fn board_page(
     board: &Board,
@@ -158,14 +162,16 @@ pub fn board_page(
     let mut body = String::new();
 
     if let Some(msg) = error {
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             r#"<div class="post-error-banner">&#9888; {}</div>"#,
             escape_html(msg)
-        ));
+        );
     }
 
     if is_admin {
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             r#"<div class="admin-toolbar">
 <span class="admin-toolbar-label">&#9632; ADMIN</span>
 <form method="POST" action="/admin/logout" style="display:inline">
@@ -175,8 +181,8 @@ pub fn board_page(
 </form>
 </div>"#,
             csrf = escape_html(csrf_token),
-            board = escape_html(&board.short_name),
-        ));
+            board = escape_html(&board.short_name)
+        );
     }
 
     {
@@ -188,21 +194,23 @@ pub fn board_page(
         } else {
             String::new()
         };
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             r#"<div class="board-header board-index-header"><h1>/{short}/  — {name}</h1><p class="board-desc">{desc}</p></div>
-<div class="board-nav"><a class="board-nav-link active" href="/{short}">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}</div>"#,
-        ));
+<div class="board-nav"><a class="board-nav-link active" href="/{short}">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}</div>"#
+        );
     }
 
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         r#"<div class="post-toggle-bar centered catalog-toggle-bar">
   <button class="post-toggle-btn" data-action="toggle-post-form">[ Post a New Thread ]</button>
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {}
 </div>"#,
-        super::forms::new_thread_form(&board.short_name, csrf_token, board),
-    ));
+        super::forms::new_thread_form(&board.short_name, csrf_token, board)
+    );
 
     for summary in summaries {
         body.push_str(&render_thread_summary(
@@ -232,12 +240,12 @@ pub fn board_page(
         csrf_token,
         boards,
         collapse_greentext,
-        board.allow_archive,
     )
 }
 
 // ─── Thread summary (used by board_page) ─────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 fn render_thread_summary(
     summary: &ThreadSummary,
     board_short: &str,
@@ -258,30 +266,34 @@ fn render_thread_summary(
         ""
     };
 
-    html.push_str(&format!(
+    let _ = write!(
+        html,
         r#"<div class="thread" id="t{tid}">
 <div class="op post" id="p{op_id}">"#,
         tid = t.id,
-        op_id = t.op_id.unwrap_or(0),
-    ));
+        op_id = t.op_id.unwrap_or(0)
+    );
 
     if let (Some(_file), Some(thumb)) = (&t.op_file, &t.op_thumb) {
-        html.push_str(&format!(
+        let _ = write!(
+            html,
             r#"<div class="file-container"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image"></a></div>"#,
             board = escape_html(board_short),
             tid = t.id,
-            th = escape_html(thumb),
-        ));
+            th = escape_html(thumb)
+        );
     } else if let Some(embed_thumb) = t.op_body.as_deref().and_then(embed_thumb_from_body) {
-        html.push_str(&format!(
+        let _ = write!(
+            html,
             r#"<div class="file-container"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" alt="video thumbnail"></a></div>"#,
             board = escape_html(board_short),
             tid = t.id,
-            src = escape_html(&embed_thumb),
-        ));
+            src = escape_html(&embed_thumb)
+        );
     }
 
-    html.push_str(&format!(
+    let _ = write!(
+        html,
         r#"<div class="post-meta">
 {sticky}{locked}
 <strong class="name">{name}</strong>
@@ -295,16 +307,17 @@ fn render_thread_summary(
         time = fmt_ts_short(t.created_at),
         board = escape_html(board_short),
         tid = t.id,
-        op_id = t.op_id.unwrap_or(0),
-    ));
+        op_id = t.op_id.unwrap_or(0)
+    );
 
     if let Some(subject) = &t.subject {
-        html.push_str(&format!(
+        let _ = write!(
+            html,
             r#"<div class="subject"><a href="/{b}/thread/{tid}"><strong>{s}</strong></a></div>"#,
             b = escape_html(board_short),
             tid = t.id,
-            s = escape_html(subject),
-        ));
+            s = escape_html(subject)
+        );
     }
 
     if let Some(body) = &t.op_body {
@@ -323,10 +336,11 @@ fn render_thread_summary(
         } else {
             escape_html(body)
         };
-        html.push_str(&format!(r#"<div class="post-body">{}</div>"#, truncated));
+        let _ = write!(html, r#"<div class="post-body">{truncated}</div>"#);
     }
 
-    html.push_str(&format!(
+    let _ = write!(
+        html,
         r#"<div class="thread-footer">
 <a href="/{board}/thread/{tid}">[reply] ({n} {word})</a>"#,
         board = escape_html(board_short),
@@ -336,8 +350,8 @@ fn render_thread_summary(
             "reply"
         } else {
             "replies"
-        },
-    ));
+        }
+    );
 
     if is_admin {
         let sticky_act = if t.sticky { "unsticky" } else { "sticky" };
@@ -352,7 +366,8 @@ fn render_thread_summary(
         } else {
             "&#128274; lock"
         };
-        html.push_str(&format!(
+        let _ = write!(
+            html,
             r#" <form method="POST" action="/admin/thread/action" style="display:inline">
 <input type="hidden" name="_csrf"      value="{csrf}">
 <input type="hidden" name="thread_id"  value="{tid}">
@@ -380,19 +395,20 @@ fn render_thread_summary(
             sticky_act = sticky_act,
             sticky_lbl = sticky_lbl,
             lock_act = lock_act,
-            lock_lbl = lock_lbl,
-        ));
+            lock_lbl = lock_lbl
+        );
     }
 
     html.push_str("</div>\n</div>");
 
     if summary.omitted > 0 {
-        html.push_str(&format!(
+        let _ = write!(
+            html,
             r#"<div class="omitted">{} posts omitted. <a href="/{b}/thread/{tid}">view thread</a></div>"#,
             summary.omitted,
             b = escape_html(board_short),
-            tid = t.id,
-        ));
+            tid = t.id
+        );
     }
 
     for post in &summary.preview_posts {
@@ -400,10 +416,13 @@ fn render_thread_summary(
             post,
             board_short,
             csrf_token,
-            false,
-            is_admin,
-            true,
-            0, // no edit link on board index previews
+            super::thread::RenderPostOpts {
+                show_delete: false,
+                is_admin,
+                show_media: true,
+                allow_editing: false, // no edit link on board index previews
+            },
+            0,
         ));
     }
 
@@ -413,6 +432,8 @@ fn render_thread_summary(
 
 // ─── Catalog page ─────────────────────────────────────────────────────────────
 
+#[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn catalog_page(
     board: &Board,
     threads: &[Thread],
@@ -427,7 +448,8 @@ pub fn catalog_page(
     let mut body = String::new();
 
     if is_admin {
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             r#"<div class="admin-toolbar">
 <span class="admin-toolbar-label">&#9632; ADMIN</span>
 <form method="POST" action="/admin/logout" style="display:inline">
@@ -437,8 +459,8 @@ pub fn catalog_page(
 </form>
 </div>"#,
             csrf = escape_html(csrf_token),
-            board = escape_html(&board.short_name),
-        ));
+            board = escape_html(&board.short_name)
+        );
     }
 
     let nav_archive = if board.allow_archive {
@@ -447,7 +469,8 @@ pub fn catalog_page(
         String::new()
     };
 
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         r#"<div class="board-header catalog-header-row">
   <div class="catalog-header-left board-catalog-header">
     <h1>/{bs}/  — {bn}</h1>
@@ -475,23 +498,22 @@ pub fn catalog_page(
         bn = bn,
         desc = escape_html(&board.description),
         nav_archive = nav_archive,
-        form = super::forms::new_thread_form(&board.short_name, csrf_token, board),
-    ));
+        form = super::forms::new_thread_form(&board.short_name, csrf_token, board)
+    );
 
     for t in threads {
-        let thumb_html = if let Some(th) = &t.op_thumb {
-            format!(
-                r#"<img class="catalog-thumb" src="/boards/{}" loading="lazy" alt="">"#,
-                escape_html(th)
+        let thumb_html = t.op_thumb.as_ref().map_or_else(|| {
+            t.op_body.as_deref().and_then(embed_thumb_from_body).map_or_else(
+                || r#"<div class="catalog-no-image">no img</div>"#.to_string(),
+                |embed_thumb| format!(
+                    r#"<img class="catalog-thumb embed-catalog-thumb" src="{}" loading="lazy" alt="video thumbnail">"#,
+                    escape_html(&embed_thumb)
+                ),
             )
-        } else if let Some(embed_thumb) = t.op_body.as_deref().and_then(embed_thumb_from_body) {
-            format!(
-                r#"<img class="catalog-thumb embed-catalog-thumb" src="{}" loading="lazy" alt="video thumbnail">"#,
-                escape_html(&embed_thumb)
-            )
-        } else {
-            r#"<div class="catalog-no-image">no img</div>"#.to_string()
-        };
+        }, |th| format!(
+            r#"<img class="catalog-thumb" src="/boards/{}" loading="lazy" alt="">"#,
+            escape_html(th)
+        ));
 
         let subject = t
             .subject
@@ -499,7 +521,8 @@ pub fn catalog_page(
             .unwrap_or_else(|| t.op_body.as_deref().unwrap_or(""));
         let preview: String = subject.chars().take(80).collect();
 
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             r#"<div class="catalog-item{sticky}" data-replies="{replies}" data-created="{created}" data-bumped="{bumped}" data-sticky="{is_sticky}">
 <a href="/{board}/thread/{tid}">
 {thumb}
@@ -518,8 +541,8 @@ pub fn catalog_page(
             images = t.image_count,
             subj = escape_html(&preview),
             created = t.created_at,
-            bumped = t.bumped_at,
-        ));
+            bumped = t.bumped_at
+        );
     }
 
     body.push_str("</div>");
@@ -536,12 +559,12 @@ pub fn catalog_page(
         csrf_token,
         boards,
         collapse_greentext,
-        board.allow_archive,
     )
 }
 
 // ─── Search results ───────────────────────────────────────────────────────────
 
+#[must_use]
 pub fn search_page(
     board: &Board,
     query: &str,
@@ -567,19 +590,23 @@ pub fn search_page(
     if posts.is_empty() {
         body.push_str(r#"<p style="color:var(--text-dim);margin-top:8px">no results found.</p>"#);
     } else {
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             r#"<p style="color:var(--text-dim);font-size:0.8rem;margin-top:6px">{} result(s)</p>"#,
             pagination.total
-        ));
+        );
         for post in posts {
             body.push_str(&super::thread::render_post(
                 post,
                 &board.short_name,
                 csrf_token,
-                false,
-                false,
-                true,
-                0, // no edit link on search results
+                super::thread::RenderPostOpts {
+                    show_delete: false,
+                    is_admin: false,
+                    show_media: true,
+                    allow_editing: false, // no edit link on search results
+                },
+                0,
             ));
         }
         body.push_str(&render_pagination(
@@ -600,12 +627,12 @@ pub fn search_page(
         csrf_token,
         boards,
         collapse_greentext,
-        board.allow_archive,
     )
 }
 
 // ─── Archive page ─────────────────────────────────────────────────────────────
 
+#[must_use]
 pub fn archive_page(
     board: &Board,
     threads: &[Thread],
@@ -646,24 +673,21 @@ pub fn archive_page(
                 .chars()
                 .take(120)
                 .collect();
-            let subj = if let Some(s) = &t.subject {
+            let subj = t.subject.as_ref().map_or_else(String::new, |s| {
                 format!(
                     r#"<span class="archive-thread-subj">{}</span> — "#,
                     escape_html(s)
                 )
-            } else {
-                String::new()
-            };
-            let thumb_html = if let Some(thumb) = &t.op_thumb {
+            });
+            let thumb_html = t.op_thumb.as_ref().map_or_else(String::new, |thumb| {
                 format!(
                     r#"<img src="/boards/{}" class="archive-thumb" alt="thumb" loading="lazy">"#,
                     escape_html(thumb)
                 )
-            } else {
-                String::new()
-            };
+            });
             let ts = fmt_ts(t.created_at);
-            body.push_str(&format!(
+            let _ = write!(
+                body,
                 r#"<div class="archive-row">
   {thumb}
   <div class="archive-row-info">
@@ -679,8 +703,8 @@ pub fn archive_page(
                 subj = subj,
                 preview = escape_html(&preview),
                 replies = t.reply_count,
-                ts = ts,
-            ));
+                ts = ts
+            );
         }
         body.push_str("</div>");
         // FIX[B-T2]: escape before embedding in pagination URL.
@@ -697,6 +721,5 @@ pub fn archive_page(
         csrf_token,
         boards,
         collapse_greentext,
-        true, // archive page — link is always shown
     )
 }
