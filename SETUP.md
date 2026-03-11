@@ -87,7 +87,7 @@ winget install --id Gyan.FFmpeg -e
 
 Verify: `ffmpeg -version`
 
-Set `require_ffmpeg = true` in `settings.toml` if you want startup to fail when ffmpeg is missing.
+Set `require_ffmpeg = true` in `settings.toml` if you want startup to fail when ffmpeg is missing. The maximum time any single ffmpeg job may run is controlled by `ffmpeg_timeout_secs` (default: 120); increase it for large video files on slow hardware.
 
 ---
 
@@ -165,7 +165,7 @@ sudo chown -R chan:chan /var/lib/chan/static
 openssl rand -hex 32
 ```
 
-Save this value — it's used for CSRF tokens and IP hashing. **Do not change it after your instance has posts.**
+Save this value — it's used for CSRF tokens and IP hashing. **Do not change it after your instance has posts.** Changing it invalidates all existing bans, IP history, and session cookies.
 
 ### systemd (Linux)
 
@@ -218,14 +218,40 @@ sudo -u chan nano /var/lib/chan/rustchan-data/settings.toml
 Key settings:
 
 ```toml
+# Site identity
 forum_name = "My Chan"
+site_subtitle = "A self-hosted imageboard"
+
+# Default theme for new visitors.
+# Options: terminal, frutiger-aero, dorific-aero, fluorogrid, neoncubicle, chan-classic
+default_theme = "terminal"
+
+# Network
 port = 8080
+
+# Upload size limits (MiB)
 max_image_size_mb = 8
 max_video_size_mb = 50
 max_audio_size_mb = 150
+
+# Optional integrations
 enable_tor_support = false
 require_ffmpeg = false
+ffmpeg_timeout_secs = 120
+
+# Database maintenance
 wal_checkpoint_interval_secs = 3600
+auto_vacuum_interval_hours = 24
+poll_cleanup_interval_hours = 72
+db_warn_threshold_mb = 2048
+
+# Background worker tuning
+job_queue_capacity = 1000
+waveform_cache_max_mb = 200
+archive_before_prune = true
+
+# Uncomment to tune the blocking thread pool (default: logical_cpus × 4)
+# blocking_threads = 8
 ```
 
 Restart after editing: `sudo systemctl restart rustchan-cli`
@@ -296,7 +322,7 @@ sudo systemctl edit rustchan-cli
 Environment=CHAN_BEHIND_PROXY=true
 ```
 
-This tells RustChan to trust `X-Forwarded-For` and automatically sets `Secure` on all cookies. Restart to apply.
+This tells RustChan to trust `X-Forwarded-For` and automatically sets `Secure` on all cookies. Without this flag, bans and rate limits will not function correctly behind nginx. Restart to apply.
 
 ### Firewall
 
@@ -376,6 +402,8 @@ All settings can be overridden via environment variables (take precedence over `
 | Variable | Default | Description |
 |---|---|---|
 | `CHAN_FORUM_NAME` | `RustChan` | Site display name |
+| `CHAN_SITE_SUBTITLE` | *(from settings.toml)* | Home page subtitle |
+| `CHAN_DEFAULT_THEME` | `terminal` | Default theme for new visitors (`terminal`, `frutiger-aero`, `dorific-aero`, `fluorogrid`, `neoncubicle`, `chan-classic`) |
 | `CHAN_PORT` | `8080` | TCP port |
 | `CHAN_BIND` | `0.0.0.0:8080` | Full bind address (overrides port) |
 | `CHAN_DB` | `rustchan-data/chan.db` | Database path |
@@ -393,25 +421,38 @@ All settings can be overridden via environment variables (take precedence over `
 | `CHAN_BEHIND_PROXY` | `false` | Trust `X-Forwarded-For` |
 | `CHAN_HTTPS_COOKIES` | *(mirrors proxy setting)* | Force `Secure` cookies |
 | `CHAN_WAL_CHECKPOINT_SECS` | `3600` | WAL checkpoint interval; `0` to disable |
+| `CHAN_AUTO_VACUUM_HOURS` | `24` | Scheduled VACUUM interval (hours); `0` to disable |
+| `CHAN_POLL_CLEANUP_HOURS` | `72` | Expired poll vote cleanup interval (hours) |
+| `CHAN_DB_WARN_MB` | `2048` | DB file size threshold for admin panel warning (MiB) |
+| `CHAN_JOB_QUEUE_CAPACITY` | `1000` | Max pending background jobs; excess dropped with a warning |
+| `CHAN_FFMPEG_TIMEOUT_SECS` | `120` | Max duration for a single ffmpeg job (seconds) |
+| `CHAN_WAVEFORM_CACHE_MB` | `200` | Max waveform/thumbnail cache per board's `thumbs/` directory (MiB) |
+| `CHAN_BLOCKING_THREADS` | `cpus × 4` | Tokio blocking thread pool size (tune down on RAM-constrained hardware) |
+| `CHAN_ARCHIVE_BEFORE_PRUNE` | `true` | Archive globally before any hard-delete, even on boards without per-board archiving |
+| `CHAN_TOR_HOSTNAME_FILE` | *(auto-detected)* | Override path to Tor `hostname` file |
 | `RUST_LOG` | `rustchan-cli=info` | Log verbosity |
 
 ---
 
 ## Admin Panel
 
-Log in at `/admin`. All moderation is available from the web panel.
+Log in at `/admin`. All moderation and configuration is available from the web panel. The panel is organised in the following order:
+
+**Site Settings** → **Boards** → **Moderation Log** → **Report Inbox** → **Moderation** (ban appeals, active bans, word filters) → **Full Site Backup & Restore** → **Board Backup & Restore** → **Database Maintenance** → **Active Onion Address**
 
 ### Key Features
 
+- **Site Settings** — update forum name, subtitle, and default theme without restarting
 - **Board settings** — click any board to edit its name, limits, and feature toggles (video embeds, PoW CAPTCHA, editing, archiving) without restarting
 - **Ban + Delete** — every post shows a ⛔ button in admin view; one click to ban the IP hash and delete the post
-- **Ban appeals** — banned users can submit appeals; review them under the **ban appeals** section with dismiss or accept+unban
+- **Ban appeals** — banned users can submit appeals; review them under the **Moderation** section with dismiss or accept+unban
 - **IP history** — click 🔍 on any post to see all posts from that IP hash across all boards
 - **Reports** — user-submitted reports appear in the report inbox with resolve and resolve+ban actions
 - **Moderation log** — append-only audit trail of all admin actions
 - **Word filters** — plain-text substring match with optional replacement
-- **Database maintenance** — one-click VACUUM with before/after size display
-- **Backups** — full and per-board backup/restore directly from the panel
+- **Database maintenance** — one-click VACUUM with before/after size display; red warning banner when the database exceeds `db_warn_threshold_mb`
+- **Full Site Backup & Restore** — streaming backup creation and restore; no RAM buffering regardless of instance size
+- **Board Backup & Restore** — self-contained per-board backup and restore
 
 ---
 
@@ -421,13 +462,15 @@ Log in at `/admin`. All moderation is available from the web panel.
 
 All backup operations are available in the admin panel — no shell access needed.
 
-**Full backups** include a consistent database snapshot and all uploaded files.
+**Full Site Backups** include a consistent database snapshot and all uploaded files. All I/O streams in 64 KiB chunks so peak RAM overhead is roughly 64 KiB regardless of instance size. Backups are written as temp files with an atomic rename, so partial backups never appear in the saved list.
+
 **Board backups** are self-contained (manifest + uploads) and can move a single board between instances.
 
 Restore behaviour:
 - Existing board → content wiped and replaced
 - Missing board → created from scratch
 - Row IDs are remapped to prevent collisions
+- Restore uploads are capped at 512 MiB
 
 ### Automated Shell Backups
 
@@ -453,6 +496,8 @@ sudo systemctl start rustchan-cli
 ## Raspberry Pi Tips
 
 ### Move Database to USB Storage
+
+Storing the database on a USB drive rather than the SD card extends card life significantly and improves write throughput.
 
 ```bash
 sudo mkfs.ext4 /dev/sda1
@@ -480,6 +525,27 @@ Add to `/etc/fstab` for persistence.
 - Set journal storage to volatile: `Storage=volatile` in `/etc/systemd/journald.conf`
 - Add `noatime` to root partition mount options in `/etc/fstab`
 
+### Tune the Blocking Thread Pool
+
+The default blocking thread pool (`logical_cpus × 4`) can exhaust RAM on a Raspberry Pi 4 under heavy transcoding load. Set a lower ceiling:
+
+```ini
+[Service]
+Environment=CHAN_BLOCKING_THREADS=8
+```
+
+Adjust based on available RAM and expected concurrent uploads. 8 is a reasonable starting point for a Pi 4 with 4 GiB RAM.
+
+### Waveform Cache
+
+With limited storage on SD cards, consider lowering `waveform_cache_max_mb`:
+
+```toml
+waveform_cache_max_mb = 50
+```
+
+The background eviction task will keep the `thumbs/` directories under this limit automatically.
+
 ---
 
 ## Security Checklist
@@ -487,17 +553,19 @@ Add to `/etc/fstab` for persistence.
 Before exposing your instance to the internet:
 
 - [ ] `CHAN_COOKIE_SECRET` set to a unique value (`openssl rand -hex 32`)
-- [ ] Default admin password changed
+- [ ] Default admin password changed immediately after first login
 - [ ] Running as `chan` user, not root
-- [ ] Port 8080 firewalled from external access
-- [ ] nginx configured with HTTPS
-- [ ] `CHAN_BEHIND_PROXY=true` set
+- [ ] Port 8080 firewalled from external access (`ufw deny 8080/tcp`)
+- [ ] nginx configured with HTTPS (Let's Encrypt)
+- [ ] `CHAN_BEHIND_PROXY=true` set — required for bans and rate limits to work with nginx
 - [ ] `client_max_body_size` in nginx matches your video size limit
 - [ ] Rate limits tuned for your audience
 - [ ] Automated backups scheduled and restore tested
-- [ ] systemd hardening directives active
+- [ ] systemd hardening directives active (`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`)
 - [ ] Tor hidden service directory owned by `tor` user with mode `700` (if applicable)
-- [ ] Log monitoring in place
+- [ ] `db_warn_threshold_mb` set to a value appropriate for your disk (default: 2048 MiB)
+- [ ] `auto_vacuum_interval_hours` enabled (default: 24) to prevent unbounded DB growth
+- [ ] Log monitoring in place (`journalctl -u rustchan-cli -f`)
 
 ---
 
@@ -522,7 +590,7 @@ sudo systemctl start rustchan-cli
 sudo journalctl -u rustchan-cli -n 20
 ```
 
-Database migrations are automatic — no manual SQL needed when upgrading.
+Database migrations run automatically on startup — no manual SQL is ever needed when upgrading.
 
 ---
 
@@ -538,25 +606,34 @@ Common causes: path doesn't exist or wrong ownership, port already in use, wrong
 ```bash
 which ffmpeg && ffmpeg -version
 ```
-If installed to a custom path, add it to PATH in the systemd override.
+If installed to a custom path, add it to PATH in the systemd override. If large videos time out during transcoding, increase `ffmpeg_timeout_secs` in `settings.toml`.
 
 **Tor address not showing:**
 1. Verify Tor is running: `sudo systemctl status tor`
 2. Check hostname file exists: `sudo cat /var/lib/tor/rustchan/hostname`
 3. Verify `enable_tor_support = true` in `settings.toml`
 4. Restart RustChan
+5. If the hostname file is in a non-standard location, set `CHAN_TOR_HOSTNAME_FILE`
 
 **Uploads failing:**
 ```bash
 ls -la /var/lib/chan/rustchan-data/boards/   # check ownership
 sudo nginx -T | grep client_max_body_size    # check nginx limit
 ```
+Large uploads rejected mid-stream indicate the nginx `client_max_body_size` is lower than RustChan's configured limit.
 
 **Admin login fails:**
 ```bash
 sudo -u chan CHAN_DB=/var/lib/chan/rustchan-data/chan.db \
     /usr/local/bin/rustchan-cli admin reset-password admin "NewPassword!"
 ```
+If the login page shows a lockout message, wait for the progressive delay to expire (up to a few minutes) before retrying.
+
+**Bans and rate limits not working:**
+Ensure `CHAN_BEHIND_PROXY=true` is set in the systemd override. Without it, RustChan sees all requests as coming from `127.0.0.1`.
+
+**Background jobs not processing:**
+Check `RUST_LOG=rustchan-cli=debug` output for job queue warnings. If jobs are being dropped with "queue at capacity", increase `job_queue_capacity`. If ffmpeg jobs are timing out, increase `ffmpeg_timeout_secs`.
 
 **Database integrity:**
 ```bash
@@ -564,4 +641,7 @@ sqlite3 /var/lib/chan/rustchan-data/chan.db "PRAGMA integrity_check;"
 # Expected: ok
 ```
 
-**Memory usage:** Typical idle footprint is 30–60 MiB. Connection pool under load uses ~32 MiB. Image processing may spike to ~64 MiB temporarily. Well within Raspberry Pi 4 limits.
+**DB growing unboundedly:**
+Verify `auto_vacuum_interval_hours` is non-zero and check the admin panel Database Maintenance section. If the DB exceeds `db_warn_threshold_mb` a red banner will appear. Run a manual VACUUM from the panel after bulk deletions.
+
+**Memory usage:** Typical idle footprint is 30–60 MiB. Connection pool under load uses ~32 MiB. Image processing may spike to ~64 MiB temporarily. Backup I/O peaks at ~64 KiB regardless of backup size. Well within Raspberry Pi 4 limits when `blocking_threads` is tuned appropriately.
