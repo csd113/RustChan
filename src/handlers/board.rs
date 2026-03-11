@@ -600,6 +600,7 @@ pub struct ReportForm {
     pub thread_id: i64,
     pub board: String,
     pub reason: Option<String>,
+    #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
 }
 
@@ -854,6 +855,7 @@ pub async fn redirect_to_post(
 #[derive(serde::Deserialize)]
 pub struct AppealForm {
     pub reason: String,
+    #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
 }
 

@@ -416,6 +416,7 @@ pub async fn edit_post_get(
 
 #[derive(Deserialize)]
 pub struct EditForm {
+    #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub deletion_token: String,
     pub body: String,
@@ -537,6 +538,7 @@ pub async fn edit_post_post(
 
 #[derive(Deserialize)]
 pub struct VoteForm {
+    #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub option_id: i64,
 }
