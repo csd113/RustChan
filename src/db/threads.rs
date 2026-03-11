@@ -90,7 +90,7 @@ fn collect_thread_file_paths(
     let placeholders: String = thread_ids
         .iter()
         .enumerate()
-        .map(|(i, _)| format!("?{}", i + 1))
+        .map(|(i, _)| format!("?{}", i.saturating_add(1)))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
@@ -404,7 +404,7 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
     let placeholders: String = ids
         .iter()
         .enumerate()
-        .map(|(i, _)| format!("?{}", i + 1))
+        .map(|(i, _)| format!("?{}", i.saturating_add(1)))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!("UPDATE threads SET archived = 1, locked = 1 WHERE id IN ({placeholders})");
@@ -477,7 +477,7 @@ pub fn prune_old_threads(
     let placeholders: String = ids
         .iter()
         .enumerate()
-        .map(|(i, _)| format!("?{}", i + 1))
+        .map(|(i, _)| format!("?{}", i.saturating_add(1)))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!("DELETE FROM threads WHERE id IN ({placeholders})");

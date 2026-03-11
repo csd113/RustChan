@@ -66,6 +66,7 @@ pub struct UploadedFile {
 ///
 /// # Errors
 /// Returns an error if the data is empty or the file type is not on the allowlist.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     if data.is_empty() {
         return Err(anyhow::anyhow!("File is empty."));
@@ -211,7 +212,7 @@ fn check_disk_space(dir: &Path, needed_bytes: usize) -> Result<()> {
             if libc::statvfs(path_cstr.as_ptr(), &raw mut stat) == 0 {
                 #[allow(clippy::unnecessary_cast)]
                 #[allow(clippy::useless_conversion, clippy::cast_lossless)]
-                let free_bytes = u64::from(stat.f_bavail) * u64::from(stat.f_frsize);
+                let free_bytes = u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize));
                 let needed = (needed_bytes as u64).saturating_mul(2);
                 if free_bytes < needed {
                     return Err(anyhow::anyhow!(
@@ -1146,6 +1147,7 @@ pub fn gen_waveform_png(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
     use super::*;
 
     // ── format_file_size ─────────────────────────────────────────────────────

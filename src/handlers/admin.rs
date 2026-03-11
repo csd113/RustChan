@@ -89,6 +89,7 @@ fn is_login_locked(ip_key: &str) -> bool {
 }
 
 /// Record a failed login attempt; returns the new failure count.
+#[allow(clippy::arithmetic_side_effects)]
 fn record_login_fail(ip_key: &str) -> u32 {
     let now = login_now_secs();
     let mut binding = ADMIN_LOGIN_FAILS
@@ -191,6 +192,7 @@ pub struct LoginForm {
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -897,6 +899,7 @@ pub struct AddBanForm {
     csrf: Option<String>,
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn add_ban(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -991,6 +994,7 @@ pub struct BanDeleteForm {
     csrf: Option<String>,
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn admin_ban_and_delete(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1355,6 +1359,7 @@ pub async fn update_board_settings(
 /// MEM-FIX: The zip is built to a `NamedTempFile` on disk (not a Vec<u8> in
 /// RAM), so peak heap usage is O(compression-buffer) not O(zip-size).
 /// The response body is streamed from disk in 64 KiB chunks via `ReaderStream`.
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
     let upload_dir = CONFIG.upload_dir.clone();
@@ -1484,6 +1489,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 
 /// Count regular files (not directories) under `dir` recursively.
 /// Used to initialise the progress bar's `files_total` before compression starts.
+#[allow(clippy::arithmetic_side_effects)]
 fn count_files_in_dir(dir: &std::path::Path) -> u64 {
     if !dir.is_dir() {
         return 0;
@@ -1581,6 +1587,7 @@ fn add_dir_to_zip<W: Write + Seek>(
 ///   • The uploaded DB is written to a temp file then opened read-only as the
 ///     backup source; it is deleted on success or failure.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn admin_restore(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1855,6 +1862,7 @@ pub async fn admin_restore(
 
 // Rewrite in-board `>>{old_id}` references in the raw post body.
 // `pairs` must be pre-sorted by old-ID string length descending.
+#[allow(clippy::arithmetic_side_effects)]
 fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> String {
     // Avoid cloning when there is nothing to change.
     if pairs.is_empty() {
@@ -1937,6 +1945,7 @@ const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 /// Like `std::io::copy` but returns `InvalidData` if more than `max_bytes`
 /// would be written.  Reads in 64 KiB chunks; aborts as soon as the limit
 /// is exceeded so disk space is not wasted.
+#[allow(clippy::arithmetic_side_effects)]
 fn copy_limited<R: std::io::Read, W: std::io::Write>(
     reader: &mut R,
     writer: &mut W,
@@ -2065,6 +2074,7 @@ fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
 /// `BufWriter`, so peak RAM usage is O(compression-buffer) not O(zip-size).
 /// A `.tmp` suffix is used during writing; the file is renamed on success so
 /// the backup list never shows a partial/corrupt zip.
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -2442,7 +2452,7 @@ pub async fn create_board_backup(
             let file_count = count_files_in_dir(&board_upload_path);
             progress.reset(crate::middleware::backup_phase::COMPRESS);
             // +1 for board.json manifest
-            progress.files_total.store(file_count + 1, Ordering::Relaxed);
+            progress.files_total.store(file_count.saturating_add(1), Ordering::Relaxed);
 
             {
                 let out_file = std::io::BufWriter::new(
@@ -2691,6 +2701,7 @@ pub struct RestoreSavedForm {
 
 /// Restore a full backup from a saved file in full-backups/.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn restore_saved_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -2845,12 +2856,14 @@ pub async fn restore_saved_full_backup(
 
 /// Restore a board backup from a saved file in board-backups/.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn restore_saved_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
     fn encode_q(s: &str) -> String {
+        #[allow(clippy::arithmetic_side_effects)]
         const fn nibble(n: u8) -> char {
             match n {
                 0..=9 => (b'0' + n) as char,
@@ -3321,6 +3334,7 @@ mod board_backup_types {
 /// MEM-FIX: Same approach as `admin_backup` — build zip into a `NamedTempFile` on
 /// disk, then stream the result in 64 KiB chunks.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -3569,11 +3583,13 @@ pub async fn board_backup(
 /// CSRF failures and multipart parse errors — redirect to the admin panel
 /// with a flash message instead of producing a blank crash page.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn board_restore(
     State(state): State<AppState>,
     jar: CookieJar,
     mut multipart: Multipart,
 ) -> Response {
+    #[allow(clippy::arithmetic_side_effects)]
     const fn nibble(n: u8) -> char {
         match n {
             0..=9 => (b'0' + n) as char,

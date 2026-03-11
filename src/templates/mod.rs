@@ -265,7 +265,7 @@ pub fn render_pagination(p: &Pagination, base_url: &str) -> String {
             html,
             r#"<a href="{}{sep}page={}">[prev]</a> "#,
             safe_base,
-            p.page - 1,
+            p.page.saturating_sub(1),
             sep = sep
         );
     }
@@ -275,7 +275,7 @@ pub fn render_pagination(p: &Pagination, base_url: &str) -> String {
             html,
             r#" <a href="{}{sep}page={}">[next]</a>"#,
             safe_base,
-            p.page + 1,
+            p.page.saturating_add(1),
             sep = sep
         );
     }
@@ -288,7 +288,7 @@ pub fn render_pagination(p: &Pagination, base_url: &str) -> String {
 // RFC 3986 percent-encoding operates on bytes.
 #[must_use]
 pub fn urlencoding_simple(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
+    let mut out = String::with_capacity(s.len().saturating_mul(3));
     for &byte in s.as_bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {

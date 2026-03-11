@@ -113,6 +113,8 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
 // Fix #7: function now returns ToolStatus so callers can branch on whether
 //         Tor is actually running.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::expect_used)]
+#[allow(clippy::arithmetic_side_effects)]
 pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> ToolStatus {
     if !enable_tor_support {
         return ToolStatus::Missing;
@@ -338,6 +340,8 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> 
 
 // ─── Hostname polling ─────────────────────────────────────────────────────────
 
+#[allow(clippy::expect_used)]
+#[allow(clippy::arithmetic_side_effects)]
 fn poll_for_hostname(
     hostname_path: &Path,
     // Fix #4: child handle passed in so crashes mid-poll are detected promptly

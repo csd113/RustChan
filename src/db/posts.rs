@@ -406,7 +406,7 @@ pub fn edit_post(
         }
 
         let now = chrono::Utc::now().timestamp();
-        if now - created_at > window {
+        if now.saturating_sub(created_at) > window {
             return Ok(false);
         }
 

@@ -350,6 +350,7 @@ pub struct EditQuery {
     pub token: Option<String>,
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn edit_post_get(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
@@ -428,6 +429,7 @@ enum EditOutcome {
     ErrorPage(String),
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn edit_post_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
