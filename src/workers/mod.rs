@@ -183,6 +183,7 @@ impl JobQueue {
 pub fn start_worker_pool(
     queue: &Arc<JobQueue>,
     ffmpeg_available: bool,
+    ffmpeg_vp9_available: bool,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let n = std::thread::available_parallelism()
         .map(NonZero::get)
@@ -195,7 +196,7 @@ pub fn start_worker_pool(
         .map(|idx| {
             let q = queue.clone();
             tokio::spawn(async move {
-                worker_loop(idx, q, ffmpeg_available).await;
+                worker_loop(idx, q, ffmpeg_available, ffmpeg_vp9_available).await;
             })
         })
         .collect()
@@ -203,7 +204,12 @@ pub fn start_worker_pool(
 
 // ─── Worker loop ─────────────────────────────────────────────────────────────
 
-async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
+async fn worker_loop(
+    id: usize,
+    queue: Arc<JobQueue>,
+    ffmpeg_available: bool,
+    ffmpeg_vp9_available: bool,
+) {
     debug!("Worker {id} started");
     // FIX[HIGH-6]: Track consecutive errors for exponential back-off.
     // Reset to 0 whenever a job is successfully claimed or the queue is empty.
@@ -234,6 +240,7 @@ async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
                     job_id,
                     &payload,
                     ffmpeg_available,
+                    ffmpeg_vp9_available,
                     queue.pool.clone(),
                     queue.in_progress.clone(),
                 )
@@ -335,6 +342,7 @@ async fn handle_job(
     job_id: i64,
     payload: &str,
     ffmpeg_available: bool,
+    ffmpeg_vp9_available: bool,
     pool: DbPool,
     in_progress: Arc<DashMap<String, bool>>,
 ) -> Result<()> {
@@ -363,6 +371,7 @@ async fn handle_job(
                 file_path.clone(),
                 board_short,
                 ffmpeg_available,
+                ffmpeg_vp9_available,
                 pool,
             )
             .await;
@@ -419,16 +428,29 @@ async fn handle_job(
 /// Transcode an MP4 upload to `WebM` (VP9 + Opus), then update the post's
 /// `file_path` and `mime_type`. The original MP4 is deleted on success.
 ///
+/// Requires both `ffmpeg_available` (binary present) and `ffmpeg_vp9_available`
+/// (libvpx-vp9 + libopus compiled in).  If either flag is false the job is
+/// skipped gracefully — no error is returned and the file remains as-is.
+///
 /// A hard timeout of `CONFIG.ffmpeg_timeout_secs` is applied (2.3).
 async fn transcode_video(
     post_id: i64,
     file_path: String,
     board_short: String,
     ffmpeg_available: bool,
+    ffmpeg_vp9_available: bool,
     pool: DbPool,
 ) -> Result<()> {
     if !ffmpeg_available {
         debug!("VideoTranscode skipped for post {post_id}: ffmpeg not available");
+        return Ok(());
+    }
+
+    if !ffmpeg_vp9_available {
+        warn!(
+            "VideoTranscode skipped for post {post_id}: libvpx-vp9 or libopus not available. \
+             Install ffmpeg with VP9 + Opus support to enable MP4→WebM transcoding."
+        );
         return Ok(());
     }
 
@@ -533,7 +555,13 @@ fn transcode_video_inner(
     // same directory first, then atomically rename into place.  The rename is
     // POSIX-atomic on the same filesystem, so readers always see either the old
     // file or the new file — never a partial write.
-    let tmp = tempfile::NamedTempFile::new_in(&board_dir)
+    //
+    // The temp file is given a .webm extension so that ffmpeg can identify the
+    // correct muxer from the output filename.  An extensionless temp file causes
+    // ffmpeg to fail immediately because it cannot determine the output format.
+    let tmp = tempfile::Builder::new()
+        .suffix(".webm")
+        .tempfile_in(&board_dir)
         .map_err(|e| anyhow::anyhow!("Failed to create temp file for WebM output: {e}"))?;
 
     crate::media::ffmpeg::ffmpeg_transcode_to_webm(&src, tmp.path())?;

@@ -50,96 +50,135 @@ pub enum PlaceholderKind {
 /// Generate a thumbnail for a media file and write it to `output_path`.
 ///
 /// All thumbnails are produced as WebP.  The strategy depends on the MIME
-/// type and whether ffmpeg is available:
+/// type and whether ffmpeg (and its libwebp encoder) is available:
 ///
-/// | Source MIME       | ffmpeg present | Action                          |
-/// |-------------------|----------------|---------------------------------|
-/// | `image/*`         | yes            | ffmpeg first-frame + WebP       |
-/// | `image/*`         | no             | `image` crate → resize → WebP   |
-/// | `video/webm`      | yes            | ffmpeg first-frame + WebP       |
-/// | `video/webm`      | no             | static SVG placeholder          |
-/// | `image/svg+xml`   | either         | static SVG placeholder          |
-/// | `audio/*`         | either         | static SVG placeholder          |
+/// | Source MIME       | ffmpeg | libwebp | Action                          |
+/// |-------------------|--------|---------|---------------------------------|
+/// | `image/*`         | yes    | —       | ffmpeg first-frame + WebP       |
+/// | `image/*`         | no     | —       | `image` crate → resize → WebP   |
+/// | `video/webm`      | yes    | yes     | ffmpeg first-frame + WebP       |
+/// | `video/webm`      | yes    | no      | static SVG placeholder          |
+/// | `video/webm`      | no     | —       | static SVG placeholder          |
+/// | `image/svg+xml`   | either | —       | static SVG placeholder          |
+/// | `audio/*`         | either | —       | static SVG placeholder          |
 ///
 /// # Arguments
-/// * `input_path`      — Absolute path to the (already converted) media file.
-/// * `mime`            — Final MIME type of the input file.
-/// * `output_path`     — Where to write the thumbnail (WebP or SVG).
-/// * `max_dim`         — Maximum width and height in pixels (aspect preserved).
-/// * `ffmpeg_available`— Whether ffmpeg was detected at startup.
+/// * `input_path`             — Absolute path to the (already converted) media file.
+/// * `mime`                   — Final MIME type of the input file.
+/// * `output_path`            — Where to write the thumbnail (WebP or SVG).
+/// * `max_dim`                — Maximum width and height in pixels (aspect preserved).
+/// * `ffmpeg_available`       — Whether ffmpeg was detected at startup.
+/// * `ffmpeg_webp_available`  — Whether ffmpeg has the libwebp encoder compiled in.
 ///
 /// # Errors
 /// Returns an error only if all strategies (including placeholder writing)
 /// fail.  Individual strategy failures are demoted to warnings so that a
 /// thumbnail failure never causes the upload to fail.
+/// Generate a thumbnail and return the **actual path written**.
+///
+/// The returned path may differ from `output_path` when a fallback SVG
+/// placeholder is written for a video whose thumbnail extraction failed.
+/// `thumbnail_output_path` selects `.webp` for video when ffmpeg+libwebp are
+/// both present (because it cannot know ahead of time whether ffmpeg will
+/// succeed).  If extraction fails, writing SVG bytes into a `.webp` file
+/// produces a file whose content and extension disagree — browsers reject it
+/// and show a broken thumbnail.  To avoid this, the video fallback writes the
+/// placeholder to a `.svg` sibling path instead and returns that path, so the
+/// caller can store the correct path in the database.
 pub fn generate_thumbnail(
     input_path: &Path,
     mime: &str,
     output_path: &Path,
     max_dim: u32,
     ffmpeg_available: bool,
-) -> Result<()> {
+    ffmpeg_webp_available: bool,
+) -> Result<PathBuf> {
     match mime {
         // ── SVG and audio: always use static placeholder ──────────────────
-        "image/svg+xml" => write_placeholder(output_path, PlaceholderKind::Video),
-        m if m.starts_with("audio/") => write_placeholder(output_path, PlaceholderKind::Audio),
+        "image/svg+xml" => write_placeholder(output_path, PlaceholderKind::Video)
+            .map(|()| output_path.to_path_buf()),
+        m if m.starts_with("audio/") => write_placeholder(output_path, PlaceholderKind::Audio)
+            .map(|()| output_path.to_path_buf()),
 
-        // ── Video (WebM): requires ffmpeg ─────────────────────────────────
+        // ── Video (WebM): requires ffmpeg AND libwebp ─────────────────────
+        // `thumbnail_output_path` pre-selects `.webp` when both are present.
+        // If ffmpeg_thumbnail then fails, write the SVG placeholder to the
+        // `.svg`-extension sibling so the file content and extension match.
+        // The `else` branch (ffmpeg absent / libwebp absent) already has the
+        // `.svg` extension pre-selected by `thumbnail_output_path`, so no
+        // rename is needed there.
         "video/webm" | "audio/webm" => {
-            if ffmpeg_available {
+            if ffmpeg_available && ffmpeg_webp_available {
                 match ffmpeg::ffmpeg_thumbnail(input_path, output_path, max_dim) {
-                    Ok(()) => Ok(()),
+                    Ok(()) => Ok(output_path.to_path_buf()),
                     Err(e) => {
                         tracing::warn!("ffmpeg video thumbnail failed ({}); using placeholder", e);
-                        write_placeholder(output_path, PlaceholderKind::Video)
+                        // Write the SVG placeholder with a .svg extension so its
+                        // content and file extension agree.  Browsers that receive
+                        // SVG bytes served as image/webp silently show nothing.
+                        let svg_path = output_path.with_extension("svg");
+                        write_placeholder(&svg_path, PlaceholderKind::Video).map(|()| svg_path)
                     }
                 }
             } else {
+                // output_path already has .svg extension in this branch.
                 write_placeholder(output_path, PlaceholderKind::Video)
+                    .map(|()| output_path.to_path_buf())
             }
         }
 
-        // ── Images: try ffmpeg, fall back to image crate ──────────────────
+        // ── WebP: skip ffmpeg entirely — use image crate directly ─────────
+        // ffmpeg fails on animated WebP (VP8L) and emits a spurious warning
+        // even though the image crate handles all WebP variants correctly.
+        "image/webp" => image_crate_thumbnail(input_path, mime, output_path, max_dim)
+            .map(|()| output_path.to_path_buf()),
+
+        // ── Other images: try ffmpeg, fall back to image crate ────────────
         _ if mime.starts_with("image/") => {
             if ffmpeg_available {
                 match ffmpeg::ffmpeg_thumbnail(input_path, output_path, max_dim) {
-                    Ok(()) => Ok(()),
+                    Ok(()) => Ok(output_path.to_path_buf()),
                     Err(e) => {
                         tracing::warn!(
                             "ffmpeg image thumbnail failed ({}); falling back to image crate",
                             e
                         );
                         image_crate_thumbnail(input_path, mime, output_path, max_dim)
+                            .map(|()| output_path.to_path_buf())
                     }
                 }
             } else {
                 image_crate_thumbnail(input_path, mime, output_path, max_dim)
+                    .map(|()| output_path.to_path_buf())
             }
         }
 
         // ── Unknown MIME: placeholder ─────────────────────────────────────
-        _ => write_placeholder(output_path, PlaceholderKind::Video),
+        _ => write_placeholder(output_path, PlaceholderKind::Video)
+            .map(|()| output_path.to_path_buf()),
     }
 }
 
 /// Determine the correct output path for a thumbnail given the media MIME type.
 ///
 /// Always returns a `.webp` path, except for types that produce an
-/// SVG placeholder (video without ffmpeg, audio, svg source).
+/// SVG placeholder (video without ffmpeg or libwebp, audio, svg source).
 ///
 /// # Arguments
-/// * `thumb_dir`  — The `thumbs/` directory (absolute path).
-/// * `file_stem`  — UUID stem shared with the media file.
-/// * `mime`       — Final MIME of the converted media file.
-/// * `ffmpeg_available` — Whether ffmpeg was detected.
+/// * `thumb_dir`              — The `thumbs/` directory (absolute path).
+/// * `file_stem`              — UUID stem shared with the media file.
+/// * `mime`                   — Final MIME of the converted media file.
+/// * `ffmpeg_available`       — Whether ffmpeg was detected.
+/// * `ffmpeg_webp_available`  — Whether ffmpeg has the libwebp encoder.
 #[must_use]
 pub fn thumbnail_output_path(
     thumb_dir: &Path,
     file_stem: &str,
     mime: &str,
     ffmpeg_available: bool,
+    ffmpeg_webp_available: bool,
 ) -> PathBuf {
-    let ext = thumbnail_extension(mime, ffmpeg_available);
+    let ext = thumbnail_extension(mime, ffmpeg_available, ffmpeg_webp_available);
     thumb_dir.join(format!("{file_stem}.{ext}"))
 }
 
@@ -227,11 +266,26 @@ fn mime_to_image_format(mime: &str) -> Option<ImageFormat> {
 ///
 /// All thumbnails are `.webp` unless the source requires a static SVG
 /// placeholder (video without ffmpeg, audio, SVG sources).
-fn thumbnail_extension(mime: &str, ffmpeg_available: bool) -> &'static str {
+///
+/// For `video/webm`, a WebP thumbnail can only be produced when ffmpeg is
+/// available AND the `libwebp` encoder is compiled in.  When either is
+/// absent, `ffmpeg_thumbnail` will fail and `write_placeholder` will be
+/// called — we must pre-select `.svg` so the placeholder is written to a
+/// path whose extension matches its actual SVG content.  Mismatching the
+/// extension (SVG bytes in a `.webp` file) causes browsers to reject the
+/// file and display nothing.
+fn thumbnail_extension(
+    mime: &str,
+    ffmpeg_available: bool,
+    ffmpeg_webp_available: bool,
+) -> &'static str {
     match mime {
         "image/svg+xml" => "svg",
         m if m.starts_with("audio/") => "svg",
-        "video/webm" | "audio/webm" if !ffmpeg_available => "svg",
+        // Video thumbnails need both ffmpeg (to demux the stream) AND libwebp
+        // (to encode the extracted frame as WebP).  If either is missing the
+        // fallback is an SVG placeholder.
+        "video/webm" | "audio/webm" if !ffmpeg_available || !ffmpeg_webp_available => "svg",
         _ => "webp",
     }
 }
@@ -243,30 +297,36 @@ mod tests {
     #[test]
     fn thumbnail_ext_is_webp_for_images_no_ffmpeg() {
         // Images use image-crate fallback, so webp even without ffmpeg
-        assert_eq!(thumbnail_extension("image/jpeg", false), "webp");
-        assert_eq!(thumbnail_extension("image/png", false), "webp");
-        assert_eq!(thumbnail_extension("image/webp", false), "webp");
+        assert_eq!(thumbnail_extension("image/jpeg", false, false), "webp");
+        assert_eq!(thumbnail_extension("image/png", false, false), "webp");
+        assert_eq!(thumbnail_extension("image/webp", false, false), "webp");
     }
 
     #[test]
     fn thumbnail_ext_is_svg_for_video_without_ffmpeg() {
-        assert_eq!(thumbnail_extension("video/webm", false), "svg");
+        assert_eq!(thumbnail_extension("video/webm", false, false), "svg");
     }
 
     #[test]
-    fn thumbnail_ext_is_webp_for_video_with_ffmpeg() {
-        assert_eq!(thumbnail_extension("video/webm", true), "webp");
+    fn thumbnail_ext_is_svg_for_video_with_ffmpeg_but_no_webp() {
+        // ffmpeg available but libwebp missing — placeholder path must be .svg
+        assert_eq!(thumbnail_extension("video/webm", true, false), "svg");
+    }
+
+    #[test]
+    fn thumbnail_ext_is_webp_for_video_with_ffmpeg_and_webp() {
+        assert_eq!(thumbnail_extension("video/webm", true, true), "webp");
     }
 
     #[test]
     fn thumbnail_ext_is_svg_for_audio() {
-        assert_eq!(thumbnail_extension("audio/mpeg", true), "svg");
-        assert_eq!(thumbnail_extension("audio/mpeg", false), "svg");
+        assert_eq!(thumbnail_extension("audio/mpeg", true, true), "svg");
+        assert_eq!(thumbnail_extension("audio/mpeg", false, false), "svg");
     }
 
     #[test]
     fn thumbnail_ext_is_svg_for_svg_source() {
-        assert_eq!(thumbnail_extension("image/svg+xml", true), "svg");
-        assert_eq!(thumbnail_extension("image/svg+xml", false), "svg");
+        assert_eq!(thumbnail_extension("image/svg+xml", true, true), "svg");
+        assert_eq!(thumbnail_extension("image/svg+xml", false, false), "svg");
     }
 }

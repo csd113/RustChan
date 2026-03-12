@@ -336,6 +336,14 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // ffmpeg: required for video thumbnails (optional — graceful degradation).
     let ffmpeg_status = detect::detect_ffmpeg(CONFIG.require_ffmpeg);
     let ffmpeg_available = ffmpeg_status == detect::ToolStatus::Available;
+    // libwebp encoder: needed for image→WebP conversion.  Checked independently
+    // so that a stock ffmpeg build (missing libwebp) still enables video/audio
+    // features while image conversion degrades gracefully.
+    let ffmpeg_webp_available = detect::detect_webp_encoder(ffmpeg_available);
+    // libvpx-vp9 + libopus encoders: needed for MP4→WebM transcoding and
+    // WebM/AV1→VP9 re-encoding.  Checked independently so that a build missing
+    // only these codecs still enables image conversion and thumbnail generation.
+    let ffmpeg_vp9_available = detect::detect_webm_encoder(ffmpeg_available);
 
     // Tor: create hidden-service directory + torrc, launch tor as a background
     // process, and poll for the hostname file (all non-blocking).
@@ -353,9 +361,10 @@ async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     let state = AppState {
         db: pool.clone(),
         ffmpeg_available,
+        ffmpeg_webp_available,
         job_queue: {
             let q = std::sync::Arc::new(workers::JobQueue::new(pool.clone()));
-            workers::start_worker_pool(&q, ffmpeg_available);
+            workers::start_worker_pool(&q, ffmpeg_available, ffmpeg_vp9_available);
             q
         },
         backup_progress: std::sync::Arc::new(middleware::BackupProgress::new()),

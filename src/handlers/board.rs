@@ -126,7 +126,11 @@ pub async fn board_index(
             // combined with the page number.  This is a cheap proxy for "has
             // anything on this page changed?".
             let max_bump = threads.iter().map(|t| t.bumped_at).max().unwrap_or(0);
-            let etag = format!("\"{max_bump}-{page}\"");
+            // Include is_admin in the ETag so admin and non-admin responses
+            // have distinct cache keys and the browser doesn't serve a cached
+            // non-admin page (missing delete controls) to a logged-in admin.
+            let admin_tag = if is_admin { "-a" } else { "" };
+            let etag = format!("\"{max_bump}-{page}{admin_tag}\"");
 
             let mut summaries = Vec::with_capacity(threads.len());
             for thread in threads {
@@ -210,6 +214,7 @@ pub async fn create_thread(
     let max_video_size = CONFIG.max_video_size;
     let max_audio_size = CONFIG.max_audio_size;
     let ffmpeg_available = state.ffmpeg_available;
+    let ffmpeg_webp_available = state.ffmpeg_webp_available;
     let cookie_secret = CONFIG.cookie_secret.clone();
     let file_data = form.file;
     let audio_file_data = form.audio_file;
@@ -312,6 +317,7 @@ pub async fn create_thread(
                 max_video_size,
                 max_audio_size,
                 ffmpeg_available,
+                ffmpeg_webp_available,
             )?;
 
             // ── Image+audio combo ─────────────────────────────────────────────
@@ -675,7 +681,38 @@ pub async fn file_report(
 
 // ─── GET /boards/{*media_path} — serve media with mp4→webm redirect ──────────
 //
+
+// ─── Content-Type helper for board media ─────────────────────────────────────
+
+/// Return the correct `Content-Type` value for a board media file based solely
+/// on its extension.  Used to override whatever `mime_guess` / `ServeFile`
+/// produces, because some builds of `mime_guess` do not include `.webp`,
+/// `.svg`, or audio formats in their database and fall back to
+/// `application/octet-stream`, which causes browsers to download the file
+/// rather than display or play it inline.
+fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("webp") => Some("image/webp"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("png") => Some("image/png"),
+        Some("gif") => Some("image/gif"),
+        Some("bmp") => Some("image/bmp"),
+        Some("tiff" | "tif") => Some("image/tiff"),
+        Some("svg") => Some("image/svg+xml"),
+        Some("webm") => Some("video/webm"),
+        Some("mp4") => Some("video/mp4"),
+        Some("mp3") => Some("audio/mpeg"),
+        Some("ogg") => Some("audio/ogg"),
+        Some("flac") => Some("audio/flac"),
+        Some("wav") => Some("audio/wav"),
+        Some("m4a") => Some("audio/mp4"),
+        Some("aac") => Some("audio/aac"),
+        _ => None,
+    }
+}
+
 // Replaces the former nest_service(ServeDir) so we can intercept stale .mp4
+
 // links (created before the background transcoder replaced them with .webm)
 // and issue a permanent redirect. All other paths are served via ServeFile.
 
@@ -712,7 +749,21 @@ pub async fn serve_board_media(
         let req = req.map(|_| axum::body::Body::empty());
         ServeFile::new(&target).oneshot(req).await.map_or_else(
             |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            |resp| resp.map(axum::body::Body::new).into_response(),
+            |resp| {
+                use axum::http::header::{HeaderValue, CONTENT_TYPE};
+                let mut resp = resp.map(axum::body::Body::new);
+                // Override Content-Type using our own extension→MIME map.
+                // tower-http delegates to `mime_guess` which may return
+                // `application/octet-stream` for formats like `.webp` or `.svg`
+                // on some builds, causing browsers to download the file instead
+                // of displaying it inline.  An explicit map guarantees the
+                // correct type for every format we store.
+                if let Some(ct) = media_content_type(&target) {
+                    resp.headers_mut()
+                        .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+                }
+                resp.into_response()
+            },
         )
     } else if std::path::Path::new(&media_path)
         .extension()

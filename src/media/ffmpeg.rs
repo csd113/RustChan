@@ -68,7 +68,11 @@ pub fn run_ffmpeg(args: &[&str]) -> Result<()> {
 /// Convert an image file to WebP using ffmpeg.
 ///
 /// Uses quality 85 and strips all metadata (`-map_metadata -1`).
-/// Input can be any format ffmpeg understands (JPEG, PNG, BMP, TIFF, …).
+/// Input can be any format ffmpeg understands (JPEG, PNG, BMP, TIFF, GIF, …).
+///
+/// The `-loop 0` flag causes multi-frame inputs (GIF) to produce an animated
+/// WebP that loops forever, matching the default GIF behaviour.  For
+/// single-frame inputs ffmpeg silently ignores the flag.
 ///
 /// # Errors
 /// Returns an error if ffmpeg exits non-zero or cannot be spawned.
@@ -81,10 +85,14 @@ pub fn ffmpeg_image_to_webp(input: &Path, output: &Path) -> Result<()> {
         "error",
         "-i",
         in_str,
-        "-map_metadata",
-        "-1",
+        "-c:v",
+        "libwebp",
         "-quality",
         "85",
+        "-loop",
+        "0",
+        "-map_metadata",
+        "-1",
         "-y",
         out_str,
     ])
@@ -93,12 +101,14 @@ pub fn ffmpeg_image_to_webp(input: &Path, output: &Path) -> Result<()> {
 
 /// Convert a GIF animation to `WebM` (VP9 codec) using ffmpeg.
 ///
-/// Uses constant-quality VP9 encoding (`-crf 30 -b:v 0`) which preserves
-/// animation while producing browser-compatible `WebM`.  All metadata is
-/// stripped.
+/// Retained for potential future use but no longer called by the conversion
+/// pipeline — GIFs are now converted to animated WebP via
+/// [`ffmpeg_image_to_webp`] so they remain in the Image media category and
+/// render as `<img>` tags rather than `<video>` tags.
 ///
 /// # Errors
 /// Returns an error if ffmpeg exits non-zero or cannot be spawned.
+#[allow(dead_code)]
 pub fn ffmpeg_gif_to_webm(input: &Path, output: &Path) -> Result<()> {
     let in_str = path_to_str(input)?;
     let out_str = path_to_str(output)?;
@@ -147,6 +157,8 @@ pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()>
         "1",
         "-vf",
         &scale,
+        "-c:v",
+        "libwebp",
         "-quality",
         "80",
         "-y",
@@ -155,69 +167,58 @@ pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()>
     .with_context(|| format!("thumbnail generation failed for {in_str}"))
 }
 
-/// Probe the video codec of the first video stream in a file.
+/// Probe the primary video codec of a media file using `ffprobe`.
 ///
-/// Returns the codec name in lower-case (e.g. `"av1"`, `"vp9"`, `"vp8"`).
-/// Called by the `VideoTranscode` background worker to decide whether a `WebM`
-/// upload needs AV1 → VP9 re-encoding.
-///
-/// Security: arguments are passed as a separate array — no shell invocation.
-/// `file_path` must be a server-controlled UUID-based path.
+/// Returns the lowercase codec name (e.g. `"vp9"`, `"av1"`, `"h264"`) on
+/// success.  `ffprobe` must be on the same PATH as `ffmpeg`.
 ///
 /// # Errors
-/// Returns an error if ffprobe cannot be run or returns no codec.
-pub fn probe_video_codec(file_path: &str) -> Result<String> {
-    let out = Command::new("ffprobe")
+/// Returns an error if `ffprobe` cannot be spawned, exits non-zero, or its
+/// output contains no recognisable codec name.
+pub fn probe_video_codec(path: &str) -> Result<String> {
+    let output = std::process::Command::new("ffprobe")
         .args([
             "-v",
-            "error",
+            "quiet",
             "-select_streams",
             "v:0",
             "-show_entries",
             "stream=codec_name",
             "-of",
-            "csv=p=0",
-            file_path,
+            "default=noprint_wrappers=1:nokey=1",
+            path,
         ])
         .output()
-        .context("ffprobe not found or failed to spawn")?;
+        .context("failed to spawn ffprobe — is it installed and on PATH?")?;
 
-    if !out.status.success() {
+    if !output.status.success() {
         return Err(anyhow::anyhow!(
-            "ffprobe exit {}: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
+            "ffprobe exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
 
-    let codec = String::from_utf8_lossy(&out.stdout)
+    let codec = String::from_utf8_lossy(&output.stdout)
         .trim()
         .to_ascii_lowercase();
 
     if codec.is_empty() {
         return Err(anyhow::anyhow!(
-            "ffprobe returned no codec for: {file_path}"
+            "ffprobe returned no codec name for: {path}"
         ));
     }
 
     Ok(codec)
 }
 
-/// Transcode a video file to `WebM` (VP9/CRF-33 + Opus/96k).
+/// Transcode a video file to `WebM` (VP9 video + Opus audio) using ffmpeg.
 ///
-/// `input` and `output` must be on the same filesystem so the caller can
-/// atomically rename `output` into its final location after this returns.
-///
-/// Encoding settings:
-///   VP9  — `-deadline good -cpu-used 4` for a good quality/speed balance.
-///           CRF 33 with unconstrained average bitrate (`-b:v 0`) — pure CRF
-///           mode is the correct libvpx-vp9 approach.
-///           `-row-mt 1` enables row-based multithreading.
-///           `-tile-columns 2` improves encode and decode parallelism.
-///   Opus — `-b:a 96k` — transparent quality for speech and music.
+/// Uses constant-quality VP9 encoding (`-crf 30 -b:v 0`) and Opus audio at
+/// 128 kbps.  All metadata is stripped.  Accepts MP4 or AV1 `WebM` inputs.
 ///
 /// # Errors
-/// Returns an error if ffmpeg cannot be spawned or exits non-zero.
+/// Returns an error if ffmpeg exits non-zero or cannot be spawned.
 pub fn ffmpeg_transcode_to_webm(input: &Path, output: &Path) -> Result<()> {
     let in_str = path_to_str(input)?;
     let out_str = path_to_str(output)?;
@@ -230,49 +231,42 @@ pub fn ffmpeg_transcode_to_webm(input: &Path, output: &Path) -> Result<()> {
         "-c:v",
         "libvpx-vp9",
         "-crf",
-        "33",
+        "30",
         "-b:v",
-        "0",
-        "-deadline",
-        "good",
-        "-cpu-used",
-        "4",
-        "-row-mt",
-        "1",
-        "-tile-columns",
-        "2",
-        "-threads",
         "0",
         "-c:a",
         "libopus",
         "-b:a",
-        "96k",
+        "128k",
+        "-map_metadata",
+        "-1",
         "-y",
         out_str,
     ])
-    .with_context(|| format!("video transcode failed for {in_str}"))
+    .with_context(|| format!("video→webm transcode failed for {in_str}"))
 }
 
-/// Generate a waveform PNG from an audio file using ffmpeg's `showwavespic` filter.
+/// Generate a waveform PNG image for an audio file using ffmpeg's
+/// `showwavespic` filter.
 ///
-/// `input` is a path to the audio file on disk (UUID-named, server-controlled).
-/// `output` receives the PNG.  Caller is responsible for atomically renaming
-/// `output` into its final location.
+/// The output image will be `width × height` pixels.  The waveform is
+/// rendered in a neutral grey (`0x888888`) suitable for both light and dark
+/// page themes.
 ///
 /// # Errors
-/// Returns an error if ffmpeg cannot be spawned or exits non-zero.
+/// Returns an error if ffmpeg exits non-zero or cannot be spawned.
 pub fn ffmpeg_audio_waveform(input: &Path, output: &Path, width: u32, height: u32) -> Result<()> {
     let in_str = path_to_str(input)?;
     let out_str = path_to_str(output)?;
-    let vf = format!("showwavespic=s={width}x{height}:colors=#00c840|#007020:split_channels=0");
+    let filter = format!("showwavespic=s={width}x{height}:colors=0x888888");
 
     run_ffmpeg(&[
         "-loglevel",
         "error",
         "-i",
         in_str,
-        "-lavfi",
-        &vf,
+        "-filter_complex",
+        &filter,
         "-frames:v",
         "1",
         "-y",
@@ -288,4 +282,77 @@ pub fn ffmpeg_audio_waveform(input: &Path, output: &Path, width: u32, height: u3
 fn path_to_str(p: &Path) -> Result<&str> {
     p.to_str()
         .ok_or_else(|| anyhow::anyhow!("path contains non-UTF-8 characters: {}", p.display()))
+}
+
+/// Probe whether the current ffmpeg binary has the `libwebp` encoder compiled in.
+///
+/// Runs `ffmpeg -encoders` and scans stdout for a line containing `libwebp`.
+/// Returns `true` only when ffmpeg is present AND the encoder is available.
+///
+/// This is a synchronous, blocking call intended for use at server startup
+/// inside a `spawn_blocking` task, or called directly from the startup path
+/// where blocking is acceptable.
+#[must_use]
+pub fn check_webp_encoder() -> bool {
+    let output = Command::new("ffmpeg")
+        .args(["-encoders"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.lines().any(|line| line.contains("libwebp"))
+        }
+        Err(_) => false,
+    }
+}
+
+/// Probe whether the current ffmpeg binary has the `libvpx-vp9` encoder compiled in.
+///
+/// Required for MP4→WebM and WebM/AV1→WebM/VP9 transcoding.  Runs
+/// `ffmpeg -encoders` and scans stdout for a line containing `libvpx-vp9`.
+/// Returns `true` only when ffmpeg is present AND the encoder is available.
+///
+/// This is a synchronous, blocking call intended for use at server startup.
+#[must_use]
+pub fn check_vp9_encoder() -> bool {
+    let output = Command::new("ffmpeg")
+        .args(["-encoders"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.lines().any(|line| line.contains("libvpx-vp9"))
+        }
+        Err(_) => false,
+    }
+}
+
+/// Probe whether the current ffmpeg binary has the `libopus` encoder compiled in.
+///
+/// Required for audio encoding during MP4→WebM and WebM/AV1→WebM/VP9 transcoding.
+/// Runs `ffmpeg -encoders` and scans stdout for a line containing `libopus`.
+/// Returns `true` only when ffmpeg is present AND the encoder is available.
+///
+/// This is a synchronous, blocking call intended for use at server startup.
+#[must_use]
+pub fn check_opus_encoder() -> bool {
+    let output = Command::new("ffmpeg")
+        .args(["-encoders"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.lines().any(|line| line.contains("libopus"))
+        }
+        Err(_) => false,
+    }
 }

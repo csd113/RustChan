@@ -2,10 +2,18 @@
 name = "rustchan"
 version = "1.1.0"
 edition = "2021"
+# axum 0.8 requires Rust 1.75; that is the effective floor for this project.
+rust-version = "1.88.0"
 license = "MIT"
 # FIX[LOW-1]: Removed hardware-specific description. This binary is portable
 # and targets any architecture/OS that Rust supports.
 description = "Self-contained imageboard — single binary, zero runtime dependencies"
+
+# cargo-msrv <0.16 reads package.metadata.msrv instead of the Cargo-standard
+# rust-version field; keep both so `cargo msrv verify` works regardless of
+# which version of cargo-msrv is installed.
+[package.metadata]
+msrv = "1.75"
 
 [profile.release]
 opt-level      = 3
@@ -23,7 +31,6 @@ name  = "chan"
 path  = "src/lib.rs"
 
 [dependencies]
-async-trait = "0.1"
 axum       = { version = "0.8",  features = ["multipart"] }
 axum-extra = { version = "0.12", features = ["cookie"] }
 tower      = "0.5"
@@ -46,7 +53,6 @@ sha2   = "0.10"
 hex    = "0.4"
 # rand_core 0.6 replaces rand = "0.8" entirely.
 # We only need OsRng + RngCore, both of which live in rand_core.
-# rand 0.9/0.10 bumps rand_core to an incompatible version (0.9) vs the
 # rand_core 0.6 that argon2 0.5 / password-hash 0.5 depends on, causing
 # OsRng type mismatches at compile time. Using rand_core 0.6 directly
 # shares the exact same crate instance as argon2's transitive dep.

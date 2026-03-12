@@ -613,10 +613,16 @@ pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>
             )
             .ok();
 
-        if let Some((fp, tp)) = maybe_row {
-            // Only delete the hash entry if both paths are in the safe set —
-            // i.e. neither is referenced by any remaining post.
-            if safe_set.contains(fp.as_str()) && safe_set.contains(tp.as_str()) {
+        if let Some((fp, _tp)) = maybe_row {
+            // Delete the hash entry when file_path is unreferenced.  We only
+            // check file_path (not thumb_path) because:
+            //   1. file_path is the dedup key — once no post holds this path,
+            //      the entry can never match a future upload and is dead weight.
+            //   2. A post's thumb_path may be NULL (e.g. audio files whose
+            //      thumbnail was never persisted), so thumb_path is absent from
+            //      `candidates` / `safe_set` and the old two-sided check would
+            //      spuriously skip deletion, leaving orphaned rows forever.
+            if safe_set.contains(fp.as_str()) {
                 let _ = conn.execute("DELETE FROM file_hashes WHERE file_path = ?1", params![fp]);
             }
         }

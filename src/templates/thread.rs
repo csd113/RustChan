@@ -448,7 +448,7 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container audio-container">
 <div class="file-info">
-  <a href="/boards/{f}">{orig}</a> ({sz})
+  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
 <div class="audio-thumb">
   <img class="thumb" src="/boards/{th}" loading="lazy" alt="audio">
@@ -469,7 +469,7 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container">
 <div class="file-info">
-  <a href="/boards/{f}">{orig}</a> ({sz})
+  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
 <div class="media-preview" data-action="expand-media" title="click to play">
@@ -492,7 +492,7 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container">
 <div class="file-info">
-  <a href="/boards/{f}">{orig}</a> ({sz})
+  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
 <div class="media-preview" data-action="expand-media" title="click to expand">
@@ -523,7 +523,7 @@ pub fn render_post(
                 html,
                 r#"<div class="file-container audio-container audio-combo">
 <div class="file-info">
-  <a href="/boards/{f}">{orig}</a> ({sz})
+  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
 <audio controls preload="none" class="audio-player">
   <source src="/boards/{f}" type="{mime}">

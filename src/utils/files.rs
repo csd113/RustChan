@@ -292,6 +292,7 @@ pub fn save_upload(
     max_video_size: usize,
     max_audio_size: usize,
     ffmpeg_available: bool,
+    ffmpeg_webp_available: bool,
 ) -> Result<UploadedFile> {
     if data.is_empty() {
         return Err(anyhow::anyhow!("File is empty."));
@@ -390,7 +391,14 @@ pub fn save_upload(
     // (same filesystem partition guaranteed).
     let tmp_input = {
         use std::io::Write as _;
-        let mut tmp = tempfile::NamedTempFile::new_in(&dest_dir)
+        // Give the temp file the correct extension so ffmpeg can reliably
+        // detect the input format by extension (in addition to magic bytes).
+        // Without an extension, some ffmpeg builds fail to select a demuxer
+        // for formats like JPEG even when the magic bytes are valid.
+        let ext = mime_to_ext(mime_type);
+        let mut tmp = tempfile::Builder::new()
+            .suffix(&format!(".{ext}"))
+            .tempfile_in(&dest_dir)
             .context("Failed to create temp input file for media processing")?;
         tmp.write_all(data)
             .context("Failed to write upload bytes to temp file")?;
@@ -399,7 +407,8 @@ pub fn save_upload(
     };
 
     // ── Run media conversion + thumbnail generation via MediaProcessor ────────
-    let processor = crate::media::MediaProcessor::new_with_ffmpeg(ffmpeg_available);
+    let processor =
+        crate::media::MediaProcessor::new_with_ffmpeg_caps(ffmpeg_available, ffmpeg_webp_available);
 
     let processed = processor.process_upload(
         tmp_input.path(),

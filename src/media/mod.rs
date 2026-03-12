@@ -79,6 +79,9 @@ pub struct ProcessedMedia {
 pub struct MediaProcessor {
     /// Whether the `ffmpeg` binary was detected on startup.
     pub ffmpeg_available: bool,
+    /// Whether the libwebp encoder is compiled into the detected ffmpeg build.
+    /// Controls image→WebP conversion independently of video/audio capabilities.
+    pub ffmpeg_webp_available: bool,
 }
 
 impl MediaProcessor {
@@ -96,19 +99,35 @@ impl MediaProcessor {
                  Install ffmpeg to enable optimal format conversion."
             );
         }
+        let webp_available = available && ffmpeg::check_webp_encoder();
         Self {
             ffmpeg_available: available,
+            ffmpeg_webp_available: webp_available,
         }
     }
 
-    /// Create a `MediaProcessor` with a pre-detected ffmpeg availability flag.
+    /// Create a `MediaProcessor` with pre-detected capability flags.
     ///
     /// Use this in request handlers to avoid re-detecting ffmpeg on every upload.
-    /// The flag should come from `AppState::ffmpeg_available` which is set once
-    /// at server startup via `detect::detect_ffmpeg`.
+    /// Both flags should come from `AppState` which is populated once at startup.
     #[must_use]
+    pub const fn new_with_ffmpeg_caps(ffmpeg_available: bool, ffmpeg_webp_available: bool) -> Self {
+        Self {
+            ffmpeg_available,
+            ffmpeg_webp_available,
+        }
+    }
+
+    /// Convenience constructor when only the base ffmpeg flag is known.
+    /// `ffmpeg_webp_available` defaults to the same value as `ffmpeg_available`.
+    /// Prefer [`new_with_ffmpeg_caps`](Self::new_with_ffmpeg_caps) in handlers.
+    #[must_use]
+    #[allow(dead_code)]
     pub const fn new_with_ffmpeg(ffmpeg_available: bool) -> Self {
-        Self { ffmpeg_available }
+        Self {
+            ffmpeg_available,
+            ffmpeg_webp_available: ffmpeg_available,
+        }
     }
 
     /// Process an uploaded file: convert to an optimal web format and generate
@@ -152,6 +171,7 @@ impl MediaProcessor {
             output_dir,
             file_stem,
             self.ffmpeg_available,
+            self.ffmpeg_webp_available,
         )
         .context("conversion step failed")?;
 
@@ -170,24 +190,33 @@ impl MediaProcessor {
             file_stem,
             conv.final_mime,
             self.ffmpeg_available,
+            self.ffmpeg_webp_available,
         );
 
-        if let Err(e) = thumbnail::generate_thumbnail(
+        // generate_thumbnail returns the actual path written, which may differ
+        // from thumb_path when a video thumbnail falls back to an SVG placeholder
+        // (the pre-selected .webp extension would mismatch the SVG content).
+        let actual_thumb_path = match thumbnail::generate_thumbnail(
             &conv.final_path,
             conv.final_mime,
             &thumb_path,
             thumb_max,
             self.ffmpeg_available,
+            self.ffmpeg_webp_available,
         ) {
-            // Thumbnail failure must never abort an upload.  Log and continue;
-            // the placeholder will already have been written or the path left
-            // empty — callers must handle a missing thumbnail gracefully.
-            tracing::warn!("thumbnail generation failed: {e}");
-        }
+            Ok(p) => p,
+            Err(e) => {
+                // Thumbnail failure must never abort an upload.  Log and fall
+                // back to the pre-computed path (the thumbnail will be missing,
+                // but the upload still succeeds).
+                tracing::warn!("thumbnail generation failed: {e}");
+                thumb_path
+            }
+        };
 
         Ok(ProcessedMedia {
             file_path: conv.final_path,
-            thumbnail_path: thumb_path,
+            thumbnail_path: actual_thumb_path,
             mime_type: conv.final_mime.to_string(),
             was_converted: conv.was_converted,
             original_size,
@@ -215,18 +244,24 @@ impl MediaProcessor {
         file_stem: &str,
         thumb_max: u32,
     ) -> Result<PathBuf> {
-        let thumb_path =
-            thumbnail::thumbnail_output_path(thumb_dir, file_stem, mime, self.ffmpeg_available);
+        let thumb_path = thumbnail::thumbnail_output_path(
+            thumb_dir,
+            file_stem,
+            mime,
+            self.ffmpeg_available,
+            self.ffmpeg_webp_available,
+        );
 
+        // Forward the actual path returned by generate_thumbnail (may differ from
+        // thumb_path when a video placeholder falls back to .svg extension).
         thumbnail::generate_thumbnail(
             input_path,
             mime,
             &thumb_path,
             thumb_max,
             self.ffmpeg_available,
-        )?;
-
-        Ok(thumb_path)
+            self.ffmpeg_webp_available,
+        )
     }
 }
 

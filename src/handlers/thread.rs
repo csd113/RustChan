@@ -45,7 +45,7 @@ pub async fn view_thread(
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
-        move || -> Result<(String, String)> {
+        move || -> Result<(String, String, bool)> {
             let conn = pool.get()?;
 
             let is_admin = jar_session
@@ -62,13 +62,13 @@ pub async fn view_thread(
                 return Err(AppError::NotFound("Thread not found in this board.".into()));
             }
 
-            // ETag derived from the thread's last-bump timestamp AND the
-            // current board-list version.  The board version component ensures
-            // that adding or deleting a board invalidates cached thread pages,
-            // so the nav bar always reflects the current board list rather than
-            // showing stale/deleted boards until the thread receives a reply.
+            // ETag derived from the thread's last-bump timestamp, the current
+            // board-list version, and whether the viewer is an admin.  Including
+            // admin status prevents a browser from serving a cached non-admin
+            // page (without delete controls) to a user who has since logged in.
             let boards_ver = crate::templates::live_boards_version();
-            let etag = format!("\"{}-b{boards_ver}\"", thread.bumped_at);
+            let admin_tag = if is_admin { "-a" } else { "" };
+            let etag = format!("\"{}-b{boards_ver}{admin_tag}\"", thread.bumped_at);
 
             let posts = db::get_posts_for_thread(&conn, thread_id)?;
             let all_boards = db::get_all_boards(&conn)?;
@@ -89,13 +89,13 @@ pub async fn view_thread(
                 None,
                 collapse_greentext,
             );
-            Ok((etag, html))
+            Ok((etag, html, is_admin))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let (etag, html) = result;
+    let (etag, html, _is_admin) = result;
 
     // 3.2: Return 304 Not Modified when client's cached copy is still current.
     let client_etag = req_headers
@@ -147,6 +147,7 @@ pub async fn post_reply(
     let max_video_size = CONFIG.max_video_size;
     let max_audio_size = CONFIG.max_audio_size;
     let ffmpeg_available = state.ffmpeg_available;
+    let ffmpeg_webp_available = state.ffmpeg_webp_available;
     let cookie_secret = CONFIG.cookie_secret.clone();
     let file_data = form.file;
     let audio_file_data = form.audio_file;
@@ -258,6 +259,7 @@ pub async fn post_reply(
                 max_video_size,
                 max_audio_size,
                 ffmpeg_available,
+                ffmpeg_webp_available,
             )?;
 
             // ── Image+audio combo ─────────────────────────────────────────────

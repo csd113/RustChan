@@ -4,7 +4,7 @@
 //
 // Conversion rules (from project spec):
 //   jpg / jpeg → WebP  (quality 85, metadata stripped)
-//   gif        → WebM  (VP9 codec, preserves animation)
+//   gif        → WebP  (quality 85, -loop 0 preserves animation if libwebp supports it)
 //   bmp        → WebP
 //   tiff       → WebP
 //   png        → WebP  ONLY if the WebP output is smaller; otherwise keep PNG
@@ -29,10 +29,8 @@ use super::ffmpeg;
 /// source MIME type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversionAction {
-    /// Convert to WebP (JPEG, BMP, TIFF).
+    /// Convert to WebP (JPEG, GIF, BMP, TIFF).
     ToWebp,
-    /// Convert to WebM/VP9 (GIF animation).
-    ToWebm,
     /// Attempt WebP; keep original if WebP is not smaller (PNG).
     ToWebpIfSmaller,
     /// No conversion; store file as-is.
@@ -46,8 +44,11 @@ pub enum ConversionAction {
 #[must_use]
 pub fn conversion_action(mime: &str) -> ConversionAction {
     match mime {
-        "image/jpeg" | "image/bmp" | "image/tiff" => ConversionAction::ToWebp,
-        "image/gif" => ConversionAction::ToWebm,
+        // GIF → animated WebP: keeps the media type as Image so it renders in
+        // an <img> tag rather than a <video> player.  The -loop 0 flag in
+        // ffmpeg_image_to_webp preserves animation for multi-frame GIFs.
+        // Falls back to storing the original GIF if libwebp is unavailable.
+        "image/jpeg" | "image/bmp" | "image/tiff" | "image/gif" => ConversionAction::ToWebp,
         "image/png" => ConversionAction::ToWebpIfSmaller,
         // Keep these formats as-is
         "image/svg+xml" | "image/webp" | "video/webm" | "audio/webm" | "video/mp4"
@@ -75,13 +76,16 @@ pub struct ConversionResult {
 ///
 /// If `ffmpeg_available` is `false`, no conversion is attempted and the
 /// input file is copied to the output directory with its original extension.
+/// If `ffmpeg_webp_available` is `false`, WebP conversion is skipped even
+/// when ffmpeg is otherwise available (e.g. stock build without libwebp).
 ///
 /// # Arguments
-/// * `input_path`      — Temporary file containing the original upload bytes.
-/// * `mime`            — Detected MIME type of the input.
-/// * `output_dir`      — Directory where the final file should be placed.
-/// * `file_stem`       — UUID-based stem (no extension) for the output filename.
-/// * `ffmpeg_available`— Whether the ffmpeg binary was detected at startup.
+/// * `input_path`           — Temporary file containing the original upload bytes.
+/// * `mime`                 — Detected MIME type of the input.
+/// * `output_dir`           — Directory where the final file should be placed.
+/// * `file_stem`            — UUID-based stem (no extension) for the output filename.
+/// * `ffmpeg_available`     — Whether the ffmpeg binary was detected at startup.
+/// * `ffmpeg_webp_available`— Whether ffmpeg has the libwebp encoder compiled in.
 ///
 /// # Errors
 /// Returns an error only for I/O failures (copy / rename).  ffmpeg failures
@@ -92,16 +96,25 @@ pub fn convert_file(
     output_dir: &Path,
     file_stem: &str,
     ffmpeg_available: bool,
+    ffmpeg_webp_available: bool,
 ) -> Result<ConversionResult> {
     let action = if ffmpeg_available {
-        conversion_action(mime)
+        let base = conversion_action(mime);
+        // Downgrade webp conversion actions if libwebp encoder is absent.
+        match base {
+            ConversionAction::ToWebp | ConversionAction::ToWebpIfSmaller
+                if !ffmpeg_webp_available =>
+            {
+                ConversionAction::KeepAsIs
+            }
+            other => other,
+        }
     } else {
         ConversionAction::KeepAsIs
     };
 
     match action {
         ConversionAction::ToWebp => convert_to_webp(input_path, output_dir, file_stem),
-        ConversionAction::ToWebm => convert_gif_to_webm(input_path, output_dir, file_stem),
         ConversionAction::ToWebpIfSmaller => {
             convert_png_if_smaller(input_path, output_dir, file_stem)
         }
@@ -123,6 +136,11 @@ fn convert_to_webp(input: &Path, output_dir: &Path, file_stem: &str) -> Result<C
         Ok(()) => {
             atomic_rename(&tmp_out, &output)?;
             let final_size = file_size(&output)?;
+            tracing::info!(
+                "image→webp: converted {} → {} ({final_size} bytes)",
+                input.display(),
+                output.display()
+            );
             Ok(ConversionResult {
                 final_path: output,
                 final_mime: "image/webp",
@@ -132,39 +150,9 @@ fn convert_to_webp(input: &Path, output_dir: &Path, file_stem: &str) -> Result<C
         }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp_out);
-            tracing::warn!("ffmpeg image→webp failed ({}); storing original", e);
+            tracing::warn!("ffmpeg image→webp failed ({:#}); storing original", e);
             // Fall back: copy input to its original extension destination
             copy_as_is_with_ext(input, output_dir, file_stem, ext_for_original_mime(input))
-        }
-    }
-}
-
-/// Convert a GIF to WebM/VP9.
-///
-/// On ffmpeg failure, stores the original GIF.
-fn convert_gif_to_webm(
-    input: &Path,
-    output_dir: &Path,
-    file_stem: &str,
-) -> Result<ConversionResult> {
-    let output = output_dir.join(format!("{file_stem}.webm"));
-    let tmp_out = temp_sibling(&output);
-
-    match ffmpeg::ffmpeg_gif_to_webm(input, &tmp_out) {
-        Ok(()) => {
-            atomic_rename(&tmp_out, &output)?;
-            let final_size = file_size(&output)?;
-            Ok(ConversionResult {
-                final_path: output,
-                final_mime: "video/webm",
-                was_converted: true,
-                final_size,
-            })
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp_out);
-            tracing::warn!("ffmpeg gif→webm failed ({}); storing original GIF", e);
-            copy_as_is_with_ext(input, output_dir, file_stem, "gif")
         }
     }
 }
@@ -202,7 +190,7 @@ fn convert_png_if_smaller(
         }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp_webp);
-            tracing::warn!("ffmpeg png→webp failed ({}); storing original PNG", e);
+            tracing::warn!("ffmpeg png→webp failed ({:#}); storing original PNG", e);
             copy_as_is_with_ext(input, output_dir, file_stem, "png")
         }
     }
@@ -243,8 +231,17 @@ fn copy_as_is_with_ext(
 // ─── Path and size utilities ──────────────────────────────────────────────────
 
 /// Create a UUID-named sibling path for use as an atomic temp output.
+///
+/// The temp file is given the same extension as `target` so that ffmpeg can
+/// determine the output format from the filename.  Without an extension,
+/// ffmpeg cannot select the right muxer and fails immediately.
 fn temp_sibling(target: &Path) -> PathBuf {
-    let tmp_name = format!(".tmp_{}", Uuid::new_v4().simple());
+    let ext = target.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let tmp_name = if ext.is_empty() {
+        format!(".tmp_{}", Uuid::new_v4().simple())
+    } else {
+        format!(".tmp_{}.{ext}", Uuid::new_v4().simple())
+    };
     target
         .parent()
         .map_or_else(|| PathBuf::from(&tmp_name), |p| p.join(&tmp_name))
@@ -311,8 +308,8 @@ mod tests {
     }
 
     #[test]
-    fn gif_maps_to_webm() {
-        assert_eq!(conversion_action("image/gif"), ConversionAction::ToWebm);
+    fn gif_maps_to_webp() {
+        assert_eq!(conversion_action("image/gif"), ConversionAction::ToWebp);
     }
 
     #[test]
