@@ -180,20 +180,6 @@ pub fn thread_page(
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {form_html}
-</div>
-
-<!-- Mobile sticky reply drawer — visible only on small screens via CSS -->
-<div class="mobile-reply-fab" id="mobile-reply-fab" data-action="toggle-mobile-drawer">
-  ✏ Reply
-</div>
-<div class="mobile-reply-drawer" id="mobile-reply-drawer">
-  <div class="mobile-drawer-header">
-    <span>reply to thread</span>
-    <button class="mobile-drawer-close" data-action="toggle-mobile-drawer">✕</button>
-  </div>
-  <div class="mobile-drawer-body">
-    {form_html}
-  </div>
 </div>"#
         );
     }
