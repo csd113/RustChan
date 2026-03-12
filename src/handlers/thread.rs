@@ -350,6 +350,7 @@ pub struct EditQuery {
     pub token: Option<String>,
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn edit_post_get(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
@@ -415,6 +416,7 @@ pub async fn edit_post_get(
 
 #[derive(Deserialize)]
 pub struct EditForm {
+    #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub deletion_token: String,
     pub body: String,
@@ -428,6 +430,7 @@ enum EditOutcome {
     ErrorPage(String),
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn edit_post_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
@@ -535,6 +538,7 @@ pub async fn edit_post_post(
 
 #[derive(Deserialize)]
 pub struct VoteForm {
+    #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub option_id: i64,
 }

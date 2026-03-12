@@ -21,32 +21,11 @@ function togglePostForm() {
   }
 }
 
-function toggleMobileDrawer() {
-  var drawer = document.getElementById('mobile-reply-drawer');
-  var fab = document.getElementById('mobile-reply-fab');
-  if (!drawer) return;
-  var opening = !drawer.classList.contains('open');
-  drawer.classList.toggle('open', opening);
-  if (fab) fab.classList.toggle('hidden', opening);
-  if (opening) {
-    var ta = drawer.querySelector('textarea');
-    if (ta) { setTimeout(function () { ta.focus(); }, 120); }
-  }
-}
-
 function appendReply(id) {
   var wrap = document.getElementById('post-form-wrap');
-  var isMobile = window.matchMedia('(max-width: 767px)').matches;
-  if (isMobile) {
-    var drawer = document.getElementById('mobile-reply-drawer');
-    if (drawer && !drawer.classList.contains('open')) toggleMobileDrawer();
-    var ta = drawer ? drawer.querySelector('textarea') : null;
-    if (ta) { ta.value += '>>' + id + '\n'; ta.focus(); }
-  } else {
-    if (wrap && wrap.style.display === 'none') togglePostForm();
-    var ta2 = document.getElementById('reply-body');
-    if (ta2) { ta2.value += '>>' + id + '\n'; ta2.focus(); }
-  }
+  if (wrap && wrap.style.display === 'none') togglePostForm();
+  var ta = document.getElementById('reply-body');
+  if (ta) { ta.value += '>>' + id + '\n'; ta.focus(); }
   return false;
 }
 
@@ -585,7 +564,7 @@ function closeReportModal() {
   wireFormTracking();
 
   document.addEventListener('click', function (e) {
-    if (e.target && (e.target.id === 'mobile-reply-fab' || e.target.classList.contains('post-toggle-btn'))) {
+    if (e.target && e.target.classList.contains('post-toggle-btn')) {
       setTimeout(wireFormTracking, 150);
     }
   });
@@ -1088,7 +1067,6 @@ document.addEventListener('click', function (e) {
   if (t) {
     switch (t.dataset.action) {
       case 'toggle-post-form':    togglePostForm(); break;
-      case 'toggle-mobile-drawer': toggleMobileDrawer(); break;
       case 'dismiss-compress':    dismissCompressModal(); break;
       case 'start-compress':      startCompress(); break;
       case 'close-report':        closeReportModal(); break;

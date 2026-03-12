@@ -1,2 +1,4 @@
 .DS_Store
 dev-check.sh
+docs/clippy.sh
+dev-check-strict.sh

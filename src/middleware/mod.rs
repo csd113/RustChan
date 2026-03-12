@@ -159,6 +159,7 @@ fn now_secs() -> u64 {
 /// shows an in-page toast notification and then navigates the browser back
 /// to the previous page — matching the "inline" behaviour of the POST
 /// cooldown errors rather than stranding the user on a bare error page.
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     // Only rate-limit GET; skip POST and all other methods entirely.
     if req.method() != axum::http::Method::GET {

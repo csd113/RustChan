@@ -27,6 +27,7 @@ use axum::extract::Multipart;
 // Text fields (CSRF token, post body, …) are routed through `field.text()`
 // which is bounded by axum's body length limit set in the router layer.
 
+#[allow(clippy::arithmetic_side_effects)]
 async fn read_field_bytes(
     mut field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
@@ -249,6 +250,8 @@ use crate::models::Board;
 ///
 /// Returns `Ok(None)` when `file_data` is `None` (no file attached).
 /// Must be called from inside a `spawn_blocking` closure.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::arithmetic_side_effects)]
 pub fn process_primary_upload(
     file_data: Option<(Vec<u8>, String)>,
     board: &Board,

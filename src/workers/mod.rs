@@ -315,6 +315,7 @@ async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
 /// Base: 500 ms × 2^n, capped at 60 s.
 /// Jitter: uniform random 0–500 ms added to spread simultaneous retries
 /// across all workers so they do not storm the DB at the same instant.
+#[allow(clippy::arithmetic_side_effects)]
 fn backoff_duration(consecutive_errors: u32) -> Duration {
     const BASE_MS: u64 = 500;
     const MAX_MS: u64 = 60_000;

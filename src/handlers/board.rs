@@ -87,6 +87,7 @@ pub async fn index(
 
 // ─── GET /:board/ — board index ───────────────────────────────────────────────
 
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn board_index(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
@@ -372,7 +373,7 @@ pub async fn create_thread(
                     )
                 })?;
                 let secs = secs.clamp(60, 30 * 24 * 3600); // clamp 1 min..30 days
-                let expires_at = chrono::Utc::now().timestamp() + secs;
+                let expires_at = chrono::Utc::now().timestamp().saturating_add(secs);
                 db::create_poll(&conn, thread_id, &q, &valid_opts, expires_at)?;
             }
 
@@ -599,6 +600,7 @@ pub struct ReportForm {
     pub thread_id: i64,
     pub board: String,
     pub reason: Option<String>,
+    #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
 }
 
@@ -717,7 +719,7 @@ pub async fn serve_board_media(
         .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
     {
         // MP4 was transcoded away — redirect permanently to the .webm sibling.
-        let webm_path_str = format!("{}.webm", &media_path[..media_path.len() - 4]);
+        let webm_path_str = format!("{}.webm", &media_path[..media_path.len().saturating_sub(4)]);
         let webm_abs = base.join(&webm_path_str);
         if webm_abs.exists() {
             Redirect::permanent(&format!("/boards/{webm_path_str}")).into_response()
@@ -853,6 +855,7 @@ pub async fn redirect_to_post(
 #[derive(serde::Deserialize)]
 pub struct AppealForm {
     pub reason: String,
+    #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
 }
 

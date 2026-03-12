@@ -575,7 +575,7 @@ pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>
     let placeholders: String = unique
         .iter()
         .enumerate()
-        .map(|(i, _)| format!("(?{})", i + 1))
+        .map(|(i, _)| format!("(?{})", i.saturating_add(1)))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(

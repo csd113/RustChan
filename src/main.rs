@@ -176,6 +176,8 @@ enum AdminAction {
 // logical CPUs × 4 but can be tuned via `blocking_threads` in settings.toml
 // or the CHAN_BLOCKING_THREADS environment variable.
 
+#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::expect_used)]
 fn main() -> anyhow::Result<()> {
     fmt::fmt()
         .with_env_filter(
@@ -214,6 +216,7 @@ fn main() -> anyhow::Result<()> {
 // ─── Server mode ─────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     let early_data_dir = {
         let exe = std::env::current_exe()
@@ -926,6 +929,7 @@ struct TermStats {
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 fn print_stats(pool: &db::DbPool, start: Instant, ts: &mut TermStats) {
     // Uptime
     let uptime = start.elapsed();
@@ -1157,6 +1161,7 @@ fn walkdir_size(path: &std::path::Path) -> u64 {
 
 // ─── Startup banner ──────────────────────────────────────────────────────────
 
+#[allow(clippy::arithmetic_side_effects)]
 fn print_banner() {
     // Fix #3: All dynamic values (forum_name, bind_addr, paths, MiB sizes) are
     // padded/truncated to exactly fill the fixed inner width, so the right-hand
@@ -1460,6 +1465,7 @@ async fn shutdown_signal() {
 // ─── Admin CLI mode ───────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 fn run_admin(action: AdminAction) -> anyhow::Result<()> {
     use crate::{db, utils::crypto};
     use chrono::TimeZone;
@@ -1647,6 +1653,7 @@ fn run_admin(action: AdminAction) -> anyhow::Result<()> {
 /// Only files inside `{upload_dir}/{board}/thumbs/` are considered — original
 /// uploads are never touched.  Deletion is best-effort: individual failures
 /// are logged and skipped rather than aborting the whole pass.
+#[allow(clippy::arithmetic_side_effects)]
 fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
     // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
     let mut files: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();
