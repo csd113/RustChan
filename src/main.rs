@@ -39,6 +39,7 @@ mod db;
 mod detect;
 mod error;
 mod handlers;
+mod media;
 mod middleware;
 mod models;
 mod templates;

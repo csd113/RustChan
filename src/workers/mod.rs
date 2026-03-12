@@ -461,6 +461,8 @@ fn transcode_video_inner(
     board_short: &str,
     pool: &DbPool,
 ) -> Result<()> {
+    use anyhow::Context as _;
+
     let upload_dir = &CONFIG.upload_dir;
     let src = PathBuf::from(upload_dir).join(file_path);
 
@@ -489,7 +491,7 @@ fn transcode_video_inner(
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8: {}", src.display()))?;
 
-        match crate::utils::files::probe_video_codec(src_str) {
+        match crate::media::ffmpeg::probe_video_codec(src_str) {
             Ok(ref codec) if codec == "av1" => {
                 info!("VideoTranscode: WebM/AV1 detected for post {post_id} — re-encoding to VP9");
             }
@@ -521,39 +523,32 @@ fn transcode_video_inner(
         post_id, file_path
     );
 
-    let data = std::fs::read(&src)?;
-    let webm_bytes = crate::utils::files::transcode_to_webm(&data)?;
-
     let board_dir = PathBuf::from(upload_dir).join(board_short);
     let webm_name = format!("{stem}.webm");
     let webm_abs = board_dir.join(&webm_name);
     let webm_rel = format!("{board_short}/{webm_name}");
 
     // FIX[ATOMIC-WRITE]: For AV1 WebM inputs, src and webm_abs resolve to the
-    // same path (same stem, same .webm extension).  A direct fs::write would
-    // overwrite the source in-place; a crash or disk-full mid-write permanently
-    // corrupts the only copy of the file with no recovery path.
-    //
-    // We write to a uniquely named temp file in the same directory first, then
-    // atomically rename it into place.  The rename is POSIX-atomic on the same
-    // filesystem, so readers always see either the old file or the new file —
-    // never a partial write.  If anything fails before the rename, the source
-    // file is untouched and the job can be retried.
-    {
-        use std::io::Write as _;
-        let mut tmp = tempfile::NamedTempFile::new_in(&board_dir)
-            .map_err(|e| anyhow::anyhow!("Failed to create temp file for WebM output: {e}"))?;
-        tmp.write_all(&webm_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to write WebM transcode output: {e}"))?;
-        tmp.persist(&webm_abs)
-            .map_err(|e| anyhow::anyhow!("Failed to atomically rename WebM output: {e}"))?;
-    }
+    // same path (same stem, same .webm extension).  Write to a temp file in the
+    // same directory first, then atomically rename into place.  The rename is
+    // POSIX-atomic on the same filesystem, so readers always see either the old
+    // file or the new file — never a partial write.
+    let tmp = tempfile::NamedTempFile::new_in(&board_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to create temp file for WebM output: {e}"))?;
+
+    crate::media::ffmpeg::ffmpeg_transcode_to_webm(&src, tmp.path())?;
+
+    tmp.persist(&webm_abs)
+        .map_err(|e| anyhow::anyhow!("Failed to atomically rename WebM output: {e}"))?;
+
+    // Read the transcoded file for SHA-256 dedup and size logging.
+    let webm_bytes =
+        std::fs::read(&webm_abs).context("Failed to read transcoded WebM for dedup hash")?;
 
     let conn = pool.get()?;
 
     // FIX[LEAK]: If any DB call below fails we must clean up the WebM we just
-    // wrote, otherwise it leaks on disk across all retry attempts.  We record
-    // the path and remove it in the error branch via a guard closure.
+    // wrote, otherwise it leaks on disk across all retry attempts.
     let db_result = (|| -> Result<()> {
         let updated =
             crate::db::update_all_posts_file_path(&conn, file_path, &webm_rel, "video/webm")?;
@@ -631,6 +626,8 @@ fn generate_waveform_inner(
     board_short: &str,
     pool: &DbPool,
 ) -> Result<()> {
+    use anyhow::Context as _;
+
     let upload_dir = &CONFIG.upload_dir;
     let src = PathBuf::from(upload_dir).join(file_path);
 
@@ -647,6 +644,8 @@ fn generate_waveform_inner(
         .ok_or_else(|| anyhow::anyhow!("Malformed audio filename: {}", src.display()))?
         .to_string();
 
+    // Read the audio file for SHA-256 dedup; the path is passed directly to
+    // ffmpeg so no redundant write-to-temp-and-read-back is needed.
     let data = std::fs::read(&src)?;
     let thumb_size = CONFIG.thumb_size;
 
@@ -658,7 +657,19 @@ fn generate_waveform_inner(
     let png_abs = thumbs_dir.join(&png_name);
     let png_rel = format!("{board_short}/thumbs/{png_name}");
 
-    crate::utils::files::gen_waveform_png(&data, &png_abs, thumb_size, thumb_size / 2)?;
+    // Write the waveform to a temp file in the same directory, then atomically
+    // rename it into place to avoid partial reads from concurrent web requests.
+    let tmp_png = tempfile::Builder::new()
+        .prefix("chan_wav_")
+        .suffix(".png")
+        .tempfile_in(&thumbs_dir)
+        .context("Failed to create temp file for waveform PNG")?;
+
+    crate::media::ffmpeg::ffmpeg_audio_waveform(&src, tmp_png.path(), thumb_size, thumb_size / 2)?;
+
+    tmp_png
+        .persist(&png_abs)
+        .context("Failed to atomically rename waveform PNG into place")?;
 
     let conn = pool.get()?;
     crate::db::update_post_thumb_path(&conn, post_id, &png_rel)?;
@@ -670,10 +681,8 @@ fn generate_waveform_inner(
     // of the waveform PNG.  We now update the dedup record so that all future
     // dedup hits for this audio file correctly inherit the waveform thumbnail.
     //
-    // We compute the SHA-256 of the audio data we already have in memory to
-    // identify the dedup row without a separate DB lookup, then refresh its
-    // thumb_path via a targeted UPDATE.  An audio file may have been uploaded
-    // on a different board, so we match by file content (sha256) not by path.
+    // We compute the SHA-256 of the audio data to identify the dedup row without
+    // a separate DB lookup, then refresh its thumb_path via a targeted UPDATE.
     let audio_sha256 = crate::utils::crypto::sha256_hex(&data);
     let _ = conn.execute(
         "UPDATE file_hashes SET thumb_path = ?1 WHERE sha256 = ?2",

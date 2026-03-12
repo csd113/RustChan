@@ -3,6 +3,88 @@
 All notable changes to RustChan will be documented in this file.
 
 ---
+## [1.1.0]
+
+## New Module: src/media/
+
+### media/ffmpeg.rs — FFmpeg detection and subprocess execution
+
+- Added detect_ffmpeg() for checking FFmpeg availability (synchronous, suitable for spawn_blocking)
+- Added run_ffmpeg() shared executor used by all FFmpeg calls
+- Added ffmpeg_image_to_webp() with quality 85 and metadata stripping
+- Added ffmpeg_gif_to_webm() using VP9 codec, CRF 30, zero bitrate target, metadata stripped
+- Added ffmpeg_thumbnail() extracting first frame as WebP at quality 80 with aspect-preserving scale
+- Added probe_video_codec() via ffprobe subprocess (moved from utils/files.rs)
+- Added ffmpeg_transcode_to_webm() using path-based API (replaces old bytes-in/bytes-out version)
+- Added ffmpeg_audio_waveform() using path-based API (same refactor as above)
+
+### media/convert.rs — Per-format conversion logic
+
+- Added ConversionAction enum: ToWebp, ToWebm, ToWebpIfSmaller, KeepAsIs
+- Added conversion_action() mapping each MIME type to the correct action
+- Added convert_file() as the main entry point for all conversions
+- PNG to WebP is attempted but original PNG is kept if WebP is larger
+- All conversions use atomic temp-then-rename strategy
+- FFmpeg failures fall back to original file with a warning (never panics, never returns 500)
+
+### media/thumbnail.rs — WebP thumbnail generation
+
+- All thumbnails output as .webp
+- SVG placeholders used for video without FFmpeg, audio, and SVG sources
+- Added generate_thumbnail() as unified entry point
+- Added image crate fallback path for when FFmpeg is unavailable (decode, resize, save as WebP)
+- Added thumbnail_output_path() for determining correct output path and extension
+- Added write_placeholder() for generating static SVG placeholders by kind
+
+### media/exif.rs — EXIF orientation handling (new file)
+
+- Moved read_exif_orientation and apply_exif_orientation from utils/files.rs
+
+### media/mod.rs — Public API
+
+- Added ProcessedMedia struct with file_path, thumbnail_path, mime_type, was_converted, original_size, final_size
+- Added MediaProcessor::new() with FFmpeg detection and warning log if not found
+- Added MediaProcessor::new_with_ffmpeg() as lightweight constructor for request handlers
+- Added MediaProcessor::process_upload() for conversion and thumbnail generation (never propagates FFmpeg errors)
+- Added MediaProcessor::generate_thumbnail() for standalone thumbnail regeneration
+- Registered submodules: convert, ffmpeg, thumbnail, exif
+
+---
+
+## Modified Files
+
+### src/utils/files.rs
+
+- Extended detect_mime_type with BMP, TIFF (LE and BE), and SVG detection including BOM stripping
+- Rewrote save_upload to delegate conversion and thumbnailing to MediaProcessor
+- GIF to WebM conversions now set processing_pending = false (converted inline, no background job)
+- MP4 and WebM uploads still set processing_pending = true as before
+- Removed dead functions: generate_video_thumb, ffmpeg_first_frame, generate_video_placeholder, generate_audio_placeholder, generate_image_thumb
+- Removed relocated functions: ffprobe_video_codec, probe_video_codec, ffmpeg_transcode_webm, transcode_to_webm, ffmpeg_audio_waveform, gen_waveform_png
+- EXIF functions kept as thin private delegates to crate::media::exif for backward compatibility
+- Added mime_to_ext_pub() public wrapper for use by media/convert.rs
+- Added apply_thumb_exif_orientation() for post-hoc EXIF correction on image crate thumbnails
+- Added tests for BMP, TIFF LE, TIFF BE, SVG detection and new mime_to_ext mappings
+
+### src/models.rs
+
+- Updated from_ext to include bmp, tiff, tif, and svg
+
+### src/lib.rs and src/main.rs
+
+- Registered new media module
+
+### src/workers/mod.rs
+
+- Updated probe_video_codec call to use crate::media::ffmpeg::probe_video_codec
+- Replaced in-memory transcode_to_webm with path-based ffmpeg_transcode_to_webm using temp file persist
+- Replaced in-memory gen_waveform_png with path-based ffmpeg_audio_waveform using temp file persist
+- File bytes now read from disk only for SHA-256 dedup step
+
+### Cargo.toml
+
+- Added bmp and tiff features to the image crate dependency
+
 
 ## [1.0.13] — 2026-03-08
 

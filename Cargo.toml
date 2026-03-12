@@ -52,7 +52,7 @@ hex    = "0.4"
 # shares the exact same crate instance as argon2's transitive dep.
 rand_core = { version = "0.6", features = ["getrandom"] }
 
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 
 # EXIF orientation correction: read Orientation tag from JPEG uploads and
 # apply the corresponding rotation before thumbnailing so that photos taken

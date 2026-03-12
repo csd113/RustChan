@@ -93,7 +93,8 @@ function collapseMedia(btn) {
 function expandVideoEmbed(preview, type, id, container) {
   var iframe = document.createElement('iframe');
   if (type === 'youtube') {
-    iframe.src = 'https://www.youtube-nocookie.com/embed/' + id + '?autoplay=1&rel=0';
+    iframe.src = 'https://www.youtube-nocookie.com/embed/' + id + '?autoplay=1&rel=0&playsinline=1';
+    iframe.setAttribute('title', 'YouTube video player');
   } else if (type === 'streamable') {
     iframe.src = 'https://streamable.com/e/' + id + '?autoplay=1';
   }

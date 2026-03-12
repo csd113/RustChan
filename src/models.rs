@@ -44,7 +44,9 @@ impl MediaType {
     #[allow(dead_code)]
     pub fn from_ext(ext: &str) -> Option<Self> {
         match ext {
-            "jpg" | "jpeg" | "png" | "gif" | "webp" => Some(Self::Image),
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "svg" => {
+                Some(Self::Image)
+            }
             "mp4" | "webm" => Some(Self::Video),
             "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "opus" => Some(Self::Audio),
             _ => None,
