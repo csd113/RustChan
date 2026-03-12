@@ -174,6 +174,23 @@ pub(super) fn reply_form(
         ""
     };
 
+    // PoW CAPTCHA block — only rendered when the board has it enabled.
+    let captcha_row = if board.allow_captcha {
+        let difficulty: u32 = crate::utils::crypto::POW_DIFFICULTY;
+        format!(
+            r#"    <tr id="captcha-row-{b}-reply"><td>captcha</td>
+        <td>
+          <span id="captcha-status-{b}-reply" style="font-size:0.8rem;color:var(--text-dim)">solving proof-of-work… (this takes a moment)</span>
+          <input type="hidden" name="pow_nonce" id="pow-nonce-{b}-reply" value=""
+                 data-pow-board="{b}" data-pow-difficulty="{diff}">
+        </td></tr>"#,
+            b = escape_html(board_short),
+            diff = difficulty,
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         r#"<div class="post-form-container reply-form-container">
 <div class="post-form-title">[ reply to thread ]</div>
@@ -191,6 +208,7 @@ pub(super) fn reply_form(
 {audio_combo_row}    <tr><td>options</td>
         <td><label class="sage-label"><input type="checkbox" name="sage" value="1"> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
     {edit_token_row}
+    {captcha_row}
   </table>
 </form>
 </div>"#,
@@ -201,5 +219,6 @@ pub(super) fn reply_form(
         file_hint = file_hint,
         audio_combo_row = audio_combo_row,
         edit_token_row = edit_token_row,
+        captcha_row = captcha_row,
     )
 }

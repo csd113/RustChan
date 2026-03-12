@@ -231,6 +231,10 @@ pub async fn create_thread(
     // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
     let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
 
+    // Clones kept outside the closure so we can re-render the board page inline on error.
+    let admin_session_err = admin_session_id.clone();
+    let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
+
     let _board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -410,12 +414,60 @@ pub async fn create_thread(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    // BadRequest → return a lightweight 422 page instead of re-querying the
-    // entire board index (which wastes significant DB and CPU under spam load).
+    // BadRequest → re-render the board page with an inline error banner so the
+    // user sees the message in context without being sent to a separate error page.
     let redirect_url = match result {
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
-            let mut resp = Html(templates::error_page(422, &msg)).into_response();
+            let board_short_render = _board_short_err.clone();
+            let pool = state.db.clone();
+            let html = tokio::task::spawn_blocking(move || -> Result<String> {
+                let conn = pool.get()?;
+                let is_admin = admin_session_err
+                    .as_deref()
+                    .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
+                let board =
+                    db::get_board_by_short(&conn, &board_short_render)?.ok_or_else(|| {
+                        AppError::NotFound(format!("Board /{board_short_render}/ not found"))
+                    })?;
+                let total = db::count_threads_for_board(&conn, board.id)?;
+                let pagination = crate::models::Pagination::new(1, THREADS_PER_PAGE, total);
+                let threads = db::get_threads_for_board(
+                    &conn,
+                    board.id,
+                    THREADS_PER_PAGE,
+                    pagination.offset(),
+                )?;
+                let mut summaries = Vec::with_capacity(threads.len());
+                for thread in threads {
+                    let total_replies = thread.reply_count;
+                    let preview = db::get_preview_posts(&conn, thread.id, PREVIEW_REPLIES)?;
+                    #[allow(clippy::arithmetic_side_effects)]
+                    let omitted =
+                        (total_replies - i64::try_from(preview.len()).unwrap_or(0)).max(0);
+                    summaries.push(ThreadSummary {
+                        thread,
+                        preview_posts: preview,
+                        omitted,
+                    });
+                }
+                let all_boards = db::get_all_boards(&conn)?;
+                let collapse_greentext = db::get_collapse_greentext(&conn);
+                Ok(templates::board_page(
+                    &board,
+                    &summaries,
+                    &pagination,
+                    &csrf_for_error,
+                    &all_boards,
+                    is_admin,
+                    Some(&msg),
+                    collapse_greentext,
+                ))
+            })
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+            let mut resp = Html(html).into_response();
             *resp.status_mut() = axum::http::StatusCode::UNPROCESSABLE_ENTITY;
             return Ok(resp);
         }

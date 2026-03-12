@@ -2,3 +2,5 @@
 dev-check.sh
 docs/clippy.sh
 dev-check-strict.sh
+/docs
+ToDO.txt

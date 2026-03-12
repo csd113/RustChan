@@ -100,14 +100,14 @@ pub fn generate_thumbnail(
         m if m.starts_with("audio/") => write_placeholder(output_path, PlaceholderKind::Audio)
             .map(|()| output_path.to_path_buf()),
 
-        // ── Video (WebM): requires ffmpeg AND libwebp ─────────────────────
+        // ── Video (WebM, MP4, and any other video/*): requires ffmpeg AND libwebp ─────────────────────
         // `thumbnail_output_path` pre-selects `.webp` when both are present.
         // If ffmpeg_thumbnail then fails, write the SVG placeholder to the
         // `.svg`-extension sibling so the file content and extension match.
         // The `else` branch (ffmpeg absent / libwebp absent) already has the
         // `.svg` extension pre-selected by `thumbnail_output_path`, so no
         // rename is needed there.
-        "video/webm" | "audio/webm" => {
+        m if m.starts_with("video/") => {
             if ffmpeg_available && ffmpeg_webp_available {
                 match ffmpeg::ffmpeg_thumbnail(input_path, output_path, max_dim) {
                     Ok(()) => Ok(output_path.to_path_buf()),
@@ -284,8 +284,10 @@ fn thumbnail_extension(
         m if m.starts_with("audio/") => "svg",
         // Video thumbnails need both ffmpeg (to demux the stream) AND libwebp
         // (to encode the extracted frame as WebP).  If either is missing the
-        // fallback is an SVG placeholder.
-        "video/webm" | "audio/webm" if !ffmpeg_available || !ffmpeg_webp_available => "svg",
+        // fallback is an SVG placeholder.  This applies to all video/* types,
+        // not just WebM — MP4 and any other video format go through ffmpeg the
+        // same way and need the same extension pre-selection logic.
+        m if m.starts_with("video/") && (!ffmpeg_available || !ffmpeg_webp_available) => "svg",
         _ => "webp",
     }
 }
@@ -305,17 +307,20 @@ mod tests {
     #[test]
     fn thumbnail_ext_is_svg_for_video_without_ffmpeg() {
         assert_eq!(thumbnail_extension("video/webm", false, false), "svg");
+        assert_eq!(thumbnail_extension("video/mp4", false, false), "svg");
     }
 
     #[test]
     fn thumbnail_ext_is_svg_for_video_with_ffmpeg_but_no_webp() {
         // ffmpeg available but libwebp missing — placeholder path must be .svg
         assert_eq!(thumbnail_extension("video/webm", true, false), "svg");
+        assert_eq!(thumbnail_extension("video/mp4", true, false), "svg");
     }
 
     #[test]
     fn thumbnail_ext_is_webp_for_video_with_ffmpeg_and_webp() {
         assert_eq!(thumbnail_extension("video/webm", true, true), "webp");
+        assert_eq!(thumbnail_extension("video/mp4", true, true), "webp");
     }
 
     #[test]

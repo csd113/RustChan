@@ -161,6 +161,12 @@ pub async fn post_reply(
     // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
     let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
 
+    // Clones kept outside the closure so we can re-render the thread page inline on error.
+    let board_short_err = board_short.clone();
+    let admin_session_err = admin_session_id.clone();
+    let client_ip_err = client_ip.clone();
+    let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
+
     let _board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -329,13 +335,44 @@ pub async fn post_reply(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    // BadRequest → return a lightweight 422 page instead of re-querying the
-    // entire thread (which wastes significant DB and CPU under spam load).
+    // BadRequest → re-render the thread page with an inline error banner so the
+    // user sees the message in context (e.g. "wait for captcha to solve") without
+    // being redirected to a separate error page and losing their scroll position.
     let redirect_url = match result {
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
-            let mut resp =
-                axum::response::Html(crate::templates::error_page(422, &msg)).into_response();
+            let pool = state.db.clone();
+            let html = tokio::task::spawn_blocking(move || -> Result<String> {
+                let conn = pool.get()?;
+                let is_admin = admin_session_err
+                    .as_deref()
+                    .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
+                let board = db::get_board_by_short(&conn, &board_short_err)?.ok_or_else(|| {
+                    AppError::NotFound(format!("Board /{board_short_err}/ not found"))
+                })?;
+                let thread = db::get_thread(&conn, thread_id)?
+                    .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
+                let posts = db::get_posts_for_thread(&conn, thread_id)?;
+                let all_boards = db::get_all_boards(&conn)?;
+                let ip_hash = hash_ip(&client_ip_err, &CONFIG.cookie_secret);
+                let poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)?;
+                let collapse_greentext = db::get_collapse_greentext(&conn);
+                Ok(crate::templates::thread_page(
+                    &board,
+                    &thread,
+                    &posts,
+                    &csrf_for_error,
+                    &all_boards,
+                    is_admin,
+                    poll.as_ref(),
+                    Some(&msg),
+                    collapse_greentext,
+                ))
+            })
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+            let mut resp = axum::response::Html(html).into_response();
             *resp.status_mut() = axum::http::StatusCode::UNPROCESSABLE_ENTITY;
             return Ok(resp);
         }
