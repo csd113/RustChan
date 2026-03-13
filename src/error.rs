@@ -47,6 +47,10 @@ pub enum AppError {
     #[error("Invalid media type: {0}")]
     InvalidMediaType(String),
 
+    /// 409 — resource already exists or snapshot already imported
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     /// 429 — rate limited
     #[error("Rate limited: posting too fast")]
     RateLimited,
@@ -101,6 +105,7 @@ impl IntoResponse for AppError {
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
+            Self::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             Self::BannedUser { reason, csrf_token } => {
                 let html = crate::templates::ban_page(reason, csrf_token);
                 return (StatusCode::FORBIDDEN, Html(html)).into_response();

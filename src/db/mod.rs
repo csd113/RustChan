@@ -49,6 +49,7 @@ use tracing::info;
 
 pub mod admin;
 pub mod boards;
+pub mod chan_net;
 pub mod posts;
 pub mod threads;
 
@@ -457,6 +458,22 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         (22, "ALTER TABLE boards ADD COLUMN post_cooldown_secs INTEGER NOT NULL DEFAULT 0"),
         (23, "CREATE INDEX IF NOT EXISTS idx_posts_thread_id ON posts(thread_id)"),
         (24, "CREATE INDEX IF NOT EXISTS idx_posts_ip_hash ON posts(ip_hash)"),
+        // Phase 3 — federation mirror table for chan_net imported posts.
+        // Stores text-only post data from remote nodes; never contains media columns.
+        // ON DELETE CASCADE keeps this table consistent when a board is removed.
+        (25, r"CREATE TABLE IF NOT EXISTS chan_net_posts (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            remote_post_id  INTEGER NOT NULL,
+            board_id        INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            author          TEXT    NOT NULL DEFAULT 'anon',
+            content         TEXT    NOT NULL DEFAULT '',
+            remote_ts       INTEGER NOT NULL,
+            imported_at     INTEGER NOT NULL DEFAULT (unixepoch())
+        )"),
+        // Unique index on (remote_post_id, board_id) — the DB-level deduplication
+        // safety net. Prevents duplicate imports even after a ledger reset (restart).
+        (26, "CREATE UNIQUE INDEX IF NOT EXISTS idx_chan_net_posts_remote \
+              ON chan_net_posts(remote_post_id, board_id)"),
     ];
 
     for &(version, sql) in migrations {

@@ -87,6 +87,13 @@ struct SettingsFile {
     /// Defaults to logical CPUs × 4. Increase if DB/render latency is a bottleneck
     /// under load.
     blocking_threads: Option<usize>,
+    // ── ChanNet / RustWave gateway ────────────────────────────────────────────
+    /// Base URL of the connected `RustWave` instance.
+    /// Must begin with http:// or https://. Default: <http://localhost:7071>.
+    rustwave_url: Option<String>,
+    /// Address to bind the second `ChanNet` TCP listener.
+    /// Default: 127.0.0.1:7070 (loopback-only; not exposed to the internet).
+    chan_net_bind: Option<String>,
 }
 
 fn load_settings_file() -> SettingsFile {
@@ -207,6 +214,17 @@ blocking_threads = 0
 # or all existing IP hashes become invalid (bans will stop working).
 # If you must rotate it, also clear the bans table.
 cookie_secret = "{secret}"
+
+# ── ChanNet / RustWave gateway ────────────────────────────────────────────────
+# Uncomment and configure these to enable the ChanNet API (--chan-net flag).
+
+# Base URL of the connected RustWave instance.
+# Must begin with http:// or https://.
+# rustwave_url = "http://localhost:7071"
+
+# Address to bind the second ChanNet TCP listener.
+# Keep on loopback unless RustWave runs on a different host.
+# chan_net_bind = "127.0.0.1:7070"
 "#
     );
 
@@ -277,6 +295,18 @@ pub struct Config {
     pub waveform_cache_max_bytes: u64,
     /// Number of threads in Tokio's blocking pool. Default: logical CPUs × 4.
     pub blocking_threads: usize,
+
+    // ── ChanNet / RustWave gateway (Step 1.2) ────────────────────────────────
+    /// Base URL of the connected `RustWave` instance (must begin with http:// or https://).
+    /// Validated at startup by `Config::validate()`.
+    pub rustwave_url: String,
+    /// Address to bind the second `ChanNet` TCP listener (default 127.0.0.1:7070).
+    /// Only used when the server is started with `--chan-net`.
+    pub chan_net_bind: String,
+    /// Maximum request body size for `/chan/import` (ZIP snapshots). Default: 10 MiB.
+    pub chan_net_max_body: usize,
+    /// Maximum request body size for `/chan/command` (raw JSON). Default: 8 KiB.
+    pub chan_net_command_max_body: usize,
 }
 
 impl Config {
@@ -334,6 +364,29 @@ impl Config {
             OsRng.fill_bytes(&mut b);
             hex::encode(b)
         };
+
+        // ── ChanNet fields (Step 1.2) — computed after cookie_secret ──────────
+        // Use as_deref() to borrow rather than move the Option<String> fields.
+        let rustwave_url = env::var("CHAN_RUSTWAVE_URL").unwrap_or_else(|_| {
+            s.rustwave_url
+                .as_deref()
+                .unwrap_or("http://localhost:7071")
+                .to_string()
+        });
+        let chan_net_bind = env::var("CHAN_NET_BIND").unwrap_or_else(|_| {
+            s.chan_net_bind
+                .as_deref()
+                .unwrap_or("127.0.0.1:7070")
+                .to_string()
+        });
+        let chan_net_max_body: usize = env::var("CHAN_NET_MAX_BODY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10 * 1024 * 1024); // 10 MiB default
+        let chan_net_command_max_body: usize = env::var("CHAN_NET_COMMAND_MAX_BODY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8 * 1024); // 8 KiB default — commands are raw JSON, never ZIPs
 
         Self {
             forum_name,
@@ -415,6 +468,12 @@ impl Config {
                     configured
                 }
             },
+
+            // ChanNet fields
+            rustwave_url,
+            chan_net_bind,
+            chan_net_max_body,
+            chan_net_command_max_body,
         }
     }
 
@@ -478,6 +537,15 @@ impl Config {
                 );
             }
             let _ = std::fs::remove_file(probe);
+        }
+
+        // Step 1.2: Validate rustwave_url scheme so operators catch
+        // misconfiguration at startup rather than at first federation call.
+        if !self.rustwave_url.starts_with("http://") && !self.rustwave_url.starts_with("https://") {
+            return Err(anyhow::anyhow!(
+                "CONFIG ERROR: rustwave_url must begin with http:// or https://, got: {}",
+                self.rustwave_url
+            ));
         }
 
         Ok(())

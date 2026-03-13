@@ -1,105 +1,44 @@
 # cargo-deny configuration for RustChan
 # https://embarkstudios.github.io/cargo-deny/
-#
-# Run:  cargo deny check
-# CI:   cargo deny --log-level error check licenses advisories sources
 
-# ---------------------------------------------------------------------------
-# Graph
-# ---------------------------------------------------------------------------
 [graph]
-# Only check dependencies that are actually compiled for the host target.
-# Dev-only and build-script deps are included by default; that's fine.
 all-features = false
 
-# ---------------------------------------------------------------------------
-# Security advisories  (RustSec database)
-# ---------------------------------------------------------------------------
 [advisories]
-# Check all dependencies (workspace + transitive) for unmaintained status.
 unmaintained = "all"
-# Yanked versions in Cargo.lock are always an error.
 yanked = "deny"
-# No crates are ignored; add entries here if a patched advisory is accepted:
-# ignore = ["RUSTSEC-0000-0000"]
 
-# ---------------------------------------------------------------------------
-# Licence policy
-# ---------------------------------------------------------------------------
 [licenses]
-# Confidence threshold for licence detection (0.0–1.0).
-# 0.8 is the cargo-deny default; lower values accept fuzzier matches.
 confidence-threshold = 0.8
 
-# Every SPDX licence expression that appears in this dependency tree must
-# appear in this allow-list.  Licences are checked per-crate; a crate with
-# an AND expression (e.g. "(MIT OR Apache-2.0) AND BSD-2-Clause") must have
-# every component covered.
 allow = [
-    # The two dominant Rust ecosystem licences — almost every crate uses one
-    # or both of these.
     "MIT",
     "Apache-2.0",
-
-    # LLVM-exception variant used by a handful of compiler-support crates
-    # (e.g. rustc-demangle, compiler_builtins).
     "Apache-2.0 WITH LLVM-exception",
-
-    # BSD family
     "BSD-2-Clause",
     "BSD-3-Clause",
-
-    # Unicode data tables (unicode-ident, unicode-xid, etc.)
     "Unicode-3.0",
-
-    # Compression / image crates (flate2, miniz_oxide, zlib-rs, png, gif)
     "Zlib",
-
-    # Public domain equivalents
     "Unlicense",
+    # Used by ring, rustls-webpki, untrusted (via rustls/reqwest)
+    "ISC",
+    # Used by webpki-roots (Mozilla CA certificate bundle)
+    "CDLA-Permissive-2.0",
 ]
 
-# Per-crate exceptions for licences that don't appear in `allow` above but
-# are acceptable for a specific package.  Add entries here rather than
-# broadening `allow` when a licence is unusual.
 [[licenses.exceptions]]
-# encoding_rs uses a compound expression:
-#   "(MIT OR Apache-2.0) AND BSD-2-Clause"
-# MIT, Apache-2.0, and BSD-2-Clause are all in `allow`; this exception is
-# listed here for documentation clarity in case cargo-deny evaluates the
-# compound expression as a single token.
 name    = "encoding_rs"
 version = "*"
 allow   = ["MIT", "Apache-2.0", "BSD-2-Clause"]
 
-# ---------------------------------------------------------------------------
-# Dependency bans
-# ---------------------------------------------------------------------------
 [bans]
-# Allow multiple versions of the same crate (common in large dependency
-# graphs; Cargo already handles version isolation correctly).
 multiple-versions = "warn"
 
-# No crates are banned outright; add entries here as needed:
-# [[bans.deny]]
-# name    = "some-crate"
-# version = "*"
-# reason  = "use X instead"
-
-# Unavoidable transitive version splits — different subtrees pin different
-# majors/minors and cannot be unified without upstream changes.
-
-# argon2 → password-hash → rand_core 0.6; uuid → rand 0.9 → rand_core 0.9
+# argon2 → password-hash → rand_core 0.6
 [[bans.skip]]
 name    = "rand_core"
 version = "0.6"
 
-[[bans.skip]]
-name    = "rand_core"
-version = "0.9"
-
-# rand_core 0.6 pulls getrandom 0.2; rand 0.9 pulls getrandom 0.3;
-# tempfile pulls getrandom 0.4 via rustix
 [[bans.skip]]
 name    = "getrandom"
 version = "0.2"
@@ -112,7 +51,6 @@ version = "0.3"
 name    = "getrandom"
 version = "0.4"
 
-# getrandom 0.3/0.4 each pull a different r-efi minor
 [[bans.skip]]
 name    = "r-efi"
 version = "5"
@@ -121,7 +59,6 @@ version = "5"
 name    = "r-efi"
 version = "6"
 
-# dashmap 6 uses hashbrown 0.14; rusqlite/zip use hashbrown 0.16
 [[bans.skip]]
 name    = "hashbrown"
 version = "0.14"
@@ -130,41 +67,19 @@ version = "0.14"
 name    = "hashbrown"
 version = "0.16"
 
-# socket2 (tokio) uses windows-sys 0.60; clap/tempfile/rustix use 0.61
-[[bans.skip]]
-name    = "windows-sys"
-version = "0.60"
-
 [[bans.skip]]
 name    = "windows-sys"
 version = "0.61"
 
-# image directly uses zune-jpeg 0.5.x + zune-core 0.5.x, while its
-# tiff sub-dependency requires zune-jpeg 0.4.x + zune-core 0.4.x.
-# These are distinct semver ranges so Cargo cannot unify them without
-# an upstream tiff release; skipping both versions here.
-[[bans.skip]]
-name    = "zune-core"
-version = "0.4"
-
 [[bans.skip]]
 name    = "zune-core"
 version = "0.5"
 
 [[bans.skip]]
 name    = "zune-jpeg"
-version = "0.4"
-
-[[bans.skip]]
-name    = "zune-jpeg"
 version = "0.5"
 
-# ---------------------------------------------------------------------------
-# Crate sources
-# ---------------------------------------------------------------------------
 [sources]
-# Only crates.io is trusted by default.  Add git or local entries below if
-# you use path or git dependencies.
 unknown-registry = "deny"
 unknown-git      = "deny"
 allow-registry   = ["https://github.com/rust-lang/crates.io-index"]

@@ -67,7 +67,7 @@ kamadak-exif = "0.5"
 
 clap = { version = "4", features = ["derive"] }
 
-uuid      = { version = "1",   features = ["v4"] }
+uuid      = { version = "1",   features = ["v4", "serde"] }
 chrono    = { version = "0.4", features = ["serde"] }
 dashmap      = "6"
 parking_lot  = "0.12"
@@ -80,6 +80,10 @@ regex     = "1"
 # Use file_names() iterator for name-only pre-flight scans (cleaner than
 # by_index_raw which is now by_index_without_decompression in zip 8).
 zip = { version = "8", default-features = false, features = ["deflate"] }
+
+# Step 1.1: reqwest for federation push (chan_refresh) and pull (chan_poll).
+# rustls-tls avoids a native OpenSSL dependency — single static binary stays intact.
+reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "rustls-tls"] }
 
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }

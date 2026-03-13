@@ -86,7 +86,7 @@ impl Drop for ScopedDecrement<'_> {
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::arithmetic_side_effects)]
-pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
+pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::Result<()> {
     let early_data_dir = {
         let exe = std::env::current_exe()
             .ok()
@@ -240,6 +240,13 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
             q
         },
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
+        chan_ledger: if chan_net {
+            Some(std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashSet::<uuid::Uuid>::new(),
+            )))
+        } else {
+            None
+        },
     };
     // Keep a reference to the job queue cancel token for graceful shutdown (#7).
     let worker_cancel = state.job_queue.cancel.clone();
@@ -404,7 +411,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         });
     }
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     info!("Listening on  http://{bind_addr}");
     info!("Admin panel   http://{bind_addr}/admin");
@@ -412,6 +419,18 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     println!();
 
     super::console::spawn_keyboard_handler(pool, start_time);
+
+    if chan_net {
+        let chan_addr = crate::config::CONFIG.chan_net_bind.clone();
+        let chan_app = crate::chan_net::chan_router(state.clone());
+        let chan_listener = tokio::net::TcpListener::bind(&chan_addr).await?;
+        tracing::info!("ChanNet API listening on http://{chan_addr}/chan/status");
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(chan_listener, chan_app.into_make_service()).await {
+                tracing::error!("ChanNet server error: {e}");
+            }
+        });
+    }
 
     axum::serve(
         listener,

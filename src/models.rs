@@ -434,6 +434,51 @@ pub struct BanAppeal {
     pub created_at: i64,
 }
 
+// ─── ChanNet federation snapshot types ───────────────────────────────────────
+//
+// Defined here (not in chan_net::snapshot) so that src/db/chan_net.rs can
+// reference SnapshotPost without creating a layering inversion. chan_net is
+// declared in main.rs and is therefore not accessible from the lib crate;
+// models.rs is re-exported by lib.rs and is safe to import from anywhere.
+//
+// chan_net::snapshot re-exports these types so that all existing call-sites
+// (snapshot::SnapshotPost, etc.) continue to compile without change.
+
+/// A single board entry in a federation snapshot.
+/// `id` is the board's `short_name` (e.g. "tech", "b").
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SnapshotBoard {
+    pub id: String,
+    pub title: String,
+}
+
+/// A single post in a federation snapshot.
+///
+/// SECURITY: Text content only. File paths, MIME types, thumbnail paths, and
+/// binary data must NEVER be added to this struct.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SnapshotPost {
+    pub post_id: u64,
+    pub board: String,
+    pub author: String,
+    pub content: String,
+    pub timestamp: u64,
+}
+
+/// Metadata block written into every federation snapshot ZIP.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SnapshotMetadata {
+    pub generated_at: u64,
+    pub rustchan_version: String,
+    pub post_count: u64,
+    pub tx_id: uuid::Uuid,
+    pub signature: Option<String>,
+    // Delta fields — always None / false in full federation snapshots.
+    pub since: Option<u64>,
+    pub is_delta: bool,
+    pub includes_archive: bool,
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
