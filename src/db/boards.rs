@@ -410,6 +410,31 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>>
     Ok(safe)
 }
 
+// ─── Per-board stats (terminal display) ──────────────────────────────────────
+
+/// Per-board thread and post counts for the terminal stats display.
+pub fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64)> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT b.short_name, \
+                (SELECT COUNT(*) FROM threads WHERE board_id = b.id) AS tc, \
+                (SELECT COUNT(*) FROM posts p \
+                   JOIN threads t ON p.thread_id = t.id \
+                  WHERE t.board_id = b.id) AS pc \
+         FROM boards b ORDER BY b.short_name",
+    ) else {
+        return vec![];
+    };
+    stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })
+    .map(|rows| rows.flatten().collect())
+    .unwrap_or_default()
+}
+
 // ─── Site statistics ──────────────────────────────────────────────────────────
 
 /// Gather aggregate site-wide statistics for the home page.

@@ -341,9 +341,9 @@ pub async fn post_reply(
     let redirect_url = match result {
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
-            let pool = state.db.clone();
+            let db_pool = state.db.clone();
             let html = tokio::task::spawn_blocking(move || -> Result<String> {
-                let conn = pool.get()?;
+                let conn = db_pool.get()?;
                 let is_admin = admin_session_err
                     .as_deref()
                     .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());

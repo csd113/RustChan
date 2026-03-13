@@ -156,6 +156,39 @@ pub fn init_pool() -> Result<DbPool> {
     Ok(pool)
 }
 
+// ─── First-run check ─────────────────────────────────────────────────────────
+
+/// Check whether this is a first run (no boards and no admins).
+/// Prints a setup banner if so. Called once at server startup.
+///
+/// # Errors
+/// Returns an error if the database connection cannot be obtained.
+pub fn first_run_check(pool: &DbPool) -> anyhow::Result<()> {
+    let conn = pool.get()?;
+    let board_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0))
+        .unwrap_or(0);
+    let admin_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM admin_users", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    if board_count == 0 && admin_count == 0 {
+        println!();
+        println!("╔══════════════════════════════════════════════════════╗");
+        println!("║           FIRST RUN — SETUP REQUIRED                 ║");
+        println!("╠══════════════════════════════════════════════════════╣");
+        println!("║  No boards or admin accounts found.                  ║");
+        println!("║  Create your first admin and boards:                 ║");
+        println!("║                                                      ║");
+        println!("║  rustchan-cli admin create-admin admin mypassword    ║");
+        println!("║  rustchan-cli admin create-board b Random \"Anything\" ║");
+        println!("║  rustchan-cli admin create-board tech Technology     ║");
+        println!("╚══════════════════════════════════════════════════════╝");
+        println!();
+    }
+    Ok(())
+}
+
 // ─── Schema creation & migrations ────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)]

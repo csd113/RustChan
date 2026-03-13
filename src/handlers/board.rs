@@ -235,7 +235,7 @@ pub async fn create_thread(
     let admin_session_err = admin_session_id.clone();
     let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
 
-    let _board_short_err = board_short.clone();
+    let board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = state.job_queue.clone();
@@ -419,7 +419,7 @@ pub async fn create_thread(
     let redirect_url = match result {
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
-            let board_short_render = _board_short_err.clone();
+            let board_short_render = board_short_err.clone();
             let pool = state.db.clone();
             let html = tokio::task::spawn_blocking(move || -> Result<String> {
                 let conn = pool.get()?;

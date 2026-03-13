@@ -34,7 +34,7 @@ path  = "src/lib.rs"
 axum       = { version = "0.8",  features = ["multipart"] }
 axum-extra = { version = "0.12", features = ["cookie"] }
 tower      = "0.5"
-tower-http = { version = "0.6",  features = ["fs", "set-header", "compression-full"] }
+tower-http = { version = "0.6",  features = ["fs", "set-header", "compression-full", "trace"] }
 tokio      = { version = "1",    features = ["full"] }
 tokio-util = "0.7"
 
@@ -82,7 +82,8 @@ regex     = "1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 tracing            = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender   = "0.2"
 
 thiserror = "2"
 tempfile  = "3"

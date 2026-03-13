@@ -5,6 +5,81 @@ All notable changes to RustChan will be documented in this file.
 ---
 ## [1.1.0]
 
+## Architecture Refactor
+
+This release restructures the codebase for maintainability. No user-facing
+behavior has changed. Every route, every feature, every pixel is identical.
+The only difference is where the code lives.
+
+### The problem
+
+`main.rs` had grown to 1,757 lines and owned everything from the HTTP router
+to the ASCII startup banner. `handlers/admin.rs` hit 4,576 lines with 33
+handler functions covering auth, backups, bans, reports, settings, and more.
+Both files were becoming difficult to navigate and risky to modify.
+
+### What changed
+
+**Phase 1 — Cleanup**
+
+- Removed unused `src/theme-init.js` (dead duplicate of `static/theme-init.js`)
+- Moved `validate_password()` from `main.rs` to `utils/crypto.rs` alongside
+  the other credential helpers
+- Moved `first_run_check()` and `get_per_board_stats()` from `main.rs` into
+  the `db` module, eliminating the only raw SQL that lived outside `db/`
+
+**Phase 2 — Background work**
+
+- Moved `evict_thumb_cache()` from `main.rs` to `workers/mod.rs` where it
+  belongs alongside the other background maintenance operations
+
+**Phase 3 — Console extraction**
+
+- Created `src/server/` directory for server infrastructure
+- Extracted terminal stats, keyboard console, startup banner, and all `kb_*`
+  helpers to `server/console.rs` (~350 lines)
+
+**Phase 4 — CLI extraction**
+
+- Moved `Cli`, `Command`, `AdminAction` clap types and `run_admin()` to
+  `server/cli.rs` (~250 lines)
+
+**Phase 5 — Server extraction**
+
+- Moved `run_server()`, `build_router()`, all 7 background task spawns,
+  static asset handlers, HSTS middleware, request tracking, `ScopedDecrement`,
+  and global atomics to `server/server.rs` (~800 lines)
+- `main.rs` is now ~50 lines: runtime construction, CLI parsing, dispatch
+
+**Phase 6 — Admin handler decomposition**
+
+- Converted `handlers/admin.rs` to a module folder (`handlers/admin/`)
+- Extracted `backup.rs` — all backup and restore handlers (~2,500 lines)
+- Extracted `auth.rs` — login, logout, session management
+- Extracted `moderation.rs` — bans, reports, appeals, word filters, mod log
+- Extracted `content.rs` — post/thread actions, board management
+- Extracted `settings.rs` — site settings, VACUUM, admin panel
+- `admin/mod.rs` now contains only shared session helpers and re-exports
+
+### By the numbers
+
+```
+File                Before        After
+main.rs             1,757 lines   ~50 lines
+handlers/admin.rs   4,576 lines   split across 6 files
+server/ (new)       —             ~1,400 lines total
+db/                 unchanged     + 2 functions from main.rs
+workers/            unchanged     + evict_thumb_cache
+utils/crypto.rs     unchanged     + validate_password
+```
+
+### What was not changed
+
+`db/`, `templates/`, `utils/`, `media/`, `config.rs`, `error.rs`, `models.rs`,
+`detect.rs`, `handlers/board.rs`, `handlers/thread.rs`, and `middleware/` are
+all untouched. They were already well-structured.
+```
+
 ## New Module: src/media/
 
 ### media/ffmpeg.rs — FFmpeg detection and subprocess execution

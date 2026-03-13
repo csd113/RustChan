@@ -775,3 +775,84 @@ fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
     }
     let _ = ip_hash;
 }
+
+// ─── Thumbnail / waveform cache eviction ─────────────────────────────────────
+
+/// Walk every board's `thumbs/` subdirectory, collect all files with their
+/// modification times, and delete the oldest ones until the total size of
+/// the remaining set is under `max_bytes`.
+///
+/// Only files inside `{upload_dir}/{board}/thumbs/` are considered — original
+/// uploads are never touched.  Deletion is best-effort: individual failures
+/// are logged and skipped rather than aborting the whole pass.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
+    // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
+    let mut files: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();
+    let Ok(boards_iter) = std::fs::read_dir(upload_dir) else {
+        return;
+    };
+    for board_entry in boards_iter.flatten() {
+        let thumbs_dir = board_entry.path().join("thumbs");
+        if !thumbs_dir.is_dir() {
+            continue;
+        }
+        let Ok(thumbs_iter) = std::fs::read_dir(&thumbs_dir) else {
+            continue;
+        };
+        for entry in thumbs_iter.flatten() {
+            let path = entry.path();
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    let mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_secs());
+                    files.push((mtime, path, meta.len()));
+                }
+            }
+        }
+    }
+
+    // FIX[AUDIT-7]: Dereference `sz` explicitly and annotate the sum type for
+    // clarity.  `Iterator<Item = &u64>` implements `Sum<&u64>` in std so this
+    // compiled before, but the explicit form is more readable and avoids the
+    // implicit coercion.
+    let total: u64 = files.iter().map(|(_, _, sz)| *sz).sum::<u64>();
+    if total <= max_bytes {
+        return; // already within budget
+    }
+
+    // Sort oldest-first so we delete the least-recently-used files first.
+    files.sort_unstable_by_key(|(mtime, _, _)| *mtime);
+
+    let mut remaining = total;
+    let mut deleted = 0u64;
+    let mut deleted_bytes = 0u64;
+    for (_, path, size) in &files {
+        if remaining <= max_bytes {
+            break;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => {
+                remaining = remaining.saturating_sub(*size);
+                deleted += 1;
+                // FIX[AUDIT-7]: Dereference `size` for clarity.
+                deleted_bytes += *size;
+            }
+            Err(e) => {
+                warn!("evict_thumb_cache: failed to delete {:?}: {}", path, e);
+            }
+        }
+    }
+    if deleted > 0 {
+        info!(
+            "evict_thumb_cache: removed {} file(s) ({} KiB), cache now {} KiB / {} KiB limit",
+            deleted,
+            deleted_bytes / 1024,
+            remaining / 1024,
+            max_bytes / 1024,
+        );
+    }
+}

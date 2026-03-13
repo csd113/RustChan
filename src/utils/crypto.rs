@@ -240,6 +240,20 @@ fn leading_zero_bits(bytes: &[u8]) -> u32 {
     count
 }
 
+// ─── Password validation ──────────────────────────────────────────────────────
+
+/// Validate an admin password meets minimum requirements.
+/// Minimum 8 characters (enforced here; tighten as needed).
+///
+/// # Errors
+/// Returns an error if the password does not meet the minimum requirements.
+pub fn validate_password(p: &str) -> anyhow::Result<()> {
+    if p.len() < 8 {
+        anyhow::bail!("Password must be at least 8 characters.");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
