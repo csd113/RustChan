@@ -180,20 +180,6 @@ pub fn thread_page(
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {form_html}
-</div>
-
-<!-- Mobile sticky reply drawer — visible only on small screens via CSS -->
-<div class="mobile-reply-fab" id="mobile-reply-fab" data-action="toggle-mobile-drawer">
-  ✏ Reply
-</div>
-<div class="mobile-reply-drawer" id="mobile-reply-drawer">
-  <div class="mobile-drawer-header">
-    <span>reply to thread</span>
-    <button class="mobile-drawer-close" data-action="toggle-mobile-drawer">✕</button>
-  </div>
-  <div class="mobile-drawer-body">
-    {form_html}
-  </div>
 </div>"#
         );
     }
@@ -260,7 +246,7 @@ fn render_poll(
     csrf_token: &str,
 ) -> String {
     let now = chrono::Utc::now().timestamp();
-    let time_left = pd.poll.expires_at - now;
+    let time_left = pd.poll.expires_at.saturating_sub(now);
     let expires_str = if pd.is_expired {
         "closed".to_string()
     } else if time_left < 3600 {
@@ -462,7 +448,7 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container audio-container">
 <div class="file-info">
-  <a href="/boards/{f}">{orig}</a> ({sz})
+  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
 <div class="audio-thumb">
   <img class="thumb" src="/boards/{th}" loading="lazy" alt="audio">
@@ -483,7 +469,7 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container">
 <div class="file-info">
-  <a href="/boards/{f}">{orig}</a> ({sz})
+  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
 <div class="media-preview" data-action="expand-media" title="click to play">
@@ -506,7 +492,7 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container">
 <div class="file-info">
-  <a href="/boards/{f}">{orig}</a> ({sz})
+  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
 <div class="media-preview" data-action="expand-media" title="click to expand">
@@ -537,7 +523,7 @@ pub fn render_post(
                 html,
                 r#"<div class="file-container audio-container audio-combo">
 <div class="file-info">
-  <a href="/boards/{f}">{orig}</a> ({sz})
+  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
 <audio controls preload="none" class="audio-player">
   <source src="/boards/{f}" type="{mime}">
@@ -563,7 +549,7 @@ pub fn render_post(
         // The previous guard had `> 0 && …` which suppressed the edit link
         // entirely when the board used the no-limit setting.
         let within_edit_window = edit_window_secs == 0
-            || (edit_window_secs > 0 && now - post.created_at <= edit_window_secs);
+            || (edit_window_secs > 0 && now.saturating_sub(post.created_at) <= edit_window_secs);
         let edit_link = if allow_editing && within_edit_window {
             format!(
                 r#" <a class="edit-btn" href="/{board}/post/{pid}/edit" title="Edit post">edit</a>"#,

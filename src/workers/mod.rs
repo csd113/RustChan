@@ -183,6 +183,7 @@ impl JobQueue {
 pub fn start_worker_pool(
     queue: &Arc<JobQueue>,
     ffmpeg_available: bool,
+    ffmpeg_vp9_available: bool,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let n = std::thread::available_parallelism()
         .map(NonZero::get)
@@ -195,7 +196,7 @@ pub fn start_worker_pool(
         .map(|idx| {
             let q = queue.clone();
             tokio::spawn(async move {
-                worker_loop(idx, q, ffmpeg_available).await;
+                worker_loop(idx, q, ffmpeg_available, ffmpeg_vp9_available).await;
             })
         })
         .collect()
@@ -203,7 +204,12 @@ pub fn start_worker_pool(
 
 // ─── Worker loop ─────────────────────────────────────────────────────────────
 
-async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
+async fn worker_loop(
+    id: usize,
+    queue: Arc<JobQueue>,
+    ffmpeg_available: bool,
+    ffmpeg_vp9_available: bool,
+) {
     debug!("Worker {id} started");
     // FIX[HIGH-6]: Track consecutive errors for exponential back-off.
     // Reset to 0 whenever a job is successfully claimed or the queue is empty.
@@ -234,6 +240,7 @@ async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
                     job_id,
                     &payload,
                     ffmpeg_available,
+                    ffmpeg_vp9_available,
                     queue.pool.clone(),
                     queue.in_progress.clone(),
                 )
@@ -315,6 +322,7 @@ async fn worker_loop(id: usize, queue: Arc<JobQueue>, ffmpeg_available: bool) {
 /// Base: 500 ms × 2^n, capped at 60 s.
 /// Jitter: uniform random 0–500 ms added to spread simultaneous retries
 /// across all workers so they do not storm the DB at the same instant.
+#[allow(clippy::arithmetic_side_effects)]
 fn backoff_duration(consecutive_errors: u32) -> Duration {
     const BASE_MS: u64 = 500;
     const MAX_MS: u64 = 60_000;
@@ -334,6 +342,7 @@ async fn handle_job(
     job_id: i64,
     payload: &str,
     ffmpeg_available: bool,
+    ffmpeg_vp9_available: bool,
     pool: DbPool,
     in_progress: Arc<DashMap<String, bool>>,
 ) -> Result<()> {
@@ -362,6 +371,7 @@ async fn handle_job(
                 file_path.clone(),
                 board_short,
                 ffmpeg_available,
+                ffmpeg_vp9_available,
                 pool,
             )
             .await;
@@ -418,16 +428,29 @@ async fn handle_job(
 /// Transcode an MP4 upload to `WebM` (VP9 + Opus), then update the post's
 /// `file_path` and `mime_type`. The original MP4 is deleted on success.
 ///
+/// Requires both `ffmpeg_available` (binary present) and `ffmpeg_vp9_available`
+/// (libvpx-vp9 + libopus compiled in).  If either flag is false the job is
+/// skipped gracefully — no error is returned and the file remains as-is.
+///
 /// A hard timeout of `CONFIG.ffmpeg_timeout_secs` is applied (2.3).
 async fn transcode_video(
     post_id: i64,
     file_path: String,
     board_short: String,
     ffmpeg_available: bool,
+    ffmpeg_vp9_available: bool,
     pool: DbPool,
 ) -> Result<()> {
     if !ffmpeg_available {
         debug!("VideoTranscode skipped for post {post_id}: ffmpeg not available");
+        return Ok(());
+    }
+
+    if !ffmpeg_vp9_available {
+        warn!(
+            "VideoTranscode skipped for post {post_id}: libvpx-vp9 or libopus not available. \
+             Install ffmpeg with VP9 + Opus support to enable MP4→WebM transcoding."
+        );
         return Ok(());
     }
 
@@ -460,6 +483,8 @@ fn transcode_video_inner(
     board_short: &str,
     pool: &DbPool,
 ) -> Result<()> {
+    use anyhow::Context as _;
+
     let upload_dir = &CONFIG.upload_dir;
     let src = PathBuf::from(upload_dir).join(file_path);
 
@@ -488,7 +513,7 @@ fn transcode_video_inner(
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8: {}", src.display()))?;
 
-        match crate::utils::files::probe_video_codec(src_str) {
+        match crate::media::ffmpeg::probe_video_codec(src_str) {
             Ok(ref codec) if codec == "av1" => {
                 info!("VideoTranscode: WebM/AV1 detected for post {post_id} — re-encoding to VP9");
             }
@@ -520,39 +545,38 @@ fn transcode_video_inner(
         post_id, file_path
     );
 
-    let data = std::fs::read(&src)?;
-    let webm_bytes = crate::utils::files::transcode_to_webm(&data)?;
-
     let board_dir = PathBuf::from(upload_dir).join(board_short);
     let webm_name = format!("{stem}.webm");
     let webm_abs = board_dir.join(&webm_name);
     let webm_rel = format!("{board_short}/{webm_name}");
 
     // FIX[ATOMIC-WRITE]: For AV1 WebM inputs, src and webm_abs resolve to the
-    // same path (same stem, same .webm extension).  A direct fs::write would
-    // overwrite the source in-place; a crash or disk-full mid-write permanently
-    // corrupts the only copy of the file with no recovery path.
+    // same path (same stem, same .webm extension).  Write to a temp file in the
+    // same directory first, then atomically rename into place.  The rename is
+    // POSIX-atomic on the same filesystem, so readers always see either the old
+    // file or the new file — never a partial write.
     //
-    // We write to a uniquely named temp file in the same directory first, then
-    // atomically rename it into place.  The rename is POSIX-atomic on the same
-    // filesystem, so readers always see either the old file or the new file —
-    // never a partial write.  If anything fails before the rename, the source
-    // file is untouched and the job can be retried.
-    {
-        use std::io::Write as _;
-        let mut tmp = tempfile::NamedTempFile::new_in(&board_dir)
-            .map_err(|e| anyhow::anyhow!("Failed to create temp file for WebM output: {e}"))?;
-        tmp.write_all(&webm_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to write WebM transcode output: {e}"))?;
-        tmp.persist(&webm_abs)
-            .map_err(|e| anyhow::anyhow!("Failed to atomically rename WebM output: {e}"))?;
-    }
+    // The temp file is given a .webm extension so that ffmpeg can identify the
+    // correct muxer from the output filename.  An extensionless temp file causes
+    // ffmpeg to fail immediately because it cannot determine the output format.
+    let tmp = tempfile::Builder::new()
+        .suffix(".webm")
+        .tempfile_in(&board_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to create temp file for WebM output: {e}"))?;
+
+    crate::media::ffmpeg::ffmpeg_transcode_to_webm(&src, tmp.path())?;
+
+    tmp.persist(&webm_abs)
+        .map_err(|e| anyhow::anyhow!("Failed to atomically rename WebM output: {e}"))?;
+
+    // Read the transcoded file for SHA-256 dedup and size logging.
+    let webm_bytes =
+        std::fs::read(&webm_abs).context("Failed to read transcoded WebM for dedup hash")?;
 
     let conn = pool.get()?;
 
     // FIX[LEAK]: If any DB call below fails we must clean up the WebM we just
-    // wrote, otherwise it leaks on disk across all retry attempts.  We record
-    // the path and remove it in the error branch via a guard closure.
+    // wrote, otherwise it leaks on disk across all retry attempts.
     let db_result = (|| -> Result<()> {
         let updated =
             crate::db::update_all_posts_file_path(&conn, file_path, &webm_rel, "video/webm")?;
@@ -630,6 +654,8 @@ fn generate_waveform_inner(
     board_short: &str,
     pool: &DbPool,
 ) -> Result<()> {
+    use anyhow::Context as _;
+
     let upload_dir = &CONFIG.upload_dir;
     let src = PathBuf::from(upload_dir).join(file_path);
 
@@ -646,6 +672,8 @@ fn generate_waveform_inner(
         .ok_or_else(|| anyhow::anyhow!("Malformed audio filename: {}", src.display()))?
         .to_string();
 
+    // Read the audio file for SHA-256 dedup; the path is passed directly to
+    // ffmpeg so no redundant write-to-temp-and-read-back is needed.
     let data = std::fs::read(&src)?;
     let thumb_size = CONFIG.thumb_size;
 
@@ -657,7 +685,19 @@ fn generate_waveform_inner(
     let png_abs = thumbs_dir.join(&png_name);
     let png_rel = format!("{board_short}/thumbs/{png_name}");
 
-    crate::utils::files::gen_waveform_png(&data, &png_abs, thumb_size, thumb_size / 2)?;
+    // Write the waveform to a temp file in the same directory, then atomically
+    // rename it into place to avoid partial reads from concurrent web requests.
+    let tmp_png = tempfile::Builder::new()
+        .prefix("chan_wav_")
+        .suffix(".png")
+        .tempfile_in(&thumbs_dir)
+        .context("Failed to create temp file for waveform PNG")?;
+
+    crate::media::ffmpeg::ffmpeg_audio_waveform(&src, tmp_png.path(), thumb_size, thumb_size / 2)?;
+
+    tmp_png
+        .persist(&png_abs)
+        .context("Failed to atomically rename waveform PNG into place")?;
 
     let conn = pool.get()?;
     crate::db::update_post_thumb_path(&conn, post_id, &png_rel)?;
@@ -669,10 +709,8 @@ fn generate_waveform_inner(
     // of the waveform PNG.  We now update the dedup record so that all future
     // dedup hits for this audio file correctly inherit the waveform thumbnail.
     //
-    // We compute the SHA-256 of the audio data we already have in memory to
-    // identify the dedup row without a separate DB lookup, then refresh its
-    // thumb_path via a targeted UPDATE.  An audio file may have been uploaded
-    // on a different board, so we match by file content (sha256) not by path.
+    // We compute the SHA-256 of the audio data to identify the dedup row without
+    // a separate DB lookup, then refresh its thumb_path via a targeted UPDATE.
     let audio_sha256 = crate::utils::crypto::sha256_hex(&data);
     let _ = conn.execute(
         "UPDATE file_hashes SET thumb_path = ?1 WHERE sha256 = ?2",
@@ -736,4 +774,85 @@ fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
         );
     }
     let _ = ip_hash;
+}
+
+// ─── Thumbnail / waveform cache eviction ─────────────────────────────────────
+
+/// Walk every board's `thumbs/` subdirectory, collect all files with their
+/// modification times, and delete the oldest ones until the total size of
+/// the remaining set is under `max_bytes`.
+///
+/// Only files inside `{upload_dir}/{board}/thumbs/` are considered — original
+/// uploads are never touched.  Deletion is best-effort: individual failures
+/// are logged and skipped rather than aborting the whole pass.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
+    // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
+    let mut files: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();
+    let Ok(boards_iter) = std::fs::read_dir(upload_dir) else {
+        return;
+    };
+    for board_entry in boards_iter.flatten() {
+        let thumbs_dir = board_entry.path().join("thumbs");
+        if !thumbs_dir.is_dir() {
+            continue;
+        }
+        let Ok(thumbs_iter) = std::fs::read_dir(&thumbs_dir) else {
+            continue;
+        };
+        for entry in thumbs_iter.flatten() {
+            let path = entry.path();
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    let mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_secs());
+                    files.push((mtime, path, meta.len()));
+                }
+            }
+        }
+    }
+
+    // FIX[AUDIT-7]: Dereference `sz` explicitly and annotate the sum type for
+    // clarity.  `Iterator<Item = &u64>` implements `Sum<&u64>` in std so this
+    // compiled before, but the explicit form is more readable and avoids the
+    // implicit coercion.
+    let total: u64 = files.iter().map(|(_, _, sz)| *sz).sum::<u64>();
+    if total <= max_bytes {
+        return; // already within budget
+    }
+
+    // Sort oldest-first so we delete the least-recently-used files first.
+    files.sort_unstable_by_key(|(mtime, _, _)| *mtime);
+
+    let mut remaining = total;
+    let mut deleted = 0u64;
+    let mut deleted_bytes = 0u64;
+    for (_, path, size) in &files {
+        if remaining <= max_bytes {
+            break;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => {
+                remaining = remaining.saturating_sub(*size);
+                deleted += 1;
+                // FIX[AUDIT-7]: Dereference `size` for clarity.
+                deleted_bytes += *size;
+            }
+            Err(e) => {
+                warn!("evict_thumb_cache: failed to delete {:?}: {}", path, e);
+            }
+        }
+    }
+    if deleted > 0 {
+        info!(
+            "evict_thumb_cache: removed {} file(s) ({} KiB), cache now {} KiB / {} KiB limit",
+            deleted,
+            deleted_bytes / 1024,
+            remaining / 1024,
+            max_bytes / 1024,
+        );
+    }
 }

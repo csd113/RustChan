@@ -45,7 +45,7 @@ pub async fn view_thread(
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
-        move || -> Result<(String, String)> {
+        move || -> Result<(String, String, bool)> {
             let conn = pool.get()?;
 
             let is_admin = jar_session
@@ -62,13 +62,13 @@ pub async fn view_thread(
                 return Err(AppError::NotFound("Thread not found in this board.".into()));
             }
 
-            // ETag derived from the thread's last-bump timestamp AND the
-            // current board-list version.  The board version component ensures
-            // that adding or deleting a board invalidates cached thread pages,
-            // so the nav bar always reflects the current board list rather than
-            // showing stale/deleted boards until the thread receives a reply.
+            // ETag derived from the thread's last-bump timestamp, the current
+            // board-list version, and whether the viewer is an admin.  Including
+            // admin status prevents a browser from serving a cached non-admin
+            // page (without delete controls) to a user who has since logged in.
             let boards_ver = crate::templates::live_boards_version();
-            let etag = format!("\"{}-b{boards_ver}\"", thread.bumped_at);
+            let admin_tag = if is_admin { "-a" } else { "" };
+            let etag = format!("\"{}-b{boards_ver}{admin_tag}\"", thread.bumped_at);
 
             let posts = db::get_posts_for_thread(&conn, thread_id)?;
             let all_boards = db::get_all_boards(&conn)?;
@@ -89,13 +89,13 @@ pub async fn view_thread(
                 None,
                 collapse_greentext,
             );
-            Ok((etag, html))
+            Ok((etag, html, is_admin))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let (etag, html) = result;
+    let (etag, html, _is_admin) = result;
 
     // 3.2: Return 304 Not Modified when client's cached copy is still current.
     let client_etag = req_headers
@@ -147,6 +147,7 @@ pub async fn post_reply(
     let max_video_size = CONFIG.max_video_size;
     let max_audio_size = CONFIG.max_audio_size;
     let ffmpeg_available = state.ffmpeg_available;
+    let ffmpeg_webp_available = state.ffmpeg_webp_available;
     let cookie_secret = CONFIG.cookie_secret.clone();
     let file_data = form.file;
     let audio_file_data = form.audio_file;
@@ -159,6 +160,12 @@ pub async fn post_reply(
     let admin_session_id = jar.get("chan_admin_session").map(|c| c.value().to_string());
     // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
     let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
+
+    // Clones kept outside the closure so we can re-render the thread page inline on error.
+    let board_short_err = board_short.clone();
+    let admin_session_err = admin_session_id.clone();
+    let client_ip_err = client_ip.clone();
+    let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
 
     let _board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
@@ -258,6 +265,7 @@ pub async fn post_reply(
                 max_video_size,
                 max_audio_size,
                 ffmpeg_available,
+                ffmpeg_webp_available,
             )?;
 
             // ── Image+audio combo ─────────────────────────────────────────────
@@ -327,13 +335,44 @@ pub async fn post_reply(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    // BadRequest → return a lightweight 422 page instead of re-querying the
-    // entire thread (which wastes significant DB and CPU under spam load).
+    // BadRequest → re-render the thread page with an inline error banner so the
+    // user sees the message in context (e.g. "wait for captcha to solve") without
+    // being redirected to a separate error page and losing their scroll position.
     let redirect_url = match result {
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
-            let mut resp =
-                axum::response::Html(crate::templates::error_page(422, &msg)).into_response();
+            let db_pool = state.db.clone();
+            let html = tokio::task::spawn_blocking(move || -> Result<String> {
+                let conn = db_pool.get()?;
+                let is_admin = admin_session_err
+                    .as_deref()
+                    .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
+                let board = db::get_board_by_short(&conn, &board_short_err)?.ok_or_else(|| {
+                    AppError::NotFound(format!("Board /{board_short_err}/ not found"))
+                })?;
+                let thread = db::get_thread(&conn, thread_id)?
+                    .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
+                let posts = db::get_posts_for_thread(&conn, thread_id)?;
+                let all_boards = db::get_all_boards(&conn)?;
+                let ip_hash = hash_ip(&client_ip_err, &CONFIG.cookie_secret);
+                let poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)?;
+                let collapse_greentext = db::get_collapse_greentext(&conn);
+                Ok(crate::templates::thread_page(
+                    &board,
+                    &thread,
+                    &posts,
+                    &csrf_for_error,
+                    &all_boards,
+                    is_admin,
+                    poll.as_ref(),
+                    Some(&msg),
+                    collapse_greentext,
+                ))
+            })
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+            let mut resp = axum::response::Html(html).into_response();
             *resp.status_mut() = axum::http::StatusCode::UNPROCESSABLE_ENTITY;
             return Ok(resp);
         }
@@ -350,6 +389,7 @@ pub struct EditQuery {
     pub token: Option<String>,
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn edit_post_get(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
@@ -415,6 +455,7 @@ pub async fn edit_post_get(
 
 #[derive(Deserialize)]
 pub struct EditForm {
+    #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub deletion_token: String,
     pub body: String,
@@ -428,6 +469,7 @@ enum EditOutcome {
     ErrorPage(String),
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn edit_post_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
@@ -535,6 +577,7 @@ pub async fn edit_post_post(
 
 #[derive(Deserialize)]
 pub struct VoteForm {
+    #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub option_id: i64,
 }

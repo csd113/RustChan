@@ -406,7 +406,7 @@ pub fn edit_post(
         }
 
         let now = chrono::Utc::now().timestamp();
-        if now - created_at > window {
+        if now.saturating_sub(created_at) > window {
             return Ok(false);
         }
 
@@ -529,6 +529,13 @@ pub fn find_file_by_hash(
 
 /// Record a newly saved upload in the deduplication table.
 ///
+/// Uses INSERT OR REPLACE so that if the same SHA-256 was previously stored
+/// with an unconverted format (e.g. image/jpeg stored before WebP conversion
+/// was enabled), re-uploading the same bytes will update the cache to point
+/// at the converted file and mime type. Without OR REPLACE, the stale
+/// cache entry would be returned on every subsequent upload of that image,
+/// silently skipping conversion forever.
+///
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn record_file_hash(
@@ -539,7 +546,7 @@ pub fn record_file_hash(
     mime_type: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO file_hashes (sha256, file_path, thumb_path, mime_type)
+        "INSERT OR REPLACE INTO file_hashes (sha256, file_path, thumb_path, mime_type)
          VALUES (?1, ?2, ?3, ?4)",
         params![sha256, file_path, thumb_path, mime_type],
     )?;

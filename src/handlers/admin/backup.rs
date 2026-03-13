@@ -1,1362 +1,40 @@
-// handlers/admin.rs
+// handlers/admin/backup.rs
 //
-// Admin panel. All routes require a valid session cookie.
-//
-// Authentication flow:
-//   1. POST /admin/login → verify Argon2 password → create session in DB → set cookie
-//   2. All /admin/* routes → check session cookie → get session from DB → proceed
-//   3. POST /admin/logout → delete session from DB → clear cookie
-//
-// Session cookie: HTTPOnly (not readable by JS), SameSite=Strict (prevents CSRF).
-// Secure=true when CHAN_HTTPS_COOKIES=true (default: same as CHAN_BEHIND_PROXY).
-//
-// FIX[HIGH-3] + FIX[MEDIUM-12]: All admin handlers now wrap DB and file I/O in
-// spawn_blocking to avoid blocking the Tokio event loop. Direct DB calls from
-// async context were stalling worker threads under concurrent load.
+// Backup and restore subsystem for the admin panel.
+// Covers full-site backups, board-level backups, streaming downloads,
+// saved-backup restoration, and live board.json restore.
 
 use crate::{
     config::CONFIG,
-    db::{self, DbPool},
+    db,
     error::{AppError, Result},
-    handlers::board::ensure_csrf,
     middleware::AppState,
     models::BackupInfo,
-    templates,
-    utils::crypto::{new_session_id, verify_password},
+    utils::crypto::new_session_id,
 };
 use axum::{
-    extract::{Form, Multipart, Path, Query, State},
+    extract::{Form, Multipart, State},
     http::header,
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::Utc;
-use dashmap::DashMap;
-use rusqlite::backup::Backup;
-use rusqlite::params;
+use rusqlite::{backup::Backup, params};
 use serde::Deserialize;
+use serde_json;
 use std::io::{Seek, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::LazyLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::Ordering;
 use time;
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
-const SESSION_COOKIE: &str = "chan_admin_session";
-
-// ─── CRIT-6: Admin login brute-force lockout ──────────────────────────────────
-//
-// After LOGIN_FAIL_LIMIT failed attempts within LOGIN_FAIL_WINDOW seconds the
-// IP is locked out for the remainder of that window.  On success the counter
-// is cleared immediately so a genuine admin is never self-locked.
-//
-// Keys are SHA-256(IP) to avoid retaining raw addresses in memory (CRIT-5).
-
-const LOGIN_FAIL_LIMIT: u32 = 5;
-const LOGIN_FAIL_WINDOW: u64 = 900; // 15 minutes
-
-/// `ip_hash` → (`fail_count`, `window_start_secs`)
-static ADMIN_LOGIN_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
-static LOGIN_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
-
-fn login_now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn login_ip_key(ip: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(ip.as_bytes());
-    hex::encode(h.finalize())
-}
-
-/// Returns true if this IP is currently locked out.
-fn is_login_locked(ip_key: &str) -> bool {
-    let now = login_now_secs();
-    if let Some(entry) = ADMIN_LOGIN_FAILS.get(ip_key) {
-        let (count, window_start) = *entry;
-        if now.saturating_sub(window_start) <= LOGIN_FAIL_WINDOW {
-            return count >= LOGIN_FAIL_LIMIT;
-        }
-    }
-    false
-}
-
-/// Record a failed login attempt; returns the new failure count.
-fn record_login_fail(ip_key: &str) -> u32 {
-    let now = login_now_secs();
-    let mut binding = ADMIN_LOGIN_FAILS
-        .entry(ip_key.to_string())
-        .or_insert((0, now));
-    let (count, window_start) = binding.value_mut();
-    if now.saturating_sub(*window_start) > LOGIN_FAIL_WINDOW {
-        *count = 1;
-        *window_start = now;
-    } else {
-        *count += 1;
-    }
-    let result = *count;
-    drop(binding);
-    result
-}
-
-/// Clear failure counter after a successful login.
-fn clear_login_fails(ip_key: &str) {
-    ADMIN_LOGIN_FAILS.remove(ip_key);
-    // Opportunistically prune stale entries every ~15 min.
-    let now = login_now_secs();
-    let last = LOGIN_CLEANUP_SECS.load(Ordering::Relaxed);
-    if now.saturating_sub(last) > 900
-        && LOGIN_CLEANUP_SECS
-            .compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-    {
-        ADMIN_LOGIN_FAILS.retain(|_, (_, ws)| now.saturating_sub(*ws) <= LOGIN_FAIL_WINDOW);
-    }
-}
-
-/// Prune all expired entries from `ADMIN_LOGIN_FAILS`.
-/// Called by a background task every 5 minutes so the map never grows
-/// unbounded during sustained brute-force attacks with no successful logins.
-pub fn prune_login_fails() {
-    let now = login_now_secs();
-    ADMIN_LOGIN_FAILS.retain(|_, (_, ws)| now.saturating_sub(*ws) <= LOGIN_FAIL_WINDOW);
-}
-
-/// Verify admin session. Returns the `admin_id` if valid.
-/// NOTE: This function performs blocking DB I/O. Only call it from within a
-/// `spawn_blocking` closure or synchronous (non-async) context.
-#[allow(dead_code)]
-fn require_admin_sync(jar: &CookieJar, pool: &DbPool) -> Result<i64> {
-    let session_id = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
-
-    let conn = pool.get()?;
-    let session = db::get_session(&conn, &session_id)?
-        .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
-
-    Ok(session.admin_id)
-}
-
-/// Public helper — returns true if the jar contains a valid admin session.
-/// Used by other handlers to conditionally show admin controls.
-/// FIX[HIGH-2]/[HIGH-3]: Callers must invoke this from inside `spawn_blocking`.
-#[allow(dead_code)]
-pub fn is_admin_session(jar: &CookieJar, pool: &DbPool) -> bool {
-    require_admin_sync(jar, pool).is_ok()
-}
-
-pub async fn admin_index(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
-    // FIX[HIGH-3]: Move DB I/O into spawn_blocking.
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-
-    let (is_logged_in, boards) = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<(bool, Vec<crate::models::Board>)> {
-            let conn = pool.get()?;
-            let logged_in = session_id
-                .as_deref()
-                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
-            let boards = db::get_all_boards(&conn)?;
-            Ok((logged_in, boards))
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    if is_logged_in {
-        return Ok(Redirect::to("/admin/panel").into_response());
-    }
-
-    let (jar, csrf) = ensure_csrf(jar);
-    Ok((jar, Html(templates::admin_login_page(None, &csrf, &boards))).into_response())
-}
-
-// ─── POST /admin/login ────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct LoginForm {
-    username: String,
-    password: String,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
 #[allow(clippy::too_many_lines)]
-pub async fn admin_login(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
-    Form(form): Form<LoginForm>,
-) -> Result<Response> {
-    // CRIT-6: Reject IPs that are currently locked out due to repeated failures.
-    let ip_key = login_ip_key(&client_ip);
-    if is_login_locked(&ip_key) {
-        warn!(
-            "Admin login blocked (brute-force lockout) for ip_prefix={}",
-            &ip_key[..8]
-        );
-        return Err(AppError::RateLimited);
-    }
-
-    // CSRF check
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
-
-    let username = form.username.trim().to_string();
-    if username.is_empty() || username.len() > 64 {
-        let (jar, csrf) = ensure_csrf(jar);
-        let boards = tokio::task::spawn_blocking({
-            let pool = state.db.clone();
-            move || {
-                let conn = pool.get()?;
-                db::get_all_boards(&conn)
-            }
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-        return Ok((
-            jar,
-            Html(templates::admin_login_page(
-                Some("Invalid username."),
-                &csrf,
-                &boards,
-            )),
-        )
-            .into_response());
-    }
-
-    let pool = state.db.clone();
-    let password = form.password.clone();
-
-    // FIX[HIGH-3]: Argon2 verification is CPU-intensive; always use spawn_blocking.
-    let result = tokio::task::spawn_blocking(move || -> Result<Option<i64>> {
-        let conn = pool.get()?;
-        let user = db::get_admin_by_username(&conn, &username)?;
-        if let Some(u) = user {
-            if verify_password(&password, &u.password_hash)? {
-                return Ok(Some(u.id));
-            }
-        }
-        Ok(None)
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    match result {
-        None => {
-            warn!("Failed admin login attempt for '{}'", form.username.trim());
-            let (jar, csrf) = ensure_csrf(jar);
-            let boards = tokio::task::spawn_blocking({
-                let pool = state.db.clone();
-                move || {
-                    let conn = pool.get()?;
-                    db::get_all_boards(&conn)
-                }
-            })
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-            // CRIT-6: Record failed attempt and check if now locked.
-            let fails = record_login_fail(&ip_key);
-            warn!(
-                "Failed admin login for '{}' (attempt {}/{})",
-                form.username.trim(),
-                fails,
-                LOGIN_FAIL_LIMIT
-            );
-            Ok((
-                jar,
-                Html(templates::admin_login_page(
-                    Some("Invalid username or password."),
-                    &csrf,
-                    &boards,
-                )),
-            )
-                .into_response())
-        }
-        Some(admin_id) => {
-            // CRIT-6: Successful login — reset any failure counter.
-            clear_login_fails(&ip_key);
-            // Create session (FIX[HIGH-3]: in spawn_blocking)
-            let session_id = new_session_id();
-            let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
-            let sid_clone = session_id.clone();
-            tokio::task::spawn_blocking({
-                let pool = state.db.clone();
-                move || -> Result<()> {
-                    let conn = pool.get()?;
-                    db::create_session(&conn, &sid_clone, admin_id, expires_at)?;
-                    Ok(())
-                }
-            })
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-            let mut cookie = Cookie::new(SESSION_COOKIE, session_id);
-            cookie.set_http_only(true);
-            cookie.set_same_site(SameSite::Strict);
-            cookie.set_path("/");
-            // FIX[MEDIUM-11]: Derive Secure flag from config; true when CHAN_HTTPS_COOKIES=true.
-            cookie.set_secure(CONFIG.https_cookies);
-            // FIX[HIGH-1]: Set Max-Age so browsers expire the cookie after the
-            // configured session lifetime instead of persisting it indefinitely.
-            cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
-
-            info!("Admin {admin_id} logged in");
-            Ok((jar.add(cookie), Redirect::to("/admin/panel")).into_response())
-        }
-    }
-}
-
-// ─── POST /admin/logout ───────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct CsrfOnly {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-    return_to: Option<String>,
-}
-
-pub async fn admin_logout(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<CsrfOnly>,
-) -> Result<Response> {
-    // Verify CSRF to prevent forced-logout attacks
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
-
-    if let Some(session_cookie) = jar.get(SESSION_COOKIE) {
-        let session_id = session_cookie.value().to_string();
-        // FIX[HIGH-3]: DB call in spawn_blocking
-        tokio::task::spawn_blocking({
-            let pool = state.db.clone();
-            move || -> Result<()> {
-                let conn = pool.get()?;
-                db::delete_session(&conn, &session_id)?;
-                Ok(())
-            }
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    }
-    let jar = jar.remove(Cookie::from(SESSION_COOKIE));
-    // Redirect back to the page where logout was triggered, or fall back to login.
-    // FIX[HIGH-4]: Reject backslash (and its percent-encoded form %5C) in
-    // addition to the existing checks.  On some browsers /\evil.com and
-    // /%5Cevil.com are treated as protocol-relative redirects to evil.com.
-    let destination = form
-        .return_to
-        .as_deref()
-        .filter(|s| {
-            s.starts_with('/')
-                && !s.contains("//")
-                && !s.contains("..")
-                && !s.contains('\\')
-                && !s.to_ascii_lowercase().contains("%5c")
-        })
-        .unwrap_or("/admin");
-    Ok((jar, Redirect::to(destination)).into_response())
-}
-
-// ─── GET /admin/panel ─────────────────────────────────────────────────────────
-
-/// Query params accepted by GET /admin/panel.
-/// All fields are optional — missing = no flash message.
-#[derive(Deserialize, Default)]
-pub struct AdminPanelQuery {
-    /// Set by `board_restore` on success: the `short_name` of the restored board.
-    pub board_restored: Option<String>,
-    /// Set by `board_restore` / `restore_saved_board_backup` on failure.
-    pub restore_error: Option<String>,
-    /// Set by `update_site_settings` on success.
-    pub settings_saved: Option<String>,
-}
-
-pub async fn admin_panel(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Query(params): Query<AdminPanelQuery>,
-) -> Result<(CookieJar, Html<String>)> {
-    // FIX[HIGH-3]: Move auth check and all DB calls into spawn_blocking.
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    let (jar, csrf) = ensure_csrf(jar);
-    let csrf_clone = csrf.clone();
-
-    // Build the flash message from query params before entering spawn_blocking.
-    let flash: Option<(bool, String)> = if let Some(err) = params.restore_error {
-        Some((true, format!("Restore failed: {err}")))
-    } else if let Some(board) = params.board_restored {
-        Some((false, format!("Board /{board}/ restored successfully.")))
-    } else if params.settings_saved.is_some() {
-        Some((false, "Site settings saved.".to_string()))
-    } else {
-        None
-    };
-
-    let html = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<String> {
-            let conn = pool.get()?;
-
-            // Auth check inside blocking task
-            let sid = session_id.ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
-            db::get_session(&conn, &sid)?
-                .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
-
-            let boards = db::get_all_boards(&conn)?;
-            let bans = db::list_bans(&conn)?;
-            let filters = db::get_word_filters(&conn)?;
-            let collapse_greentext = db::get_collapse_greentext(&conn);
-            let reports = db::get_open_reports(&conn)?;
-            let appeals = db::get_open_ban_appeals(&conn)?;
-            let site_name = db::get_site_name(&conn);
-            let site_subtitle = db::get_site_subtitle(&conn);
-            let default_theme = db::get_default_user_theme(&conn);
-
-            // Collect saved backup file lists (read from disk, not DB).
-            let full_backups = list_backup_files(&full_backup_dir());
-            let board_backups_list = list_backup_files(&board_backup_dir());
-
-            let db_size_bytes = db::get_db_size_bytes(&conn).unwrap_or(0);
-
-            // 1.8: Compute whether the DB file size exceeds the configured
-            // warning threshold. Uses the on-disk file size (via fs::metadata)
-            // rather than SQLite's PRAGMA page_count estimate for accuracy,
-            // falling back to the pragma value if the path is unavailable.
-            let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
-                let file_size = std::fs::metadata(&CONFIG.database_path)
-                    .map_or_else(|_| db_size_bytes.cast_unsigned(), |m| m.len());
-                file_size >= CONFIG.db_warn_threshold_bytes
-            } else {
-                false
-            };
-
-            // Read the tor onion address from the hostname file if tor is enabled.
-            let tor_address: Option<String> = if CONFIG.enable_tor_support {
-                let data_dir = std::path::PathBuf::from(&CONFIG.database_path)
-                    .parent()
-                    .map_or_else(
-                        || std::path::PathBuf::from("."),
-                        std::path::Path::to_path_buf,
-                    );
-                let hostname_path = data_dir.join("tor_hidden_service").join("hostname");
-                std::fs::read_to_string(&hostname_path)
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            } else {
-                None
-            };
-
-            let flash_ref = flash.as_ref().map(|(is_err, msg)| (*is_err, msg.as_str()));
-
-            Ok(templates::admin_panel_page(
-                &boards,
-                &bans,
-                &filters,
-                collapse_greentext,
-                &csrf_clone,
-                &full_backups,
-                &board_backups_list,
-                db_size_bytes,
-                db_size_warning,
-                &reports,
-                &appeals,
-                &site_name,
-                &site_subtitle,
-                &default_theme,
-                tor_address.as_deref(),
-                flash_ref,
-            ))
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok((jar, Html(html)))
-}
-
-// ─── POST /admin/board/create ─────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct CreateBoardForm {
-    short_name: String,
-    name: String,
-    description: String,
-    nsfw: Option<String>,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn create_board(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<CreateBoardForm>,
-) -> Result<Response> {
-    // FIX[HIGH-3]: auth + DB write in spawn_blocking
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
-
-    let short = form
-        .short_name
-        .trim()
-        .to_lowercase()
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(8)
-        .collect::<String>();
-
-    if short.is_empty() {
-        return Err(AppError::BadRequest("Invalid board name.".into()));
-    }
-
-    let nsfw = form.nsfw.as_deref() == Some("1");
-    let name = form.name.trim().chars().take(64).collect::<String>();
-    let description = form
-        .description
-        .trim()
-        .chars()
-        .take(256)
-        .collect::<String>();
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
-            db::create_board(&conn, &short, &name, &description, nsfw)?;
-            info!("Admin created board /{short}/");
-            // Refresh live board list so the top bar on any subsequent error
-            // page includes the newly created board.
-            crate::templates::set_live_boards(db::get_all_boards(&conn)?);
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel").into_response())
-}
-
-// ─── POST /admin/board/delete ─────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct BoardIdForm {
-    board_id: i64,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn delete_board(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<BoardIdForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    let upload_dir = CONFIG.upload_dir.clone();
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
-
-            // Fetch the board's short_name before deletion so we can remove
-            // its upload directory entirely after cleaning tracked files.
-            let short_name: Option<String> = conn
-                .query_row(
-                    "SELECT short_name FROM boards WHERE id = ?1",
-                    rusqlite::params![form.board_id],
-                    |r| r.get(0),
-                )
-                .ok();
-
-            // delete_board returns all file paths for posts in this board.
-            let paths = db::delete_board(&conn, form.board_id)?;
-
-            // Delete every tracked file and thumbnail from disk.
-            for p in &paths {
-                crate::utils::files::delete_file(&upload_dir, p);
-            }
-
-            // Remove the entire board upload directory — handles the thumbs/
-            // sub-directory and any orphaned/untracked files too.
-            if let Some(short) = short_name {
-                let board_dir = PathBuf::from(&upload_dir).join(&short);
-                if board_dir.exists() {
-                    if let Err(e) = std::fs::remove_dir_all(&board_dir) {
-                        warn!("Could not remove board dir {:?}: {}", board_dir, e);
-                    }
-                }
-            }
-
-            info!(
-                "Admin deleted board id={} ({} file(s) removed)",
-                form.board_id,
-                paths.len()
-            );
-            // Refresh live board list so the top bar immediately stops showing
-            // the deleted board — important because error pages use this cache.
-            crate::templates::set_live_boards(db::get_all_boards(&conn)?);
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel").into_response())
-}
-
-// ─── POST /admin/thread/action ────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct ThreadActionForm {
-    thread_id: i64,
-    board: String,
-    action: String, // "sticky", "unsticky", "lock", "unlock"
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn thread_action(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<ThreadActionForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    // Validate action before spawning to give early error
-    match form.action.as_str() {
-        "sticky" | "unsticky" | "lock" | "unlock" | "archive" => {}
-        _ => return Err(AppError::BadRequest("Unknown action.".into())),
-    }
-
-    let action = form.action.clone();
-    let thread_id = form.thread_id;
-    let board_for_log = form.board.clone();
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            let (admin_id, admin_name) =
-                require_admin_session_with_name(&conn, session_id.as_deref())?;
-            match action.as_str() {
-                "sticky" => db::set_thread_sticky(&conn, thread_id, true)?,
-                "unsticky" => db::set_thread_sticky(&conn, thread_id, false)?,
-                "lock" => db::set_thread_locked(&conn, thread_id, true)?,
-                "unlock" => db::set_thread_locked(&conn, thread_id, false)?,
-                "archive" => db::set_thread_archived(&conn, thread_id, true)?,
-                _ => {}
-            }
-            let _ = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                &action,
-                "thread",
-                Some(thread_id),
-                &board_for_log,
-                "",
-            );
-            info!("Admin {action} thread {thread_id}");
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    // FIX[MEDIUM-10]: Use the board name from the DB (via the thread's board_id),
-    // not the user-supplied form.board, to prevent path-confusion redirects.
-    let redirect_url = {
-        let pool = state.db.clone();
-        let board_name = tokio::task::spawn_blocking(move || -> Result<String> {
-            let conn = pool.get()?;
-            let thread = db::get_thread(&conn, thread_id)?;
-            if let Some(t) = thread {
-                let boards = db::get_all_boards(&conn)?;
-                if let Some(b) = boards.iter().find(|b| b.id == t.board_id) {
-                    return Ok(b.short_name.clone());
-                }
-            }
-            // Fallback: sanitize the user-supplied board name to prevent open-redirect.
-            // Only allow alphanumeric characters (matching the board short_name format).
-            let safe: String = form
-                .board
-                .chars()
-                .filter(char::is_ascii_alphanumeric)
-                .take(8)
-                .collect();
-            Ok(safe)
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-        // After archiving, send to the board archive; for all other actions
-        // stay on the thread.
-        if form.action == "archive" {
-            format!("/{board_name}/archive")
-        } else {
-            format!("/{board_name}/thread/{}", form.thread_id)
-        }
-    };
-
-    Ok(Redirect::to(&redirect_url).into_response())
-}
-
-// ─── POST /admin/post/delete ──────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct AdminDeletePostForm {
-    post_id: i64,
-    board: String,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn admin_delete_post(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<AdminDeletePostForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    let upload_dir = CONFIG.upload_dir.clone();
-    let post_id = form.post_id;
-
-    let redirect_board = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<String> {
-            let conn = pool.get()?;
-            let (admin_id, admin_name) =
-                require_admin_session_with_name(&conn, session_id.as_deref())?;
-
-            let post = db::get_post(&conn, post_id)?
-                .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
-
-            // FIX[MEDIUM-10]: Resolve board name from DB, not user-supplied form field.
-            // Fallback sanitizes the user-supplied value to alphanumeric only.
-            let board_name = db::get_all_boards(&conn)?
-                .into_iter()
-                .find(|b| b.id == post.board_id)
-                .map_or_else(
-                    || {
-                        form.board
-                            .chars()
-                            .filter(char::is_ascii_alphanumeric)
-                            .take(8)
-                            .collect()
-                    },
-                    |b| b.short_name,
-                );
-
-            let thread_id = post.thread_id;
-            let is_op = post.is_op;
-
-            let paths = if post.is_op {
-                db::delete_thread(&conn, post.thread_id)?
-            } else {
-                db::delete_post(&conn, post_id)?
-            };
-
-            for p in paths {
-                crate::utils::files::delete_file(&upload_dir, &p);
-            }
-
-            let action = if is_op {
-                "delete_thread"
-            } else {
-                "delete_post"
-            };
-            let _ = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                action,
-                "post",
-                Some(post_id),
-                &board_name,
-                &post.body.chars().take(80).collect::<String>(),
-            );
-            info!("Admin deleted post {post_id}");
-            // Return board_name + thread context so we can redirect back to the thread.
-            // If the post was an OP, redirect to the board index (thread is gone).
-            if is_op {
-                Ok(format!("/{board_name}"))
-            } else {
-                Ok(format!("/{board_name}/thread/{thread_id}"))
-            }
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to(&redirect_board).into_response())
-}
-
-// ─── POST /admin/thread/delete ────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct AdminDeleteThreadForm {
-    thread_id: i64,
-    board: String,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn admin_delete_thread(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<AdminDeleteThreadForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    let upload_dir = CONFIG.upload_dir.clone();
-    let thread_id = form.thread_id;
-
-    let redirect_board = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<String> {
-            let conn = pool.get()?;
-            let (admin_id, admin_name) =
-                require_admin_session_with_name(&conn, session_id.as_deref())?;
-
-            // FIX[MEDIUM-10]: Resolve board name from DB.
-            // Fallback sanitizes the user-supplied value to alphanumeric only.
-            let board_name = db::get_thread(&conn, thread_id)?
-                .and_then(|t| {
-                    db::get_all_boards(&conn)
-                        .ok()?
-                        .into_iter()
-                        .find(|b| b.id == t.board_id)
-                        .map(|b| b.short_name)
-                })
-                .unwrap_or_else(|| {
-                    form.board
-                        .chars()
-                        .filter(char::is_ascii_alphanumeric)
-                        .take(8)
-                        .collect()
-                });
-
-            let paths = db::delete_thread(&conn, thread_id)?;
-            for p in paths {
-                crate::utils::files::delete_file(&upload_dir, &p);
-            }
-
-            let _ = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                "delete_thread",
-                "thread",
-                Some(thread_id),
-                &board_name,
-                "",
-            );
-            info!("Admin deleted thread {thread_id}");
-            Ok(board_name)
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to(&format!("/{redirect_board}")).into_response())
-}
-
-// ─── POST /admin/ban/add ──────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct AddBanForm {
-    ip_hash: String,
-    reason: String,
-    duration_hours: Option<i64>,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn add_ban(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<AddBanForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    let expires_at = form
-        .duration_hours
-        .filter(|&h| h > 0)
-        // Cap at 87_600 hours (10 years) to prevent overflow in h * 3600.
-        // Permanent bans are represented by None (duration_hours absent or zero).
-        .map(|h| Utc::now().timestamp() + h.min(87_600).saturating_mul(3600));
-
-    let ip_hash_log = form.ip_hash.chars().take(8).collect::<String>();
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            let (admin_id, admin_name) =
-                require_admin_session_with_name(&conn, session_id.as_deref())?;
-            db::add_ban(&conn, &form.ip_hash, &form.reason, expires_at)?;
-            let _ = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                "ban",
-                "ban",
-                None,
-                "",
-                &format!("ip_hash={}… reason={}", &ip_hash_log, form.reason),
-            );
-            info!("Admin added ban for ip_hash {ip_hash_log}…");
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel").into_response())
-}
-
-// ─── POST /admin/ban/remove ───────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct BanIdForm {
-    ban_id: i64,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn remove_ban(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<BanIdForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
-            db::remove_ban(&conn, form.ban_id)?;
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel").into_response())
-}
-
-// ─── POST /admin/post/ban-delete ──────────────────────────────────────────────
-// Inline ban + delete from the per-post admin toolbar.
-// Bans the post author's IP hash, deletes the post, then redirects back to
-// the thread (or the board index if the OP is deleted).
-
-#[derive(Deserialize)]
-pub struct BanDeleteForm {
-    post_id: i64,
-    ip_hash: String,
-    board: String,
-    thread_id: i64,
-    is_op: Option<String>,
-    reason: Option<String>,
-    duration_hours: Option<i64>,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn admin_ban_and_delete(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<BanDeleteForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    let reason = form
-        .reason
-        .as_deref()
-        .map(|r| r.trim().to_string())
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| "Rule violation".to_string());
-
-    let expires_at = form
-        .duration_hours
-        .filter(|&h| h > 0)
-        .map(|h| chrono::Utc::now().timestamp() + h.min(87_600).saturating_mul(3600));
-
-    let ip_hash_log = form.ip_hash.chars().take(8).collect::<String>();
-    let post_id = form.post_id;
-    let board_short = form.board.clone();
-    let thread_id = form.thread_id;
-    let is_op = form.is_op.as_deref() == Some("1");
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            let (admin_id, admin_name) =
-                require_admin_session_with_name(&conn, session_id.as_deref())?;
-
-            // Validate ip_hash: must be a well-formed SHA-256 hex string (64 hex
-            // chars).  The value comes from a form field in the post toolbar; a
-            // confused or tampered submission should be rejected cleanly.
-            if form.ip_hash.len() != 64 || !form.ip_hash.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(AppError::BadRequest("Invalid IP hash format.".into()));
-            }
-
-            // Ban first so the IP cannot re-post before the delete lands
-            db::add_ban(&conn, &form.ip_hash, &reason, expires_at)?;
-            let _ = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                "ban",
-                "ban",
-                None,
-                &board_short,
-                &format!("inline ban — ip_hash={reason}… reason={}", &ip_hash_log),
-            );
-
-            // Delete post (or whole thread if OP)
-            if is_op {
-                let paths = db::delete_thread(&conn, thread_id)?;
-                for p in paths {
-                    crate::utils::files::delete_file(&crate::config::CONFIG.upload_dir, &p);
-                }
-                let _ = db::log_mod_action(
-                    &conn,
-                    admin_id,
-                    &admin_name,
-                    "delete_thread",
-                    "thread",
-                    Some(thread_id),
-                    &board_short,
-                    "",
-                );
-            } else {
-                let paths = db::delete_post(&conn, post_id)?;
-                for p in paths {
-                    crate::utils::files::delete_file(&crate::config::CONFIG.upload_dir, &p);
-                }
-                let _ = db::log_mod_action(
-                    &conn,
-                    admin_id,
-                    &admin_name,
-                    "delete_post",
-                    "post",
-                    Some(post_id),
-                    &board_short,
-                    "",
-                );
-            }
-
-            info!("Admin ban+delete: post={post_id} ip_hash={ip_hash_log}… board={board_short}");
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    // FIX[A1]: form.board is user-supplied; sanitise to alphanumeric only before
-    // embedding in the redirect URL to prevent open-redirect via "//" prefixes.
-    let safe_board: String = form
-        .board
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(8)
-        .collect();
-    // If OP was deleted, the thread is gone — send to board index
-    let redirect = if is_op {
-        format!("/{safe_board}")
-    } else {
-        format!("/{safe_board}/thread/{thread_id}#p{post_id}")
-    };
-    Ok(Redirect::to(&redirect).into_response())
-}
-
-// ─── POST /admin/appeal/dismiss ───────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct AppealActionForm {
-    appeal_id: i64,
-    ip_hash: Option<String>,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn dismiss_appeal(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<AppealActionForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
-            db::dismiss_ban_appeal(&conn, form.appeal_id)?;
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel#appeals").into_response())
-}
-
-// ─── POST /admin/appeal/accept ────────────────────────────────────────────────
-
-pub async fn accept_appeal(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<AppealActionForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            let (admin_id, admin_name) =
-                require_admin_session_with_name(&conn, session_id.as_deref())?;
-            let ip = form.ip_hash.as_deref().unwrap_or("");
-            db::accept_ban_appeal(&conn, form.appeal_id, ip)?;
-            let _ = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                "accept_appeal",
-                "ban",
-                None,
-                "",
-                &format!("appeal {} — ip unban", form.appeal_id),
-            );
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel#appeals").into_response())
-}
-
-#[derive(Deserialize)]
-pub struct AddFilterForm {
-    pattern: String,
-    replacement: String,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn add_filter(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<AddFilterForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    if form.pattern.trim().is_empty() {
-        return Err(AppError::BadRequest("Pattern cannot be empty.".into()));
-    }
-
-    let pattern = form.pattern.trim().chars().take(256).collect::<String>();
-    let replacement = form
-        .replacement
-        .trim()
-        .chars()
-        .take(256)
-        .collect::<String>();
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
-            db::add_word_filter(&conn, &pattern, &replacement)?;
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel").into_response())
-}
-
-// ─── POST /admin/filter/remove ────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct FilterIdForm {
-    filter_id: i64,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn remove_filter(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<FilterIdForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
-            db::remove_word_filter(&conn, form.filter_id)?;
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel").into_response())
-}
-
-// ─── POST /admin/board/settings ──────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct BoardSettingsForm {
-    board_id: i64,
-    name: String,
-    description: String,
-    bump_limit: Option<String>,
-    max_threads: Option<String>,
-    nsfw: Option<String>,
-    allow_images: Option<String>,
-    allow_video: Option<String>,
-    allow_audio: Option<String>,
-    allow_tripcodes: Option<String>,
-    allow_editing: Option<String>,
-    edit_window_secs: Option<String>,
-    allow_archive: Option<String>,
-    allow_video_embeds: Option<String>,
-    allow_captcha: Option<String>,
-    post_cooldown_secs: Option<String>,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn update_board_settings(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<BoardSettingsForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    let bump_limit = form
-        .bump_limit
-        .as_deref()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(500)
-        .clamp(1, 10_000);
-    let max_threads = form
-        .max_threads
-        .as_deref()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(150)
-        .clamp(1, 1_000);
-    let edit_window_secs = form
-        .edit_window_secs
-        .as_deref()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(300)
-        .clamp(0, 86_400); // 0 = disabled, max 24 h
-    let post_cooldown_secs = form
-        .post_cooldown_secs
-        .as_deref()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(0)
-        .clamp(0, 3_600); // 0 = disabled, max 1 hour
-
-    // Enforce server-side length limits on free-text fields
-    let name = form.name.trim().chars().take(64).collect::<String>();
-    let description = form
-        .description
-        .trim()
-        .chars()
-        .take(256)
-        .collect::<String>();
-    let board_id = form.board_id;
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
-            db::update_board_settings(
-                &conn,
-                board_id,
-                &name,
-                &description,
-                form.nsfw.as_deref() == Some("1"),
-                bump_limit,
-                max_threads,
-                form.allow_images.as_deref() == Some("1"),
-                form.allow_video.as_deref() == Some("1"),
-                form.allow_audio.as_deref() == Some("1"),
-                form.allow_tripcodes.as_deref() == Some("1"),
-                edit_window_secs,
-                form.allow_editing.as_deref() == Some("1"),
-                form.allow_archive.as_deref() == Some("1"),
-                form.allow_video_embeds.as_deref() == Some("1"),
-                form.allow_captcha.as_deref() == Some("1"),
-                post_cooldown_secs,
-            )?;
-            info!("Admin updated settings for board id={board_id}");
-            crate::templates::set_live_boards(db::get_all_boards(&conn)?);
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel").into_response())
-}
-
-// ─── GET /admin/backup ────────────────────────────────────────────────────────
-
-/// Stream a full zip backup of the database + all uploaded files.
-///
-/// MEM-FIX: The zip is built to a `NamedTempFile` on disk (not a Vec<u8> in
-/// RAM), so peak heap usage is O(compression-buffer) not O(zip-size).
-/// The response body is streamed from disk in 64 KiB chunks via `ReaderStream`.
 pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
     let upload_dir = CONFIG.upload_dir.clone();
     let progress = state.backup_progress.clone();
 
@@ -1364,7 +42,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
         let pool = state.db.clone();
         move || -> Result<(PathBuf, String, u64)> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
 
@@ -1387,7 +65,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             // +1 for chan.db
             progress
                 .files_total
-                .store(file_count + 1, Ordering::Relaxed);
+                .store(file_count.saturating_add(1), Ordering::Relaxed);
 
             // MEM-FIX: write zip directly to a NamedTempFile instead of Vec<u8>.
             let zip_tmp = tempfile::NamedTempFile::new()
@@ -1404,7 +82,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                 progress.reset(crate::middleware::backup_phase::COMPRESS);
                 progress
                     .files_total
-                    .store(file_count + 1, Ordering::Relaxed);
+                    .store(file_count.saturating_add(1), Ordering::Relaxed);
 
                 // ── Database snapshot (streamed, not read into RAM) ────────
                 zip.start_file("chan.db", opts)
@@ -1484,6 +162,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 
 /// Count regular files (not directories) under `dir` recursively.
 /// Used to initialise the progress bar's `files_total` before compression starts.
+#[allow(clippy::arithmetic_side_effects)]
 fn count_files_in_dir(dir: &std::path::Path) -> u64 {
     if !dir.is_dir() {
         return 0;
@@ -1581,12 +260,15 @@ fn add_dir_to_zip<W: Write + Seek>(
 ///   • The uploaded DB is written to a temp file then opened read-only as the
 ///     backup source; it is deleted on success or failure.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn admin_restore(
     State(state): State<AppState>,
     jar: CookieJar,
     mut multipart: Multipart,
 ) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
 
     // FIX[A7]: Stream the uploaded zip to a NamedTempFile on disk instead of
     // buffering the entire upload into a Vec<u8>.  Full-site backups can be
@@ -1673,7 +355,7 @@ pub async fn admin_restore(
             let mut live_conn = pool.get()?;
             // Save admin_id now — we'll need it to create a new session
             // in the restored DB once the backup completes.
-            let admin_id = require_admin_session_sid(&live_conn, session_id.as_deref())?;
+            let admin_id = super::require_admin_session_sid(&live_conn, session_id.as_deref())?;
 
             // ── Open the on-disk zip (FIX[A7]) ───────────────────────────
             // reopen() gives a fresh File descriptor seeked to position 0,
@@ -1794,11 +476,11 @@ pub async fn admin_restore(
     // If we got a valid session ID back, replace the cookie and go to the
     // panel.  If not (admin didn't exist in the backup), go to login instead.
     if fresh_sid.is_empty() {
-        let jar = jar.remove(Cookie::from(SESSION_COOKIE));
+        let jar = jar.remove(Cookie::from(super::SESSION_COOKIE));
         return Ok((jar, Redirect::to("/admin")).into_response());
     }
 
-    let mut new_cookie = Cookie::new(SESSION_COOKIE, fresh_sid);
+    let mut new_cookie = Cookie::new(super::SESSION_COOKIE, fresh_sid);
     new_cookie.set_http_only(true);
     new_cookie.set_same_site(SameSite::Strict);
     new_cookie.set_path("/");
@@ -1855,6 +537,7 @@ pub async fn admin_restore(
 
 // Rewrite in-board `>>{old_id}` references in the raw post body.
 // `pairs` must be pre-sorted by old-ID string length descending.
+#[allow(clippy::arithmetic_side_effects)]
 fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> String {
     // Avoid cloning when there is nothing to change.
     if pairs.is_empty() {
@@ -1937,6 +620,7 @@ const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 /// Like `std::io::copy` but returns `InvalidData` if more than `max_bytes`
 /// would be written.  Reads in 64 KiB chunks; aborts as soon as the limit
 /// is exceeded so disk space is not wasted.
+#[allow(clippy::arithmetic_side_effects)]
 fn copy_limited<R: std::io::Read, W: std::io::Write>(
     reader: &mut R,
     writer: &mut W,
@@ -1971,36 +655,6 @@ fn copy_limited<R: std::io::Read, W: std::io::Write>(
 /// Check CSRF using the cookie jar. Returns error on mismatch.
 /// Verify admin session and also return the admin's username.
 /// For use inside `spawn_blocking` closures.
-fn require_admin_session_with_name(
-    conn: &rusqlite::Connection,
-    session_id: Option<&str>,
-) -> Result<(i64, String)> {
-    let admin_id = require_admin_session_sid(conn, session_id)?;
-    let name = db::get_admin_name_by_id(conn, admin_id)?.unwrap_or_else(|| "unknown".to_string());
-    Ok((admin_id, name))
-}
-
-fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
-    let cookie_token = jar.get("csrf_token").map(|c| c.value().to_string());
-    if crate::middleware::validate_csrf(cookie_token.as_deref(), form_token.unwrap_or("")) {
-        Ok(())
-    } else {
-        Err(AppError::Forbidden("CSRF token mismatch.".into()))
-    }
-}
-
-/// Verify admin session from a session ID string.
-/// For use inside `spawn_blocking` closures where we have an open connection.
-fn require_admin_session_sid(conn: &rusqlite::Connection, session_id: Option<&str>) -> Result<i64> {
-    let sid = session_id.ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
-    let session = db::get_session(conn, sid)?
-        .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
-    Ok(session.admin_id)
-}
-
-// ─── Backup directory helpers ────────────────────────────────────────────────
-
-/// Returns the directory that contains chan.db (i.e. rustchan-data/).
 fn db_dir() -> PathBuf {
     PathBuf::from(&CONFIG.database_path)
         .parent()
@@ -2018,7 +672,7 @@ pub fn board_backup_dir() -> PathBuf {
 }
 
 /// List `.zip` files in `dir`, newest-filename-first.
-fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
+pub fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -2065,13 +719,16 @@ fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
 /// `BufWriter`, so peak RAM usage is O(compression-buffer) not O(zip-size).
 /// A `.tmp` suffix is used during writing; the file is renamed on success so
 /// the backup list never shows a partial/corrupt zip.
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
-    Form(form): Form<CsrfOnly>,
+    Form(form): Form<super::CsrfOnly>,
 ) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let upload_dir = CONFIG.upload_dir.clone();
     let progress = state.backup_progress.clone();
@@ -2080,7 +737,7 @@ pub async fn create_full_backup(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
 
@@ -2103,7 +760,7 @@ pub async fn create_full_backup(
             let file_count = count_files_in_dir(uploads_base);
             progress
                 .files_total
-                .store(file_count + 1, Ordering::Relaxed);
+                .store(file_count.saturating_add(1), Ordering::Relaxed);
 
             // MEM-FIX: write zip directly to a .tmp file on disk, not a Vec<u8>.
             let backup_dir = full_backup_dir();
@@ -2126,7 +783,7 @@ pub async fn create_full_backup(
                 progress.reset(crate::middleware::backup_phase::COMPRESS);
                 progress
                     .files_total
-                    .store(file_count + 1, Ordering::Relaxed);
+                    .store(file_count.saturating_add(1), Ordering::Relaxed);
 
                 // ── Database snapshot (streamed, not read into RAM) ────────
                 zip.start_file("chan.db", opts)
@@ -2192,8 +849,10 @@ pub async fn create_board_backup(
     jar: CookieJar,
     Form(form): Form<BoardBackupCreateForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let board_short = form
         .board_short
@@ -2214,7 +873,7 @@ pub async fn create_board_backup(
     use board_backup_types::{BoardRow, ThreadRow, PostRow, PollRow, PollOptionRow, PollVoteRow, FileHashRow, BoardBackupManifest};
 
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
             let board: BoardRow = conn
                 .query_row(
@@ -2442,7 +1101,7 @@ pub async fn create_board_backup(
             let file_count = count_files_in_dir(&board_upload_path);
             progress.reset(crate::middleware::backup_phase::COMPRESS);
             // +1 for board.json manifest
-            progress.files_total.store(file_count + 1, Ordering::Relaxed);
+            progress.files_total.store(file_count.saturating_add(1), Ordering::Relaxed);
 
             {
                 let out_file = std::io::BufWriter::new(
@@ -2509,14 +1168,16 @@ pub async fn download_backup(
     jar: CookieJar,
     axum::extract::Path((kind, filename)): axum::extract::Path<(String, String)>,
 ) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
 
     // Auth check.
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
             Ok(())
         }
     })
@@ -2587,12 +1248,14 @@ pub async fn backup_progress_json(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
             Ok(())
         }
     })
@@ -2632,8 +1295,10 @@ pub async fn delete_backup(
     jar: CookieJar,
     Form(form): Form<DeleteBackupForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     // Validate filename.
     let safe_filename: String = form
@@ -2663,7 +1328,7 @@ pub async fn delete_backup(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
             let path = backup_dir.join(&safe_filename);
             if path.exists() {
@@ -2691,13 +1356,16 @@ pub struct RestoreSavedForm {
 
 /// Restore a full backup from a saved file in full-backups/.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn restore_saved_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let safe_filename: String = form
         .filename
@@ -2725,7 +1393,7 @@ pub async fn restore_saved_full_backup(
         move || -> Result<String> {
             let mut live_conn = pool.get()?;
             // Auth check first — only read the (potentially huge) file if valid.
-            let admin_id = require_admin_session_sid(&live_conn, session_id.as_deref())?;
+            let admin_id = super::require_admin_session_sid(&live_conn, session_id.as_deref())?;
 
             // MEM-FIX: open the zip as a seekable BufReader<File> instead of
             // reading the whole file into a Vec<u8>.  The FIX[A3] comment above
@@ -2827,11 +1495,11 @@ pub async fn restore_saved_full_backup(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     if fresh_sid.is_empty() {
-        let jar = jar.remove(Cookie::from(SESSION_COOKIE));
+        let jar = jar.remove(Cookie::from(super::SESSION_COOKIE));
         return Ok((jar, Redirect::to("/admin")).into_response());
     }
 
-    let mut new_cookie = Cookie::new(SESSION_COOKIE, fresh_sid);
+    let mut new_cookie = Cookie::new(super::SESSION_COOKIE, fresh_sid);
     new_cookie.set_http_only(true);
     new_cookie.set_same_site(SameSite::Strict);
     new_cookie.set_path("/");
@@ -2845,12 +1513,14 @@ pub async fn restore_saved_full_backup(
 
 /// Restore a board backup from a saved file in board-backups/.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn restore_saved_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
     fn encode_q(s: &str) -> String {
+        #[allow(clippy::arithmetic_side_effects)]
         const fn nibble(n: u8) -> char {
             match n {
                 0..=9 => (b'0' + n) as char,
@@ -2867,8 +1537,10 @@ pub async fn restore_saved_board_backup(
             })
             .collect()
     }
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let safe_filename: String = form
         .filename
@@ -2897,7 +1569,7 @@ pub async fn restore_saved_board_backup(
 
             let conn = pool.get()?;
             // Auth check first — only read the file if the session is valid.
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
             // MEM-FIX: open the zip as BufReader<File> instead of loading the
             // entire file into a Vec<u8>.  Board backups can be hundreds of MB.
@@ -3321,12 +1993,15 @@ mod board_backup_types {
 /// MEM-FIX: Same approach as `admin_backup` — build zip into a `NamedTempFile` on
 /// disk, then stream the result in 64 KiB chunks.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     axum::extract::Path(board_short): axum::extract::Path<String>,
 ) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
     let upload_dir = CONFIG.upload_dir.clone();
     let progress = state.backup_progress.clone();
 
@@ -3336,7 +2011,7 @@ pub async fn board_backup(
     use board_backup_types::{BoardRow, ThreadRow, PostRow, PollRow, PollOptionRow, PollVoteRow, FileHashRow, BoardBackupManifest};
 
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
             let board: BoardRow = conn.query_row(
@@ -3485,7 +2160,7 @@ pub async fn board_backup(
             let board_upload_path = uploads_base.join(&board_short);
             let file_count = count_files_in_dir(&board_upload_path);
             progress.reset(crate::middleware::backup_phase::COMPRESS);
-            progress.files_total.store(file_count + 1, Ordering::Relaxed);
+            progress.files_total.store(file_count.saturating_add(1), Ordering::Relaxed);
 
             let zip_tmp = tempfile::NamedTempFile::new()
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp zip: {e}")))?;
@@ -3569,11 +2244,13 @@ pub async fn board_backup(
 /// CSRF failures and multipart parse errors — redirect to the admin panel
 /// with a flash message instead of producing a blank crash page.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn board_restore(
     State(state): State<AppState>,
     jar: CookieJar,
     mut multipart: Multipart,
 ) -> Response {
+    #[allow(clippy::arithmetic_side_effects)]
     const fn nibble(n: u8) -> char {
         match n {
             0..=9 => (b'0' + n) as char,
@@ -3601,7 +2278,9 @@ pub async fn board_restore(
     // Run the whole operation as a fallible async block so any early return
     // with Err(...) is caught below and turned into a redirect.
     let result: Result<String> = async {
-        let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+        let session_id = jar
+            .get(super::SESSION_COOKIE)
+            .map(|c| c.value().to_string());
         let upload_dir = CONFIG.upload_dir.clone();
 
         // MEM-FIX: stream the uploaded file to a NamedTempFile on disk instead
@@ -3685,7 +2364,7 @@ pub async fn board_restore(
                 use std::io::Read;
 
                 let conn = pool.get()?;
-                require_admin_session_sid(&conn, session_id.as_deref())?;
+                super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
                 // Detect format from the first four bytes (ZIP magic or JSON '{').
                 let mut magic = [0u8; 4];
@@ -4127,434 +2806,5 @@ pub async fn board_restore(
             encode_q(&e.to_string())
         ))
         .into_response(),
-    }
-}
-
-// ─── POST /admin/site/settings ────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct SiteSettingsForm {
-    #[serde(rename = "_csrf")]
-    pub csrf: Option<String>,
-    /// Checkbox: present = "1", absent = not submitted (treat as false)
-    pub collapse_greentext: Option<String>,
-    /// Custom site name (replaces [ `RustChan` ] on home page and footer).
-    pub site_name: Option<String>,
-    /// Custom home page subtitle line below the site name.
-    pub site_subtitle: Option<String>,
-    /// Default theme served to first-time visitors.
-    /// Valid slugs: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
-    pub default_theme: Option<String>,
-}
-
-pub async fn update_site_settings(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<SiteSettingsForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            const VALID_THEMES: &[&str] = &[
-                "terminal",
-                "aero",
-                "dorfic",
-                "fluorogrid",
-                "neoncubicle",
-                "chanclassic",
-            ];
-            let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
-            let val = if form.collapse_greentext.as_deref() == Some("1") {
-                "1"
-            } else {
-                "0"
-            };
-            db::set_site_setting(&conn, "collapse_greentext", val)?;
-            info!("Admin updated site setting: collapse_greentext={val}");
-
-            // Save the custom site name (trimmed, max 64 chars).
-            let new_name = form
-                .site_name
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .chars()
-                .take(64)
-                .collect::<String>();
-            db::set_site_setting(&conn, "site_name", &new_name)?;
-            // Update the in-memory live name so all pages reflect it immediately.
-            crate::templates::set_live_site_name(&new_name);
-            info!("Admin updated site name to: {:?}", new_name);
-
-            // Save the custom subtitle.
-            let new_subtitle = form
-                .site_subtitle
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .chars()
-                .take(128)
-                .collect::<String>();
-            db::set_site_setting(&conn, "site_subtitle", &new_subtitle)?;
-            crate::templates::set_live_site_subtitle(&new_subtitle);
-            info!("Admin updated site subtitle to: {:?}", new_subtitle);
-
-            // Persist both values back to settings.toml so they survive a
-            // server restart without requiring a manual file edit.
-            crate::config::update_settings_file_site_names(&new_name, &new_subtitle);
-            info!("settings.toml updated with new site_name and site_subtitle");
-
-            // Save the default theme slug (validated against allowed values).
-            let new_theme = form
-                .default_theme
-                .as_deref()
-                .unwrap_or("terminal")
-                .trim()
-                .to_string();
-            let new_theme = if VALID_THEMES.contains(&new_theme.as_str()) {
-                new_theme
-            } else {
-                "terminal".to_string()
-            };
-            db::set_site_setting(&conn, "default_theme", &new_theme)?;
-            crate::templates::set_live_default_theme(&new_theme);
-            info!("Admin updated default theme to: {:?}", new_theme);
-
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel?settings_saved=1").into_response())
-}
-
-// ─── POST /admin/vacuum ───────────────────────────────────────────────────────
-//
-// Runs SQLite VACUUM to reclaim space after bulk deletions.
-// Returns an inline result page showing DB size before and after.
-
-#[derive(Deserialize)]
-pub struct VacuumForm {
-    #[serde(rename = "_csrf")]
-    pub csrf: Option<String>,
-}
-
-pub async fn admin_vacuum(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<VacuumForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
-
-    let (jar, csrf) = ensure_csrf(jar);
-
-    let html = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        let csrf_clone = csrf.clone();
-        move || -> Result<String> {
-            let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
-
-            let size_before = db::get_db_size_bytes(&conn).unwrap_or(0);
-
-            db::run_vacuum(&conn)?;
-
-            let size_after = db::get_db_size_bytes(&conn).unwrap_or(0);
-
-            let saved = size_before.saturating_sub(size_after);
-
-            info!(
-                "Admin ran VACUUM: {} → {} bytes ({} reclaimed)",
-                size_before, size_after, saved
-            );
-
-            Ok(crate::templates::admin_vacuum_result_page(
-                size_before,
-                size_after,
-                &csrf_clone,
-            ))
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok((jar, Html(html)).into_response())
-}
-
-// ─── GET /admin/ip/{ip_hash} ──────────────────────────────────────────────────
-//
-// Shows all posts made by a given IP hash across all boards, newest first,
-// with pagination.  Requires an active admin session.
-
-#[derive(Deserialize)]
-pub struct IpHistoryQuery {
-    #[serde(default = "default_page")]
-    pub page: i64,
-}
-
-const fn default_page() -> i64 {
-    1
-}
-
-pub async fn admin_ip_history(
-    State(state): State<AppState>,
-    Path(ip_hash): Path<String>,
-    Query(params): Query<IpHistoryQuery>,
-    jar: CookieJar,
-) -> Result<(CookieJar, Html<String>)> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    let (jar, csrf) = ensure_csrf(jar);
-    let csrf_clone = csrf.clone();
-
-    // Sanitise the IP hash: must be exactly a SHA-256 hex string (64 hex chars).
-    // The previous guard used `> 64` which accepted any string of 0–64 chars,
-    // including an empty string.  Require exactly 64.
-    if ip_hash.len() != 64 || !ip_hash.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(AppError::BadRequest("Invalid IP hash.".into()));
-    }
-
-    let page = params.page.max(1);
-
-    let html = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<String> {
-            const PER_PAGE: i64 = 25;
-            let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
-
-            let total = db::count_posts_by_ip_hash(&conn, &ip_hash)?;
-            let pagination = crate::models::Pagination::new(page, PER_PAGE, total);
-            let posts_with_boards =
-                db::get_posts_by_ip_hash(&conn, &ip_hash, PER_PAGE, pagination.offset())?;
-
-            let all_boards = db::get_all_boards(&conn)?;
-
-            Ok(crate::templates::admin_ip_history_page(
-                &ip_hash,
-                &posts_with_boards,
-                &pagination,
-                &all_boards,
-                &csrf_clone,
-            ))
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok((jar, Html(html)))
-}
-
-// ─── POST /admin/report/resolve ───────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct ResolveReportForm {
-    report_id: i64,
-    /// Optional: also ban the reported post's author
-    ban_ip_hash: Option<String>,
-    ban_reason: Option<String>,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-pub async fn resolve_report(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<ResolveReportForm>,
-) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            let (admin_id, admin_name) =
-                require_admin_session_with_name(&conn, session_id.as_deref())?;
-
-            db::resolve_report(&conn, form.report_id, admin_id)?;
-
-            // Optionally ban the reporter's target while resolving.
-            if let Some(ref ip) = form.ban_ip_hash {
-                let ip = ip.trim();
-                if !ip.is_empty() {
-                    // Validate the ip_hash is a well-formed SHA-256 hex string
-                    // (64 hex chars) before inserting — guards against form tampering.
-                    if ip.len() != 64 || !ip.chars().all(|c| c.is_ascii_hexdigit()) {
-                        return Err(AppError::BadRequest("Invalid IP hash format.".into()));
-                    }
-                    let reason = form.ban_reason.as_deref().unwrap_or("Reported content");
-                    db::add_ban(&conn, ip, reason, None)?; // permanent ban
-                    let _ = db::log_mod_action(
-                        &conn,
-                        admin_id,
-                        &admin_name,
-                        "ban",
-                        "ban",
-                        None,
-                        "",
-                        &format!("via report {} — {reason}", form.report_id),
-                    );
-                }
-            }
-
-            let _ = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                "resolve_report",
-                "report",
-                Some(form.report_id),
-                "",
-                "",
-            );
-            info!("Admin resolved report {}", form.report_id);
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel#reports").into_response())
-}
-
-// ─── GET /admin/mod-log ───────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct ModLogQuery {
-    #[serde(default = "default_mod_log_page")]
-    page: i64,
-}
-
-const fn default_mod_log_page() -> i64 {
-    1
-}
-
-pub async fn mod_log_page(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Query(params): Query<ModLogQuery>,
-) -> Result<(CookieJar, Html<String>)> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    let (jar, csrf) = ensure_csrf(jar);
-    let csrf_clone = csrf.clone();
-    let page = params.page.max(1);
-
-    let html = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<String> {
-            const PER_PAGE: i64 = 50;
-            let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
-
-            let total = db::count_mod_log(&conn)?;
-            let pagination = crate::models::Pagination::new(page, PER_PAGE, total);
-            let entries = db::get_mod_log(&conn, PER_PAGE, pagination.offset())?;
-            let boards = db::get_all_boards(&conn)?;
-            Ok(crate::templates::mod_log_page(
-                &entries,
-                &pagination,
-                &csrf_clone,
-                &boards,
-            ))
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok((jar, Html(html)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── login_ip_key ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn ip_key_is_hex_sha256() {
-        let key = login_ip_key("127.0.0.1");
-        // SHA-256 produces 32 bytes = 64 hex chars
-        assert_eq!(key.len(), 64);
-        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn ip_key_same_ip_same_key() {
-        assert_eq!(login_ip_key("192.168.1.1"), login_ip_key("192.168.1.1"));
-    }
-
-    #[test]
-    fn ip_key_different_ips_different_keys() {
-        assert_ne!(login_ip_key("192.168.1.1"), login_ip_key("192.168.1.2"));
-    }
-
-    #[test]
-    fn ip_key_hides_raw_ip() {
-        // The raw IP should not appear anywhere in the hash output
-        let key = login_ip_key("10.0.0.1");
-        assert!(!key.contains("10.0.0.1"));
-    }
-
-    // ── is_login_locked ──────────────────────────────────────────────────────
-
-    #[test]
-    fn fresh_ip_is_not_locked() {
-        let key = login_ip_key("test-fresh-ip-not-in-map");
-        assert!(!is_login_locked(&key));
-    }
-
-    #[test]
-    fn locked_after_exceeding_fail_limit() {
-        // Use a unique key so parallel tests don't interfere
-        let key = login_ip_key("test-lock-unique-99887766");
-        // Clean up any residue from a previous run
-        ADMIN_LOGIN_FAILS.remove(&key);
-
-        let now = login_now_secs();
-        // Insert exactly LOGIN_FAIL_LIMIT failures within the window
-        ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT, now));
-        assert!(is_login_locked(&key));
-
-        // Cleanup
-        ADMIN_LOGIN_FAILS.remove(&key);
-    }
-
-    #[test]
-    fn not_locked_below_fail_limit() {
-        let key = login_ip_key("test-below-limit-11223344");
-        ADMIN_LOGIN_FAILS.remove(&key);
-
-        let now = login_now_secs();
-        ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT - 1, now));
-        assert!(!is_login_locked(&key));
-
-        ADMIN_LOGIN_FAILS.remove(&key);
-    }
-
-    #[test]
-    fn expired_window_is_not_locked() {
-        let key = login_ip_key("test-expired-window-55667788");
-        ADMIN_LOGIN_FAILS.remove(&key);
-
-        // window_start far in the past, beyond LOGIN_FAIL_WINDOW
-        let old_ts = login_now_secs().saturating_sub(LOGIN_FAIL_WINDOW + 60);
-        ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT + 10, old_ts));
-        assert!(!is_login_locked(&key));
-
-        ADMIN_LOGIN_FAILS.remove(&key);
     }
 }

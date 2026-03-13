@@ -27,6 +27,7 @@ use axum::extract::Multipart;
 // Text fields (CSRF token, post body, …) are routed through `field.text()`
 // which is bounded by axum's body length limit set in the router layer.
 
+#[allow(clippy::arithmetic_side_effects)]
 async fn read_field_bytes(
     mut field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
@@ -249,6 +250,8 @@ use crate::models::Board;
 ///
 /// Returns `Ok(None)` when `file_data` is `None` (no file attached).
 /// Must be called from inside a `spawn_blocking` closure.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::arithmetic_side_effects)]
 pub fn process_primary_upload(
     file_data: Option<(Vec<u8>, String)>,
     board: &Board,
@@ -259,6 +262,7 @@ pub fn process_primary_upload(
     max_video_size: usize,
     max_audio_size: usize,
     ffmpeg_available: bool,
+    ffmpeg_webp_available: bool,
 ) -> Result<Option<crate::utils::files::UploadedFile>> {
     let Some((data, fname)) = file_data else {
         return Ok(None);
@@ -290,19 +294,47 @@ pub fn process_primary_upload(
     }
 
     // SHA-256 deduplication — serve the cached entry without re-saving.
+    //
+    // FIX[BUG]: Validate that both the cached file and thumbnail still exist
+    // on disk before returning the dedup hit.  When a thread or board is
+    // deleted its files are removed from disk, but the file_hashes table is
+    // not pruned.  Without this check, re-uploading the same image after its
+    // original thread/board was deleted would return stale paths pointing at
+    // deleted files, so the post would display no image and no thumbnail.
+    //
+    // If either path is missing we fall through to re-process the upload.
+    // record_file_hash uses INSERT OR REPLACE, so the cache entry is
+    // automatically refreshed to point at the newly saved files.
     let hash = crate::utils::crypto::sha256_hex(&data);
     if let Some(cached) = crate::db::find_file_by_hash(conn, &hash)? {
-        let cached_media = crate::models::MediaType::from_mime(&cached.mime_type)
-            .unwrap_or(crate::models::MediaType::Image);
-        return Ok(Some(crate::utils::files::UploadedFile {
-            file_path: cached.file_path,
-            thumb_path: cached.thumb_path,
-            original_name: crate::utils::sanitize::sanitize_filename(&fname),
-            mime_type: cached.mime_type,
-            file_size: i64::try_from(data.len()).unwrap_or(0),
-            media_type: cached_media,
-            processing_pending: false,
-        }));
+        let file_ok = std::path::Path::new(upload_dir)
+            .join(&cached.file_path)
+            .exists();
+        let thumb_ok = cached.thumb_path.is_empty()
+            || std::path::Path::new(upload_dir)
+                .join(&cached.thumb_path)
+                .exists();
+
+        if file_ok && thumb_ok {
+            let cached_media = crate::models::MediaType::from_mime(&cached.mime_type)
+                .unwrap_or(crate::models::MediaType::Image);
+            return Ok(Some(crate::utils::files::UploadedFile {
+                file_path: cached.file_path,
+                thumb_path: cached.thumb_path,
+                original_name: crate::utils::sanitize::sanitize_filename(&fname),
+                mime_type: cached.mime_type,
+                file_size: i64::try_from(data.len()).unwrap_or(0),
+                media_type: cached_media,
+                processing_pending: false,
+            }));
+        }
+
+        // One or both paths are gone — the entry is stale.  Log and fall
+        // through so the file is re-saved and the cache is updated below.
+        tracing::debug!(
+            "dedup cache miss (files deleted): file_ok={file_ok} thumb_ok={thumb_ok}, \
+             re-processing upload for hash {hash}"
+        );
     }
 
     let f = crate::utils::files::save_upload(
@@ -315,6 +347,7 @@ pub fn process_primary_upload(
         max_video_size,
         max_audio_size,
         ffmpeg_available,
+        ffmpeg_webp_available,
     )
     .map_err(|e| classify_upload_error(&e))?;
     crate::db::record_file_hash(conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;

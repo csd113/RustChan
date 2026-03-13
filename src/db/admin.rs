@@ -450,6 +450,7 @@ pub fn open_report_count(conn: &rusqlite::Connection) -> Result<i64> {
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
+#[allow(clippy::too_many_arguments)]
 pub fn log_mod_action(
     conn: &rusqlite::Connection,
     admin_id: i64,
@@ -634,7 +635,7 @@ pub fn open_appeal_count(conn: &rusqlite::Connection) -> Result<i64> {
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn has_recent_appeal(conn: &rusqlite::Connection, ip_hash: &str) -> Result<bool> {
-    let cutoff = chrono::Utc::now().timestamp() - 86400;
+    let cutoff = chrono::Utc::now().timestamp().saturating_sub(86400);
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM ban_appeals WHERE ip_hash=?1 AND created_at > ?2",
         params![ip_hash, cutoff],
@@ -746,7 +747,7 @@ pub fn run_wal_checkpoint(conn: &rusqlite::Connection) -> Result<(i64, i64, i64)
 pub fn get_db_size_bytes(conn: &rusqlite::Connection) -> Result<i64> {
     let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
     let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
-    Ok(page_count * page_size)
+    Ok(page_count.saturating_mul(page_size))
 }
 
 /// Run VACUUM on the database, rebuilding it into a minimal file.

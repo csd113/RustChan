@@ -156,6 +156,39 @@ pub fn init_pool() -> Result<DbPool> {
     Ok(pool)
 }
 
+// ─── First-run check ─────────────────────────────────────────────────────────
+
+/// Check whether this is a first run (no boards and no admins).
+/// Prints a setup banner if so. Called once at server startup.
+///
+/// # Errors
+/// Returns an error if the database connection cannot be obtained.
+pub fn first_run_check(pool: &DbPool) -> anyhow::Result<()> {
+    let conn = pool.get()?;
+    let board_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0))
+        .unwrap_or(0);
+    let admin_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM admin_users", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    if board_count == 0 && admin_count == 0 {
+        println!();
+        println!("╔══════════════════════════════════════════════════════╗");
+        println!("║           FIRST RUN — SETUP REQUIRED                 ║");
+        println!("╠══════════════════════════════════════════════════════╣");
+        println!("║  No boards or admin accounts found.                  ║");
+        println!("║  Create your first admin and boards:                 ║");
+        println!("║                                                      ║");
+        println!("║  rustchan-cli admin create-admin admin mypassword    ║");
+        println!("║  rustchan-cli admin create-board b Random \"Anything\" ║");
+        println!("║  rustchan-cli admin create-board tech Technology     ║");
+        println!("╚══════════════════════════════════════════════════════╝");
+        println!();
+    }
+    Ok(())
+}
+
 // ─── Schema creation & migrations ────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)]
@@ -575,7 +608,7 @@ pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>
     let placeholders: String = unique
         .iter()
         .enumerate()
-        .map(|(i, _)| format!("(?{})", i + 1))
+        .map(|(i, _)| format!("(?{})", i.saturating_add(1)))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
@@ -613,10 +646,16 @@ pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>
             )
             .ok();
 
-        if let Some((fp, tp)) = maybe_row {
-            // Only delete the hash entry if both paths are in the safe set —
-            // i.e. neither is referenced by any remaining post.
-            if safe_set.contains(fp.as_str()) && safe_set.contains(tp.as_str()) {
+        if let Some((fp, _tp)) = maybe_row {
+            // Delete the hash entry when file_path is unreferenced.  We only
+            // check file_path (not thumb_path) because:
+            //   1. file_path is the dedup key — once no post holds this path,
+            //      the entry can never match a future upload and is dead weight.
+            //   2. A post's thumb_path may be NULL (e.g. audio files whose
+            //      thumbnail was never persisted), so thumb_path is absent from
+            //      `candidates` / `safe_set` and the old two-sided check would
+            //      spuriously skip deletion, leaving orphaned rows forever.
+            if safe_set.contains(fp.as_str()) {
                 let _ = conn.execute("DELETE FROM file_hashes WHERE file_path = ?1", params![fp]);
             }
         }

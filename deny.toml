@@ -139,6 +139,26 @@ version = "0.60"
 name    = "windows-sys"
 version = "0.61"
 
+# image directly uses zune-jpeg 0.5.x + zune-core 0.5.x, while its
+# tiff sub-dependency requires zune-jpeg 0.4.x + zune-core 0.4.x.
+# These are distinct semver ranges so Cargo cannot unify them without
+# an upstream tiff release; skipping both versions here.
+[[bans.skip]]
+name    = "zune-core"
+version = "0.4"
+
+[[bans.skip]]
+name    = "zune-core"
+version = "0.5"
+
+[[bans.skip]]
+name    = "zune-jpeg"
+version = "0.4"
+
+[[bans.skip]]
+name    = "zune-jpeg"
+version = "0.5"
+
 # ---------------------------------------------------------------------------
 # Crate sources
 # ---------------------------------------------------------------------------

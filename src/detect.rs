@@ -92,6 +92,138 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
     }
 }
 
+/// Probe whether the detected ffmpeg binary has `libwebp` compiled in, and
+/// print actionable install instructions if it does not.
+///
+/// Called immediately after `detect_ffmpeg` at server startup.  Returns
+/// `false` silently when `ffmpeg_ok` is `false` (no point checking encoders
+/// when ffmpeg itself is absent).
+pub fn detect_webp_encoder(ffmpeg_ok: bool) -> bool {
+    if !ffmpeg_ok {
+        return false;
+    }
+
+    let has_webp = crate::media::ffmpeg::check_webp_encoder();
+
+    if has_webp {
+        println!("[INFO] ffmpeg libwebp encoder detected. Image→WebP conversion enabled.");
+    } else {
+        println!();
+        println!("[WARN] ffmpeg is installed but the libwebp encoder is missing.");
+        println!("       JPEG / PNG / BMP / TIFF uploads will be stored in their");
+        println!("       original format instead of being converted to WebP.");
+        println!();
+
+        // Detect platform and print the appropriate reinstall instructions.
+        #[cfg(target_os = "macos")]
+        {
+            println!("  ── macOS — reinstall ffmpeg with libwebp support ──────────────────");
+            println!("  brew uninstall ffmpeg");
+            println!("  brew tap homebrew-ffmpeg/ffmpeg");
+            println!("  brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-webp");
+            println!();
+            println!("  Verify with:");
+            println!("    ffmpeg -encoders 2>/dev/null | grep webp");
+            println!("  You should see:");
+            println!("    V..... libwebp              libwebp WebP image (codec webp)");
+            println!("    V..... libwebp_anim         libwebp WebP image (codec webp)");
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            println!("  ── Linux — install ffmpeg with libwebp support ────────────────────");
+            println!("  sudo apt update");
+            println!("  sudo apt install ffmpeg libwebp-dev");
+            println!();
+            println!("  Verify with:");
+            println!("    ffmpeg -encoders 2>/dev/null | grep webp");
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            println!("  Reinstall ffmpeg with libwebp encoder support enabled.");
+            println!("  See: https://ffmpeg.org/download.html");
+        }
+
+        println!();
+    }
+
+    has_webp
+}
+
+/// Probe whether the detected ffmpeg binary has both `libvpx-vp9` (video) and
+/// `libopus` (audio) compiled in, and print actionable install instructions if
+/// either is missing.
+///
+/// Both encoders are required for MP4→WebM transcoding and WebM/AV1→WebM/VP9
+/// re-encoding.  Called immediately after `detect_webp_encoder` at server
+/// startup.  Returns `false` silently when `ffmpeg_ok` is `false`.
+pub fn detect_webm_encoder(ffmpeg_ok: bool) -> bool {
+    if !ffmpeg_ok {
+        return false;
+    }
+
+    let has_vp9 = crate::media::ffmpeg::check_vp9_encoder();
+    let has_opus = crate::media::ffmpeg::check_opus_encoder();
+    let has_webm = has_vp9 && has_opus;
+
+    if has_webm {
+        println!("[INFO] ffmpeg libvpx-vp9 + libopus encoders detected. MP4→WebM transcoding and WebM/AV1→VP9 re-encoding enabled.");
+    } else {
+        println!();
+        println!("[WARN] ffmpeg is installed but required WebM encoders are missing.");
+
+        if !has_vp9 {
+            println!("       Missing: libvpx-vp9 (VP9 video encoder)");
+        }
+        if !has_opus {
+            println!("       Missing: libopus (Opus audio encoder)");
+        }
+
+        println!();
+        println!("       MP4 uploads will be stored as MP4 instead of being");
+        println!("       transcoded to WebM.  WebM files encoded with AV1 will");
+        println!("       not be re-encoded to the browser-compatible VP9 format.");
+        println!();
+
+        #[cfg(target_os = "macos")]
+        {
+            println!("  ── macOS — reinstall ffmpeg with VP9 + Opus support ───────────────");
+            println!("  brew uninstall ffmpeg");
+            println!("  brew install ffmpeg");
+            println!("  # Or for a fully-featured build:");
+            println!("  brew tap homebrew-ffmpeg/ffmpeg");
+            println!("  brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libvpx --with-opus");
+            println!();
+            println!("  Verify with:");
+            println!("    ffmpeg -encoders 2>/dev/null | grep -E 'libvpx-vp9|libopus'");
+            println!("  You should see:");
+            println!("    V..... libvpx-vp9           libvpx VP9 (codec vp9)");
+            println!("    A..... libopus               libopus Opus (codec opus)");
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            println!("  ── Linux — install ffmpeg with VP9 + Opus support ─────────────────");
+            println!("  sudo apt update");
+            println!("  sudo apt install ffmpeg libvpx-dev libopus-dev");
+            println!();
+            println!("  Verify with:");
+            println!("    ffmpeg -encoders 2>/dev/null | grep -E 'libvpx-vp9|libopus'");
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            println!("  Reinstall ffmpeg with libvpx-vp9 and libopus encoder support enabled.");
+            println!("  See: https://ffmpeg.org/download.html");
+        }
+
+        println!();
+    }
+
+    has_webm
+}
+
 // ─── Tor ─────────────────────────────────────────────────────────────────────
 
 /// Set up and launch a Tor hidden-service instance.
@@ -113,6 +245,8 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
 // Fix #7: function now returns ToolStatus so callers can branch on whether
 //         Tor is actually running.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::expect_used)]
+#[allow(clippy::arithmetic_side_effects)]
 pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> ToolStatus {
     if !enable_tor_support {
         return ToolStatus::Missing;
@@ -338,6 +472,8 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> 
 
 // ─── Hostname polling ─────────────────────────────────────────────────────────
 
+#[allow(clippy::expect_used)]
+#[allow(clippy::arithmetic_side_effects)]
 fn poll_for_hostname(
     hostname_path: &Path,
     // Fix #4: child handle passed in so crashes mid-poll are detected promptly

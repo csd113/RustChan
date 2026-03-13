@@ -3,6 +3,163 @@
 All notable changes to RustChan will be documented in this file.
 
 ---
+## [1.1.0]
+
+## Architecture Refactor
+
+This release restructures the codebase for maintainability. No user-facing
+behavior has changed. Every route, every feature, every pixel is identical.
+The only difference is where the code lives.
+
+### The problem
+
+`main.rs` had grown to 1,757 lines and owned everything from the HTTP router
+to the ASCII startup banner. `handlers/admin.rs` hit 4,576 lines with 33
+handler functions covering auth, backups, bans, reports, settings, and more.
+Both files were becoming difficult to navigate and risky to modify.
+
+### What changed
+
+**Phase 1 — Cleanup**
+
+- Removed unused `src/theme-init.js` (dead duplicate of `static/theme-init.js`)
+- Moved `validate_password()` from `main.rs` to `utils/crypto.rs` alongside
+  the other credential helpers
+- Moved `first_run_check()` and `get_per_board_stats()` from `main.rs` into
+  the `db` module, eliminating the only raw SQL that lived outside `db/`
+
+**Phase 2 — Background work**
+
+- Moved `evict_thumb_cache()` from `main.rs` to `workers/mod.rs` where it
+  belongs alongside the other background maintenance operations
+
+**Phase 3 — Console extraction**
+
+- Created `src/server/` directory for server infrastructure
+- Extracted terminal stats, keyboard console, startup banner, and all `kb_*`
+  helpers to `server/console.rs` (~350 lines)
+
+**Phase 4 — CLI extraction**
+
+- Moved `Cli`, `Command`, `AdminAction` clap types and `run_admin()` to
+  `server/cli.rs` (~250 lines)
+
+**Phase 5 — Server extraction**
+
+- Moved `run_server()`, `build_router()`, all 7 background task spawns,
+  static asset handlers, HSTS middleware, request tracking, `ScopedDecrement`,
+  and global atomics to `server/server.rs` (~800 lines)
+- `main.rs` is now ~50 lines: runtime construction, CLI parsing, dispatch
+
+**Phase 6 — Admin handler decomposition**
+
+- Converted `handlers/admin.rs` to a module folder (`handlers/admin/`)
+- Extracted `backup.rs` — all backup and restore handlers (~2,500 lines)
+- Extracted `auth.rs` — login, logout, session management
+- Extracted `moderation.rs` — bans, reports, appeals, word filters, mod log
+- Extracted `content.rs` — post/thread actions, board management
+- Extracted `settings.rs` — site settings, VACUUM, admin panel
+- `admin/mod.rs` now contains only shared session helpers and re-exports
+
+### By the numbers
+
+```
+File                Before        After
+main.rs             1,757 lines   ~50 lines
+handlers/admin.rs   4,576 lines   split across 6 files
+server/ (new)       —             ~1,400 lines total
+db/                 unchanged     + 2 functions from main.rs
+workers/            unchanged     + evict_thumb_cache
+utils/crypto.rs     unchanged     + validate_password
+```
+
+### What was not changed
+
+`db/`, `templates/`, `utils/`, `media/`, `config.rs`, `error.rs`, `models.rs`,
+`detect.rs`, `handlers/board.rs`, `handlers/thread.rs`, and `middleware/` are
+all untouched. They were already well-structured.
+```
+
+## New Module: src/media/
+
+### media/ffmpeg.rs — FFmpeg detection and subprocess execution
+
+- Added detect_ffmpeg() for checking FFmpeg availability (synchronous, suitable for spawn_blocking)
+- Added run_ffmpeg() shared executor used by all FFmpeg calls
+- Added ffmpeg_image_to_webp() with quality 85 and metadata stripping
+- Added ffmpeg_gif_to_webm() using VP9 codec, CRF 30, zero bitrate target, metadata stripped
+- Added ffmpeg_thumbnail() extracting first frame as WebP at quality 80 with aspect-preserving scale
+- Added probe_video_codec() via ffprobe subprocess (moved from utils/files.rs)
+- Added ffmpeg_transcode_to_webm() using path-based API (replaces old bytes-in/bytes-out version)
+- Added ffmpeg_audio_waveform() using path-based API (same refactor as above)
+
+### media/convert.rs — Per-format conversion logic
+
+- Added ConversionAction enum: ToWebp, ToWebm, ToWebpIfSmaller, KeepAsIs
+- Added conversion_action() mapping each MIME type to the correct action
+- Added convert_file() as the main entry point for all conversions
+- PNG to WebP is attempted but original PNG is kept if WebP is larger
+- All conversions use atomic temp-then-rename strategy
+- FFmpeg failures fall back to original file with a warning (never panics, never returns 500)
+
+### media/thumbnail.rs — WebP thumbnail generation
+
+- All thumbnails output as .webp
+- SVG placeholders used for video without FFmpeg, audio, and SVG sources
+- Added generate_thumbnail() as unified entry point
+- Added image crate fallback path for when FFmpeg is unavailable (decode, resize, save as WebP)
+- Added thumbnail_output_path() for determining correct output path and extension
+- Added write_placeholder() for generating static SVG placeholders by kind
+
+### media/exif.rs — EXIF orientation handling (new file)
+
+- Moved read_exif_orientation and apply_exif_orientation from utils/files.rs
+
+### media/mod.rs — Public API
+
+- Added ProcessedMedia struct with file_path, thumbnail_path, mime_type, was_converted, original_size, final_size
+- Added MediaProcessor::new() with FFmpeg detection and warning log if not found
+- Added MediaProcessor::new_with_ffmpeg() as lightweight constructor for request handlers
+- Added MediaProcessor::process_upload() for conversion and thumbnail generation (never propagates FFmpeg errors)
+- Added MediaProcessor::generate_thumbnail() for standalone thumbnail regeneration
+- Registered submodules: convert, ffmpeg, thumbnail, exif
+
+---
+
+## Modified Files
+
+### src/utils/files.rs
+
+- Extended detect_mime_type with BMP, TIFF (LE and BE), and SVG detection including BOM stripping
+- Rewrote save_upload to delegate conversion and thumbnailing to MediaProcessor
+- GIF to WebM conversions now set processing_pending = false (converted inline, no background job)
+- MP4 and WebM uploads still set processing_pending = true as before
+- Removed dead functions: generate_video_thumb, ffmpeg_first_frame, generate_video_placeholder, generate_audio_placeholder, generate_image_thumb
+- Removed relocated functions: ffprobe_video_codec, probe_video_codec, ffmpeg_transcode_webm, transcode_to_webm, ffmpeg_audio_waveform, gen_waveform_png
+- EXIF functions kept as thin private delegates to crate::media::exif for backward compatibility
+- Added mime_to_ext_pub() public wrapper for use by media/convert.rs
+- Added apply_thumb_exif_orientation() for post-hoc EXIF correction on image crate thumbnails
+- Added tests for BMP, TIFF LE, TIFF BE, SVG detection and new mime_to_ext mappings
+
+### src/models.rs
+
+- Updated from_ext to include bmp, tiff, tif, and svg
+
+### src/lib.rs and src/main.rs
+
+- Registered new media module
+
+### src/workers/mod.rs
+
+- Updated probe_video_codec call to use crate::media::ffmpeg::probe_video_codec
+- Replaced in-memory transcode_to_webm with path-based ffmpeg_transcode_to_webm using temp file persist
+- Replaced in-memory gen_waveform_png with path-based ffmpeg_audio_waveform using temp file persist
+- File bytes now read from disk only for SHA-256 dedup step
+
+### Cargo.toml
+
+- Added bmp and tiff features to the image crate dependency
+
 
 ## [1.0.13] — 2026-03-08
 

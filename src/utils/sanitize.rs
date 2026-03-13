@@ -20,20 +20,27 @@ use rand_core::{OsRng, RngCore};
 use regex::Regex;
 use std::sync::LazyLock;
 
+#[allow(clippy::expect_used)]
 static RE_REPLY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"&gt;&gt;(\d+)").expect("RE_REPLY is valid"));
+#[allow(clippy::expect_used)]
 static RE_CROSSLINK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)?").expect("RE_CROSSLINK is valid")
 });
+#[allow(clippy::expect_used)]
 static RE_URL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").expect("RE_URL is valid"));
+#[allow(clippy::expect_used)]
 static RE_BOLD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("RE_BOLD is valid"));
+#[allow(clippy::expect_used)]
 static RE_ITALIC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"__([^_]+)__").expect("RE_ITALIC is valid"));
+#[allow(clippy::expect_used)]
 static RE_SPOILER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\[spoiler\]([\s\S]*?)\[/spoiler\]").expect("RE_SPOILER is valid")
 });
+#[allow(clippy::expect_used)]
 static RE_DICE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[dice (\d{1,2})d(\d{1,3})\]").expect("RE_DICE is valid"));
 
@@ -74,6 +81,7 @@ pub fn extract_video_embed(url: &str) -> Option<(&'static str, String)> {
     None
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 fn extract_yt_id(url: &str) -> Option<String> {
     // youtu.be/ID
     if let Some(pos) = url.find("youtu.be/") {
@@ -103,6 +111,7 @@ fn extract_yt_id(url: &str) -> Option<String> {
     extract_yt_id_from_watch_param(url)
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 fn extract_yt_id_from_watch_param(url: &str) -> Option<String> {
     for prefix in &["?v=", "&v="] {
         if let Some(pos) = url.find(prefix) {
@@ -120,6 +129,7 @@ fn extract_yt_id_from_watch_param(url: &str) -> Option<String> {
     None
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 fn extract_streamable_id(url: &str) -> Option<String> {
     // streamable.com/CODE — code is alphanumeric, typically 6 chars
     if let Some(pos) = url.find("streamable.com/") {
@@ -150,6 +160,7 @@ const fn d6_face(n: u32) -> char {
 }
 
 /// Roll `count` dice each with `sides` faces, return (rolls, sum).
+#[allow(clippy::arithmetic_side_effects)]
 fn roll_dice(count: u32, sides: u32) -> (Vec<u32>, u32) {
     let mut rolls = Vec::with_capacity(count as usize);
     let mut sum = 0u32;
@@ -251,6 +262,7 @@ fn apply_emoji(text: &str) -> String {
 /// intermediate allocations, unlike the chained `.replace()` approach which
 /// produces up to five heap-allocated intermediates per call.
 #[must_use]
+#[allow(clippy::arithmetic_side_effects)]
 pub fn escape_html(s: &str) -> String {
     // Pre-allocate with a small headroom for the most common entities.
     let mut out = String::with_capacity(s.len() + s.len() / 8);
@@ -296,6 +308,7 @@ const MAX_BODY_BYTES: usize = 32 * 1024; // 32 KiB
 /// the client side (JS removes the `open` attribute when the page-level
 /// `data-collapse-greentext` attribute is present on `<body>`).
 #[must_use]
+#[allow(clippy::arithmetic_side_effects)]
 pub fn render_post_body(escaped: &str) -> String {
     // Hard length guard before touching any regex. Must be enforced here
     // (not only at the HTTP layer) because the sanitizer is also called

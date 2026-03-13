@@ -44,7 +44,9 @@ impl MediaType {
     #[allow(dead_code)]
     pub fn from_ext(ext: &str) -> Option<Self> {
         match ext {
-            "jpg" | "jpeg" | "png" | "gif" | "webp" => Some(Self::Image),
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "svg" => {
+                Some(Self::Image)
+            }
             "mp4" | "webm" => Some(Self::Video),
             "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "opus" => Some(Self::Audio),
             _ => None,
@@ -322,17 +324,21 @@ impl Pagination {
     /// Total number of pages. Always returns at least 1 so templates can
     /// safely display "page 1 of 1" even on empty result sets.
     #[must_use]
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn total_pages(&self) -> i64 {
         // per_page is guaranteed >= 1 by new(), but defend against manual
         // construction just in case.
         let pp = self.per_page.max(1);
         let t = self.total.max(0);
-        ((t.saturating_add(pp - 1)) / pp).max(1)
+        ((t + pp - 1) / pp).max(1)
     }
 
     #[must_use]
     pub fn offset(&self) -> i64 {
-        (self.page.max(1) - 1).saturating_mul(self.per_page.max(1))
+        self.page
+            .max(1)
+            .saturating_sub(1)
+            .saturating_mul(self.per_page.max(1))
     }
 
     #[must_use]
@@ -437,6 +443,7 @@ mod tests {
     // ── MediaType serde ↔ DB string parity ────────────────────────────────
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn media_type_serde_matches_db_str() {
         for mt in [MediaType::Image, MediaType::Video, MediaType::Audio] {
             let json =

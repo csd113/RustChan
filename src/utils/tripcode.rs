@@ -77,6 +77,7 @@ pub fn parse_name_tripcode(raw: &str) -> (String, Option<String>) {
 
 /// Truncate `s` to at most `max_bytes` bytes, rounding down to the nearest
 /// UTF-8 character boundary so the result is always valid `&str`.
+#[allow(clippy::arithmetic_side_effects)]
 fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -94,6 +95,7 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
 ///
 /// Returns a string like `"!Ab3Xy7Kp2Q"` — a `'!'` prefix followed by
 /// [`TRIPCODE_ENCODED_LEN`] base64url characters.
+#[allow(clippy::expect_used)]
 fn compute_tripcode(password: &str) -> String {
     let hash = Sha256::digest(password.as_bytes());
 
@@ -126,6 +128,7 @@ fn compute_tripcode(password: &str) -> String {
 /// - `ALPHABET[x]` where `x` is produced by 6-bit masking (0‥63) into a
 ///   64-element array — always in bounds.
 #[allow(clippy::indexing_slicing)]
+#[allow(clippy::arithmetic_side_effects)]
 fn base64url_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
@@ -164,6 +167,7 @@ fn base64url_encode(input: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
     use super::*;
 
     #[test]

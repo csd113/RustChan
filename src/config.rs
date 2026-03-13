@@ -340,9 +340,15 @@ impl Config {
             initial_site_subtitle,
             initial_default_theme,
             port,
-            max_image_size: (max_image_mb as usize) * 1024 * 1024,
-            max_video_size: (max_video_mb as usize) * 1024 * 1024,
-            max_audio_size: (max_audio_mb as usize) * 1024 * 1024,
+            max_image_size: (max_image_mb as usize)
+                .saturating_mul(1024)
+                .saturating_mul(1024),
+            max_video_size: (max_video_mb as usize)
+                .saturating_mul(1024)
+                .saturating_mul(1024),
+            max_audio_size: (max_audio_mb as usize)
+                .saturating_mul(1024)
+                .saturating_mul(1024),
 
             enable_tor_support: env_bool("CHAN_TOR_SUPPORT", s.enable_tor_support.unwrap_or(true)),
             require_ffmpeg: env_bool("CHAN_REQUIRE_FFMPEG", s.require_ffmpeg.unwrap_or(false)),
@@ -376,7 +382,7 @@ impl Config {
                     "CHAN_DB_WARN_THRESHOLD_MB",
                     s.db_warn_threshold_mb.unwrap_or(2048),
                 );
-                mb * 1024 * 1024
+                mb.saturating_mul(1024).saturating_mul(1024)
             },
             job_queue_capacity: env_parse(
                 "CHAN_JOB_QUEUE_CAPACITY",
@@ -395,7 +401,7 @@ impl Config {
                     "CHAN_WAVEFORM_CACHE_MAX_MB",
                     s.waveform_cache_max_mb.unwrap_or(200),
                 );
-                mb * 1024 * 1024
+                mb.saturating_mul(1024).saturating_mul(1024)
             },
             blocking_threads: {
                 let cpus = std::thread::available_parallelism()
@@ -404,7 +410,7 @@ impl Config {
                 let configured =
                     env_parse("CHAN_BLOCKING_THREADS", s.blocking_threads.unwrap_or(0));
                 if configured == 0 {
-                    cpus * 4
+                    cpus.saturating_mul(4)
                 } else {
                     configured
                 }

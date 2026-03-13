@@ -58,6 +58,19 @@ pub enum AppError {
     /// 500 — internal error (database failure, IO error, etc.)
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
+
+    /// Structured error for future API integration.
+    ///
+    /// Carries the HTTP status returned by the remote API, a human-readable
+    /// detail string, and an optional endpoint label so log lines are
+    /// self-describing without having to cross-reference request traces.
+    #[error("API error {status} at {endpoint:?}: {detail}")]
+    #[allow(dead_code)]
+    Api {
+        status: u16,
+        detail: String,
+        endpoint: Option<String>,
+    },
 }
 
 // Allow ? operator on rusqlite::Error — map SQLITE_BUSY to DbBusy (503) and
@@ -107,6 +120,21 @@ impl IntoResponse for AppError {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred.".to_string(),
+                )
+            }
+            Self::Api {
+                status,
+                detail,
+                endpoint,
+            } => {
+                error!(
+                    status,
+                    endpoint = endpoint.as_deref().unwrap_or("unknown"),
+                    "API error: {detail}",
+                );
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("API error {status}: {detail}"),
                 )
             }
         };

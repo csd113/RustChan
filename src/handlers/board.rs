@@ -87,6 +87,7 @@ pub async fn index(
 
 // ─── GET /:board/ — board index ───────────────────────────────────────────────
 
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn board_index(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
@@ -125,7 +126,11 @@ pub async fn board_index(
             // combined with the page number.  This is a cheap proxy for "has
             // anything on this page changed?".
             let max_bump = threads.iter().map(|t| t.bumped_at).max().unwrap_or(0);
-            let etag = format!("\"{max_bump}-{page}\"");
+            // Include is_admin in the ETag so admin and non-admin responses
+            // have distinct cache keys and the browser doesn't serve a cached
+            // non-admin page (missing delete controls) to a logged-in admin.
+            let admin_tag = if is_admin { "-a" } else { "" };
+            let etag = format!("\"{max_bump}-{page}{admin_tag}\"");
 
             let mut summaries = Vec::with_capacity(threads.len());
             for thread in threads {
@@ -209,6 +214,7 @@ pub async fn create_thread(
     let max_video_size = CONFIG.max_video_size;
     let max_audio_size = CONFIG.max_audio_size;
     let ffmpeg_available = state.ffmpeg_available;
+    let ffmpeg_webp_available = state.ffmpeg_webp_available;
     let cookie_secret = CONFIG.cookie_secret.clone();
     let file_data = form.file;
     let audio_file_data = form.audio_file;
@@ -225,7 +231,11 @@ pub async fn create_thread(
     // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
     let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
 
-    let _board_short_err = board_short.clone();
+    // Clones kept outside the closure so we can re-render the board page inline on error.
+    let admin_session_err = admin_session_id.clone();
+    let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
+
+    let board_short_err = board_short.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = state.job_queue.clone();
@@ -311,6 +321,7 @@ pub async fn create_thread(
                 max_video_size,
                 max_audio_size,
                 ffmpeg_available,
+                ffmpeg_webp_available,
             )?;
 
             // ── Image+audio combo ─────────────────────────────────────────────
@@ -372,7 +383,7 @@ pub async fn create_thread(
                     )
                 })?;
                 let secs = secs.clamp(60, 30 * 24 * 3600); // clamp 1 min..30 days
-                let expires_at = chrono::Utc::now().timestamp() + secs;
+                let expires_at = chrono::Utc::now().timestamp().saturating_add(secs);
                 db::create_poll(&conn, thread_id, &q, &valid_opts, expires_at)?;
             }
 
@@ -403,12 +414,60 @@ pub async fn create_thread(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    // BadRequest → return a lightweight 422 page instead of re-querying the
-    // entire board index (which wastes significant DB and CPU under spam load).
+    // BadRequest → re-render the board page with an inline error banner so the
+    // user sees the message in context without being sent to a separate error page.
     let redirect_url = match result {
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
-            let mut resp = Html(templates::error_page(422, &msg)).into_response();
+            let board_short_render = board_short_err.clone();
+            let pool = state.db.clone();
+            let html = tokio::task::spawn_blocking(move || -> Result<String> {
+                let conn = pool.get()?;
+                let is_admin = admin_session_err
+                    .as_deref()
+                    .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
+                let board =
+                    db::get_board_by_short(&conn, &board_short_render)?.ok_or_else(|| {
+                        AppError::NotFound(format!("Board /{board_short_render}/ not found"))
+                    })?;
+                let total = db::count_threads_for_board(&conn, board.id)?;
+                let pagination = crate::models::Pagination::new(1, THREADS_PER_PAGE, total);
+                let threads = db::get_threads_for_board(
+                    &conn,
+                    board.id,
+                    THREADS_PER_PAGE,
+                    pagination.offset(),
+                )?;
+                let mut summaries = Vec::with_capacity(threads.len());
+                for thread in threads {
+                    let total_replies = thread.reply_count;
+                    let preview = db::get_preview_posts(&conn, thread.id, PREVIEW_REPLIES)?;
+                    #[allow(clippy::arithmetic_side_effects)]
+                    let omitted =
+                        (total_replies - i64::try_from(preview.len()).unwrap_or(0)).max(0);
+                    summaries.push(ThreadSummary {
+                        thread,
+                        preview_posts: preview,
+                        omitted,
+                    });
+                }
+                let all_boards = db::get_all_boards(&conn)?;
+                let collapse_greentext = db::get_collapse_greentext(&conn);
+                Ok(templates::board_page(
+                    &board,
+                    &summaries,
+                    &pagination,
+                    &csrf_for_error,
+                    &all_boards,
+                    is_admin,
+                    Some(&msg),
+                    collapse_greentext,
+                ))
+            })
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+            let mut resp = Html(html).into_response();
             *resp.status_mut() = axum::http::StatusCode::UNPROCESSABLE_ENTITY;
             return Ok(resp);
         }
@@ -599,6 +658,7 @@ pub struct ReportForm {
     pub thread_id: i64,
     pub board: String,
     pub reason: Option<String>,
+    #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
 }
 
@@ -673,7 +733,38 @@ pub async fn file_report(
 
 // ─── GET /boards/{*media_path} — serve media with mp4→webm redirect ──────────
 //
+
+// ─── Content-Type helper for board media ─────────────────────────────────────
+
+/// Return the correct `Content-Type` value for a board media file based solely
+/// on its extension.  Used to override whatever `mime_guess` / `ServeFile`
+/// produces, because some builds of `mime_guess` do not include `.webp`,
+/// `.svg`, or audio formats in their database and fall back to
+/// `application/octet-stream`, which causes browsers to download the file
+/// rather than display or play it inline.
+fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("webp") => Some("image/webp"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("png") => Some("image/png"),
+        Some("gif") => Some("image/gif"),
+        Some("bmp") => Some("image/bmp"),
+        Some("tiff" | "tif") => Some("image/tiff"),
+        Some("svg") => Some("image/svg+xml"),
+        Some("webm") => Some("video/webm"),
+        Some("mp4") => Some("video/mp4"),
+        Some("mp3") => Some("audio/mpeg"),
+        Some("ogg") => Some("audio/ogg"),
+        Some("flac") => Some("audio/flac"),
+        Some("wav") => Some("audio/wav"),
+        Some("m4a") => Some("audio/mp4"),
+        Some("aac") => Some("audio/aac"),
+        _ => None,
+    }
+}
+
 // Replaces the former nest_service(ServeDir) so we can intercept stale .mp4
+
 // links (created before the background transcoder replaced them with .webm)
 // and issue a permanent redirect. All other paths are served via ServeFile.
 
@@ -710,14 +801,28 @@ pub async fn serve_board_media(
         let req = req.map(|_| axum::body::Body::empty());
         ServeFile::new(&target).oneshot(req).await.map_or_else(
             |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            |resp| resp.map(axum::body::Body::new).into_response(),
+            |resp| {
+                use axum::http::header::{HeaderValue, CONTENT_TYPE};
+                let mut resp = resp.map(axum::body::Body::new);
+                // Override Content-Type using our own extension→MIME map.
+                // tower-http delegates to `mime_guess` which may return
+                // `application/octet-stream` for formats like `.webp` or `.svg`
+                // on some builds, causing browsers to download the file instead
+                // of displaying it inline.  An explicit map guarantees the
+                // correct type for every format we store.
+                if let Some(ct) = media_content_type(&target) {
+                    resp.headers_mut()
+                        .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+                }
+                resp.into_response()
+            },
         )
     } else if std::path::Path::new(&media_path)
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
     {
         // MP4 was transcoded away — redirect permanently to the .webm sibling.
-        let webm_path_str = format!("{}.webm", &media_path[..media_path.len() - 4]);
+        let webm_path_str = format!("{}.webm", &media_path[..media_path.len().saturating_sub(4)]);
         let webm_abs = base.join(&webm_path_str);
         if webm_abs.exists() {
             Redirect::permanent(&format!("/boards/{webm_path_str}")).into_response()
@@ -853,6 +958,7 @@ pub async fn redirect_to_post(
 #[derive(serde::Deserialize)]
 pub struct AppealForm {
     pub reason: String,
+    #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
 }
 
