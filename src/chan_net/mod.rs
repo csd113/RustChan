@@ -141,8 +141,14 @@ async fn json_body_limit_error(req: axum::http::Request<axum::body::Body>, next:
 /// Build the `ChanNet` router.
 ///
 /// All `/chan/*` routes are wired here. `DefaultBodyLimit` is applied
-/// per-route so that the tight 8 KiB JSON command limit does not
-/// accidentally apply to the ZIP import route and vice-versa.
+/// per-route so that the `/chan/command` JSON limit does not accidentally
+/// apply to the ZIP import route and vice-versa.
+///
+/// `/chan/command` body limit (`CONFIG.chan_net_command_max_body`) must be
+/// at least 128 KiB so that a `reply_push` carrying the maximum 32,768-char
+/// content field reaches the handler's length-validation logic rather than
+/// being rejected as 413 before validation runs. The config default is
+/// `128 * 1024`. Do NOT set it below `34_000` bytes.
 pub fn chan_router(state: AppState) -> Router {
     Router::new()
         // ── Status ──────────────────────────────────────────────────────────

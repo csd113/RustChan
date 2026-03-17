@@ -29,7 +29,12 @@
 // instead of anyhow::Error. Fixed: db.get() now uses ? directly (From<r2d2::Error>
 // impl), and the JoinError from spawn_blocking uses anyhow::anyhow!(e).
 
-use axum::{extract::State, http::header, response::IntoResponse, Json};
+use axum::{
+    extract::{rejection::JsonRejection, FromRequest, Request, State},
+    http::header,
+    response::IntoResponse,
+    Json,
+};
 use serde::Deserialize;
 
 use super::selective_snapshot::{
@@ -37,6 +42,49 @@ use super::selective_snapshot::{
     build_full_snapshot, build_thread_snapshot,
 };
 use crate::{error::AppError, middleware::AppState};
+
+// ── ChanJson extractor ────────────────────────────────────────────────────────
+//
+// axum's built-in `Json` extractor maps all deserialization failures
+// (missing required fields, wrong types, syntax errors) to HTTP 422.
+// `/chan/command` must return 400 for those cases.
+//
+// `ChanJson` wraps `Json`, intercepts `JsonRejection`, and converts it to a
+// `ChanError(AppError::BadRequest(…))` so that the existing `ChanError`
+// `IntoResponse` impl renders the correct status code and JSON shape:
+//   { "error": "<message>" }
+
+pub struct ChanJson<T>(T);
+
+impl<T, S> FromRequest<S> for ChanJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = super::ChanError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(val)) => Ok(Self(val)),
+            Err(rejection) => {
+                let msg = match &rejection {
+                    JsonRejection::JsonDataError(_) => {
+                        // Covers missing required fields and wrong field types.
+                        format!("Invalid request body: {rejection}")
+                    }
+                    JsonRejection::JsonSyntaxError(_) => {
+                        format!("Malformed JSON: {rejection}")
+                    }
+                    JsonRejection::MissingJsonContentType(_) => {
+                        "Content-Type must be application/json".to_string()
+                    }
+                    _ => rejection.to_string(),
+                };
+                Err(AppError::BadRequest(msg).into())
+            }
+        }
+    }
+}
 
 // ── Command enum ──────────────────────────────────────────────────────────────
 
@@ -117,7 +165,7 @@ pub enum Command {
 ///   Tokio join errors            → 500 Internal Server Error
 pub async fn chan_command(
     State(state): State<AppState>,
-    Json(cmd): Json<Command>,
+    ChanJson(cmd): ChanJson<Command>,
 ) -> Result<impl IntoResponse, super::ChanError> {
     // Use ? directly — AppError implements From<r2d2::Error>.
     let conn = state.db.get()?;

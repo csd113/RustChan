@@ -235,7 +235,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             subject        TEXT,
             body           TEXT NOT NULL,
             body_html      TEXT NOT NULL,
-            ip_hash        TEXT NOT NULL,
+            ip_hash        TEXT,                -- nullable: NULL for gateway-inserted posts
             file_path        TEXT,
             file_name        TEXT,
             file_size        INTEGER,
@@ -518,6 +518,78 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             rusqlite::params![version],
         )
         .with_context(|| format!("Failed to update schema_version after migration v{version}"))?;
+    }
+
+    // ─── Structural migration: make posts.ip_hash nullable ───────────────────
+    //
+    // SQLite does not support ALTER COLUMN, so removing NOT NULL from an
+    // existing column requires the copy-rename-drop pattern.
+    //
+    // This block is intentionally NOT in the migrations array above because
+    // that loop's idempotency guard (catching "already exists") would falsely
+    // mark the migration as done if posts_new already existed from a failed
+    // partial run, leaving ip_hash still NOT NULL.
+    //
+    // Instead we guard with PRAGMA table_info: if ip_hash already has
+    // notnull = 0, the block is a true no-op and is never re-entered.
+    let ip_hash_notnull: i64 = conn
+        .query_row(
+            "SELECT \"notnull\" FROM pragma_table_info('posts') WHERE name = 'ip_hash'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    if ip_hash_notnull == 1 {
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             BEGIN;
+
+             CREATE TABLE posts_new (
+                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                 thread_id        INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                 board_id         INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+                 name             TEXT    NOT NULL DEFAULT 'Anonymous',
+                 tripcode         TEXT,
+                 subject          TEXT,
+                 body             TEXT    NOT NULL,
+                 body_html        TEXT    NOT NULL,
+                 ip_hash          TEXT,
+                 file_path        TEXT,
+                 file_name        TEXT,
+                 file_size        INTEGER,
+                 thumb_path       TEXT,
+                 mime_type        TEXT,
+                 created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+                 deletion_token   TEXT    NOT NULL,
+                 is_op            INTEGER NOT NULL DEFAULT 0,
+                 media_type       TEXT,
+                 audio_file_path  TEXT,
+                 audio_file_name  TEXT,
+                 audio_file_size  INTEGER,
+                 audio_mime_type  TEXT,
+                 edited_at        INTEGER
+             );
+
+             INSERT INTO posts_new SELECT * FROM posts;
+             DROP TABLE posts;
+             ALTER TABLE posts_new RENAME TO posts;
+
+             CREATE INDEX IF NOT EXISTS idx_posts_thread
+                 ON posts(thread_id, created_at ASC);
+             CREATE INDEX IF NOT EXISTS idx_posts_board
+                 ON posts(board_id, created_at DESC);
+             CREATE INDEX IF NOT EXISTS idx_posts_thread_id
+                 ON posts(thread_id);
+             CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
+                 ON posts(ip_hash);
+
+             COMMIT;
+             PRAGMA foreign_keys = ON;",
+        )
+        .context("Structural migration: make posts.ip_hash nullable failed")?;
+
+        info!("Applied structural migration: posts.ip_hash is now nullable");
     }
 
     // ─── One-time media_type backfill ────────────────────────────────────────
