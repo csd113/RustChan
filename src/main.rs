@@ -2,6 +2,7 @@
 //
 // Run modes (via subcommands):
 //   rustchan-cli                               → start the web server (default)
+//   rustchan-cli serve --chan-net              → start server + ChanNet API listener
 //   rustchan-cli admin create-admin  <u> <p>   → create an admin user
 //   rustchan-cli admin reset-password <u> <p>  → reset admin password
 //   rustchan-cli admin list-admins             → list admins
@@ -18,9 +19,11 @@
 // All HTTP server logic lives in server/server.rs.
 // CLI types and admin commands live in server/cli.rs.
 // Terminal console and startup banner live in server/console.rs.
+// ChanNet / RustWave gateway lives in chan_net/mod.rs (second listener, port 7070).
 
 use clap::Parser;
 
+mod chan_net;
 mod config;
 mod db;
 mod detect;
@@ -79,10 +82,11 @@ fn main() -> anyhow::Result<()> {
 
     rt.block_on(async move {
         match cli.command {
-            None | Some(server::cli::Command::Serve { port: None }) => {
-                server::run_server(None).await
+            // Default (no subcommand) or explicit `serve`: start the server.
+            None | Some(server::cli::Command::Serve) => {
+                server::run_server(cli.port, cli.chan_net).await
             }
-            Some(server::cli::Command::Serve { port }) => server::run_server(port).await,
+
             Some(server::cli::Command::Admin { action }) => {
                 server::cli::run_admin(action)?;
                 Ok(())

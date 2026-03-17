@@ -17,16 +17,21 @@ use clap::{Parser, Subcommand};
                   Run without arguments to start the server."
 )]
 pub struct Cli {
+    /// TCP port to bind the main forum server
+    #[arg(long, short = 'p', global = true)]
+    pub port: Option<u16>,
+
+    /// Enable the `ChanNet` / `RustWave` API on a second port (see `chan_net_bind` in config)
+    #[arg(long = "chan-net", global = true)]
+    pub chan_net: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 pub enum Command {
-    Serve {
-        #[arg(long, short = 'p')]
-        port: Option<u16>,
-    },
+    Serve,
     Admin {
         #[command(subcommand)]
         action: AdminAction,
