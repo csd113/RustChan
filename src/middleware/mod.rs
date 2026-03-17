@@ -130,6 +130,13 @@ pub struct AppState {
     pub job_queue: std::sync::Arc<crate::workers::JobQueue>,
     /// Live backup progress counters.  Polled by GET /admin/backup/progress.
     pub backup_progress: std::sync::Arc<BackupProgress>,
+    /// `ChanNet` transaction deduplication ledger (Step 1.5).
+    /// `Some(...)` only when the server was started with `--chan-net`.
+    /// Wraps a `HashSet<Uuid>` of already-imported snapshot transaction IDs.
+    /// The DB's unique index on `chan_net_posts` provides a persistent safety net
+    /// even if the ledger is cleared by a server restart.
+    pub chan_ledger:
+        Option<std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<uuid::Uuid>>>>,
 }
 
 /// Get current Unix timestamp in seconds.
