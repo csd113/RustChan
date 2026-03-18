@@ -94,6 +94,10 @@ struct SettingsFile {
     /// Address to bind the second `ChanNet` TCP listener.
     /// Default: 127.0.0.1:7070 (loopback-only; not exposed to the internet).
     chan_net_bind: Option<String>,
+    /// Pre-shared API key required for /chan/refresh and /chan/poll endpoints.
+    /// Must be at least 32 characters. Leave empty to disable the endpoints.
+    /// Set via `CHAN_NET_API_KEY` environment variable or `settings.toml`.
+    chan_net_api_key: Option<String>,
 }
 
 fn load_settings_file() -> SettingsFile {
@@ -307,6 +311,9 @@ pub struct Config {
     pub chan_net_max_body: usize,
     /// Maximum request body size for `/chan/command` (raw JSON). Default: 8 KiB.
     pub chan_net_command_max_body: usize,
+    /// Pre-shared key required on X-ChanNet-Key header for /chan/refresh and
+    /// /chan/poll. An empty string means those endpoints are disabled entirely.
+    pub chan_net_api_key: String,
 }
 
 impl Config {
@@ -474,6 +481,10 @@ impl Config {
             chan_net_bind,
             chan_net_max_body,
             chan_net_command_max_body,
+            chan_net_api_key: std::env::var("CHAN_NET_API_KEY")
+                .ok()
+                .or(s.chan_net_api_key)
+                .unwrap_or_default(),
         }
     }
 

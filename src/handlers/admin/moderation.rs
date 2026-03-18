@@ -180,7 +180,7 @@ pub async fn admin_ban_and_delete(
                 "ban",
                 None,
                 &board_short,
-                &format!("inline ban — ip_hash={reason}… reason={}", &ip_hash_log),
+                &format!("inline ban — ip_hash={}… reason={reason}", &ip_hash_log),
             );
 
             // Delete post (or whole thread if OP)

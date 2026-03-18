@@ -64,12 +64,17 @@ pub fn insert_board_if_absent(conn: &Connection, short_name: &str, title: &str) 
         return Ok(id);
     }
 
-    conn.execute(
+    // FIX[High-7]: Use INSERT … RETURNING id instead of last_insert_rowid().
+    // last_insert_rowid() is connection-local; in a multi-connection pool another
+    // write on the same connection between the INSERT and this call would return
+    // the wrong row ID.
+    let id: i64 = conn.query_row(
         "INSERT INTO boards (short_name, title, description, nsfw, max_threads, bump_limit)
-         VALUES (?1, ?2, '', 0, 100, 300)",
+         VALUES (?1, ?2, '', 0, 100, 300) RETURNING id",
         rusqlite::params![short_name, title],
+        |r| r.get(0),
     )?;
-    Ok(conn.last_insert_rowid())
+    Ok(id)
 }
 
 // ── insert_post_if_absent ─────────────────────────────────────────────────────

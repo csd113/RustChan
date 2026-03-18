@@ -138,6 +138,39 @@ async fn json_body_limit_error(req: axum::http::Request<axum::body::Body>, next:
     response
 }
 
+// ─── ChanNet API key middleware ───────────────────────────────────────────────
+
+/// Middleware that enforces the pre-shared `X-ChanNet-Key` header on sensitive
+/// `ChanNet` endpoints (/chan/refresh and /chan/poll).
+///
+/// FIX[High-9]: These endpoints were previously unauthenticated. Any process
+/// that could reach the `ChanNet` bind address could trigger a full DB snapshot
+/// push (refresh) or pull-and-import from a remote node (poll) with no
+/// credentials. The API key is configured via `CHAN_NET_API_KEY` / settings.toml.
+///
+/// If `chan_net_api_key` is empty the request is rejected with 403 Forbidden
+/// (the feature is intentionally disabled rather than wide open).
+async fn verify_chan_api_key(req: axum::extract::Request, next: Next) -> Response {
+    use subtle::ConstantTimeEq as _;
+    let expected = &crate::config::CONFIG.chan_net_api_key;
+    if expected.is_empty() {
+        // API key not configured — refuse the request to prevent accidental
+        // exposure when an operator forgets to set the key.
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let provided = req
+        .headers()
+        .get("X-ChanNet-Key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // Constant-time comparison to prevent timing side-channels.
+    if provided.as_bytes().ct_eq(expected.as_bytes()).into() {
+        next.run(req).await
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
+    }
+}
+
 /// Build the `ChanNet` router.
 ///
 /// All `/chan/*` routes are wired here. `DefaultBodyLimit` is applied
@@ -170,7 +203,14 @@ pub fn chan_router(state: AppState) -> Router {
             "/chan/import",
             post(import::chan_import).layer(DefaultBodyLimit::max(CONFIG.chan_net_max_body)),
         )
-        .route("/chan/refresh", post(refresh::chan_refresh))
-        .route("/chan/poll", post(poll::chan_poll))
+        // FIX[High-9]: /chan/refresh and /chan/poll now require X-ChanNet-Key.
+        .route(
+            "/chan/refresh",
+            post(refresh::chan_refresh).layer(middleware::from_fn(verify_chan_api_key)),
+        )
+        .route(
+            "/chan/poll",
+            post(poll::chan_poll).layer(middleware::from_fn(verify_chan_api_key)),
+        )
         .with_state(state)
 }

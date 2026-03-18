@@ -369,7 +369,7 @@ pub fn verify_deletion_token(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn edit_post(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     post_id: i64,
     token: &str,
     new_body: &str,
@@ -382,54 +382,51 @@ pub fn edit_post(
         edit_window_secs
     };
 
-    // BEGIN IMMEDIATE acquires the write lock now, preventing any concurrent
-    // writer from modifying the post between our SELECT and UPDATE.
-    conn.execute_batch("BEGIN IMMEDIATE")
+    // FIX[High-6]: Use rusqlite's typed transaction API instead of raw
+    // execute_batch("BEGIN IMMEDIATE"). Raw execute_batch does not update
+    // rusqlite's internal transaction-tracking state; a subsequent call to
+    // unchecked_transaction() on the same pooled connection would attempt to
+    // start a nested transaction on top of an already-committed one, causing
+    // SQLITE_ERROR: cannot start a transaction within a transaction.
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .context("Failed to begin IMMEDIATE transaction for edit_post")?;
 
-    let result: Result<bool> = (|| {
-        // FIX[HIGH-2]: Fetch token and created_at in a single round-trip.
-        let row: Option<(String, i64)> = conn
-            .query_row(
-                "SELECT deletion_token, created_at FROM posts WHERE id = ?1",
-                params![post_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
+    // FIX[HIGH-2]: Fetch token and created_at in a single round-trip inside
+    // the IMMEDIATE transaction so no concurrent writer can modify the post
+    // between our SELECT and UPDATE.
+    let row: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT deletion_token, created_at FROM posts WHERE id = ?1",
+            params![post_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .context("Failed to query post for edit")?;
 
-        let Some((stored_token, created_at)) = row else {
-            return Ok(false); // post does not exist
-        };
+    let Some((stored_token, created_at)) = row else {
+        return Ok(false); // post does not exist
+    };
 
-        if !constant_time_eq(stored_token.as_bytes(), token.as_bytes()) {
-            return Ok(false);
-        }
-
-        let now = chrono::Utc::now().timestamp();
-        if now.saturating_sub(created_at) > window {
-            return Ok(false);
-        }
-
-        conn.execute(
-            "UPDATE posts SET body = ?1, body_html = ?2, edited_at = ?3 WHERE id = ?4",
-            params![new_body, new_body_html, now, post_id],
-        )?;
-
-        // Belt-and-suspenders: confirm the row was actually written.
-        Ok(conn.changes() > 0)
-    })();
-
-    match result {
-        Ok(updated) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit edit_post transaction")?;
-            Ok(updated)
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
+    if !constant_time_eq(stored_token.as_bytes(), token.as_bytes()) {
+        return Ok(false);
     }
+
+    let now = chrono::Utc::now().timestamp();
+    if now.saturating_sub(created_at) > window {
+        return Ok(false);
+    }
+
+    tx.execute(
+        "UPDATE posts SET body = ?1, body_html = ?2, edited_at = ?3 WHERE id = ?4",
+        params![new_body, new_body_html, now, post_id],
+    )
+    .context("Failed to update post body")?;
+
+    let updated = tx.changes() > 0;
+    tx.commit()
+        .context("Failed to commit edit_post transaction")?;
+    Ok(updated)
 }
 
 /// Constant-time byte slice comparison to prevent timing side-channel attacks.

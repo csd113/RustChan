@@ -483,14 +483,19 @@ pub async fn catalog(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     jar: CookieJar,
-) -> Result<(CookieJar, Html<String>)> {
+    req_headers: HeaderMap,
+) -> Result<Response> {
     let (jar, csrf) = ensure_csrf(jar);
 
-    let html = tokio::task::spawn_blocking({
+    // FIX[High-8]: Add ETag caching to the catalog. Previously every request
+    // fetched up to 200 full thread rows and re-rendered the entire page
+    // regardless of whether anything changed. The ETag is derived from the
+    // most-recently-bumped thread, mirroring the board index handler.
+    let (etag, html) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
-        move || -> Result<String> {
+        move || -> Result<(String, String)> {
             let conn = pool.get()?;
             let is_admin = jar_session
                 .as_deref()
@@ -498,22 +503,47 @@ pub async fn catalog(
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
             let threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
+            let max_bump = threads.iter().map(|t| t.bumped_at).max().unwrap_or(0);
+            let admin_tag = if is_admin { "-a" } else { "" };
+            let etag = format!("\"{max_bump}-catalog{admin_tag}\"");
             let all_boards = db::get_all_boards(&conn)?;
             let collapse_greentext = db::get_collapse_greentext(&conn);
-            Ok(templates::catalog_page(
+            let html = templates::catalog_page(
                 &board,
                 &threads,
                 &csrf_clone,
                 &all_boards,
                 is_admin,
                 collapse_greentext,
-            ))
+            );
+            Ok((etag, html))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)))
+    let client_etag = req_headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if client_etag == etag {
+        let mut resp = axum::http::Response::builder()
+            .status(axum::http::StatusCode::NOT_MODIFIED)
+            .body(axum::body::Body::empty())
+            .unwrap_or_default();
+        resp.headers_mut().insert(
+            "etag",
+            axum::http::HeaderValue::from_str(&etag)
+                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
+        );
+        return Ok((jar, resp).into_response());
+    }
+
+    let mut resp = Html(html).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
+        resp.headers_mut().insert("etag", v);
+    }
+    Ok((jar, resp).into_response())
 }
 
 // ─── GET /:board/archive ──────────────────────────────────────────────────────
@@ -750,7 +780,10 @@ fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
         Some("gif") => Some("image/gif"),
         Some("bmp") => Some("image/bmp"),
         Some("tiff" | "tif") => Some("image/tiff"),
-        Some("svg") => Some("image/svg+xml"),
+        // SVG is intentionally omitted: serving SVG inline allows stored XSS via
+        // embedded <script> tags. SVGs are not accepted as uploads (detect_mime_type
+        // rejects image/svg+xml) so this arm would never match, but the explicit
+        // absence here documents the security decision.
         Some("webm") => Some("video/webm"),
         Some("mp4") => Some("video/mp4"),
         Some("mp3") => Some("audio/mpeg"),
