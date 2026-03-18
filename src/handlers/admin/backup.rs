@@ -30,6 +30,56 @@ use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
+// ─── URL query-string encoder ─────────────────────────────────────────────────
+//
+// FIX[#30]: `encode_q` was previously defined as an inner function inside two
+// separate async handlers, with one implementation slightly less efficient than
+// the other. Extracted here so both call sites share a single definition.
+//
+// Encodes `s` using percent-encoding, with spaces as `+` (form-URL encoding).
+// Used only for error messages in redirect query strings — not for URL paths.
+fn encode_q(s: &str) -> String {
+    const fn nibble(n: u8) -> char {
+        match n {
+            0 => '0',
+            1 => '1',
+            2 => '2',
+            3 => '3',
+            4 => '4',
+            5 => '5',
+            6 => '6',
+            7 => '7',
+            8 => '8',
+            9 => '9',
+            10 => 'A',
+            11 => 'B',
+            12 => 'C',
+            13 => 'D',
+            14 => 'E',
+            _ => 'F',
+        }
+    }
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            b => {
+                out.push('%');
+                out.push(nibble(b >> 4));
+                out.push(nibble(b & 0xf));
+            }
+        }
+    }
+    out
+}
+
+// FIX[#19]: Module-level constant so it can be referenced inside closures and
+// loops without triggering the "item after statements" clippy lint.
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
 #[allow(clippy::too_many_lines)]
 pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
     let session_id = jar
@@ -397,6 +447,35 @@ pub async fn admin_restore(
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp DB: {e}")))?;
                     copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp DB: {e}")))?;
+
+                    // FIX[#19]: Validate SQLite magic bytes before handing this
+                    // file to the backup API. Without this check a malicious or
+                    // corrupted "chan.db" inside the zip (e.g. a shell script or
+                    // truncated file) would be opened by rusqlite, which could
+                    // panic or return opaque internal errors. The magic sequence
+                    // is the first 16 bytes of every valid SQLite 3 database.
+                    let mut header = [0u8; 16];
+                    {
+                        use std::io::Read;
+                        let mut f = std::fs::File::open(&temp_db).map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Magic check open: {e}"))
+                        })?;
+                        if f.read_exact(&mut header).is_err() {
+                            let _ = std::fs::remove_file(&temp_db);
+                            return Err(AppError::BadRequest(
+                                "Uploaded chan.db is not a valid SQLite database (file too small)."
+                                    .into(),
+                            ));
+                        }
+                    }
+                    if &header != SQLITE_HEADER {
+                        let _ = std::fs::remove_file(&temp_db);
+                        return Err(AppError::BadRequest(
+                            "Uploaded chan.db is not a valid SQLite database (invalid magic bytes)."
+                                .into(),
+                        ));
+                    }
+
                     db_extracted = true;
 
                 } else if let Some(rel) = name.strip_prefix("uploads/") {
@@ -1430,6 +1509,30 @@ pub async fn restore_saved_full_backup(
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp DB: {e}")))?;
                     copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp DB: {e}")))?;
+
+                    // FIX[#19]: Validate SQLite magic bytes (same guard as admin_restore).
+                    let mut header = [0u8; 16];
+                    {
+                        use std::io::Read;
+                        let mut f = std::fs::File::open(&temp_db).map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Magic check open: {e}"))
+                        })?;
+                        if f.read_exact(&mut header).is_err() {
+                            let _ = std::fs::remove_file(&temp_db);
+                            return Err(AppError::BadRequest(
+                                "Uploaded chan.db is not a valid SQLite database (file too small)."
+                                    .into(),
+                            ));
+                        }
+                    }
+                    if &header != SQLITE_HEADER {
+                        let _ = std::fs::remove_file(&temp_db);
+                        return Err(AppError::BadRequest(
+                            "Uploaded chan.db is not a valid SQLite database (invalid magic bytes)."
+                                .into(),
+                        ));
+                    }
+
                     db_extracted = true;
                 } else if let Some(rel) = name.strip_prefix("uploads/") {
                     if rel.is_empty() {
@@ -1519,24 +1622,6 @@ pub async fn restore_saved_board_backup(
     jar: CookieJar,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
-    fn encode_q(s: &str) -> String {
-        #[allow(clippy::arithmetic_side_effects)]
-        const fn nibble(n: u8) -> char {
-            match n {
-                0..=9 => (b'0' + n) as char,
-                _ => (b'A' + n - 10) as char,
-            }
-        }
-        s.bytes()
-            .flat_map(|b| match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    vec![b as char]
-                }
-                b' ' => vec!['+'],
-                b => vec!['%', nibble(b >> 4), nibble(b & 0xf)],
-            })
-            .collect()
-    }
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
@@ -2250,31 +2335,6 @@ pub async fn board_restore(
     jar: CookieJar,
     mut multipart: Multipart,
 ) -> Response {
-    #[allow(clippy::arithmetic_side_effects)]
-    const fn nibble(n: u8) -> char {
-        match n {
-            0..=9 => (b'0' + n) as char,
-            _ => (b'A' + n - 10) as char,
-        }
-    }
-    fn encode_q(s: &str) -> String {
-        let mut out = String::with_capacity(s.len());
-        for b in s.bytes() {
-            match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    out.push(b as char);
-                }
-                b' ' => out.push('+'),
-                b => {
-                    out.push('%');
-                    out.push(nibble(b >> 4));
-                    out.push(nibble(b & 0xf));
-                }
-            }
-        }
-        out
-    }
-
     // Run the whole operation as a fallible async block so any early return
     // with Err(...) is caught below and turned into a redirect.
     let result: Result<String> = async {
