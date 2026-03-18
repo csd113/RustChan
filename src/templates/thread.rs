@@ -389,7 +389,8 @@ pub fn render_post(
         .edited_at
         .map(|ts| {
             format!(
-                r#" <span class="post-edited" title="last edited {full}">(edited {short})</span>"#,
+                r#" <span class="post-edited" data-utc="{utc}" title="last edited {full}">(edited {short})</span>"#,
+                utc = ts,
                 full = fmt_ts(ts),
                 short = fmt_ts_short(ts),
             )
@@ -402,7 +403,7 @@ pub fn render_post(
         r##"<div class="post{op_class}" id="p{id}">
 <div class="post-meta">
 <strong class="name">{name}</strong>{tripcode}
-<span class="post-time">{time}</span>{edited}
+<span class="post-time" data-utc="{ts}">{time}</span>{edited}
 <a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>
 <span class="backrefs" id="backrefs-{id}"></span>
 </div>"##,
@@ -410,6 +411,7 @@ pub fn render_post(
         id = post.id,
         name = escape_html(&post.name),
         tripcode = tripcode_html,
+        ts = post.created_at,
         time = fmt_ts_short(post.created_at),
         edited = edited_html,
     );

@@ -47,22 +47,17 @@ pub async fn do_import(state: &AppState, bytes: bytes::Bytes) -> Result<usize, A
         unpack_snapshot(&bytes).map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     // ── 2. Ed25519 signature check ───────────────────────────────────────────
-    // Verification is not yet implemented. If a signature is present we log a
-    // warning and continue rather than silently ignoring it.  A future phase
-    // will verify the signature and reject snapshots that fail verification.
+    // Verification is not yet implemented. Reject any signed snapshot rather
+    // than silently accepting unverified data. A signed snapshot without
+    // verification offers zero authenticity guarantee and exposes the
+    // chan_net_posts table to arbitrary data injection.
     //
-    // SECURITY NOTE: Accepting signed snapshots without verification means
-    // signature presence currently offers no authenticity guarantee.  Do NOT
-    // promote this instance to production without completing Ed25519
-    // verification (see channet_build_plan.md § 6.3).
-    if let Some(ref sig) = metadata.signature {
-        tracing::warn!(
-            tx_id = %metadata.tx_id,
-            signature = %sig,
-            "Snapshot carries an Ed25519 signature — verification not yet \
-             implemented; signature will not be checked until Phase N. \
-             Proceeding without verification."
-        );
+    // This guard must be removed only when Phase N (Ed25519 verification) is
+    // fully implemented and tested (see channet_build_plan.md § 6.3).
+    if metadata.signature.is_some() {
+        return Err(AppError::BadRequest(
+            "Ed25519 signature verification is not yet implemented.              Signed snapshots are rejected until Phase N is complete.".into(),
+        ));
     }
 
     // ── 3. Ledger check — must happen BEFORE any DB write ───────────────────

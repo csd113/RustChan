@@ -230,15 +230,19 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     crate::detect::detect_tor(CONFIG.enable_tor_support, bind_port, &data_dir);
     println!();
 
+    // FIX[High-10]: Capture JoinHandles from start_worker_pool so the shutdown
+    // sequence can await each worker instead of blindly sleeping for 10 s.
+    // Previously the return value was silently discarded, making it impossible
+    // to know whether in-flight jobs had finished before the process exited.
+    let worker_queue = std::sync::Arc::new(crate::workers::JobQueue::new(pool.clone()));
+    let worker_handles =
+        crate::workers::start_worker_pool(&worker_queue, ffmpeg_available, ffmpeg_vp9_available);
+
     let state = AppState {
         db: pool.clone(),
         ffmpeg_available,
         ffmpeg_webp_available,
-        job_queue: {
-            let q = std::sync::Arc::new(crate::workers::JobQueue::new(pool.clone()));
-            crate::workers::start_worker_pool(&q, ffmpeg_available, ffmpeg_vp9_available);
-            q
-        },
+        job_queue: worker_queue,
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
         chan_ledger: if chan_net {
             Some(std::sync::Arc::new(parking_lot::Mutex::new(
@@ -439,11 +443,14 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     .with_graceful_shutdown(shutdown_signal())
     .await?;
 
-    // Signal background workers to drain and exit (#7).
+    // FIX[High-10]: Signal workers and then await each handle with a per-worker
+    // timeout, replacing the previous blind 10-second sleep. Each worker is
+    // given up to 30 seconds to finish its in-flight job before we give up.
     info!("Signalling background workers to shut down…");
     worker_cancel.cancel();
-    // Give workers up to 10 seconds to finish in-flight jobs.
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    for handle in worker_handles {
+        let _ = tokio::time::timeout(Duration::from_secs(30), handle).await;
+    }
 
     info!("Server shut down gracefully.");
     Ok(())
@@ -595,7 +602,8 @@ fn build_router(state: AppState) -> Router {
         // anonymous upload risk.
         .route(
             "/admin/restore",
-            post(crate::handlers::admin::admin_restore).layer(DefaultBodyLimit::disable()),
+            post(crate::handlers::admin::admin_restore)
+                .layer(DefaultBodyLimit::max(20 * 1024 * 1024 * 1024)), // 20 GiB — large but bounded
         )
         .route(
             "/admin/board/backup/{board}",
@@ -603,7 +611,8 @@ fn build_router(state: AppState) -> Router {
         )
         .route(
             "/admin/board/restore",
-            post(crate::handlers::admin::board_restore).layer(DefaultBodyLimit::disable()),
+            post(crate::handlers::admin::board_restore)
+                .layer(DefaultBodyLimit::max(20 * 1024 * 1024 * 1024)), // 20 GiB — large but bounded
         )
         // ── Disk-based backup management routes ──────────────────────────────
         .route(

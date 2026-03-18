@@ -219,6 +219,7 @@ pub fn probe_video_codec(path: &str) -> Result<String> {
 ///
 /// # Errors
 /// Returns an error if ffmpeg exits non-zero or cannot be spawned.
+#[allow(dead_code)]
 pub fn ffmpeg_transcode_to_webm(input: &Path, output: &Path) -> Result<()> {
     let in_str = path_to_str(input)?;
     let out_str = path_to_str(output)?;
@@ -255,6 +256,7 @@ pub fn ffmpeg_transcode_to_webm(input: &Path, output: &Path) -> Result<()> {
 ///
 /// # Errors
 /// Returns an error if ffmpeg exits non-zero or cannot be spawned.
+#[allow(dead_code)]
 pub fn ffmpeg_audio_waveform(input: &Path, output: &Path, width: u32, height: u32) -> Result<()> {
     let in_str = path_to_str(input)?;
     let out_str = path_to_str(output)?;

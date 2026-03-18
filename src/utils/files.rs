@@ -175,15 +175,11 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     if header.starts_with(b"\x49\x49\x2a\x00") || header.starts_with(b"\x4d\x4d\x00\x2a") {
         return Ok("image/tiff");
     }
-    // ── SVG (text XML) ────────────────────────────────────────────────────────
-    // SVG files start with either `<svg` or an XML declaration `<?xml`.
-    // Security note: SVG files can embed JavaScript via event handlers.
-    // The server must serve them with Content-Security-Policy or as attachments.
-    // Stored as-is; the media pipeline does not transcode SVG.
+    // ── SVG — detected but not accepted as an upload ──────────────────────────
+    // Rejection is enforced in save_upload(); detect_mime_type() returns the
+    // correct MIME type so callers can identify SVGs before deciding what to do.
     {
-        // Inspect up to 512 bytes of (possibly UTF-8 with BOM) text.
         let text_peek = data.get(..data.len().min(512)).unwrap_or(data);
-        // Strip a UTF-8 BOM if present.
         let text_peek = text_peek.strip_prefix(b"\xef\xbb\xbf").unwrap_or(text_peek);
         if text_peek.starts_with(b"<svg")
             || text_peek.starts_with(b"<SVG")
@@ -221,7 +217,7 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     }
 
     Err(anyhow::anyhow!(
-        "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, BMP, TIFF, SVG, \
+        "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, BMP, TIFF, \
          MP4, WebM, MP3, OGG, FLAC, WAV, M4A, AAC"
     ))
 }
@@ -300,6 +296,15 @@ pub fn save_upload(
 
     // Detect MIME type first so we can apply the correct size limit.
     let mime_type = detect_mime_type(data)?;
+
+    // SVG files can embed <script> tags and onload= handlers; reject them here
+    // with a clear message rather than letting them fall through to the generic
+    // "unsupported type" error.
+    if mime_type == "image/svg+xml" {
+        return Err(anyhow::anyhow!(
+            "File type not allowed. SVG files are not accepted because they can contain executable JavaScript."
+        ));
+    }
     let media_type = crate::models::MediaType::from_mime(mime_type)
         .ok_or_else(|| anyhow::anyhow!("Could not classify detected MIME type: {mime_type}"))?;
 

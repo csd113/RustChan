@@ -6,6 +6,48 @@
 
 'use strict';
 
+// ─── Localize post timestamps to device timezone ──────────────────────────────
+
+function localizePostTimes(root) {
+  var els = (root || document).querySelectorAll(
+    'span.post-time[data-utc], span.post-edited[data-utc]'
+  );
+  var days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  els.forEach(function (el) {
+    var ts = parseInt(el.getAttribute('data-utc'), 10);
+    if (isNaN(ts)) return;
+    var d = new Date(ts * 1000);
+    var mm  = String(d.getMonth() + 1).padStart(2, '0');
+    var dd  = String(d.getDate()).padStart(2, '0');
+    var yy  = String(d.getFullYear()).slice(-2);
+    var day = days[d.getDay()];
+    var hh  = String(d.getHours()).padStart(2, '0');
+    var min = String(d.getMinutes()).padStart(2, '0');
+    var ss  = String(d.getSeconds()).padStart(2, '0');
+    var local = mm + '/' + dd + '/' + yy + '(' + day + ')' + hh + ':' + min + ':' + ss;
+    if (el.classList.contains('post-edited')) {
+      el.title = 'last edited ' + local;
+      el.textContent = '(edited ' + local + ')';
+    } else {
+      el.textContent = local;
+    }
+    el.removeAttribute('data-utc'); // prevent double-processing
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  localizePostTimes(document);
+});
+
+// Hook into new-post insertions (thread auto-update, quote popups, etc.)
+(function () {
+  var _origLocalize = window._onNewPostsInserted;
+  window._onNewPostsInserted = function (container) {
+    localizePostTimes(container);
+    if (_origLocalize) _origLocalize(container);
+  };
+}());
+
 // ─── Post form toggle & mobile drawer ────────────────────────────────────────
 
 function togglePostForm() {

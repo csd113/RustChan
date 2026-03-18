@@ -5,6 +5,18 @@ All notable changes to RustChan will be documented in this file.
 ---
 ## [1.1.0]
 
+## 🌐 New: ChanNet API (Port 7070)
+
+RustChan can now talk to other RustChans. Introducing the **ChanNet API** — a two-layer federation and gateway system living entirely on port 7070.
+
+**Layer 1 — Federation** (`/chan/export`, `/chan/import`, `/chan/refresh`, `/chan/poll`): nodes sync with each other via ZIP snapshots. Push your posts out, pull theirs in, keep your mirror fresh.
+
+**Layer 2 — RustWave Gateway** (`/chan/command`): the [RustWave](https://github.com/a2kiti/rustwave) audio transport client gets its own command interface. Send a typed JSON command, get a ZIP back. Supported commands: `full_export`, `board_export`, `thread_export`, `archive_export`, `force_refresh`, and `reply_push` (the only one that actually writes anything).
+
+Text only — no images, no media, no binary data cross this interface by design. Full schema docs in `channet_api_reference.docx`.
+
+---
+
 ## Architecture Refactor
 
 This release restructures the codebase for maintainability. No user-facing

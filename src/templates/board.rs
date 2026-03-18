@@ -297,13 +297,14 @@ fn render_thread_summary(
         r#"<div class="post-meta">
 {sticky}{locked}
 <strong class="name">{name}</strong>
-<span class="post-time">{time}</span>
+<span class="post-time" data-utc="{ts}">{time}</span>
 <a class="post-num" href="/{board}/thread/{tid}">No.{op_id}</a>
 <a class="thread-id-link" href="/{board}/thread/{tid}" title="Thread #{tid}">[ #{tid} ]</a>
 </div>"#,
         sticky = sticky_label,
         locked = locked_label,
         name = escape_html(t.op_name.as_deref().unwrap_or("Anonymous")),
+        ts = t.created_at,
         time = fmt_ts_short(t.created_at),
         board = escape_html(board_short),
         tid = t.id,

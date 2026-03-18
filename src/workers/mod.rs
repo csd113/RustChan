@@ -33,7 +33,9 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::num::NonZero;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
+use tokio::process::Command as TokioCommand;
 use tokio::sync::Notify;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_util::sync::CancellationToken;
@@ -432,7 +434,19 @@ async fn handle_job(
 /// (libvpx-vp9 + libopus compiled in).  If either flag is false the job is
 /// skipped gracefully — no error is returned and the file remains as-is.
 ///
-/// A hard timeout of `CONFIG.ffmpeg_timeout_secs` is applied (2.3).
+/// FIX[Critical-3]: The previous implementation wrapped `std::process::Command`
+/// in `spawn_blocking` and applied `tokio::time::timeout`. When the timeout
+/// fired, Tokio stopped polling the future but the OS process kept running,
+/// occupying a blocking thread until it finished. The log message "ffmpeg killed"
+/// was factually incorrect.
+///
+/// The fix switches to `tokio::process::Command` with `kill_on_drop(true)`.
+/// The `Child` handle is driven by `child.wait_with_output()` directly on the
+/// async executor. When `timeout` fires, the future (and the `Child` inside it)
+/// is dropped, and `kill_on_drop` ensures the OS process receives SIGKILL
+/// immediately. No blocking thread is held during the wait.
+///
+/// A hard timeout of `CONFIG.ffmpeg_timeout_secs` is applied.
 async fn transcode_video(
     post_id: i64,
     file_path: String,
@@ -457,34 +471,90 @@ async fn transcode_video(
     let timeout_secs = CONFIG.ffmpeg_timeout_secs;
     let ffmpeg_timeout = Duration::from_secs(timeout_secs);
 
-    // Wrap the entire blocking transcode in a configurable timeout (2.3).
-    match timeout(
-        ffmpeg_timeout,
+    // Phase 1: prepare (file checks, codec probe, temp file creation) — blocking.
+    let prepare_result = {
+        let file_path2 = file_path.clone();
+        let board_short2 = board_short.clone();
         tokio::task::spawn_blocking(move || {
-            transcode_video_inner(post_id, &file_path, &board_short, &pool)
-        }),
-    )
-    .await
-    {
-        Ok(Ok(result)) => result,
-        Ok(Err(join_err)) => Err(anyhow::anyhow!("spawn_blocking panicked: {join_err}")),
+            transcode_video_prepare(post_id, &file_path2, &board_short2)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in prepare: {e}"))?
+    }?;
+
+    let Some((args, src_path, webm_abs, webm_rel, _webm_name, tmp)) = prepare_result else {
+        return Ok(()); // skip gracefully
+    };
+
+    // Phase 2: run ffmpeg via tokio::process::Command with kill_on_drop(true).
+    // When the timeout future is dropped, the Child is dropped, and kill_on_drop
+    // ensures the OS process receives SIGKILL immediately — unlike the previous
+    // spawn_blocking approach where the OS process kept running after timeout.
+    let child = TokioCommand::new("ffmpeg")
+        .args(&args)
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn ffmpeg: {e}"))?;
+
+    match timeout(ffmpeg_timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            if !output.status.success() {
+                return Err(anyhow::anyhow!(
+                    "ffmpeg exited with {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+        }
+        Ok(Err(e)) => return Err(anyhow::anyhow!("ffmpeg I/O error: {e}")),
         Err(_elapsed) => {
-            warn!("VideoTranscode: job for post {post_id} timed out after {timeout_secs}s — ffmpeg killed");
-            Err(anyhow::anyhow!(
+            // Child is dropped here; kill_on_drop fires SIGKILL on the OS process.
+            warn!(
+                "VideoTranscode: job for post {post_id} timed out after                  {timeout_secs}s — ffmpeg process killed"
+            );
+            return Err(anyhow::anyhow!(
                 "ffmpeg transcode timed out after {timeout_secs}s"
-            ))
+            ));
         }
     }
+
+    // Phase 3: persist temp file + DB updates — blocking.
+    tokio::task::spawn_blocking(move || {
+        transcode_video_finalise(
+            post_id, &file_path, &src_path, &webm_abs, &webm_rel, tmp, &pool,
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in finalise: {e}"))?
 }
 
-fn transcode_video_inner(
+/// Prepare a video transcode: validate the source file, optionally probe the
+/// codec for `WebM` inputs, create a temp output file, and return the ffmpeg
+/// argument list along with the relevant paths.
+///
+/// Returns `Ok(None)` when the job should be skipped gracefully (unrecognised
+/// extension, or `WebM` that is already VP8/VP9). Returns `Ok(Some(...))` when
+/// ffmpeg should be invoked. `Err` for genuine failures.
+///
+/// This is a pure synchronous function; call it from `spawn_blocking` or at
+/// startup where blocking is acceptable.
+/// Parts returned by [`transcode_video_prepare`] when a transcode should proceed.
+type TranscodePrepareParts = (
+    Vec<String>,
+    PathBuf,
+    PathBuf,
+    String,
+    String,
+    tempfile::NamedTempFile,
+);
+
+fn transcode_video_prepare(
     post_id: i64,
     file_path: &str,
     board_short: &str,
-    pool: &DbPool,
-) -> Result<()> {
-    use anyhow::Context as _;
-
+) -> Result<Option<TranscodePrepareParts>> {
     let upload_dir = &CONFIG.upload_dir;
     let src = PathBuf::from(upload_dir).join(file_path);
 
@@ -495,7 +565,6 @@ fn transcode_video_inner(
         ));
     }
 
-    // Handle MP4 and WebM (AV1) inputs; skip anything else.
     let ext = src
         .extension()
         .and_then(|e| e.to_str())
@@ -503,16 +572,13 @@ fn transcode_video_inner(
         .to_ascii_lowercase();
     if ext != "mp4" && ext != "webm" {
         debug!("VideoTranscode: skipping unrecognised extension {file_path}");
-        return Ok(());
+        return Ok(None);
     }
 
-    // For WebM uploads, probe the codec first.  VP8/VP9 WebM is already
-    // in the correct format; only AV1 needs re-encoding.
     if ext == "webm" {
         let src_str = src
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8: {}", src.display()))?;
-
         match crate::media::ffmpeg::probe_video_codec(src_str) {
             Ok(ref codec) if codec == "av1" => {
                 info!("VideoTranscode: WebM/AV1 detected for post {post_id} — re-encoding to VP9");
@@ -522,14 +588,14 @@ fn transcode_video_inner(
                     "VideoTranscode: skipping WebM with codec '{}' for post {} (already VP8/VP9)",
                     codec, post_id
                 );
-                return Ok(());
+                return Ok(None);
             }
             Err(e) => {
                 warn!(
                     "VideoTranscode: could not probe codec for post {} ({}); skipping",
                     post_id, e
                 );
-                return Ok(());
+                return Ok(None);
             }
         }
     }
@@ -550,55 +616,101 @@ fn transcode_video_inner(
     let webm_abs = board_dir.join(&webm_name);
     let webm_rel = format!("{board_short}/{webm_name}");
 
-    // FIX[ATOMIC-WRITE]: For AV1 WebM inputs, src and webm_abs resolve to the
-    // same path (same stem, same .webm extension).  Write to a temp file in the
-    // same directory first, then atomically rename into place.  The rename is
-    // POSIX-atomic on the same filesystem, so readers always see either the old
-    // file or the new file — never a partial write.
-    //
-    // The temp file is given a .webm extension so that ffmpeg can identify the
-    // correct muxer from the output filename.  An extensionless temp file causes
-    // ffmpeg to fail immediately because it cannot determine the output format.
+    // FIX[ATOMIC-WRITE]: temp file in the same directory for POSIX-atomic rename.
     let tmp = tempfile::Builder::new()
         .suffix(".webm")
         .tempfile_in(&board_dir)
         .map_err(|e| anyhow::anyhow!("Failed to create temp file for WebM output: {e}"))?;
 
-    crate::media::ffmpeg::ffmpeg_transcode_to_webm(&src, tmp.path())?;
+    let tmp_path_str = tmp
+        .path()
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Temp file path is non-UTF-8"))?
+        .to_string();
+    let src_path_str = src
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8"))?
+        .to_string();
 
-    tmp.persist(&webm_abs)
+    // Build the ffmpeg argument list as owned strings so it can cross the
+    // async boundary without lifetime issues.
+    let args: Vec<String> = [
+        "-loglevel",
+        "error",
+        "-i",
+        &src_path_str,
+        "-c:v",
+        "libvpx-vp9",
+        "-crf",
+        "30",
+        "-b:v",
+        "0",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "128k",
+        "-map_metadata",
+        "-1",
+        "-y",
+        &tmp_path_str,
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+
+    Ok(Some((args, src, webm_abs, webm_rel, webm_name, tmp)))
+}
+
+/// Finalise a completed video transcode: persist the temp file atomically,
+/// read the result for dedup, and update the database.
+///
+/// On any DB error the temp-turned-final `WebM` is removed to prevent leaks.
+fn transcode_video_finalise(
+    post_id: i64,
+    file_path: &str,
+    src: &PathBuf,
+    webm_abs: &PathBuf,
+    webm_rel: &str,
+    tmp: tempfile::NamedTempFile,
+    pool: &DbPool,
+) -> Result<()> {
+    use anyhow::Context as _;
+
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    tmp.persist(webm_abs)
         .map_err(|e| anyhow::anyhow!("Failed to atomically rename WebM output: {e}"))?;
 
-    // Read the transcoded file for SHA-256 dedup and size logging.
     let webm_bytes =
-        std::fs::read(&webm_abs).context("Failed to read transcoded WebM for dedup hash")?;
+        std::fs::read(webm_abs).context("Failed to read transcoded WebM for dedup hash")?;
 
     let conn = pool.get()?;
 
-    // FIX[LEAK]: If any DB call below fails we must clean up the WebM we just
-    // wrote, otherwise it leaks on disk across all retry attempts.
+    // FIX[LEAK]: clean up on DB failure.
     let db_result = (|| -> Result<()> {
         let updated =
-            crate::db::update_all_posts_file_path(&conn, file_path, &webm_rel, "video/webm")?;
+            crate::db::update_all_posts_file_path(&conn, file_path, webm_rel, "video/webm")?;
         if updated == 0 {
-            crate::db::update_post_file_info(&conn, post_id, &webm_rel, "video/webm")?;
+            crate::db::update_post_file_info(&conn, post_id, webm_rel, "video/webm")?;
         }
-
         let thumb_path = crate::db::get_post_thumb_path(&conn, post_id)?.unwrap_or_default();
         let webm_sha256 = crate::utils::crypto::sha256_hex(&webm_bytes);
         crate::db::delete_file_hash_by_path(&conn, file_path)?;
-        crate::db::record_file_hash(&conn, &webm_sha256, &webm_rel, &thumb_path, "video/webm")?;
+        crate::db::record_file_hash(&conn, &webm_sha256, webm_rel, &thumb_path, "video/webm")?;
         Ok(())
     })();
 
     if let Err(e) = db_result {
-        // Remove the WebM we wrote so it doesn't accumulate across retries.
-        let _ = std::fs::remove_file(&webm_abs);
+        let _ = std::fs::remove_file(webm_abs);
         return Err(e);
     }
 
     if ext != "webm" {
-        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(src);
     }
 
     info!(
@@ -614,7 +726,20 @@ fn transcode_video_inner(
 // ─── AudioWaveform ────────────────────────────────────────────────────────────
 
 /// Generate a waveform PNG thumbnail for an audio upload via ffmpeg.
-/// A hard timeout of `CONFIG.ffmpeg_timeout_secs` is applied (2.3).
+///
+/// FIX[Critical-3]: Same `kill_on_drop` fix as `transcode_video`. Uses
+/// `tokio::process::Command` so the OS process is actually killed when the
+/// timeout fires, rather than continuing to run in an abandoned blocking thread.
+/// Parts produced by [`waveform_prepare`] that are consumed by the ffmpeg
+/// phase and [`waveform_finalise`].
+type WaveformPrepareParts = (
+    Vec<String>,
+    PathBuf,
+    String,
+    Vec<u8>,
+    tempfile::NamedTempFile,
+);
+
 async fn generate_waveform(
     post_id: i64,
     file_path: String,
@@ -629,94 +754,133 @@ async fn generate_waveform(
     let timeout_secs = CONFIG.ffmpeg_timeout_secs;
     let ffmpeg_timeout = Duration::from_secs(timeout_secs);
 
-    match timeout(
-        ffmpeg_timeout,
-        tokio::task::spawn_blocking(move || {
-            generate_waveform_inner(post_id, &file_path, &board_short, &pool)
-        }),
-    )
-    .await
-    {
-        Ok(Ok(result)) => result,
-        Ok(Err(join_err)) => Err(anyhow::anyhow!("spawn_blocking panicked: {join_err}")),
+    // Phase 1: prepare (file I/O, temp file creation) — blocking.
+    let (args, png_abs, png_rel, data, tmp_png) = {
+        let file_path2 = file_path.clone();
+        let board_short2 = board_short.clone();
+        tokio::task::spawn_blocking(move || waveform_prepare(&file_path2, &board_short2))
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform prepare: {e}"))??
+    };
+
+    // Phase 2: run ffmpeg with kill_on_drop.
+    let child = TokioCommand::new("ffmpeg")
+        .args(&args)
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn ffmpeg for waveform: {e}"))?;
+
+    match timeout(ffmpeg_timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            if !output.status.success() {
+                return Err(anyhow::anyhow!(
+                    "ffmpeg waveform exited with {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+        }
+        Ok(Err(e)) => return Err(anyhow::anyhow!("ffmpeg waveform I/O error: {e}")),
         Err(_elapsed) => {
-            warn!("AudioWaveform: job for post {post_id} timed out after {timeout_secs}s");
-            Err(anyhow::anyhow!(
+            warn!("AudioWaveform: job for post {post_id} timed out after {timeout_secs}s — ffmpeg process killed");
+            return Err(anyhow::anyhow!(
                 "ffmpeg waveform timed out after {timeout_secs}s"
-            ))
+            ));
         }
     }
+
+    // Phase 3: persist + DB update — blocking.
+    tokio::task::spawn_blocking(move || {
+        waveform_finalise(post_id, &png_abs, &png_rel, &data, tmp_png, &pool)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform finalise: {e}"))?
 }
 
-fn generate_waveform_inner(
-    post_id: i64,
-    file_path: &str,
-    board_short: &str,
-    pool: &DbPool,
-) -> Result<()> {
+/// Blocking prepare phase for [`generate_waveform`]: validate the source,
+/// read its bytes, create a temp output file, and build the ffmpeg arg list.
+fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepareParts> {
     use anyhow::Context as _;
-
     let upload_dir = &CONFIG.upload_dir;
     let src = PathBuf::from(upload_dir).join(file_path);
-
     if !src.exists() {
         return Err(anyhow::anyhow!(
             "Audio source not found for waveform: {}",
             src.display()
         ));
     }
-
     let stem = src
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("Malformed audio filename: {}", src.display()))?
         .to_string();
-
-    // Read the audio file for SHA-256 dedup; the path is passed directly to
-    // ffmpeg so no redundant write-to-temp-and-read-back is needed.
     let data = std::fs::read(&src)?;
     let thumb_size = CONFIG.thumb_size;
-
-    let board_dir = PathBuf::from(upload_dir).join(board_short);
-    let thumbs_dir = board_dir.join("thumbs");
+    let thumbs_dir = PathBuf::from(upload_dir).join(board_short).join("thumbs");
     std::fs::create_dir_all(&thumbs_dir)?;
-
     let png_name = format!("{stem}.png");
     let png_abs = thumbs_dir.join(&png_name);
     let png_rel = format!("{board_short}/thumbs/{png_name}");
-
-    // Write the waveform to a temp file in the same directory, then atomically
-    // rename it into place to avoid partial reads from concurrent web requests.
     let tmp_png = tempfile::Builder::new()
         .prefix("chan_wav_")
         .suffix(".png")
         .tempfile_in(&thumbs_dir)
         .context("Failed to create temp file for waveform PNG")?;
+    let src_str = src
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8"))?
+        .to_string();
+    let tmp_str = tmp_png
+        .path()
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Temp path is non-UTF-8"))?
+        .to_string();
+    let filter = format!(
+        "showwavespic=s={thumb_size}x{}:colors=0x888888",
+        thumb_size / 2
+    );
+    let args: Vec<String> = [
+        "-loglevel",
+        "error",
+        "-i",
+        &src_str,
+        "-filter_complex",
+        &filter,
+        "-frames:v",
+        "1",
+        "-y",
+        &tmp_str,
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    Ok((args, png_abs, png_rel, data, tmp_png))
+}
 
-    crate::media::ffmpeg::ffmpeg_audio_waveform(&src, tmp_png.path(), thumb_size, thumb_size / 2)?;
-
+/// Blocking finalise phase for [`generate_waveform`]: atomically persist the
+/// temp PNG and update the database with the new thumb path.
+fn waveform_finalise(
+    post_id: i64,
+    png_abs: &std::path::Path,
+    png_rel: &str,
+    data: &[u8],
+    tmp_png: tempfile::NamedTempFile,
+    pool: &DbPool,
+) -> Result<()> {
+    use anyhow::Context as _;
     tmp_png
-        .persist(&png_abs)
+        .persist(png_abs)
         .context("Failed to atomically rename waveform PNG into place")?;
-
     let conn = pool.get()?;
-    crate::db::update_post_thumb_path(&conn, post_id, &png_rel)?;
-
-    // FIX[DEDUP-STALE]: The file_hashes dedup table was not updated after the
-    // waveform PNG was generated, so it still held the SVG placeholder path as
-    // thumb_path.  Any future post uploading the same audio file and hitting the
-    // dedup cache via find_file_by_hash would receive the stale SVG path instead
-    // of the waveform PNG.  We now update the dedup record so that all future
-    // dedup hits for this audio file correctly inherit the waveform thumbnail.
-    //
-    // We compute the SHA-256 of the audio data to identify the dedup row without
-    // a separate DB lookup, then refresh its thumb_path via a targeted UPDATE.
-    let audio_sha256 = crate::utils::crypto::sha256_hex(&data);
+    crate::db::update_post_thumb_path(&conn, post_id, png_rel)?;
+    // FIX[DEDUP-STALE]: update dedup record with final thumb path.
+    let audio_sha256 = crate::utils::crypto::sha256_hex(data);
     let _ = conn.execute(
         "UPDATE file_hashes SET thumb_path = ?1 WHERE sha256 = ?2",
         rusqlite::params![png_rel, audio_sha256],
     );
-
     info!("AudioWaveform done: post {post_id} → {png_rel}");
     Ok(())
 }

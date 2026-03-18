@@ -488,7 +488,7 @@ pub async fn edit_post_post(
         let pool = state.db.clone();
         let csrf_clone = csrf_cookie.clone().unwrap_or_default();
         move || -> Result<EditOutcome> {
-            let conn = pool.get()?;
+            let mut conn = pool.get()?;
 
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
@@ -521,7 +521,7 @@ pub async fn edit_post_post(
             let body_html = crate::utils::sanitize::render_post_body(&escaped);
 
             let success = db::edit_post(
-                &conn,
+                &mut conn,
                 post_id,
                 &token,
                 &body_text,
