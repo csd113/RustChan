@@ -24,17 +24,6 @@
 
 | # | Severity | Title | File |
 |---|----------|-------|------|
-| 1 | **Critical** | SVG served inline — stored XSS | `handlers/board.rs:753` |
-| 2 | **Critical** | ChanNet Ed25519 signatures not verified | `chan_net/import.rs:~90` |
-| 3 | **Critical** | ffmpeg process not killed on timeout | `workers/mod.rs:460` |
-| 4 | **High** | Swapped format args in mod log entry | `handlers/admin/moderation.rs:183` |
-| 5 | **High** | Unbounded body on admin restore endpoints | `server/server.rs:598,606` |
-| 6 | **High** | `edit_post` misuses `execute_batch` for transactions | `db/posts.rs:~190` |
-| 7 | **High** | `insert_board_if_absent` uses `last_insert_rowid()` | `db/chan_net.rs:~57` |
-| 8 | **High** | Catalog has no ETag caching | `handlers/board.rs:500` |
-| 9 | **High** | ChanNet `/chan/refresh` and `/chan/poll` unauthenticated | `chan_net/mod.rs:146` |
-| 10 | **High** | Worker `JoinHandle`s discarded; shutdown is blind sleep | `server/server.rs:239` |
-| 11 | **High** | `get_per_board_stats` still uses correlated subqueries | `db/boards.rs:416` |
 | 12 | **Medium** | PoW nonce prune not rate-gated under concurrency | `utils/crypto.rs:~165` |
 | 13 | **Medium** | `constant_time_eq` in posts.rs — use `subtle` crate | `db/posts.rs:~270` |
 | 14 | **Medium** | `update_settings_file_site_names` matches comment lines | `config.rs:~320` |
