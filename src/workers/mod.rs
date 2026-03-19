@@ -872,12 +872,8 @@ fn waveform_finalise(
         "UPDATE file_hashes SET thumb_path = ?1 WHERE sha256 = ?2",
         rusqlite::params![png_rel, audio_sha256],
     );
-<<<<<<< Updated upstream
-    info!("AudioWaveform done: post {post_id} → {png_rel}");
-=======
 
     tracing::info!(target: "workers", post_id = post_id, thumb = %png_rel, "AudioWaveform done");
->>>>>>> Stashed changes
     Ok(())
 }
 
