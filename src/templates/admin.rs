@@ -321,7 +321,7 @@ pub fn admin_panel_page(
             age = escape_html(&age),
             csrf = escape_html(csrf_token),
             rid = rc.report.id,
-            ip_hash = escape_html(&rc.post_ip_hash)
+            ip_hash = escape_html(rc.post_ip_hash.as_deref().unwrap_or(""))
         );
     }
 

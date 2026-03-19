@@ -169,10 +169,12 @@ pub async fn board_index(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if client_etag == etag {
+        // StatusCode::NOT_MODIFIED and Body::empty() are always valid constants;
+        // this builder call is infallible.
         let mut resp = axum::http::Response::builder()
             .status(axum::http::StatusCode::NOT_MODIFIED)
             .body(axum::body::Body::empty())
-            .unwrap_or_default();
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
         resp.headers_mut().insert(
             "etag",
             axum::http::HeaderValue::from_str(&etag)
@@ -526,10 +528,12 @@ pub async fn catalog(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if client_etag == etag {
+        // StatusCode::NOT_MODIFIED and Body::empty() are always valid constants;
+        // this builder call is infallible.
         let mut resp = axum::http::Response::builder()
             .status(axum::http::StatusCode::NOT_MODIFIED)
             .body(axum::body::Body::empty())
-            .unwrap_or_default();
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
         resp.headers_mut().insert(
             "etag",
             axum::http::HeaderValue::from_str(&etag)

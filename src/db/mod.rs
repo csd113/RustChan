@@ -139,9 +139,10 @@ pub fn init_pool() -> Result<DbPool> {
         )
     });
 
-    // FIX[LOW-15]: Pool size comes from config so it can be tuned without
-    // recompiling. Falls back to 8 if not set.
-    let pool_size = 8u32;
+    // Pool size is configurable via CHAN_DB_POOL_SIZE env var or settings.toml.
+    // Falls back to 8 if not set. Each connection holds ~32 MiB of page cache,
+    // so size × 32 MiB sets the upper bound on SQLite memory usage.
+    let pool_size = CONFIG.db_pool_size;
 
     let pool = Pool::builder()
         .max_size(pool_size)
@@ -552,7 +553,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             [],
             |r| r.get(0),
         )
-        .unwrap_or(0);
+        .context("Failed to read ip_hash nullability from pragma_table_info")?;
 
     if ip_hash_notnull == 1 {
         conn.execute_batch(
@@ -625,7 +626,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             [],
             |r| r.get(0),
         )
-        .unwrap_or(0);
+        .context("Failed to count posts needing media_type backfill")?;
 
     if needs_backfill > 0 {
         conn.execute_batch(

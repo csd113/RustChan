@@ -24,6 +24,7 @@ pub enum ToolStatus {
 
 static TOR_CHILD: OnceLock<Arc<Mutex<std::process::Child>>> = OnceLock::new();
 
+#[allow(dead_code)]
 pub fn kill_tor() {
     if let Some(child) = TOR_CHILD.get() {
         if let Ok(mut c) = child.lock() {
@@ -355,11 +356,26 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> 
 
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        kill_tor();
+        // A panic hook MUST NOT panic — doing so causes an unconditional abort
+        // with no useful diagnostic output.  We therefore use try_lock() so
+        // that a poisoned or already-locked mutex is silently skipped; the OS
+        // will reap the Tor child on process exit regardless.
+        if let Some(child) = TOR_CHILD.get() {
+            if let Ok(mut c) = child.try_lock() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            // If try_lock fails (mutex poisoned or already held during unwind),
+            // skip the kill — do NOT call .lock()/.expect() here.
+        }
         prev_hook(info);
     }));
 
-    let pid = child.lock().expect("child process mutex poisoned").id();
+    // Recover from a poisoned mutex instead of crashing the process.
+    let pid = child
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .id();
     tracing::info!(target: "detect", pid = pid, "Tor process started — waiting for .onion address");
 
     let hostname_path = hs_abs.join("hostname");
@@ -374,12 +390,14 @@ pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> 
 
         let try_wait_result = child_bg
             .lock()
-            .expect("child process mutex poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .try_wait();
 
         match try_wait_result {
             Ok(Some(status)) => {
-                let lines = stderr_bg.lock().expect("stderr buffer mutex poisoned");
+                let lines = stderr_bg
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 tracing::error!(
                     target: "detect",
                     exit_status = %status,
@@ -442,7 +460,9 @@ fn poll_for_hostname(
     loop {
         if let Ok(mut c) = child.try_lock() {
             if let Ok(Some(status)) = c.try_wait() {
-                let lines = stderr_lines.lock().expect("stderr buffer mutex poisoned");
+                let lines = stderr_lines
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 tracing::error!(
                     target: "detect",
                     exit_status = %status,

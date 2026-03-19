@@ -361,53 +361,62 @@ pub fn get_seconds_since_last_post(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>> {
-    let tx = conn
-        .unchecked_transaction()
+    conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin delete_board transaction")?;
 
-    // Collect every file path that belongs to this board before the CASCADE.
-    // The ON DELETE CASCADE on boards→threads→posts handles DB row removal, but
-    // on-disk files must be cleaned up by the caller.
-    let candidates = {
-        let mut stmt = tx.prepare_cached(
-            "SELECT file_path, thumb_path, audio_file_path
-             FROM posts WHERE board_id = ?1",
-        )?;
-        let rows: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
-            .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut v = Vec::new();
-        for (f, t, a) in rows {
-            if let Some(p) = f {
-                v.push(p);
+    let result: anyhow::Result<Vec<String>> = (|| {
+        // Collect every file path that belongs to this board before the CASCADE.
+        // The ON DELETE CASCADE on boards→threads→posts handles DB row removal, but
+        // on-disk files must be cleaned up by the caller.
+        let candidates = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT file_path, thumb_path, audio_file_path
+                 FROM posts WHERE board_id = ?1",
+            )?;
+            let rows: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
+                .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut v = Vec::new();
+            for (f, t, a) in rows {
+                if let Some(p) = f {
+                    v.push(p);
+                }
+                if let Some(p) = t {
+                    v.push(p);
+                }
+                if let Some(p) = a {
+                    v.push(p);
+                }
             }
-            if let Some(p) = t {
-                v.push(p);
-            }
-            if let Some(p) = a {
-                v.push(p);
-            }
+            v
+        };
+
+        // Cascade-delete threads, posts, polls, etc. for this board.
+        let n = conn
+            .execute("DELETE FROM boards WHERE id = ?1", params![id])
+            .context("Failed to delete board")?;
+        if n == 0 {
+            anyhow::bail!("Board id {id} not found");
         }
-        v
-    };
 
-    // Cascade-delete threads, posts, polls, etc. for this board.
-    let n = tx
-        .execute("DELETE FROM boards WHERE id = ?1", params![id])
-        .context("Failed to delete board")?;
-    if n == 0 {
-        tx.rollback().ok();
-        anyhow::bail!("Board id {id} not found");
+        // paths_safe_to_delete runs inside the transaction so it sees the
+        // post-delete state: any file exclusively used by this board's posts now
+        // has zero remaining references and is safe to remove.
+        let safe = super::paths_safe_to_delete(conn, candidates);
+        Ok(safe)
+    })();
+
+    match result {
+        Ok(safe) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit delete_board transaction")?;
+            Ok(safe)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-
-    // paths_safe_to_delete runs inside the transaction so it sees the post-delete
-    // state: any file exclusively used by this board's posts now has zero
-    // remaining references and is safe to remove.
-    let safe = super::paths_safe_to_delete(&tx, candidates);
-
-    tx.commit()
-        .context("Failed to commit delete_board transaction")?;
-    Ok(safe)
 }
 
 // ─── Per-board stats (terminal display) ──────────────────────────────────────

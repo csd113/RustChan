@@ -76,7 +76,7 @@ pub(super) fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
         subject: row.get(5)?,
         body: row.get(6)?,
         body_html: row.get(7)?,
-        ip_hash: row.get(8)?,
+        ip_hash: row.get::<_, Option<String>>(8)?,
         file_path: row.get(9)?,
         file_name: row.get(10)?,
         file_size: row.get(11)?,
@@ -276,48 +276,58 @@ pub fn get_post_on_board(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<String>> {
-    let tx = conn
-        .unchecked_transaction()
+    conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin delete_post transaction")?;
 
-    let candidates = {
-        let mut candidates = Vec::new();
-        let mut stmt = tx.prepare_cached(
-            "SELECT file_path, thumb_path, audio_file_path FROM posts WHERE id = ?1",
-        )?;
-        if let Some((f, t, a)) = stmt
-            .query_row(params![post_id], |r| {
-                Ok((
-                    r.get::<_, Option<String>>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                ))
-            })
-            .optional()?
-        {
-            if let Some(p) = f {
-                candidates.push(p);
+    let result: anyhow::Result<Vec<String>> = (|| {
+        let candidates = {
+            let mut candidates = Vec::new();
+            let mut stmt = conn.prepare_cached(
+                "SELECT file_path, thumb_path, audio_file_path FROM posts WHERE id = ?1",
+            )?;
+            if let Some((f, t, a)) = stmt
+                .query_row(params![post_id], |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .optional()?
+            {
+                if let Some(p) = f {
+                    candidates.push(p);
+                }
+                if let Some(p) = t {
+                    candidates.push(p);
+                }
+                if let Some(p) = a {
+                    candidates.push(p);
+                }
             }
-            if let Some(p) = t {
-                candidates.push(p);
-            }
-            if let Some(p) = a {
-                candidates.push(p);
-            }
+            candidates
+        };
+
+        conn.execute("DELETE FROM posts WHERE id = ?1", params![post_id])
+            .context("Failed to delete post")?;
+
+        // Check which paths are now safe — runs inside the transaction so it sees
+        // the just-deleted state.
+        let safe = super::paths_safe_to_delete(conn, candidates);
+        Ok(safe)
+    })();
+
+    match result {
+        Ok(safe) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit delete_post transaction")?;
+            Ok(safe)
         }
-        candidates
-    };
-
-    tx.execute("DELETE FROM posts WHERE id = ?1", params![post_id])
-        .context("Failed to delete post")?;
-
-    // Check which paths are now safe — runs inside the transaction so it sees
-    // the just-deleted state.
-    let safe = super::paths_safe_to_delete(&tx, candidates);
-
-    tx.commit()
-        .context("Failed to commit delete_post transaction")?;
-    Ok(safe)
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 /// Use constant-time byte comparison to prevent timing side-channel attacks on
@@ -570,37 +580,48 @@ pub fn create_poll(
     options: &[String],
     expires_at: i64,
 ) -> Result<i64> {
-    // Wrap poll row + all option rows in one transaction so a crash mid-loop
-    // cannot leave a poll with zero options (which would cause divide-by-zero
-    // in the vote-percentage display).
-    let tx = conn
-        .unchecked_transaction()
+    // Wrap poll row + all option rows in one IMMEDIATE transaction so a crash
+    // mid-loop cannot leave a poll with zero options (divide-by-zero in display),
+    // and so the write lock is held from the start (no DEFERRED upgrade race).
+    conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin poll transaction")?;
 
-    let poll_id: i64 = tx
-        .query_row(
-            "INSERT INTO polls (thread_id, question, expires_at) VALUES (?1, ?2, ?3)
-             RETURNING id",
-            params![thread_id, question, expires_at],
-            |r| r.get(0),
-        )
-        .context("Failed to insert poll")?;
+    let result: anyhow::Result<i64> = (|| {
+        let poll_id: i64 = conn
+            .query_row(
+                "INSERT INTO polls (thread_id, question, expires_at) VALUES (?1, ?2, ?3)
+                 RETURNING id",
+                params![thread_id, question, expires_at],
+                |r| r.get(0),
+            )
+            .context("Failed to insert poll")?;
 
-    let mut opt_stmt = tx
-        .prepare_cached("INSERT INTO poll_options (poll_id, text, position) VALUES (?1, ?2, ?3)")?;
-    for (i, text) in options.iter().enumerate() {
-        opt_stmt
-            .execute(params![
-                poll_id,
-                text,
-                i64::try_from(i).context("poll option index overflow")?
-            ])
-            .context("Failed to insert poll option")?;
+        let mut opt_stmt = conn.prepare_cached(
+            "INSERT INTO poll_options (poll_id, text, position) VALUES (?1, ?2, ?3)",
+        )?;
+        for (i, text) in options.iter().enumerate() {
+            opt_stmt
+                .execute(params![
+                    poll_id,
+                    text,
+                    i64::try_from(i).context("poll option index overflow")?
+                ])
+                .context("Failed to insert poll option")?;
+        }
+        Ok(poll_id)
+    })();
+
+    match result {
+        Ok(poll_id) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit poll transaction")?;
+            Ok(poll_id)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-    drop(opt_stmt); // release borrow on tx before commit
-
-    tx.commit().context("Failed to commit poll transaction")?;
-    Ok(poll_id)
 }
 
 /// Fetch the full poll for a thread including vote counts and the user's choice.

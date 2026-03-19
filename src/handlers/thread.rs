@@ -102,10 +102,12 @@ pub async fn view_thread(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if client_etag == etag {
+        // StatusCode::NOT_MODIFIED and Body::empty() are always valid; this
+        // builder call is infallible in practice.
         let mut resp = axum::http::Response::builder()
             .status(axum::http::StatusCode::NOT_MODIFIED)
             .body(axum::body::Body::empty())
-            .unwrap_or_default();
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
         resp.headers_mut().insert(
             "etag",
             axum::http::HeaderValue::from_str(&etag)

@@ -3,7 +3,206 @@
 All notable changes to RustChan will be documented in this file.
 
 ---
-## [1.1.0]
+
+## [1.1.0 alpha 2]
+
+## Reliability & Shutdown Improvements
+
+---
+
+## Multipart Handling & Memory Safety (`src/handlers/mod.rs`)
+
+- Added strict per-field size limits for multipart text inputs:
+  - Post body capped (~100KB)
+  - Name, subject, and other fields capped (~4KB)
+- Replaced unbounded `field.text()` usage with controlled byte-reading logic
+- Prevented large heap allocations from oversized text fields
+- Eliminated OOM risk under concurrent large-form submissions
+
+- Hardened poll duration parsing:
+  - Added validation before multiplication
+  - Prevented intermediate integer overflow prior to clamping
+
+---
+
+## Backup System Reliability (`src/handlers/admin/backup.rs`)
+
+- Replaced fragile `VACUUM INTO` string-based SQL with `rusqlite::backup` API
+- Eliminated dependency on manual SQL escaping and path formatting
+- Improved cross-platform correctness and error transparency
+
+- Implemented guaranteed temporary file cleanup:
+  - Introduced RAII-style cleanup mechanism
+  - Ensures backup artifacts are removed even on:
+    - client disconnects
+    - early termination
+    - runtime drops
+
+- Improved error signaling:
+  - Database pool exhaustion now correctly returns retryable errors (503) instead of 500
+
+---
+
+## Tor Detection & Panic Safety (`src/detect.rs`)
+
+- Removed all `.expect()` usage on shared mutexes
+- Replaced with poison-tolerant locking strategies
+- Prevented cascade crashes caused by mutex poisoning
+
+- Hardened global panic hook:
+  - Eliminated potential for double-panic aborts
+  - Replaced blocking locks with `try_lock()` where required
+  - Ensured panic hook never panics under any condition
+
+- Restored original panic hook after Tor lifecycle completes
+- Reduced global side effects of detection logic
+
+---
+
+## Database Layer Improvements (`src/db/mod.rs`)
+
+- Made database connection pool size configurable via environment/config
+- Removed hardcoded pool limit to improve scalability under load
+
+- Corrected error mapping:
+  - `r2d2::Error` (pool exhaustion) now maps to `503 Service Unavailable`
+  - Prevents misclassification of load-related failures as internal errors
+
+- Removed silent fallback in initialization logic:
+  - Replaced `unwrap_or(0)` with proper error propagation
+  - Prevents incorrect “first-run” detection on DB failure
+
+---
+
+## Transaction Safety & Concurrency (`src/db/threads.rs`, `src/db/posts.rs`, `src/db/admin.rs`, `src/db/boards.rs`)
+
+- Replaced `unchecked_transaction()` (DEFERRED) with explicit `BEGIN IMMEDIATE`
+- Ensured write locks are acquired at transaction start
+- Eliminated mid-transaction lock upgrade failures (`SQLITE_BUSY`)
+- Improved consistency and reliability under concurrent write load
+
+---
+
+## Logging System Stability (`src/logging.rs`)
+
+- Replaced unbounded log file (`rolling::never`) with rotating log strategy
+- Prevented uncontrolled log growth and disk exhaustion
+- Improved long-term operational stability in production environments
+
+---
+
+## HTTP Response Correctness (`src/handlers/thread.rs`, `src/handlers/board.rs`)
+
+- Removed `.unwrap_or_default()` from 304 response builders
+- Replaced with explicit, safe response construction
+- Ensured correct HTTP semantics for cache validation responses
+
+---
+
+## Configuration File Safety (`src/config.rs`)
+
+- Replaced non-atomic file writes with atomic write pattern:
+  - write to temporary file
+  - persist via rename
+- Prevented configuration corruption on crash or partial write
+
+---
+
+## Cross-Cutting Improvements
+
+### Error Handling
+
+- Reduced silent error suppression patterns
+- Improved propagation and visibility of operational failures
+- Increased observability of system state under failure conditions
+
+---
+
+### Database Reliability
+
+- Standardized transaction patterns across modules
+- Improved behavior under high contention scenarios
+- Reduced retry loops and transient DB errors
+
+---
+
+## Summary
+
+These changes collectively improve:
+
+- Memory safety under user input
+- Database correctness under concurrency
+- Crash resilience and panic handling
+- Backup integrity and filesystem safety
+- Logging reliability and disk usage control
+- Accuracy of error reporting and HTTP responses
+
+Resulting in a significantly more robust and production-ready system.
+
+### Worker Lifecycle Management (`src/server/server.rs`, `src/workers/mod.rs`)
+
+- Persisted `JoinHandle`s returned by the worker pool instead of discarding them
+- Implemented proper graceful shutdown by:
+  - Signaling worker cancellation via `CancellationToken`
+  - Awaiting all worker tasks with bounded timeouts
+- Eliminated reliance on fixed sleep-based shutdown timing
+- Prevented corruption of in-progress jobs (e.g., FFmpeg transcodes)
+- Enabled deterministic shutdown behavior for background workers
+
+### Job Recovery
+
+- Added startup recovery logic to reset jobs stuck in `running` state
+- Ensures jobs interrupted during shutdown are retried instead of permanently stalled
+
+---
+
+## ChanNet Server Shutdown (`src/server/server.rs`)
+
+- Added graceful shutdown support to ChanNet server
+- Unified shutdown signal with main HTTP server
+- Prevents abrupt termination of in-flight federation requests
+- Eliminates risk of partial/corrupt response streams during shutdown
+
+---
+
+## Background Task Control (`src/server/server.rs`)
+
+- Integrated cancellation awareness into background tasks
+- Replaced infinite loops with `tokio::select!` to listen for shutdown signals
+- Ensures all periodic tasks (cleanup, pruning, etc.) terminate cleanly
+- Reduces risk of abrupt termination mid-operation
+
+---
+
+## HTTP Reliability (`src/server/server.rs`)
+
+- Added request timeout middleware
+- Protects against slow or stalled clients holding connections indefinitely
+- Improves resilience against slowloris-style behavior
+
+---
+
+## Worker System Stability (`src/workers/mod.rs`)
+
+- Ensured worker pool properly integrates with shutdown lifecycle
+- Improved coordination between job queue and worker threads
+- Reinforced guarantees around job completion and cancellation handling
+
+---
+
+## Summary
+
+These changes significantly improve:
+
+- Graceful shutdown correctness
+- Background task reliability
+- Job processing integrity
+- Resistance to partial writes and corruption
+- Operational stability under restart conditions
+
+---
+
+## [1.1.0 alpha 1]
 
 ## 🌐 New: ChanNet API (Port 7070)
 

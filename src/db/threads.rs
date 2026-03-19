@@ -334,25 +334,37 @@ pub fn set_thread_archived(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<String>> {
-    let tx = conn
-        .unchecked_transaction()
+    // BEGIN IMMEDIATE acquires the write lock up-front, preventing SQLITE_BUSY
+    // on the lock upgrade that DEFERRED (unchecked_transaction) suffers under WAL.
+    conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin delete_thread transaction")?;
 
-    // Step 1: collect file paths from all posts in this thread.
-    let candidates = collect_thread_file_paths(&tx, &[thread_id])?;
+    let result: anyhow::Result<Vec<String>> = (|| {
+        // Step 1: collect file paths from all posts in this thread.
+        let candidates = collect_thread_file_paths(conn, &[thread_id])?;
 
-    // Step 2: delete thread (CASCADE removes posts).
-    tx.execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
-        .context("Failed to delete thread")?;
+        // Step 2: delete thread (CASCADE removes posts).
+        conn.execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
+            .context("Failed to delete thread")?;
 
-    // Step 3: determine which paths are now unreferenced.
-    // paths_safe_to_delete sees the post-delete state because we're still inside
-    // the same transaction.
-    let safe = super::paths_safe_to_delete(&tx, candidates);
+        // Step 3: determine which paths are now unreferenced.
+        // paths_safe_to_delete sees the post-delete state because we're still
+        // inside the same transaction.
+        let safe = super::paths_safe_to_delete(conn, candidates);
+        Ok(safe)
+    })();
 
-    tx.commit()
-        .context("Failed to commit delete_thread transaction")?;
-    Ok(safe)
+    match result {
+        Ok(safe) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit delete_thread transaction")?;
+            Ok(safe)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 // ─── Archive / prune ──────────────────────────────────────────────────────────
@@ -377,43 +389,63 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -> Result<usize> {
-    let tx = conn
-        .unchecked_transaction()
+    conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin archive_old_threads transaction")?;
 
-    // Collect inside the transaction to prevent races with concurrent bumps.
-    let ids: Vec<i64> = {
-        let mut stmt = tx.prepare_cached(
-            "SELECT id FROM threads
-             WHERE board_id = ?1 AND sticky = 0 AND archived = 0
-             ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
-        )?;
-        let x = stmt
-            .query_map(params![board_id, max], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        x
-    };
+    let result: anyhow::Result<usize> = (|| {
+        // Collect inside the transaction to prevent races with concurrent bumps.
+        let ids: Vec<i64> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT id FROM threads
+                 WHERE board_id = ?1 AND sticky = 0 AND archived = 0
+                 ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
+            )?;
+            // Bind `collected` explicitly so `stmt` is dropped before the
+            // block ends — the MappedRows iterator borrows `stmt`, and the
+            // compiler requires the borrow to end before the binding goes out
+            // of scope at the closing `}`.
+            let collected = stmt
+                .query_map(params![board_id, max], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
 
-    let count = ids.len();
-    if count == 0 {
-        tx.rollback().ok();
-        return Ok(0);
+        let count = ids.len();
+        if count == 0 {
+            return Ok(0);
+        }
+
+        // Single bulk UPDATE instead of N individual statements.
+        let placeholders: String = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i.saturating_add(1)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql =
+            format!("UPDATE threads SET archived = 1, locked = 1 WHERE id IN ({placeholders})");
+        conn.execute(&sql, rusqlite::params_from_iter(&ids))
+            .context("Failed to bulk archive threads")?;
+
+        Ok(count)
+    })();
+
+    match result {
+        Ok(0) => {
+            // Nothing to archive — roll back the (empty) transaction cleanly.
+            let _ = conn.execute_batch("ROLLBACK");
+            Ok(0)
+        }
+        Ok(count) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit archive_old_threads transaction")?;
+            Ok(count)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-
-    // Single bulk UPDATE instead of N individual statements.
-    let placeholders: String = ids
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("?{}", i.saturating_add(1)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!("UPDATE threads SET archived = 1, locked = 1 WHERE id IN ({placeholders})");
-    tx.execute(&sql, rusqlite::params_from_iter(&ids))
-        .context("Failed to bulk archive threads")?;
-
-    tx.commit()
-        .context("Failed to commit archive_old_threads transaction")?;
-    Ok(count)
 }
 
 /// Hard-delete oldest non-sticky, non-archived threads that exceed `max_threads`.
@@ -447,51 +479,64 @@ pub fn prune_old_threads(
     board_id: i64,
     max: i64,
 ) -> Result<Vec<String>> {
-    let tx = conn
-        .unchecked_transaction()
+    conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin prune_old_threads transaction")?;
 
-    // Collect ids inside the transaction to prevent concurrent bumps from
-    // changing the ordering between the SELECT and the DELETE.
-    let ids: Vec<i64> = {
-        let mut stmt = tx.prepare_cached(
-            "SELECT id FROM threads
-             WHERE board_id = ?1 AND sticky = 0 AND archived = 0
-             ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
-        )?;
-        let x = stmt
-            .query_map(params![board_id, max], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        x
-    };
+    let result: anyhow::Result<Vec<String>> = (|| {
+        // Collect ids inside the transaction to prevent concurrent bumps from
+        // changing the ordering between the SELECT and the DELETE.
+        let ids: Vec<i64> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT id FROM threads
+                 WHERE board_id = ?1 AND sticky = 0 AND archived = 0
+                 ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
+            )?;
+            let collected = stmt
+                .query_map(params![board_id, max], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
 
-    if ids.is_empty() {
-        tx.rollback().ok();
-        return Ok(Vec::new());
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Collect all file paths in a single query BEFORE the DELETEs.
+        let candidates = collect_thread_file_paths(conn, &ids)?;
+
+        // Single bulk DELETE instead of N individual statements.
+        let placeholders: String = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i.saturating_add(1)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("DELETE FROM threads WHERE id IN ({placeholders})");
+        conn.execute(&sql, rusqlite::params_from_iter(&ids))
+            .context("Failed to bulk delete pruned threads")?;
+
+        // Determine safe paths INSIDE the transaction so the check sees the
+        // post-delete state before any concurrent writer can insert new references.
+        let safe = super::paths_safe_to_delete(conn, candidates);
+        Ok(safe)
+    })();
+
+    match result {
+        Ok(ref paths) if paths.is_empty() => {
+            // Nothing pruned — roll back cleanly.
+            let _ = conn.execute_batch("ROLLBACK");
+            Ok(Vec::new())
+        }
+        Ok(safe) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit prune_old_threads transaction")?;
+            Ok(safe)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-
-    // Collect all file paths in a single query BEFORE the DELETEs.
-    let candidates = collect_thread_file_paths(&tx, &ids)?;
-
-    // Single bulk DELETE instead of N individual statements.
-    let placeholders: String = ids
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("?{}", i.saturating_add(1)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!("DELETE FROM threads WHERE id IN ({placeholders})");
-    tx.execute(&sql, rusqlite::params_from_iter(&ids))
-        .context("Failed to bulk delete pruned threads")?;
-
-    // Determine safe paths INSIDE the transaction so the check sees the
-    // post-delete state before any concurrent writer can insert new references.
-    let safe = super::paths_safe_to_delete(&tx, candidates);
-
-    tx.commit()
-        .context("Failed to commit prune_old_threads transaction")?;
-
-    Ok(safe)
 }
 
 // ─── Archive listing ──────────────────────────────────────────────────────────
