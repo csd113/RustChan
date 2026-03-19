@@ -15,7 +15,6 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
 use serde::Deserialize;
-use tracing::info;
 
 // ─── POST /admin/ban/add ──────────────────────────────────────────────────────
 
@@ -65,7 +64,7 @@ pub async fn add_ban(
                 "",
                 &format!("ip_hash={}… reason={}", &ip_hash_log, form.reason),
             );
-            info!("Admin added ban for ip_hash {ip_hash_log}…");
+            tracing::info!(target: "admin", "Ban added");
             Ok(())
         }
     })
@@ -216,7 +215,7 @@ pub async fn admin_ban_and_delete(
                 );
             }
 
-            info!("Admin ban+delete: post={post_id} ip_hash={ip_hash_log}… board={board_short}");
+            tracing::info!(target: "admin", post_id = post_id, board = %board_short, "Ban and delete");
             Ok(())
         }
     })
@@ -525,7 +524,7 @@ pub async fn resolve_report(
                 "",
                 "",
             );
-            info!("Admin resolved report {}", form.report_id);
+            tracing::info!(target: "admin", report_id = form.report_id, "Report resolved");
             Ok(())
         }
     })

@@ -32,7 +32,6 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use std::collections::HashMap;
-use tracing::info;
 
 const PREVIEW_REPLIES: i64 = 3;
 const THREADS_PER_PAGE: i64 = 10;
@@ -407,7 +406,7 @@ pub async fn create_thread(
                 allow_archive: board.allow_archive,
             });
 
-            info!("New thread {thread_id} created in /{}/", board.short_name);
+            tracing::info!(target: "board", thread_id = thread_id, board = %board.short_name, "New thread created");
             Ok(format!("/{}/thread/{thread_id}", board.short_name))
         }
     })

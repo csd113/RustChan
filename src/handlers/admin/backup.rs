@@ -28,7 +28,7 @@ use std::sync::atomic::Ordering;
 use time;
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::ReaderStream;
-use tracing::{info, warn};
+use tracing::warn;
 
 // ─── URL query-string encoder ─────────────────────────────────────────────────
 //
@@ -174,7 +174,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
             let fname = format!("rustchan-backup-{ts}.zip");
-            info!("Admin downloaded full backup ({} bytes on disk)", file_size);
+            tracing::info!(target: "admin", bytes = file_size, "Full backup downloaded");
             progress
                 .phase
                 .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
@@ -534,7 +534,7 @@ pub async fn admin_restore(
             let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
             match db::create_session(&live_conn, &fresh_sid, admin_id, expires_at) {
                 Ok(()) => {
-                    info!("Admin restore completed; new session issued for admin_id={admin_id}");
+                    tracing::info!(target: "admin", admin_id = admin_id, "Restore completed, new session issued");
                     // Refresh live board list — the restored DB may have
                     // different boards than what was running before.
                     if let Ok(boards) = db::get_all_boards(&live_conn) {
@@ -899,7 +899,7 @@ pub async fn create_full_backup(
             })?;
 
             let size = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
-            info!("Admin created full backup: {} ({} bytes)", fname, size);
+            tracing::info!(target: "admin", filename = %fname, bytes = size, "Full backup created");
             progress
                 .phase
                 .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
@@ -1219,7 +1219,7 @@ pub async fn create_board_backup(
             })?;
 
             let size = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
-            info!("Admin created board backup: {} ({} bytes)", fname, size);
+            tracing::info!(target: "admin", filename = %fname, bytes = size, "Board backup created");
             progress.phase.store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
             Ok(())
         }
@@ -1413,7 +1413,7 @@ pub async fn delete_backup(
             if path.exists() {
                 std::fs::remove_file(&path)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {e}")))?;
-                info!("Admin deleted backup file: {safe_filename}");
+                tracing::info!(target: "admin", filename = %safe_filename, "Backup file deleted");
             }
             Ok(())
         }
@@ -1584,7 +1584,7 @@ pub async fn restore_saved_full_backup(
             let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
             match db::create_session(&live_conn, &fresh_sid, admin_id, expires_at) {
                 Ok(()) => {
-                    info!("Admin restore-saved completed; new session for admin_id={admin_id}");
+                    tracing::info!(target: "admin", admin_id = admin_id, "Restore-saved completed");
                     Ok(fresh_sid)
                 }
                 Err(e) => {
@@ -1915,7 +1915,7 @@ pub async fn restore_saved_board_backup(
                 }
             }
 
-            info!("Admin board restore-saved completed for /{board_short}/");
+            tracing::info!(target: "admin", board = %board_short, "Board restore-saved completed");
             let safe_short: String = board_short
                 .chars()
                 .filter(char::is_ascii_alphanumeric)
@@ -2291,7 +2291,7 @@ pub async fn board_backup(
 
             let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
             let fname = format!("rustchan-board-{board_short}-{ts}.zip");
-            info!("Admin downloaded board backup for /{}/  ({} bytes on disk)", board_short, file_size);
+            tracing::info!(target: "admin", board = %board_short, bytes = file_size, "Board backup downloaded");
             progress.phase.store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
             Ok((final_path, fname, file_size))
         }
@@ -2838,7 +2838,7 @@ pub async fn board_restore(
                     }
                 }
 
-                info!("Admin board restore completed for /{board_short}/");
+                tracing::info!(target: "admin", board = %board_short, "Board restore completed");
                 // Refresh live board list — board_restore may have created a
                 // board that didn't exist before, so the top bar must update.
                 if let Ok(boards) = db::get_all_boards(&conn) {

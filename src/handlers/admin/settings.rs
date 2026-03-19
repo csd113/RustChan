@@ -16,7 +16,6 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
-use tracing::info;
 
 // ─── POST /admin/board/settings ──────────────────────────────────────────────
 
@@ -111,7 +110,7 @@ pub async fn update_board_settings(
                 form.allow_captcha.as_deref() == Some("1"),
                 post_cooldown_secs,
             )?;
-            info!("Admin updated settings for board id={board_id}");
+            tracing::info!(target: "admin", board_id = board_id, "Board settings updated");
             crate::templates::set_live_boards(db::get_all_boards(&conn)?);
             Ok(())
         }
@@ -172,7 +171,7 @@ pub async fn update_site_settings(
                 "0"
             };
             db::set_site_setting(&conn, "collapse_greentext", val)?;
-            info!("Admin updated site setting: collapse_greentext={val}");
+            tracing::info!(target: "admin", value = val, "Site setting collapse_greentext updated");
 
             // Save the custom site name (trimmed, max 64 chars).
             let new_name = form
@@ -186,7 +185,7 @@ pub async fn update_site_settings(
             db::set_site_setting(&conn, "site_name", &new_name)?;
             // Update the in-memory live name so all pages reflect it immediately.
             crate::templates::set_live_site_name(&new_name);
-            info!("Admin updated site name to: {:?}", new_name);
+            tracing::info!(target: "admin", "Site name updated");
 
             // Save the custom subtitle.
             let new_subtitle = form
@@ -199,12 +198,12 @@ pub async fn update_site_settings(
                 .collect::<String>();
             db::set_site_setting(&conn, "site_subtitle", &new_subtitle)?;
             crate::templates::set_live_site_subtitle(&new_subtitle);
-            info!("Admin updated site subtitle to: {:?}", new_subtitle);
+            tracing::info!(target: "admin", "Site subtitle updated");
 
             // Persist both values back to settings.toml so they survive a
             // server restart without requiring a manual file edit.
             crate::config::update_settings_file_site_names(&new_name, &new_subtitle);
-            info!("settings.toml updated with new site_name and site_subtitle");
+            tracing::info!(target: "admin", "settings.toml updated");
 
             // Save the default theme slug (validated against allowed values).
             let new_theme = form
@@ -220,7 +219,7 @@ pub async fn update_site_settings(
             };
             db::set_site_setting(&conn, "default_theme", &new_theme)?;
             crate::templates::set_live_default_theme(&new_theme);
-            info!("Admin updated default theme to: {:?}", new_theme);
+            tracing::info!(target: "admin", "Default theme updated");
 
             Ok(())
         }
@@ -273,9 +272,12 @@ pub async fn admin_vacuum(
 
             let saved = size_before.saturating_sub(size_after);
 
-            info!(
-                "Admin ran VACUUM: {} → {} bytes ({} reclaimed)",
-                size_before, size_after, saved
+            tracing::info!(
+                target: "admin",
+                before_bytes = size_before,
+                after_bytes  = size_after,
+                saved_bytes  = saved,
+                "Admin ran VACUUM"
             );
 
             Ok(crate::templates::admin_vacuum_result_page(

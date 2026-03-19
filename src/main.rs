@@ -62,6 +62,7 @@ fn main() -> anyhow::Result<()> {
     logging::init_logging(&binary_dir);
 
     tracing::info!(
+        target: "startup",
         version = env!("CARGO_PKG_VERSION"),
         log_dir = %binary_dir.display(),
         "rustchan starting",

@@ -39,7 +39,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::Notify;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 // How many times a job may be attempted before being permanently failed.
 #[allow(dead_code)]
@@ -192,7 +192,7 @@ pub fn start_worker_pool(
         .unwrap_or(2)
         .min(4); // cap at 4 to avoid overwhelming SQLite's write lock
 
-    info!("Background worker pool: {} worker(s) online", n);
+    tracing::info!(target: "workers", count = n, "Background worker pool online");
 
     (0..n)
         .map(|idx| {
@@ -581,7 +581,7 @@ fn transcode_video_prepare(
             .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8: {}", src.display()))?;
         match crate::media::ffmpeg::probe_video_codec(src_str) {
             Ok(ref codec) if codec == "av1" => {
-                info!("VideoTranscode: WebM/AV1 detected for post {post_id} — re-encoding to VP9");
+                tracing::info!(target: "workers", post_id = post_id, codec = "av1", "VideoTranscode: re-encoding WebM/AV1 to VP9");
             }
             Ok(ref codec) => {
                 debug!(
@@ -606,10 +606,7 @@ fn transcode_video_prepare(
         .ok_or_else(|| anyhow::anyhow!("Malformed filename: {}", src.display()))?
         .to_string();
 
-    info!(
-        "VideoTranscode: transcoding post {} ({})…",
-        post_id, file_path
-    );
+    tracing::info!(target: "workers", post_id = post_id, file = %file_path, "VideoTranscode: starting");
 
     let board_dir = PathBuf::from(upload_dir).join(board_short);
     let webm_name = format!("{stem}.webm");
@@ -713,13 +710,7 @@ fn transcode_video_finalise(
         let _ = std::fs::remove_file(src);
     }
 
-    info!(
-        "VideoTranscode done: post {} {} → {} ({} bytes)",
-        post_id,
-        file_path,
-        webm_rel,
-        webm_bytes.len()
-    );
+    tracing::info!(target: "workers", post_id = post_id, output = %webm_rel, bytes = webm_bytes.len(), "VideoTranscode done");
     Ok(())
 }
 
@@ -881,7 +872,12 @@ fn waveform_finalise(
         "UPDATE file_hashes SET thumb_path = ?1 WHERE sha256 = ?2",
         rusqlite::params![png_rel, audio_sha256],
     );
+<<<<<<< Updated upstream
     info!("AudioWaveform done: post {post_id} → {png_rel}");
+=======
+
+    tracing::info!(target: "workers", post_id = post_id, thumb = %png_rel, "AudioWaveform done");
+>>>>>>> Stashed changes
     Ok(())
 }
 
@@ -905,10 +901,7 @@ async fn prune_threads(
         if do_archive {
             let count = crate::db::archive_old_threads(&conn, board_id, max_threads)?;
             if count > 0 {
-                info!(
-                    "ThreadArchive: moved {} overflow thread(s) to archive in /{}/ (board_id={}, archive_before_prune={})",
-                    count, board_short, board_id, CONFIG.archive_before_prune
-                );
+                tracing::info!(target: "workers", count = count, board = %board_short, board_id = board_id, "ThreadArchive: threads archived");
             }
         } else {
             let paths = crate::db::prune_old_threads(&conn, board_id, max_threads)?;
@@ -917,10 +910,7 @@ async fn prune_threads(
                 crate::utils::files::delete_file(&CONFIG.upload_dir, p);
             }
             if count > 0 {
-                info!(
-                    "ThreadPrune: deleted {} overflow thread(s) from /{}/ (board_id={}), removed {} file(s)",
-                    count, board_short, board_id, paths.len()
-                );
+                tracing::info!(target: "workers", count = count, board = %board_short, board_id = board_id, files_removed = paths.len(), "ThreadPrune: threads deleted");
             }
         }
         Ok(())
@@ -1011,12 +1001,6 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
         }
     }
     if deleted > 0 {
-        info!(
-            "evict_thumb_cache: removed {} file(s) ({} KiB), cache now {} KiB / {} KiB limit",
-            deleted,
-            deleted_bytes / 1024,
-            remaining / 1024,
-            max_bytes / 1024,
-        );
+        tracing::info!(target: "workers", files_removed = deleted, freed_kib = deleted_bytes / 1024, remaining_kib = remaining / 1024, limit_kib = max_bytes / 1024, "Thumbnail cache eviction complete");
     }
 }

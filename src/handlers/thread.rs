@@ -27,7 +27,6 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
-use tracing::info;
 
 // ─── GET /:board/thread/:id ───────────────────────────────────────────────────
 
@@ -328,7 +327,7 @@ pub async fn post_reply(
                 &board.short_name,
             );
 
-            info!("Reply {post_id} posted in thread {thread_id} on /{}/", board.short_name);
+            tracing::info!(target: "board", post_id = post_id, thread_id = thread_id, board = %board.short_name, "Reply posted");
             Ok(format!("/{}/thread/{thread_id}#p{post_id}", board.short_name))
         }
     })
@@ -557,7 +556,7 @@ pub async fn edit_post_post(
                 return Ok(EditOutcome::ErrorPage(html));
             }
 
-            info!("Post {post_id} edited on /{}/", board.short_name);
+            tracing::info!(target: "board", post_id = post_id, board = %board.short_name, "Post edited");
             Ok(EditOutcome::Redirect(format!(
                 "/{}/thread/{}#p{post_id}",
                 board.short_name, post.thread_id
@@ -632,9 +631,11 @@ pub async fn vote_handler(
             }
 
             db::cast_vote(&conn, poll_id, option_id, &ip_hash)?;
-            info!(
-                "Vote cast on poll {poll_id} option {option_id} by {}",
-                &ip_hash[..8]
+            tracing::info!(
+                target: "board",
+                poll_id = poll_id,
+                option_id = option_id,
+                "Vote cast"
             );
             Ok(format!("/{board_short}/thread/{thread_id}#poll"))
         }

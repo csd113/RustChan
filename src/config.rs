@@ -585,7 +585,12 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Warning: could not read settings.toml for update: {e}");
+            tracing::warn!(
+                target: "config",
+                path = %path.display(),
+                error = %e,
+                "Could not read settings.toml for update"
+            );
             return;
         }
     };
@@ -615,7 +620,12 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
     }
 
     if let Err(e) = std::fs::write(&path, out) {
-        eprintln!("Warning: could not write updated settings.toml: {e}");
+        tracing::warn!(
+            target: "config",
+            path = %path.display(),
+            error = %e,
+            "Could not write updated settings.toml"
+        );
     }
 }
 

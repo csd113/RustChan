@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use time;
-use tracing::{info, warn};
+use tracing::warn;
 
 // ─── CRIT-6: Admin login brute-force lockout ──────────────────────────────────
 //
@@ -297,7 +297,7 @@ pub async fn admin_login(
             // configured session lifetime instead of persisting it indefinitely.
             cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
-            info!("Admin {admin_id} logged in");
+            tracing::info!(target: "admin", admin_id = admin_id, "Admin logged in");
             Ok((jar.add(cookie), Redirect::to("/admin/panel")).into_response())
         }
     }

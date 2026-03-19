@@ -26,7 +26,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use tracing::info;
 use tracing::Instrument as _;
 
 use crate::config::{check_cookie_secret_rotation, generate_settings_file_if_missing, CONFIG};
@@ -228,7 +227,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         .and_then(|(_, p)| p.parse::<u16>().ok())
         .unwrap_or(8080);
     crate::detect::detect_tor(CONFIG.enable_tor_support, bind_port, &data_dir);
-    println!();
 
     // FIX[High-10]: Capture JoinHandles from start_worker_pool so the shutdown
     // sequence can await each worker instead of blindly sleeping for 10 s.
@@ -265,7 +263,9 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 iv.tick().await;
                 if let Ok(conn) = bg.get() {
                     match crate::db::purge_expired_sessions(&conn) {
-                        Ok(n) if n > 0 => info!("Purged {n} expired sessions"),
+                        Ok(n) if n > 0 => {
+                            tracing::info!(target: "sessions", purged = n, "Expired sessions purged");
+                        }
                         Err(e) => tracing::error!("Session purge error: {e}"),
                         Ok(_) => {}
                     }
@@ -347,9 +347,12 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                             Ok(()) => {
                                 let after = crate::db::get_db_size_bytes(&conn).unwrap_or(0);
                                 let saved = before.saturating_sub(after);
-                                info!(
-                                    "Scheduled VACUUM complete: {} → {} bytes ({} reclaimed)",
-                                    before, after, saved
+                                tracing::info!(
+                                    target: "db",
+                                    before_bytes = before,
+                                    after_bytes  = after,
+                                    saved_bytes  = saved,
+                                    "VACUUM complete"
                                 );
                             }
                             Err(e) => tracing::warn!("Scheduled VACUUM failed: {e}"),
@@ -380,7 +383,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                         let cutoff = chrono::Utc::now().timestamp() - retention_cutoff_secs;
                         match crate::db::cleanup_expired_poll_votes(&conn, cutoff) {
                             Ok(n) if n > 0 => {
-                                info!("Poll vote cleanup: removed {} expired vote row(s)", n);
+                                tracing::info!(target: "polls", removed = n, "Expired poll vote rows purged");
                             }
                             Ok(_) => {}
                             Err(e) => tracing::warn!("Poll vote cleanup failed: {e}"),
@@ -417,10 +420,29 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    info!("Listening on  http://{bind_addr}");
-    info!("Admin panel   http://{bind_addr}/admin");
-    info!("Data dir      {}", data_dir.display());
-    println!();
+    tracing::info!(target: "server", addr = %bind_addr, "HTTP server listening");
+    tracing::info!(target: "server", url = %format!("http://{bind_addr}/admin"), "Admin panel");
+    tracing::info!(target: "server", path = %data_dir.display(), "Data directory");
+
+    // First-run admin wizard: if no admin accounts exist and stdout is a TTY,
+    // prompt interactively before starting the keyboard handler (which also
+    // reads stdin).  In non-TTY mode (daemon/systemd) we log a warning instead
+    // so the operator knows to use the CLI.
+    if crate::db::has_no_admin(&pool) {
+        if crate::logging::is_tty() {
+            let stdin = std::io::stdin();
+            // Acquire and immediately pass the stdin lock to the wizard.
+            // The lock is released when `reader` drops at the end of this block,
+            // before spawn_keyboard_handler acquires its own stdin lock below.
+            let mut reader = std::io::BufReader::new(stdin.lock());
+            super::console::prompt_create_first_admin(&pool, &mut reader);
+        } else {
+            tracing::warn!(
+                target: "startup",
+                "No admin accounts exist — run: rustchan-cli admin create-admin <username> <password>"
+            );
+        }
+    }
 
     super::console::spawn_keyboard_handler(pool, start_time);
 
@@ -428,10 +450,10 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let chan_addr = crate::config::CONFIG.chan_net_bind.clone();
         let chan_app = crate::chan_net::chan_router(state.clone());
         let chan_listener = tokio::net::TcpListener::bind(&chan_addr).await?;
-        tracing::info!("ChanNet API listening on http://{chan_addr}/chan/status");
+        tracing::info!(target: "chan_net", addr = %chan_addr, "ChanNet API listening");
         tokio::spawn(async move {
             if let Err(e) = axum::serve(chan_listener, chan_app.into_make_service()).await {
-                tracing::error!("ChanNet server error: {e}");
+                tracing::error!(target: "chan_net", error = %e, "ChanNet server error");
             }
         });
     }
@@ -443,16 +465,21 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     .with_graceful_shutdown(shutdown_signal())
     .await?;
 
+<<<<<<< Updated upstream
     // FIX[High-10]: Signal workers and then await each handle with a per-worker
     // timeout, replacing the previous blind 10-second sleep. Each worker is
     // given up to 30 seconds to finish its in-flight job before we give up.
     info!("Signalling background workers to shut down…");
+=======
+    // Signal background workers to drain and exit (#7).
+    tracing::info!(target: "server", "Signalling background workers to shut down…");
+>>>>>>> Stashed changes
     worker_cancel.cancel();
     for handle in worker_handles {
         let _ = tokio::time::timeout(Duration::from_secs(30), handle).await;
     }
 
-    info!("Server shut down gracefully.");
+    tracing::info!(target: "server", "Server shut down gracefully.");
     Ok(())
 }
 
@@ -704,34 +731,35 @@ fn build_router(state: AppState) -> Router {
         // checks both the request scheme and the X-Forwarded-Proto header
         // (set by TLS-terminating proxies) before adding the header.
         .layer(axum_middleware::from_fn(hsts_middleware))
-        // Structured per-request tracing: logs method, URI, status, and
-        // latency for every HTTP request.  Spans are emitted at `info` level;
-        // failures at `error`.  tower_http filter in RUST_LOG controls noise.
+        // HTTP tracing: silent for normal responses, loud for failures.
+        //
+        // on_response is intentionally omitted — logging every 200/304 at INFO
+        // floods the terminal with one line per user action and buries real events.
+        // Operators who want per-request access logs can set RUST_LOG=tower_http=debug.
+        //
+        // on_failure fires for 5xx responses and transport errors at ERROR level.
+        // on_eos fires when a streaming response body closes unexpectedly.
+        // make_span_with creates a DEBUG span so req_id / method / uri are available
+        // in the file log for correlation without appearing on the terminal at INFO.
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
                 .make_span_with(|request: &axum::http::Request<_>| {
-                    tracing::info_span!(
-                        "http_request",
+                    tracing::debug_span!(
+                        "http",
                         method = %request.method(),
                         uri    = %request.uri(),
                     )
                 })
+                // No on_response — 200/304/etc. are completely silent at INFO level.
                 .on_response(
-                    |response: &axum::http::Response<_>,
-                     latency: std::time::Duration,
-                     _span: &tracing::Span| {
-                        tracing::info!(
-                            status = response.status().as_u16(),
-                            latency_ms = latency.as_millis(),
-                            "response sent",
-                        );
-                    },
+                    tower_http::trace::DefaultOnResponse::new().level(tracing::Level::TRACE),
                 )
                 .on_failure(
                     |error: tower_http::classify::ServerErrorsFailureClass,
                      latency: std::time::Duration,
                      _span: &tracing::Span| {
                         tracing::error!(
+                            target: "server",
                             %error,
                             latency_ms = latency.as_millis(),
                             "request failed",
@@ -890,7 +918,7 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
     tokio::select! {
-        () = ctrl_c => info!("Received Ctrl+C"),
-        () = terminate => info!("Received SIGTERM"),
+        () = ctrl_c =>   tracing::info!(target: "server", signal = "SIGINT",  "Shutdown signal received"),
+        () = terminate => tracing::info!(target: "server", signal = "SIGTERM", "Shutdown signal received"),
     }
 }
