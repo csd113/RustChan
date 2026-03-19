@@ -1,18 +1,5 @@
-// db/logging.rs — Structured logging initialisation.
+// logging.rs — Structured logging initialisation.
 //
-<<<<<<< Updated upstream
-// Sets up two output layers:
-//   1. stderr  — human-readable, `info` and above (terminal/systemd journal)
-//   2. file    — JSON formatted, `debug` and above, written to
-//               `rustchan.log` inside `db_dir`
-//
-// Respects `RUST_LOG` env var if set.
-//
-// NOTE: this module lives in `db/` so that log files are written alongside the
-// database file rather than next to the binary.  The caller should pass the
-// same directory used for `chan.db` (typically the directory containing the
-// binary at first run, but overridable via config).
-=======
 // Two output channels:
 //
 //   1. Terminal (stdout, TTY-aware)
@@ -45,7 +32,6 @@
 // to emit ANSI escape codes. Exposed via `is_tty()`.
 //
 // Respects the RUST_LOG environment variable if set.
->>>>>>> Stashed changes
 
 use std::fmt;
 use std::io::{self, Write};
@@ -54,7 +40,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
 
 use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::fmt::format::{FmtSpan, FormatEvent, FormatFields, Writer};
+use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, FmtSpan, Writer};
 use tracing_subscriber::fmt::{FmtContext, MakeWriter};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -63,33 +49,6 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 /// Global mutex that serialises all stdout writes across the process.
 ///
-<<<<<<< Updated upstream
-/// `db_dir` is the directory where `rustchan.log` will be written.
-/// This should be the same directory as `chan.db` so that logs and the
-/// database stay together and are easy to locate, back up, and rotate as
-/// a unit.
-///
-/// FIX[#33]: The file appender now uses daily rotation
-/// (`tracing_appender::rolling::daily`) instead of `rolling::never`.  A single
-/// append-only log file grows without bound on a busy instance; if the
-/// filesystem fills, `SQLite`'s WAL checkpoint will fail and can corrupt the
-/// database.  Daily rotation caps each log file to roughly one day of output
-/// and leaves old files on disk with a date suffix so they can be pruned by a
-/// standard `logrotate` rule or a cron job.
-///
-/// Suggested logrotate stanza (`/etc/logrotate.d/rustchan`):
-/// ```text
-/// /path/to/db/rustchan.log.* {
-///     daily
-///     rotate 14
-///     compress
-///     missingok
-///     notifempty
-///     copytruncate
-/// }
-/// ```
-pub fn init_logging(db_dir: &Path) {
-=======
 /// Both the tracing terminal layer (via [`ConsoleLock`]) and the `console.rs`
 /// interactive helpers acquire this before writing. The result: log events
 /// and stats/prompt blocks never interleave, even under high async concurrency.
@@ -168,16 +127,16 @@ where
         let (tag, open, close) = if tty {
             match level {
                 Level::ERROR => ("[ERROR]", "\x1b[1;31m", "\x1b[0m"),
-                Level::WARN => ("[WARN ]", "\x1b[33m", "\x1b[0m"),
-                Level::INFO => ("[INFO ]", "", ""),
-                Level::DEBUG => ("[DEBUG]", "\x1b[2m", "\x1b[0m"),
-                Level::TRACE => ("[TRACE]", "\x1b[2m", "\x1b[0m"),
+                Level::WARN  => ("[WARN ]", "\x1b[33m",   "\x1b[0m"),
+                Level::INFO  => ("[INFO ]", "",            ""),
+                Level::DEBUG => ("[DEBUG]", "\x1b[2m",    "\x1b[0m"),
+                Level::TRACE => ("[TRACE]", "\x1b[2m",    "\x1b[0m"),
             }
         } else {
             match level {
                 Level::ERROR => ("[ERROR]", "", ""),
-                Level::WARN => ("[WARN ]", "", ""),
-                Level::INFO => ("[INFO ]", "", ""),
+                Level::WARN  => ("[WARN ]", "", ""),
+                Level::INFO  => ("[INFO ]", "", ""),
                 Level::DEBUG => ("[DEBUG]", "", ""),
                 Level::TRACE => ("[TRACE]", "", ""),
             }
@@ -239,9 +198,7 @@ impl<'a> MakeWriter<'a> for ConsoleLock {
     type Writer = LockedWriter;
 
     fn make_writer(&'a self) -> LockedWriter {
-        LockedWriter {
-            _guard: CONSOLE_MUTEX.lock(),
-        }
+        LockedWriter { _guard: CONSOLE_MUTEX.lock() }
     }
 }
 
@@ -266,7 +223,6 @@ pub fn init_logging(log_dir: &Path) {
     let tty = io::stdout().is_terminal();
     IS_TTY.store(tty, Ordering::Relaxed);
 
->>>>>>> Stashed changes
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("rustchan=info,tower_http=warn"));
 
@@ -274,15 +230,8 @@ pub fn init_logging(log_dir: &Path) {
         .event_format(ConsoleFormatter)
         .with_writer(ConsoleLock);
 
-<<<<<<< Updated upstream
-    // File layer — JSON, includes file/line for structured log analysis.
-    // FIX[#33]: daily rotation; files are named `rustchan.log.YYYY-MM-DD`.
-    let file_appender = tracing_appender::rolling::daily(db_dir, "rustchan.log");
-    let file_layer = fmt::layer()
-=======
     let file_appender = tracing_appender::rolling::daily(log_dir, "rustchan.log");
     let file_layer = tracing_subscriber::fmt::layer()
->>>>>>> Stashed changes
         .json()
         .with_writer(file_appender)
         .with_target(true)

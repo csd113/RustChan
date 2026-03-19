@@ -32,7 +32,6 @@
 use crate::models::Post;
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
-use subtle::ConstantTimeEq as _;
 
 // ─── Retry budget constant ────────────────────────────────────────────────────
 
@@ -352,16 +351,8 @@ pub fn verify_deletion_token(
 
 /// Edit a post's body, verified against the deletion token and a per-board edit window.
 ///
-/// `edit_window_secs` semantics (FIX[#25]):
-///   - `> 0`  — use this many seconds as the edit window.
-///   - `== 0` — no time limit; editing is always allowed regardless of post age.
-///     Use this when the board's `edit_window_secs` column is 0.
-///   - `< 0`  — use the built-in default of 300 s.
-///
-/// Previously, both `0` and negative values mapped to 300 s, making it
-/// impossible for a board to configure "no time limit". The caller is
-/// responsible for checking `board.allow_editing` before calling this.
-///
+/// `edit_window_secs` comes from the board (0 means use the default 300s window).
+/// The caller is responsible for checking `board.allow_editing` before calling this.
 /// Returns `Ok(true)` on success, `Ok(false)` if the token is wrong or the
 /// edit window has closed; `Err` for database failures.
 ///
@@ -378,80 +369,85 @@ pub fn verify_deletion_token(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn edit_post(
-    conn: &mut rusqlite::Connection,
+    conn: &rusqlite::Connection,
     post_id: i64,
     token: &str,
     new_body: &str,
     new_body_html: &str,
     edit_window_secs: i64,
 ) -> Result<bool> {
-    // FIX[#25]: `0` now means "no time limit". Negative values use the 300 s default.
-    let window_opt: Option<i64> = match edit_window_secs.cmp(&0) {
-        std::cmp::Ordering::Greater => Some(edit_window_secs),
-        std::cmp::Ordering::Equal => None, // no limit — skip the window check entirely
-        std::cmp::Ordering::Less => Some(300), // negative → built-in default
+    let window = if edit_window_secs <= 0 {
+        300
+    } else {
+        edit_window_secs
     };
 
-    // FIX[High-6]: Use rusqlite's typed transaction API instead of raw
-    // execute_batch("BEGIN IMMEDIATE"). Raw execute_batch does not update
-    // rusqlite's internal transaction-tracking state; a subsequent call to
-    // unchecked_transaction() on the same pooled connection would attempt to
-    // start a nested transaction on top of an already-committed one, causing
-    // SQLITE_ERROR: cannot start a transaction within a transaction.
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+    // BEGIN IMMEDIATE acquires the write lock now, preventing any concurrent
+    // writer from modifying the post between our SELECT and UPDATE.
+    conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin IMMEDIATE transaction for edit_post")?;
 
-    // FIX[HIGH-2]: Fetch token and created_at in a single round-trip inside
-    // the IMMEDIATE transaction so no concurrent writer can modify the post
-    // between our SELECT and UPDATE.
-    let row: Option<(String, i64)> = tx
-        .query_row(
-            "SELECT deletion_token, created_at FROM posts WHERE id = ?1",
-            params![post_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .context("Failed to query post for edit")?;
+    let result: Result<bool> = (|| {
+        // FIX[HIGH-2]: Fetch token and created_at in a single round-trip.
+        let row: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT deletion_token, created_at FROM posts WHERE id = ?1",
+                params![post_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
 
-    let Some((stored_token, created_at)) = row else {
-        return Ok(false); // post does not exist
-    };
+        let Some((stored_token, created_at)) = row else {
+            return Ok(false); // post does not exist
+        };
 
-    if !constant_time_eq(stored_token.as_bytes(), token.as_bytes()) {
-        return Ok(false);
-    }
+        if !constant_time_eq(stored_token.as_bytes(), token.as_bytes()) {
+            return Ok(false);
+        }
 
-    let now = chrono::Utc::now().timestamp();
-    if let Some(window) = window_opt {
+        let now = chrono::Utc::now().timestamp();
         if now.saturating_sub(created_at) > window {
             return Ok(false);
         }
+
+        conn.execute(
+            "UPDATE posts SET body = ?1, body_html = ?2, edited_at = ?3 WHERE id = ?4",
+            params![new_body, new_body_html, now, post_id],
+        )?;
+
+        // Belt-and-suspenders: confirm the row was actually written.
+        Ok(conn.changes() > 0)
+    })();
+
+    match result {
+        Ok(updated) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit edit_post transaction")?;
+            Ok(updated)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-    // window_opt == None → no time limit, skip the check
-
-    tx.execute(
-        "UPDATE posts SET body = ?1, body_html = ?2, edited_at = ?3 WHERE id = ?4",
-        params![new_body, new_body_html, now, post_id],
-    )
-    .context("Failed to update post body")?;
-
-    let updated = tx.changes() > 0;
-    tx.commit()
-        .context("Failed to commit edit_post transaction")?;
-    Ok(updated)
 }
 
 /// Constant-time byte slice comparison to prevent timing side-channel attacks.
 ///
-/// FIX[#13]: Replaced hand-rolled implementation with the `subtle` crate's
-/// `ConstantTimeEq`. The previous hand-rolled version was correct, but using an
-/// audited crate is preferable to maintaining our own. Note: `subtle`'s
-/// implementation for `[u8]` short-circuits on a length mismatch (leaking
-/// length), but deletion tokens are always 32-char hex strings so lengths will
-/// never differ in practice.
+/// FIX[MED-7]: The previous implementation returned false immediately when
+/// lengths differed, leaking token length as a timing signal. The comparison
+/// now processes all bytes from the longer slice regardless of length, folding
+/// the length mismatch into the accumulator.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.ct_eq(b).into()
+    let max_len = a.len().max(b.len());
+    // Non-zero when lengths differ.
+    let mut diff = u8::try_from(a.len() ^ b.len()).unwrap_or(u8::MAX);
+    for i in 0..max_len {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 // ─── LIKE escape helper ───────────────────────────────────────────────────────
@@ -693,17 +689,9 @@ pub fn get_poll_for_thread(
 /// the same INSERT statement via a correlated WHERE EXISTS. A mismatched
 /// (`poll_id`, `option_id`) pair inserts nothing and returns false.
 ///
-/// FIX[#16]: Poll expiry is now re-checked atomically inside the INSERT's
-/// WHERE clause. Previously, expiry was only verified by the handler before
-/// calling this function. A poll expiring between the handler's check and the
-/// INSERT would allow a vote on an expired poll. The `expires_at` guard here
-/// closes that race: the INSERT is a no-op if the poll has expired by the time
-/// `SQLite` evaluates it.
-///
-/// Note (MED-14): This function returns false for three distinct cases:
+/// Note (MED-14): This function returns false for two distinct cases:
 ///   1. The voter has already voted (UNIQUE constraint fires INSERT OR IGNORE)
 ///   2. The `option_id` does not belong to `poll_id` (EXISTS check fails)
-///   3. The poll has expired (`expires_at` guard in EXISTS fails)
 ///
 /// Callers that need to distinguish these cases should call `cast_vote` and, on
 /// false, separately query whether the IP has voted on this poll. A future
@@ -721,11 +709,8 @@ pub fn cast_vote(
         "INSERT OR IGNORE INTO poll_votes (poll_id, option_id, ip_hash)
          SELECT ?1, ?2, ?3
          WHERE EXISTS (
-             SELECT 1 FROM poll_options po
-             JOIN polls p ON p.id = po.poll_id
-             WHERE po.id = ?2
-               AND po.poll_id = ?1
-               AND (p.expires_at IS NULL OR p.expires_at > unixepoch())
+             SELECT 1 FROM poll_options
+             WHERE id = ?2 AND poll_id = ?1
          )",
         params![poll_id, option_id, ip_hash],
     )?;
