@@ -227,6 +227,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         .and_then(|(_, p)| p.parse::<u16>().ok())
         .unwrap_or(8080);
     crate::detect::detect_tor(CONFIG.enable_tor_support, bind_port, &data_dir);
+<<<<<<< Updated upstream
 
     // FIX[High-10]: Capture JoinHandles from start_worker_pool so the shutdown
     // sequence can await each worker instead of blindly sleeping for 10 s.
@@ -235,6 +236,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     let worker_queue = std::sync::Arc::new(crate::workers::JobQueue::new(pool.clone()));
     let worker_handles =
         crate::workers::start_worker_pool(&worker_queue, ffmpeg_available, ffmpeg_vp9_available);
+=======
+>>>>>>> Stashed changes
 
     let state = AppState {
         db: pool.clone(),
@@ -466,10 +469,15 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     .await?;
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     // FIX[High-10]: Signal workers and then await each handle with a per-worker
     // timeout, replacing the previous blind 10-second sleep. Each worker is
     // given up to 30 seconds to finish its in-flight job before we give up.
     info!("Signalling background workers to shut down…");
+=======
+    // Signal background workers to drain and exit (#7).
+    tracing::info!(target: "server", "Signalling background workers to shut down…");
+>>>>>>> Stashed changes
 =======
     // Signal background workers to drain and exit (#7).
     tracing::info!(target: "server", "Signalling background workers to shut down…");

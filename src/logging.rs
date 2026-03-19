@@ -40,7 +40,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
 
 use tracing::{Event, Level, Subscriber};
+<<<<<<< Updated upstream
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, FmtSpan, Writer};
+=======
+use tracing_subscriber::fmt::format::{FmtSpan, FormatEvent, FormatFields, Writer};
+>>>>>>> Stashed changes
 use tracing_subscriber::fmt::{FmtContext, MakeWriter};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -127,16 +131,28 @@ where
         let (tag, open, close) = if tty {
             match level {
                 Level::ERROR => ("[ERROR]", "\x1b[1;31m", "\x1b[0m"),
+<<<<<<< Updated upstream
                 Level::WARN  => ("[WARN ]", "\x1b[33m",   "\x1b[0m"),
                 Level::INFO  => ("[INFO ]", "",            ""),
                 Level::DEBUG => ("[DEBUG]", "\x1b[2m",    "\x1b[0m"),
                 Level::TRACE => ("[TRACE]", "\x1b[2m",    "\x1b[0m"),
+=======
+                Level::WARN => ("[WARN ]", "\x1b[33m", "\x1b[0m"),
+                Level::INFO => ("[INFO ]", "", ""),
+                Level::DEBUG => ("[DEBUG]", "\x1b[2m", "\x1b[0m"),
+                Level::TRACE => ("[TRACE]", "\x1b[2m", "\x1b[0m"),
+>>>>>>> Stashed changes
             }
         } else {
             match level {
                 Level::ERROR => ("[ERROR]", "", ""),
+<<<<<<< Updated upstream
                 Level::WARN  => ("[WARN ]", "", ""),
                 Level::INFO  => ("[INFO ]", "", ""),
+=======
+                Level::WARN => ("[WARN ]", "", ""),
+                Level::INFO => ("[INFO ]", "", ""),
+>>>>>>> Stashed changes
                 Level::DEBUG => ("[DEBUG]", "", ""),
                 Level::TRACE => ("[TRACE]", "", ""),
             }
@@ -198,7 +214,13 @@ impl<'a> MakeWriter<'a> for ConsoleLock {
     type Writer = LockedWriter;
 
     fn make_writer(&'a self) -> LockedWriter {
+<<<<<<< Updated upstream
         LockedWriter { _guard: CONSOLE_MUTEX.lock() }
+=======
+        LockedWriter {
+            _guard: CONSOLE_MUTEX.lock(),
+        }
+>>>>>>> Stashed changes
     }
 }
 
