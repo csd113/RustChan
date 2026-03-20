@@ -8,6 +8,20 @@ all-features = false
 unmaintained = "all"
 yanked = "deny"
 
+# RUSTSEC-2023-0071: Marvin Attack timing side-channel in rsa 0.9.x.
+# No fixed version available. rsa is a transitive dep pulled in by arti-client;
+# we do not use RSA decryption directly, and Arti uses it only for TLS relay
+# connections where an adaptive chosen-ciphertext oracle is not exposed.
+[[advisories.ignore]]
+id = "RUSTSEC-2023-0071"
+
+# RUSTSEC-2024-0436: paste crate marked unmaintained by its author.
+# paste is a transitive dep of arti-client / tor-hsservice. No direct usage
+# in RustChan code; no functional impact. Will be resolved when Arti updates
+# its dependency tree.
+[[advisories.ignore]]
+id = "RUSTSEC-2024-0436"
+
 [licenses]
 confidence-threshold = 0.8
 
@@ -24,6 +38,14 @@ allow = [
     "ISC",
     # Used by webpki-roots (Mozilla CA certificate bundle)
     "CDLA-Permissive-2.0",
+    # Used by notify (arti-client transitive dep)
+    "CC0-1.0",
+    # Used by option-ext and priority-queue (arti-client transitive deps)
+    "MPL-2.0",
+    # Used by priority-queue (arti-client transitive dep)
+    "LGPL-3.0-or-later",
+    # Used by xxhash-rust (arti-client transitive dep)
+    "BSL-1.0",
 ]
 
 [[licenses.exceptions]]
@@ -33,6 +55,8 @@ allow   = ["MIT", "Apache-2.0", "BSD-2-Clause"]
 
 [bans]
 multiple-versions = "warn"
+
+# ── Pre-existing skips ─────────────────────────────────────────────────────────
 
 # argon2 → password-hash → rand_core 0.6
 [[bans.skip]]
@@ -71,13 +95,162 @@ version = "0.16"
 name    = "windows-sys"
 version = "0.61"
 
+# ── Arti transitive dep duplicates ────────────────────────────────────────────
+# These arise from arti-client / tor-hsservice pulling in newer versions of
+# crates that other parts of the tree already depend on at an older version.
+# All are benign version splits with no API conflicts in RustChan code.
+
 [[bans.skip]]
-name    = "zune-core"
+name    = "atomic"
 version = "0.5"
 
 [[bans.skip]]
-name    = "zune-jpeg"
-version = "0.5"
+name    = "bitflags"
+version = "1"
+
+[[bans.skip]]
+name    = "cpufeatures"
+version = "0.2"
+
+[[bans.skip]]
+name    = "darling"
+version = "0.14"
+
+[[bans.skip]]
+name    = "darling"
+version = "0.21"
+
+[[bans.skip]]
+name    = "darling_core"
+version = "0.14"
+
+[[bans.skip]]
+name    = "darling_core"
+version = "0.21"
+
+[[bans.skip]]
+name    = "darling_macro"
+version = "0.14"
+
+[[bans.skip]]
+name    = "darling_macro"
+version = "0.21"
+
+[[bans.skip]]
+name    = "itertools"
+version = "0.13"
+
+[[bans.skip]]
+name    = "rand"
+version = "0.8"
+
+[[bans.skip]]
+name    = "rand"
+version = "0.9"
+
+[[bans.skip]]
+name    = "rand_chacha"
+version = "0.3"
+
+[[bans.skip]]
+name    = "rand_core"
+version = "0.9"
+
+[[bans.skip]]
+name    = "serde_spanned"
+version = "0.6"
+
+[[bans.skip]]
+name    = "strsim"
+version = "0.10"
+
+[[bans.skip]]
+name    = "syn"
+version = "1"
+
+[[bans.skip]]
+name    = "thiserror"
+version = "1"
+
+[[bans.skip]]
+name    = "thiserror-impl"
+version = "1"
+
+[[bans.skip]]
+name    = "toml"
+version = "0.8"
+
+[[bans.skip]]
+name    = "toml"
+version = "0.9"
+
+[[bans.skip]]
+name    = "toml_datetime"
+version = "0.6"
+
+[[bans.skip]]
+name    = "toml_datetime"
+version = "0.7"
+
+[[bans.skip]]
+name    = "toml_edit"
+version = "0.22"
+
+[[bans.skip]]
+name    = "windows-core"
+version = "0.61"
+
+[[bans.skip]]
+name    = "windows-link"
+version = "0.1"
+
+[[bans.skip]]
+name    = "windows-result"
+version = "0.3"
+
+[[bans.skip]]
+name    = "windows-strings"
+version = "0.4"
+
+[[bans.skip]]
+name    = "windows-sys"
+version = "0.52"
+
+[[bans.skip]]
+name    = "windows-targets"
+version = "0.52"
+
+[[bans.skip]]
+name    = "windows_aarch64_gnullvm"
+version = "0.52"
+
+[[bans.skip]]
+name    = "windows_aarch64_msvc"
+version = "0.52"
+
+[[bans.skip]]
+name    = "windows_i686_gnu"
+version = "0.52"
+
+[[bans.skip]]
+name    = "windows_i686_gnullvm"
+version = "0.52"
+
+[[bans.skip]]
+name    = "windows_i686_msvc"
+version = "0.52"
+
+[[bans.skip]]
+name    = "windows_x86_64_gnu"
+version = "0.52"
+
+[[bans.skip]]
+name    = "windows_x86_64_gnullvm"
+version = "0.52"
+
+[[bans.skip]]
+name    = "windows_x86_64_msvc"
+version = "0.52"
 
 [sources]
 unknown-registry = "deny"

@@ -17,11 +17,11 @@
 [![SQLite](https://img.shields.io/badge/SQLite-WAL_Mode-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Axum](https://img.shields.io/badge/Axum-0.8-7c3aed?style=for-the-badge)](https://github.com/tokio-rs/axum)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.0.13-0ea5e9?style=for-the-badge)](#changelog)
+[![Version](https://img.shields.io/badge/Version-1.1.0--alpha.2-0ea5e9?style=for-the-badge)](#changelog)
 
 <br>
 
-[**Quick Start**](#-quick-start) · [**Features**](#-features) · [**Optional Integrations**](#-optional-integrations-ffmpeg--tor) · [**Configuration**](#-configuration) · [**Backup System**](#-backup--restore) · [**Deployment**](#-production-deployment) · [**Themes**](#-themes) · [**Changelog**](CHANGELOG.md)
+[**Quick Start**](#-quick-start) · [**Features**](#-features) · [**ChanNet API**](#-channet-api) · [**Optional Integrations**](#-optional-integrations-ffmpeg--tor) · [**Configuration**](#-configuration) · [**Backup System**](#-backup--restore) · [**Deployment**](#-production-deployment) · [**Themes**](#-themes) · [**Changelog**](CHANGELOG.md)
 
 <br>
 
@@ -31,7 +31,7 @@
 
 RustChan is a fully-featured imageboard engine compiled into a **single Rust binary**. Deploy it on a VPS, a Raspberry Pi, or a local machine — no containers, no runtime, no package manager required. All persistent data lives in a single directory alongside the binary, making migrations as simple as `cp -r`.
 
-Two external tools are supported as **optional enhancements**: [**ffmpeg**](#ffmpeg--video--audio-processing) for video transcoding and audio waveforms, and [**Tor**](#tor--onion-service) for anonymous `.onion` access. Neither is required — RustChan degrades gracefully without them.
+**[ffmpeg](#ffmpeg--video--audio-processing)** is supported as an optional enhancement for video transcoding and audio waveforms. **[Tor](#tor--onion-service)** onion service hosting is built in via [Arti](https://gitlab.torproject.org/tpo/core/arti) — no system `tor` installation required. Both degrade gracefully when disabled.
 
 <br>
 
@@ -62,18 +62,19 @@ Two external tools are supported as **optional enhancements**: [**ffmpeg**](#ffm
 <td width="50%" valign="top">
 
 ### 🖼️ Media
-- **Images:** JPEG *(EXIF-stripped and orientation-corrected on upload)*, PNG, GIF, WebP
+- **Images:** JPEG *(EXIF-stripped and orientation-corrected on upload)*, PNG, GIF, WebP, BMP, TIFF, SVG
 - **Video:** MP4, WebM — auto-transcoded to VP9+Opus WebM via ffmpeg; AV1 streams re-encoded to VP9
+- **GIF → WebM** — animated GIFs are converted to WebM inline at upload time (VP9, no background job)
 - **Audio:** MP3, OGG, FLAC, WAV, M4A, AAC (up to 150 MB default)
 - **Image + audio combo posts** — attach both an image and an audio file simultaneously
 - **Audio waveform thumbnails** — generated via ffmpeg's `showwavespic` filter for standalone audio uploads
 - **Waveform cache eviction** — background task prunes oldest thumbnails when the cache exceeds `waveform_cache_max_mb` (default 200 MiB); originals never touched
 - **Video embed unfurling** — per-board opt-in; YouTube, Invidious, and Streamable URLs render as thumbnail + click-to-play widgets
-- Auto-generated thumbnails with configurable dimensions
+- Auto-generated **WebP thumbnails** with configurable dimensions; SVG placeholders used for video (without ffmpeg), audio, and SVG sources
 - Resizable inline image expansion via drag-to-resize
 - **Client-side auto-compression** — oversized files are compressed in-browser before upload with a live progress bar
-- **Streaming multipart** — uploads are validated against size limits in flight; never fully buffered in RAM
-- Two-layer file validation: Content-Type header + magic byte inspection (extensions are never trusted)
+- **Streaming multipart** — uploads are validated against size limits in flight; never fully buffered in RAM; per-field text caps prevent OOM from oversized form fields
+- Two-layer file validation: Content-Type header + magic byte inspection (extensions are never trusted); BMP, TIFF, and SVG magic bytes supported
 
 </td>
 </tr>
@@ -158,6 +159,102 @@ Two external tools are supported as **optional enhancements**: [**ffmpeg**](#ffm
 
 <br>
 
+## 🌐 ChanNet API
+
+RustChan includes a two-layer federation and gateway system that runs automatically on **port 7070** alongside the main web server. No additional configuration is required to enable it — if you want to federate with another RustChan node or integrate with a RustWave client, just start talking to port 7070.
+
+> **Text only.** No images, no media, and no binary data cross the ChanNet interface by design. All payloads are ZIP archives containing structured text (JSON manifests + plain `.txt` post bodies). Full schema documentation is in `channet_api_reference.docx`.
+
+### Layer 1 — Node Federation
+
+These endpoints let RustChan nodes sync content with each other. All responses are ZIP archives.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/chan/export` | `GET` | Export all posts from this node as a ZIP snapshot |
+| `/chan/import` | `POST` | Import a ZIP snapshot from a remote node |
+| `/chan/refresh` | `POST` | Pull fresh content from a known remote and apply it locally |
+| `/chan/poll` | `GET` | Lightweight poll — returns only new content since a given timestamp |
+
+**Quick example — pull content from a remote node:**
+
+```bash
+# Export your node's posts
+curl http://localhost:7070/chan/export -o my-export.zip
+
+# Import a ZIP from another node
+curl -X POST http://localhost:7070/chan/import \
+     -H "Content-Type: application/zip" \
+     --data-binary @remote-export.zip
+
+# Refresh from a peer (supply the peer's export URL as the body)
+curl -X POST http://localhost:7070/chan/refresh \
+     -H "Content-Type: text/plain" \
+     -d "http://peer.example.com:7070/chan/export"
+
+# Poll for posts newer than a Unix timestamp
+curl "http://localhost:7070/chan/poll?since=1741900000" -o delta.zip
+```
+
+### Layer 2 — RustWave Gateway
+
+The `/chan/command` endpoint exposes a typed JSON command interface for the [RustWave](https://github.com/a2kiti/rustwave) audio transport client. Send a JSON command, receive a ZIP back. `reply_push` is the only command that writes anything to the database.
+
+```bash
+# Full export via command interface
+curl -X POST http://localhost:7070/chan/command \
+     -H "Content-Type: application/json" \
+     -d '{"command": "full_export"}' \
+     -o full.zip
+
+# Export a single board
+curl -X POST http://localhost:7070/chan/command \
+     -H "Content-Type: application/json" \
+     -d '{"command": "board_export", "board": "b"}' \
+     -o board-b.zip
+
+# Export a single thread
+curl -X POST http://localhost:7070/chan/command \
+     -H "Content-Type: application/json" \
+     -d '{"command": "thread_export", "board": "b", "thread_id": 42}' \
+     -o thread-42.zip
+
+# Export the archive for a board
+curl -X POST http://localhost:7070/chan/command \
+     -H "Content-Type: application/json" \
+     -d '{"command": "archive_export", "board": "b"}' \
+     -o archive.zip
+
+# Force a refresh from a peer
+curl -X POST http://localhost:7070/chan/command \
+     -H "Content-Type: application/json" \
+     -d '{"command": "force_refresh", "peer": "http://peer.example.com:7070"}' \
+     -o result.zip
+
+# Push a reply (the only write command)
+curl -X POST http://localhost:7070/chan/command \
+     -H "Content-Type: application/json" \
+     -d '{
+       "command": "reply_push",
+       "board": "b",
+       "thread_id": 42,
+       "body": "Hello from RustWave"
+     }' \
+     -o result.zip
+```
+
+### Firewall Note
+
+Port 7070 is for node-to-node communication and RustWave integration. If you are running a public-facing instance and do not need federation, block port 7070 externally:
+
+```bash
+sudo ufw deny 7070/tcp
+```
+
+If you do want to federate with other nodes, allow port 7070 selectively rather than opening it to the world.
+
+---
+
 ## 🔌 Optional Integrations: ffmpeg & Tor
 
 RustChan is fully functional without either tool. When detected at startup, additional capabilities activate automatically.
@@ -177,14 +274,18 @@ See **[SETUP.md — Installing ffmpeg](SETUP.md#installing-ffmpeg)** for platfor
 
 ### Tor — Onion Service
 
-When `enable_tor_support = true` and a Tor daemon is running:
+RustChan includes **built-in Tor onion service support via [Arti](https://gitlab.torproject.org/tpo/core/arti)** — no system `tor` installation required. Set `enable_tor_support = true` in `settings.toml` and restart. On first launch RustChan will:
 
-- The `.onion` address is read from the hidden-service `hostname` file and displayed on the home page and admin panel
-- Setup hints are printed to the console if Tor is detected but not yet configured
+1. Download ~2 MB of Tor directory data and bootstrap to the network (~30 seconds)
+2. Generate a persistent Ed25519 keypair in `rustchan-data/arti_state/keys/`
+3. Derive your permanent `.onion` address from that keypair and start the hidden service
+4. Begin accepting and proxying inbound onion connections to the local HTTP port
 
-Tor handles all onion routing independently — RustChan binds to its normal port while your `torrc` forwards `.onion` traffic to it.
+The `.onion` address appears on the home page and in the admin panel as soon as the service is ready. Subsequent starts are ready in ~5 seconds using the cached consensus in `rustchan-data/arti_cache/`.
 
-See **[SETUP.md — Installing Tor](SETUP.md#installing-tor)** for configuration details.
+**Back up `rustchan-data/arti_state/keys/`** — this directory contains your service keypair. Losing it means a new `.onion` address on the next start. Delete it intentionally to rotate to a new address.
+
+See **[SETUP.md — Tor](SETUP.md#tor--onion-service)** for details on key management and migrating from a previous system `tor` installation.
 
 <br>
 
@@ -263,7 +364,8 @@ max_audio_size_mb = 150
 # existing IP hashes and bans will become invalid.
 cookie_secret = "<auto-generated 32-byte hex>"
 
-# Display .onion address if a Tor daemon is running.
+# Built-in Tor onion service (via Arti — no system tor required).
+# First run bootstraps in ~30 s; keypair in rustchan-data/arti_state/keys/.
 enable_tor_support = false
 
 # Hard-exit if ffmpeg is not found (default: warn only).
@@ -337,7 +439,6 @@ All settings can be overridden via environment variables, which take precedence 
 | `CHAN_WAVEFORM_CACHE_MB` | `200` | Max waveform thumbnail cache per board (MiB) |
 | `CHAN_BLOCKING_THREADS` | `cpus × 4` | Tokio blocking thread pool size |
 | `CHAN_ARCHIVE_BEFORE_PRUNE` | `true` | Archive globally before any hard-delete |
-| `CHAN_TOR_HOSTNAME_FILE` | *(auto-detected)* | Override path to the Tor `hostname` file |
 | `RUST_LOG` | `rustchan-cli=info` | Log verbosity |
 
 <br>
@@ -431,35 +532,55 @@ RustChan is intentionally minimal — no template engine, no ORM, no JavaScript 
 |---|---|
 | Web framework | [Axum](https://github.com/tokio-rs/axum) 0.8 |
 | Async runtime | [Tokio](https://tokio.rs/) 1.x (manually sized blocking pool) |
-| Database | SQLite via [rusqlite](https://github.com/rusqlite/rusqlite) (bundled, 32 MiB page cache) |
-| Connection pool | r2d2 + r2d2_sqlite (5-second acquisition timeout) |
-| Image processing | [`image`](https://github.com/image-rs/image) crate + `kamadak-exif` for JPEG orientation |
-| Video transcoding | ffmpeg (optional, configurable timeout) |
+| Database | SQLite via [rusqlite](https://github.com/rusqlite/rusqlite) (bundled, 32 MiB page cache, `BEGIN IMMEDIATE` transactions) |
+| Connection pool | r2d2 + r2d2_sqlite (configurable size, 5-second acquisition timeout; exhaustion → 503) |
+| Image processing | [`image`](https://github.com/image-rs/image) crate + `kamadak-exif` for JPEG orientation; BMP/TIFF/SVG supported |
+| Video transcoding | ffmpeg (optional, configurable timeout); GIF→WebM converted inline |
 | Audio waveforms | ffmpeg `showwavespic` filter (optional) |
+| Thumbnails | WebP output via ffmpeg or image crate fallback; SVG placeholders for video/audio/SVG |
 | Password hashing | `argon2` crate (Argon2id) |
 | Timing-safe comparison | `subtle` crate |
 | Response compression | `tower-http` CompressionLayer (gzip, Brotli, zstd) |
+| Request timeout | `tower-http` TimeoutLayer |
+| Logging | `tracing` + `tracing-subscriber` + daily-rotating file appender; logs in `rustchan-data/` |
 | HTML rendering | Plain Rust `format!` strings |
-| Configuration | `settings.toml` + env var overrides via `once_cell::Lazy` |
-| Logging | `tracing` + `tracing-subscriber` |
+| Configuration | `settings.toml` (atomic writes) + env var overrides via `once_cell::Lazy` |
+| Federation | ChanNet API on port 7070 (ZIP-based, text-only) |
+| Tor onion service | [Arti](https://gitlab.torproject.org/tpo/core/arti) in-process (`onion-service-service` feature); keypair in `arti_state/keys/` |
 
 ### Source Layout
 
 ```
 src/
-├── main.rs             — entry point, router, background tasks, keyboard console
-├── config.rs           — settings.toml + env var resolution
+├── main.rs             — entry point (~50 lines): runtime construction, CLI parsing, dispatch
+├── config.rs           — settings.toml + env var resolution (atomic writes)
 ├── error.rs            — error handling and ban page rendering
-├── models.rs           — database row structs
-├── middleware/mod.rs    — rate limiting, CSRF, IP hashing, proxy trust
+├── models.rs           — database row structs (ip_hash is Option<String>)
+├── middleware/mod.rs    — rate limiting, CSRF, IP hashing, proxy trust, request timeout
 ├── workers/mod.rs       — background job queue, media transcoding, cache eviction
+├── server/
+│   ├── server.rs       — HTTP router, background task spawns, graceful shutdown
+│   ├── console.rs      — terminal stats, keyboard console, startup banner
+│   └── cli.rs          — Cli / Command / AdminAction clap types, run_admin()
+├── media/
+│   ├── mod.rs          — MediaProcessor, ProcessedMedia; public API
+│   ├── ffmpeg.rs       — FFmpeg detection, subprocess execution, all ffmpeg helpers
+│   ├── convert.rs      — per-format conversion logic (ConversionAction, convert_file)
+│   ├── thumbnail.rs    — WebP thumbnail generation, SVG placeholders
+│   └── exif.rs         — EXIF orientation read/apply
 ├── handlers/
-│   ├── admin.rs        — admin panel, moderation, backup/restore, appeals
+│   ├── admin/
+│   │   ├── mod.rs      — shared session helpers, re-exports
+│   │   ├── backup.rs   — all backup and restore handlers (rusqlite backup API)
+│   │   ├── auth.rs     — login, logout, session management
+│   │   ├── moderation.rs — bans, reports, appeals, word filters, mod log
+│   │   ├── content.rs  — post/thread actions, board management
+│   │   └── settings.rs — site settings, VACUUM, admin panel
 │   ├── board.rs        — board index, catalog, archive, search, thread creation
 │   ├── mod.rs          — streaming multipart, shared upload helpers
 │   └── thread.rs       — thread view, replies, polls, editing
 ├── db/
-│   ├── mod.rs          — connection pool, schema init, shared helpers
+│   ├── mod.rs          — connection pool (configurable size), schema init, shared helpers
 │   ├── boards.rs       — site settings, board CRUD, stats
 │   ├── threads.rs      — thread listing, creation, mutation, archiving, pruning
 │   ├── posts.rs        — post CRUD, file deduplication, polls, job queue
@@ -471,8 +592,8 @@ src/
 │   ├── admin.rs        — login page, admin panel, mod log, VACUUM results, IP history
 │   └── forms.rs        — new thread and reply forms
 └── utils/
-    ├── crypto.rs       — Argon2id, CSRF, sessions, IP hashing, PoW verification
-    ├── files.rs        — upload validation, thumbnails, EXIF stripping + orientation
+    ├── crypto.rs       — Argon2id, CSRF, sessions, IP hashing, PoW verification, password validation
+    ├── files.rs        — upload validation, thumbnails (delegates to media/), EXIF stripping
     ├── sanitize.rs     — HTML escaping, markup (greentext, spoilers, dice, embeds)
     └── tripcode.rs     — SHA-256 tripcode generation
 ```
@@ -500,11 +621,14 @@ src/
 | **Redirect hardening** | Backslash and percent-encoded variants blocked on `return_to` parameters |
 | **Path traversal** | Backup filenames validated against `[a-zA-Z0-9._-]` before filesystem access |
 | **Body limits** | Per-route limits on small endpoints (64 KiB) to prevent memory exhaustion |
-| **Connection pool** | 5-second acquisition timeout prevents thread-pool exhaustion under load |
+| **Connection pool** | Configurable pool size; 5-second acquisition timeout; pool exhaustion returns 503 (not 500) |
 | **PoW CAPTCHA** | SHA-256 hashcash (20-bit difficulty), verified server-side with 5-minute grace window; covers threads and replies |
 | **PoW nonce replay** | Used nonces tracked in memory; stale entries auto-pruned after the validity window expires |
 | **Job queue** | Capped at `job_queue_capacity`; excess jobs logged and dropped, never causing OOM |
-| **Streaming uploads** | Multipart fields validated against size limits in flight; memory use bounded regardless of payload |
+| **Streaming uploads** | Multipart fields validated against size limits in flight; per-field text caps (~100 KB body, ~4 KB name/subject) prevent OOM from oversized forms |
+| **Request timeout** | Middleware terminates slow or stalled client connections; guards against slowloris-style attacks |
+| **Gateway IP safety** | ChanNet gateway posts carry no IP address; `ip_hash` is nullable throughout — `NULL` rendered as empty string, never causes a 500 |
+| **Atomic config writes** | `settings.toml` written via temp-file-then-rename; config never partially written on crash |
 
 <br>
 
@@ -543,7 +667,13 @@ Six built-in themes, selectable via the floating picker on every page. Persisted
 
 See **[CHANGELOG.md](CHANGELOG.md)** for the full version history.
 
-**Latest — v1.0.13:**
+**Latest — v1.1.0-alpha.2:**
+**Tor migrated to Arti (built-in, no system `tor` required)** — Arti bootstraps in-process at startup, derives a `.onion` address from a persistent keypair in `arti_state/keys/`, and proxies onion connections to the local HTTP port; no subprocess, no `torrc`, no hostname file polling · Critical fix: ChanNet gateway posts have no IP — `ip_hash` changed to `Option<String>` throughout (no more 500s on pages with gateway posts) · Log files now written to `rustchan-data/` (not the binary directory) · Log file names fixed (`rustchan.2024-01-15.log` format) · Logs changed from dense JSON to human-readable text · Per-field multipart size caps (~100 KB body, ~4 KB name/subject) eliminate OOM risk from oversized form submissions · Poll duration overflow hardened · Backup system rewrites: `rusqlite::backup` API replaces fragile SQL string, RAII temp-file cleanup, pool exhaustion → 503 · DB pool size configurable; `r2d2::Error` correctly maps to 503 · All write transactions upgraded from DEFERRED to `BEGIN IMMEDIATE` · Rotating log files prevent disk exhaustion · 304 response builders fixed · Atomic `settings.toml` writes · Request timeout middleware (slowloris protection) · Worker `JoinHandle`s persisted; graceful shutdown via `CancellationToken` + bounded await · Job recovery on startup for interrupted jobs · ChanNet server graceful shutdown unified with main HTTP server · Background tasks use `tokio::select!` for clean cancellation
+
+**v1.1.0-alpha.1:**
+ChanNet API on port 7070 (federation + RustWave gateway) · Major codebase refactor: `main.rs` shrunk from 1,757 → ~50 lines; `handlers/admin.rs` split into 6 focused files; new `server/` module (server, console, CLI); new `src/media/` module (ffmpeg, convert, thumbnail, exif) · BMP, TIFF, SVG upload support · GIF→WebM inline conversion · All thumbnails output as WebP · SVG placeholders for video/audio/SVG sources · PNG→WebP with size-check fallback · Atomic temp-then-rename for all conversions
+
+**v1.0.13:**
 Scheduled VACUUM · expired poll vote cleanup · DB size warning banner · job queue back-pressure · duplicate media job coalescing · configurable ffmpeg timeout · global `archive_before_prune` flag · waveform cache eviction · streaming multipart · ETag / Conditional GET (304) · gzip/Brotli/zstd response compression · manual Tokio blocking pool sizing · EXIF orientation correction · streaming backup I/O (peak RAM ~64 KiB) · **ChanClassic** theme · `default_theme` + `site_subtitle` in `settings.toml` · default theme selector in admin panel · admin panel reorganised · prepared statement caching audit · `RETURNING` clause for inserts · 32 MiB SQLite page cache · two new DB indexes (`idx_posts_thread_id`, `idx_posts_ip_hash`)
 
 **v1.0.12:** Database module split into 5 focused files · template module split into 5 focused files · PoW bypass on replies fixed (critical) · PoW nonce replay protection · inline JS fully eliminated (`script-src 'self'` CSP) · backup upload size cap (512 MiB) · post rate limiting simplified · `/api/` routes excluded from GET rate limit · trailing slash 404s fixed
@@ -566,7 +696,7 @@ Scheduled VACUUM · expired poll vote cleanup · DB size warning banner · job q
 
 <div align="center">
 
-Built with 🦀 Rust &nbsp;·&nbsp; Powered by SQLite &nbsp;·&nbsp; Optional integrations: ffmpeg · Tor
+Built with 🦀 Rust &nbsp;·&nbsp; Powered by SQLite &nbsp;·&nbsp; Optional: ffmpeg &nbsp;·&nbsp; Tor built-in via Arti
 
 *Drop it anywhere. It just runs.*
 

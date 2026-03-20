@@ -3,7 +3,242 @@
 All notable changes to RustChan will be documented in this file.
 
 ---
-## [1.1.0]
+
+## [1.1.0 alpha 2]
+
+### Fixed
+
+#### 🔴 Critical — HTTP 500 errors on pages with gateway posts
+**Problem:** Posts from the ChanNet gateway have no IP address, causing crashes when pages try to display them.
+
+**Solution:** Changed `ip_hash` from `String` to `Option<String>` throughout the codebase so `NULL` values are handled gracefully instead of panicking.
+
+**Files changed:**
+- `src/models.rs`, `src/db/posts.rs`, `src/db/admin.rs` — Handle optional IP hashes
+- `src/templates/thread.rs`, `src/templates/admin.rs` — Render empty string for missing IPs
+- `src/handlers/admin/backup.rs`, `src/handlers/backup.rs` — Preserve `NULL` on backup/restore
+
+---
+
+#### 🟠 Log files written to wrong directory
+**Problem:** Logs were created in the executable folder instead of `rustchan-data/`.
+
+**Solution:** Pass `data_dir` instead of `binary_dir` to the logger, and create the directory *before* logging initializes.
+
+**Files changed:** `src/main.rs`
+
+---
+
+#### 🟠 Log file names have wrong extension
+**Problem:** Rotated logs named `rustchan.log.2024-01-15` instead of `rustchan.2024-01-15.log`.
+
+**Solution:** Use `RollingFileAppender::builder()` with `.filename_prefix()` and `.filename_suffix()` for correct naming.
+
+**Files changed:** `src/logging.rs`
+
+---
+
+#### 🟡 Log files changed from JSON to readable text
+**Problem:** Logs were dense JSON, hard to read with `tail`, `grep`, etc.
+
+
+## Reliability & Shutdown Improvements
+
+---
+
+## Multipart Handling & Memory Safety (`src/handlers/mod.rs`)
+
+- Added strict per-field size limits for multipart text inputs:
+  - Post body capped (~100KB)
+  - Name, subject, and other fields capped (~4KB)
+- Replaced unbounded `field.text()` usage with controlled byte-reading logic
+- Prevented large heap allocations from oversized text fields
+- Eliminated OOM risk under concurrent large-form submissions
+
+- Hardened poll duration parsing:
+  - Added validation before multiplication
+  - Prevented intermediate integer overflow prior to clamping
+
+---
+
+## Backup System Reliability (`src/handlers/admin/backup.rs`)
+
+- Replaced fragile `VACUUM INTO` string-based SQL with `rusqlite::backup` API
+- Eliminated dependency on manual SQL escaping and path formatting
+- Improved cross-platform correctness and error transparency
+
+- Implemented guaranteed temporary file cleanup:
+  - Introduced RAII-style cleanup mechanism
+  - Ensures backup artifacts are removed even on:
+    - client disconnects
+    - early termination
+    - runtime drops
+
+- Improved error signaling:
+  - Database pool exhaustion now correctly returns retryable errors (503) instead of 500
+
+---
+
+## Tor — Arti In-Process Migration
+
+Replaced the subprocess-based C Tor launcher with **[Arti](https://gitlab.torproject.org/tpo/core/arti)** running fully in-process. **No system `tor` installation is required.**
+
+**How it works:** at startup a single Tokio task bootstraps Arti, derives a `.onion` address from a persistent Ed25519 keypair, launches the hidden service, and proxies inbound onion connections to the local HTTP port — all without spawning a child process, writing a `torrc`, or polling a `hostname` file.
+
+- Bootstrap takes ~30 s on first run (Arti downloads ~2 MB of directory data) and ~5 s on subsequent runs (consensus cached in `arti_cache/`)
+- The onion address is published to `AppState` the moment the service is ready; handlers read it from memory with zero filesystem I/O per request
+- Service keypair lives in `rustchan-data/arti_state/keys/` — back this directory up to preserve your `.onion` address; delete it to rotate to a new one
+- Old `rustchan-data/tor_data/`, `rustchan-data/tor_hidden_service/`, and `rustchan-data/torrc` are no longer created and can be safely deleted after migration
+- **Note:** the keypair location changed on migration (`tor_hidden_service/` → `arti_state/keys/`), so a new `.onion` address is generated on first run unless the old Ed25519 key is manually imported via Arti's key management tooling
+
+**Files changed:** `Cargo.toml` (+6 deps: `arti-client`, `tor-hsservice`, `tor-cell`, `futures`, `sha3`, `data-encoding`), `src/detect.rs`, `src/middleware/mod.rs`, `src/server/server.rs`, `src/handlers/board.rs`, `src/handlers/admin/mod.rs`, `src/handlers/admin/settings.rs`, `src/config.rs`
+
+---
+
+## Database Layer Improvements (`src/db/mod.rs`)
+
+- Made database connection pool size configurable via environment/config
+- Removed hardcoded pool limit to improve scalability under load
+
+- Corrected error mapping:
+  - `r2d2::Error` (pool exhaustion) now maps to `503 Service Unavailable`
+  - Prevents misclassification of load-related failures as internal errors
+
+- Removed silent fallback in initialization logic:
+  - Replaced `unwrap_or(0)` with proper error propagation
+  - Prevents incorrect “first-run” detection on DB failure
+
+---
+
+## Transaction Safety & Concurrency (`src/db/threads.rs`, `src/db/posts.rs`, `src/db/admin.rs`, `src/db/boards.rs`)
+
+- Replaced `unchecked_transaction()` (DEFERRED) with explicit `BEGIN IMMEDIATE`
+- Ensured write locks are acquired at transaction start
+- Eliminated mid-transaction lock upgrade failures (`SQLITE_BUSY`)
+- Improved consistency and reliability under concurrent write load
+
+---
+
+## Logging System Stability (`src/logging.rs`)
+
+- Replaced unbounded log file (`rolling::never`) with rotating log strategy
+- Prevented uncontrolled log growth and disk exhaustion
+- Improved long-term operational stability in production environments
+
+---
+
+## HTTP Response Correctness (`src/handlers/thread.rs`, `src/handlers/board.rs`)
+
+- Removed `.unwrap_or_default()` from 304 response builders
+- Replaced with explicit, safe response construction
+- Ensured correct HTTP semantics for cache validation responses
+
+---
+
+## Configuration File Safety (`src/config.rs`)
+
+- Replaced non-atomic file writes with atomic write pattern:
+  - write to temporary file
+  - persist via rename
+- Prevented configuration corruption on crash or partial write
+
+---
+
+## Cross-Cutting Improvements
+
+### Error Handling
+
+- Reduced silent error suppression patterns
+- Improved propagation and visibility of operational failures
+- Increased observability of system state under failure conditions
+
+---
+
+### Database Reliability
+
+- Standardized transaction patterns across modules
+- Improved behavior under high contention scenarios
+- Reduced retry loops and transient DB errors
+
+---
+
+## Summary
+
+These changes collectively improve:
+
+- Memory safety under user input
+- Database correctness under concurrency
+- Crash resilience and panic handling
+- Backup integrity and filesystem safety
+- Logging reliability and disk usage control
+- Accuracy of error reporting and HTTP responses
+
+Resulting in a significantly more robust and production-ready system.
+
+### Worker Lifecycle Management (`src/server/server.rs`, `src/workers/mod.rs`)
+
+- Persisted `JoinHandle`s returned by the worker pool instead of discarding them
+- Implemented proper graceful shutdown by:
+  - Signaling worker cancellation via `CancellationToken`
+  - Awaiting all worker tasks with bounded timeouts
+- Eliminated reliance on fixed sleep-based shutdown timing
+- Prevented corruption of in-progress jobs (e.g., FFmpeg transcodes)
+- Enabled deterministic shutdown behavior for background workers
+
+### Job Recovery
+
+- Added startup recovery logic to reset jobs stuck in `running` state
+- Ensures jobs interrupted during shutdown are retried instead of permanently stalled
+
+---
+
+## ChanNet Server Shutdown (`src/server/server.rs`)
+
+- Added graceful shutdown support to ChanNet server
+- Unified shutdown signal with main HTTP server
+- Prevents abrupt termination of in-flight federation requests
+- Eliminates risk of partial/corrupt response streams during shutdown
+
+---
+
+## Background Task Control (`src/server/server.rs`)
+
+- Integrated cancellation awareness into background tasks
+- Replaced infinite loops with `tokio::select!` to listen for shutdown signals
+- Ensures all periodic tasks (cleanup, pruning, etc.) terminate cleanly
+- Reduces risk of abrupt termination mid-operation
+
+---
+
+## HTTP Reliability (`src/server/server.rs`)
+
+- Added request timeout middleware
+- Protects against slow or stalled clients holding connections indefinitely
+- Improves resilience against slowloris-style behavior
+
+---
+
+## Worker System Stability (`src/workers/mod.rs`)
+
+- Ensured worker pool properly integrates with shutdown lifecycle
+- Improved coordination between job queue and worker threads
+- Reinforced guarantees around job completion and cancellation handling
+
+---
+
+## Summary
+
+These changes significantly improve:
+
+- Graceful shutdown correctness
+- Background task reliability
+- Job processing integrity
+- Resistance to partial writes and corruption
+- Operational stability under restart conditions
+
+---
+
+## [1.1.0 alpha 1]
 
 ## 🌐 New: ChanNet API (Port 7070)
 

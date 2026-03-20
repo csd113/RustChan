@@ -87,6 +87,9 @@ struct SettingsFile {
     /// Defaults to logical CPUs × 4. Increase if DB/render latency is a bottleneck
     /// under load.
     blocking_threads: Option<usize>,
+    /// `SQLite` connection pool size. Default: 8.
+    /// Increase on high-traffic deployments; each connection uses ~32 MiB page cache.
+    db_pool_size: Option<u32>,
     // ── ChanNet / RustWave gateway ────────────────────────────────────────────
     /// Base URL of the connected `RustWave` instance.
     /// Must begin with http:// or https://. Default: <http://localhost:7071>.
@@ -158,9 +161,11 @@ max_video_size_mb = 50
 # Maximum size for audio uploads in megabytes (mp3, ogg, flac, wav, m4a, aac).
 max_audio_size_mb = 150
 
-# Tor Onion Service support.
-# When true, the server probes for `tor` at startup and prints torrc hints.
-# The server always starts regardless — this is purely informational.
+# Tor Onion Service support (powered by Arti — no system tor required).
+# When true, Arti bootstraps at startup and hosts a .onion hidden service.
+# First run downloads ~2 MB of directory data and takes ~30 s.
+# The service keypair lives in rustchan-data/arti_state/keys/ — back it up.
+# Delete that directory to rotate to a new .onion address.
 enable_tor_support = true
 
 # Set to true to hard-exit at startup when ffmpeg is not found.
@@ -299,6 +304,8 @@ pub struct Config {
     pub waveform_cache_max_bytes: u64,
     /// Number of threads in Tokio's blocking pool. Default: logical CPUs × 4.
     pub blocking_threads: usize,
+    /// `SQLite` `r2d2` connection pool size (default 8).
+    pub db_pool_size: u32,
 
     // ── ChanNet / RustWave gateway (Step 1.2) ────────────────────────────────
     /// Base URL of the connected `RustWave` instance (must begin with http:// or https://).
@@ -476,6 +483,8 @@ impl Config {
                 }
             },
 
+            db_pool_size: env_parse("CHAN_DB_POOL_SIZE", s.db_pool_size.unwrap_or(8)),
+
             // ChanNet fields
             rustwave_url,
             chan_net_bind,
@@ -585,7 +594,12 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Warning: could not read settings.toml for update: {e}");
+            tracing::warn!(
+                target: "config",
+                path = %path.display(),
+                error = %e,
+                "Could not read settings.toml for update"
+            );
             return;
         }
     };
@@ -614,8 +628,44 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
         out.push('\n');
     }
 
-    if let Err(e) = std::fs::write(&path, out) {
-        eprintln!("Warning: could not write updated settings.toml: {e}");
+    // Atomic write: write to a temp file in the same directory, then rename
+    // over the target. This prevents a partial write from corrupting settings.toml
+    // if the process is killed mid-write (rename(2) is atomic on POSIX).
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    match tempfile::Builder::new()
+        .prefix(".settings_")
+        .suffix(".tmp")
+        .tempfile_in(dir)
+    {
+        Err(e) => {
+            tracing::warn!(
+                target: "config",
+                path = %path.display(),
+                error = %e,
+                "Could not create temp file for settings.toml update"
+            );
+        }
+        Ok(mut tmp) => {
+            use std::io::Write as _;
+            let write_result = tmp
+                .write_all(out.as_bytes())
+                .and_then(|()| tmp.as_file().sync_all());
+            if let Err(e) = write_result {
+                tracing::warn!(
+                    target: "config",
+                    path = %path.display(),
+                    error = %e,
+                    "Could not write settings.toml temp file"
+                );
+            } else if let Err(e) = tmp.persist(&path) {
+                tracing::warn!(
+                    target: "config",
+                    path = %path.display(),
+                    error = %e.error,
+                    "Could not atomically replace settings.toml"
+                );
+            }
+        }
     }
 }
 

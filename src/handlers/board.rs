@@ -32,7 +32,6 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use std::collections::HashMap;
-use tracing::info;
 
 const PREVIEW_REPLIES: i64 = 3;
 const THREADS_PER_PAGE: i64 = 10;
@@ -57,19 +56,9 @@ pub async fn index(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    // Read the tor onion address from the hostname file if tor is enabled.
+    // Read the onion address from AppState (populated by the Arti task on startup).
     let onion_address: Option<String> = if crate::config::CONFIG.enable_tor_support {
-        let data_dir = std::path::PathBuf::from(&crate::config::CONFIG.database_path)
-            .parent()
-            .map_or_else(
-                || std::path::PathBuf::from("."),
-                std::path::Path::to_path_buf,
-            );
-        let hostname_path = data_dir.join("tor_hidden_service").join("hostname");
-        std::fs::read_to_string(&hostname_path)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        state.onion_address.read().await.clone()
     } else {
         None
     };
@@ -170,10 +159,12 @@ pub async fn board_index(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if client_etag == etag {
+        // StatusCode::NOT_MODIFIED and Body::empty() are always valid constants;
+        // this builder call is infallible.
         let mut resp = axum::http::Response::builder()
             .status(axum::http::StatusCode::NOT_MODIFIED)
             .body(axum::body::Body::empty())
-            .unwrap_or_default();
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
         resp.headers_mut().insert(
             "etag",
             axum::http::HeaderValue::from_str(&etag)
@@ -407,7 +398,7 @@ pub async fn create_thread(
                 allow_archive: board.allow_archive,
             });
 
-            info!("New thread {thread_id} created in /{}/", board.short_name);
+            tracing::info!(target: "board", thread_id = thread_id, board = %board.short_name, "New thread created");
             Ok(format!("/{}/thread/{thread_id}", board.short_name))
         }
     })
@@ -527,10 +518,12 @@ pub async fn catalog(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if client_etag == etag {
+        // StatusCode::NOT_MODIFIED and Body::empty() are always valid constants;
+        // this builder call is infallible.
         let mut resp = axum::http::Response::builder()
             .status(axum::http::StatusCode::NOT_MODIFIED)
             .body(axum::body::Body::empty())
-            .unwrap_or_default();
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
         resp.headers_mut().insert(
             "etag",
             axum::http::HeaderValue::from_str(&etag)

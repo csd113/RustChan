@@ -16,7 +16,6 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use std::path::PathBuf;
-use tracing::info;
 
 // ─── POST /admin/board/create ─────────────────────────────────────────────────
 
@@ -73,7 +72,7 @@ pub async fn create_board(
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             db::create_board(&conn, &short, &name, &description, nsfw)?;
-            info!("Admin created board /{short}/");
+            tracing::info!(target: "admin", board = %short, "Board created");
             // Refresh live board list so the top bar on any subsequent error
             // page includes the newly created board.
             crate::templates::set_live_boards(db::get_all_boards(&conn)?);
@@ -142,11 +141,7 @@ pub async fn delete_board(
                 }
             }
 
-            info!(
-                "Admin deleted board id={} ({} file(s) removed)",
-                form.board_id,
-                paths.len()
-            );
+            tracing::info!(target: "admin", board_id = form.board_id, files_removed = paths.len(), "Board deleted");
             // Refresh live board list so the top bar immediately stops showing
             // the deleted board — important because error pages use this cache.
             crate::templates::set_live_boards(db::get_all_boards(&conn)?);
@@ -213,7 +208,7 @@ pub async fn thread_action(
                 &board_for_log,
                 "",
             );
-            info!("Admin {action} thread {thread_id}");
+            tracing::info!(target: "admin", action = %action, thread_id = thread_id, "Thread action");
             Ok(())
         }
     })
@@ -334,7 +329,7 @@ pub async fn admin_delete_post(
                 &board_name,
                 &post.body.chars().take(80).collect::<String>(),
             );
-            info!("Admin deleted post {post_id}");
+            tracing::info!(target: "admin", post_id = post_id, "Post deleted");
             // Return board_name + thread context so we can redirect back to the thread.
             // If the post was an OP, redirect to the board index (thread is gone).
             if is_op {
@@ -413,7 +408,7 @@ pub async fn admin_delete_thread(
                 &board_name,
                 "",
             );
-            info!("Admin deleted thread {thread_id}");
+            tracing::info!(target: "admin", thread_id = thread_id, "Thread deleted");
             Ok(board_name)
         }
     })

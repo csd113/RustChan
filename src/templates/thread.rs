@@ -607,7 +607,7 @@ pub fn render_post(
             csrf = escape_html(csrf_token),
             pid = post.id,
             board = escape_html(board_short),
-            ip_hash = escape_html(&post.ip_hash),
+            ip_hash = escape_html(post.ip_hash.as_deref().unwrap_or("")),
             tid = post.thread_id,
             is_op = is_op_val
         );

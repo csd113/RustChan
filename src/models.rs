@@ -138,7 +138,9 @@ pub struct Post {
     pub subject: Option<String>,
     pub body: String,
     pub body_html: String, // pre-rendered HTML (greentext, links, >>refs)
-    pub ip_hash: String,
+    /// SHA-256(IP + secret). `None` for gateway-inserted federation posts
+    /// which have no inbound client IP.
+    pub ip_hash: Option<String>,
     pub file_path: Option<String>,
     pub file_name: Option<String>,
     pub file_size: Option<i64>,
@@ -390,8 +392,9 @@ pub struct ReportWithContext {
     pub board_short: String,
     /// First 120 chars of the reported post body for preview
     pub post_preview: String,
-    /// IP hash of the post's author (for quick ban from the inbox)
-    pub post_ip_hash: String,
+    /// IP hash of the post's author (for quick ban from the inbox).
+    /// `None` for gateway-inserted federation posts which have no client IP.
+    pub post_ip_hash: Option<String>,
 }
 
 /// A single entry in the moderation action log

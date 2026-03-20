@@ -80,6 +80,56 @@ fn encode_q(s: &str) -> String {
 // loops without triggering the "item after statements" clippy lint.
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
+// ─── RAII temp-file cleanup guard ─────────────────────────────────────────────
+//
+// Deletes the wrapped path when dropped — even on early return, panic, or
+// client disconnect.  This replaces the previous 10-minute timer approach that
+// leaked temp files on server restart before the timer fired.
+
+struct TempFileGuard(std::path::PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.0) {
+            // NotFound is fine — means we already cleaned up explicitly.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.0.display(),
+                    error = %e,
+                    "Failed to clean up temp backup file"
+                );
+            }
+        }
+    }
+}
+
+// ─── RAII streaming body wrapper ──────────────────────────────────────────────
+//
+// Holds a `NamedTempFile` alongside the byte stream so the temp file is
+// deleted when the stream is fully consumed OR when the client disconnects
+// early (axum drops the body, which drops this stream, which drops the guard).
+
+struct TempFileStream {
+    inner: ReaderStream<tokio::fs::File>,
+    // Kept for its Drop impl only — deleted when this stream is dropped.
+    _guard: tempfile::NamedTempFile,
+}
+
+// NamedTempFile wraps a File + PathBuf, both Unpin — safe to declare Unpin.
+impl Unpin for TempFileStream {}
+
+impl futures_core::Stream for TempFileStream {
+    type Item = std::io::Result<bytes::Bytes>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        // inner is Unpin (ReaderStream<tokio::fs::File>), so Pin::new is safe.
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
     let session_id = jar
@@ -99,13 +149,24 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             let temp_dir = std::env::temp_dir();
             let tmp_id = uuid::Uuid::new_v4().simple().to_string();
             let temp_db = temp_dir.join(format!("chan_backup_{tmp_id}.db"));
-            let temp_db_str = temp_db
-                .to_str()
-                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path is non-UTF-8")))?
-                .replace('\'', "''");
 
-            conn.execute_batch(&format!("VACUUM INTO '{temp_db_str}'"))
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO failed: {e}")))?;
+            // RAII guard: temp_db is always removed when this guard drops,
+            // including on early return or error.
+            let _temp_db_guard = TempFileGuard(temp_db.clone());
+
+            // FIX[CRIT-3]: Replace VACUUM INTO with rusqlite's backup API.
+            // VACUUM INTO does not accept bound parameters; using format-string
+            // SQL with path escaping is fragile (backslashes, newlines).
+            // Backup::new(src, dst) copies the live DB into `temp_db` safely,
+            // with no SQL string construction.
+            {
+                let mut dst = rusqlite::Connection::open(&temp_db)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open temp DB: {e}")))?;
+                let bk = Backup::new(&conn, &mut dst)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup init: {e}")))?;
+                bk.run_to_completion(100, std::time::Duration::from_millis(0), None)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup copy: {e}")))?;
+            }
             drop(conn);
 
             // Count files for progress bar before compressing.
@@ -142,7 +203,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                 let copied = std::io::copy(&mut db_src, &mut zip)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Stream DB to zip: {e}")))?;
                 drop(db_src);
-                let _ = std::fs::remove_file(&temp_db);
+                // _temp_db_guard will clean up temp_db when the closure returns.
                 progress.files_done.fetch_add(1, Ordering::Relaxed);
                 progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
 
@@ -165,12 +226,14 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 
             let file_size = zip_tmp.as_file().metadata().map(|m| m.len()).unwrap_or(0);
 
-            // Persist the temp file (prevents auto-delete on drop).
-            // We delete it manually in the background after serving.
-            let (_, tmp_path_obj) = zip_tmp.into_parts();
-            let final_path = tmp_path_obj
-                .keep()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Persist temp zip: {e}")))?;
+            // Seek the zip temp file back to the beginning so the async reader
+            // starts from byte 0.  We keep zip_tmp as NamedTempFile (not
+            // persisted) so it auto-deletes when the TempFileStream is dropped —
+            // whether that happens after a clean transfer or an early disconnect.
+            zip_tmp
+                .as_file()
+                .seek(std::io::SeekFrom::Start(0))
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek zip to start: {e}")))?;
 
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
             let fname = format!("rustchan-backup-{ts}.zip");
@@ -178,24 +241,25 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             progress
                 .phase
                 .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
-            Ok((final_path, fname, file_size))
+            Ok((zip_tmp, fname, file_size))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    // MEM-FIX: Stream the zip file from disk in chunks — never load it all into heap.
-    let file = tokio::fs::File::open(&tmp_path)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Open backup for streaming: {e}")))?;
-    let stream = ReaderStream::new(file);
-    let body = axum::body::Body::from_stream(stream);
-
-    // Schedule temp-file cleanup after a generous window so even slow clients finish.
-    let cleanup_path = tmp_path;
-    tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
-        let _ = tokio::fs::remove_file(cleanup_path).await;
+    // FIX[MED-8]: Use TempFileStream — a RAII stream wrapper that holds the
+    // NamedTempFile alongside the reader.  When the body is fully consumed OR
+    // when the client disconnects (axum drops the body), the stream is dropped,
+    // which drops the NamedTempFile, which deletes the temp file.
+    // This replaces the previous 10-minute sleep task that leaked files on restart.
+    let std_file = zip_tmp
+        .as_file()
+        .try_clone()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Clone zip fd: {e}")))?;
+    let tokio_file = tokio::fs::File::from_std(std_file);
+    let body = axum::body::Body::from_stream(TempFileStream {
+        inner: ReaderStream::new(tokio_file),
+        _guard: zip_tmp,
     });
 
     let disposition = format!("attachment; filename=\"{filename}\"");
@@ -820,17 +884,25 @@ pub async fn create_full_backup(
 
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
 
-            // VACUUM INTO for a consistent snapshot.
+            // FIX[CRIT-3]: Replace VACUUM INTO with rusqlite's backup API.
+            // VACUUM INTO uses format-string SQL which is fragile (backslashes,
+            // newlines in temp paths). Backup::new(src, dst) copies the live DB
+            // safely with no SQL string construction.
             let temp_dir = std::env::temp_dir();
             let tmp_id = uuid::Uuid::new_v4().simple().to_string();
             let temp_db = temp_dir.join(format!("chan_backup_{tmp_id}.db"));
-            let temp_db_str = temp_db
-                .to_str()
-                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path non-UTF-8")))?
-                .replace('\'', "''");
 
-            conn.execute_batch(&format!("VACUUM INTO '{temp_db_str}'"))
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {e}")))?;
+            // RAII guard: temp_db is always removed on drop, even on early return.
+            let _temp_db_guard = TempFileGuard(temp_db.clone());
+
+            {
+                let mut dst = rusqlite::Connection::open(&temp_db)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open temp DB: {e}")))?;
+                let bk = Backup::new(&conn, &mut dst)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup init: {e}")))?;
+                bk.run_to_completion(100, std::time::Duration::from_millis(0), None)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup copy: {e}")))?;
+            }
             drop(conn);
 
             // Count files for progress bar before compressing.
@@ -2019,7 +2091,7 @@ mod board_backup_types {
         pub subject: Option<String>,
         pub body: String,
         pub body_html: String,
-        pub ip_hash: Option<String>,
+        pub ip_hash: String,
         pub file_path: Option<String>,
         pub file_name: Option<String>,
         pub file_size: Option<i64>,

@@ -1,70 +1,23 @@
 // detect.rs — Startup detection for optional external tools.
 //
-// Responsibilities:
-//   • detect_ffmpeg() — probe ffmpeg via `ffmpeg -version`
-//   • detect_tor()    — probe tor, set up an isolated hidden-service instance,
-//                       launch it as a background process, and poll for the
-//                       hostname file.  Works alongside a system Tor that is
-//                       already running (brew, apt, systemd, etc.).
+// All terminal output goes through crate::logging helpers so it is
+// serialised with the tracing terminal layer (CONSOLE_MUTEX).  This
+// prevents interleaving with concurrent log events during startup.
 //
-// ── Why a second Tor process is safe ──────────────────────────────────────────
-// The torrc we write contains:
-//
-//   SocksPort  0                  ← disables SOCKS; no port conflict with
-//                                    the system Tor (which owns 9050)
-//   DataDirectory  <data_dir>/tor_data/
-//                                 ← separate lock-file + keys from system Tor
-//
-// This means RustChan's Tor instance owns only the hidden service and nothing
-// else.  It starts cleanly even when brew / apt / systemd Tor is running.
-//
-// ── Platform support ──────────────────────────────────────────────────────────
-//   macOS  (brew): /opt/homebrew/bin/tor  (Apple Silicon)
-//                  /usr/local/bin/tor     (Intel)
-//   Linux  (apt):  /usr/bin/tor  or  bare "tor" on PATH
-//   Other:         bare "tor" on PATH
-//
-// ── Security ──────────────────────────────────────────────────────────────────
-//   • Command arguments are always separate &str / Path values; no shell string.
-//   • We never eval or execute output from spawned processes.
-//   • HiddenServiceDir is mode 0700 so only the running user can read the
-//     private key and hostname files.
-//   • If the spawned Tor process exits within the first few seconds, we capture
-//     and display its stderr so the operator can diagnose the problem.
+// Structured events (info!/warn!/error!) capture the detection result in
+// the JSON log file with structured fields.  Human-readable install
+// instructions are written via console_print_raw so they appear only
+// on TTY-mode terminals and never pollute piped / systemd output.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 /// Result of probing for a tool at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     Available,
     Missing,
-}
-
-// ─── Global Tor child handle (fix #5: orphan-process cleanup) ─────────────────
-//
-// Stored here so that:
-//   • `kill_tor()` can be called from a graceful-shutdown handler, and
-//   • the panic hook registered inside `detect_tor` can kill the child on panic.
-//
-// Callers should invoke `kill_tor()` during their own shutdown path (e.g. after
-// the HTTP server loop exits).  SIGKILL / abrupt process death is handled by the
-// OS on most platforms once the parent exits, but calling `kill_tor()` ensures
-// clean shutdown even for SIGTERM / normal `std::process::exit` paths.
-static TOR_CHILD: OnceLock<Arc<Mutex<std::process::Child>>> = OnceLock::new();
-
-/// Kill the background Tor process that `detect_tor` launched, if any.
-///
-/// Safe to call multiple times; subsequent calls are no-ops.
-pub fn kill_tor() {
-    if let Some(child) = TOR_CHILD.get() {
-        if let Ok(mut c) = child.lock() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
 }
 
 // ─── ffmpeg ───────────────────────────────────────────────────────────────────
@@ -79,25 +32,34 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
         .unwrap_or(false);
 
     if ok {
-        println!("[INFO] ffmpeg detected. Video thumbnails and transcoding enabled.");
+        tracing::info!(target: "detect", available = true, "ffmpeg detected — video thumbnails and transcoding enabled");
         ToolStatus::Available
     } else if require_ffmpeg {
-        eprintln!("[ERROR] ffmpeg required but not installed.");
-        eprintln!("        Install ffmpeg or set require_ffmpeg = false in settings.toml.");
+        tracing::error!(
+            target: "detect",
+            available = false,
+            "ffmpeg required but not installed — set require_ffmpeg = false in settings.toml to disable this check"
+        );
+        crate::logging::console_print_raw(
+            "  Install ffmpeg from: https://ffmpeg.org/download.html\n\n",
+        );
         std::process::exit(1);
     } else {
-        println!("[WARN] ffmpeg not detected. Video thumbnails disabled.");
-        println!("       Install from: https://ffmpeg.org/download.html");
+        tracing::warn!(
+            target: "detect",
+            available = false,
+            "ffmpeg not detected — video thumbnails and transcoding disabled"
+        );
+        if crate::logging::is_tty() {
+            crate::logging::console_print_raw(
+                "  Install from: https://ffmpeg.org/download.html\n\n",
+            );
+        }
         ToolStatus::Missing
     }
 }
 
-/// Probe whether the detected ffmpeg binary has `libwebp` compiled in, and
-/// print actionable install instructions if it does not.
-///
-/// Called immediately after `detect_ffmpeg` at server startup.  Returns
-/// `false` silently when `ffmpeg_ok` is `false` (no point checking encoders
-/// when ffmpeg itself is absent).
+/// Probe whether the detected ffmpeg has `libwebp` compiled in.
 pub fn detect_webp_encoder(ffmpeg_ok: bool) -> bool {
     if !ffmpeg_ok {
         return false;
@@ -106,58 +68,61 @@ pub fn detect_webp_encoder(ffmpeg_ok: bool) -> bool {
     let has_webp = crate::media::ffmpeg::check_webp_encoder();
 
     if has_webp {
-        println!("[INFO] ffmpeg libwebp encoder detected. Image→WebP conversion enabled.");
+        tracing::info!(
+            target: "detect",
+            webp = true,
+            "ffmpeg libwebp encoder available — image to WebP conversion enabled"
+        );
     } else {
-        println!();
-        println!("[WARN] ffmpeg is installed but the libwebp encoder is missing.");
-        println!("       JPEG / PNG / BMP / TIFF uploads will be stored in their");
-        println!("       original format instead of being converted to WebP.");
-        println!();
-
-        // Detect platform and print the appropriate reinstall instructions.
-        #[cfg(target_os = "macos")]
-        {
-            println!("  ── macOS — reinstall ffmpeg with libwebp support ──────────────────");
-            println!("  brew uninstall ffmpeg");
-            println!("  brew tap homebrew-ffmpeg/ffmpeg");
-            println!("  brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-webp");
-            println!();
-            println!("  Verify with:");
-            println!("    ffmpeg -encoders 2>/dev/null | grep webp");
-            println!("  You should see:");
-            println!("    V..... libwebp              libwebp WebP image (codec webp)");
-            println!("    V..... libwebp_anim         libwebp WebP image (codec webp)");
+        tracing::warn!(
+            target: "detect",
+            webp = false,
+            "ffmpeg libwebp encoder missing — JPEG/PNG/BMP/TIFF stored in original format"
+        );
+        if crate::logging::is_tty() {
+            crate::logging::console_print_raw(&webp_install_hint());
         }
-
-        #[cfg(target_os = "linux")]
-        {
-            println!("  ── Linux — install ffmpeg with libwebp support ────────────────────");
-            println!("  sudo apt update");
-            println!("  sudo apt install ffmpeg libwebp-dev");
-            println!();
-            println!("  Verify with:");
-            println!("    ffmpeg -encoders 2>/dev/null | grep webp");
-        }
-
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            println!("  Reinstall ffmpeg with libwebp encoder support enabled.");
-            println!("  See: https://ffmpeg.org/download.html");
-        }
-
-        println!();
     }
 
     has_webp
 }
 
-/// Probe whether the detected ffmpeg binary has both `libvpx-vp9` (video) and
-/// `libopus` (audio) compiled in, and print actionable install instructions if
-/// either is missing.
-///
-/// Both encoders are required for MP4→WebM transcoding and WebM/AV1→WebM/VP9
-/// re-encoding.  Called immediately after `detect_webp_encoder` at server
-/// startup.  Returns `false` silently when `ffmpeg_ok` is `false`.
+fn webp_install_hint() -> String {
+    let mut s = String::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        s.push_str(
+            "  ── macOS: reinstall ffmpeg with libwebp ─────────────────────────────\n\
+             \n\
+             \x1b[2m  brew uninstall ffmpeg\n\
+             \x1b[2m  brew tap homebrew-ffmpeg/ffmpeg\n\
+             \x1b[2m  brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-webp\x1b[0m\n\n",
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        s.push_str(
+            "  ── Linux: install ffmpeg with libwebp ───────────────────────────────\n\
+             \n\
+             \x1b[2m  sudo apt update && sudo apt install ffmpeg libwebp-dev\x1b[0m\n\n",
+        );
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        s.push_str(
+            "  Reinstall ffmpeg with libwebp support. See: https://ffmpeg.org/download.html\n\n",
+        );
+    }
+
+    if !crate::logging::is_tty() {
+        // Strip any ANSI codes we added for TTY mode
+        s.retain(|c| c != '\x1b');
+    }
+    s
+}
+
+/// Probe whether the detected ffmpeg has `libvpx-vp9` + `libopus` compiled in.
 pub fn detect_webm_encoder(ffmpeg_ok: bool) -> bool {
     if !ffmpeg_ok {
         return false;
@@ -168,485 +133,260 @@ pub fn detect_webm_encoder(ffmpeg_ok: bool) -> bool {
     let has_webm = has_vp9 && has_opus;
 
     if has_webm {
-        println!("[INFO] ffmpeg libvpx-vp9 + libopus encoders detected. MP4→WebM transcoding and WebM/AV1→VP9 re-encoding enabled.");
+        tracing::info!(
+            target: "detect",
+            vp9 = true, opus = true,
+            "ffmpeg VP9 + Opus encoders available — MP4 to WebM transcoding enabled"
+        );
     } else {
-        println!();
-        println!("[WARN] ffmpeg is installed but required WebM encoders are missing.");
-
-        if !has_vp9 {
-            println!("       Missing: libvpx-vp9 (VP9 video encoder)");
+        tracing::warn!(
+            target: "detect",
+            vp9   = has_vp9,
+            opus  = has_opus,
+            "ffmpeg VP9/Opus encoders missing — MP4 uploads stored as MP4"
+        );
+        if crate::logging::is_tty() {
+            crate::logging::console_print_raw(&webm_install_hint(has_vp9, has_opus));
         }
-        if !has_opus {
-            println!("       Missing: libopus (Opus audio encoder)");
-        }
-
-        println!();
-        println!("       MP4 uploads will be stored as MP4 instead of being");
-        println!("       transcoded to WebM.  WebM files encoded with AV1 will");
-        println!("       not be re-encoded to the browser-compatible VP9 format.");
-        println!();
-
-        #[cfg(target_os = "macos")]
-        {
-            println!("  ── macOS — reinstall ffmpeg with VP9 + Opus support ───────────────");
-            println!("  brew uninstall ffmpeg");
-            println!("  brew install ffmpeg");
-            println!("  # Or for a fully-featured build:");
-            println!("  brew tap homebrew-ffmpeg/ffmpeg");
-            println!("  brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libvpx --with-opus");
-            println!();
-            println!("  Verify with:");
-            println!("    ffmpeg -encoders 2>/dev/null | grep -E 'libvpx-vp9|libopus'");
-            println!("  You should see:");
-            println!("    V..... libvpx-vp9           libvpx VP9 (codec vp9)");
-            println!("    A..... libopus               libopus Opus (codec opus)");
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            println!("  ── Linux — install ffmpeg with VP9 + Opus support ─────────────────");
-            println!("  sudo apt update");
-            println!("  sudo apt install ffmpeg libvpx-dev libopus-dev");
-            println!();
-            println!("  Verify with:");
-            println!("    ffmpeg -encoders 2>/dev/null | grep -E 'libvpx-vp9|libopus'");
-        }
-
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            println!("  Reinstall ffmpeg with libvpx-vp9 and libopus encoder support enabled.");
-            println!("  See: https://ffmpeg.org/download.html");
-        }
-
-        println!();
     }
 
     has_webm
 }
 
-// ─── Tor ─────────────────────────────────────────────────────────────────────
+fn webm_install_hint(has_vp9: bool, has_opus: bool) -> String {
+    let mut s = String::new();
+    if !has_vp9 {
+        s.push_str("  Missing: libvpx-vp9 (VP9 video encoder)\n");
+    }
+    if !has_opus {
+        s.push_str("  Missing: libopus   (Opus audio encoder)\n");
+    }
+    s.push('\n');
 
-/// Set up and launch a Tor hidden-service instance.
-///
-/// Creates inside `data_dir`:
-///   `tor_data`/           — Tor's `DataDirectory` (lock file, keys, etc.)
-///   `tor_hidden_service`/ — `HiddenServiceDir`  (private key + hostname)
-///   torrc               — auto-generated config
-///
-/// Launches `tor -f <torrc>` as a background process then polls for the
-/// hostname file in a background OS thread.  Returns immediately — the
-/// HTTP server is never blocked.
-///
-/// Returns `ToolStatus::Available` once Tor has been successfully spawned,
-/// or `ToolStatus::Missing` if Tor could not be found or started.
-///
-/// Call `kill_tor()` during graceful shutdown to avoid orphaned processes.
+    #[cfg(target_os = "macos")]
+    {
+        s.push_str(
+            "  ── macOS: reinstall ffmpeg with VP9 + Opus ──────────────────────────\n\
+             \n\
+             \x1b[2m  brew install ffmpeg\x1b[0m\n\n",
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        s.push_str(
+            "  ── Linux: install ffmpeg with VP9 + Opus ────────────────────────────\n\
+             \n\
+             \x1b[2m  sudo apt update && sudo apt install ffmpeg libvpx-dev libopus-dev\x1b[0m\n\n",
+        );
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        s.push_str(
+            "  Reinstall ffmpeg with libvpx-vp9 and libopus support.\n\
+             See: https://ffmpeg.org/download.html\n\n",
+        );
+    }
+
+    if !crate::logging::is_tty() {
+        s.retain(|c| c != '\x1b');
+    }
+    s
+}
+
+// ─── Tor (Arti in-process) ────────────────────────────────────────────────────
 //
-// Fix #7: function now returns ToolStatus so callers can branch on whether
-//         Tor is actually running.
-#[allow(clippy::too_many_lines)]
-#[allow(clippy::expect_used)]
-#[allow(clippy::arithmetic_side_effects)]
-pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> ToolStatus {
+// Previously: spawned the system `tor` binary as a subprocess, wrote a torrc,
+// created two directories with chmod 0700, and polled for the hostname file
+// for up to 120 seconds.
+//
+// Now: spawns one Tokio task that bootstraps Arti in-process, launches the
+// onion service, and proxies incoming connections to the local HTTP server.
+// No subprocess, no torrc, no hostname file, no polling loop.
+
+use arti_client::{config::TorClientConfigBuilder, TorClient};
+use futures::StreamExt;
+use tokio::net::TcpStream;
+use tokio::sync::RwLock;
+use tor_cell::relaycell::msg::Connected;
+use tor_hsservice::{config::OnionServiceConfigBuilder, handle_rend_requests, HsId, StreamRequest};
+
+/// Spawn the Arti in-process Tor task.
+///
+/// Returns `Available` immediately. The onion address becomes available in
+/// `onion_address` roughly 30 seconds later on first run or ~5 seconds on
+/// subsequent runs (consensus served from `arti_cache/`).
+///
+/// If `enable_tor_support` is false this is a no-op and returns `Missing`.
+pub fn detect_tor(
+    enable_tor_support: bool,
+    bind_port: u16,
+    data_dir: &Path,
+    onion_address: Arc<RwLock<Option<String>>>,
+) -> ToolStatus {
     if !enable_tor_support {
         return ToolStatus::Missing;
     }
 
-    // ── 1. Find the tor binary ────────────────────────────────────────────────
-    let candidates = [
-        "/opt/homebrew/bin/tor", // macOS Apple-Silicon brew
-        "/usr/local/bin/tor",    // macOS Intel brew
-        "/usr/bin/tor",          // Linux apt / rpm
-        "tor",                   // anything else on PATH
-    ];
+    let data_dir = data_dir.to_path_buf();
 
-    let tor_bin: Option<&str> = candidates.iter().copied().find(|bin| {
-        // `--version` may return exit code 1 on some builds; treat any
-        // successful spawn (binary found) as "available".
-        Command::new(bin)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
+    tokio::spawn(async move {
+        if let Err(e) = run_arti(data_dir, bind_port, onion_address).await {
+            tracing::error!(target: "detect", error = %e, "Tor: fatal error in Arti task");
+        }
     });
 
-    let Some(tor_bin) = tor_bin else {
-        print_install_instructions(bind_port);
-        return ToolStatus::Missing;
-    };
+    tracing::info!(
+        target: "detect",
+        "Tor: Arti task spawned — bootstrapping in background (first run ~30 s)"
+    );
+    ToolStatus::Available
+}
 
-    println!("[INFO] Tor binary: {tor_bin}");
+/// No-op. Previously killed the tor subprocess.
+/// The [`TorClient`] is owned by the `tokio::spawn` task; dropping the runtime
+/// closes all circuits cleanly.
+#[allow(dead_code)]
+pub const fn kill_tor() {}
 
-    // ── 2. Create directories ─────────────────────────────────────────────────
-    let hs_dir = data_dir.join("tor_hidden_service");
-    let data_subdir = data_dir.join("tor_data");
+// ─── Core Arti task ───────────────────────────────────────────────────────────
 
-    for dir in [&hs_dir, &data_subdir] {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            println!(
-                "[WARN] Tor: cannot create directory '{}': {}",
-                dir.display(),
-                e
-            );
-            print_torrc_hint(&hs_dir, bind_port);
-            return ToolStatus::Missing;
-        }
-    }
-
-    // Tor refuses to use a HiddenServiceDir that is world- or group-readable.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for dir in [&hs_dir, &data_subdir] {
-            if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
-                println!(
-                    "[WARN] Tor: cannot set 0700 on '{}': {} (Tor may reject it)",
-                    dir.display(),
-                    e
-                );
-            }
-        }
-    }
-
-    // ── 3. Write torrc ────────────────────────────────────────────────────────
+async fn run_arti(
+    data_dir: std::path::PathBuf,
+    bind_port: u16,
+    onion_address: Arc<RwLock<Option<String>>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // arti_cache/ — consensus cache (safe to delete; re-fetched on next start).
+    // arti_state/ — service keypair. Back this up.
+    //   Delete it only if you want a new .onion address.
     //
-    // Fix #6: torrc_path is now derived from the canonicalized data_dir so it
-    //         is always an absolute path, regardless of how RustChan was
-    //         invoked.  Tor is started with an absolute path argument, which
-    //         means it works even when Tor's working directory differs from ours.
-    //
-    // Canonical absolute paths avoid problems when Tor's working directory
-    // differs from ours.  canonicalize() is called after the directories exist.
-    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let hs_abs = canon(&hs_dir);
-    let data_abs = canon(&data_subdir);
-    let torrc_path = canon(data_dir).join("torrc"); // fix #6: absolute torrc path
+    // NOTE: TorClientConfigBuilder::from_directories takes AsRef<Path> directly.
+    // Do NOT use the builder().storage().cache_dir(PathBuf) path — CfgPath does
+    // not implement From<PathBuf> and it will not compile.
+    let config = TorClientConfigBuilder::from_directories(
+        data_dir.join("arti_state"),
+        data_dir.join("arti_cache"),
+    )
+    .build()?;
 
-    // Fix #2: paths are quoted so that a data_dir containing spaces does not
-    //         produce a syntactically invalid torrc (Tor treats unquoted
-    //         whitespace as a value delimiter).
-    let torrc = format!(
-        "# RustChan — auto-generated torrc  (do not edit while Tor is running)\n\
-         \n\
-         ## Isolate this instance from any system-level Tor (brew / apt / systemd).\n\
-         ## SocksPort 0  → do not bind a SOCKS port; avoids conflict with port 9050.\n\
-         ## DataDirectory → separate lock file + state from the system Tor.\n\
-         SocksPort 0\n\
-         DataDirectory \"{data}\"\n\
-         \n\
-         ## Hidden service — forwards .onion:80 to the local RustChan port.\n\
-         HiddenServiceDir \"{hs}\"\n\
-         HiddenServicePort 80 127.0.0.1:{port}\n",
-        data = data_abs.display(),
-        hs = hs_abs.display(),
-        port = bind_port,
+    tracing::info!(
+        target: "detect",
+        cache_dir  = %data_dir.join("arti_cache").display(),
+        state_dir  = %data_dir.join("arti_state").display(),
+        "Tor: bootstrapping — first run downloads ~2 MB of directory data"
     );
 
-    if let Err(e) = std::fs::write(&torrc_path, &torrc) {
-        println!(
-            "[WARN] Tor: cannot write torrc to '{}': {}",
-            torrc_path.display(),
-            e
-        );
-        print_torrc_hint(&hs_dir, bind_port);
-        return ToolStatus::Missing;
+    let tor_client = TorClient::create_bootstrapped(config)
+        .await
+        .map_err(|e| format!("Tor bootstrap failed: {e}"))?;
+
+    tracing::info!(target: "detect", "Tor: connected to the Tor network");
+
+    let svc_config = OnionServiceConfigBuilder::default()
+        .nickname("rustchan".parse()?)
+        .build()?;
+
+    let (onion_service, rend_requests) = tor_client
+        .launch_onion_service(svc_config)?
+        .ok_or("launch_onion_service returned None — unexpected with code-only config")?;
+
+    let hsid = onion_service
+        .onion_address()
+        .ok_or("onion_address() returned None immediately after launch")?;
+    let onion_name = hsid_to_onion_address(hsid);
+
+    tracing::info!(
+        target: "detect",
+        onion_address = %onion_name,
+        keys_dir = %data_dir.join("arti_state").join("keys").display(),
+        "Tor: hidden service active"
+    );
+
+    *onion_address.write().await = Some(onion_name.clone());
+
+    if crate::logging::is_tty() {
+        crate::logging::console_print_raw(&format!(
+            "\n\
+            ╔══════════════════════════════════════════════════════╗\n\
+            ║  TOR ONION SERVICE ACTIVE  ✓                         ║\n\
+            ╠══════════════════════════════════════════════════════╣\n\
+            ║  http://{onion:<44}║\n\
+            ║                                                      ║\n\
+            ║  Keys stored at:                                     ║\n\
+            ║    {keys:<50}║\n\
+            ║  Back up this directory to preserve your address.    ║\n\
+            ╚══════════════════════════════════════════════════════╝\n\n",
+            onion = onion_name,
+            keys = data_dir.join("arti_state/keys").display(),
+        ));
     }
 
-    println!("[INFO] Tor: torrc          → {}", torrc_path.display());
-    println!("[INFO] Tor: hidden-svc dir → {}", hs_abs.display());
-    println!("[INFO] Tor: data dir       → {}", data_abs.display());
+    let mut stream_requests = handle_rend_requests(rend_requests);
 
-    // ── 4. Spawn Tor ──────────────────────────────────────────────────────────
-    // Stderr is piped so we can surface diagnostics if Tor exits early.
-    let child = Command::new(tor_bin)
-        .arg("-f")
-        .arg(&torrc_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn();
-
-    let mut child = match child {
-        Err(e) => {
-            println!("[WARN] Tor: failed to start '{tor_bin}': {e}");
-            print_torrc_hint(&hs_dir, bind_port);
-            return ToolStatus::Missing;
-        }
-        Ok(c) => c,
-    };
-
-    // Fix #8: Drain stderr in a dedicated thread to prevent the pipe buffer
-    //         from filling up and blocking Tor.  Without this, a verbose Tor
-    //         (e.g. LogLevel debug) would stall once the OS pipe buffer (~64 KiB)
-    //         fills, causing try_wait() to never see an exit and the 120-second
-    //         poll timeout to fire instead.
-    let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    if let Some(pipe) = child.stderr.take() {
-        let buf = Arc::clone(&stderr_lines);
-        std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            // Cap at 500 lines to bound memory; Tor can be very verbose at
-            // higher log levels.
-            for line in BufReader::new(pipe).lines().map_while(Result::ok).take(500) {
-                buf.lock().expect("stderr buffer mutex poisoned").push(line);
+    while let Some(stream_req) = stream_requests.next().await {
+        let local_addr = format!("127.0.0.1:{bind_port}");
+        tokio::spawn(async move {
+            if let Err(e) = proxy_tor_stream(stream_req, &local_addr).await {
+                tracing::debug!(
+                    target: "detect",
+                    error = %e,
+                    "Tor: stream closed"
+                );
             }
         });
     }
 
-    // Fix #5: Wrap child in Arc<Mutex<>> so it can be shared between:
-    //   • the background monitoring thread (which may call try_wait / kill)
-    //   • the global TOR_CHILD handle (for kill_tor() / panic hook)
-    let child = Arc::new(Mutex::new(child));
-
-    // Store globally so kill_tor() works from any context.
-    let _ = TOR_CHILD.set(Arc::clone(&child));
-
-    // Best-effort cleanup on panic: kill Tor before printing the panic message.
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        kill_tor();
-        prev_hook(info);
-    }));
-
-    let pid = child.lock().expect("child process mutex poisoned").id();
-    println!("[INFO] Tor: process started (pid {pid}). Waiting for .onion address…");
-
-    // ── 5. Quick health-check + hostname polling (background thread) ──────────
-    let hostname_path = hs_abs.join("hostname");
-    let torrc_display = torrc_path.display().to_string();
-    let tor_bin_owned = tor_bin.to_string();
-
-    let child_bg = Arc::clone(&child);
-    let stderr_bg = Arc::clone(&stderr_lines);
-
-    std::thread::spawn(move || {
-        // Give Tor ~4 seconds to either establish itself or fail fast.
-        std::thread::sleep(std::time::Duration::from_secs(4));
-
-        // Fix #4 (early-exit check): use the shared child Arc instead of
-        //         a moved value so the same handle can also be used by
-        //         poll_for_hostname to detect crashes during polling.
-        let try_wait_result = child_bg
-            .lock()
-            .expect("child process mutex poisoned")
-            .try_wait();
-        match try_wait_result {
-            Ok(Some(status)) => {
-                // Process already exited — surface stderr for the operator.
-                let lines = stderr_bg.lock().expect("stderr buffer mutex poisoned");
-                println!();
-                println!("[ERR ] Tor: process exited early ({status})");
-                if !lines.is_empty() {
-                    println!("────── Tor stderr ──────────────────────────────");
-                    for line in lines.iter().take(20) {
-                        println!("  {line}");
-                    }
-                    println!("────────────────────────────────────────────────");
-                }
-                drop(lines);
-                println!();
-                print_diagnosis_hints(&torrc_display, &tor_bin_owned, bind_port);
-                return;
-            }
-            Ok(None) => {
-                // Still running — good.
-            }
-            Err(e) => {
-                println!("[WARN] Tor: could not query process status: {e}");
-                // Continue to poll for the hostname file anyway.
-            }
-        }
-
-        poll_for_hostname(
-            &hostname_path,
-            &child_bg,
-            &stderr_bg,
-            &torrc_display,
-            &tor_bin_owned,
-            bind_port,
-        );
-    });
-
-    ToolStatus::Available
-}
-
-// ─── Hostname polling ─────────────────────────────────────────────────────────
-
-#[allow(clippy::expect_used)]
-#[allow(clippy::arithmetic_side_effects)]
-fn poll_for_hostname(
-    hostname_path: &Path,
-    // Fix #4: child handle passed in so crashes mid-poll are detected promptly
-    //         instead of waiting for the full 120-second timeout.
-    child: &Arc<Mutex<std::process::Child>>,
-    stderr_lines: &Arc<Mutex<Vec<String>>>,
-    torrc_display: &str,
-    tor_bin: &str,
-    bind_port: u16,
-) {
-    const TIMEOUT_SECS: u64 = 120; // v3 onion keys can take ~60–90 s first run
-    const POLL_MS: u64 = 500;
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(TIMEOUT_SECS);
-
-    loop {
-        // Fix #4: check for mid-poll crash every iteration.
-        //         try_lock() is used instead of lock() to be non-blocking;
-        //         if the mutex is momentarily held by the stderr-drain thread
-        //         we simply skip the check this iteration.
-        if let Ok(mut c) = child.try_lock() {
-            if let Ok(Some(status)) = c.try_wait() {
-                let lines = stderr_lines.lock().expect("stderr buffer mutex poisoned");
-                println!();
-                println!("[ERR ] Tor: process crashed during startup ({status})");
-                if !lines.is_empty() {
-                    println!("────── Tor stderr ──────────────────────────────");
-                    for line in lines.iter().take(20) {
-                        println!("  {line}");
-                    }
-                    println!("────────────────────────────────────────────────");
-                }
-                drop(lines);
-                println!();
-                print_diagnosis_hints(torrc_display, tor_bin, bind_port);
-                return;
-            }
-        }
-
-        if hostname_path.exists() {
-            match std::fs::read_to_string(hostname_path) {
-                Ok(raw) => {
-                    let onion = raw.trim();
-                    if !onion.is_empty() {
-                        print_onion_banner(onion, hostname_path);
-                        return;
-                    }
-                    // Empty file — Tor is still writing; retry.
-                }
-                Err(e) => {
-                    println!("[WARN] Tor: hostname unreadable: {e}");
-                }
-            }
-        }
-
-        if std::time::Instant::now() >= deadline {
-            println!();
-            println!("[WARN] Tor: timed out after {TIMEOUT_SECS}s waiting for hostname file.");
-            println!("       Expected at: {}", hostname_path.display());
-            println!();
-            print_diagnosis_hints(torrc_display, tor_bin, bind_port);
-            return;
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
-    }
-}
-
-// ─── Success banner ───────────────────────────────────────────────────────────
-
-/// Print the .onion address in a bordered banner.
-///
-/// Fix #1: The box is wide enough (inner width = 72) to hold a v3 .onion URL
-///         (`http://` + 56-char address + `.onion` = 69 chars) without overflowing.
-///
-/// Fix #3: The private-key-path line used `{:<48}` with a 4-char indent inside
-///         the old 54-char-wide box, producing a line 2 characters short of the
-///         box edge.  Both field widths have been corrected for the new box size.
-fn print_onion_banner(onion: &str, hostname_path: &Path) {
-    // v3 .onion URL: "http://" (7) + 56-char base32 address + ".onion" (6) = 69 chars.
-    // Box inner width 72 gives 3 chars of right-margin after the longest URL.
-    let addr_line = format!("http://{onion}");
-    let key_dir = hostname_path.parent().unwrap_or(hostname_path);
-
-    println!();
-    println!("╔════════════════════════════════════════════════════════════════════════╗");
-    println!("║        TOR ONION SERVICE ACTIVE  ✓                                     ║");
-    println!("╠════════════════════════════════════════════════════════════════════════╣");
-    println!("║  {addr_line:<70}║"); // fix #1: {:<70}, 2+70+1 = inner 72
-    println!("║                                                                        ║");
-    println!("║  Share this with Tor Browser users.                                    ║");
-    println!("║  Your private key is stored at:                                        ║");
-    println!("║    {:<68}║", key_dir.display()); // fix #3: {:<68}, 4+68+1 = inner 72
-    println!("║  Back it up — losing it means a new .onion address.                    ║");
-    println!("╚════════════════════════════════════════════════════════════════════════╝");
-    println!();
-}
-
-// ─── Diagnostic helpers ───────────────────────────────────────────────────────
-
-/// Printed when we know Tor is not installed.
-fn print_install_instructions(bind_port: u16) {
-    println!("[INFO] Tor not found. This server supports Tor Onion Services.");
-    println!();
-    println!("  ── macOS (Homebrew) ────────────────────────────────────────");
-    println!("  brew install tor");
-    println!("  (Re-start RustChan after installing — it configures Tor automatically.)");
-    println!();
-    println!("  ── Debian / Ubuntu ─────────────────────────────────────────");
-    println!("  sudo apt-get install tor");
-    println!("  (Re-start RustChan after installing — it configures Tor automatically.)");
-    println!();
-    println!("  ── Manual (any OS) ─────────────────────────────────────────");
-    println!("  https://www.torproject.org/download/tor/");
-    println!("  Then add to your torrc:");
-    println!("    SocksPort 0");
-    println!("    HiddenServiceDir /path/to/tor_hidden_service/");
-    println!("    HiddenServicePort 80 127.0.0.1:{bind_port}");
-    println!();
-}
-
-/// Printed when Tor crashed or timed out, with actionable next steps.
-fn print_diagnosis_hints(torrc_path: &str, tor_bin: &str, bind_port: u16) {
-    println!("  ── Troubleshooting ─────────────────────────────────────────────────────");
-    println!();
-    println!("  1. Run Tor manually to see live error output:");
-    println!("       {tor_bin} -f {torrc_path}");
-    println!();
-    println!("  2. Common causes:");
-    println!();
-    println!("     a) SocksPort conflict  (rare with our torrc — SocksPort is set to 0)");
-    println!("        Check: lsof -i :9050   or   ss -tlnp | grep 9050");
-    println!();
-    println!("     b) DataDirectory permissions");
-    println!("        Tor requires its data dir to be owned by the current user.");
-    println!("        Fix: chmod 700 <data_dir>/tor_data/");
-    println!();
-    println!("     c) HiddenServiceDir permissions");
-    println!("        Fix: chmod 700 <data_dir>/tor_hidden_service/");
-    println!();
-    println!("     d) Firewall / network — Tor needs outbound TCP on ports 9001 & 443.");
-    println!("        Tor may take several minutes on a first run while it builds");
-    println!("        its circuits.  Try again; the timeout is now 120 seconds.");
-    println!();
-    println!("     e) macOS brew service conflict");
-    println!("        The brew service Tor and RustChan's Tor are independent");
-    println!("        (RustChan uses SocksPort 0 + its own DataDirectory).");
-    println!("        Both should coexist, but if you see lock-file errors, stop");
-    println!("        the brew service first:");
-    println!("          brew services stop tor");
-    println!("        Then restart RustChan.");
-    println!();
-    println!("     f) Linux: SELinux / AppArmor");
-    println!("        Check: sudo journalctl -u tor --since '5 min ago'");
-    println!("        Or:    sudo ausearch -c tor | tail -20");
-    println!();
-    println!("  3. If Tor works but you want to manage it yourself:");
-    println!("       Set  enable_tor_support = false  in settings.toml");
-    println!("       and add to your own torrc:");
-    println!("         HiddenServicePort 80 127.0.0.1:{bind_port}");
-    println!("  ────────────────────────────────────────────────────────────────────────");
-    println!();
-}
-
-/// Printed when we cannot write the torrc / create directories.
-fn print_torrc_hint(hs_dir: &Path, bind_port: u16) {
-    println!("[HINT] Add the following to your torrc and restart Tor:");
-    println!("         SocksPort 0");
-    println!("         DataDirectory /var/lib/tor/rustchan-data/");
-    println!("         HiddenServiceDir {}", hs_dir.display());
-    println!("         HiddenServicePort 80 127.0.0.1:{bind_port}");
-    println!(
-        "       Your .onion address will appear in: {}/hostname",
-        hs_dir.display()
+    tracing::warn!(
+        target: "detect",
+        "Tor: rendezvous stream ended — onion service offline"
     );
+    Ok(())
+}
+
+// ─── Connection proxy ─────────────────────────────────────────────────────────
+
+async fn proxy_tor_stream(
+    stream_req: StreamRequest,
+    local_addr: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut tor_stream = stream_req.accept(Connected::new_empty()).await?;
+    let mut local = TcpStream::connect(local_addr).await?;
+    tokio::io::copy_bidirectional(&mut tor_stream, &mut local).await?;
+    Ok(())
+}
+
+// ─── Onion address encoding ───────────────────────────────────────────────────
+
+/// Encode an [`HsId`] (Ed25519 public key) as a v3 `.onion` address string.
+///
+/// [`HsId`] does not implement `std::fmt::Display` in arti-client 0.40.
+/// Encoded manually using `HsId: AsRef<[u8; 32]>`.
+///
+/// Format: `base32( pubkey || sha3_256(".onion checksum" || pubkey || version)[..2] || version )`
+fn hsid_to_onion_address(hsid: HsId) -> String {
+    use sha3::{Digest, Sha3_256};
+
+    let pubkey: &[u8; 32] = hsid.as_ref();
+    let version: u8 = 3;
+
+    let mut hasher = Sha3_256::new();
+    hasher.update(b".onion checksum");
+    hasher.update(pubkey);
+    hasher.update([version]);
+    let hash = hasher.finalize();
+
+    // Destructure via iterator — avoids the indexing_slicing lint.
+    // Safe: Sha3_256 always produces exactly 32 bytes.
+    let mut iter = hash.iter().copied();
+    let checksum = [iter.next().unwrap_or(0), iter.next().unwrap_or(0)];
+
+    let mut address_bytes = [0u8; 35];
+    address_bytes[..32].copy_from_slice(pubkey);
+    address_bytes[32..34].copy_from_slice(&checksum);
+    address_bytes[34] = version;
+
+    let encoded = data_encoding::BASE32_NOPAD
+        .encode(&address_bytes)
+        .to_ascii_lowercase();
+
+    format!("{encoded}.onion")
 }

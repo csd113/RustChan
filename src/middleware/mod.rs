@@ -137,6 +137,9 @@ pub struct AppState {
     /// even if the ledger is cleared by a server restart.
     pub chan_ledger:
         Option<std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<uuid::Uuid>>>>,
+    /// Onion address populated by the Arti task once the hidden service is ready.
+    /// `None` until Arti has bootstrapped (~30 s first run, ~5 s subsequent runs).
+    pub onion_address: std::sync::Arc<tokio::sync::RwLock<Option<String>>>,
 }
 
 /// Get current Unix timestamp in seconds.

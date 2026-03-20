@@ -15,13 +15,14 @@ Complete setup instructions for Linux, macOS, and Windows.
 7. [First-Run Configuration](#first-run-configuration)
 8. [nginx + TLS](#nginx--tls)
 9. [Tor Hidden Service](#tor-hidden-service)
-10. [Configuration Reference](#configuration-reference)
-11. [Admin Panel](#admin-panel)
-12. [Backups](#backups)
-13. [Raspberry Pi Tips](#raspberry-pi-tips)
-14. [Security Checklist](#security-checklist)
-15. [Updating](#updating)
-16. [Troubleshooting](#troubleshooting)
+10. [ChanNet API](#channet-api)
+11. [Configuration Reference](#configuration-reference)
+12. [Admin Panel](#admin-panel)
+13. [Backups](#backups)
+14. [Raspberry Pi Tips](#raspberry-pi-tips)
+15. [Security Checklist](#security-checklist)
+16. [Updating](#updating)
+17. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -395,6 +396,143 @@ Environment=CHAN_TOR_HOSTNAME_FILE=/custom/path/hostname
 
 ---
 
+## ChanNet API
+
+RustChan includes a built-in federation and gateway server that starts automatically on **port 7070** whenever you run `rustchan-cli`. No extra flags or config keys are needed to enable it — it is always running alongside the main web server on port 8080.
+
+> **Text only.** No images, no media, and no binary data cross the ChanNet interface by design. All payloads are ZIP archives containing structured text (JSON manifests + plain post bodies). Full schema documentation is in `channet_api_reference.docx`.
+
+### Starting the server
+
+Nothing extra is required. When you start RustChan normally, the ChanNet API is already available:
+
+```bash
+# Development
+./rustchan-cli
+
+# Production (systemd)
+sudo systemctl start rustchan-cli
+```
+
+Both the web UI (port 8080) and the ChanNet API (port 7070) start in the same process. Logs for both appear in `rustchan-data/rustchan.YYYY-MM-DD.log`.
+
+### Firewall
+
+If you do **not** need federation, block port 7070 from external access. It is fine to leave it reachable on `localhost` for local tooling.
+
+```bash
+sudo ufw deny 7070/tcp      # block external federation
+sudo ufw allow 8080/tcp     # or let nginx handle 80/443 and deny 8080 externally
+```
+
+If you **do** want to federate with specific peers, allow selectively rather than opening to all:
+
+```bash
+sudo ufw allow from <peer-ip> to any port 7070
+```
+
+### Layer 1 — Node Federation
+
+These endpoints let RustChan nodes sync content with each other. All responses are ZIP archives.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/chan/export` | `GET` | Export all posts from this node as a ZIP snapshot |
+| `/chan/import` | `POST` | Import a ZIP snapshot from a remote node |
+| `/chan/refresh` | `POST` | Pull fresh content from a peer and apply it locally |
+| `/chan/poll` | `GET` | Lightweight delta — returns only content since a given timestamp |
+
+```bash
+# Export your node's posts
+curl http://localhost:7070/chan/export -o my-export.zip
+
+# Import a ZIP from another node
+curl -X POST http://localhost:7070/chan/import \
+     -H "Content-Type: application/zip" \
+     --data-binary @remote-export.zip
+
+# Refresh from a peer (body is the peer's export URL)
+curl -X POST http://localhost:7070/chan/refresh \
+     -H "Content-Type: text/plain" \
+     -d "http://peer.example.com:7070/chan/export"
+
+# Poll for posts newer than a Unix timestamp
+curl "http://localhost:7070/chan/poll?since=1741900000" -o delta.zip
+```
+
+### Layer 2 — RustWave Gateway
+
+`POST /chan/command` accepts a JSON body and returns a ZIP. The `reply_push` command is the only one that writes to the database — all others are read-only exports.
+
+```bash
+# Full export
+curl -X POST http://localhost:7070/chan/command \
+     -H "Content-Type: application/json" \
+     -d '{"command": "full_export"}' \
+     -o full.zip
+
+# Export a single board
+curl -X POST http://localhost:7070/chan/command \
+     -H "Content-Type: application/json" \
+     -d '{"command": "board_export", "board": "b"}' \
+     -o board-b.zip
+
+# Export a single thread
+curl -X POST http://localhost:7070/chan/command \
+     -H "Content-Type: application/json" \
+     -d '{"command": "thread_export", "board": "b", "thread_id": 42}' \
+     -o thread-42.zip
+
+# Export the archive for a board
+curl -X POST http://localhost:7070/chan/command \
+     -H "Content-Type: application/json" \
+     -d '{"command": "archive_export", "board": "b"}' \
+     -o archive.zip
+
+# Force a refresh from a peer
+curl -X POST http://localhost:7070/chan/command \
+     -H "Content-Type: application/json" \
+     -d '{"command": "force_refresh", "peer": "http://peer.example.com:7070"}' \
+     -o result.zip
+
+# Push a reply (only write command)
+curl -X POST http://localhost:7070/chan/command \
+     -H "Content-Type: application/json" \
+     -d '{
+       "command": "reply_push",
+       "board": "b",
+       "thread_id": 42,
+       "body": "Hello from RustWave"
+     }' \
+     -o result.zip
+```
+
+### nginx + ChanNet
+
+If you want to expose the ChanNet API through nginx (e.g. to serve it over HTTPS or from a subdomain), add a second server block:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name channet.your-domain.com;
+
+    location / {
+        proxy_pass         http://127.0.0.1:7070;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Then lock port 7070 from direct external access and let nginx handle it:
+
+```bash
+sudo ufw deny 7070/tcp
+```
+
+---
+
 ## Configuration Reference
 
 All settings can be overridden via environment variables (take precedence over `settings.toml`).
@@ -556,6 +694,7 @@ Before exposing your instance to the internet:
 - [ ] Default admin password changed immediately after first login
 - [ ] Running as `chan` user, not root
 - [ ] Port 8080 firewalled from external access (`ufw deny 8080/tcp`)
+- [ ] Port 7070 (ChanNet API) firewalled unless you intend to federate (`ufw deny 7070/tcp`)
 - [ ] nginx configured with HTTPS (Let's Encrypt)
 - [ ] `CHAN_BEHIND_PROXY=true` set — required for bans and rate limits to work with nginx
 - [ ] `client_max_body_size` in nginx matches your video size limit
@@ -565,7 +704,7 @@ Before exposing your instance to the internet:
 - [ ] Tor hidden service directory owned by `tor` user with mode `700` (if applicable)
 - [ ] `db_warn_threshold_mb` set to a value appropriate for your disk (default: 2048 MiB)
 - [ ] `auto_vacuum_interval_hours` enabled (default: 24) to prevent unbounded DB growth
-- [ ] Log monitoring in place (`journalctl -u rustchan-cli -f`)
+- [ ] Log monitoring in place (`journalctl -u rustchan-cli -f` or `tail -f rustchan-data/rustchan.$(date +%F).log`)
 
 ---
 
@@ -599,14 +738,22 @@ Database migrations run automatically on startup — no manual SQL is ever neede
 **Service won't start:**
 ```bash
 sudo journalctl -u rustchan-cli -n 50 --no-pager
+# Or read the rotating log file directly:
+sudo -u chan tail -n 50 /var/lib/chan/rustchan-data/rustchan.$(date +%F).log
 ```
 Common causes: path doesn't exist or wrong ownership, port already in use, wrong architecture.
+
+**Log files not appearing:**
+Logs are written to `rustchan-data/` (e.g. `rustchan-data/rustchan.2026-03-19.log`), not the directory of the binary. Ensure the `chan` user has write permission to `rustchan-data/`. The directory is created automatically on first run, but will fail silently if permissions are wrong — check `journalctl` output in that case.
 
 **ffmpeg not detected:**
 ```bash
 which ffmpeg && ffmpeg -version
 ```
 If installed to a custom path, add it to PATH in the systemd override. If large videos time out during transcoding, increase `ffmpeg_timeout_secs` in `settings.toml`.
+
+**GIF uploads not converting:**
+GIF→WebM conversion now happens inline at upload time, not in the background worker. If GIF conversion fails, the original GIF is kept and a warning is logged. No restart is needed.
 
 **Tor address not showing:**
 1. Verify Tor is running: `sudo systemctl status tor`
@@ -620,7 +767,7 @@ If installed to a custom path, add it to PATH in the systemd override. If large 
 ls -la /var/lib/chan/rustchan-data/boards/   # check ownership
 sudo nginx -T | grep client_max_body_size    # check nginx limit
 ```
-Large uploads rejected mid-stream indicate the nginx `client_max_body_size` is lower than RustChan's configured limit.
+Large uploads rejected mid-stream indicate the nginx `client_max_body_size` is lower than RustChan's configured limit. Text field rejections (413) indicate the post body exceeded ~100 KB or name/subject fields exceeded ~4 KB.
 
 **Admin login fails:**
 ```bash
@@ -633,7 +780,7 @@ If the login page shows a lockout message, wait for the progressive delay to exp
 Ensure `CHAN_BEHIND_PROXY=true` is set in the systemd override. Without it, RustChan sees all requests as coming from `127.0.0.1`.
 
 **Background jobs not processing:**
-Check `RUST_LOG=rustchan-cli=debug` output for job queue warnings. If jobs are being dropped with "queue at capacity", increase `job_queue_capacity`. If ffmpeg jobs are timing out, increase `ffmpeg_timeout_secs`.
+Check `RUST_LOG=rustchan-cli=debug` output for job queue warnings. If jobs are being dropped with "queue at capacity", increase `job_queue_capacity`. If ffmpeg jobs are timing out, increase `ffmpeg_timeout_secs`. On startup, any jobs that were interrupted mid-run (e.g. by an unclean shutdown) are automatically reset to pending and retried.
 
 **Database integrity:**
 ```bash
@@ -643,5 +790,11 @@ sqlite3 /var/lib/chan/rustchan-data/chan.db "PRAGMA integrity_check;"
 
 **DB growing unboundedly:**
 Verify `auto_vacuum_interval_hours` is non-zero and check the admin panel Database Maintenance section. If the DB exceeds `db_warn_threshold_mb` a red banner will appear. Run a manual VACUUM from the panel after bulk deletions.
+
+**Backup restore returns 503:**
+The backup system now correctly maps database pool exhaustion to 503 (Service Unavailable) instead of 500. This is a retryable condition — wait a moment and try again, or check if the instance is under heavy load.
+
+**ChanNet API not reachable:**
+Verify port 7070 is not firewalled. RustChan logs a startup message confirming the ChanNet server is listening. Check `rustchan-data/rustchan.$(date +%F).log` for any bind errors. If you are behind nginx, ensure you have a separate proxy block for port 7070.
 
 **Memory usage:** Typical idle footprint is 30–60 MiB. Connection pool under load uses ~32 MiB. Image processing may spike to ~64 MiB temporarily. Backup I/O peaks at ~64 KiB regardless of backup size. Well within Raspberry Pi 4 limits when `blocking_threads` is tuned appropriately.

@@ -92,10 +92,20 @@ impl From<rusqlite::Error> for AppError {
     }
 }
 
-// Allow ? operator on r2d2::Error
+// Allow ? operator on r2d2::Error.
+// Pool connection timeouts → DbBusy (503) so clients know to retry.
+// Other pool errors (misconfiguration, driver failure) → Internal (500).
 impl From<r2d2::Error> for AppError {
     fn from(e: r2d2::Error) -> Self {
-        Self::Internal(anyhow::Error::new(e))
+        // r2d2 surfaces timeout as "timed out waiting for connection".
+        // Match on the message rather than a private variant so this keeps
+        // working across r2d2 minor versions.
+        let msg = e.to_string();
+        if msg.contains("timed out") || msg.contains("Timeout") {
+            Self::DbBusy
+        } else {
+            Self::Internal(anyhow::Error::new(e))
+        }
     }
 }
 

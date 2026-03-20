@@ -400,7 +400,7 @@ pub fn get_open_reports(
         };
         let board_short: String = row.get(10)?;
         let body: String = row.get(11)?;
-        let ip_hash: String = row.get(12)?;
+        let ip_hash: Option<String> = row.get(12)?;
         let preview: String = body.chars().take(120).collect();
         Ok(crate::models::ReportWithContext {
             report,
@@ -593,25 +593,36 @@ pub fn dismiss_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64) -> Result
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64, ip_hash: &str) -> Result<()> {
-    // Both updates must succeed together.
-    let tx = conn
-        .unchecked_transaction()
+    // Both updates must succeed atomically; IMMEDIATE prevents write contention.
+    conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin accept-appeal transaction")?;
-    let n = tx
-        .execute(
-            "UPDATE ban_appeals SET status='accepted' WHERE id=?1",
-            params![appeal_id],
-        )
-        .context("Failed to accept ban appeal")?;
-    if n == 0 {
-        tx.rollback().ok();
-        anyhow::bail!("Ban appeal id {appeal_id} not found");
+
+    let result: anyhow::Result<()> = (|| {
+        let n = conn
+            .execute(
+                "UPDATE ban_appeals SET status='accepted' WHERE id=?1",
+                params![appeal_id],
+            )
+            .context("Failed to accept ban appeal")?;
+        if n == 0 {
+            anyhow::bail!("Ban appeal id {appeal_id} not found");
+        }
+        conn.execute("DELETE FROM bans WHERE ip_hash=?1", params![ip_hash])
+            .context("Failed to lift ban during appeal acceptance")?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit accept-appeal transaction")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-    tx.execute("DELETE FROM bans WHERE ip_hash=?1", params![ip_hash])
-        .context("Failed to lift ban during appeal acceptance")?;
-    tx.commit()
-        .context("Failed to commit accept-appeal transaction")?;
-    Ok(())
 }
 
 /// Count of currently open ban appeals.

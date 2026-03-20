@@ -27,7 +27,6 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
-use tracing::info;
 
 // ─── GET /:board/thread/:id ───────────────────────────────────────────────────
 
@@ -103,10 +102,12 @@ pub async fn view_thread(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if client_etag == etag {
+        // StatusCode::NOT_MODIFIED and Body::empty() are always valid; this
+        // builder call is infallible in practice.
         let mut resp = axum::http::Response::builder()
             .status(axum::http::StatusCode::NOT_MODIFIED)
             .body(axum::body::Body::empty())
-            .unwrap_or_default();
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
         resp.headers_mut().insert(
             "etag",
             axum::http::HeaderValue::from_str(&etag)
@@ -328,7 +329,7 @@ pub async fn post_reply(
                 &board.short_name,
             );
 
-            info!("Reply {post_id} posted in thread {thread_id} on /{}/", board.short_name);
+            tracing::info!(target: "board", post_id = post_id, thread_id = thread_id, board = %board.short_name, "Reply posted");
             Ok(format!("/{}/thread/{thread_id}#p{post_id}", board.short_name))
         }
     })
@@ -488,7 +489,7 @@ pub async fn edit_post_post(
         let pool = state.db.clone();
         let csrf_clone = csrf_cookie.clone().unwrap_or_default();
         move || -> Result<EditOutcome> {
-            let mut conn = pool.get()?;
+            let conn = pool.get()?;
 
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
@@ -521,7 +522,7 @@ pub async fn edit_post_post(
             let body_html = crate::utils::sanitize::render_post_body(&escaped);
 
             let success = db::edit_post(
-                &mut conn,
+                &conn,
                 post_id,
                 &token,
                 &body_text,
@@ -557,7 +558,7 @@ pub async fn edit_post_post(
                 return Ok(EditOutcome::ErrorPage(html));
             }
 
-            info!("Post {post_id} edited on /{}/", board.short_name);
+            tracing::info!(target: "board", post_id = post_id, board = %board.short_name, "Post edited");
             Ok(EditOutcome::Redirect(format!(
                 "/{}/thread/{}#p{post_id}",
                 board.short_name, post.thread_id
@@ -632,9 +633,11 @@ pub async fn vote_handler(
             }
 
             db::cast_vote(&conn, poll_id, option_id, &ip_hash)?;
-            info!(
-                "Vote cast on poll {poll_id} option {option_id} by {}",
-                &ip_hash[..8]
+            tracing::info!(
+                target: "board",
+                poll_id = poll_id,
+                option_id = option_id,
+                "Vote cast"
             );
             Ok(format!("/{board_short}/thread/{thread_id}#poll"))
         }

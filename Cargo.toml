@@ -3,7 +3,7 @@ name = "rustchan"
 version = "1.1.0"
 edition = "2021"
 # axum 0.8 requires Rust 1.75; that is the effective floor for this project.
-rust-version = "1.88.0"
+rust-version = "1.90"
 license = "MIT"
 # FIX[LOW-1]: Removed hardware-specific description. This binary is portable
 # and targets any architecture/OS that Rust supports.
@@ -93,6 +93,13 @@ tracing-appender   = "0.2"
 thiserror = "2"
 tempfile  = "3"
 libc      = "0.2"
+
+arti-client   = { version = "0.40", features = ["tokio", "native-tls", "onion-service-service"] }
+tor-hsservice = { version = "0.40" }
+tor-cell      = { version = "0.40" }
+futures       = "0.3"
+sha3          = "0.10"
+data-encoding = "2"
 
 [lints.clippy]
 too_many_arguments             = "allow"

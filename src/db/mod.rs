@@ -45,7 +45,6 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
 use std::collections::HashSet;
 use std::path::Path;
-use tracing::info;
 
 pub mod admin;
 pub mod boards;
@@ -140,9 +139,10 @@ pub fn init_pool() -> Result<DbPool> {
         )
     });
 
-    // FIX[LOW-15]: Pool size comes from config so it can be tuned without
-    // recompiling. Falls back to 8 if not set.
-    let pool_size = 8u32;
+    // Pool size is configurable via CHAN_DB_POOL_SIZE env var or settings.toml.
+    // Falls back to 8 if not set. Each connection holds ~32 MiB of page cache,
+    // so size × 32 MiB sets the upper bound on SQLite memory usage.
+    let pool_size = CONFIG.db_pool_size;
 
     let pool = Pool::builder()
         .max_size(pool_size)
@@ -153,14 +153,17 @@ pub fn init_pool() -> Result<DbPool> {
     let conn = pool.get().context("Failed to get DB connection")?;
     create_schema(&conn)?;
 
-    info!("Database initialised at {}", db_path);
+    tracing::info!(target: "db", path = db_path, "Database initialised");
     Ok(pool)
 }
 
 // ─── First-run check ─────────────────────────────────────────────────────────
 
 /// Check whether this is a first run (no boards and no admins).
-/// Prints a setup banner if so. Called once at server startup.
+///
+/// Logs an info event if no boards exist. The interactive admin-creation
+/// wizard is handled by the caller (server.rs) after this returns, using
+/// `has_no_admin()` to decide whether to prompt.
 ///
 /// # Errors
 /// Returns an error if the database connection cannot be obtained.
@@ -168,26 +171,38 @@ pub fn first_run_check(pool: &DbPool) -> anyhow::Result<()> {
     let conn = pool.get()?;
     let board_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0))
-        .unwrap_or(0);
+        .context("Failed to count boards during first-run check")?;
     let admin_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM admin_users", [], |r| r.get(0))
-        .unwrap_or(0);
+        .context("Failed to count admin users during first-run check")?;
 
-    if board_count == 0 && admin_count == 0 {
-        println!();
-        println!("╔══════════════════════════════════════════════════════╗");
-        println!("║           FIRST RUN — SETUP REQUIRED                 ║");
-        println!("╠══════════════════════════════════════════════════════╣");
-        println!("║  No boards or admin accounts found.                  ║");
-        println!("║  Create your first admin and boards:                 ║");
-        println!("║                                                      ║");
-        println!("║  rustchan-cli admin create-admin admin mypassword    ║");
-        println!("║  rustchan-cli admin create-board b Random \"Anything\" ║");
-        println!("║  rustchan-cli admin create-board tech Technology     ║");
-        println!("╚══════════════════════════════════════════════════════╝");
-        println!();
+    if board_count == 0 {
+        tracing::info!(
+            target: "startup",
+            boards = 0,
+            admins = admin_count,
+            "No boards found — create boards via admin panel or: rustchan-cli admin create-board"
+        );
     }
     Ok(())
+}
+
+/// Returns `true` when the database contains no admin accounts.
+///
+/// Called at startup to decide whether to run the interactive first-run
+/// admin wizard. Returns `false` on any DB error (fail-safe: skip the
+/// wizard rather than blocking startup).
+#[must_use]
+pub fn has_no_admin(pool: &DbPool) -> bool {
+    pool.get()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM admin_users", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .ok()
+        })
+        .is_some_and(|count| count == 0)
 }
 
 // ─── Schema creation & migrations ────────────────────────────────────────────
@@ -538,7 +553,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             [],
             |r| r.get(0),
         )
-        .unwrap_or(0);
+        .context("Failed to read ip_hash nullability from pragma_table_info")?;
 
     if ip_hash_notnull == 1 {
         conn.execute_batch(
@@ -589,7 +604,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("Structural migration: make posts.ip_hash nullable failed")?;
 
-        info!("Applied structural migration: posts.ip_hash is now nullable");
+        tracing::info!(target: "db", "Applied structural migration: posts.ip_hash is now nullable");
     }
 
     // ─── One-time media_type backfill ────────────────────────────────────────
@@ -611,7 +626,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             [],
             |r| r.get(0),
         )
-        .unwrap_or(0);
+        .context("Failed to count posts needing media_type backfill")?;
 
     if needs_backfill > 0 {
         conn.execute_batch(

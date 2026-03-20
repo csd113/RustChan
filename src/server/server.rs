@@ -26,7 +26,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use tracing::info;
 use tracing::Instrument as _;
 
 use crate::config::{check_cookie_secret_rotation, generate_settings_file_if_missing, CONFIG};
@@ -217,20 +216,14 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // only these codecs still enables image conversion and thumbnail generation.
     let ffmpeg_vp9_available = crate::detect::detect_webm_encoder(ffmpeg_available);
 
-    // Tor: create hidden-service directory + torrc, launch tor as a background
-    // process, and poll for the hostname file (all non-blocking).
-    // Fix #1: derive bind_port from `bind_addr` (which already incorporates
-    // port_override) rather than CONFIG.bind_addr.  Previously, starting with
-    // `--port 9000` would still pass 8080 to Tor's HiddenServicePort.
+    // Derive bind_port from `bind_addr` (which already incorporates port_override).
     // rsplit_once(':') handles both IPv4 ("0.0.0.0:9000") and IPv6 ("[::1]:9000").
     let bind_port = bind_addr
         .rsplit_once(':')
         .and_then(|(_, p)| p.parse::<u16>().ok())
         .unwrap_or(8080);
-    crate::detect::detect_tor(CONFIG.enable_tor_support, bind_port, &data_dir);
-    println!();
 
-    // FIX[High-10]: Capture JoinHandles from start_worker_pool so the shutdown
+    // CRIT-1 FIX: Capture JoinHandles from start_worker_pool so the shutdown
     // sequence can await each worker instead of blindly sleeping for 10 s.
     // Previously the return value was silently discarded, making it impossible
     // to know whether in-flight jobs had finished before the process exited.
@@ -251,7 +244,18 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         } else {
             None
         },
+        onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
     };
+
+    // Tor: spawn Arti in-process. The onion address is written to
+    // state.onion_address once Arti has bootstrapped and the hidden service
+    // is active (~30 s first run, ~5 s on subsequent runs).
+    crate::detect::detect_tor(
+        CONFIG.enable_tor_support,
+        bind_port,
+        &data_dir,
+        state.onion_address.clone(),
+    );
     // Keep a reference to the job queue cancel token for graceful shutdown (#7).
     let worker_cancel = state.job_queue.cancel.clone();
     let start_time = Instant::now();
@@ -259,15 +263,25 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // Background: purge expired sessions hourly
     {
         let bg = pool.clone();
+        let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
             let mut iv = tokio::time::interval(Duration::from_secs(3600));
             loop {
-                iv.tick().await;
-                if let Ok(conn) = bg.get() {
-                    match crate::db::purge_expired_sessions(&conn) {
-                        Ok(n) if n > 0 => info!("Purged {n} expired sessions"),
-                        Err(e) => tracing::error!("Session purge error: {e}"),
-                        Ok(_) => {}
+                tokio::select! {
+                    _ = iv.tick() => {
+                        if let Ok(conn) = bg.get() {
+                            match crate::db::purge_expired_sessions(&conn) {
+                                Ok(n) if n > 0 => {
+                                    tracing::info!(target: "sessions", purged = n, "Expired sessions purged");
+                                }
+                                Err(e) => tracing::error!("Session purge error: {e}"),
+                                Ok(_) => {}
+                            }
+                        }
+                    }
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!("Session purge task shutting down");
+                        return;
                     }
                 }
             }
@@ -280,84 +294,129 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     if CONFIG.wal_checkpoint_interval > 0 {
         let bg = pool.clone();
         let interval_secs = CONFIG.wal_checkpoint_interval;
+        let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
             // Stagger the first run by half the interval so it doesn't fire
             // immediately at startup alongside the session purge.
-            tokio::time::sleep(Duration::from_secs(interval_secs / 2 + 1)).await;
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(interval_secs / 2 + 1)) => {}
+                () = cancel_clone.cancelled() => { return; }
+            }
             let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
             loop {
-                iv.tick().await;
-                if let Ok(conn) = bg.get() {
-                    match crate::db::run_wal_checkpoint(&conn) {
-                        Ok((pages, moved, backfill)) => {
-                            tracing::debug!("WAL checkpoint: {pages} pages total, {moved} moved, {backfill} backfilled");
+                tokio::select! {
+                    _ = iv.tick() => {
+                        if let Ok(conn) = bg.get() {
+                            match crate::db::run_wal_checkpoint(&conn) {
+                                Ok((pages, moved, backfill)) => {
+                                    tracing::debug!("WAL checkpoint: {pages} pages total, {moved} moved, {backfill} backfilled");
+                                }
+                                Err(e) => tracing::warn!("WAL checkpoint failed: {e}"),
+                            }
+                            // Fix #7: reuse `conn` instead of calling bg.get() again.
+                            // A second acquire while the first is still alive deadlocks
+                            // with a pool size of 1.
+                            let _ = conn.execute_batch("PRAGMA optimize;");
                         }
-                        Err(e) => tracing::warn!("WAL checkpoint failed: {e}"),
                     }
-                    // Fix #7: reuse `conn` instead of calling bg.get() again.
-                    // A second acquire while the first is still alive deadlocks
-                    // with a pool size of 1.
-                    let _ = conn.execute_batch("PRAGMA optimize;");
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!("WAL checkpoint task shutting down");
+                        return;
+                    }
                 }
             }
         });
     }
 
     // Background: prune stale IPs from ACTIVE_IPS every 5 min
-    tokio::spawn(async move {
-        let mut iv = tokio::time::interval(Duration::from_secs(300));
-        loop {
-            iv.tick().await;
-            let cutoff = Instant::now()
-                .checked_sub(Duration::from_secs(300))
-                .unwrap_or_else(Instant::now);
-            ACTIVE_IPS.retain(|_, last_seen| *last_seen > cutoff);
-        }
-    });
+    {
+        let cancel_clone = worker_cancel.clone();
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                tokio::select! {
+                    _ = iv.tick() => {
+                        let cutoff = Instant::now()
+                            .checked_sub(Duration::from_secs(300))
+                            .unwrap_or_else(Instant::now);
+                        ACTIVE_IPS.retain(|_, last_seen| *last_seen > cutoff);
+                    }
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!("Active IP prune task shutting down");
+                        return;
+                    }
+                }
+            }
+        });
+    }
 
     // Background: prune expired entries from ADMIN_LOGIN_FAILS every 5 min.
     // Prevents unbounded growth under a sustained brute-force attack that
     // never produces a successful login (which would trigger the existing
     // opportunistic prune path inside clear_login_fails).
-    tokio::spawn(async move {
-        let mut iv = tokio::time::interval(Duration::from_secs(300));
-        loop {
-            iv.tick().await;
-            crate::handlers::admin::prune_login_fails();
-        }
-    });
+    {
+        let cancel_clone = worker_cancel.clone();
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                tokio::select! {
+                    _ = iv.tick() => {
+                        crate::handlers::admin::prune_login_fails();
+                    }
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!("Login fail prune task shutting down");
+                        return;
+                    }
+                }
+            }
+        });
+    }
 
     // 1.6: Scheduled database VACUUM — reclaim disk space from deleted posts
     // and threads without requiring manual admin intervention.
     if CONFIG.auto_vacuum_interval_hours > 0 {
         let bg = pool.clone();
         let interval_secs = CONFIG.auto_vacuum_interval_hours * 3600;
+        let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
             // Stagger the first run by half the interval to avoid hammering the
             // DB immediately at startup alongside WAL checkpoint and session purge.
-            tokio::time::sleep(Duration::from_secs(interval_secs / 2 + 7)).await;
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(interval_secs / 2 + 7)) => {}
+                () = cancel_clone.cancelled() => { return; }
+            }
             let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
             loop {
-                iv.tick().await;
-                let bg2 = bg.clone();
-                tokio::task::spawn_blocking(move || {
-                    if let Ok(conn) = bg2.get() {
-                        let before = crate::db::get_db_size_bytes(&conn).unwrap_or(0);
-                        match crate::db::run_vacuum(&conn) {
-                            Ok(()) => {
-                                let after = crate::db::get_db_size_bytes(&conn).unwrap_or(0);
-                                let saved = before.saturating_sub(after);
-                                info!(
-                                    "Scheduled VACUUM complete: {} → {} bytes ({} reclaimed)",
-                                    before, after, saved
-                                );
+                tokio::select! {
+                    _ = iv.tick() => {
+                        let bg2 = bg.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Ok(conn) = bg2.get() {
+                                let before = crate::db::get_db_size_bytes(&conn).unwrap_or(0);
+                                match crate::db::run_vacuum(&conn) {
+                                    Ok(()) => {
+                                        let after = crate::db::get_db_size_bytes(&conn).unwrap_or(0);
+                                        let saved = before.saturating_sub(after);
+                                        tracing::info!(
+                                            target: "db",
+                                            before_bytes = before,
+                                            after_bytes  = after,
+                                            saved_bytes  = saved,
+                                            "VACUUM complete"
+                                        );
+                                    }
+                                    Err(e) => tracing::warn!("Scheduled VACUUM failed: {e}"),
+                                }
                             }
-                            Err(e) => tracing::warn!("Scheduled VACUUM failed: {e}"),
-                        }
+                        })
+                        .await
+                        .ok();
                     }
-                })
-                .await
-                .ok();
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!("VACUUM task shutting down");
+                        return;
+                    }
+                }
             }
         });
     }
@@ -368,27 +427,38 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     if CONFIG.poll_cleanup_interval_hours > 0 {
         let bg = pool.clone();
         let interval_secs = CONFIG.poll_cleanup_interval_hours * 3600;
+        let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(600)).await; // initial delay
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(600)) => {} // initial delay
+                () = cancel_clone.cancelled() => { return; }
+            }
             let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
             loop {
-                iv.tick().await;
-                let bg2 = bg.clone();
-                let retention_cutoff_secs = interval_secs.cast_signed();
-                tokio::task::spawn_blocking(move || {
-                    if let Ok(conn) = bg2.get() {
-                        let cutoff = chrono::Utc::now().timestamp() - retention_cutoff_secs;
-                        match crate::db::cleanup_expired_poll_votes(&conn, cutoff) {
-                            Ok(n) if n > 0 => {
-                                info!("Poll vote cleanup: removed {} expired vote row(s)", n);
+                tokio::select! {
+                    _ = iv.tick() => {
+                        let bg2 = bg.clone();
+                        let retention_cutoff_secs = interval_secs.cast_signed();
+                        tokio::task::spawn_blocking(move || {
+                            if let Ok(conn) = bg2.get() {
+                                let cutoff = chrono::Utc::now().timestamp() - retention_cutoff_secs;
+                                match crate::db::cleanup_expired_poll_votes(&conn, cutoff) {
+                                    Ok(n) if n > 0 => {
+                                        tracing::info!(target: "polls", removed = n, "Expired poll vote rows purged");
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => tracing::warn!("Poll vote cleanup failed: {e}"),
+                                }
                             }
-                            Ok(_) => {}
-                            Err(e) => tracing::warn!("Poll vote cleanup failed: {e}"),
-                        }
+                        })
+                        .await
+                        .ok();
                     }
-                })
-                .await
-                .ok();
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!("Poll vote cleanup task shutting down");
+                        return;
+                    }
+                }
             }
         });
     }
@@ -400,27 +470,57 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // regenerated from the originals.  Uses 1-hour intervals.
     if CONFIG.waveform_cache_max_bytes > 0 {
         let max_bytes = CONFIG.waveform_cache_max_bytes;
+        let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(1800)).await; // initial stagger
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(1800)) => {} // initial stagger
+                () = cancel_clone.cancelled() => { return; }
+            }
             let mut iv = tokio::time::interval(Duration::from_secs(3600));
             loop {
-                iv.tick().await;
-                let upload_dir = CONFIG.upload_dir.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::workers::evict_thumb_cache(&upload_dir, max_bytes);
-                })
-                .await
-                .ok();
+                tokio::select! {
+                    _ = iv.tick() => {
+                        let upload_dir = CONFIG.upload_dir.clone();
+                        tokio::task::spawn_blocking(move || {
+                            crate::workers::evict_thumb_cache(&upload_dir, max_bytes);
+                        })
+                        .await
+                        .ok();
+                    }
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!("Waveform cache eviction task shutting down");
+                        return;
+                    }
+                }
             }
         });
     }
 
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    info!("Listening on  http://{bind_addr}");
-    info!("Admin panel   http://{bind_addr}/admin");
-    info!("Data dir      {}", data_dir.display());
-    println!();
+    tracing::info!(target: "server", addr = %bind_addr, "HTTP server listening");
+    tracing::info!(target: "server", url = %format!("http://{bind_addr}/admin"), "Admin panel");
+    tracing::info!(target: "server", path = %data_dir.display(), "Data directory");
+
+    // First-run admin wizard: if no admin accounts exist and stdout is a TTY,
+    // prompt interactively before starting the keyboard handler (which also
+    // reads stdin).  In non-TTY mode (daemon/systemd) we log a warning instead
+    // so the operator knows to use the CLI.
+    if crate::db::has_no_admin(&pool) {
+        if crate::logging::is_tty() {
+            let stdin = std::io::stdin();
+            // Acquire and immediately pass the stdin lock to the wizard.
+            // The lock is released when `reader` drops at the end of this block,
+            // before spawn_keyboard_handler acquires its own stdin lock below.
+            let mut reader = std::io::BufReader::new(stdin.lock());
+            super::console::prompt_create_first_admin(&pool, &mut reader);
+        } else {
+            tracing::warn!(
+                target: "startup",
+                "No admin accounts exist — run: rustchan-cli admin create-admin <username> <password>"
+            );
+        }
+    }
 
     super::console::spawn_keyboard_handler(pool, start_time);
 
@@ -428,10 +528,17 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let chan_addr = crate::config::CONFIG.chan_net_bind.clone();
         let chan_app = crate::chan_net::chan_router(state.clone());
         let chan_listener = tokio::net::TcpListener::bind(&chan_addr).await?;
-        tracing::info!("ChanNet API listening on http://{chan_addr}/chan/status");
+        tracing::info!(target: "chan_net", addr = %chan_addr, "ChanNet API listening");
+        // CRIT-2 FIX: Wire the same shutdown signal so in-flight federation
+        // requests are drained before the runtime is dropped. Without this the
+        // ChanNet task was detached and forcibly killed on SIGTERM, potentially
+        // corrupting a streaming snapshot response mid-transfer.
         tokio::spawn(async move {
-            if let Err(e) = axum::serve(chan_listener, chan_app.into_make_service()).await {
-                tracing::error!("ChanNet server error: {e}");
+            if let Err(e) = axum::serve(chan_listener, chan_app.into_make_service())
+                .with_graceful_shutdown(shutdown_signal())
+                .await
+            {
+                tracing::error!(target: "chan_net", error = %e, "ChanNet server error");
             }
         });
     }
@@ -443,16 +550,17 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     .with_graceful_shutdown(shutdown_signal())
     .await?;
 
-    // FIX[High-10]: Signal workers and then await each handle with a per-worker
+    // CRIT-1 FIX: Signal workers and then await each handle with a per-worker
     // timeout, replacing the previous blind 10-second sleep. Each worker is
-    // given up to 30 seconds to finish its in-flight job before we give up.
-    info!("Signalling background workers to shut down…");
+    // given up to (ffmpeg_timeout + 10)s to finish its in-flight job.
+    tracing::info!(target: "server", "Signalling background workers to shut down…");
     worker_cancel.cancel();
+    let shutdown_timeout = Duration::from_secs(CONFIG.ffmpeg_timeout_secs + 10);
     for handle in worker_handles {
-        let _ = tokio::time::timeout(Duration::from_secs(30), handle).await;
+        let _ = tokio::time::timeout(shutdown_timeout, handle).await;
     }
 
-    info!("Server shut down gracefully.");
+    tracing::info!(target: "server", "Server shut down gracefully.");
     Ok(())
 }
 
@@ -704,34 +812,57 @@ fn build_router(state: AppState) -> Router {
         // checks both the request scheme and the X-Forwarded-Proto header
         // (set by TLS-terminating proxies) before adding the header.
         .layer(axum_middleware::from_fn(hsts_middleware))
-        // Structured per-request tracing: logs method, URI, status, and
-        // latency for every HTTP request.  Spans are emitted at `info` level;
-        // failures at `error`.  tower_http filter in RUST_LOG controls noise.
+        // MED-4 FIX: Hard per-request timeout to prevent slow-loris style
+        // attacks from holding async tasks indefinitely. Clients that open a
+        // connection but never finish sending the request body will be cut off
+        // after 30 seconds. This covers all routes including file upload
+        // endpoints where the multipart streaming loop could block forever.
+        //
+        // TimeoutLayer injects Box<dyn Error> into the service error type when
+        // a timeout fires. Axum's Router::layer requires all errors to be
+        // Into<Infallible>, so HandleErrorLayer must wrap TimeoutLayer and both
+        // must be bundled inside a ServiceBuilder — applying them as separate
+        // .layer() calls leaves the intermediate error type unresolved and
+        // causes E0277. ServiceBuilder fuses them into a single layer whose
+        // output error type is Infallible.
+        .layer(
+            tower::ServiceBuilder::new()
+                .layer(axum::error_handling::HandleErrorLayer::new(
+                    |_err: tower::BoxError| async {
+                        (axum::http::StatusCode::REQUEST_TIMEOUT, "Request timed out")
+                    },
+                ))
+                .layer(tower::timeout::TimeoutLayer::new(Duration::from_secs(30))),
+        )
+        // HTTP tracing: silent for normal responses, loud for failures.
+        //
+        // on_response is intentionally omitted — logging every 200/304 at INFO
+        // floods the terminal with one line per user action and buries real events.
+        // Operators who want per-request access logs can set RUST_LOG=tower_http=debug.
+        //
+        // on_failure fires for 5xx responses and transport errors at ERROR level.
+        // on_eos fires when a streaming response body closes unexpectedly.
+        // make_span_with creates a DEBUG span so req_id / method / uri are available
+        // in the file log for correlation without appearing on the terminal at INFO.
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
                 .make_span_with(|request: &axum::http::Request<_>| {
-                    tracing::info_span!(
-                        "http_request",
+                    tracing::debug_span!(
+                        "http",
                         method = %request.method(),
                         uri    = %request.uri(),
                     )
                 })
+                // No on_response — 200/304/etc. are completely silent at INFO level.
                 .on_response(
-                    |response: &axum::http::Response<_>,
-                     latency: std::time::Duration,
-                     _span: &tracing::Span| {
-                        tracing::info!(
-                            status = response.status().as_u16(),
-                            latency_ms = latency.as_millis(),
-                            "response sent",
-                        );
-                    },
+                    tower_http::trace::DefaultOnResponse::new().level(tracing::Level::TRACE),
                 )
                 .on_failure(
                     |error: tower_http::classify::ServerErrorsFailureClass,
                      latency: std::time::Duration,
                      _span: &tracing::Span| {
                         tracing::error!(
+                            target: "server",
                             %error,
                             latency_ms = latency.as_millis(),
                             "request failed",
@@ -890,7 +1021,7 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
     tokio::select! {
-        () = ctrl_c => info!("Received Ctrl+C"),
-        () = terminate => info!("Received SIGTERM"),
+        () = ctrl_c =>   tracing::info!(target: "server", signal = "SIGINT",  "Shutdown signal received"),
+        () = terminate => tracing::info!(target: "server", signal = "SIGTERM", "Shutdown signal received"),
     }
 }
