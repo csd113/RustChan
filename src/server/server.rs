@@ -216,17 +216,12 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // only these codecs still enables image conversion and thumbnail generation.
     let ffmpeg_vp9_available = crate::detect::detect_webm_encoder(ffmpeg_available);
 
-    // Tor: create hidden-service directory + torrc, launch tor as a background
-    // process, and poll for the hostname file (all non-blocking).
-    // Fix #1: derive bind_port from `bind_addr` (which already incorporates
-    // port_override) rather than CONFIG.bind_addr.  Previously, starting with
-    // `--port 9000` would still pass 8080 to Tor's HiddenServicePort.
+    // Derive bind_port from `bind_addr` (which already incorporates port_override).
     // rsplit_once(':') handles both IPv4 ("0.0.0.0:9000") and IPv6 ("[::1]:9000").
     let bind_port = bind_addr
         .rsplit_once(':')
         .and_then(|(_, p)| p.parse::<u16>().ok())
         .unwrap_or(8080);
-    crate::detect::detect_tor(CONFIG.enable_tor_support, bind_port, &data_dir);
 
     // CRIT-1 FIX: Capture JoinHandles from start_worker_pool so the shutdown
     // sequence can await each worker instead of blindly sleeping for 10 s.
@@ -249,7 +244,18 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         } else {
             None
         },
+        onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
     };
+
+    // Tor: spawn Arti in-process. The onion address is written to
+    // state.onion_address once Arti has bootstrapped and the hidden service
+    // is active (~30 s first run, ~5 s on subsequent runs).
+    crate::detect::detect_tor(
+        CONFIG.enable_tor_support,
+        bind_port,
+        &data_dir,
+        state.onion_address.clone(),
+    );
     // Keep a reference to the job queue cancel token for graceful shutdown (#7).
     let worker_cancel = state.job_queue.cancel.clone();
     let start_time = Instant::now();

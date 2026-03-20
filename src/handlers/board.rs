@@ -56,19 +56,9 @@ pub async fn index(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    // Read the tor onion address from the hostname file if tor is enabled.
+    // Read the onion address from AppState (populated by the Arti task on startup).
     let onion_address: Option<String> = if crate::config::CONFIG.enable_tor_support {
-        let data_dir = std::path::PathBuf::from(&crate::config::CONFIG.database_path)
-            .parent()
-            .map_or_else(
-                || std::path::PathBuf::from("."),
-                std::path::Path::to_path_buf,
-            );
-        let hostname_path = data_dir.join("tor_hidden_service").join("hostname");
-        std::fs::read_to_string(&hostname_path)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        state.onion_address.read().await.clone()
     } else {
         None
     };

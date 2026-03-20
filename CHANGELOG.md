@@ -79,19 +79,19 @@ All notable changes to RustChan will be documented in this file.
 
 ---
 
-## Tor Detection & Panic Safety (`src/detect.rs`)
+## Tor — Arti In-Process Migration
 
-- Removed all `.expect()` usage on shared mutexes
-- Replaced with poison-tolerant locking strategies
-- Prevented cascade crashes caused by mutex poisoning
+Replaced the subprocess-based C Tor launcher with **[Arti](https://gitlab.torproject.org/tpo/core/arti)** running fully in-process. **No system `tor` installation is required.**
 
-- Hardened global panic hook:
-  - Eliminated potential for double-panic aborts
-  - Replaced blocking locks with `try_lock()` where required
-  - Ensured panic hook never panics under any condition
+**How it works:** at startup a single Tokio task bootstraps Arti, derives a `.onion` address from a persistent Ed25519 keypair, launches the hidden service, and proxies inbound onion connections to the local HTTP port — all without spawning a child process, writing a `torrc`, or polling a `hostname` file.
 
-- Restored original panic hook after Tor lifecycle completes
-- Reduced global side effects of detection logic
+- Bootstrap takes ~30 s on first run (Arti downloads ~2 MB of directory data) and ~5 s on subsequent runs (consensus cached in `arti_cache/`)
+- The onion address is published to `AppState` the moment the service is ready; handlers read it from memory with zero filesystem I/O per request
+- Service keypair lives in `rustchan-data/arti_state/keys/` — back this directory up to preserve your `.onion` address; delete it to rotate to a new one
+- Old `rustchan-data/tor_data/`, `rustchan-data/tor_hidden_service/`, and `rustchan-data/torrc` are no longer created and can be safely deleted after migration
+- **Note:** the keypair location changed on migration (`tor_hidden_service/` → `arti_state/keys/`), so a new `.onion` address is generated on first run unless the old Ed25519 key is manually imported via Arti's key management tooling
+
+**Files changed:** `Cargo.toml` (+6 deps: `arti-client`, `tor-hsservice`, `tor-cell`, `futures`, `sha3`, `data-encoding`), `src/detect.rs`, `src/middleware/mod.rs`, `src/server/server.rs`, `src/handlers/board.rs`, `src/handlers/admin/mod.rs`, `src/handlers/admin/settings.rs`, `src/config.rs`
 
 ---
 

@@ -161,9 +161,11 @@ max_video_size_mb = 50
 # Maximum size for audio uploads in megabytes (mp3, ogg, flac, wav, m4a, aac).
 max_audio_size_mb = 150
 
-# Tor Onion Service support.
-# When true, the server probes for `tor` at startup and prints torrc hints.
-# The server always starts regardless — this is purely informational.
+# Tor Onion Service support (powered by Arti — no system tor required).
+# When true, Arti bootstraps at startup and hosts a .onion hidden service.
+# First run downloads ~2 MB of directory data and takes ~30 s.
+# The service keypair lives in rustchan-data/arti_state/keys/ — back it up.
+# Delete that directory to rotate to a new .onion address.
 enable_tor_support = true
 
 # Set to true to hard-exit at startup when ffmpeg is not found.

@@ -123,6 +123,14 @@ pub async fn admin_panel(
         None
     };
 
+    // Read onion address before entering spawn_blocking — await is not allowed
+    // inside the synchronous closure.
+    let onion_address_val: Option<String> = if CONFIG.enable_tor_support {
+        state.onion_address.read().await.clone()
+    } else {
+        None
+    };
+
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
@@ -161,22 +169,8 @@ pub async fn admin_panel(
                 false
             };
 
-            // Read the tor onion address from the hostname file if tor is enabled.
-            let tor_address: Option<String> = if CONFIG.enable_tor_support {
-                let data_dir = std::path::PathBuf::from(&CONFIG.database_path)
-                    .parent()
-                    .map_or_else(
-                        || std::path::PathBuf::from("."),
-                        std::path::Path::to_path_buf,
-                    );
-                let hostname_path = data_dir.join("tor_hidden_service").join("hostname");
-                std::fs::read_to_string(&hostname_path)
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            } else {
-                None
-            };
+            // Onion address resolved before spawn_blocking (see above).
+            let tor_address: Option<String> = onion_address_val;
 
             let flash_ref = flash.as_ref().map(|(is_err, msg)| (*is_err, msg.as_str()));
 
