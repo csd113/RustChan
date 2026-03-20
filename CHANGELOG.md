@@ -6,6 +6,42 @@ All notable changes to RustChan will be documented in this file.
 
 ## [1.1.0 alpha 2]
 
+### Fixed
+
+#### 🔴 Critical — HTTP 500 errors on pages with gateway posts
+**Problem:** Posts from the ChanNet gateway have no IP address, causing crashes when pages try to display them.
+
+**Solution:** Changed `ip_hash` from `String` to `Option<String>` throughout the codebase so `NULL` values are handled gracefully instead of panicking.
+
+**Files changed:**
+- `src/models.rs`, `src/db/posts.rs`, `src/db/admin.rs` — Handle optional IP hashes
+- `src/templates/thread.rs`, `src/templates/admin.rs` — Render empty string for missing IPs
+- `src/handlers/admin/backup.rs`, `src/handlers/backup.rs` — Preserve `NULL` on backup/restore
+
+---
+
+#### 🟠 Log files written to wrong directory
+**Problem:** Logs were created in the executable folder instead of `rustchan-data/`.
+
+**Solution:** Pass `data_dir` instead of `binary_dir` to the logger, and create the directory *before* logging initializes.
+
+**Files changed:** `src/main.rs`
+
+---
+
+#### 🟠 Log file names have wrong extension
+**Problem:** Rotated logs named `rustchan.log.2024-01-15` instead of `rustchan.2024-01-15.log`.
+
+**Solution:** Use `RollingFileAppender::builder()` with `.filename_prefix()` and `.filename_suffix()` for correct naming.
+
+**Files changed:** `src/logging.rs`
+
+---
+
+#### 🟡 Log files changed from JSON to readable text
+**Problem:** Logs were dense JSON, hard to read with `tail`, `grep`, etc.
+
+
 ## Reliability & Shutdown Improvements
 
 ---

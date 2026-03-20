@@ -51,20 +51,29 @@ use config::CONFIG;
 #[allow(clippy::arithmetic_side_effects)]
 #[allow(clippy::expect_used)]
 fn main() -> anyhow::Result<()> {
-    // Resolve the binary directory so the log file lands alongside the
-    // executable (e.g. /opt/rustchan/rustchan.log).  Falls back to "." if the
-    // path cannot be determined.
+    // Resolve the binary directory, then derive rustchan-data/ so the log
+    // file lands in <exe-dir>/rustchan-data/ alongside the database and
+    // uploads.  Falls back to "./rustchan-data" if the exe path cannot be
+    // determined.
     let binary_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(std::path::PathBuf::from))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    logging::init_logging(&binary_dir);
+    // Create rustchan-data/ before init_logging so the rolling file appender
+    // can open the directory immediately on startup.  run_server() also calls
+    // create_dir_all on this path; calling it twice is safe.
+    let data_dir = binary_dir.join("rustchan-data");
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!("Warning: could not create rustchan-data directory: {e}");
+    }
+
+    logging::init_logging(&data_dir);
 
     tracing::info!(
         target: "startup",
         version = env!("CARGO_PKG_VERSION"),
-        log_dir = %binary_dir.display(),
+        log_dir = %data_dir.display(),
         "rustchan starting",
     );
 
