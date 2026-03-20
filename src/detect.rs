@@ -11,27 +11,13 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 /// Result of probing for a tool at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     Available,
     Missing,
-}
-
-// ─── Global Tor child handle ──────────────────────────────────────────────────
-
-static TOR_CHILD: OnceLock<Arc<Mutex<std::process::Child>>> = OnceLock::new();
-
-#[allow(dead_code)]
-pub fn kill_tor() {
-    if let Some(child) = TOR_CHILD.get() {
-        if let Ok(mut c) = child.lock() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
 }
 
 // ─── ffmpeg ───────────────────────────────────────────────────────────────────
@@ -207,397 +193,200 @@ fn webm_install_hint(has_vp9: bool, has_opus: bool) -> String {
     s
 }
 
-// ─── Tor ─────────────────────────────────────────────────────────────────────
+// ─── Tor (Arti in-process) ────────────────────────────────────────────────────
+//
+// Previously: spawned the system `tor` binary as a subprocess, wrote a torrc,
+// created two directories with chmod 0700, and polled for the hostname file
+// for up to 120 seconds.
+//
+// Now: spawns one Tokio task that bootstraps Arti in-process, launches the
+// onion service, and proxies incoming connections to the local HTTP server.
+// No subprocess, no torrc, no hostname file, no polling loop.
 
-#[allow(clippy::too_many_lines)]
-#[allow(clippy::expect_used)]
-#[allow(clippy::arithmetic_side_effects)]
-pub fn detect_tor(enable_tor_support: bool, bind_port: u16, data_dir: &Path) -> ToolStatus {
+use arti_client::{config::TorClientConfigBuilder, TorClient};
+use futures::StreamExt;
+use tokio::net::TcpStream;
+use tokio::sync::RwLock;
+use tor_cell::relaycell::msg::Connected;
+use tor_hsservice::{config::OnionServiceConfigBuilder, handle_rend_requests, HsId, StreamRequest};
+
+/// Spawn the Arti in-process Tor task.
+///
+/// Returns `Available` immediately. The onion address becomes available in
+/// `onion_address` roughly 30 seconds later on first run or ~5 seconds on
+/// subsequent runs (consensus served from `arti_cache/`).
+///
+/// If `enable_tor_support` is false this is a no-op and returns `Missing`.
+pub fn detect_tor(
+    enable_tor_support: bool,
+    bind_port: u16,
+    data_dir: &Path,
+    onion_address: Arc<RwLock<Option<String>>>,
+) -> ToolStatus {
     if !enable_tor_support {
         return ToolStatus::Missing;
     }
 
-    let candidates = [
-        "/opt/homebrew/bin/tor",
-        "/usr/local/bin/tor",
-        "/usr/bin/tor",
-        "tor",
-    ];
+    let data_dir = data_dir.to_path_buf();
 
-    let tor_bin: Option<&str> = candidates.iter().copied().find(|bin| {
-        Command::new(bin)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
+    tokio::spawn(async move {
+        if let Err(e) = run_arti(data_dir, bind_port, onion_address).await {
+            tracing::error!(target: "detect", error = %e, "Tor: fatal error in Arti task");
+        }
     });
-
-    let Some(tor_bin) = tor_bin else {
-        tracing::warn!(target: "detect", available = false, "Tor not found — onion service disabled");
-        if crate::logging::is_tty() {
-            crate::logging::console_print_raw(&tor_install_hint(bind_port));
-        }
-        return ToolStatus::Missing;
-    };
-
-    tracing::info!(target: "detect", binary = tor_bin, "Tor binary found");
-
-    let hs_dir = data_dir.join("tor_hidden_service");
-    let data_subdir = data_dir.join("tor_data");
-
-    for dir in [&hs_dir, &data_subdir] {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            tracing::warn!(
-                target: "detect",
-                path = %dir.display(),
-                error = %e,
-                "Tor: cannot create directory"
-            );
-            if crate::logging::is_tty() {
-                crate::logging::console_print_raw(&tor_torrc_hint(&hs_dir, bind_port));
-            }
-            return ToolStatus::Missing;
-        }
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for dir in [&hs_dir, &data_subdir] {
-            if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
-                tracing::warn!(
-                    target: "detect",
-                    path = %dir.display(),
-                    error = %e,
-                    "Tor: cannot set 0700 permissions (Tor may reject directory)"
-                );
-            }
-        }
-    }
-
-    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let hs_abs = canon(&hs_dir);
-    let data_abs = canon(&data_subdir);
-    let torrc_path = canon(data_dir).join("torrc");
-
-    let torrc = format!(
-        "# RustChan — auto-generated torrc  (do not edit while Tor is running)\n\
-         \n\
-         SocksPort 0\n\
-         DataDirectory \"{data}\"\n\
-         \n\
-         HiddenServiceDir \"{hs}\"\n\
-         HiddenServicePort 80 127.0.0.1:{port}\n",
-        data = data_abs.display(),
-        hs = hs_abs.display(),
-        port = bind_port,
-    );
-
-    if let Err(e) = std::fs::write(&torrc_path, &torrc) {
-        tracing::warn!(
-            target: "detect",
-            path  = %torrc_path.display(),
-            error = %e,
-            "Tor: cannot write torrc"
-        );
-        if crate::logging::is_tty() {
-            crate::logging::console_print_raw(&tor_torrc_hint(&hs_dir, bind_port));
-        }
-        return ToolStatus::Missing;
-    }
 
     tracing::info!(
         target: "detect",
-        torrc      = %torrc_path.display(),
-        hidden_svc = %hs_abs.display(),
-        data_dir   = %data_abs.display(),
-        "Tor configured"
+        "Tor: Arti task spawned — bootstrapping in background (first run ~30 s)"
+    );
+    ToolStatus::Available
+}
+
+/// No-op. Previously killed the tor subprocess.
+/// The [`TorClient`] is owned by the `tokio::spawn` task; dropping the runtime
+/// closes all circuits cleanly.
+#[allow(dead_code)]
+pub const fn kill_tor() {}
+
+// ─── Core Arti task ───────────────────────────────────────────────────────────
+
+async fn run_arti(
+    data_dir: std::path::PathBuf,
+    bind_port: u16,
+    onion_address: Arc<RwLock<Option<String>>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // arti_cache/ — consensus cache (safe to delete; re-fetched on next start).
+    // arti_state/ — service keypair. Back this up.
+    //   Delete it only if you want a new .onion address.
+    //
+    // NOTE: TorClientConfigBuilder::from_directories takes AsRef<Path> directly.
+    // Do NOT use the builder().storage().cache_dir(PathBuf) path — CfgPath does
+    // not implement From<PathBuf> and it will not compile.
+    let config = TorClientConfigBuilder::from_directories(
+        data_dir.join("arti_state"),
+        data_dir.join("arti_cache"),
+    )
+    .build()?;
+
+    tracing::info!(
+        target: "detect",
+        cache_dir  = %data_dir.join("arti_cache").display(),
+        state_dir  = %data_dir.join("arti_state").display(),
+        "Tor: bootstrapping — first run downloads ~2 MB of directory data"
     );
 
-    let child = Command::new(tor_bin)
-        .arg("-f")
-        .arg(&torrc_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn();
+    let tor_client = TorClient::create_bootstrapped(config)
+        .await
+        .map_err(|e| format!("Tor bootstrap failed: {e}"))?;
 
-    let mut child = match child {
-        Err(e) => {
-            tracing::warn!(
-                target: "detect",
-                binary = tor_bin,
-                error  = %e,
-                "Tor: failed to start process"
-            );
-            if crate::logging::is_tty() {
-                crate::logging::console_print_raw(&tor_torrc_hint(&hs_dir, bind_port));
-            }
-            return ToolStatus::Missing;
-        }
-        Ok(c) => c,
-    };
+    tracing::info!(target: "detect", "Tor: connected to the Tor network");
 
-    let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    if let Some(pipe) = child.stderr.take() {
-        let buf = Arc::clone(&stderr_lines);
-        std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            for line in BufReader::new(pipe).lines().map_while(Result::ok).take(500) {
-                if let Ok(mut g) = buf.lock() {
-                    g.push(line);
-                }
+    let svc_config = OnionServiceConfigBuilder::default()
+        .nickname("rustchan".parse()?)
+        .build()?;
+
+    let (onion_service, rend_requests) = tor_client
+        .launch_onion_service(svc_config)?
+        .ok_or("launch_onion_service returned None — unexpected with code-only config")?;
+
+    let hsid = onion_service
+        .onion_address()
+        .ok_or("onion_address() returned None immediately after launch")?;
+    let onion_name = hsid_to_onion_address(hsid);
+
+    tracing::info!(
+        target: "detect",
+        onion_address = %onion_name,
+        keys_dir = %data_dir.join("arti_state").join("keys").display(),
+        "Tor: hidden service active"
+    );
+
+    *onion_address.write().await = Some(onion_name.clone());
+
+    if crate::logging::is_tty() {
+        crate::logging::console_print_raw(&format!(
+            "\n\
+            ╔══════════════════════════════════════════════════════╗\n\
+            ║  TOR ONION SERVICE ACTIVE  ✓                         ║\n\
+            ╠══════════════════════════════════════════════════════╣\n\
+            ║  http://{onion:<44}║\n\
+            ║                                                      ║\n\
+            ║  Keys stored at:                                     ║\n\
+            ║    {keys:<50}║\n\
+            ║  Back up this directory to preserve your address.    ║\n\
+            ╚══════════════════════════════════════════════════════╝\n\n",
+            onion = onion_name,
+            keys = data_dir.join("arti_state/keys").display(),
+        ));
+    }
+
+    let mut stream_requests = handle_rend_requests(rend_requests);
+
+    while let Some(stream_req) = stream_requests.next().await {
+        let local_addr = format!("127.0.0.1:{bind_port}");
+        tokio::spawn(async move {
+            if let Err(e) = proxy_tor_stream(stream_req, &local_addr).await {
+                tracing::debug!(
+                    target: "detect",
+                    error = %e,
+                    "Tor: stream closed"
+                );
             }
         });
     }
 
-    let child = Arc::new(Mutex::new(child));
-    let _ = TOR_CHILD.set(Arc::clone(&child));
-
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        // A panic hook MUST NOT panic — doing so causes an unconditional abort
-        // with no useful diagnostic output.  We therefore use try_lock() so
-        // that a poisoned or already-locked mutex is silently skipped; the OS
-        // will reap the Tor child on process exit regardless.
-        if let Some(child) = TOR_CHILD.get() {
-            if let Ok(mut c) = child.try_lock() {
-                let _ = c.kill();
-                let _ = c.wait();
-            }
-            // If try_lock fails (mutex poisoned or already held during unwind),
-            // skip the kill — do NOT call .lock()/.expect() here.
-        }
-        prev_hook(info);
-    }));
-
-    // Recover from a poisoned mutex instead of crashing the process.
-    let pid = child
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .id();
-    tracing::info!(target: "detect", pid = pid, "Tor process started — waiting for .onion address");
-
-    let hostname_path = hs_abs.join("hostname");
-    let torrc_display = torrc_path.display().to_string();
-    let tor_bin_owned = tor_bin.to_string();
-
-    let child_bg = Arc::clone(&child);
-    let stderr_bg = Arc::clone(&stderr_lines);
-
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(4));
-
-        let try_wait_result = child_bg
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .try_wait();
-
-        match try_wait_result {
-            Ok(Some(status)) => {
-                let lines = stderr_bg
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                tracing::error!(
-                    target: "detect",
-                    exit_status = %status,
-                    "Tor process exited early"
-                );
-                if crate::logging::is_tty() && !lines.is_empty() {
-                    let mut block =
-                        String::from("\n  ── Tor stderr ──────────────────────────────────\n");
-                    for line in lines.iter().take(20) {
-                        block.push_str("  ");
-                        block.push_str(line);
-                        block.push('\n');
-                    }
-                    block.push_str("  ────────────────────────────────────────────────\n\n");
-                    drop(lines);
-                    crate::logging::console_print_raw(&block);
-                    crate::logging::console_print_raw(&tor_diagnosis_hint(
-                        &torrc_display,
-                        &tor_bin_owned,
-                        bind_port,
-                    ));
-                }
-                return;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(target: "detect", error = %e, "Tor: could not query process status");
-            }
-        }
-
-        poll_for_hostname(
-            &hostname_path,
-            &child_bg,
-            &stderr_bg,
-            &torrc_display,
-            &tor_bin_owned,
-            bind_port,
-        );
-    });
-
-    ToolStatus::Available
+    tracing::warn!(
+        target: "detect",
+        "Tor: rendezvous stream ended — onion service offline"
+    );
+    Ok(())
 }
 
-// ─── Hostname polling ─────────────────────────────────────────────────────────
+// ─── Connection proxy ─────────────────────────────────────────────────────────
 
-#[allow(clippy::expect_used)]
-#[allow(clippy::arithmetic_side_effects)]
-fn poll_for_hostname(
-    hostname_path: &Path,
-    child: &Arc<Mutex<std::process::Child>>,
-    stderr_lines: &Arc<Mutex<Vec<String>>>,
-    torrc_display: &str,
-    tor_bin: &str,
-    bind_port: u16,
-) {
-    const TIMEOUT_SECS: u64 = 120;
-    const POLL_MS: u64 = 500;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(TIMEOUT_SECS);
-
-    loop {
-        if let Ok(mut c) = child.try_lock() {
-            if let Ok(Some(status)) = c.try_wait() {
-                let lines = stderr_lines
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                tracing::error!(
-                    target: "detect",
-                    exit_status = %status,
-                    "Tor process crashed during startup"
-                );
-                if crate::logging::is_tty() && !lines.is_empty() {
-                    let mut block =
-                        String::from("\n  ── Tor stderr ──────────────────────────────────\n");
-                    for line in lines.iter().take(20) {
-                        block.push_str("  ");
-                        block.push_str(line);
-                        block.push('\n');
-                    }
-                    block.push_str("  ────────────────────────────────────────────────\n\n");
-                    drop(lines);
-                    crate::logging::console_print_raw(&block);
-                    crate::logging::console_print_raw(&tor_diagnosis_hint(
-                        torrc_display,
-                        tor_bin,
-                        bind_port,
-                    ));
-                }
-                return;
-            }
-        }
-
-        if hostname_path.exists() {
-            match std::fs::read_to_string(hostname_path) {
-                Ok(raw) => {
-                    let onion = raw.trim();
-                    if !onion.is_empty() {
-                        tracing::info!(
-                            target: "detect",
-                            onion_address = onion,
-                            "Tor hidden service active"
-                        );
-                        if crate::logging::is_tty() {
-                            crate::logging::console_print_raw(&tor_onion_banner(
-                                onion,
-                                hostname_path,
-                            ));
-                        }
-                        return;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(target: "detect", error = %e, "Tor: hostname file unreadable");
-                }
-            }
-        }
-
-        if std::time::Instant::now() >= deadline {
-            tracing::warn!(
-                target: "detect",
-                timeout_secs = TIMEOUT_SECS,
-                hostname_path = %hostname_path.display(),
-                "Tor timed out waiting for hostname file"
-            );
-            if crate::logging::is_tty() {
-                crate::logging::console_print_raw(&tor_diagnosis_hint(
-                    torrc_display,
-                    tor_bin,
-                    bind_port,
-                ));
-            }
-            return;
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
-    }
+async fn proxy_tor_stream(
+    stream_req: StreamRequest,
+    local_addr: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut tor_stream = stream_req.accept(Connected::new_empty()).await?;
+    let mut local = TcpStream::connect(local_addr).await?;
+    tokio::io::copy_bidirectional(&mut tor_stream, &mut local).await?;
+    Ok(())
 }
 
-// ─── Tor print helpers (console_print_raw blocks) ────────────────────────────
+// ─── Onion address encoding ───────────────────────────────────────────────────
 
-fn tor_onion_banner(onion: &str, hostname_path: &Path) -> String {
-    let addr_line = format!("http://{onion}");
-    let key_dir = hostname_path.parent().unwrap_or(hostname_path);
-    format!(
-        "\n\
-        ╔════════════════════════════════════════════════════════════════════════╗\n\
-        ║        TOR ONION SERVICE ACTIVE  ✓                                     ║\n\
-        ╠════════════════════════════════════════════════════════════════════════╣\n\
-        ║  {addr:<70}║\n\
-        ║                                                                        ║\n\
-        ║  Share this with Tor Browser users.                                    ║\n\
-        ║  Your private key is stored at:                                        ║\n\
-        ║    {key:<68}║\n\
-        ║  Back it up — losing it means a new .onion address.                    ║\n\
-        ╚════════════════════════════════════════════════════════════════════════╝\n\n",
-        addr = addr_line,
-        key = key_dir.display(),
-    )
-}
+/// Encode an [`HsId`] (Ed25519 public key) as a v3 `.onion` address string.
+///
+/// [`HsId`] does not implement `std::fmt::Display` in arti-client 0.40.
+/// Encoded manually using `HsId: AsRef<[u8; 32]>`.
+///
+/// Format: `base32( pubkey || sha3_256(".onion checksum" || pubkey || version)[..2] || version )`
+fn hsid_to_onion_address(hsid: HsId) -> String {
+    use sha3::{Digest, Sha3_256};
 
-fn tor_install_hint(bind_port: u16) -> String {
-    format!(
-        "\n\
-        \x1b[2m  ── Install Tor ────────────────────────────────────────────────────────\n\
-          macOS:   brew install tor\n\
-          Linux:   sudo apt-get install tor\n\
-          Other:   https://www.torproject.org/download/tor/\n\
-        \n\
-          After installing, restart RustChan — it configures Tor automatically.\n\
-          Or add to your own torrc:\n\
-            HiddenServicePort 80 127.0.0.1:{bind_port}\x1b[0m\n\n"
-    )
-}
+    let pubkey: &[u8; 32] = hsid.as_ref();
+    let version: u8 = 3;
 
-fn tor_torrc_hint(hs_dir: &Path, bind_port: u16) -> String {
-    format!(
-        "\n  Add to your torrc and restart Tor:\n\
-         \x1b[2m    SocksPort 0\n\
-           DataDirectory /var/lib/tor/rustchan-data/\n\
-           HiddenServiceDir {hs}\n\
-           HiddenServicePort 80 127.0.0.1:{bind_port}\x1b[0m\n\n",
-        hs = hs_dir.display(),
-    )
-}
+    let mut hasher = Sha3_256::new();
+    hasher.update(b".onion checksum");
+    hasher.update(pubkey);
+    hasher.update([version]);
+    let hash = hasher.finalize();
 
-fn tor_diagnosis_hint(torrc_path: &str, tor_bin: &str, bind_port: u16) -> String {
-    format!(
-        "\n  \x1b[2m── Tor troubleshooting ──────────────────────────────────────────────────\n\
-         \n\
-           1. Run manually to see live output:\n\
-                {tor_bin} -f {torrc_path}\n\
-         \n\
-           2. Common causes:\n\
-              a) DataDirectory permissions  — chmod 700 <data_dir>/tor_data/\n\
-              b) HiddenServiceDir perms     — chmod 700 <data_dir>/tor_hidden_service/\n\
-              c) Firewall: Tor needs outbound TCP on ports 9001 and 443.\n\
-              d) macOS brew conflict: brew services stop tor, then restart RustChan.\n\
-              e) Linux SELinux/AppArmor: sudo journalctl -u tor --since '5 min ago'\n\
-         \n\
-           3. To manage Tor yourself:\n\
-              Set enable_tor_support = false in settings.toml\n\
-              and add to your torrc:  HiddenServicePort 80 127.0.0.1:{bind_port}\x1b[0m\n\n"
-    )
+    // Destructure via iterator — avoids the indexing_slicing lint.
+    // Safe: Sha3_256 always produces exactly 32 bytes.
+    let mut iter = hash.iter().copied();
+    let checksum = [iter.next().unwrap_or(0), iter.next().unwrap_or(0)];
+
+    let mut address_bytes = [0u8; 35];
+    address_bytes[..32].copy_from_slice(pubkey);
+    address_bytes[32..34].copy_from_slice(&checksum);
+    address_bytes[34] = version;
+
+    let encoded = data_encoding::BASE32_NOPAD
+        .encode(&address_bytes)
+        .to_ascii_lowercase();
+
+    format!("{encoded}.onion")
 }

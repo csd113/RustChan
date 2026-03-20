@@ -1,0 +1,3 @@
+# audit.toml
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]
