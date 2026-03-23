@@ -218,10 +218,20 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     // Derive bind_port from `bind_addr` (which already incorporates port_override).
     // rsplit_once(':') handles both IPv4 ("0.0.0.0:9000") and IPv6 ("[::1]:9000").
+    // F-07: Log a warning if parsing fails so the operator knows Tor proxy is
+    // using a fallback port that may not match the actual HTTP listener.
     let bind_port = bind_addr
         .rsplit_once(':')
         .and_then(|(_, p)| p.parse::<u16>().ok())
-        .unwrap_or(8080);
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                target: "server",
+                bind_addr = %bind_addr,
+                fallback = 8080,
+                "Could not parse port from bind_addr — Tor proxy will use port 8080"
+            );
+            8080
+        });
 
     // CRIT-1 FIX: Capture JoinHandles from start_worker_pool so the shutdown
     // sequence can await each worker instead of blindly sleeping for 10 s.
@@ -247,16 +257,9 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
     };
 
-    // Tor: spawn Arti in-process. The onion address is written to
-    // state.onion_address once Arti has bootstrapped and the hidden service
-    // is active (~30 s first run, ~5 s on subsequent runs).
-    crate::detect::detect_tor(
-        CONFIG.enable_tor_support,
-        bind_port,
-        &data_dir,
-        state.onion_address.clone(),
-    );
-    // Keep a reference to the job queue cancel token for graceful shutdown (#7).
+    // worker_cancel is the shutdown token threaded through all background tasks
+    // and the Tor task. Declared here so it is available to background tasks
+    // spawned below. detect_tor is called later, after the first-run wizard.
     let worker_cancel = state.job_queue.cancel.clone();
     let start_time = Instant::now();
 
@@ -522,6 +525,20 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         }
     }
 
+    // Tor: spawn Arti in-process AFTER the first-run wizard so that Arti's
+    // bootstrapping log events do not interleave with wizard prompts.
+    // console_prompt() releases CONSOLE_MUTEX before blocking on read_line,
+    // so any concurrent tracing::info! from the Tor task would print mid-prompt.
+    // Arti bootstrapping takes ~30 s regardless, so starting it here costs nothing.
+    // F-04: Store the handle so it can be awaited during graceful shutdown.
+    let tor_handle = crate::detect::detect_tor(
+        CONFIG.enable_tor_support,
+        bind_port,
+        &data_dir,
+        state.onion_address.clone(),
+        worker_cancel.clone(),
+    );
+
     super::console::spawn_keyboard_handler(pool, start_time);
 
     if chan_net {
@@ -558,6 +575,16 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     let shutdown_timeout = Duration::from_secs(CONFIG.ffmpeg_timeout_secs + 10);
     for handle in worker_handles {
         let _ = tokio::time::timeout(shutdown_timeout, handle).await;
+    }
+
+    // CRIT-3 FIX: worker_cancel.cancel() above already signals the Tor task's
+    // CancellationToken, so it will exit its select! loop promptly instead of
+    // sleeping through a multi-minute backoff. The 15-second safety-net timeout
+    // below is only a last resort for the in-flight copy_bidirectional on any
+    // active stream — Arti sends RELAY_END cells synchronously on drop, which
+    // completes well within this window under normal conditions.
+    if let Some(h) = tor_handle {
+        let _ = tokio::time::timeout(Duration::from_secs(15), h).await;
     }
 
     tracing::info!(target: "server", "Server shut down gracefully.");
@@ -870,7 +897,63 @@ fn build_router(state: AppState) -> Router {
                     },
                 ),
         )
+        // HIGH-9: Inject `Onion-Location` response header when the onion service
+        // is active. Tor Browser reads this header on clearnet responses and
+        // prompts the user to switch to the .onion address automatically.
+        // Only injected when enable_tor_support=true and the address is known.
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            onion_location_middleware,
+        ))
         .with_state(state)
+}
+
+/// Inject the `Onion-Location` response header when the Tor hidden service is
+/// active and the request arrived over clearnet (not already via .onion).
+///
+/// Tor Browser reads this header and prompts the user to switch to the .onion
+/// address automatically, improving privacy without requiring the user to know
+/// the onion address in advance.
+///
+/// The header is suppressed when:
+///   - `enable_tor_support` is false (no onion service running)
+///   - The onion address is not yet known (Arti still bootstrapping)
+///   - The request already came in via the onion address (no double-redirect)
+///
+/// Spec: <https://community.torproject.org/onion-services/advanced/onion-location/>
+async fn onion_location_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    // Skip if Tor is not enabled.
+    if !crate::config::CONFIG.enable_tor_support {
+        return next.run(req).await;
+    }
+
+    // Read the onion address under a short-lived read lock before await.
+    let maybe_addr = state.onion_address.read().await.clone();
+
+    let mut resp = next.run(req).await;
+
+    if let Some(addr) = maybe_addr {
+        // Only inject on HTML responses — static assets, JSON, and media do
+        // not benefit from the header and it adds noise to every response.
+        let is_html = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/html"));
+
+        if is_html {
+            if let Ok(val) = header::HeaderValue::from_str(&format!("http://{addr}")) {
+                resp.headers_mut()
+                    .insert(header::HeaderName::from_static("onion-location"), val);
+            }
+        }
+    }
+
+    resp
 }
 
 /// Middleware that adds `Strict-Transport-Security` only when the connection

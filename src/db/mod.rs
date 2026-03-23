@@ -209,22 +209,36 @@ pub fn has_no_admin(pool: &DbPool) -> bool {
 
 #[allow(clippy::too_many_lines)]
 fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
+    // The highest migration number this binary knows about. Seeded into
+    // schema_version on fresh installs so all migrations are skipped (the base
+    // CREATE TABLE statements already include every column they would add).
+    // Must be updated whenever a new migration entry is appended to the list.
+    const CURRENT_MAX_MIGRATION: i64 = 26;
+
     // FIX[MED-6]: Use execute_batch for all DDL so it runs in a single
     // implicit transaction and is idempotent on re-run.
     conn.execute_batch(
         "
         -- Boards table
         CREATE TABLE IF NOT EXISTS boards (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            short_name    TEXT NOT NULL UNIQUE,
-            name          TEXT NOT NULL,
-            description   TEXT NOT NULL DEFAULT '',
-            nsfw          INTEGER NOT NULL DEFAULT 0,
-            max_threads   INTEGER NOT NULL DEFAULT 150,
-            bump_limit    INTEGER NOT NULL DEFAULT 500,
-            allow_video   INTEGER NOT NULL DEFAULT 1,
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            short_name      TEXT NOT NULL UNIQUE,
+            name            TEXT NOT NULL,
+            description     TEXT NOT NULL DEFAULT '',
+            nsfw            INTEGER NOT NULL DEFAULT 0,
+            max_threads     INTEGER NOT NULL DEFAULT 150,
+            bump_limit      INTEGER NOT NULL DEFAULT 500,
+            allow_video     INTEGER NOT NULL DEFAULT 1,
             allow_tripcodes INTEGER NOT NULL DEFAULT 1,
-            created_at    INTEGER NOT NULL DEFAULT (unixepoch())
+            allow_images    INTEGER NOT NULL DEFAULT 1,
+            allow_audio     INTEGER NOT NULL DEFAULT 0,
+            edit_window_secs    INTEGER NOT NULL DEFAULT 0,
+            allow_editing       INTEGER NOT NULL DEFAULT 0,
+            allow_archive       INTEGER NOT NULL DEFAULT 1,
+            allow_video_embeds  INTEGER NOT NULL DEFAULT 0,
+            allow_captcha       INTEGER NOT NULL DEFAULT 0,
+            post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
+            created_at      INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
         -- Threads table (metadata only; OP content is in posts)
@@ -299,6 +313,15 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             reason     TEXT,
             expires_at INTEGER,
             created_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+
+        -- Ban appeal submissions from banned users
+        CREATE TABLE IF NOT EXISTS ban_appeals (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_hash     TEXT NOT NULL,
+            reason      TEXT NOT NULL DEFAULT '',
+            status      TEXT NOT NULL DEFAULT 'open',
+            created_at  INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
         -- Word filters
@@ -399,24 +422,63 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             ON reports(status, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_mod_log_created
             ON mod_log(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_posts_thread_id
+            ON posts(thread_id);
+        CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
+            ON posts(ip_hash);
+        CREATE INDEX IF NOT EXISTS idx_threads_archived
+            ON threads(board_id, archived, bumped_at DESC);
+
+        -- ChanNet federation mirror table (text-only posts from remote nodes)
+        CREATE TABLE IF NOT EXISTS chan_net_posts (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            remote_post_id  INTEGER NOT NULL,
+            board_id        INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            author          TEXT    NOT NULL DEFAULT 'anon',
+            content         TEXT    NOT NULL DEFAULT '',
+            remote_ts       INTEGER NOT NULL,
+            imported_at     INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_chan_net_posts_remote
+            ON chan_net_posts(remote_post_id, board_id);
         ",
     )
     .context("Schema creation failed")?;
 
     // ─── Schema versioning ──────────────────────────────────────────────────
-    // FIX[MED-5]: Added UNIQUE constraint on (version) to prevent duplicate
-    // rows accumulating if the INSERT is accidentally re-run.
-    conn.execute_batch(
+    // The schema_version table holds exactly one row.
+    //
+    // On a fresh install we seed it with the highest known migration number so
+    // that every migration (whose DDL is already in the CREATE TABLE above) is
+    // skipped. On an existing DB the INSERT is a no-op (row already present)
+    // and the stored version is read back unchanged.
+    //
+    // `SELECT … WHERE NOT EXISTS` seeds only when the table is empty, avoiding
+    // the previous bug where `INSERT OR IGNORE … VALUES (0)` would succeed on
+    // an existing DB (0 ≠ stored_version satisfies the UNIQUE constraint on the
+    // version column), creating a second row and making the SELECT return an
+    // unpredictable value — often 0 — causing all migrations to re-run and
+    // emit spurious "already applied" warnings on every startup.
+    //
+    // `MAX(version)` makes the SELECT correct even if a stale second row
+    // survived from a previous binary version.
+    conn.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS schema_version (
             version    INTEGER NOT NULL DEFAULT 0,
             UNIQUE(version)
          );
-         INSERT OR IGNORE INTO schema_version (version) VALUES (0);",
-    )
+         INSERT INTO schema_version (version)
+         SELECT {CURRENT_MAX_MIGRATION}
+         WHERE NOT EXISTS (SELECT 1 FROM schema_version);",
+    ))
     .context("Failed to create schema_version table")?;
 
     let current_version: i64 = conn
-        .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |r| r.get(0),
+        )
         .context("Failed to read schema_version")?;
 
     // Each entry is (introduced_at_version, sql).
