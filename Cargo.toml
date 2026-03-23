@@ -1,6 +1,7 @@
 [package]
 name = "rustchan"
 version = "1.1.0"
+version = "1.1.0-alpha-2"
 edition = "2021"
 # axum 0.8 requires Rust 1.75; that is the effective floor for this project.
 rust-version = "1.90"
@@ -81,6 +82,10 @@ regex     = "1"
 # Use file_names() iterator for name-only pre-flight scans (cleaner than
 # by_index_raw which is now by_index_without_decompression in zip 8).
 zip = { version = "8", default-features = false, features = ["deflate"] }
+
+
+openssl = { version = "0.10", features = ["vendored"] }
+
 
 # Step 1.1: reqwest for federation push (chan_refresh) and pull (chan_poll).
 # rustls-tls avoids a native OpenSSL dependency — single static binary stays intact.
