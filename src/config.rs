@@ -56,6 +56,25 @@ struct SettingsFile {
     max_audio_size_mb: Option<u32>,
     cookie_secret: Option<String>,
     enable_tor_support: Option<bool>,
+    /// When true, the HTTP server binds exclusively to 127.0.0.1 so it is
+    /// reachable only through the Tor hidden service. Overrides the host
+    /// portion of `bind_addr` (the configured port is preserved).
+    /// Default: false (clearnet and Tor both active when `enable_tor_support=true`).
+    tor_only: Option<bool>,
+    /// Seconds to wait for Tor bootstrap before timing out and retrying.
+    /// Increase to 300+ on heavily censored networks or when using bridges.
+    /// Default: 120.
+    tor_bootstrap_timeout_secs: Option<u64>,
+    /// Maximum simultaneous inbound Tor streams (proxy tasks).
+    /// Each stream holds one file descriptor. Reduce if the process runs low
+    /// on FDs; excess connections are dropped with a `RELAY_END` cell.
+    /// Default: 512.
+    tor_max_concurrent_streams: Option<usize>,
+    /// Nickname for the Arti onion service key.
+    /// Must be unique per `arti_state/` directory. Change this when running
+    /// multiple instances that share the same storage to avoid key collisions.
+    /// Default: "rustchan".
+    tor_service_nickname: Option<String>,
     require_ffmpeg: Option<bool>,
     /// How often to run PRAGMA `wal_checkpoint(TRUNCATE)`, in seconds.
     /// Set to 0 to disable. Default: 3600 (hourly).
@@ -131,7 +150,20 @@ pub fn generate_settings_file_if_missing() {
     OsRng.fill_bytes(&mut secret_bytes);
     let secret = hex::encode(secret_bytes);
 
-    let content = format!(
+    let content = settings_template(&secret);
+
+    match std::fs::write(&path, content) {
+        Ok(()) => println!("Created  settings.toml  ({})", path.display()),
+        Err(e) => eprintln!("Warning: could not write settings.toml: {e}"),
+    }
+}
+
+/// Build the default settings.toml content with the given generated secret.
+///
+/// Extracted from `generate_settings_file_if_missing` to keep that function
+/// under the line-count lint threshold.
+fn settings_template(secret: &str) -> String {
+    format!(
         r#"# RustChan — Instance Settings
 # Edit this file to configure your imageboard.
 # Restart the server after making changes.
@@ -167,6 +199,27 @@ max_audio_size_mb = 150
 # The service keypair lives in rustchan-data/arti_state/keys/ — back it up.
 # Delete that directory to rotate to a new .onion address.
 enable_tor_support = true
+
+# When true, the HTTP server binds exclusively to 127.0.0.1 so the site is
+# reachable ONLY through the Tor hidden service — clearnet access is blocked.
+# Requires enable_tor_support = true. Default: false (dual-stack: both
+# clearnet and Tor are active simultaneously).
+# tor_only = false
+
+# Seconds to wait for Tor to connect to the network before giving up and
+# retrying. The default (120 s) works on open networks. On censored networks
+# or when using bridges, increase this to 300 or more.
+# tor_bootstrap_timeout_secs = 120
+
+# Maximum number of simultaneous inbound Tor connections.
+# Each connection holds one file descriptor. Reduce if you hit FD limits.
+# tor_max_concurrent_streams = 512
+
+# Nickname for this instance's Tor hidden service key.
+# Only needs changing when multiple rustchan instances share the same
+# rustchan-data/arti_state/ directory — identical nicknames cause key
+# collisions and one instance will fail to start its onion service.
+# tor_service_nickname = "rustchan"
 
 # Set to true to hard-exit at startup when ffmpeg is not found.
 # When false (default), the server starts normally and video thumbnails
@@ -235,12 +288,7 @@ cookie_secret = "{secret}"
 # Keep on loopback unless RustWave runs on a different host.
 # chan_net_bind = "127.0.0.1:7070"
 "#
-    );
-
-    match std::fs::write(&path, content) {
-        Ok(()) => println!("Created  settings.toml  ({})", path.display()),
-        Err(e) => eprintln!("Warning: could not write settings.toml: {e}"),
-    }
+    )
 }
 
 // ─── Runtime config ───────────────────────────────────────────────────────────
@@ -265,6 +313,12 @@ pub struct Config {
     // ── External tool settings ────────────────────────────────────────────────
     /// When true, Tor is probed at startup and hints are printed.
     pub enable_tor_support: bool,
+    /// Seconds before a bootstrap attempt is considered failed and retried.
+    pub tor_bootstrap_timeout_secs: u64,
+    /// Maximum simultaneous inbound Tor proxy tasks.
+    pub tor_max_concurrent_streams: usize,
+    /// Nickname for the Arti onion service. Unique per `arti_state/` directory.
+    pub tor_service_nickname: String,
     /// When true, the server exits if ffmpeg is missing.
     pub require_ffmpeg: bool,
 
@@ -357,6 +411,23 @@ impl Config {
             &format!("{}:{}", env_str("CHAN_HOST", "0.0.0.0"), port),
         );
 
+        let tor_only = env_bool("CHAN_TOR_ONLY", s.tor_only.unwrap_or(false));
+        let enable_tor_support = env_bool("CHAN_TOR_SUPPORT", s.enable_tor_support.unwrap_or(true));
+
+        // When tor_only=true, force the bind host to 127.0.0.1 regardless of
+        // what bind_addr or CHAN_HOST are set to. The configured port is kept.
+        let bind_addr = if tor_only && enable_tor_support {
+            let port_str = bind_addr.rsplit_once(':').map_or("8080", |(_, p)| p);
+            tracing::info!(
+                target: "config",
+                bind_addr = %format!("127.0.0.1:{port_str}"),
+                "tor_only=true: overriding bind address to loopback"
+            );
+            format!("127.0.0.1:{port_str}")
+        } else {
+            bind_addr
+        };
+
         let behind_proxy = env_bool("CHAN_BEHIND_PROXY", false);
 
         // Resolve cookie_secret from env > settings.toml.
@@ -417,7 +488,19 @@ impl Config {
                 .saturating_mul(1024)
                 .saturating_mul(1024),
 
-            enable_tor_support: env_bool("CHAN_TOR_SUPPORT", s.enable_tor_support.unwrap_or(true)),
+            enable_tor_support,
+            tor_bootstrap_timeout_secs: env_parse(
+                "CHAN_TOR_BOOTSTRAP_TIMEOUT",
+                s.tor_bootstrap_timeout_secs.unwrap_or(120),
+            ),
+            tor_max_concurrent_streams: env_parse(
+                "CHAN_TOR_MAX_STREAMS",
+                s.tor_max_concurrent_streams.unwrap_or(512),
+            ),
+            tor_service_nickname: std::env::var("CHAN_TOR_NICKNAME")
+                .ok()
+                .or(s.tor_service_nickname)
+                .unwrap_or_else(|| "rustchan".to_string()),
             require_ffmpeg: env_bool("CHAN_REQUIRE_FFMPEG", s.require_ffmpeg.unwrap_or(false)),
 
             bind_addr,
@@ -557,6 +640,51 @@ impl Config {
                 );
             }
             let _ = std::fs::remove_file(probe);
+        }
+
+        // F-13: Pre-flight writability check for Arti data directories.
+        // Without this, a permissions error on these dirs only surfaces ~30 s
+        // into bootstrap as a cryptic internal error — invisible at startup.
+        if self.enable_tor_support {
+            let exe = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let data_dir = exe.join("rustchan-data");
+            for subdir in ["arti_state", "arti_cache"] {
+                let dir = data_dir.join(subdir);
+                std::fs::create_dir_all(&dir).map_err(|e| {
+                    anyhow::anyhow!("CONFIG ERROR: cannot create Tor dir {}: {e}", dir.display())
+                })?;
+
+                // Arti requires arti_state/ to have permissions 0700 (no group
+                // or other read access) for its key material. create_dir_all
+                // respects the process umask, typically yielding 0755, which
+                // Arti rejects with "problem with filesystem permissions".
+                // Explicitly set 0700 on Unix so Arti accepts the directory.
+                // arti_cache/ holds no sensitive data and is left at normal
+                // permissions, but we restrict it too for defence-in-depth.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(0o700);
+                    std::fs::set_permissions(&dir, perms).map_err(|e| {
+                        anyhow::anyhow!(
+                            "CONFIG ERROR: cannot set permissions on Tor dir {}: {e}",
+                            dir.display()
+                        )
+                    })?;
+                }
+
+                let probe = dir.join(".write_probe");
+                std::fs::write(&probe, b"").map_err(|_| {
+                    anyhow::anyhow!(
+                        "CONFIG ERROR: Tor dir {} is not writable — check permissions",
+                        dir.display()
+                    )
+                })?;
+                let _ = std::fs::remove_file(probe);
+            }
         }
 
         // Step 1.2: Validate rustwave_url scheme so operators catch

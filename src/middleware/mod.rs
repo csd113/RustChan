@@ -416,10 +416,27 @@ pub fn extract_ip(req: &Request) -> String {
         }
     }
 
-    // Direct connection IP (not behind proxy, or proxy headers absent)
-    req.extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map_or_else(|| "unknown".to_string(), |ci| ci.0.ip().to_string())
+    // Direct connection IP (not behind proxy, or proxy headers absent).
+    let ci = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>();
+    let peer = ci.map(|c| c.0);
+
+    // CRIT-2A: when the TCP peer is loopback and Tor support is active, look
+    // up the peer port in TOR_STREAM_TOKENS. Each Tor stream registers a unique
+    // pseudonymous token so that Tor users get isolated rate-limit and ban
+    // buckets instead of all sharing "127.0.0.1".
+    if CONFIG.enable_tor_support {
+        if let Some(addr) = peer {
+            if addr.ip().is_loopback() {
+                if let Some(token) = crate::detect::TOR_STREAM_TOKENS.get(&addr.port()) {
+                    return token.value().to_string();
+                }
+            }
+        }
+    }
+
+    peer.map_or_else(|| "unknown".to_string(), |a| a.ip().to_string())
 }
 
 /// Validate CSRF token from a form against the cookie.
@@ -546,10 +563,25 @@ where
             }
         }
         // Direct connection (or proxy headers absent).
-        let ip = parts
+        let ci = parts
             .extensions
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map_or_else(|| "unknown".to_string(), |ci| ci.0.ip().to_string());
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>();
+        let peer = ci.map(|c| c.0);
+
+        // CRIT-2A: same token lookup as extract_ip — keeps both code paths
+        // consistent. When the TCP peer is loopback and Tor is enabled, return
+        // the per-stream pseudonymous token instead of "127.0.0.1".
+        if CONFIG.enable_tor_support {
+            if let Some(addr) = peer {
+                if addr.ip().is_loopback() {
+                    if let Some(token) = crate::detect::TOR_STREAM_TOKENS.get(&addr.port()) {
+                        return Ok(Self(token.value().to_string()));
+                    }
+                }
+            }
+        }
+
+        let ip = peer.map_or_else(|| "unknown".to_string(), |a| a.ip().to_string());
         Ok(Self(ip))
     }
 }
