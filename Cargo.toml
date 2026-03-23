@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.1.0"
+version = "1.1.0-alpha.2"
 edition = "2021"
 # axum 0.8 requires Rust 1.75; that is the effective floor for this project.
 rust-version = "1.90"
@@ -85,6 +85,9 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # Step 1.1: reqwest for federation push (chan_refresh) and pull (chan_poll).
 # rustls-tls avoids a native OpenSSL dependency — single static binary stays intact.
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "rustls-tls"] }
+# Pin to patched version — fixes RUSTSEC-2026-0049 (CRL distribution point
+# matching bug). Transitive dep via reqwest/arti-client.
+rustls-webpki = "0.103.10"
 
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
@@ -94,7 +97,11 @@ thiserror = "2"
 tempfile  = "3"
 libc      = "0.2"
 
-arti-client   = { version = "0.40", features = ["tokio", "native-tls", "onion-service-service"] }
+# F-09: Use rustls instead of native-tls to keep the binary self-contained.
+# native-tls pulls in OpenSSL as a transitive dep, causing a dynamic link
+# against libssl/libcrypto — contradicting the rustls-tls choice on reqwest.
+# Verify post-change: cargo tree --edges features | grep openssl (expect nothing)
+arti-client   = { version = "0.40", features = ["tokio", "rustls", "onion-service-service"] }
 tor-hsservice = { version = "0.40" }
 tor-cell      = { version = "0.40" }
 futures       = "0.3"

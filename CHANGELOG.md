@@ -6,235 +6,271 @@ All notable changes to RustChan will be documented in this file.
 
 ## [1.1.0 alpha 2]
 
-### Fixed
-
-#### 🔴 Critical — HTTP 500 errors on pages with gateway posts
-**Problem:** Posts from the ChanNet gateway have no IP address, causing crashes when pages try to display them.
-
-**Solution:** Changed `ip_hash` from `String` to `Option<String>` throughout the codebase so `NULL` values are handled gracefully instead of panicking.
-
-**Files changed:**
-- `src/models.rs`, `src/db/posts.rs`, `src/db/admin.rs` — Handle optional IP hashes
-- `src/templates/thread.rs`, `src/templates/admin.rs` — Render empty string for missing IPs
-- `src/handlers/admin/backup.rs`, `src/handlers/backup.rs` — Preserve `NULL` on backup/restore
+The headline change in this release is a deep security and correctness audit of the Arti/Tor implementation introduced in alpha 1, resulting in six critical fixes, nine high-priority fixes, and a set of new operator-facing configuration options. Alongside that, this release includes reliability improvements to shutdown coordination, backup handling, multipart parsing, and the database layer.
 
 ---
 
-#### 🟠 Log files written to wrong directory
-**Problem:** Logs were created in the executable folder instead of `rustchan-data/`.
+### 🔒 Tor / Arti — Security & Correctness Audit
 
-**Solution:** Pass `data_dir` instead of `binary_dir` to the logger, and create the directory *before* logging initializes.
+#### Architecture
 
-**Files changed:** `src/main.rs`
-
----
-
-#### 🟠 Log file names have wrong extension
-**Problem:** Rotated logs named `rustchan.log.2024-01-15` instead of `rustchan.2024-01-15.log`.
-
-**Solution:** Use `RollingFileAppender::builder()` with `.filename_prefix()` and `.filename_suffix()` for correct naming.
-
-**Files changed:** `src/logging.rs`
+The hidden service implementation from alpha 1 has been audited and corrected. The core architecture — bootstrapping Arti in-process, deriving a `.onion` address from a persistent Ed25519 keypair, and proxying inbound onion streams to the local HTTP port — is unchanged. What changed is correctness, isolation, and operational safety.
 
 ---
 
-#### 🟡 Log files changed from JSON to readable text
-**Problem:** Logs were dense JSON, hard to read with `tail`, `grep`, etc.
+#### 🔴 Critical fixes
 
+**Per-stream IP isolation for Tor users**
 
-## Reliability & Shutdown Improvements
+Previously every Tor user resolved to `127.0.0.1` as their client IP. The Arti proxy was a raw TCP passthrough (`copy_bidirectional`) with no HTTP awareness, so no header injection was possible. This meant all Tor users shared a single rate-limit bucket, ban entry, and post cooldown: banning one Tor user banned everyone on Tor simultaneously.
+
+Fixed by introducing `TOR_STREAM_TOKENS`, a `DashMap<u16, Arc<str>>` in `detect.rs` keyed by the ephemeral local port of each proxy connection. When `proxy_tor_stream` connects to the local axum socket, the OS assigns an ephemeral source port; axum's `ConnectInfo` sees this as the peer port on the accepted socket. A random `tor:<hex>` token is inserted into the map under that port, and a `TokenGuard` RAII struct removes it when the task ends. Both `ClientIp::from_request_parts` and `extract_ip` now look up the peer port in `TOR_STREAM_TOKENS` when the connection is from loopback with `enable_tor_support=true`, returning the per-stream token instead of `127.0.0.1`. Every Tor stream now has its own isolated bucket for rate limiting, bans, and post cooldowns.
+
+**Files:** `src/detect.rs`, `src/middleware/mod.rs`
 
 ---
 
-## Multipart Handling & Memory Safety (`src/handlers/mod.rs`)
+**Tor-only mode (`tor_only` setting)**
 
-- Added strict per-field size limits for multipart text inputs:
-  - Post body capped (~100KB)
-  - Name, subject, and other fields capped (~4KB)
-- Replaced unbounded `field.text()` usage with controlled byte-reading logic
-- Prevented large heap allocations from oversized text fields
+With `enable_tor_support = true` and the default `bind_addr = 0.0.0.0:8080`, the HTTP server was reachable directly over clearnet simultaneously with the hidden service. An operator expecting a private Tor-only site had no way to enforce that without manually overriding `bind_addr`.
+
+Added a new `tor_only` setting to `settings.toml`. When `tor_only = true` and `enable_tor_support = true`, `bind_addr` is silently overridden to `127.0.0.1:{port}` during config loading — the port is preserved, only the host changes. The override is logged at startup. Default remains `false` (dual-stack: clearnet and Tor both active), which is the correct default for an imageboard that wants to be reachable both ways.
+
+```toml
+# Restrict to Tor-only (hidden service). Clearnet access blocked.
+# tor_only = false
+```
+
+**Files:** `src/config.rs`
+
+---
+
+**Graceful shutdown for the Tor task**
+
+The Tor retry loop had no `CancellationToken`. During shutdown, `worker_cancel.cancel()` signaled every other background task but the Tor task continued running — sleeping through a backoff of up to 480 seconds. The shutdown code then hit a hard 10-second timeout and abandoned the task, leaving Tor circuits open without sending `RELAY_END` cells.
+
+Fixed by adding a `cancel: CancellationToken` parameter to `detect_tor()`. Both the `run_arti(...)` call and the backoff sleep now use `tokio::select!` against the token, so the task exits promptly when shutdown is signaled. The `worker_cancel` variable in `run_server()` is moved to before the `detect_tor` call so it is available to pass in. The shutdown timeout is extended from 10s to 15s as a safety net for any in-flight `copy_bidirectional` draining — in practice the task exits in milliseconds once the token fires.
+
+**Files:** `src/detect.rs`, `src/server/server.rs`
+
+---
+
+**`tor_client` and `onion_service` explicit keepalive**
+
+`tor_client` is last used on the line that calls `launch_onion_service`. `onion_service` is last used inside the `HsId` retry block. Both have side-effectful `Drop` implementations: dropping `tor_client` closes all Tor circuits; dropping `onion_service` deregisters the hidden service from the Tor network. Both variables must stay alive through the entire stream loop.
+
+Rust named `let` bindings drop at end of their enclosing scope (the function body), not at last-use, so this was not a live bug — but it was invisible and fragile. Added explicit `let _ = &tor_client; let _ = &onion_service;` keepalive borrows at the end of `run_arti`, after the stream loop exits, making the intent unambiguous and guarding against any future tooling that might warn about "unused" bindings.
+
+**Files:** `src/detect.rs`
+
+---
+
+#### 🟠 High-priority fixes
+
+**Onion address encoder: fixed checksum computation**
+
+In `hsid_to_onion_address`, the two checksum bytes were extracted from the `Sha3_256` digest using an iterator with `.unwrap_or(0)` fallbacks. `Sha3_256` always produces 32 bytes so the fallback was dead code, but it masked the logic and would silently produce a wrong checksum if the digest size ever changed. Replaced with direct array indexing: `let hash: [u8; 32] = hasher.finalize().into(); let checksum = [hash[0], hash[1]];`.
+
+Added a Python-verified cryptographic test vector for the all-zeros Ed25519 key:
+```
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion
+```
+Verified with:
+```python
+import hashlib, base64
+pub = bytes(32); ver = bytes([3])
+chk = hashlib.sha3_256(b'.onion checksum' + pub + ver).digest()[:2]
+print(base64.b32encode(pub+chk+ver).decode().lower().rstrip('=')+'.onion')
+```
+
+**Files:** `src/detect.rs`
+
+---
+
+**`Onion-Location` response header for Tor Browser**
+
+Tor Browser reads the `Onion-Location` response header and automatically prompts the user to switch to the `.onion` address when browsing the clearnet version of a site. The header was never set anywhere in the codebase.
+
+Added `onion_location_middleware` — an async middleware function that reads `state.onion_address`, and when the address is known and the response `Content-Type` is `text/html`, inserts `Onion-Location: http://<addr>` into the response headers. Wired into `build_router` via `axum_middleware::from_fn_with_state` at the outermost position so it fires on every HTML response. Non-HTML responses (static assets, JSON, media) are skipped.
+
+**Files:** `src/server/server.rs`
+
+---
+
+**Configurable bootstrap timeout**
+
+The Tor bootstrap timeout was hardcoded at 120 seconds. On censored networks using bridges or pluggable transports, directory fetch is slow and 120 seconds is insufficient — the task would time out, wait through exponential backoff, and retry indefinitely without ever succeeding.
+
+Added `tor_bootstrap_timeout_secs` to `settings.toml` (default 120). The timeout error message now includes a hint to increase this value.
+
+```toml
+# Increase for censored networks or when using bridges.
+# tor_bootstrap_timeout_secs = 120
+```
+
+**Files:** `src/config.rs`, `src/detect.rs`
+
+---
+
+**Configurable maximum concurrent Tor streams**
+
+`MAX_CONCURRENT_TOR_STREAMS` was a hardcoded compile-time constant (`512`). Operators on resource-constrained hosts (low FD limits, limited RAM) had no way to reduce it without recompiling.
+
+Added `tor_max_concurrent_streams` to `settings.toml` (default 512). When the limit is reached, `stream_req` is dropped explicitly — Arti sends a `RELAY_END` cell automatically on drop.
+
+```toml
+# Reduce if the process hits file descriptor limits.
+# tor_max_concurrent_streams = 512
+```
+
+**Files:** `src/config.rs`, `src/detect.rs`
+
+---
+
+**Infrastructure errors distinguished from normal stream closure**
+
+All errors from `proxy_tor_stream` were logged at `DEBUG` with the message "Tor: stream closed". This made it impossible to distinguish a normal client disconnect (expected, routine) from "local TCP connect failed" (axum has crashed or is unrestarted — requires operator attention).
+
+Split error handling: connection failures to the local HTTP server now log at `ERROR` with a clear message ("Tor: cannot reach local HTTP server — is axum running?"). Normal stream closures (EOF, client disconnect, keep-alive expiry) continue to log at `DEBUG`.
+
+**Files:** `src/detect.rs`
+
+---
+
+**Attempt counter reset after healthy session**
+
+The exponential backoff retry counter (`attempt`) incremented on both crash exits and clean exits. After 4 clean reconnect cycles, the service was waiting 480 seconds between restart attempts — identical behavior to a crash loop. A clean exit after ≥60 seconds of healthy operation now resets `attempt = 0`.
+
+**Files:** `src/detect.rs`
+
+---
+
+**`Arc<str>` for the local address string**
+
+`local_addr` was a `String` cloned into every spawned proxy task — one heap allocation per Tor connection. Replaced with `Arc<str>`, making each clone an atomic reference count increment with no heap allocation.
+
+**Files:** `src/detect.rs`
+
+---
+
+**Configurable service nickname**
+
+The Arti onion service nickname was hardcoded to `"rustchan"`. When multiple instances share the same `arti_state/` directory (e.g. Docker volume mounts, CI), identical nicknames cause key collisions and one instance fails to start its onion service.
+
+Added `tor_service_nickname` to `settings.toml` (default `"rustchan"`).
+
+```toml
+# Change when running multiple instances sharing the same arti_state/ directory.
+# tor_service_nickname = "rustchan"
+```
+
+**Files:** `src/config.rs`, `src/detect.rs`
+
+---
+
+**Onion address omitted from structured INFO log**
+
+The onion address was logged as a structured field at `INFO` level, causing it to appear in plaintext in the JSON log file (`rustchan.log`) and any log aggregator or forwarding pipeline it feeds into. For operators running a sensitive hidden service, this is unwanted metadata exposure.
+
+The address is now logged as a structured field only at `DEBUG`. A bare `INFO` event ("Tor: hidden service active") fires without the address. The TTY banner and admin panel always show the full address.
+
+**Files:** `src/detect.rs`
+
+---
+
+#### 🟡 Other Arti changes
+
+- **`yield_now()` in rendezvous loop** — `stream_requests.next().await` runs in a tight async loop. Under a connection flood, the task could monopolize the Tokio executor thread between `next()` returning and the `tokio::spawn` call. Added `tokio::task::yield_now().await` at the top of the loop body.
+- **Local connect timeout increased** — the timeout for `proxy_tor_stream` to connect to the local axum socket was 5 seconds. Under load the axum TCP accept queue fills and `connect()` can legitimately take longer. Increased to 15 seconds.
+- **Dead `ToolStatus::Spawning` variant removed** — `Spawning` was added for the old subprocess-based Tor launcher. `detect_tor` now returns `Option<JoinHandle<()>>` and never produces this variant. Removed to prevent future code from adding unreachable match arms.
+- **`stream_req.target()` call removed** — this method does not exist on `StreamRequest` in `tor-hsservice 0.40`. The diagnostic log line it produced has been removed.
+- **`run_arti` refactored for line-count compliance** — the onion address publication and TTY banner block extracted into `async fn publish_onion_address()`, keeping `run_arti` under the clippy line-count threshold.
+
+---
+
+### 🔴 Critical — HTTP 500 errors on pages with gateway posts
+
+Posts inserted via the ChanNet gateway carry no IP address. Pages that attempted to display or process these posts were crashing because `ip_hash` was typed as `String` and the `NULL` database value caused a panic.
+
+Changed `ip_hash` to `Option<String>` throughout. `NULL` values are now handled gracefully — they render as an empty string in templates and are passed through backup/restore without modification.
+
+**Files:** `src/models.rs`, `src/db/posts.rs`, `src/db/admin.rs`, `src/templates/thread.rs`, `src/templates/admin.rs`, `src/handlers/admin/backup.rs`, `src/handlers/backup.rs`
+
+---
+
+### 🟠 Reliability & Shutdown
+
+**Worker lifecycle**
+
+- Persisted `JoinHandle`s returned by the worker pool; shutdown now awaits each worker with a bounded per-worker timeout instead of a blind fixed sleep
+- Signaling via `CancellationToken` threaded through every worker task
+- Prevents corruption of in-progress FFmpeg transcodes during shutdown
+- Added startup recovery to reset jobs stuck in `running` state after an unclean exit
+
+**ChanNet server**
+
+- Added graceful shutdown support to the ChanNet listener (port 7070)
+- Unified shutdown signal with the main HTTP server so in-flight federation requests drain before the process exits
+
+**Background tasks**
+
+- All periodic background tasks (session purge, WAL checkpoint, IP prune, login-fail prune, VACUUM, poll cleanup, cache eviction) replaced infinite loops with `tokio::select!` against the worker cancel token
+- Ensures every task exits cleanly on shutdown with no orphaned async tasks
+
+**HTTP**
+
+- Added request timeout middleware (30 seconds) to protect against slow-loris style attacks and stalled client connections
+
+---
+
+### 🟠 Multipart Handling
+
+- Added strict per-field size limits: post body capped at ~100 KB, name/subject/other fields at ~4 KB
+- Replaced unbounded `field.text()` calls with controlled byte-reading that returns `413` the moment the running total exceeds the limit
 - Eliminated OOM risk under concurrent large-form submissions
+- Hardened poll duration parsing: added overflow validation before the seconds multiplication step
 
-- Hardened poll duration parsing:
-  - Added validation before multiplication
-  - Prevented intermediate integer overflow prior to clamping
-
----
-
-## Backup System Reliability (`src/handlers/admin/backup.rs`)
-
-- Replaced fragile `VACUUM INTO` string-based SQL with `rusqlite::backup` API
-- Eliminated dependency on manual SQL escaping and path formatting
-- Improved cross-platform correctness and error transparency
-
-- Implemented guaranteed temporary file cleanup:
-  - Introduced RAII-style cleanup mechanism
-  - Ensures backup artifacts are removed even on:
-    - client disconnects
-    - early termination
-    - runtime drops
-
-- Improved error signaling:
-  - Database pool exhaustion now correctly returns retryable errors (503) instead of 500
+**Files:** `src/handlers/mod.rs`
 
 ---
 
-## Tor — Arti In-Process Migration
+### 🟠 Backup System
 
-Replaced the subprocess-based C Tor launcher with **[Arti](https://gitlab.torproject.org/tpo/core/arti)** running fully in-process. **No system `tor` installation is required.**
+- Replaced `VACUUM INTO` string-based SQL with the `rusqlite::backup` API — eliminates manual SQL escaping and improves cross-platform correctness
+- Introduced RAII-style temporary file cleanup: backup artifacts are removed even on client disconnect, early termination, or runtime drop
+- Database pool exhaustion during backup now returns 503 (retryable) instead of 500
 
-**How it works:** at startup a single Tokio task bootstraps Arti, derives a `.onion` address from a persistent Ed25519 keypair, launches the hidden service, and proxies inbound onion connections to the local HTTP port — all without spawning a child process, writing a `torrc`, or polling a `hostname` file.
-
-- Bootstrap takes ~30 s on first run (Arti downloads ~2 MB of directory data) and ~5 s on subsequent runs (consensus cached in `arti_cache/`)
-- The onion address is published to `AppState` the moment the service is ready; handlers read it from memory with zero filesystem I/O per request
-- Service keypair lives in `rustchan-data/arti_state/keys/` — back this directory up to preserve your `.onion` address; delete it to rotate to a new one
-- Old `rustchan-data/tor_data/`, `rustchan-data/tor_hidden_service/`, and `rustchan-data/torrc` are no longer created and can be safely deleted after migration
-- **Note:** the keypair location changed on migration (`tor_hidden_service/` → `arti_state/keys/`), so a new `.onion` address is generated on first run unless the old Ed25519 key is manually imported via Arti's key management tooling
-
-**Files changed:** `Cargo.toml` (+6 deps: `arti-client`, `tor-hsservice`, `tor-cell`, `futures`, `sha3`, `data-encoding`), `src/detect.rs`, `src/middleware/mod.rs`, `src/server/server.rs`, `src/handlers/board.rs`, `src/handlers/admin/mod.rs`, `src/handlers/admin/settings.rs`, `src/config.rs`
+**Files:** `src/handlers/admin/backup.rs`
 
 ---
 
-## Database Layer Improvements (`src/db/mod.rs`)
+### 🟡 Database
 
-- Made database connection pool size configurable via environment/config
-- Removed hardcoded pool limit to improve scalability under load
+- Made connection pool size configurable; removed hardcoded pool limit
+- `r2d2::Error` (pool exhaustion) now maps to `503 Service Unavailable` instead of 500
+- Removed `unwrap_or(0)` silent fallback in DB initialization — replaced with proper error propagation
+- Replaced `unchecked_transaction()` (DEFERRED) with `BEGIN IMMEDIATE` across `threads.rs`, `posts.rs`, `admin.rs`, `boards.rs` — eliminates mid-transaction lock upgrade failures under concurrent write load
 
-- Corrected error mapping:
-  - `r2d2::Error` (pool exhaustion) now maps to `503 Service Unavailable`
-  - Prevents misclassification of load-related failures as internal errors
-
-- Removed silent fallback in initialization logic:
-  - Replaced `unwrap_or(0)` with proper error propagation
-  - Prevents incorrect “first-run” detection on DB failure
+**Files:** `src/db/mod.rs`, `src/db/threads.rs`, `src/db/posts.rs`, `src/db/admin.rs`, `src/db/boards.rs`
 
 ---
 
-## Transaction Safety & Concurrency (`src/db/threads.rs`, `src/db/posts.rs`, `src/db/admin.rs`, `src/db/boards.rs`)
+### 🟡 Logging
 
-- Replaced `unchecked_transaction()` (DEFERRED) with explicit `BEGIN IMMEDIATE`
-- Ensured write locks are acquired at transaction start
-- Eliminated mid-transaction lock upgrade failures (`SQLITE_BUSY`)
-- Improved consistency and reliability under concurrent write load
+- Replaced rolling-never log strategy with a rotating appender to prevent unbounded disk growth
+- Fixed log directory: logs now write to `rustchan-data/` instead of the executable folder
+- Fixed log filename format: rotated files now named `rustchan.2024-01-15.log` instead of `rustchan.log.2024-01-15`
 
----
-
-## Logging System Stability (`src/logging.rs`)
-
-- Replaced unbounded log file (`rolling::never`) with rotating log strategy
-- Prevented uncontrolled log growth and disk exhaustion
-- Improved long-term operational stability in production environments
+**Files:** `src/main.rs`, `src/logging.rs`
 
 ---
 
-## HTTP Response Correctness (`src/handlers/thread.rs`, `src/handlers/board.rs`)
+### 🟡 Other fixes
 
-- Removed `.unwrap_or_default()` from 304 response builders
-- Replaced with explicit, safe response construction
-- Ensured correct HTTP semantics for cache validation responses
+- **HTTP 304 responses** — removed `.unwrap_or_default()` from 304 response builders; replaced with explicit safe construction
+- **Configuration file writes** — replaced non-atomic file writes with write-to-temp-then-rename pattern; prevents `settings.toml` corruption on crash
 
----
-
-## Configuration File Safety (`src/config.rs`)
-
-- Replaced non-atomic file writes with atomic write pattern:
-  - write to temporary file
-  - persist via rename
-- Prevented configuration corruption on crash or partial write
-
----
-
-## Cross-Cutting Improvements
-
-### Error Handling
-
-- Reduced silent error suppression patterns
-- Improved propagation and visibility of operational failures
-- Increased observability of system state under failure conditions
-
----
-
-### Database Reliability
-
-- Standardized transaction patterns across modules
-- Improved behavior under high contention scenarios
-- Reduced retry loops and transient DB errors
-
----
-
-## Summary
-
-These changes collectively improve:
-
-- Memory safety under user input
-- Database correctness under concurrency
-- Crash resilience and panic handling
-- Backup integrity and filesystem safety
-- Logging reliability and disk usage control
-- Accuracy of error reporting and HTTP responses
-
-Resulting in a significantly more robust and production-ready system.
-
-### Worker Lifecycle Management (`src/server/server.rs`, `src/workers/mod.rs`)
-
-- Persisted `JoinHandle`s returned by the worker pool instead of discarding them
-- Implemented proper graceful shutdown by:
-  - Signaling worker cancellation via `CancellationToken`
-  - Awaiting all worker tasks with bounded timeouts
-- Eliminated reliance on fixed sleep-based shutdown timing
-- Prevented corruption of in-progress jobs (e.g., FFmpeg transcodes)
-- Enabled deterministic shutdown behavior for background workers
-
-### Job Recovery
-
-- Added startup recovery logic to reset jobs stuck in `running` state
-- Ensures jobs interrupted during shutdown are retried instead of permanently stalled
-
----
-
-## ChanNet Server Shutdown (`src/server/server.rs`)
-
-- Added graceful shutdown support to ChanNet server
-- Unified shutdown signal with main HTTP server
-- Prevents abrupt termination of in-flight federation requests
-- Eliminates risk of partial/corrupt response streams during shutdown
-
----
-
-## Background Task Control (`src/server/server.rs`)
-
-- Integrated cancellation awareness into background tasks
-- Replaced infinite loops with `tokio::select!` to listen for shutdown signals
-- Ensures all periodic tasks (cleanup, pruning, etc.) terminate cleanly
-- Reduces risk of abrupt termination mid-operation
-
----
-
-## HTTP Reliability (`src/server/server.rs`)
-
-- Added request timeout middleware
-- Protects against slow or stalled clients holding connections indefinitely
-- Improves resilience against slowloris-style behavior
-
----
-
-## Worker System Stability (`src/workers/mod.rs`)
-
-- Ensured worker pool properly integrates with shutdown lifecycle
-- Improved coordination between job queue and worker threads
-- Reinforced guarantees around job completion and cancellation handling
-
----
-
-## Summary
-
-These changes significantly improve:
-
-- Graceful shutdown correctness
-- Background task reliability
-- Job processing integrity
-- Resistance to partial writes and corruption
-- Operational stability under restart conditions
+**Files:** `src/handlers/thread.rs`, `src/handlers/board.rs`, `src/config.rs`
 
 ---
 

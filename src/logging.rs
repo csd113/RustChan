@@ -316,8 +316,24 @@ pub fn init_logging(log_dir: &Path) {
     let tty = io::stdout().is_terminal();
     IS_TTY.store(tty, Ordering::Relaxed);
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("rustchan=info,tower_http=warn"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(
+            // F-08: Explicitly suppress Arti's internal crates in the default
+            // filter. Without this they emit at DEBUG/TRACE (circuit negotiation,
+            // guard selection, consensus downloads) — hundreds of lines/minute.
+            // Operators who need Arti internals can set RUST_LOG=tor_proto=debug.
+            "rustchan=info,\
+             tower_http=warn,\
+             arti_client=warn,\
+             tor_proto=warn,\
+             tor_circmgr=warn,\
+             tor_dirmgr=warn,\
+             tor_guardmgr=warn,\
+             tor_chanmgr=warn,\
+             tor_hsservice=warn,\
+             tor_keymgr=warn",
+        )
+    });
 
     let terminal_layer = tracing_subscriber::fmt::layer()
         .event_format(TerminalFormatter)
