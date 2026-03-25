@@ -106,11 +106,11 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
 
 /// Maximum decompressed size per JSON entry in a snapshot ZIP.
 /// Prevents ZIP bombs from expanding unboundedly into RAM.
-/// DefaultBodyLimit caps the *compressed* payload; this caps the *decompressed* output.
+/// `DefaultBodyLimit` caps the *compressed* payload; this caps the *decompressed* output.
 const MAX_SNAPSHOT_ENTRY_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB per entry
 
 /// Read a named ZIP entry with a hard decompressed-size cap.
-/// Returns an error if the entry expands beyond MAX_SNAPSHOT_ENTRY_BYTES.
+/// Returns an error if the entry expands beyond `MAX_SNAPSHOT_ENTRY_BYTES`.
 fn read_zip_entry_bounded(
     archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
     name: &str,
@@ -135,7 +135,7 @@ fn read_zip_entry_bounded(
 ///
 /// Rejects any ZIP that contains files other than the three known names,
 /// guarding against path traversal and unexpected content.
-/// FIX[C-6]: Each entry is now read through read_zip_entry_bounded to prevent
+/// FIX$$C-6$$: Each entry is now read through `read_zip_entry_bounded` to prevent
 /// ZIP bombs from exhausting RAM via unbounded decompression.
 pub fn unpack_snapshot(
     bytes: &[u8],

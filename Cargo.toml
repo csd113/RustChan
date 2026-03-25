@@ -84,6 +84,8 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 
 
 openssl = { version = "0.10", features = ["vendored"] }
+fs2 = "0.4"
+tor-rtcompat = "0.40"
 
 
 # Step 1.1: reqwest for federation push (chan_refresh) and pull (chan_poll).

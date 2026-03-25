@@ -42,15 +42,14 @@ async fn read_field_bytes_limited(
         buf.extend_from_slice(&chunk);
         if buf.len() > limit {
             return Err(AppError::BadRequest(format!(
-                "Text field exceeds {} byte limit.",
-                limit
+                "Text field exceeds {limit} byte limit.",
             )));
         }
     }
     Ok(buf)
 }
 
-/// Read a multipart field as a UTF-8 string, rejecting if it exceeds MAX_TEXT_FIELD_BYTES.
+/// Read a multipart field as a UTF-8 string, rejecting if it exceeds `MAX_TEXT_FIELD_BYTES`.
 async fn read_field_text(field: axum::extract::multipart::Field<'_>) -> Result<String> {
     let bytes = read_field_bytes_limited(field, MAX_TEXT_FIELD_BYTES).await?;
     String::from_utf8(bytes).map_err(|_| AppError::BadRequest("Field is not valid UTF-8.".into()))
@@ -151,7 +150,7 @@ pub async fn parse_post_multipart(
             Some("subject") => subject = read_field_text(field).await.unwrap_or_default(),
             Some("body") => body = read_field_text(field).await?,
             Some("deletion_token") => {
-                deletion_token = read_field_text(field).await.unwrap_or_default()
+                deletion_token = read_field_text(field).await.unwrap_or_default();
             }
             Some("sage") => {
                 let v = read_field_text(field).await.unwrap_or_default();

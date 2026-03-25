@@ -75,12 +75,12 @@ pub mod backup_phase {
 }
 
 /// Shared atomic progress state for backup operations.
-/// Stored as Arc<BackupProgress> in `AppState` so admin handlers and the
+/// Stored as `Arc<BackupProgress>` in `AppState` so admin handlers and the
 /// progress endpoint can both access it without locking.
 pub struct BackupProgress {
     /// FIX[H-9]: Guards against concurrent backup/restore operations.
-    /// compare_exchange(false, true) at the start of every backup handler;
-    /// a RAII BackupGuard in backup.rs clears it on exit (success or panic).
+    /// `compare_exchange(false, true)` at the start of every backup handler;
+    /// a RAII `BackupGuard` in `backup.rs` clears it on exit (success or panic).
     pub backup_in_progress: std::sync::atomic::AtomicBool,
     pub phase: std::sync::atomic::AtomicU64,
     pub files_done: std::sync::atomic::AtomicU64,
@@ -387,12 +387,12 @@ fn rate_limited_toast_page() -> String {
 
 /// Extract client IP, respecting proxy headers when configured.
 ///
-/// FIX[HIGH-1]: When `behind_proxy=true`, we now prefer X-Real-IP (set by nginx
+/// FIX[HIGH-1]: When `behind_proxy=true`, we now prefer `X-Real-IP` (set by nginx
 /// to `$remote_addr` — the actual TCP peer — and not modifiable by the client).
-/// We explicitly do NOT use the leftmost X-Forwarded-For entry because it is
+/// We explicitly do NOT use the leftmost `X-Forwarded-For` entry because it is
 /// client-supplied and trivially forgeable, enabling rate-limit and ban bypass.
 ///
-/// If X-Real-IP is absent but X-Forwarded-For is present, we take the
+/// If `X-Real-IP` is absent but `X-Forwarded-For` is present, we take the
 /// rightmost entry (the last proxy in the chain), which is also not
 /// client-controlled when the chain passes through a trusted proxy.
 pub fn extract_ip(req: &Request) -> String {
@@ -481,9 +481,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 ///
 /// Strips a trailing `/` from every path except the root `/` and issues a
 /// 308 Permanent Redirect.  This makes routes like
-///   /{board}/catalog/  →  /{board}/catalog
-///   /{board}/thread/5/ →  /{board}/thread/5
-///   /{board}/          →  /{board}
+///   `/{board}/catalog/`  →  `/{board}/catalog`
+///   `/{board}/thread/5/` →  `/{board}/thread/5`
+///   `/{board}/`          →  `/{board}`
 /// work correctly without 404s, regardless of whether the user typed the
 /// slash, a browser added it, or an old bookmark included it.
 ///
@@ -528,7 +528,7 @@ pub async fn normalize_trailing_slash(req: Request, next: Next) -> Response {
 /// Proxy-aware client IP extractor for use in Axum handler signatures.
 ///
 /// CRIT-2: Replaces direct use of `ConnectInfo<SocketAddr>` in post handlers.
-/// When `CHAN_BEHIND_PROXY=true` this reads X-Real-IP (set by nginx to the
+/// When `CHAN_BEHIND_PROXY=true` this reads `X-Real-IP` (set by nginx to the
 /// real TCP peer) rather than the raw socket address (which would always be
 /// the proxy's IP, making IP bans and rate-limits ineffective).
 pub struct ClientIp(pub String);

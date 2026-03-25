@@ -138,7 +138,6 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
     // FIX[H-9]: Reject concurrent backup/restore requests.
     // compare_exchange(false→true): only one handler may run at a time.
     // BackupGuard clears the flag on drop (success or panic).
-    use std::sync::atomic::Ordering;
     if state
         .backup_progress
         .backup_in_progress
@@ -176,8 +175,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             // Guard: reject paths containing characters that are unsafe in SQLite literals.
             if temp_db_str.contains('\'') || temp_db_str.contains('\0') {
                 return Err(AppError::Internal(anyhow::anyhow!(
-                    "Temp DB path contains characters unsafe for SQL interpolation: {}",
-                    temp_db_str
+                    "Temp DB path contains characters unsafe for SQL interpolation: {temp_db_str}"
                 )));
             }
 
@@ -487,7 +485,6 @@ pub async fn admin_restore(
     // FIX[H-9]: Reject concurrent backup/restore requests.
     // compare_exchange(false→true): only one handler may run at a time.
     // BackupGuard clears the flag on drop (success or panic).
-    use std::sync::atomic::Ordering;
     if state
         .backup_progress
         .backup_in_progress
@@ -588,12 +585,9 @@ pub async fn admin_restore(
                     // The old guard ran on the raw name before stripping, so a path
                     // like "uploads/foo/../../../etc/evil" passed the ".." check but
                     // resolved outside the upload directory after stripping.
-                    let target = match safe_join(std::path::Path::new(&upload_dir), rel) {
-                        Some(p) => p,
-                        None => {
-                            warn!("Restore: skipping path-traversal attempt in ZIP entry '{name}'");
-                            continue;
-                        }
+                    let Some(target) = safe_join(std::path::Path::new(&upload_dir), rel) else {
+                        warn!("Restore: skipping path-traversal attempt in ZIP entry '{name}'");
+                        continue;
                     };
 
                     if entry.is_dir() {
@@ -912,7 +906,7 @@ pub fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
 /// `BufWriter`, so peak RAM usage is O(compression-buffer) not O(zip-size).
 /// A `.tmp` suffix is used during writing; the file is renamed on success so
 /// the backup list never shows a partial/corrupt zip.
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::too_many_lines, clippy::arithmetic_side_effects)]
 pub async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -929,7 +923,6 @@ pub async fn create_full_backup(
     // FIX[H-9]: Reject concurrent backup/restore requests.
     // compare_exchange(false→true): only one handler may run at a time.
     // BackupGuard clears the flag on drop (success or panic).
-    use std::sync::atomic::Ordering;
     if state
         .backup_progress
         .backup_in_progress
@@ -963,8 +956,7 @@ pub async fn create_full_backup(
 
             if temp_db_str.contains('\'') || temp_db_str.contains('\0') {
                 return Err(AppError::Internal(anyhow::anyhow!(
-                    "Temp DB path contains characters unsafe for SQL interpolation: {}",
-                    temp_db_str
+                    "Temp DB path contains characters unsafe for SQL interpolation: {temp_db_str}"
                 )));
             }
 
@@ -1003,7 +995,7 @@ pub async fn create_full_backup(
                     .files_total
                     .store(file_count.saturating_add(1), Ordering::Relaxed);
 
-                // ── Database snapshot (streamed, not read into RAM) ────────
+                // ── Database snapshot (streamed, not read into RAM) ────────────────
                 zip.start_file("chan.db", opts)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip DB: {e}")))?;
                 let mut db_src = std::fs::File::open(&temp_db)
@@ -1015,7 +1007,7 @@ pub async fn create_full_backup(
                 progress.files_done.fetch_add(1, Ordering::Relaxed);
                 progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
 
-                // ── Upload files (streamed via io::copy) ───────────────────
+                // ── Upload files (streamed via io::copy) ───────────────────────────
                 if uploads_base.exists() {
                     add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
                 }
@@ -1604,7 +1596,6 @@ pub async fn restore_saved_full_backup(
     // FIX[H-9]: Reject concurrent backup/restore requests.
     // compare_exchange(false→true): only one handler may run at a time.
     // BackupGuard clears the flag on drop (success or panic).
-    use std::sync::atomic::Ordering;
     if state
         .backup_progress
         .backup_in_progress
@@ -1695,12 +1686,11 @@ pub async fn restore_saved_full_backup(
                         continue;
                     }
                     // FIX[C-4]: safe_join prevents traversal after prefix strip.
-                    let target = match safe_join(std::path::Path::new(&upload_dir), rel) {
-                        Some(p) => p,
-                        None => {
-                            warn!("Restore-saved: skipping path-traversal attempt in ZIP entry '{name}'");
-                            continue;
-                        }
+                    let Some(target) = safe_join(std::path::Path::new(&upload_dir), rel) else {
+                        warn!(
+                            "Restore-saved: skipping path-traversal attempt in ZIP entry '{name}'"
+                        );
+                        continue;
                     };
                     if entry.is_dir() {
                         std::fs::create_dir_all(&target)
@@ -1809,7 +1799,6 @@ pub async fn restore_saved_board_backup(
     // FIX[H-9]: Reject concurrent backup/restore requests.
     // compare_exchange(false→true): only one handler may run at a time.
     // BackupGuard clears the flag on drop (success or panic).
-    use std::sync::atomic::Ordering;
     if state
         .backup_progress
         .backup_in_progress
@@ -2078,12 +2067,9 @@ pub async fn restore_saved_board_backup(
                         continue;
                     }
                     // FIX[C-4]: safe_join prevents traversal after prefix strip.
-                    let target = match safe_join(std::path::Path::new(&upload_dir), rel) {
-                        Some(p) => p,
-                        None => {
-                            warn!("Board restore-saved: skipping path-traversal attempt in ZIP entry '{name}'");
-                            continue;
-                        }
+                    let Some(target) = safe_join(std::path::Path::new(&upload_dir), rel) else {
+                        warn!("Board restore-saved: skipping path-traversal attempt in ZIP entry '{name}'");
+                        continue;
                     };
                     if entry.is_dir() {
                         std::fs::create_dir_all(&target)
@@ -3015,12 +3001,9 @@ pub async fn board_restore(
                                 continue;
                             }
                             // FIX[C-4]: safe_join prevents traversal after prefix strip.
-                            let target = match safe_join(std::path::Path::new(&upload_dir), rel) {
-                                Some(p) => p,
-                                None => {
-                                    warn!("Board restore: skipping path-traversal attempt in ZIP entry '{name}'");
-                                    continue;
-                                }
+                            let Some(target) = safe_join(std::path::Path::new(&upload_dir), rel) else {
+                                warn!("Board restore: skipping path-traversal attempt in ZIP entry '{name}'");
+                                continue;
                             };
                             if entry.is_dir() {
                                 std::fs::create_dir_all(&target).map_err(|e| {
