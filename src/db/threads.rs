@@ -350,7 +350,7 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
         // Step 3: determine which paths are now unreferenced.
         // paths_safe_to_delete sees the post-delete state because we're still
         // inside the same transaction.
-        let safe = super::paths_safe_to_delete(conn, candidates);
+        let safe = super::paths_safe_to_delete(conn, candidates)?;
         Ok(safe)
     })();
 
@@ -517,7 +517,7 @@ pub fn prune_old_threads(
 
         // Determine safe paths INSIDE the transaction so the check sees the
         // post-delete state before any concurrent writer can insert new references.
-        let safe = super::paths_safe_to_delete(conn, candidates);
+        let safe = super::paths_safe_to_delete(conn, candidates)?;
         Ok(safe)
     })();
 

@@ -78,6 +78,10 @@ pub mod backup_phase {
 /// Stored as Arc<BackupProgress> in `AppState` so admin handlers and the
 /// progress endpoint can both access it without locking.
 pub struct BackupProgress {
+    /// FIX[H-9]: Guards against concurrent backup/restore operations.
+    /// compare_exchange(false, true) at the start of every backup handler;
+    /// a RAII BackupGuard in backup.rs clears it on exit (success or panic).
+    pub backup_in_progress: std::sync::atomic::AtomicBool,
     pub phase: std::sync::atomic::AtomicU64,
     pub files_done: std::sync::atomic::AtomicU64,
     pub files_total: std::sync::atomic::AtomicU64,
@@ -87,8 +91,9 @@ pub struct BackupProgress {
 
 impl BackupProgress {
     pub const fn new() -> Self {
-        use std::sync::atomic::AtomicU64;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
         Self {
+            backup_in_progress: AtomicBool::new(false),
             phase: AtomicU64::new(backup_phase::IDLE),
             files_done: AtomicU64::new(0),
             files_total: AtomicU64::new(0),

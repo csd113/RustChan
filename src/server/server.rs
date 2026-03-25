@@ -116,6 +116,58 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&CONFIG.upload_dir)?;
 
+    // FIX[H-8]: Sweep stale backup temp files left by a previous crashed process.
+    // Any .zip file in the backups directories older than 2 hours is considered stale.
+    // The normal 600-second deferred cleanup in admin_backup cannot run after a crash,
+    // so this sweep handles the crash-recovery case at startup.
+    {
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(7200))
+            .unwrap_or(std::time::UNIX_EPOCH);
+        for backup_dir in [
+            crate::handlers::admin::full_backup_dir(),
+            crate::handlers::admin::board_backup_dir(),
+        ] {
+            if let Err(e) = std::fs::create_dir_all(&backup_dir) {
+                tracing::warn!(path = %backup_dir.display(), error = %e, "Could not create backup dir at startup");
+                continue;
+            }
+            if let Ok(entries) = std::fs::read_dir(&backup_dir) {
+                for entry in entries.flatten() {
+                    // Only sweep files whose names start with our temp prefix.
+                    let is_tmp = entry.file_name().to_string_lossy().starts_with("backup_")
+                        || entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("board_backup_");
+                    if !is_tmp {
+                        continue;
+                    }
+                    if let Ok(meta) = entry.metadata() {
+                        if meta.is_file() {
+                            if let Ok(modified) = meta.modified() {
+                                if modified < cutoff {
+                                    if let Err(e) = std::fs::remove_file(entry.path()) {
+                                        tracing::warn!(
+                                            path = %entry.path().display(),
+                                            error = %e,
+                                            "Failed to remove stale backup temp file"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            path = %entry.path().display(),
+                                            "Removed stale backup temp file from previous crash"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     super::console::print_banner();
 
     let bind_addr: String = port_override.map_or_else(

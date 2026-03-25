@@ -13,7 +13,7 @@
 //   rustchan-cli admin unban  <ban_id>
 //   rustchan-cli admin list-bans
 //
-// Data lives in  <exe-dir>/rustchan-data/   (override with CHAN_DB / CHAN_UPLOADS)
+// Data lives in  <exe-dir>/rustchan-data/   (override with CHAN_DATA_DIR env var)
 // Static CSS is compiled into the binary — no external files needed.
 //
 // All HTTP server logic lives in server/server.rs.
@@ -21,6 +21,7 @@
 // Terminal console and startup banner live in server/console.rs.
 // ChanNet / RustWave gateway lives in chan_net/mod.rs (second listener, port 7070).
 
+use anyhow::Context;
 use clap::Parser;
 
 mod chan_net;
@@ -40,34 +41,47 @@ mod workers;
 
 use config::CONFIG;
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
+// ─── Data directory resolution ───────────────────────────────────────────────
 //
-// `#[tokio::main]` does not expose `max_blocking_threads`, so we build the
-// runtime manually.  The blocking thread pool (used by every `spawn_blocking`
-// call — page renders, DB queries, file I/O) defaults to logical CPUs × 4 but
-// can be tuned via `blocking_threads` in settings.toml or the
-// CHAN_BLOCKING_THREADS environment variable.
+// Precedence:
+//   1. `CHAN_DATA_DIR` environment variable  (explicit override)
+//   2. `<binary-dir>/rustchan-data`          (binary-relative)
+//   3. `./rustchan-data`                     (fallback — CWD-relative)
 
-#[allow(clippy::arithmetic_side_effects)]
-#[allow(clippy::expect_used)]
-fn main() -> anyhow::Result<()> {
-    // Resolve the binary directory, then derive rustchan-data/ so the log
-    // file lands in <exe-dir>/rustchan-data/ alongside the database and
-    // uploads.  Falls back to "./rustchan-data" if the exe path cannot be
-    // determined.
-    let binary_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(std::path::PathBuf::from))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-
-    // Create rustchan-data/ before init_logging so the rolling file appender
-    // can open the directory immediately on startup.  run_server() also calls
-    // create_dir_all on this path; calling it twice is safe.
-    let data_dir = binary_dir.join("rustchan-data");
-    if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        eprintln!("Warning: could not create rustchan-data directory: {e}");
+fn resolve_data_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("CHAN_DATA_DIR") {
+        return std::path::PathBuf::from(dir);
     }
 
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            return parent.join("rustchan-data");
+        }
+    }
+
+    // Logging is not initialised yet — stderr is all we have.
+    eprintln!(
+        "Warning: could not determine binary directory; \
+         falling back to ./rustchan-data"
+    );
+    std::path::PathBuf::from("./rustchan-data")
+}
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
+//
+// We build the Tokio runtime manually (instead of `#[tokio::main]`) so we can
+// tune `max_blocking_threads` via `blocking_threads` in settings.toml or the
+// `CHAN_BLOCKING_THREADS` environment variable.  The blocking pool is used by
+// every `spawn_blocking` call — page renders, DB queries, file I/O.
+
+fn main() -> anyhow::Result<()> {
+    // ── Resolve and create data directory ────────────────────────────────
+    let data_dir = resolve_data_dir();
+
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("Failed to create data directory: {}", data_dir.display()))?;
+
+    // ── Initialise logging ───────────────────────────────────────────────
     logging::init_logging(&data_dir);
 
     tracing::info!(
@@ -77,30 +91,36 @@ fn main() -> anyhow::Result<()> {
         "rustchan starting",
     );
 
-    // CONFIG must be initialised before building the runtime so that
-    // blocking_threads is available.  This is safe because CONFIG is a
-    // LazyLock<Config> that initialises itself on first access.
-    let blocking_threads = CONFIG.blocking_threads;
+    // ── Load configuration ───────────────────────────────────────────────
+    //
+    // CONFIG is a LazyLock<Config> that initialises on first access.  Wrap
+    // the access in catch_unwind so a config-parse panic becomes a clean
+    // error rather than an opaque abort.
+    let blocking_threads = std::panic::catch_unwind(|| CONFIG.blocking_threads).map_err(|_| {
+        anyhow::anyhow!("Failed to load configuration — check settings.toml for syntax errors")
+    })?;
 
+    anyhow::ensure!(
+        (1..=4096).contains(&blocking_threads),
+        "blocking_threads must be between 1 and 4096, got {blocking_threads}",
+    );
+
+    // ── Parse CLI arguments ──────────────────────────────────────────────
+    let cli = server::cli::Cli::parse();
+    let port = cli.port;
+    let chan_net = cli.chan_net;
+
+    // ── Admin commands are synchronous — no async runtime needed ─────────
+    if let Some(server::cli::Command::Admin { action }) = cli.command {
+        return server::cli::run_admin(action);
+    }
+
+    // ── Build the Tokio runtime (server path only) ───────────────────────
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .max_blocking_threads(blocking_threads)
         .build()
-        .expect("Failed to build Tokio runtime");
+        .context("Failed to build Tokio runtime")?;
 
-    let cli = server::cli::Cli::parse();
-
-    rt.block_on(async move {
-        match cli.command {
-            // Default (no subcommand) or explicit `serve`: start the server.
-            None | Some(server::cli::Command::Serve) => {
-                server::run_server(cli.port, cli.chan_net).await
-            }
-
-            Some(server::cli::Command::Admin { action }) => {
-                server::cli::run_admin(action)?;
-                Ok(())
-            }
-        }
-    })
+    rt.block_on(async move { server::run_server(port, chan_net).await })
 }

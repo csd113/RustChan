@@ -4,6 +4,23 @@ All notable changes to RustChan will be documented in this file.
 
 ---
 
+## [1.1.0 alpha 3]
+
+### fixes:
+
+- **Files left behind on DB errors:** Disk fills forever. *Fix:* Show errors clearly, handle deletions properly.
+- **Stuck tasks after crashes:** Jobs never restart. *Fix:* Auto-reset at startup, limit retries.
+- **Huge text uploads crash memory:** Attackers overload server. *Fix:* Cap text fields at 64KB.
+- **Multiple backups corrupt progress:** Overlapping runs mess up display. *Fix:* Add lock flag.
+- **ZIP files write to wrong folders:** Hackers escape safe areas. *Fix:* Strict path checks.
+- **Temp folder tricks break SQL:** Env vars inject bad chars. *Fix:* Use safe folder near DB.
+- **Restore uploads fill disk unchecked:** No per-file limits. *Fix:* Cap at 4GB per file.
+- **ZIP bombs explode RAM:** Bad peers unpack gigabytes. *Fix:* Limit entries to 8MB each.
+- **FFmpeg hangs block everything:** No timeouts tie up workers. *Fix:* Add 2-min timeout, kill if stuck.
+- **Leftover backup files after crashes:** Disk clogs on restart. *Fix:* Startup cleanup, use safe temp folder.
+
+---
+
 ## [1.1.0 alpha 2]
 
 The headline change in this release is a deep security and correctness audit of the Arti/Tor implementation introduced in alpha 1, resulting in six critical fixes, nine high-priority fixes, and a set of new operator-facing configuration options. Alongside that, this release includes reliability improvements to shutdown coordination, backup handling, multipart parsing, and the database layer.

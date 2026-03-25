@@ -15,3 +15,5 @@ target
 /clippy_reports
 build-release.sh
 tor_audit_report.md
+rustchan_implementation_plan_fixes.md
+src/main copy.rs

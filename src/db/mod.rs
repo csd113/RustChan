@@ -709,6 +709,26 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         .context("Failed to backfill media_type column")?;
     }
 
+    // ─── FIX[C-8]: Startup recovery for stuck "running" jobs ────────────────
+    //
+    // On a hard crash (OOM kill, power loss, SIGKILL), in-flight jobs are left
+    // at status = 'running' permanently. They are never re-queued, never retried,
+    // and never cleaned up without manual SQL intervention.
+    //
+    // Re-queue any stuck jobs by setting them back to 'pending'. Incrementing
+    // `attempts` counts this against MAX_JOB_ATTEMPTS so permanently-broken
+    // jobs do not retry forever.
+    conn.execute(
+        "UPDATE background_jobs
+         SET status    = 'pending',
+             attempts  = attempts + 1,
+             last_error = 'Recovered from crash (was stuck in running state)',
+             updated_at = unixepoch()
+         WHERE status = 'running'",
+        [],
+    )
+    .context("Failed to recover stuck running jobs")?;
+
     Ok(())
 }
 
@@ -746,9 +766,21 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 /// the paths that have ZERO remaining references in one round-trip.
 ///
 /// FIX[LOW-14]: Replaced sort+dedup with a `HashSet` for O(1) deduplication.
-pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>) -> Vec<String> {
+// FIX[C-1]: Changed return type from Vec<String> to Result<Vec<String>, rusqlite::Error>
+// so that DB errors propagate to the caller instead of silently returning an
+// empty list. Previously, a prepare/query failure after the DELETE had already
+// committed would cause the caller to skip file cleanup with no recovery path,
+// permanently leaking orphaned files on disk.
+///
+/// # Errors
+/// Returns a `rusqlite::Error` if the reference-check query cannot be prepared
+/// or executed (e.g. schema mismatch, I/O error, or connection failure).
+pub fn paths_safe_to_delete(
+    conn: &rusqlite::Connection,
+    candidates: Vec<String>,
+) -> Result<Vec<String>, rusqlite::Error> {
     if candidates.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // FIX[LOW-14]: HashSet dedup instead of sort+dedup — avoids O(n log n)
@@ -761,16 +793,12 @@ pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>
         .collect();
 
     if unique.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // FIX[MED-13]: Single batch query — find all candidate paths that have NO
     // remaining post referencing them as file_path, thumb_path, or
     // audio_file_path. Uses VALUES() to avoid N round-trips.
-    //
-    // The VALUES clause binds each candidate path as a separate parameter.
-    // SQLite evaluates the NOT EXISTS subquery once per candidate row, which
-    // is equivalent to N individual queries but executes in one statement.
     let placeholders: String = unique
         .iter()
         .enumerate()
@@ -785,23 +813,15 @@ pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>
          )"
     );
 
-    let Ok(mut stmt) = conn.prepare(&sql) else {
-        return Vec::new(); // on prepare error, assume all still in use — safer to leak
-    };
-
-    let safe: Vec<String> = match stmt.query_map(rusqlite::params_from_iter(&unique), |r| r.get(0))
-    {
-        Ok(rows) => rows.filter_map(Result::ok).collect(),
-        Err(_) => return Vec::new(),
-    };
+    let mut stmt = conn.prepare(&sql)?; // propagate — do not swallow
+    let safe: Vec<String> = stmt
+        .query_map(rusqlite::params_from_iter(&unique), |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
 
     // FIX[MED-4]: For each safe-to-delete path, only remove the file_hashes
-    // row if both the file_path and thumb_path in that entry are unreferenced.
-    // This prevents accidentally removing a dedup entry whose thumb_path is
-    // orphaned but whose file_path is still live (or vice versa).
+    // row if the file_path in that entry is unreferenced.
     let safe_set: HashSet<&str> = safe.iter().map(String::as_str).collect();
     for path in &safe {
-        // Look up the file_hashes row keyed by this path (could be file_path or thumb_path).
         let maybe_row: Option<(String, String)> = conn
             .query_row(
                 "SELECT file_path, thumb_path FROM file_hashes
@@ -813,19 +833,11 @@ pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>
             .ok();
 
         if let Some((fp, _tp)) = maybe_row {
-            // Delete the hash entry when file_path is unreferenced.  We only
-            // check file_path (not thumb_path) because:
-            //   1. file_path is the dedup key — once no post holds this path,
-            //      the entry can never match a future upload and is dead weight.
-            //   2. A post's thumb_path may be NULL (e.g. audio files whose
-            //      thumbnail was never persisted), so thumb_path is absent from
-            //      `candidates` / `safe_set` and the old two-sided check would
-            //      spuriously skip deletion, leaving orphaned rows forever.
             if safe_set.contains(fp.as_str()) {
                 let _ = conn.execute("DELETE FROM file_hashes WHERE file_path = ?1", params![fp]);
             }
         }
     }
 
-    safe
+    Ok(safe)
 }

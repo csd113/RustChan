@@ -45,23 +45,71 @@ pub fn detect_ffmpeg() -> bool {
 /// Returns `Ok(())` on exit code 0, or an `Err` containing the trimmed
 /// stderr output on any non-zero exit.
 ///
+/// FIX[C-7]: The previous implementation used `Command::output()`, a blocking
+/// wait with no timeout. If ffmpeg hangs (malformed input, stuck on degenerate
+/// GIF, I/O wait on a full filesystem), the `spawn_blocking` thread is held
+/// forever. With enough concurrent stuck uploads, `Tokio`'s blocking thread pool
+/// exhausts and all subsequent `spawn_blocking` calls — including DB queries —
+/// queue indefinitely.
+///
+/// The new implementation polls `try_wait()` in a 100ms loop and kills the
+/// child process if it exceeds `CONFIG.ffmpeg_timeout_secs`.
+///
 /// # Errors
 /// Returns an error if ffmpeg cannot be spawned (binary missing, permission
-/// denied) or if the process exits with a non-zero status code.
+/// denied), if the process exits with a non-zero status code, or if it times out.
 pub fn run_ffmpeg(args: &[&str]) -> Result<()> {
-    let output = Command::new("ffmpeg")
+    use std::io::Read as _;
+    use std::time::Duration;
+
+    let timeout = Duration::from_secs(crate::config::CONFIG.ffmpeg_timeout_secs);
+
+    let mut child = Command::new("ffmpeg")
         .args(args)
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("failed to spawn ffmpeg — is it installed and on PATH?")?;
 
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "ffmpeg exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
+    let pid = child.id();
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(|| std::time::Instant::now() + Duration::from_secs(300));
+
+    loop {
+        match child.try_wait().context("ffmpeg try_wait failed")? {
+            Some(status) => {
+                if status.success() {
+                    return Ok(());
+                }
+                let stderr = child
+                    .stderr
+                    .take()
+                    .map(|mut s| {
+                        let mut b = Vec::new();
+                        let _ = s.read_to_end(&mut b);
+                        b
+                    })
+                    .unwrap_or_default();
+                return Err(anyhow::anyhow!(
+                    "ffmpeg exited with {}: {}",
+                    status,
+                    String::from_utf8_lossy(&stderr).trim()
+                ));
+            }
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                anyhow::bail!(
+                    "ffmpeg timed out after {}s (pid {})",
+                    timeout.as_secs(),
+                    pid
+                );
+            }
+            None => {
+                // Not done yet, not timed out. Sleep briefly to avoid busy-loop.
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
     }
 }
 

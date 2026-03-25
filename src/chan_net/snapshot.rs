@@ -104,15 +104,42 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
 
 // ── unpack_snapshot ───────────────────────────────────────────────────────────
 
+/// Maximum decompressed size per JSON entry in a snapshot ZIP.
+/// Prevents ZIP bombs from expanding unboundedly into RAM.
+/// DefaultBodyLimit caps the *compressed* payload; this caps the *decompressed* output.
+const MAX_SNAPSHOT_ENTRY_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB per entry
+
+/// Read a named ZIP entry with a hard decompressed-size cap.
+/// Returns an error if the entry expands beyond MAX_SNAPSHOT_ENTRY_BYTES.
+fn read_zip_entry_bounded(
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+    name: &str,
+) -> anyhow::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let f = archive.by_name(name)?;
+    let mut buf = Vec::new();
+    // Read at most MAX_SNAPSHOT_ENTRY_BYTES + 1 bytes.
+    // If we fill the buffer beyond the limit, the entry is oversized.
+    f.take(MAX_SNAPSHOT_ENTRY_BYTES + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_SNAPSHOT_ENTRY_BYTES {
+        anyhow::bail!(
+            "Snapshot entry '{}' exceeds {} MiB decompressed limit — possible ZIP bomb.",
+            name,
+            MAX_SNAPSHOT_ENTRY_BYTES / 1_048_576
+        );
+    }
+    Ok(buf)
+}
+
 /// Unpack and parse a federation snapshot ZIP.
 ///
 /// Rejects any ZIP that contains files other than the three known names,
 /// guarding against path traversal and unexpected content.
+/// FIX[C-6]: Each entry is now read through read_zip_entry_bounded to prevent
+/// ZIP bombs from exhausting RAM via unbounded decompression.
 pub fn unpack_snapshot(
     bytes: &[u8],
 ) -> anyhow::Result<(Vec<SnapshotBoard>, Vec<SnapshotPost>, SnapshotMetadata)> {
-    use std::io::Read;
-
     let cursor = Cursor::new(bytes);
     let mut zip = zip::ZipArchive::new(cursor)?;
 
@@ -127,26 +154,14 @@ pub fn unpack_snapshot(
         }
     }
 
-    let boards: Vec<SnapshotBoard> = {
-        let mut f = zip.by_name("boards.json")?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
-        serde_json::from_slice(&buf)?
-    };
+    let buf = read_zip_entry_bounded(&mut zip, "boards.json")?;
+    let boards: Vec<SnapshotBoard> = serde_json::from_slice(&buf)?;
 
-    let posts: Vec<SnapshotPost> = {
-        let mut f = zip.by_name("posts.json")?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
-        serde_json::from_slice(&buf)?
-    };
+    let buf = read_zip_entry_bounded(&mut zip, "posts.json")?;
+    let posts: Vec<SnapshotPost> = serde_json::from_slice(&buf)?;
 
-    let metadata: SnapshotMetadata = {
-        let mut f = zip.by_name("metadata.json")?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
-        serde_json::from_slice(&buf)?
-    };
+    let buf = read_zip_entry_bounded(&mut zip, "metadata.json")?;
+    let metadata: SnapshotMetadata = serde_json::from_slice(&buf)?;
 
     Ok((boards, posts, metadata))
 }

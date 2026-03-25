@@ -312,8 +312,9 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
             .context("Failed to delete post")?;
 
         // Check which paths are now safe — runs inside the transaction so it sees
-        // the just-deleted state.
-        let safe = super::paths_safe_to_delete(conn, candidates);
+        // the just-deleted state. FIX[C-1]: propagate errors instead of swallowing.
+        let safe =
+            super::paths_safe_to_delete(conn, candidates).context("paths_safe_to_delete failed")?;
         Ok(safe)
     })();
 
