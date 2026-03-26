@@ -785,11 +785,11 @@ pub fn spawn_keyboard_handler(pool: DbPool, start_time: Instant) {
 fn print_keyboard_help() {
     let block = format!(
         "\n\
-        {cyan}╔══ Admin Console ══════════════════════════════════╗{rst}\n\
+        {cyan}╔══ Admin Console ════════════════════════════════╗{rst}\n\
         {cyan}║{rst}  [s] show stats     [l] list boards             {cyan}║{rst}\n\
         {cyan}║{rst}  [c] create board   [a] create admin account    {cyan}║{rst}\n\
         {cyan}║{rst}  [d] delete thread  [h] help    [q] quit hint   {cyan}║{rst}\n\
-        {cyan}╚══════════════════════════════════════════════════╝{rst}\n\n",
+        {cyan}╚═════════════════════════════════════════════════╝{rst}\n\n",
         cyan = c(CYN),
         rst = c(RST),
     );
