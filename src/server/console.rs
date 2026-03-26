@@ -5,7 +5,7 @@
 // writing.  This ensures log events from the tracing layer and console
 // output from this module never interleave on stdout.
 //
-// All ANSI escape codes are guarded by crate::logging::is_tty() so that
+// All ANSI escape codes are guarded by cached TTY detection so that
 // piped / systemd / Docker deployments receive plain text with zero escape
 // pollution.
 //
@@ -18,14 +18,26 @@ use crate::config::CONFIG;
 use crate::db::DbPool;
 use crate::server::{ACTIVE_IPS, ACTIVE_UPLOADS, IN_FLIGHT, REQUEST_COUNT, SPINNER_TICK};
 use std::io::{BufRead, BufReader};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+// ─── Cached TTY detection ─────────────────────────────────────────────────────
+
+/// Cached result of `crate::logging::is_tty()`.  Evaluated once, reused
+/// everywhere so we never call `isatty(2)` more than once.
+static IS_TTY: std::sync::LazyLock<bool> = std::sync::LazyLock::new(crate::logging::is_tty);
+
+#[inline]
+fn is_tty() -> bool {
+    *IS_TTY
+}
 
 // ─── ANSI helpers ─────────────────────────────────────────────────────────────
 
 /// Return `code` when in TTY mode, empty string otherwise.
+#[inline]
 fn c(code: &'static str) -> &'static str {
-    if crate::logging::is_tty() {
+    if is_tty() {
         code
     } else {
         ""
@@ -42,21 +54,86 @@ const DIM: &str = "\x1b[2m";
 const BLD_GRN: &str = "\x1b[1;32m";
 const BLD_YLW: &str = "\x1b[1;33m";
 
-// ─── Terminal stats ───────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-pub struct TermStats {
-    pub prev_req_count: u64,
-    pub prev_post_count: i64,
-    pub prev_thread_count: i64,
-    pub last_tick: Instant,
+/// Minimum interval between successive stat prints (rate-limit).
+const STATS_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Maximum board description length (bytes).
+const MAX_BOARD_DESC_LEN: usize = 500;
+
+/// Maximum board display-name length (bytes).
+const MAX_BOARD_NAME_LEN: usize = 64;
+
+/// Maximum recursion depth for `walkdir_size`.
+const MAX_DIR_DEPTH: u32 = 64;
+
+// ─── Byte-size thresholds (used by `fmt_bytes`) ──────────────────────────────
+
+const KIB: i64 = 1024;
+const MIB: i64 = 1024 * 1024;
+const GIB: i64 = 1024 * 1024 * 1024;
+
+// ─── Unicode width helpers ────────────────────────────────────────────────────
+
+/// Return `true` for characters that typically occupy two terminal columns
+/// (CJK Unified Ideographs, fullwidth forms, etc.).
+fn is_wide_char(ch: char) -> bool {
+    let cp = ch as u32;
+    (0x4E00..=0x9FFF).contains(&cp)
+        || (0x3400..=0x4DBF).contains(&cp)
+        || (0xF900..=0xFAFF).contains(&cp)
+        || (0xFF01..=0xFF60).contains(&cp)
+        || (0xFFE0..=0xFFE6).contains(&cp)
+        || (0x20000..=0x2FA1F).contains(&cp)
+        || (0xAC00..=0xD7AF).contains(&cp)
+        || (0x2E80..=0x2FDF).contains(&cp)
+        || (0x3000..=0x303F).contains(&cp)
+        || (0x3040..=0x30FF).contains(&cp)
+        || (0x3200..=0x33FF).contains(&cp)
 }
 
+/// Estimate the display-column width of a single character.
+fn char_display_width(ch: char) -> usize {
+    if ch.is_control() {
+        0
+    } else if is_wide_char(ch) {
+        2
+    } else {
+        1
+    }
+}
+
+/// Estimate the display-column width of a string.
+fn display_width(s: &str) -> usize {
+    s.chars().map(char_display_width).sum()
+}
+
+// ─── Zeroize helper ───────────────────────────────────────────────────────────
+
+/// Securely overwrite a `String`'s backing buffer with zeros, then truncate.
+/// Uses `write_volatile` to prevent the compiler from eliding the stores.
+/// This is a best-effort measure — the allocator may retain copies elsewhere.
+fn zeroize_string(s: &mut String) {
+    // SAFETY: we overwrite valid UTF-8 bytes with 0x00 (valid UTF-8 for NUL),
+    // then immediately clear the length so the String is empty.
+    unsafe {
+        let bytes = s.as_bytes_mut();
+        for b in bytes.iter_mut() {
+            std::ptr::write_volatile(b, 0);
+        }
+    }
+    s.clear();
+    s.shrink_to_fit();
+}
+
+// ─── Numeric helpers ──────────────────────────────────────────────────────────
+
 /// Format a byte count as a human-readable string (B / KiB / MiB / GiB).
-#[allow(clippy::cast_precision_loss)] // file-size display; f64 precision is adequate
+/// Negative inputs are clamped to zero.
+#[allow(clippy::cast_precision_loss)]
 fn fmt_bytes(b: i64) -> String {
-    const KIB: i64 = 1024;
-    const MIB: i64 = 1024 * 1024;
-    const GIB: i64 = 1024 * 1024 * 1024;
+    let b = b.max(0);
     if b < KIB {
         format!("{b} B")
     } else if b < MIB {
@@ -68,11 +145,37 @@ fn fmt_bytes(b: i64) -> String {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-#[allow(clippy::arithmetic_side_effects)]
-#[allow(clippy::many_single_char_names)]
+/// Saturating cast from `u64` to `i64`, clamping at `i64::MAX`.
+#[inline]
+fn saturating_i64(v: u64) -> i64 {
+    i64::try_from(v).unwrap_or(i64::MAX)
+}
+
+// ─── Terminal stats ───────────────────────────────────────────────────────────
+
+pub struct TermStats {
+    pub prev_req_count: u64,
+    pub prev_post_count: i64,
+    pub prev_thread_count: i64,
+    pub last_tick: Instant,
+    pub last_stats_time: Option<Instant>,
+}
+
+#[allow(clippy::too_many_lines, clippy::arithmetic_side_effects)]
 pub fn print_stats(pool: &DbPool, start: Instant, ts: &mut TermStats) {
     use std::fmt::Write as _;
+
+    // ── Rate-limit ────────────────────────────────────────────────────────────
+    let now = Instant::now();
+    if let Some(last) = ts.last_stats_time {
+        if now.duration_since(last) < STATS_MIN_INTERVAL {
+            crate::logging::console_println(
+                "  Stats rate-limited — please wait at least 1 second.",
+            );
+            return;
+        }
+    }
+    ts.last_stats_time = Some(now);
 
     // ── Uptime ────────────────────────────────────────────────────────────────
     let uptime = start.elapsed();
@@ -95,7 +198,7 @@ pub fn print_stats(pool: &DbPool, start: Instant, ts: &mut TermStats) {
 
     // ── DB snapshot ───────────────────────────────────────────────────────────
     let (boards, threads, posts, db_bytes, board_stats) = pool.get().map_or_else(
-        |_| (0i64, 0i64, 0i64, 0i64, vec![]),
+        |_| (0_i64, 0_i64, 0_i64, 0_i64, vec![]),
         |conn| {
             let boards_n: i64 = conn
                 .query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0))
@@ -115,7 +218,7 @@ pub fn print_stats(pool: &DbPool, start: Instant, ts: &mut TermStats) {
                 let ps: i64 = conn
                     .query_row("PRAGMA page_size", [], |r| r.get(0))
                     .unwrap_or(4096);
-                pc * ps
+                pc.saturating_mul(ps)
             };
             let stats = crate::db::get_per_board_stats(&conn);
             (boards_n, threads_n, posts_n, db_n, stats)
@@ -125,11 +228,11 @@ pub fn print_stats(pool: &DbPool, start: Instant, ts: &mut TermStats) {
     let upload_bytes = dir_size_bytes(&CONFIG.upload_dir);
     let in_flight = IN_FLIGHT.load(Ordering::Relaxed);
     let online = ACTIVE_IPS.len();
-    let mem_bytes = process_rss_kb().cast_signed().saturating_mul(1024);
+    let mem_bytes = saturating_i64(process_rss_kb()).saturating_mul(1024);
 
     // ── Delta highlights ──────────────────────────────────────────────────────
-    let new_threads = (threads - ts.prev_thread_count).max(0);
-    let new_posts = (posts - ts.prev_post_count).max(0);
+    let new_threads = threads.saturating_sub(ts.prev_thread_count).max(0);
+    let new_posts = posts.saturating_sub(ts.prev_post_count).max(0);
     ts.prev_thread_count = threads;
     ts.prev_post_count = posts;
 
@@ -181,8 +284,12 @@ pub fn print_stats(pool: &DbPool, start: Instant, ts: &mut TermStats) {
     )
     .ok();
 
-    writeln!(block,
-        "  uptime  {up_h}h {up_m:02}m {up_s:02}s    requests  {curr_reqs}    {rps_val}    in-flight {in_flight}").ok();
+    writeln!(
+        block,
+        "  uptime  {up_h}h {up_m:02}m {up_s:02}s    requests  {curr_reqs}    \
+         {rps_val}    in-flight {in_flight}"
+    )
+    .ok();
 
     writeln!(
         block,
@@ -202,7 +309,7 @@ pub fn print_stats(pool: &DbPool, start: Instant, ts: &mut TermStats) {
     // Board breakdown (two boards per line)
     if !board_stats.is_empty() {
         writeln!(block, "  {dim}", dim = c(DIM)).ok();
-        let mut col = 0usize;
+        let mut col = 0_usize;
         for (short, thr, pst) in &board_stats {
             let seg = format!("/{short}/ {thr}t {pst}p");
             if col == 0 {
@@ -220,9 +327,7 @@ pub fn print_stats(pool: &DbPool, start: Instant, ts: &mut TermStats) {
     }
 
     block.push_str(&upload_line);
-    writeln!(block, "{dim}", dim = c(DIM)).ok();
     block.push('\n');
-    block.push_str(c(RST));
 
     crate::logging::console_print_raw(&block);
 }
@@ -255,25 +360,46 @@ fn process_rss_kb() -> u64 {
             }
         }
     }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        tracing::debug!(target: "console", "RSS measurement not available on this platform");
+    }
     0
 }
 
 fn dir_size_bytes(path: &str) -> i64 {
-    walkdir_size(std::path::Path::new(path)).cast_signed()
+    saturating_i64(walkdir_size(std::path::Path::new(path), 0))
 }
 
-fn walkdir_size(path: &std::path::Path) -> u64 {
+fn walkdir_size(path: &std::path::Path, depth: u32) -> u64 {
+    if depth > MAX_DIR_DEPTH {
+        tracing::warn!(
+            target: "console",
+            path = %path.display(),
+            "Directory traversal exceeded max depth ({MAX_DIR_DEPTH}), skipping"
+        );
+        return 0;
+    }
+
     let Ok(entries) = std::fs::read_dir(path) else {
         return 0;
     };
     entries
         .flatten()
         .map(|e| {
-            let is_real_dir = e.file_type().is_ok_and(|ft| ft.is_dir());
-            if is_real_dir {
-                walkdir_size(&e.path())
+            let Ok(ft) = e.file_type() else {
+                return 0;
+            };
+            if ft.is_symlink() {
+                // Do not follow symlinks — avoids inflated sizes and loops.
+                0
+            } else if ft.is_dir() {
+                walkdir_size(&e.path(), depth.saturating_add(1))
             } else {
-                e.metadata().map(|m| m.len()).unwrap_or(0)
+                // Use symlink_metadata to avoid following symlinks for size.
+                std::fs::symlink_metadata(e.path())
+                    .map(|m| m.len())
+                    .unwrap_or(0)
             }
         })
         .sum()
@@ -281,32 +407,45 @@ fn walkdir_size(path: &std::path::Path) -> u64 {
 
 // ─── Startup banner ──────────────────────────────────────────────────────────
 
-#[allow(clippy::arithmetic_side_effects)]
+/// Pad or truncate `s` to exactly `width` **display columns**.
+fn banner_cell(s: &str, width: usize) -> String {
+    let dw = display_width(s);
+    if dw >= width {
+        let mut out = String::new();
+        let mut w = 0_usize;
+        for ch in s.chars() {
+            let cw = char_display_width(ch);
+            if w.saturating_add(cw) > width {
+                break;
+            }
+            out.push(ch);
+            w = w.saturating_add(cw);
+        }
+        while w < width {
+            out.push(' ');
+            w = w.saturating_add(1);
+        }
+        out
+    } else {
+        format!("{s}{}", " ".repeat(width.saturating_sub(dw)))
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
 pub fn print_banner() {
     const INNER: usize = 53;
-    let cell = |s: String, width: usize| -> String {
-        let char_count = s.chars().count();
-        if char_count >= width {
-            s.chars().take(width).collect()
-        } else {
-            format!("{s}{}", " ".repeat(width - char_count))
-        }
-    };
 
-    let title = cell(
-        format!("{} v{}", CONFIG.forum_name, env!("CARGO_PKG_VERSION")),
-        INNER - 2,
-    );
-    let bind = cell(CONFIG.bind_addr.clone(), INNER - 10);
-    let db = cell(CONFIG.database_path.clone(), INNER - 10);
-    let upl = cell(CONFIG.upload_dir.clone(), INNER - 10);
-    let img_mib = CONFIG.max_image_size / 1024 / 1024;
-    let vid_mib = CONFIG.max_video_size / 1024 / 1024;
-    let aud_mib = CONFIG.max_audio_size / 1024 / 1024;
-    let limits = cell(
-        format!("img {img_mib} MiB  vid {vid_mib} MiB  audio {aud_mib} MiB"),
-        INNER - 4,
-    );
+    let title_raw = format!("{} v{}", CONFIG.forum_name, env!("CARGO_PKG_VERSION"));
+    let title = banner_cell(&title_raw, INNER.saturating_sub(2));
+    let bind = banner_cell(&CONFIG.bind_addr, INNER.saturating_sub(10));
+    let db = banner_cell(&CONFIG.database_path, INNER.saturating_sub(10));
+    let upl = banner_cell(&CONFIG.upload_dir, INNER.saturating_sub(10));
+
+    let img_mib = CONFIG.max_image_size as f64 / (1024.0 * 1024.0);
+    let vid_mib = CONFIG.max_video_size as f64 / (1024.0 * 1024.0);
+    let aud_mib = CONFIG.max_audio_size as f64 / (1024.0 * 1024.0);
+    let limits_raw = format!("img {img_mib:.1} MiB  vid {vid_mib:.1} MiB  audio {aud_mib:.1} MiB");
+    let limits = banner_cell(&limits_raw, INNER.saturating_sub(4));
 
     let block = format!(
         "{cyan}┌─────────────────────────────────────────────────────┐\n\
@@ -321,6 +460,120 @@ pub fn print_banner() {
         rst = c(RST),
     );
     crate::logging::console_print_raw(&block);
+}
+
+// ─── Shared prompt helpers ────────────────────────────────────────────────────
+
+/// Helper to print a prompt and read one line from `reader`.
+/// Returns `None` on EOF or I/O error (prints a message in both cases).
+fn console_prompt_line(msg: &str, reader: &mut dyn BufRead) -> Option<String> {
+    crate::logging::console_prompt(msg);
+    let mut s = String::new();
+    match reader.read_line(&mut s) {
+        Ok(0) => {
+            crate::logging::console_println("  Input cancelled (EOF).");
+            None
+        }
+        Err(e) => {
+            crate::logging::console_println(&format!("  Input error: {e}"));
+            None
+        }
+        Ok(_) => Some(s.trim().to_string()),
+    }
+}
+
+/// Strip ASCII control characters (except space) from `s`.
+fn strip_control_chars(s: &str) -> String {
+    s.chars()
+        .filter(|ch| !ch.is_control() || *ch == ' ')
+        .collect()
+}
+
+/// Read and validate a username from `reader`. Returns `None` on EOF/Ctrl-C.
+fn prompt_username(reader: &mut dyn BufRead) -> Option<String> {
+    loop {
+        crate::logging::console_prompt(&format!("  {}Username:{} ", c(CYN), c(RST)));
+        let mut s = String::new();
+        match reader.read_line(&mut s) {
+            Ok(0) | Err(_) => {
+                crate::logging::console_println(
+                    "\n  Skipped — run: rustchan-cli admin create-admin <user> <pass>",
+                );
+                return None;
+            }
+            Ok(_) => {}
+        }
+        let u = s.trim().to_string();
+        if u.is_empty() {
+            crate::logging::console_println("  Username cannot be empty.");
+            continue;
+        }
+        if u.len() > 32 {
+            crate::logging::console_println("  Username must be 32 characters or fewer.");
+            continue;
+        }
+        if !u
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            crate::logging::console_println(
+                "  Username must be alphanumeric (underscores and hyphens allowed).",
+            );
+            continue;
+        }
+        return Some(u);
+    }
+}
+
+/// Read and confirm a password from `reader`. Returns `None` on EOF/Ctrl-C.
+/// The returned `String` should be zeroed after use via `zeroize_string`.
+fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
+    loop {
+        crate::logging::console_prompt(&format!("  {}Password (min 8 chars):{} ", c(CYN), c(RST)));
+        let mut p1_raw = String::new();
+        match reader.read_line(&mut p1_raw) {
+            Ok(0) | Err(_) => {
+                zeroize_string(&mut p1_raw);
+                crate::logging::console_println("\n  Skipped.");
+                return None;
+            }
+            Ok(_) => {}
+        }
+        let trimmed = p1_raw.trim().to_string();
+        zeroize_string(&mut p1_raw);
+        let mut p1 = trimmed;
+
+        if let Err(e) = crate::utils::crypto::validate_password(&p1) {
+            zeroize_string(&mut p1);
+            crate::logging::console_println(&format!("  {}✗{} {e}", c(RED), c(RST)));
+            continue;
+        }
+
+        crate::logging::console_prompt(&format!("  {}Confirm password:{}   ", c(CYN), c(RST)));
+        let mut p2_raw = String::new();
+        if reader.read_line(&mut p2_raw).is_err() {
+            zeroize_string(&mut p1);
+            zeroize_string(&mut p2_raw);
+            crate::logging::console_println("\n  Skipped.");
+            return None;
+        }
+        let trimmed2 = p2_raw.trim().to_string();
+        zeroize_string(&mut p2_raw);
+        let mut p2 = trimmed2;
+
+        if p1 != p2 {
+            zeroize_string(&mut p1);
+            zeroize_string(&mut p2);
+            crate::logging::console_println(&format!(
+                "  {}✗{} Passwords do not match. Try again.",
+                c(RED),
+                c(RST)
+            ));
+            continue;
+        }
+        zeroize_string(&mut p2);
+        return Some(p1);
+    }
 }
 
 // ─── First-run admin wizard ───────────────────────────────────────────────────
@@ -347,12 +600,11 @@ pub fn prompt_create_first_admin(pool: &DbPool, reader: &mut dyn BufRead) {
     );
     crate::logging::console_print_raw(&header);
 
-    let username = prompt_username(reader);
-    let Some(username) = username else {
+    let Some(username) = prompt_username(reader) else {
         return;
     };
 
-    if crate::logging::is_tty() {
+    if is_tty() {
         crate::logging::console_println(&format!(
             "  {}Note: password input is visible — this is a one-time setup.{}",
             c(YLW),
@@ -360,12 +612,14 @@ pub fn prompt_create_first_admin(pool: &DbPool, reader: &mut dyn BufRead) {
         ));
     }
 
-    let password = prompt_password(reader);
-    let Some(password) = password else {
+    let Some(mut password) = prompt_password(reader) else {
         return;
     };
 
-    let Ok(hash) = crate::utils::crypto::hash_password(&password) else {
+    let hash_result = crate::utils::crypto::hash_password(&password);
+    zeroize_string(&mut password);
+
+    let Ok(hash) = hash_result else {
         crate::logging::console_println(&format!(
             "  {}[err]{} Failed to hash password.",
             c(RED),
@@ -428,127 +682,104 @@ pub fn prompt_create_first_admin(pool: &DbPool, reader: &mut dyn BufRead) {
     crate::logging::console_println("");
 }
 
-// ─── Shared prompt helpers ────────────────────────────────────────────────────
-
-/// Read and validate a username from `reader`. Returns `None` on EOF/Ctrl-C.
-fn prompt_username(reader: &mut dyn BufRead) -> Option<String> {
-    loop {
-        crate::logging::console_prompt(&format!("  {}Username:{} ", c(CYN), c(RST)));
-        let mut s = String::new();
-        match reader.read_line(&mut s) {
-            Ok(0) | Err(_) => {
-                crate::logging::console_println(
-                    "\n  Skipped — run: rustchan-cli admin create-admin <user> <pass>",
-                );
-                return None;
-            }
-            Ok(_) => {}
-        }
-        let u = s.trim().to_string();
-        if u.is_empty() {
-            crate::logging::console_println("  Username cannot be empty.");
-            continue;
-        }
-        if u.len() > 32 {
-            crate::logging::console_println("  Username must be 32 characters or fewer.");
-            continue;
-        }
-        if !u
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-        {
-            crate::logging::console_println(
-                "  Username must be alphanumeric (underscores and hyphens allowed).",
-            );
-            continue;
-        }
-        return Some(u);
-    }
-}
-
-/// Read and confirm a password from `reader`. Returns `None` on EOF/Ctrl-C.
-fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
-    loop {
-        crate::logging::console_prompt(&format!("  {}Password (min 8 chars):{} ", c(CYN), c(RST)));
-        let mut p1 = String::new();
-        match reader.read_line(&mut p1) {
-            Ok(0) | Err(_) => {
-                crate::logging::console_println("\n  Skipped.");
-                return None;
-            }
-            Ok(_) => {}
-        }
-        let p1 = p1.trim().to_string();
-
-        if let Err(e) = crate::utils::crypto::validate_password(&p1) {
-            crate::logging::console_println(&format!("  {}✗{} {e}", c(RED), c(RST)));
-            continue;
-        }
-
-        crate::logging::console_prompt(&format!("  {}Confirm password:{}   ", c(CYN), c(RST)));
-        let mut p2 = String::new();
-        if reader.read_line(&mut p2).is_err() {
-            crate::logging::console_println("\n  Skipped.");
-            return None;
-        }
-        let p2 = p2.trim().to_string();
-        if p1 != p2 {
-            crate::logging::console_println(&format!(
-                "  {}✗{} Passwords do not match. Try again.",
-                c(RED),
-                c(RST)
-            ));
-            continue;
-        }
-        return Some(p1);
-    }
-}
-
 // ─── Keyboard-driven admin console ───────────────────────────────────────────
 
+/// Global shutdown flag for the keyboard handler thread.
+/// Checked in the input loop; set via `signal_keyboard_shutdown()`.
+static KEYBOARD_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Signal the keyboard handler thread to stop.
+/// Called from the shutdown path in `server.rs` (e.g. on `SIGTERM` / `Ctrl+C`).
+#[allow(dead_code)]
+pub fn signal_keyboard_shutdown() {
+    KEYBOARD_SHUTDOWN.store(true, Ordering::SeqCst);
+}
+
+/// Spawn the interactive keyboard console thread.
+///
+/// The thread sleeps briefly to let server bind/startup log messages flush,
+/// then prints the help text and enters the input loop.
+///
+/// **Invariant:** Only this thread reads from stdin for the lifetime of the
+/// process.  No other code path should call `stdin().lock()` or
+/// `stdin().read_line()`.
 #[allow(clippy::significant_drop_tightening)]
 pub fn spawn_keyboard_handler(pool: DbPool, start_time: Instant) {
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(600));
-        print_keyboard_help();
+    let result = std::thread::Builder::new()
+        .name("console-kbd".into())
+        .spawn(move || {
+            // Brief sleep to let server bind/startup log messages flush first.
+            std::thread::sleep(Duration::from_millis(600));
 
-        let stdin = std::io::stdin();
+            print_keyboard_help();
 
-        let mut persistent_stats = TermStats {
-            prev_req_count: REQUEST_COUNT.load(Ordering::Relaxed),
-            prev_post_count: 0,
-            prev_thread_count: 0,
-            last_tick: Instant::now(),
-        };
+            // Initialise counters from the DB so the first [s] doesn't show
+            // the entire database as "new".
+            let (init_posts, init_threads) = pool.get().map_or((0_i64, 0_i64), |conn| {
+                let posts: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM posts", [], |r| r.get(0))
+                    .unwrap_or(0);
+                let threads: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM threads WHERE archived = 0", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap_or(0);
+                (posts, threads)
+            });
 
-        let mut reader = BufReader::new(stdin.lock());
+            let mut persistent_stats = TermStats {
+                prev_req_count: REQUEST_COUNT.load(Ordering::Relaxed),
+                prev_post_count: init_posts,
+                prev_thread_count: init_threads,
+                last_tick: Instant::now(),
+                last_stats_time: None,
+            };
 
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
+            let stdin = std::io::stdin();
+
+            // Note: the stdin lock is held for the lifetime of this thread.
+            // No other code path in the application should read from stdin.
+            let mut reader = BufReader::new(stdin.lock());
+
+            loop {
+                if KEYBOARD_SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+
+                if KEYBOARD_SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let cmd = line.trim().to_lowercase();
+                match cmd.as_str() {
+                    "s" => print_stats(&pool, start_time, &mut persistent_stats),
+                    "l" => kb_list_boards(&pool),
+                    "c" => kb_create_board(&pool, &mut reader),
+                    "a" => kb_create_admin(&pool, &mut reader),
+                    "d" => kb_delete_thread(&pool, &mut reader),
+                    "h" => print_keyboard_help(),
+                    "q" => crate::logging::console_println(&format!(
+                        "  {}[!]{} Use Ctrl+C or SIGTERM to stop the server.",
+                        c(YLW),
+                        c(RST)
+                    )),
+                    "" => {}
+                    other => crate::logging::console_println(&format!(
+                        "  Unknown command '{other}'. Press [h] for help."
+                    )),
+                }
             }
-            let cmd = line.trim().to_lowercase();
-            match cmd.as_str() {
-                "s" => print_stats(&pool, start_time, &mut persistent_stats),
-                "l" => kb_list_boards(&pool),
-                "c" => kb_create_board(&pool, &mut reader),
-                "a" => kb_create_admin(&pool, &mut reader),
-                "d" => kb_delete_thread(&pool, &mut reader),
-                "h" => print_keyboard_help(),
-                "q" => crate::logging::console_println(&format!(
-                    "  {}[!]{} Use Ctrl+C or SIGTERM to stop the server.",
-                    c(YLW),
-                    c(RST)
-                )),
-                "" => {}
-                other => crate::logging::console_println(&format!(
-                    "  Unknown command '{other}'. Press [h] for help."
-                )),
-            }
-        }
-    });
+        });
+
+    if let Err(e) = result {
+        tracing::error!(target: "console", "Failed to spawn console-kbd thread: {e}");
+    }
 }
 
 fn print_keyboard_help() {
@@ -618,16 +849,7 @@ fn kb_list_boards(pool: &DbPool) {
 
 #[allow(clippy::too_many_lines)]
 pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
-    let prompt = |msg: &str, reader: &mut dyn BufRead| -> Option<String> {
-        crate::logging::console_prompt(msg);
-        let mut s = String::new();
-        match reader.read_line(&mut s) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => Some(s.trim().to_string()),
-        }
-    };
-
-    let short = match prompt(
+    let short = match console_prompt_line(
         &format!("  {}Short name (e.g. 'tech'):{} ", c(CYN), c(RST)),
         reader,
     ) {
@@ -651,7 +873,7 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
         return;
     }
 
-    let name = match prompt(&format!("  {}Display name:{} ", c(CYN), c(RST)), reader) {
+    let name = match console_prompt_line(&format!("  {}Display name:{} ", c(CYN), c(RST)), reader) {
         Some(v) if !v.is_empty() => v,
         _ => {
             crate::logging::console_println("  Aborted.");
@@ -659,26 +881,57 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
         }
     };
 
-    let desc = prompt(
+    // Validate display name: strip control chars, enforce length.
+    let name = strip_control_chars(&name);
+    if name.is_empty() {
+        crate::logging::console_println(&format!(
+            "  {}[err]{} Display name cannot be empty after stripping control characters.",
+            c(RED),
+            c(RST)
+        ));
+        return;
+    }
+    if name.len() > MAX_BOARD_NAME_LEN {
+        crate::logging::console_println(&format!(
+            "  {}[err]{} Display name must be {MAX_BOARD_NAME_LEN} characters or fewer.",
+            c(RED),
+            c(RST)
+        ));
+        return;
+    }
+
+    let desc_raw = console_prompt_line(
         &format!("  {}Description (blank = none):{} ", c(CYN), c(RST)),
         reader,
     )
     .unwrap_or_default();
-    let nsfw_raw =
-        prompt(&format!("  {}NSFW? [y/N]:{} ", c(CYN), c(RST)), reader).unwrap_or_default();
+
+    // Validate and sanitise description.
+    let desc = strip_control_chars(&desc_raw);
+    if desc.len() > MAX_BOARD_DESC_LEN {
+        crate::logging::console_println(&format!(
+            "  {}[err]{} Description must be {MAX_BOARD_DESC_LEN} characters or fewer.",
+            c(RED),
+            c(RST)
+        ));
+        return;
+    }
+
+    let nsfw_raw = console_prompt_line(&format!("  {}NSFW? [y/N]:{} ", c(CYN), c(RST)), reader)
+        .unwrap_or_default();
     let nsfw = matches!(nsfw_raw.to_lowercase().as_str(), "y" | "yes");
 
-    let no_img = prompt(
+    let no_img = console_prompt_line(
         &format!("  {}Disable images? [y/N]:{} ", c(CYN), c(RST)),
         reader,
     )
     .unwrap_or_default();
-    let no_vid = prompt(
+    let no_vid = console_prompt_line(
         &format!("  {}Disable video?  [y/N]:{} ", c(CYN), c(RST)),
         reader,
     )
     .unwrap_or_default();
-    let no_aud = prompt(
+    let no_aud = console_prompt_line(
         &format!("  {}Disable audio?  [y/N]:{} ", c(CYN), c(RST)),
         reader,
     )
@@ -730,7 +983,6 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
 // ─── kb_create_admin ─────────────────────────────────────────────────────────
 
 /// Create an additional admin account from the interactive console.
-/// Also called by `prompt_create_first_admin` for the first-run wizard.
 #[allow(clippy::too_many_lines)]
 fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
     crate::logging::console_print_raw(&format!(
@@ -739,7 +991,7 @@ fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
         c(RST),
     ));
 
-    if crate::logging::is_tty() {
+    if is_tty() {
         crate::logging::console_println(&format!(
             "  {}Note: password input is visible in terminal.{}",
             c(YLW),
@@ -750,11 +1002,14 @@ fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
     let Some(username) = prompt_username(reader) else {
         return;
     };
-    let Some(password) = prompt_password(reader) else {
+    let Some(mut password) = prompt_password(reader) else {
         return;
     };
 
-    let Ok(hash) = crate::utils::crypto::hash_password(&password) else {
+    let hash_result = crate::utils::crypto::hash_password(&password);
+    zeroize_string(&mut password);
+
+    let Ok(hash) = hash_result else {
         crate::logging::console_println(&format!(
             "  {}[err]{} Failed to hash password.",
             c(RED),
@@ -794,20 +1049,47 @@ fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
 // ─── kb_delete_thread ────────────────────────────────────────────────────────
 
 fn kb_delete_thread(pool: &DbPool, reader: &mut dyn BufRead) {
-    crate::logging::console_prompt(&format!("  {}Thread ID to delete:{} ", c(CYN), c(RST)));
-    let mut s = String::new();
-    if reader.read_line(&mut s).is_err() {
+    let Some(id_str) = console_prompt_line(
+        &format!("  {}Thread ID to delete:{} ", c(CYN), c(RST)),
+        reader,
+    ) else {
         return;
-    }
-    let Ok(thread_id) = s.trim().parse::<i64>() else {
+    };
+
+    // Parse as u64 — thread IDs are always positive.
+    let Ok(thread_id_u) = id_str.parse::<u64>() else {
         crate::logging::console_println(&format!(
-            "  {}[err]{} '{}' is not a valid thread ID.",
+            "  {}[err]{} '{}' is not a valid thread ID (must be a positive integer).",
             c(RED),
             c(RST),
-            s.trim()
+            id_str
         ));
         return;
     };
+    if thread_id_u == 0 {
+        crate::logging::console_println(&format!(
+            "  {}[err]{} Thread ID must be greater than zero.",
+            c(RED),
+            c(RST)
+        ));
+        return;
+    }
+    let thread_id = saturating_i64(thread_id_u);
+
+    let Some(confirm_str) = console_prompt_line(
+        &format!(
+            "  {}Delete thread {thread_id} and all its posts? [y/N]:{} ",
+            c(YLW),
+            c(RST)
+        ),
+        reader,
+    ) else {
+        return;
+    };
+    if !matches!(confirm_str.to_lowercase().as_str(), "y" | "yes") {
+        crate::logging::console_println("  Aborted.");
+        return;
+    }
 
     let Ok(conn) = pool.get() else {
         crate::logging::console_println(&format!(
@@ -818,37 +1100,38 @@ fn kb_delete_thread(pool: &DbPool, reader: &mut dyn BufRead) {
         return;
     };
 
-    let exists: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM threads WHERE id = ?1",
-            [thread_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    if exists == 0 {
-        crate::logging::console_println(&format!(
-            "  {}[err]{} Thread {thread_id} not found.",
-            c(RED),
-            c(RST)
-        ));
-        return;
-    }
+    // Perform existence check + deletion atomically to avoid TOCTOU.
+    let result: Result<Vec<String>, String> = (|| {
+        conn.execute("BEGIN IMMEDIATE", [])
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
-    crate::logging::console_prompt(&format!(
-        "  {}Delete thread {thread_id} and all its posts? [y/N]:{} ",
-        c(YLW),
-        c(RST)
-    ));
-    let mut confirm = String::new();
-    if reader.read_line(&mut confirm).is_err() {
-        return;
-    }
-    if !matches!(confirm.trim().to_lowercase().as_str(), "y" | "yes") {
-        crate::logging::console_println("  Aborted.");
-        return;
-    }
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM threads WHERE id = ?1",
+                [thread_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
 
-    match crate::db::delete_thread(&conn, thread_id) {
+        if exists == 0 {
+            conn.execute("ROLLBACK", []).ok();
+            return Err(format!("Thread {thread_id} not found."));
+        }
+
+        match crate::db::delete_thread(&conn, thread_id) {
+            Ok(paths) => {
+                conn.execute("COMMIT", [])
+                    .map_err(|e| format!("Failed to commit: {e}"))?;
+                Ok(paths)
+            }
+            Err(e) => {
+                conn.execute("ROLLBACK", []).ok();
+                Err(format!("{e}"))
+            }
+        }
+    })();
+
+    match result {
         Ok(paths) => {
             let n = paths.len();
             for p in &paths {
