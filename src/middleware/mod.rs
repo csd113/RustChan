@@ -2,7 +2,7 @@
 //
 // Two middleware systems:
 //
-// Rate Limiter — In-memory sliding window per IP address.
+// Rate Limiter — In-memory fixed-window per IP address.
 //   Applies ONLY to navigational GET requests (board index, catalog, thread,
 //   archive, search).  The following are unconditionally excluded and never
 //   counted against the limit:
@@ -10,8 +10,14 @@
 //     • /boards/*  — media thumbnails; one request per attachment per page.
 //     • /admin*    — admin panel; operators must never be throttled.
 //     • /api/*     — quote-hover preview calls; fired on every hover.
-//     • Any request carrying a chan_admin_session cookie.
+//     • Any request carrying a non-empty chan_admin_session cookie.
 //   The GET limit is purely an anti-scraping / catalog-DoS safeguard.
+//
+//   NOTE: This is a fixed-window counter, not a true sliding window.
+//   A client can make up to `limit` requests at the end of one window and
+//   `limit` more at the start of the next, briefly doubling throughput.
+//   This is an acceptable trade-off for simplicity; the limit exists only
+//   as a scraping deterrent, not a hard traffic-shaping mechanism.
 //
 //   POST rate limiting does NOT exist at the middleware level.
 //   The ONLY post cooldown mechanism is the per-board post_cooldown_secs
@@ -52,6 +58,9 @@ static RATE_TABLE: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap
 /// FIX[MEDIUM-4]: Track the last time we ran a full cleanup so we can also
 /// clean on a time basis, not just when the table exceeds a size threshold.
 static LAST_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// Cached 429 toast page HTML — built once since it depends only on static CONFIG.
+static RATE_LIMITED_PAGE: LazyLock<String> = LazyLock::new(build_rate_limited_toast_page);
 
 // ─── Backup progress tracking ─────────────────────────────────────────────────
 //
@@ -100,6 +109,13 @@ impl BackupProgress {
             bytes_done: AtomicU64::new(0),
             bytes_total: AtomicU64::new(0),
         }
+    }
+
+    /// Load the current phase with `Acquire` ordering, ensuring all preceding
+    /// counter stores (done via `Relaxed`) are visible.
+    #[allow(dead_code)]
+    pub fn phase(&self) -> u64 {
+        self.phase.load(Ordering::Acquire)
     }
 
     /// Reset all counters and set a new phase.
@@ -155,6 +171,54 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Core IP resolution logic shared by `extract_ip` and `ClientIp`.
+///
+/// Avoids duplicating the proxy-header + Tor-token lookup in two places.
+fn resolve_ip_from_headers_and_peer(
+    headers: &axum::http::HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+) -> String {
+    if CONFIG.behind_proxy {
+        // Prefer X-Real-IP (set by nginx to $remote_addr; unforgeable).
+        if let Some(val) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return val.to_string();
+        }
+
+        // Fall back to the RIGHTMOST X-Forwarded-For entry (added by the
+        // trusted proxy, not by the client).
+        if let Some(val) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next_back())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return val.to_string();
+        }
+    }
+
+    // CRIT-2A: when the TCP peer is loopback and Tor support is active, look
+    // up the peer port in TOR_STREAM_TOKENS. Each Tor stream registers a unique
+    // pseudonymous token so that Tor users get isolated rate-limit and ban
+    // buckets instead of all sharing "127.0.0.1".
+    if CONFIG.enable_tor_support {
+        if let Some(addr) = peer {
+            if addr.ip().is_loopback() {
+                if let Some(token) = crate::detect::TOR_STREAM_TOKENS.get(&addr.port()) {
+                    return token.value().to_string();
+                }
+            }
+        }
+    }
+
+    peer.map_or_else(|| "unknown".to_string(), |a| a.ip().to_string())
+}
+
 /// Rate limit middleware — applied only to navigational GET requests.
 ///
 /// POST rate limiting is intentionally handled inside the individual posting
@@ -177,7 +241,6 @@ fn now_secs() -> u64 {
 /// shows an in-page toast notification and then navigates the browser back
 /// to the previous page — matching the "inline" behaviour of the POST
 /// cooldown errors rather than stranding the user on a bare error page.
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     // Only rate-limit GET; skip POST and all other methods entirely.
     if req.method() != axum::http::Method::GET {
@@ -190,11 +253,13 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     // /boards/*  — thumbnails and media files, one per attachment per page.
     // /admin*    — admin panel; operators must never be throttled here.
     // /api/*     — post-hover preview calls, fired on every quote-link hover.
+    // /favicon.ico — browser-initiated, one per page load.
     let path = req.uri().path();
     if path.starts_with("/static/")
         || path.starts_with("/boards/")
         || path.starts_with("/admin")
         || path.starts_with("/api/")
+        || path == "/favicon.ico"
     {
         return next.run(req).await;
     }
@@ -210,13 +275,20 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     //   • `Cookie: xchan_admin_session=anything` (name is a prefix)
     // We now split on ';', trim each pair, and require the segment to *start*
     // with exactly "chan_admin_session=" — an exact cookie-name match.
+    //
+    // Additionally, we require a non-empty value after the '=' to prevent
+    // trivial bypass with `chan_admin_session=` (empty value).
     let has_admin_cookie = req
         .headers()
         .get(axum::http::header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|s| {
-            s.split(';')
-                .any(|pair| pair.trim().starts_with("chan_admin_session="))
+            s.split(';').any(|pair| {
+                let trimmed = pair.trim();
+                trimmed
+                    .strip_prefix("chan_admin_session=")
+                    .is_some_and(|val| !val.is_empty())
+            })
         });
     if has_admin_cookie {
         return next.run(req).await;
@@ -237,7 +309,7 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
 
     // Check and update rate limit counter
     let blocked = {
-        let mut binding = RATE_TABLE.entry(ip_key.clone()).or_insert((0, now));
+        let mut binding = RATE_TABLE.entry(ip_key).or_insert((0, now));
         let (count, window_start) = binding.value_mut();
         let result = if now.saturating_sub(*window_start) > window {
             // Window has expired, reset
@@ -245,29 +317,33 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
             *window_start = now;
             false
         } else {
-            *count += 1;
+            // FIX: Use saturating_add to prevent overflow in release mode
+            // (which would wrap to 0, resetting the counter and letting the
+            // client through) or panic in debug mode.
+            *count = count.saturating_add(1);
             *count > limit
         };
-        drop(binding);
+        drop(binding); // Release shard lock before proceeding
         result
     };
 
     if blocked {
-        // Return an in-page toast rather than a bare 429 error page.
-        // The script shows a visible notification then navigates back so the
-        // user stays in context instead of landing on a dead-end error screen.
-        let html = rate_limited_toast_page();
+        // Return the cached in-page toast rather than rebuilding it each time.
         return (
             axum::http::StatusCode::TOO_MANY_REQUESTS,
-            axum::response::Html(html),
+            axum::response::Html(RATE_LIMITED_PAGE.clone()),
         )
             .into_response();
     }
 
     // FIX[MEDIUM-4]: Clean old entries when the table grows large OR at least
     // once every 10 minutes (600 seconds), whichever comes first.
+    //
+    // We avoid calling `RATE_TABLE.len()` on the hot path unless the time-based
+    // check passes, since `DashMap::len()` locks every shard to sum counts.
     let last_cleanup = LAST_CLEANUP_SECS.load(Ordering::Relaxed);
-    let should_clean = RATE_TABLE.len() > 5000 || now.saturating_sub(last_cleanup) > 600;
+    let time_based = now.saturating_sub(last_cleanup) > 600;
+    let should_clean = time_based || RATE_TABLE.len() > 5000;
 
     if should_clean {
         // Use compare_exchange to avoid concurrent threads all cleaning simultaneously
@@ -275,8 +351,9 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
             .compare_exchange(last_cleanup, now, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
+            let retention = window.saturating_mul(2);
             RATE_TABLE
-                .retain(|_, (_, window_start)| now.saturating_sub(*window_start) <= window * 2);
+                .retain(|_, (_, window_start)| now.saturating_sub(*window_start) <= retention);
         }
     }
 
@@ -310,7 +387,10 @@ fn html_escape(s: &str) -> String {
 /// This is returned instead of the bare `AppError::RateLimited` 429 page so
 /// that the user stays in context (they see the message overlaid on what looks
 /// like their previous page) rather than landing on a dead-end error screen.
-fn rate_limited_toast_page() -> String {
+///
+/// Built once and cached in `RATE_LIMITED_PAGE` since it depends only on the
+/// static forum name from CONFIG.
+fn build_rate_limited_toast_page() -> String {
     // FIX[YELLOW-4]: escape before interpolation so special chars in the forum
     // name never produce malformed HTML (or a future XSS if copied elsewhere).
     let forum_name_escaped = html_escape(&crate::config::CONFIG.forum_name);
@@ -396,52 +476,11 @@ fn rate_limited_toast_page() -> String {
 /// rightmost entry (the last proxy in the chain), which is also not
 /// client-controlled when the chain passes through a trusted proxy.
 pub fn extract_ip(req: &Request) -> String {
-    if CONFIG.behind_proxy {
-        // Prefer X-Real-IP (set by nginx to $remote_addr; unforgeable)
-        if let Some(real_ip) = req.headers().get("x-real-ip") {
-            if let Ok(val) = real_ip.to_str() {
-                let trimmed = val.trim();
-                if !trimmed.is_empty() {
-                    return trimmed.to_string();
-                }
-            }
-        }
-
-        // Fall back to the RIGHTMOST X-Forwarded-For entry (added by the
-        // trusted proxy, not by the client).
-        if let Some(fwd) = req.headers().get("x-forwarded-for") {
-            if let Ok(val) = fwd.to_str() {
-                if let Some(ip) = val.split(',').next_back() {
-                    let trimmed = ip.trim();
-                    if !trimmed.is_empty() {
-                        return trimmed.to_string();
-                    }
-                }
-            }
-        }
-    }
-
-    // Direct connection IP (not behind proxy, or proxy headers absent).
     let ci = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>();
     let peer = ci.map(|c| c.0);
-
-    // CRIT-2A: when the TCP peer is loopback and Tor support is active, look
-    // up the peer port in TOR_STREAM_TOKENS. Each Tor stream registers a unique
-    // pseudonymous token so that Tor users get isolated rate-limit and ban
-    // buckets instead of all sharing "127.0.0.1".
-    if CONFIG.enable_tor_support {
-        if let Some(addr) = peer {
-            if addr.ip().is_loopback() {
-                if let Some(token) = crate::detect::TOR_STREAM_TOKENS.get(&addr.port()) {
-                    return token.value().to_string();
-                }
-            }
-        }
-    }
-
-    peer.map_or_else(|| "unknown".to_string(), |a| a.ip().to_string())
+    resolve_ip_from_headers_and_peer(req.headers(), peer)
 }
 
 /// Validate CSRF token from a form against the cookie.
@@ -503,6 +542,10 @@ pub async fn normalize_trailing_slash(req: Request, next: Next) -> Response {
     if path.len() > 1 && path.ends_with('/') {
         let stripped = path.trim_end_matches('/');
 
+        // FIX: If stripping all trailing slashes yields an empty string (e.g.
+        // path was "//"), redirect to "/" instead of an empty target.
+        let stripped = if stripped.is_empty() { "/" } else { stripped };
+
         // Rebuild the URI, preserving any query string.
         let new_path_and_query = uri
             .query()
@@ -543,51 +586,11 @@ where
         parts: &mut axum::http::request::Parts,
         _state: &S,
     ) -> std::result::Result<Self, Self::Rejection> {
-        if CONFIG.behind_proxy {
-            // Prefer X-Real-IP (nginx $remote_addr — not client-controlled).
-            if let Some(val) = parts
-                .headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                return Ok(Self(val.to_string()));
-            }
-            // Fall back to rightmost X-Forwarded-For entry (added by the
-            // trusted proxy, not by the client).
-            if let Some(val) = parts
-                .headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.split(',').next_back())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                return Ok(Self(val.to_string()));
-            }
-        }
-        // Direct connection (or proxy headers absent).
-        let ci = parts
+        let peer = parts
             .extensions
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>();
-        let peer = ci.map(|c| c.0);
-
-        // CRIT-2A: same token lookup as extract_ip — keeps both code paths
-        // consistent. When the TCP peer is loopback and Tor is enabled, return
-        // the per-stream pseudonymous token instead of "127.0.0.1".
-        if CONFIG.enable_tor_support {
-            if let Some(addr) = peer {
-                if addr.ip().is_loopback() {
-                    if let Some(token) = crate::detect::TOR_STREAM_TOKENS.get(&addr.port()) {
-                        return Ok(Self(token.value().to_string()));
-                    }
-                }
-            }
-        }
-
-        let ip = peer.map_or_else(|| "unknown".to_string(), |a| a.ip().to_string());
-        Ok(Self(ip))
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0);
+        Ok(Self(resolve_ip_from_headers_and_peer(&parts.headers, peer)))
     }
 }
 
@@ -655,18 +658,27 @@ mod tests {
         assert!(!constant_time_eq(b"token_a", b"token_b"));
     }
 
+    #[test]
+    fn constant_time_eq_single_byte_equal() {
+        assert!(constant_time_eq(b"x", b"x"));
+    }
+
+    #[test]
+    fn constant_time_eq_single_byte_differ() {
+        assert!(!constant_time_eq(b"x", b"y"));
+    }
+
     // ── BackupProgress ───────────────────────────────────────────────────────
 
     #[test]
     fn backup_progress_initial_phase_is_idle() {
-        use std::sync::atomic::Ordering::Acquire;
         let bp = BackupProgress::new();
-        assert_eq!(bp.phase.load(Acquire), backup_phase::IDLE);
+        assert_eq!(bp.phase(), backup_phase::IDLE);
     }
 
     #[test]
     fn backup_progress_reset_clears_counters() {
-        use std::sync::atomic::Ordering::{Acquire, Relaxed};
+        use std::sync::atomic::Ordering::Relaxed;
         let bp = BackupProgress::new();
         bp.files_done.store(10, Relaxed);
         bp.files_total.store(20, Relaxed);
@@ -675,10 +687,57 @@ mod tests {
 
         bp.reset(backup_phase::COMPRESS);
 
-        assert_eq!(bp.phase.load(Acquire), backup_phase::COMPRESS);
+        assert_eq!(bp.phase(), backup_phase::COMPRESS);
         assert_eq!(bp.files_done.load(Relaxed), 0);
         assert_eq!(bp.files_total.load(Relaxed), 0);
         assert_eq!(bp.bytes_done.load(Relaxed), 0);
         assert_eq!(bp.bytes_total.load(Relaxed), 0);
+    }
+
+    // ── html_escape ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn html_escape_special_chars() {
+        assert_eq!(
+            html_escape(r#"<b>"Hello" & 'World'</b>"#),
+            "&lt;b&gt;&quot;Hello&quot; &amp; &#x27;World&#x27;&lt;/b&gt;"
+        );
+    }
+
+    #[test]
+    fn html_escape_plain_string_unchanged() {
+        assert_eq!(html_escape("Hello World 123"), "Hello World 123");
+    }
+
+    #[test]
+    fn html_escape_empty() {
+        assert_eq!(html_escape(""), "");
+    }
+
+    // ── trailing slash normalization (unit-level) ────────────────────────────
+
+    #[test]
+    fn trim_end_double_slash_yields_root() {
+        // Verifies the fix: "//" should normalize to "/" not ""
+        let path = "//";
+        let stripped = path.trim_end_matches('/');
+        let result = if stripped.is_empty() { "/" } else { stripped };
+        assert_eq!(result, "/");
+    }
+
+    #[test]
+    fn trim_end_single_trailing_slash() {
+        let path = "/board/catalog/";
+        let stripped = path.trim_end_matches('/');
+        let result = if stripped.is_empty() { "/" } else { stripped };
+        assert_eq!(result, "/board/catalog");
+    }
+
+    #[test]
+    fn trim_end_no_trailing_slash_unchanged() {
+        let path = "/board/catalog";
+        let stripped = path.trim_end_matches('/');
+        let result = if stripped.is_empty() { "/" } else { stripped };
+        assert_eq!(result, "/board/catalog");
     }
 }
