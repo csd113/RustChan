@@ -2,33 +2,29 @@
 // job queue (including worker-side update helpers).
 //
 // Dependency notes:
-// create_post_inner is pub(super) — threads.rs calls it inside
-// create_thread_with_op's manual transaction.
-// delete_post calls super::paths_safe_to_delete.
+// `create_post_inner` is `pub(super)` — `threads.rs` calls it inside
+// `create_thread_with_op`'s manual transaction.
+// `delete_post` calls `super::paths_safe_to_delete`.
 //
 
 use crate::models::Post;
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, OptionalExtension};
 
-// ─── Retry budget constant ────────────────────────────────────────────────────
-
 const MAX_JOB_ATTEMPTS: i64 = 3;
 
-// ─── Row mapper ───────────────────────────────────────────────────────────────
-
-/// Map a full post row (23 columns, selected in the canonical order used
-/// throughout this module) into a Post struct.
+/// Map a full post row (`23` columns, selected in the canonical order used
+/// throughout this module) into a `Post` struct.
 ///
 /// Column layout:
-/// 0 id 8 ip_hash 16 is_op
-/// 1 thread_id 9 file_path 17 media_type
-/// 2 board_id 10 file_name 18 audio_file_path
-/// 3 name 11 file_size 19 audio_file_name
-/// 4 tripcode 12 thumb_path 20 audio_file_size
-/// 5 subject 13 mime_type 21 audio_mime_type
-/// 6 body 14 created_at 22 edited_at
-/// 7 body_html 15 deletion_token
+/// `0 id` `8 ip_hash` `16 is_op`
+/// `1 thread_id` `9 file_path` `17 media_type`
+/// `2 board_id` `10 file_name` `18 audio_file_path`
+/// `3 name` `11 file_size` `19 audio_file_name`
+/// `4 tripcode` `12 thumb_path` `20 audio_file_size`
+/// `5 subject` `13 mime_type` `21 audio_mime_type`
+/// `6 body` `14 created_at` `22 edited_at`
+/// `7 body_html` `15 deletion_token`
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -65,8 +61,6 @@ pub(super) fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
     })
 }
 
-// ─── Post queries ─────────────────────────────────────────────────────────────
-
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<Post>> {
@@ -86,7 +80,7 @@ pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Resu
     Ok(posts)
 }
 
-/// Fetch posts in thread_id whose id is strictly greater than since_id.
+/// Fetch posts in `thread_id` whose `id` is strictly greater than `since_id`.
 /// Returns them oldest-first. Used by the thread auto-update polling endpoint.
 ///
 /// # Errors
@@ -116,7 +110,7 @@ pub fn get_new_posts_since(
     Ok(posts)
 }
 
-/// Get last N posts for a thread (for board index preview).
+/// Get last `N` posts for a thread (for board index preview).
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -148,10 +142,10 @@ pub fn get_preview_posts(conn: &rusqlite::Connection, thread_id: i64, n: i64) ->
     Ok(posts)
 }
 
-/// Internal post insertion. Called directly by threads::create_thread_with_op
-/// inside its manual BEGIN IMMEDIATE transaction, and wrapped by create_post.
+/// Internal post insertion. Called directly by `threads::create_thread_with_op`
+/// inside its manual `BEGIN IMMEDIATE` transaction, and wrapped by `create_post`.
 ///
-/// pub(super) so sibling modules can call it without exposing it externally.
+/// `pub(super)` so sibling modules can call it without exposing it externally.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -237,7 +231,7 @@ pub fn get_post_on_board(
         .optional()?)
 }
 
-/// Delete a post by id; returns file paths safe to remove from disk.
+/// Delete a post by `id`; returns file paths safe to remove from disk.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -331,10 +325,10 @@ pub fn verify_deletion_token(
 
 /// Edit a post's body, verified against the deletion token and a per-board edit window.
 ///
-/// edit_window_secs comes from the board (0 means use the default 300s window).
-/// The caller is responsible for checking board.allow_editing before calling this.
-/// Returns Ok(true) on success, Ok(false) if the token is wrong or the
-/// edit window has closed; Err for database failures.
+/// `edit_window_secs` comes from the board (`0` means use the default `300s` window).
+/// The caller is responsible for checking `board.allow_editing` before calling this.
+/// Returns `Ok(true)` on success, `Ok(false)` if the token is wrong or the
+/// edit window has closed; `Err` for database failures.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -411,21 +405,19 @@ pub fn edit_post(
 /// accumulator so equality is only true when lengths and contents match.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let max_len = a.len().max(b.len());
-    let mut diff: usize = a.len() ^ b.len();
+    let mut diff = usize::from(a.len() != b.len());
 
     for i in 0..max_len {
         let x = a.get(i).copied().unwrap_or(0);
         let y = b.get(i).copied().unwrap_or(0);
-        diff |= usize::from(x ^ y);
+        diff |= usize::from(x != y);
     }
 
     diff == 0
 }
 
-// ─── LIKE escape helper ───────────────────────────────────────────────────────
-
 fn like_escape(query: &str) -> String {
-    let mut escaped = String::with_capacity(query.len() + 2);
+    let mut escaped = String::with_capacity(query.len().saturating_add(2));
 
     escaped.push('%');
     for ch in query.chars() {
@@ -441,8 +433,6 @@ fn like_escape(query: &str) -> String {
 
     escaped
 }
-
-// ─── Search ───────────────────────────────────────────────────────────────────
 
 /// Full-text search across post bodies.
 ///
@@ -491,9 +481,7 @@ pub fn count_search_results(
     )?)
 }
 
-// ─── File deduplication ───────────────────────────────────────────────────────
-
-/// Look up an existing upload by its SHA-256 hash.
+/// Look up an existing upload by its `SHA-256` hash.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -537,8 +525,6 @@ pub fn record_file_hash(
     )?;
     Ok(())
 }
-
-// ─── Poll queries ─────────────────────────────────────────────────────────────
 
 /// Create a poll with its options atomically.
 ///
@@ -680,7 +666,7 @@ pub fn get_poll_for_thread(
     }))
 }
 
-/// Cast a vote. Returns true if vote was recorded, false otherwise.
+/// Cast a vote. Returns `true` if vote was recorded, `false` otherwise.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -706,7 +692,7 @@ pub fn cast_vote(
     Ok(result > 0)
 }
 
-/// Resolve (poll_id, thread_id, board_short) from an option_id.
+/// Resolve (`poll_id`, `thread_id`, `board_short`) from an `option_id`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -728,9 +714,7 @@ pub fn get_poll_context(
         .optional()?)
 }
 
-// ─── Poll maintenance ─────────────────────────────────────────────────────────
-
-/// Delete vote rows for polls whose expires_at is older than the given cutoff timestamp.
+/// Delete vote rows for polls whose `expires_at` is older than the given cutoff timestamp.
 ///
 /// The poll question and options are preserved for historical display; only
 /// the per-IP vote records are pruned.
@@ -754,12 +738,7 @@ pub fn cleanup_expired_poll_votes(
     Ok(n)
 }
 
-// ─── Background job queue ─────────────────────────────────────────────────────
-//
-// Jobs flow through: pending → running → done | failed
-// claim_next_job uses UPDATE … RETURNING for atomic claim with no TOCTOU race.
-
-/// Persist a new job in the pending state. Returns the new row id.
+/// Persist a new job in the pending state. Returns the new row `id`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -777,7 +756,7 @@ pub fn enqueue_job(conn: &rusqlite::Connection, job_type: &str, payload: &str) -
 }
 
 /// Atomically claim the highest-priority pending job that has not exhausted
-/// its retry budget. Returns (job_id, payload) or None when the queue is empty.
+/// its retry budget. Returns (`job_id`, `payload`) or `None` when the queue is empty.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -821,7 +800,7 @@ pub fn complete_job(conn: &rusqlite::Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Record a job failure. After MAX_JOB_ATTEMPTS the job stays "failed" permanently.
+/// Record a job failure. After `MAX_JOB_ATTEMPTS` the job stays `"failed"` permanently.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -841,7 +820,7 @@ pub fn fail_job(conn: &rusqlite::Connection, id: i64, error: &str) -> Result<()>
     Ok(())
 }
 
-/// Count jobs currently in the 'pending' state (used for monitoring).
+/// Count jobs currently in the `"pending"` state (used for monitoring).
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -855,9 +834,7 @@ pub fn pending_job_count(conn: &rusqlite::Connection) -> Result<i64> {
     Ok(n)
 }
 
-// ─── Post update helpers (used by background workers) ────────────────────────
-
-/// Update a post's file_path and mime_type after background transcoding.
+/// Update a post's `file_path` and `mime_type` after background transcoding.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -877,15 +854,13 @@ pub fn update_post_file_info(
     Ok(())
 }
 
-/// Update every post that currently stores old_path as its file_path.
+/// Update every post that currently stores `old_path` as its `file_path`.
 ///
 /// Required after video transcoding: the deduplication system shares one
-/// physical file across N posts. The VideoTranscode worker knows only the
-/// post_id that triggered the job, but ALL posts that reference the same MP4
-/// must be migrated to the new WebM path before the MP4 is removed from disk.
-/// Without this, paths_safe_to_delete counts zero references to the old MP4
-/// and marks it safe to delete — but the WebM it was replaced with would also
-/// be considered orphaned the next time any of those stale posts is deleted.
+/// physical file across `N` posts. The `VideoTranscode` worker knows only the
+/// `post_id` that triggered the job, but all posts that reference the same
+/// `MP4` must be migrated to the new `WebM` path before the `MP4` is removed
+/// from disk.
 ///
 /// Returns the number of posts updated.
 ///
@@ -904,7 +879,7 @@ pub fn update_all_posts_file_path(
     Ok(n)
 }
 
-/// Update a post's thumb_path after background waveform / thumbnail generation.
+/// Update a post's `thumb_path` after background waveform / thumbnail generation.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -923,8 +898,8 @@ pub fn update_post_thumb_path(
     Ok(())
 }
 
-/// Retrieve just the thumb_path for a post (used by VideoTranscode worker to
-/// preserve the existing thumbnail when refreshing the file-hash record).
+/// Retrieve just the `thumb_path` for a post (used by the `VideoTranscode` worker to
+/// preserve the existing thumbnail when refreshing the `file_hashes` record).
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -940,8 +915,8 @@ pub fn get_post_thumb_path(conn: &rusqlite::Connection, post_id: i64) -> Result<
     Ok(result)
 }
 
-/// Delete a file-hash record by its stored file_path (used when the worker
-/// replaces an MP4 with the transcoded WebM and needs to refresh the index).
+/// Delete a `file_hashes` record by its stored `file_path` (used when the worker
+/// replaces an `MP4` with the transcoded `WebM` and needs to refresh the index).
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
