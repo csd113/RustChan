@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.1.0-alpha-2"
+version = "1.1.0-alpha-3"
 edition = "2021"
 # axum 0.8 requires Rust 1.75; that is the effective floor for this project.
 rust-version = "1.90"
@@ -72,7 +72,8 @@ uuid      = { version = "1",   features = ["v4", "serde"] }
 chrono    = { version = "0.4", features = ["serde"] }
 dashmap      = "6"
 parking_lot  = "0.12"
-anyhow       = "1"
+atty    = "0.2"
+anyhow  = "1"
 once_cell    = "1"
 regex     = "1"
 
@@ -84,6 +85,8 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 
 
 openssl = { version = "0.10", features = ["vendored"] }
+fs2 = "0.4"
+tor-rtcompat = "0.40"
 
 
 # Step 1.1: reqwest for federation push (chan_refresh) and pull (chan_poll).
