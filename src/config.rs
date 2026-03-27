@@ -53,6 +53,9 @@ struct SettingsFile {
     tor_bootstrap_timeout_secs: Option<u64>,
     tor_max_concurrent_streams: Option<usize>,
     tor_service_nickname: Option<String>,
+    tor_stable_run_threshold_secs: Option<u64>,
+    tor_stream_timeout_secs: Option<u64>,
+    tor_num_intro_points: Option<u8>,
     require_ffmpeg: Option<bool>,
     wal_checkpoint_interval_secs: Option<u64>,
     auto_vacuum_interval_hours: Option<u64>,
@@ -145,10 +148,29 @@ tor_only = false
 tor_bootstrap_timeout_secs = 120
 
 # Maximum number of simultaneous inbound Tor connections.
-tor_max_concurrent_streams = 512
+# 512 is far too high for a typical hidden service and allows stale half-open
+# streams to accumulate, triggering mass circuit teardowns. Start at 64 and
+# raise under measured load.
+tor_max_concurrent_streams = 64
 
 # Nickname for this instance's Tor hidden service key.
 tor_service_nickname = "rustchan"
+
+# Seconds a run must stay alive before its restart-attempt counter resets.
+# 60 s (the old default) was too short: a client that bootstrapped and then
+# hit guard failures would still reset the counter, causing infinite 30 s
+# retries. 600 s (10 min) correctly distinguishes a stable run from a crash.
+tor_stable_run_threshold_secs = 600
+
+# Wall-clock timeout (seconds) for each proxied onion-service stream. Stale
+# half-open streams are forcibly closed after this many seconds so they do not
+# accumulate and exhaust the semaphore. 300 s covers large file uploads.
+tor_stream_timeout_secs = 300
+
+# Number of Tor introduction points to establish for the onion service.
+# Arti (≥0.40) enforces a hard minimum of 3 and a maximum of 20; values
+# outside that range are rejected at startup. 3 is the recommended default.
+tor_num_intro_points = 3
 
 # Set to true to hard-exit at startup when ffmpeg is not found.
 require_ffmpeg = false
@@ -214,6 +236,12 @@ pub struct Config {
     pub tor_bootstrap_timeout_secs: u64,
     pub tor_max_concurrent_streams: usize,
     pub tor_service_nickname: String,
+    /// Seconds a run must stay alive before its attempt counter resets.
+    pub tor_stable_run_threshold_secs: u64,
+    /// Wall-clock timeout (seconds) for each proxied onion-service stream.
+    pub tor_stream_timeout_secs: u64,
+    /// Number of introduction points to establish for the onion service.
+    pub tor_num_intro_points: u8,
     pub require_ffmpeg: bool,
 
     pub bind_addr: String,
@@ -352,12 +380,24 @@ impl Config {
             ),
             tor_max_concurrent_streams: env_parse(
                 "CHAN_TOR_MAX_STREAMS",
-                s.tor_max_concurrent_streams.unwrap_or(512),
+                s.tor_max_concurrent_streams.unwrap_or(64),
             ),
             tor_service_nickname: std::env::var("CHAN_TOR_NICKNAME")
                 .ok()
                 .or(s.tor_service_nickname)
                 .unwrap_or_else(|| "rustchan".to_string()),
+            tor_stable_run_threshold_secs: env_parse(
+                "CHAN_TOR_STABLE_RUN_SECS",
+                s.tor_stable_run_threshold_secs.unwrap_or(600),
+            ),
+            tor_stream_timeout_secs: env_parse(
+                "CHAN_TOR_STREAM_TIMEOUT",
+                s.tor_stream_timeout_secs.unwrap_or(300),
+            ),
+            tor_num_intro_points: env_parse(
+                "CHAN_TOR_INTRO_POINTS",
+                s.tor_num_intro_points.unwrap_or(3),
+            ),
             require_ffmpeg: env_bool("CHAN_REQUIRE_FFMPEG", s.require_ffmpeg.unwrap_or(false)),
 
             bind_addr,

@@ -50,6 +50,7 @@ mod middleware;
 mod models;
 mod server;
 mod templates;
+mod terminal;
 mod utils;
 mod workers;
 
@@ -258,6 +259,17 @@ fn load_blocking_threads() -> anyhow::Result<usize> {
 // every `spawn_blocking` call — page renders, DB queries, file I/O.
 
 fn main() -> anyhow::Result<()> {
+    // ── Auto-terminal relaunch (double-click / no-TTY support) ───────────
+    //
+    // Must be the very first thing in main() — before arg parsing, logging,
+    // or any other initialisation.  If we are not attached to a TTY and
+    // RUSTCHAN_SPAWNED is not set, spawn_in_terminal() opens a terminal
+    // emulator, re-runs this binary inside it, and returns true so we exit
+    // the current headless process immediately.
+    if terminal::relaunch_in_terminal_if_needed()? {
+        return Ok(());
+    }
+
     // ── Parse CLI arguments first ────────────────────────────────────────
     //
     // Admin sub-commands are fully synchronous and intentionally run *before*

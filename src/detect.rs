@@ -218,6 +218,21 @@ pub fn detect_tor(
     }
     let data_dir = data_dir.to_path_buf();
     let handle = tokio::spawn(async move {
+        // Backoff table: 30 s → 60 s → 120 s → 240 s → 480 s → 960 s.
+        // Consts are declared at the top of the block (before any statements)
+        // to satisfy the `items_after_statements` lint.
+        const BACKOFF_SECS: [u64; 6] = [30, 60, 120, 240, 480, 960];
+        // Jitter table: 8 fixed offsets per level (~0–20 % of each base).
+        // Selected by the low 3 bits of a random byte — no division needed.
+        const JITTER_SECS: [[u64; 8]; 6] = [
+            [0, 1, 2, 3, 4, 5, 6, 6],
+            [0, 2, 4, 6, 8, 10, 12, 12],
+            [0, 4, 8, 12, 16, 20, 24, 24],
+            [0, 8, 16, 24, 32, 40, 48, 48],
+            [0, 16, 32, 48, 64, 80, 96, 96],
+            [0, 32, 64, 96, 128, 160, 192, 192],
+        ];
+
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let mut attempt = 0u32;
         loop {
@@ -233,7 +248,16 @@ pub fn detect_tor(
             };
             match result {
                 Ok(()) => {
-                    if run_start.elapsed() >= std::time::Duration::from_secs(60) {
+                    // Only reset the attempt counter if the task ran stably for
+                    // at least tor_stable_run_threshold_secs. 60 s was too short:
+                    // a client that bootstrapped successfully and then immediately
+                    // hit guard failures would still reset attempt to 0, causing
+                    // the next restart to use the minimum 30 s backoff again
+                    // indefinitely.
+                    let stable_threshold = std::time::Duration::from_secs(
+                        crate::config::CONFIG.tor_stable_run_threshold_secs,
+                    );
+                    if run_start.elapsed() >= stable_threshold {
                         attempt = 0;
                     }
                     tracing::warn!(target: "rustchan::detect", "Tor: Arti exited cleanly");
@@ -243,8 +267,18 @@ pub fn detect_tor(
                 }
             }
             *onion_address.write().await = None;
-            let backoff =
-                std::time::Duration::from_secs(30_u64.saturating_mul(1 << attempt.min(4)));
+            let idx = attempt.min(5) as usize;
+            let base_secs = BACKOFF_SECS.get(idx).copied().unwrap_or(960);
+            let jitter_secs = {
+                let mut buf = [0u8; 1];
+                rand_core::OsRng.fill_bytes(&mut buf);
+                let jitter_row = JITTER_SECS.get(idx).copied().unwrap_or([0u64; 8]);
+                jitter_row
+                    .get((buf[0] & 0b0000_0111) as usize)
+                    .copied()
+                    .unwrap_or(0)
+            };
+            let backoff = std::time::Duration::from_secs(base_secs.saturating_add(jitter_secs));
             tracing::warn!(target: "rustchan::detect", retry_in = ?backoff, "Tor: scheduling restart");
             tokio::select! {
                 () = tokio::time::sleep(backoff) => {}
@@ -276,12 +310,37 @@ type DynError = Box<dyn std::error::Error + Send + Sync>;
 async fn bootstrap_tor_client(
     data_dir: &std::path::Path,
 ) -> Result<TorClient<PreferredRuntime>, DynError> {
-    let config = TorClientConfigBuilder::from_directories(
+    let mut builder = TorClientConfigBuilder::from_directories(
         data_dir.join("arti_state"),
         data_dir.join("arti_cache"),
-    )
-    .build()
-    .map_err(|e| Box::new(e) as DynError)?;
+    );
+
+    // Give each circuit build attempt up to 120 s before counting it as a
+    // failure (default is 60 s). On restricted networks this prevents guards
+    // from being marked "questionable" just because the first few circuits
+    // were slow.
+    builder
+        .circuit_timing()
+        .request_timeout(std::time::Duration::from_secs(120))
+        .request_max_retries(3u32);
+
+    // Raise the number of circuits a guard must successfully complete before
+    // it is treated as fully confirmed. The consensus parameter
+    // "guard-confirmed-min-lifetime" controls a related concept; here we use
+    // override_net_params to tell the directory manager to be more lenient
+    // about how quickly it considers a guard usable. A higher
+    // "guard-min-filtered-sample-size" means Arti keeps a larger candidate
+    // pool before promoting guards, reducing the chance a single bad actor
+    // ends up as the sole usable guard on a flaky network.
+    {
+        let params = builder.override_net_params();
+        // Keep at least 40 guards in the sample before filtering down to
+        // primary guards (default is 20). More candidates → more diversity
+        // → fewer "all guards questionable" situations.
+        params.insert("guard-min-filtered-sample-size".to_string(), 40);
+    }
+
+    let config = builder.build().map_err(|e| Box::new(e) as DynError)?;
 
     tracing::info!(
         target: "rustchan::detect",
@@ -329,6 +388,11 @@ fn launch_onion_service(
                 .parse()
                 .map_err(|e| Box::new(e) as DynError)?,
         )
+        // Arti (≥0.40) enforces num_intro_points in the range 3–20 and rejects
+        // anything outside that range at startup. 3 is the minimum and the
+        // recommended default. If circuit stability is a concern, tune
+        // tor_stable_run_threshold_secs rather than lowering this value.
+        .num_intro_points(crate::config::CONFIG.tor_num_intro_points)
         .build()
         .map_err(|e| Box::new(e) as DynError)?;
 
@@ -412,17 +476,22 @@ async fn run_arti(
     bind_port: u16,
     onion_address: Arc<RwLock<Option<String>>>,
 ) -> ArtiResult {
-    let tor_client = bootstrap_tor_client(&data_dir).await?;
-    let (onion_service, rend_requests) = launch_onion_service(&tor_client)?;
-    let hsid = resolve_hsid(&onion_service).await?;
+    let keep_client = bootstrap_tor_client(&data_dir).await?;
+    let (onion_service, rend_requests) = launch_onion_service(&keep_client)?;
+    let keep_service = onion_service;
+    let hsid = resolve_hsid(&keep_service).await?;
 
     let onion_name = hsid_to_onion_address(hsid);
     publish_onion_address(&onion_name, &data_dir, &onion_address).await;
 
     accept_streams(rend_requests, bind_port).await;
 
-    let _ = &tor_client;
-    let _ = &onion_service;
+    // keep_client and keep_service are held alive across the entire accept
+    // loop by virtue of being in scope here. They drop in reverse declaration
+    // order at end-of-scope, which lets Arti send RELAY_END cells cleanly
+    // before the TorClient itself shuts down.
+    drop(keep_service);
+    drop(keep_client);
     tracing::warn!(
         target: "rustchan::detect",
         "Tor: rendezvous stream ended — onion service offline"
@@ -522,9 +591,23 @@ async fn proxy_tor_stream(
         None
     };
 
-    tokio::io::copy_bidirectional(&mut tor_stream, &mut local)
-        .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    // Bound the lifetime of every proxied stream. Without a timeout, stale
+    // half-open streams accumulate in the semaphore and Arti marks the
+    // underlying channels as bad, triggering mass circuit teardowns.
+    let stream_timeout =
+        std::time::Duration::from_secs(crate::config::CONFIG.tor_stream_timeout_secs);
+    tokio::time::timeout(
+        stream_timeout,
+        tokio::io::copy_bidirectional(&mut tor_stream, &mut local),
+    )
+    .await
+    .map_err(|_| {
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Tor stream idle timeout — closing stale circuit",
+        )) as Box<dyn std::error::Error + Send + Sync>
+    })?
+    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     Ok(())
 }
