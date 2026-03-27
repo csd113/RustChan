@@ -4,11 +4,6 @@ All notable changes to RustChan will be documented in this file.
 
 ---
 
-## [1.1.0 alpha 4]
-
-
-
----
 
 ## [1.1.0 alpha 3]
 

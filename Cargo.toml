@@ -112,6 +112,11 @@ futures       = "0.3"
 sha3          = "0.10"
 data-encoding = "2"
 
+[target.'cfg(windows)'.dependencies]
+# AllocConsole — used by the double-click / no-TTY re-launch guard in main.rs
+# to attach a visible console window when the binary is started from Explorer.
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
 [lints.clippy]
 too_many_arguments             = "allow"
 manual_pattern_char_comparison = "allow"

@@ -51,6 +51,55 @@ use config::CONFIG;
 #[allow(clippy::arithmetic_side_effects)]
 #[allow(clippy::expect_used)]
 fn main() -> anyhow::Result<()> {
+    // ── Double-click / no-TTY guard ───────────────────────────────────────────
+    // When launched from a file manager (Linux) or Explorer (Windows), stdout
+    // is not a TTY. Re-attach to a terminal so the banner, first-run wizard,
+    // and keyboard console are visible to the user.
+    //
+    // RUSTCHAN_SPAWNED prevents the child from looping back here.
+    {
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() && std::env::var("RUSTCHAN_SPAWNED").is_err() {
+            #[cfg(target_os = "linux")]
+            {
+                let exe = std::env::current_exe()?;
+                let exe_str = exe.to_string_lossy();
+                // Try terminal emulators in order of likelihood.
+                // CRITICAL: Command::new takes the *binary name only*.
+                // Passing "env RUSTCHAN_SPAWNED=1 /path/to/bin" as one string
+                // to Command::new is the execve bug — the Linux kernel does not
+                // tokenise it; it looks for a file literally named that string.
+                for term in [
+                    "xterm",
+                    "gnome-terminal",
+                    "konsole",
+                    "xfce4-terminal",
+                    "x-terminal-emulator",
+                ] {
+                    if std::process::Command::new(term) // ← binary name only
+                        .arg("-e")
+                        .arg(exe_str.as_ref()) // ← separate arg
+                        .env("RUSTCHAN_SPAWNED", "1") // ← env set on child, not in arg string
+                        .spawn()
+                        .is_ok()
+                    {
+                        return Ok(());
+                    }
+                }
+                // No terminal emulator found — fall through and run headless.
+            }
+            #[cfg(target_os = "windows")]
+            {
+                // On Windows, AllocConsole() attaches a new console window
+                // in-process. No re-exec needed; execution continues below
+                // with stdout now connected to the new window.
+                unsafe {
+                    windows_sys::Win32::System::Console::AllocConsole();
+                }
+            }
+        }
+    }
+
     // Resolve the binary directory, then derive rustchan-data/ so the log
     // file lands in <exe-dir>/rustchan-data/ alongside the database and
     // uploads.  Falls back to "./rustchan-data" if the exe path cannot be
