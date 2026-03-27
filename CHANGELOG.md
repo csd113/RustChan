@@ -6,6 +6,10 @@ All notable changes to RustChan will be documented in this file.
 
 ## [1.1.0 alpha 3]
 
+### Auto-Terminal Launch Support
+
+RustChan now automatically opens in a terminal window when double-clicked, instead of silently failing. If already running in a terminal, it behaves as normal. Works on Windows, Linux, and macOS.
+
 ### fixes:
 
 - **Files left behind on DB errors:** Disk fills forever. *Fix:* Show errors clearly, handle deletions properly.
