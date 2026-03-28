@@ -135,10 +135,9 @@ data-encoding = "2"
 # ── TLS ───────────────────────────────────────────────────────────────────────
 # rustls-pki-types: standalone PKI types crate split out of rustls 0.23+.
 # Required directly by src/tls/mod.rs (CertificateDer, PrivateKeyDer, PemObject).
-rustls-pki-types = "1"
+rustls-pki-types = "1.9"
 tokio-rustls   = "0.26"
 rustls         = { version = "0.23", features = ["ring"] }
-rustls-pemfile = "2"
 
 # Optional — gated by Cargo features
 rustls-acme    = { version = "0.12", features = ["tokio"], optional = true }
@@ -147,7 +146,7 @@ pem-rfc7468    = { version = "0.7",  optional = true }
 x509-cert      = { version = "0.2",  optional = true }
 
 # HTTPS listen integration for Axum (handles Static cert path)
-axum-server    = { version = "0.7", features = ["tls-rustls-no-provider"] }
+axum-server    = { version = "0.8", features = ["tls-rustls-no-provider"] }
 hyper          = { version = "1",   features = ["http1", "http2", "server"] }
 hyper-util     = { version = "0.1", features = ["tokio", "server"] }
 

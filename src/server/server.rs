@@ -891,7 +891,15 @@ pub async fn run_https_static(
         }
     };
 
-    if let Err(e) = axum_server::from_tcp_rustls(std_listener, tls_config)
+    let server = match axum_server::from_tcp_rustls(std_listener, tls_config) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(target: "server", error = %e, "Failed to create HTTPS server");
+            return;
+        }
+    };
+
+    if let Err(e) = server
         .handle(handle)
         .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await
