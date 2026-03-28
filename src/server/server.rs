@@ -86,6 +86,11 @@ impl Drop for ScopedDecrement<'_> {
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::arithmetic_side_effects)]
 pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::Result<()> {
+    // rustls 0.23 requires an explicit process-wide crypto provider.
+    // install_default() is idempotent — a second call (e.g. in tests) returns
+    // Err but never panics, so the let _ discard is intentional.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let early_data_dir = {
         let exe = std::env::current_exe()
             .ok()
@@ -560,6 +565,97 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
+    // ── TLS / HTTPS listener ──────────────────────────────────────────────────
+    // Spawned as a background task so the HTTP listener below can start
+    // immediately. Both share the same AppState (Arc'd internally).
+    // build_acceptor() returns None when tls.enabled = false — existing
+    // HTTP-only deployments are completely unaffected.
+    //
+    // FIX[TLS-1]: The TCP socket is pre-bound here on the *main* task (before
+    // spawning) so that any bind failure (port in use, missing CAP_NET_BIND_SERVICE,
+    // etc.) is caught immediately with `?` propagation and a clear error message,
+    // rather than silently dying inside a spawned future where the error is easy
+    // to miss.  The "HTTPS server listening" log is emitted here — after the
+    // successful bind — so it is never printed for a socket that wasn't actually
+    // bound.  axum_server::from_tcp_rustls accepts the pre-bound std::TcpListener
+    // and does not attempt a second bind.
+    //
+    // FIX[TLS-2]: build_acceptor failure is now a hard error (return Err) instead
+    // of a silent log-and-continue.  If TLS is enabled in config but the acceptor
+    // cannot be constructed (missing cert files, bad PEM, permission denied on
+    // tls/dev/, etc.), the process exits with a clear message rather than running
+    // silently as HTTP-only with no indication that HTTPS is absent.
+    if CONFIG.tls.enabled {
+        let data_dir_tls = data_dir.clone();
+        let cancel_tls   = worker_cancel.clone();
+        let app_tls      = build_router(state.clone());
+
+        let https_addr: std::net::SocketAddr =
+            format!("0.0.0.0:{}", CONFIG.tls.port)
+                .parse()
+                .expect("valid HTTPS addr");
+
+        // FIX[TLS-2]: propagate build_acceptor errors as hard failures.
+        let acceptor = crate::tls::build_acceptor(&CONFIG.tls, &data_dir_tls)
+            .map_err(|e| anyhow::anyhow!("TLS init failed — cannot start HTTPS listener: {e}"))?;
+
+        match acceptor {
+            Some(crate::tls::Acceptor::Static(_arc_acceptor, server_cfg)) => {
+                // Acceptor::Static now carries Arc<ServerConfig> directly alongside
+                // the TlsAcceptor — pass it straight to axum-server.
+                let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_cfg);
+
+                // FIX[TLS-1]: pre-bind on the main task so failures surface here.
+                let https_tcp = tokio::net::TcpListener::bind(https_addr).await
+                    .map_err(|e| anyhow::anyhow!(
+                        "Failed to bind HTTPS listener on {https_addr}: {e}"
+                    ))?;
+
+                tracing::info!(target: "server", addr = %https_addr, "HTTPS server listening");
+                tracing::info!(
+                    target: "server",
+                    url = %format!("https://{https_addr}/admin"),
+                    "Admin panel (HTTPS)"
+                );
+
+                tokio::spawn(async move {
+                    run_https_static(https_tcp, rustls_cfg, app_tls, cancel_tls).await;
+                });
+            }
+
+            #[cfg(feature = "tls-acme")]
+            Some(crate::tls::Acceptor::Acme(acme_acceptor, server_cfg)) => {
+                tokio::spawn(async move {
+                    run_https_acme(https_addr, acme_acceptor, server_cfg, app_tls, cancel_tls).await;
+                });
+            }
+
+            None => { /* tls.enabled = false — unreachable here but exhaustive */ }
+
+            // Suppress unreachable-pattern warning when tls-acme feature is off.
+            #[allow(unreachable_patterns)]
+            Some(_) => {
+                return Err(anyhow::anyhow!(
+                    "ACME acceptor built but tls-acme feature is not enabled — \
+                     rebuild with: cargo build --features tls-acme"
+                ));
+            }
+        }
+    }
+
+    // ── HTTP→HTTPS redirect listener (optional) ───────────────────────────────
+    if CONFIG.tls.enabled && CONFIG.tls.redirect_http {
+        let http_addr: std::net::SocketAddr =
+            format!("0.0.0.0:{}", CONFIG.tls.http_port)
+                .parse()
+                .expect("valid HTTP redirect addr");
+        let https_port = CONFIG.tls.port;
+        let cancel_redirect = worker_cancel.clone();
+        tokio::spawn(async move {
+            run_http_redirect(http_addr, https_port, cancel_redirect).await;
+        });
+    }
+
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -589,6 +685,201 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     tracing::info!(target: "server", "Server shut down gracefully.");
     Ok(())
+}
+
+// ── HTTPS listener (Static path: self-signed or manual PEM) ──────────────────
+//
+// Uses axum-server which preserves ConnectInfo<SocketAddr> so the IP-banning
+// and rate-limiting middleware in middleware/mod.rs continues to work correctly.
+//
+// FIX[TLS-1]: Accepts a pre-bound TcpListener instead of a SocketAddr so the
+// actual socket bind (and any OS-level failure) happens on the main task in
+// run_server() where errors propagate with `?`.  axum_server::from_tcp_rustls
+// takes ownership of the already-bound std::TcpListener and does not re-bind.
+// The "HTTPS server listening" log is emitted by run_server() after the pre-bind
+// succeeds, so it is never printed for a socket that wasn't actually bound.
+pub async fn run_https_static(
+    listener: tokio::net::TcpListener,
+    tls_config: axum_server::tls_rustls::RustlsConfig,
+    app: axum::Router,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let handle = axum_server::Handle::new();
+    let handle_clone = handle.clone();
+
+    // Wire graceful shutdown to the same CancellationToken that controls
+    // background workers and the HTTP listener.
+    tokio::spawn(async move {
+        cancel.cancelled().await;
+        handle_clone.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+    });
+
+    // Convert tokio TcpListener → std TcpListener for axum_server::from_tcp_rustls.
+    // set_nonblocking(true) is required — axum-server expects a non-blocking socket.
+    let std_listener = match listener.into_std() {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(target: "server", error = %e, "Failed to convert HTTPS listener");
+            return;
+        }
+    };
+
+    if let Err(e) = axum_server::from_tcp_rustls(std_listener, tls_config)
+        .handle(handle)
+        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .await
+    {
+        tracing::error!(target: "server", error = %e, "HTTPS server error");
+    }
+}
+
+// ── HTTPS listener (ACME / Let's Encrypt path) ────────────────────────────────
+//
+// ACME requires a manual accept loop because AcmeAcceptor::accept() must
+// inspect each connection for TLS-ALPN-01 challenges before the TLS handshake
+// completes. axum-server cannot intercept at that level.
+//
+// ConnectInfo<SocketAddr> is injected manually into each request so that the
+// IP-banning and rate-limiting middleware in middleware/mod.rs continues to work.
+#[cfg(feature = "tls-acme")]
+pub async fn run_https_acme(
+    https_addr: std::net::SocketAddr,
+    acme_acceptor: std::sync::Arc<rustls_acme::AcmeAcceptor>,
+    server_cfg: std::sync::Arc<rustls::ServerConfig>,
+    app: axum::Router,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    use hyper::server::conn::http1;
+    use hyper_util::rt::TokioIo;
+    use tower::Service as _;
+
+    let listener = match tokio::net::TcpListener::bind(https_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(target: "server", error = %e, "Failed to bind HTTPS/ACME listener");
+            return;
+        }
+    };
+    tracing::info!(target: "server", addr = %https_addr, "HTTPS/ACME server listening");
+    tracing::info!(
+        target: "server",
+        url = %format!("https://{https_addr}/admin"),
+        "Admin panel (HTTPS/ACME)"
+    );
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!(target: "server", "HTTPS/ACME listener shutting down");
+                break;
+            }
+            result = listener.accept() => {
+                let (tcp, peer_addr) = match result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(target: "server", error = %e, "ACME TCP accept error");
+                        continue;
+                    }
+                };
+
+                let acme_acceptor = acme_acceptor.clone();
+                let server_cfg    = server_cfg.clone();
+                let mut svc       = app.clone();
+
+                tokio::spawn(async move {
+                    match acme_acceptor.accept(tcp).await {
+                        Ok(Some(start)) => {
+                            match start.into_stream(server_cfg).await {
+                                Ok(tls_stream) => {
+                                    let io = TokioIo::new(tls_stream);
+                                    // Inject peer_addr as ConnectInfo so the
+                                    // IP-banning/rate-limiting extractors work
+                                    // identically to the axum-server Static path.
+                                    let svc = tower::service_fn(move |mut req: axum::extract::Request| {
+                                        req.extensions_mut()
+                                           .insert(axum::extract::ConnectInfo(peer_addr));
+                                        svc.call(req)
+                                    });
+                                    if let Err(e) = http1::Builder::new()
+                                        .serve_connection(io, svc)
+                                        .await
+                                    {
+                                        tracing::debug!(
+                                            target: "server",
+                                            peer = %peer_addr,
+                                            error = %e,
+                                            "ACME HTTPS connection error"
+                                        );
+                                    }
+                                }
+                                Err(e) => tracing::debug!(
+                                    target: "server",
+                                    peer = %peer_addr,
+                                    error = %e,
+                                    "TLS handshake failed"
+                                ),
+                            }
+                        }
+                        Ok(None) => { /* ACME challenge — handled internally, no action needed */ }
+                        Err(e)   => tracing::debug!(
+                            target: "server",
+                            peer = %peer_addr,
+                            error = %e,
+                            "ACME acceptor error"
+                        ),
+                    }
+                });
+            }
+        }
+    }
+}
+
+// ── HTTP→HTTPS redirect listener ─────────────────────────────────────────────
+//
+// Issues a 301 permanent redirect to the HTTPS equivalent of every request.
+// Only spawned when `tls.enabled = true` and `tls.redirect_http = true`.
+pub async fn run_http_redirect(
+    http_addr: std::net::SocketAddr,
+    https_port: u16,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    use axum::{extract::Request, response::Redirect, routing::any};
+
+    let redirect_app = axum::Router::new().route(
+        "/{*path}",
+        any(move |req: Request| async move {
+            let path = req
+                .uri()
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/");
+            let host = req
+                .headers()
+                .get(axum::http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|h| h.split(':').next())
+                .unwrap_or("localhost");
+            Redirect::permanent(&format!("https://{}:{}{}", host, https_port, path))
+        }),
+    );
+
+    let listener = match tokio::net::TcpListener::bind(http_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(
+                target: "server",
+                error = %e,
+                "Failed to bind HTTP→HTTPS redirect listener"
+            );
+            return;
+        }
+    };
+    tracing::info!(target: "server", addr = %http_addr, "HTTP→HTTPS redirect listening");
+
+    axum::serve(listener, redirect_app)
+        .with_graceful_shutdown(async move { cancel.cancelled().await })
+        .await
+        .ok();
 }
 
 #[allow(clippy::too_many_lines)]

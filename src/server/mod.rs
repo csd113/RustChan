@@ -14,6 +14,13 @@ pub mod console;
 pub mod server;
 
 pub use server::run_server;
+#[allow(unused_imports)]
+pub use server::run_https_static;
+#[allow(unused_imports)]
+pub use server::run_http_redirect;
+#[cfg(feature = "tls-acme")]
+#[allow(unused_imports)]
+pub use server::run_https_acme;
 
 // Re-export the global atomics so console.rs (and any future module) can
 // reference them as `crate::server::REQUEST_COUNT` etc. rather than the

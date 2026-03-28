@@ -4,8 +4,30 @@ All notable changes to RustChan will be documented in this file.
 
 ---
 
-
 ## [1.1.0 alpha 3]
+
+### Native HTTPS / TLS Support
+
+RustChan can now serve itself directly over HTTPS without needing a reverse proxy in front of it. Two modes are available:
+
+**Self-signed certificate** — enabled with two lines in `settings.toml`. A certificate is generated automatically on first run and saved to disk. Your browser will show a security warning (normal for self-signed), which you can accept. Good for local development and private installs.
+
+**Let's Encrypt (ACME)** — for public servers with a real domain name. RustChan contacts Let's Encrypt automatically, proves it owns the domain, and gets a trusted certificate. No browser warning. Renews itself before it expires.
+
+Both modes run alongside the existing HTTP server — adding HTTPS does not remove or break anything. Installs that do not add a `[tls]` section to `settings.toml` are completely unaffected.
+
+### HTTP → HTTPS Redirect
+
+When HTTPS is enabled, an optional redirect listener can be turned on. Any visitor who arrives on the plain HTTP port is automatically sent to the HTTPS address. Enable with `redirect_http = true` in the `[tls]` section.
+
+### HSTS (automatic)
+
+Once a visitor connects over HTTPS, their browser is instructed to always use HTTPS for future visits. No configuration needed — this activates automatically when TLS is running.
+
+### Fixes
+
+- **IP banning and rate limiting now work correctly over HTTPS** — the security features that track visitor IPs continue to work on HTTPS connections the same way they do on HTTP. No bans or limits are bypassed by switching to HTTPS.
+- **Secure cookies enforced when TLS is active** — session and auth cookies are automatically marked `Secure` when HTTPS is enabled, preventing them from being sent over plain HTTP.
 
 ### Auto-Terminal Launch Support
 

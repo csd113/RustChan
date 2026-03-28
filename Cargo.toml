@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.1.0-alpha-4"
+version = "1.1.0-alpha-3"
 edition = "2021"
 # axum 0.8 requires Rust 1.75; arti-client 0.40 bumps the effective floor to
 # 1.90 — keep both fields in sync.
@@ -131,6 +131,27 @@ tor-cell      = { version = "0.40", default-features = false }
 futures       = "0.3"
 sha3          = "0.10"
 data-encoding = "2"
+
+# ── TLS ───────────────────────────────────────────────────────────────────────
+tokio-rustls   = "0.26"
+rustls         = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+
+# Optional — gated by Cargo features
+rustls-acme    = { version = "0.12", features = ["tokio"], optional = true }
+rcgen          = { version = "0.13", optional = true }
+pem-rfc7468    = { version = "0.7",  optional = true }
+x509-cert      = { version = "0.2",  optional = true }
+
+# HTTPS listen integration for Axum (handles Static cert path)
+axum-server    = { version = "0.7", features = ["tls-rustls-no-provider"] }
+hyper          = { version = "1",   features = ["http1", "http2", "server"] }
+hyper-util     = { version = "0.1", features = ["tokio", "server"] }
+
+[features]
+default         = ["tls-self-signed"]
+tls-self-signed = ["dep:rcgen", "dep:pem-rfc7468", "dep:x509-cert"]
+tls-acme        = ["dep:rustls-acme"]
 
 [target.'cfg(windows)'.dependencies]
 # AllocConsole — used by the double-click / no-TTY re-launch guard in main.rs

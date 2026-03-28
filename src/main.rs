@@ -35,6 +35,7 @@ mod middleware;
 mod models;
 mod server;
 mod templates;
+mod tls;
 mod utils;
 mod workers;
 
@@ -140,6 +141,12 @@ fn main() -> anyhow::Result<()> {
     let cli = server::cli::Cli::parse();
 
     rt.block_on(async move {
+        // Install the ring crypto provider once before anything else accesses
+        // rustls. ok() = harmless if already installed (tests, re-runs).
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+
         match cli.command {
             // Default (no subcommand) or explicit `serve`: start the server.
             None | Some(server::cli::Command::Serve) => {

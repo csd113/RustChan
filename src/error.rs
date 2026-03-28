@@ -75,6 +75,10 @@ pub enum AppError {
         detail: String,
         endpoint: Option<String>,
     },
+
+    /// TLS initialisation or certificate error (startup-time only).
+    #[error("TLS error: {0}")]
+    Tls(String),
 }
 
 // Allow ? operator on rusqlite::Error — map SQLITE_BUSY to DbBusy (503) and
@@ -106,6 +110,15 @@ impl From<r2d2::Error> for AppError {
         } else {
             Self::Internal(anyhow::Error::new(e))
         }
+    }
+}
+
+// Allow ? operator on std::io::Error inside the TLS module.
+// All IO errors at TLS startup are surfaced as Tls(msg) rather than Internal
+// so they produce a clear message without a full anyhow backtrace.
+impl From<std::io::Error> for AppError {
+    fn from(e: std::io::Error) -> Self {
+        AppError::Tls(e.to_string())
     }
 }
 
@@ -151,6 +164,10 @@ impl IntoResponse for AppError {
                     StatusCode::BAD_GATEWAY,
                     format!("API error {status}: {detail}"),
                 )
+            }
+            Self::Tls(msg) => {
+                error!("TLS error: {msg}");
+                (StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
             }
         };
 

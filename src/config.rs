@@ -120,6 +120,8 @@ struct SettingsFile {
     /// Must be at least 32 characters. Leave empty to disable the endpoints.
     /// Set via `CHAN_NET_API_KEY` environment variable or `settings.toml`.
     chan_net_api_key: Option<String>,
+    /// TLS/HTTPS configuration. Omitting this section keeps TLS disabled.
+    tls: Option<TlsConfig>,
 }
 
 fn load_settings_file() -> SettingsFile {
@@ -287,9 +289,90 @@ cookie_secret = "{secret}"
 # Address to bind the second ChanNet TCP listener.
 # Keep on loopback unless RustWave runs on a different host.
 # chan_net_bind = "127.0.0.1:7070"
+
+# ── TLS / HTTPS ───────────────────────────────────────────────────────────────
+# HTTPS is enabled by default on port 8443. On first run a self-signed
+# localhost certificate is generated automatically in rustchan-data/tls/dev/.
+# For production, configure [tls.acme] (Let's Encrypt) or [tls.manual_cert].
+
+[tls]
+enabled = true
+port    = 8443
+
+# Redirect plain HTTP → HTTPS (binds an extra listener on http_port).
+# redirect_http = true
+# http_port     = 8080
+
+# Let's Encrypt via ACME (requires the tls-acme Cargo feature):
+# [tls.acme]
+# enabled   = true
+# staging   = true
+# domains   = ["example.com"]
+# email     = "admin@example.com"
+# cache_dir = "tls/acme"
+
+# Manual PEM certificate (paths relative to rustchan-data/):
+# [tls.manual_cert]
+# cert_path = "tls/cert.pem"
+# key_path  = "tls/key.pem"
 "#
     )
 }
+
+// ─── TLS configuration ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TlsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_https_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub redirect_http: bool,
+    #[serde(default = "default_http_port")]
+    pub http_port: u16,
+    #[serde(default)]
+    pub acme: AcmeConfig,
+    pub manual_cert: Option<ManualCertConfig>,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_https_port(),
+            redirect_http: false,
+            http_port: default_http_port(),
+            acme: AcmeConfig::default(),
+            manual_cert: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub struct AcmeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default = "default_true")]
+    pub staging: bool,
+    #[serde(default = "default_acme_dir")]
+    pub cache_dir: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ManualCertConfig {
+    pub cert_path: String,
+    pub key_path: String,
+}
+
+fn default_https_port() -> u16  { 8443 }
+fn default_http_port()  -> u16  { 8080 }
+fn default_true()       -> bool { true }
+fn default_acme_dir()   -> String { "tls/acme".into() }
 
 // ─── Runtime config ───────────────────────────────────────────────────────────
 
@@ -375,6 +458,10 @@ pub struct Config {
     /// Pre-shared key required on X-ChanNet-Key header for /chan/refresh and
     /// /chan/poll. An empty string means those endpoints are disabled entirely.
     pub chan_net_api_key: String,
+
+    // ── TLS / HTTPS ───────────────────────────────────────────────────────────
+    /// TLS configuration. Defaults to disabled so existing installs are unaffected.
+    pub tls: TlsConfig,
 }
 
 impl Config {
@@ -577,6 +664,9 @@ impl Config {
                 .ok()
                 .or(s.chan_net_api_key)
                 .unwrap_or_default(),
+
+            // TLS — loaded from [tls] section in settings.toml; defaults to disabled.
+            tls: s.tls.unwrap_or_default(),
         }
     }
 
@@ -627,6 +717,13 @@ impl Config {
 
         if self.port == 0 {
             anyhow::bail!("CONFIG ERROR: port must not be 0.");
+        }
+
+        if self.tls.enabled && self.tls.port == 0 {
+            anyhow::bail!(
+                "CONFIG ERROR: tls.port must not be 0. \
+                 Add `port = 8443` under [tls] in settings.toml, or remove the explicit `port = 0`."
+            );
         }
 
         // Verify the upload directory is writable.

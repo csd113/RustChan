@@ -15,3 +15,4 @@ target
 /clippy_reports
 build-release.sh
 tor_audit_report.md
+rustchan-console-conversion.md
