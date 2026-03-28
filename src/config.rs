@@ -11,7 +11,6 @@
 // SECURITY: The cookie_secret is auto-generated on first run and persisted
 // to settings.toml. It is never left at a well-known default value.
 use rand_core::{OsRng, RngCore};
-
 use serde::Deserialize;
 use std::env;
 use std::path::PathBuf;
@@ -33,6 +32,9 @@ fn binary_dir() -> PathBuf {
 }
 
 fn settings_file_path() -> PathBuf {
+    // Store settings.toml in rustchan-data/ alongside the database.
+    // rustchan-data/ is created by run_server before CONFIG is first accessed,
+    // so this directory always exists by the time settings are read.
     let data_dir = binary_dir().join("rustchan-data");
     data_dir.join("settings.toml")
 }
@@ -41,7 +43,10 @@ fn settings_file_path() -> PathBuf {
 #[derive(Deserialize, Default)]
 struct SettingsFile {
     forum_name: Option<String>,
+    /// Home page subtitle shown below the site name.
     site_subtitle: Option<String>,
+    /// Default theme served to first-time visitors before they pick one.
+    /// Valid values: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
     default_theme: Option<String>,
     port: Option<u16>,
     max_image_size_mb: Option<u32>,
@@ -49,28 +54,69 @@ struct SettingsFile {
     max_audio_size_mb: Option<u32>,
     cookie_secret: Option<String>,
     enable_tor_support: Option<bool>,
+    /// When true, the HTTP server binds exclusively to 127.0.0.1 so it is
+    /// reachable only through the Tor hidden service. Overrides the host
+    /// portion of `bind_addr` (the configured port is preserved).
+    /// Default: false (clearnet and Tor both active when `enable_tor_support=true`).
     tor_only: Option<bool>,
+    /// Seconds to wait for Tor bootstrap before timing out and retrying.
+    /// Increase to 300+ on heavily censored networks or when using bridges.
+    /// Default: 120.
     tor_bootstrap_timeout_secs: Option<u64>,
+    /// Maximum simultaneous inbound Tor streams (proxy tasks).
+    /// Each stream holds one file descriptor. Reduce if the process runs low
+    /// on FDs; excess connections are dropped with a `RELAY_END` cell.
+    /// Default: 512.
     tor_max_concurrent_streams: Option<usize>,
+    /// Nickname for the Arti onion service key.
+    /// Must be unique per `arti_state/` directory. Change this when running
+    /// multiple instances that share the same storage to avoid key collisions.
+    /// Default: "rustchan".
     tor_service_nickname: Option<String>,
-    tor_stable_run_threshold_secs: Option<u64>,
-    tor_stream_timeout_secs: Option<u64>,
-    tor_num_intro_points: Option<u8>,
     require_ffmpeg: Option<bool>,
+    /// How often to run PRAGMA `wal_checkpoint(TRUNCATE)`, in seconds.
+    /// Set to 0 to disable. Default: 3600 (hourly).
     wal_checkpoint_interval_secs: Option<u64>,
+    /// How often to run VACUUM to reclaim disk space, in hours.
+    /// Set to 0 to disable. Default: 24 (daily).
     auto_vacuum_interval_hours: Option<u64>,
+    /// How often to purge vote records for expired polls, in hours.
+    /// Set to 0 to disable. Default: 72 (every 3 days).
     poll_cleanup_interval_hours: Option<u64>,
+    /// Database file size (MB) above which a warning banner is shown in the
+    /// admin panel. Set to 0 to disable. Default: 2048 (2 GiB).
     db_warn_threshold_mb: Option<u64>,
+    /// Maximum number of pending jobs in the background job queue.
+    /// When this limit is reached, new jobs are dropped (with a warning) rather
+    /// than accepted. Default: 1000.
     job_queue_capacity: Option<u64>,
+    /// Maximum seconds to allow a single `FFmpeg` transcode or waveform job to
+    /// run before it is killed. Default: 120.
     ffmpeg_timeout_secs: Option<u64>,
+    /// When true, overflow threads are always archived rather than hard-deleted,
+    /// even on boards with `allow_archive` = false. Default: true.
     archive_before_prune: Option<bool>,
+    /// Maximum total size (MiB) of all thumbnail/waveform cache files across all
+    /// boards. A background task evicts the oldest files when exceeded.
+    /// Set to 0 to disable. Default: 200.
     waveform_cache_max_mb: Option<u64>,
+    /// Number of threads in Tokio's blocking pool (`spawn_blocking`).
+    /// Defaults to logical CPUs × 4. Increase if DB/render latency is a bottleneck
+    /// under load.
     blocking_threads: Option<usize>,
+    /// `SQLite` connection pool size. Default: 8.
+    /// Increase on high-traffic deployments; each connection uses ~32 MiB page cache.
     db_pool_size: Option<u32>,
-
     // ── ChanNet / RustWave gateway ────────────────────────────────────────────
+    /// Base URL of the connected `RustWave` instance.
+    /// Must begin with http:// or https://. Default: <http://localhost:7071>.
     rustwave_url: Option<String>,
+    /// Address to bind the second `ChanNet` TCP listener.
+    /// Default: 127.0.0.1:7070 (loopback-only; not exposed to the internet).
     chan_net_bind: Option<String>,
+    /// Pre-shared API key required for /chan/refresh and /chan/poll endpoints.
+    /// Must be at least 32 characters. Leave empty to disable the endpoints.
+    /// Set via `CHAN_NET_API_KEY` environment variable or `settings.toml`.
     chan_net_api_key: Option<String>,
     /// TLS/HTTPS configuration. Omitting this section keeps TLS disabled.
     tls: Option<TlsConfig>,
@@ -87,16 +133,18 @@ fn load_settings_file() -> SettingsFile {
     })
 }
 
+/// Create settings.toml with defaults if it does not exist yet.
+/// Call this once at startup (before CONFIG is accessed for the first time).
+///
+/// A cryptographically random `cookie_secret` is generated on first run and
+/// written to settings.toml. Subsequent runs load it from the file.
+/// The server never operates with a known/default secret.
 pub fn generate_settings_file_if_missing() {
     let path = settings_file_path();
     if path.exists() {
         return;
     }
-<<<<<<< HEAD
-
-=======
     // Generate a random 64-hex-char secret (32 bytes of entropy).
->>>>>>> origin/indev-1.1.0-alpha-4
     let mut secret_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut secret_bytes);
     let secret = hex::encode(secret_bytes);
@@ -107,17 +155,15 @@ pub fn generate_settings_file_if_missing() {
     }
 }
 
+/// Build the default settings.toml content with the given generated secret.
+///
+/// Extracted from `generate_settings_file_if_missing` to keep that function
+/// under the line-count lint threshold.
 fn settings_template(secret: &str) -> String {
     format!(
         r#"# RustChan — Instance Settings
-<<<<<<< HEAD
-Edit this file to configure your imageboard.
-Restart the server after making changes.
-
-=======
 # Edit this file to configure your imageboard.
 # Restart the server after making changes.
->>>>>>> origin/indev-1.1.0-alpha-4
 # Name shown in the browser tab, page header, and home page title.
 forum_name = "RustChan"
 # Subtitle shown below the site name on the home page.
@@ -164,44 +210,13 @@ cookie_secret = "{secret}"
 const fn settings_template_server_section() -> &'static str {
     r#"
 # Tor Onion Service support (powered by Arti — no system tor required).
+# When true, Arti bootstraps at startup and hosts a .onion hidden service.
+# First run downloads ~2 MB of directory data and takes ~30 s.
+# The service keypair lives in rustchan-data/arti_state/keys/ — back it up.
+# Delete that directory to rotate to a new .onion address.
 enable_tor_support = true
 # When true, the HTTP server binds exclusively to 127.0.0.1 so the site is
 # reachable ONLY through the Tor hidden service — clearnet access is blocked.
-<<<<<<< HEAD
-# Requires enable_tor_support = true.
-tor_only = false
-
-# Seconds to wait for Tor to connect to the network before giving up and
-# retrying. The default (120 s) works on open networks. On censored networks
-# or when using bridges, increase this to 300 or more.
-tor_bootstrap_timeout_secs = 120
-
-# Maximum number of simultaneous inbound Tor connections.
-# 512 is far too high for a typical hidden service and allows stale half-open
-# streams to accumulate, triggering mass circuit teardowns. Start at 64 and
-# raise under measured load.
-tor_max_concurrent_streams = 64
-
-# Nickname for this instance's Tor hidden service key.
-tor_service_nickname = "rustchan"
-
-# Seconds a run must stay alive before its restart-attempt counter resets.
-# 60 s (the old default) was too short: a client that bootstrapped and then
-# hit guard failures would still reset the counter, causing infinite 30 s
-# retries. 600 s (10 min) correctly distinguishes a stable run from a crash.
-tor_stable_run_threshold_secs = 600
-
-# Wall-clock timeout (seconds) for each proxied onion-service stream. Stale
-# half-open streams are forcibly closed after this many seconds so they do not
-# accumulate and exhaust the semaphore. 300 s covers large file uploads.
-tor_stream_timeout_secs = 300
-
-# Number of Tor introduction points to establish for the onion service.
-# Arti (≥0.40) enforces a hard minimum of 3 and a maximum of 20; values
-# outside that range are rejected at startup. 3 is the recommended default.
-tor_num_intro_points = 3
-
-=======
 # Requires enable_tor_support = true. Default: false (dual-stack: both
 # clearnet and Tor are active simultaneously).
 # tor_only = false
@@ -217,48 +232,10 @@ tor_num_intro_points = 3
 # rustchan-data/arti_state/ directory — identical nicknames cause key
 # collisions and one instance will fail to start its onion service.
 # tor_service_nickname = "rustchan"
->>>>>>> origin/indev-1.1.0-alpha-4
 # Set to true to hard-exit at startup when ffmpeg is not found.
+# When false (default), the server starts normally and video thumbnails
+# are replaced with SVG placeholders.
 require_ffmpeg = false
-<<<<<<< HEAD
-
-# How often (in seconds) to run PRAGMA wal_checkpoint(TRUNCATE) …
-wal_checkpoint_interval_secs = 3600
-
-# How often (in hours) to run VACUUM automatically …
-auto_vacuum_interval_hours = 24
-
-# How often (in hours) to purge vote records for expired polls …
-poll_cleanup_interval_hours = 72
-
-# Database file size (MiB) above which a warning banner appears …
-db_warn_threshold_mb = 2048
-
-# Maximum number of pending background jobs …
-job_queue_capacity = 1000
-
-# Maximum seconds a single FFmpeg job may run …
-ffmpeg_timeout_secs = 120
-
-# When true, threads that would be hard-deleted are instead archived …
-archive_before_prune = true
-
-# Maximum total size (MiB) of all thumbnail/waveform cache files …
-waveform_cache_max_mb = 200
-
-# Number of threads in Tokio's blocking pool …
-blocking_threads = 0
-
-# Secret key for IP hashing.
-# AUTO-GENERATED on first run — do NOT change after your first post.
-cookie_secret = "{secret}"
-
-# ── ChanNet / RustWave gateway ────────────────────────────────────────────────
-# Uncomment and configure these to enable the ChanNet API (--chan-net flag).
-
-# rustwave_url = "http://localhost:7071"
-# chan_net_bind = "127.0.0.1:7070"
-=======
 # How often (in seconds) to run PRAGMA wal_checkpoint(TRUNCATE) to keep
 # the SQLite WAL file from growing unbounded under write load.
 # Set to 0 to disable. Default: 3600 (hourly).
@@ -295,7 +272,6 @@ waveform_cache_max_mb = 200
 # it from becoming a bottleneck under concurrent load.
 # Default: logical CPUs × 4 (auto-detected at startup; leave 0 for auto).
 blocking_threads = 0
->>>>>>> origin/indev-1.1.0-alpha-4
 "#
 }
 
@@ -404,21 +380,15 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct Config {
+    // ── Loaded from settings.toml (env vars still override) ──────────────────
     pub forum_name: String,
+    /// Initial subtitle shown on the home page (seeds the DB on first run).
     pub initial_site_subtitle: String,
+    /// Initial default theme slug (seeds the DB on first run).
+    /// Valid: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
     pub initial_default_theme: String,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // read by CLI subcommands and printed at startup
     pub port: u16,
-<<<<<<< HEAD
-    pub max_image_size: usize,
-    pub max_video_size: usize,
-    pub max_audio_size: usize,
-
-    /// When true, Tor is probed at startup and hints are printed.
-    pub enable_tor_support: bool,
-    /// When true, the HTTP server binds exclusively to 127.0.0.1.
-    pub tor_only: bool,
-=======
     pub max_image_size: usize, // bytes
     pub max_video_size: usize, // bytes
     pub max_audio_size: usize, // bytes,
@@ -429,57 +399,64 @@ pub struct Config {
     /// via the Tor hidden service. Requires `enable_tor_support = true`.
     pub tor_only: bool,
     /// Seconds before a bootstrap attempt is considered failed and retried.
->>>>>>> origin/indev-1.1.0-alpha-4
     pub tor_bootstrap_timeout_secs: u64,
+    /// Maximum simultaneous inbound Tor proxy tasks.
     pub tor_max_concurrent_streams: usize,
+    /// Nickname for the Arti onion service. Unique per `arti_state/` directory.
     pub tor_service_nickname: String,
-    /// Seconds a run must stay alive before its attempt counter resets.
-    pub tor_stable_run_threshold_secs: u64,
-    /// Wall-clock timeout (seconds) for each proxied onion-service stream.
-    pub tor_stream_timeout_secs: u64,
-    /// Number of introduction points to establish for the onion service.
-    pub tor_num_intro_points: u8,
+    /// When true, the server exits if ffmpeg is missing.
     pub require_ffmpeg: bool,
-<<<<<<< HEAD
-
-=======
     // ── Internal / env-only settings ─────────────────────────────────────────
->>>>>>> origin/indev-1.1.0-alpha-4
     pub bind_addr: String,
     pub database_path: String,
     pub upload_dir: String,
     pub thumb_size: u32,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used as default when creating boards via CLI/admin
     pub default_bump_limit: u32,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used as default when creating boards via CLI/admin
     pub max_threads_per_board: u32,
+    /// Maximum GET requests per IP per `rate_limit_window`.
     pub rate_limit_gets: u32,
     pub rate_limit_window: u64,
     pub cookie_secret: String,
     pub session_duration: i64,
     pub behind_proxy: bool,
     pub https_cookies: bool,
+    /// Interval in seconds between WAL checkpoint runs. 0 = disabled.
     pub wal_checkpoint_interval: u64,
+    /// Interval in hours between automatic VACUUM runs. 0 = disabled.
     pub auto_vacuum_interval_hours: u64,
+    /// Interval in hours between expired poll vote cleanup runs. 0 = disabled.
     pub poll_cleanup_interval_hours: u64,
+    /// DB file size threshold in bytes above which admin panel shows a warning.
+    /// 0 = disabled.
     pub db_warn_threshold_bytes: u64,
+    /// Maximum number of pending jobs before new ones are dropped.
     pub job_queue_capacity: u64,
+    /// Maximum seconds a single `FFmpeg` job may run before being killed.
     pub ffmpeg_timeout_secs: u64,
+    /// When true, threads are always archived (never hard-deleted) on prune,
+    /// overriding individual board settings.
     pub archive_before_prune: bool,
+    /// Total thumbnail/waveform cache size limit in bytes. 0 = disabled.
     pub waveform_cache_max_bytes: u64,
+    /// Number of threads in Tokio's blocking pool. Default: logical CPUs × 4.
     pub blocking_threads: usize,
+    /// `SQLite` `r2d2` connection pool size (default 8).
     pub db_pool_size: u32,
-<<<<<<< HEAD
-
-=======
     // ── ChanNet / RustWave gateway (Step 1.2) ────────────────────────────────
     /// Base URL of the connected `RustWave` instance (must begin with http:// or https://).
     /// Validated at startup by `Config::validate()`.
->>>>>>> origin/indev-1.1.0-alpha-4
     pub rustwave_url: String,
+    /// Address to bind the second `ChanNet` TCP listener (default 127.0.0.1:7070).
+    /// Only used when the server is started with `--chan-net`.
     pub chan_net_bind: String,
+    /// Maximum request body size for `/chan/import` (ZIP snapshots). Default: 10 MiB.
     pub chan_net_max_body: usize,
+    /// Maximum request body size for `/chan/command` (raw JSON). Default: 8 KiB.
     pub chan_net_command_max_body: usize,
+    /// Pre-shared key required on X-ChanNet-Key header for /chan/refresh and
+    /// /chan/poll. An empty string means those endpoints are disabled entirely.
     pub chan_net_api_key: String,
     // ── TLS / HTTPS ───────────────────────────────────────────────────────────
     /// TLS configuration. Defaults to disabled so existing installs are unaffected.
@@ -518,12 +495,8 @@ impl Config {
         );
         let tor_only = env_bool("CHAN_TOR_ONLY", s.tor_only.unwrap_or(false));
         let enable_tor_support = env_bool("CHAN_TOR_SUPPORT", s.enable_tor_support.unwrap_or(true));
-<<<<<<< HEAD
-
-=======
         // When tor_only=true, force the bind host to 127.0.0.1 regardless of
         // what bind_addr or CHAN_HOST are set to. The configured port is kept.
->>>>>>> origin/indev-1.1.0-alpha-4
         let bind_addr = if tor_only && enable_tor_support {
             let port_str = bind_addr.rsplit_once(':').map_or("8080", |(_, p)| p);
             tracing::info!(
@@ -536,13 +509,9 @@ impl Config {
             bind_addr
         };
         let behind_proxy = env_bool("CHAN_BEHIND_PROXY", false);
-<<<<<<< HEAD
-
-=======
         // Resolve cookie_secret from env > settings.toml.
         // generate_settings_file_if_missing() ensures settings.toml always has
         // a generated secret, so this fallback should only fire in abnormal cases.
->>>>>>> origin/indev-1.1.0-alpha-4
         let cookie_secret = if let Ok(v) = env::var("CHAN_COOKIE_SECRET") {
             v
         } else if let Some(v) = s.cookie_secret {
@@ -553,16 +522,14 @@ impl Config {
                  IP hashing is using an empty secret. Run the server once to auto-generate, \
                  or set CHAN_COOKIE_SECRET."
             );
+            // Random in-memory secret so each restart invalidates hashes
+            // (better than a known empty string, worse than a persisted one).
             let mut b = [0u8; 32];
             OsRng.fill_bytes(&mut b);
             hex::encode(b)
         };
-<<<<<<< HEAD
-
-=======
         // ── ChanNet fields (Step 1.2) — computed after cookie_secret ──────────
         // Use as_deref() to borrow rather than move the Option<String> fields.
->>>>>>> origin/indev-1.1.0-alpha-4
         let rustwave_url = env::var("CHAN_RUSTWAVE_URL").unwrap_or_else(|_| {
             s.rustwave_url
                 .as_deref()
@@ -578,29 +545,16 @@ impl Config {
         let chan_net_max_body: usize = env::var("CHAN_NET_MAX_BODY")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(10 * 1024 * 1024);
+            .unwrap_or(10 * 1024 * 1024); // 10 MiB default
         let chan_net_command_max_body: usize = env::var("CHAN_NET_COMMAND_MAX_BODY")
             .ok()
             .and_then(|v| v.parse().ok())
-<<<<<<< HEAD
-            .unwrap_or(8 * 1024);
-
-=======
             .unwrap_or(8 * 1024); // 8 KiB default — commands are raw JSON, never ZIPs
->>>>>>> origin/indev-1.1.0-alpha-4
         Self {
             forum_name,
             initial_site_subtitle,
             initial_default_theme,
             port,
-<<<<<<< HEAD
-            max_image_size: (max_image_mb as usize).saturating_mul(1024 * 1024),
-            max_video_size: (max_video_mb as usize).saturating_mul(1024 * 1024),
-            max_audio_size: (max_audio_mb as usize).saturating_mul(1024 * 1024),
-
-            enable_tor_support,
-            tor_only,
-=======
             max_image_size: (max_image_mb as usize)
                 .saturating_mul(1024)
                 .saturating_mul(1024),
@@ -612,31 +566,18 @@ impl Config {
                 .saturating_mul(1024),
             enable_tor_support,
             tor_only: tor_only && enable_tor_support,
->>>>>>> origin/indev-1.1.0-alpha-4
             tor_bootstrap_timeout_secs: env_parse(
                 "CHAN_TOR_BOOTSTRAP_TIMEOUT",
                 s.tor_bootstrap_timeout_secs.unwrap_or(120),
             ),
             tor_max_concurrent_streams: env_parse(
                 "CHAN_TOR_MAX_STREAMS",
-                s.tor_max_concurrent_streams.unwrap_or(64),
+                s.tor_max_concurrent_streams.unwrap_or(512),
             ),
             tor_service_nickname: std::env::var("CHAN_TOR_NICKNAME")
                 .ok()
                 .or(s.tor_service_nickname)
                 .unwrap_or_else(|| "rustchan".to_string()),
-            tor_stable_run_threshold_secs: env_parse(
-                "CHAN_TOR_STABLE_RUN_SECS",
-                s.tor_stable_run_threshold_secs.unwrap_or(600),
-            ),
-            tor_stream_timeout_secs: env_parse(
-                "CHAN_TOR_STREAM_TIMEOUT",
-                s.tor_stream_timeout_secs.unwrap_or(300),
-            ),
-            tor_num_intro_points: env_parse(
-                "CHAN_TOR_INTRO_POINTS",
-                s.tor_num_intro_points.unwrap_or(3),
-            ),
             require_ffmpeg: env_bool("CHAN_REQUIRE_FFMPEG", s.require_ffmpeg.unwrap_or(false)),
             bind_addr,
             database_path: env_str("CHAN_DB", &default_db),
@@ -662,11 +603,13 @@ impl Config {
                 "CHAN_POLL_CLEANUP_HOURS",
                 s.poll_cleanup_interval_hours.unwrap_or(72),
             ),
-            db_warn_threshold_bytes: env_parse::<u64>(
-                "CHAN_DB_WARN_THRESHOLD_MB",
-                s.db_warn_threshold_mb.unwrap_or(2048),
-            )
-            .saturating_mul(1024 * 1024),
+            db_warn_threshold_bytes: {
+                let mb = env_parse::<u64>(
+                    "CHAN_DB_WARN_THRESHOLD_MB",
+                    s.db_warn_threshold_mb.unwrap_or(2048),
+                );
+                mb.saturating_mul(1024).saturating_mul(1024)
+            },
             job_queue_capacity: env_parse(
                 "CHAN_JOB_QUEUE_CAPACITY",
                 s.job_queue_capacity.unwrap_or(1000),
@@ -679,11 +622,13 @@ impl Config {
                 "CHAN_ARCHIVE_BEFORE_PRUNE",
                 s.archive_before_prune.unwrap_or(true),
             ),
-            waveform_cache_max_bytes: env_parse::<u64>(
-                "CHAN_WAVEFORM_CACHE_MAX_MB",
-                s.waveform_cache_max_mb.unwrap_or(200),
-            )
-            .saturating_mul(1024 * 1024),
+            waveform_cache_max_bytes: {
+                let mb = env_parse::<u64>(
+                    "CHAN_WAVEFORM_CACHE_MAX_MB",
+                    s.waveform_cache_max_mb.unwrap_or(200),
+                );
+                mb.saturating_mul(1024).saturating_mul(1024)
+            },
             blocking_threads: {
                 let cpus = std::thread::available_parallelism()
                     .map(std::num::NonZero::get)
@@ -697,11 +642,7 @@ impl Config {
                 }
             },
             db_pool_size: env_parse("CHAN_DB_POOL_SIZE", s.db_pool_size.unwrap_or(8)),
-<<<<<<< HEAD
-
-=======
             // ChanNet fields
->>>>>>> origin/indev-1.1.0-alpha-4
             rustwave_url,
             chan_net_bind,
             chan_net_max_body,
@@ -721,19 +662,13 @@ impl Config {
     ///
     /// # Errors
     /// Returns an error if any configuration value is out of an acceptable range,
-    /// the upload directory (or any Tor data directory) is not writable/creatible,
-    /// `tor_only` is enabled without `enable_tor_support`, or `chan_net_api_key`
-    /// is set but shorter than 32 characters.
+    /// or if the upload directory is not writable.
     pub fn validate(&self) -> anyhow::Result<()> {
         const MIB: usize = 1024 * 1024;
         const MAX_IMAGE_MIB: usize = 100;
         const MAX_VIDEO_MIB: usize = 2048;
         const MAX_AUDIO_MIB: usize = 512;
-<<<<<<< HEAD
-
-=======
         // cookie_secret is hex-encoded: 64 hex chars = 32 bytes of entropy.
->>>>>>> origin/indev-1.1.0-alpha-4
         if self.cookie_secret.len() < 64 {
             anyhow::bail!(
                 "CONFIG ERROR: cookie_secret is too short ({} chars). \
@@ -766,9 +701,6 @@ impl Config {
         if self.port == 0 {
             anyhow::bail!("CONFIG ERROR: port must not be 0.");
         }
-<<<<<<< HEAD
-
-=======
         if self.tls.enabled && self.tls.port == 0 {
             anyhow::bail!(
                 "CONFIG ERROR: tls.port must not be 0. \
@@ -776,30 +708,20 @@ impl Config {
             );
         }
         // Verify the upload directory is writable.
->>>>>>> origin/indev-1.1.0-alpha-4
         let upload_path = std::path::Path::new(&self.upload_dir);
-        std::fs::create_dir_all(upload_path).map_err(|e| {
-            anyhow::anyhow!(
-                "CONFIG ERROR: cannot create upload_dir '{}': {e}",
-                self.upload_dir
-            )
-        })?;
-        let probe = upload_path.join(".write_probe");
-        if std::fs::write(&probe, b"").is_err() {
-            let _ = std::fs::remove_file(&probe);
-            anyhow::bail!(
-                "CONFIG ERROR: upload_dir '{}' is not writable.",
-                self.upload_dir
-            );
+        if upload_path.exists() {
+            let probe = upload_path.join(".write_probe");
+            if std::fs::write(&probe, b"").is_err() {
+                anyhow::bail!(
+                    "CONFIG ERROR: upload_dir '{}' is not writable.",
+                    self.upload_dir
+                );
+            }
+            let _ = std::fs::remove_file(probe);
         }
-<<<<<<< HEAD
-        let _ = std::fs::remove_file(probe);
-
-=======
         // F-13: Pre-flight writability check for Arti data directories.
         // Without this, a permissions error on these dirs only surfaces ~30 s
         // into bootstrap as a cryptic internal error — invisible at startup.
->>>>>>> origin/indev-1.1.0-alpha-4
         if self.enable_tor_support {
             let exe = std::env::current_exe()
                 .ok()
@@ -811,9 +733,6 @@ impl Config {
                 std::fs::create_dir_all(&dir).map_err(|e| {
                     anyhow::anyhow!("CONFIG ERROR: cannot create Tor dir {}: {e}", dir.display())
                 })?;
-<<<<<<< HEAD
-
-=======
                 // Arti requires arti_state/ to have permissions 0700 (no group
                 // or other read access) for its key material. create_dir_all
                 // respects the process umask, typically yielding 0755, which
@@ -821,7 +740,6 @@ impl Config {
                 // Explicitly set 0700 on Unix so Arti accepts the directory.
                 // arti_cache/ holds no sensitive data and is left at normal
                 // permissions, but we restrict it too for defence-in-depth.
->>>>>>> origin/indev-1.1.0-alpha-4
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -843,31 +761,18 @@ impl Config {
                 let _ = std::fs::remove_file(probe);
             }
         }
-<<<<<<< HEAD
-
-        if self.tor_only && !self.enable_tor_support {
-            anyhow::bail!("CONFIG ERROR: tor_only=true requires enable_tor_support=true.");
-        }
-        if !self.chan_net_api_key.is_empty() && self.chan_net_api_key.len() < 32 {
-            anyhow::bail!("CONFIG ERROR: chan_net_api_key must be at least 32 characters if set.");
-        }
-
-=======
         // Step 1.2: Validate rustwave_url scheme so operators catch
         // misconfiguration at startup rather than at first federation call.
->>>>>>> origin/indev-1.1.0-alpha-4
         if !self.rustwave_url.starts_with("http://") && !self.rustwave_url.starts_with("https://") {
-            anyhow::bail!(
+            return Err(anyhow::anyhow!(
                 "CONFIG ERROR: rustwave_url must begin with http:// or https://, got: {}",
                 self.rustwave_url
-            );
+            ));
         }
         Ok(())
     }
 }
 
-<<<<<<< HEAD
-=======
 /// Update `forum_name` and `site_subtitle` in `settings.toml` in-place,
 /// preserving all other lines and comments.
 ///
@@ -879,15 +784,10 @@ impl Config {
 /// key (it won't append new lines — the file is only updated if the key already
 /// exists). On a fresh install `generate_settings_file_if_missing` always
 /// writes both keys, so this is only a concern for manually-crafted files.
->>>>>>> origin/indev-1.1.0-alpha-4
 pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
+    // Escape backslash and double-quote, then wrap in double quotes.
     fn toml_quote(s: &str) -> String {
-        let inner = s
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('\t', "\\t");
+        let inner = s.replace('\\', "\\\\").replace('"', "\\\"");
         format!("\"{inner}\"")
     }
     let path = settings_file_path();
@@ -903,17 +803,14 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
             return;
         }
     };
-<<<<<<< HEAD
-
-=======
     // Replace the value portion of `key = "..."` lines while preserving
     // indentation, comments on the same line, and surrounding whitespace.
     // We use a simple line-by-line scan so that file comments are untouched.
->>>>>>> origin/indev-1.1.0-alpha-4
     let trailing_newline = content.ends_with('\n');
     let updated: Vec<String> = content
         .lines()
         .map(|line| {
+            // Match `forum_name = ...` (possibly with surrounding spaces).
             if line.trim_start().starts_with("forum_name") && line.contains('=') {
                 return format!("forum_name = {}", toml_quote(forum_name));
             }
@@ -927,13 +824,9 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
     if trailing_newline {
         out.push('\n');
     }
-<<<<<<< HEAD
-
-=======
     // Atomic write: write to a temp file in the same directory, then rename
     // over the target. This prevents a partial write from corrupting settings.toml
     // if the process is killed mid-write (rename(2) is atomic on POSIX).
->>>>>>> origin/indev-1.1.0-alpha-4
     let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     match tempfile::Builder::new()
         .prefix(".settings_")
@@ -972,8 +865,6 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
     }
 }
 
-<<<<<<< HEAD
-=======
 // ─── Cookie secret rotation check ────────────────────────────────────────────
 /// Check whether the `cookie_secret` has changed since the last run by comparing
 /// a SHA-256 hash stored in the DB against the currently loaded secret.
@@ -981,7 +872,6 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
 /// Called once at startup after the DB pool is ready.
 /// If the secret has rotated, all IP-based bans become invalid — warn loudly.
 /// On first run (no stored hash), silently stores the current hash and returns.
->>>>>>> origin/indev-1.1.0-alpha-4
 pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
     use sha2::{Digest, Sha256};
     const KEY: &str = "cookie_secret_hash";
@@ -999,7 +889,7 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
         .ok();
     if let Some(ref h) = stored {
         if h == &current_hash {
-            return;
+            return; // Secret unchanged — nothing to do.
         }
         tracing::warn!(
             "SECURITY WARNING: cookie_secret has changed since the last run. \
@@ -1009,11 +899,7 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
              DELETE FROM bans; DELETE FROM ban_appeals;"
         );
     }
-<<<<<<< HEAD
-
-=======
     // First run (None) or rotated secret (Some) — store the current hash.
->>>>>>> origin/indev-1.1.0-alpha-4
     let _ = conn.execute(
         "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1021,10 +907,7 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
     );
 }
 
-<<<<<<< HEAD
-=======
 // ─── Env helpers ──────────────────────────────────────────────────────────────
->>>>>>> origin/indev-1.1.0-alpha-4
 fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -1037,5 +920,7 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
 }
 
 fn env_bool(key: &str, default: bool) -> bool {
-    env::var(key).map_or(default, |v| v == "1" || v.eq_ignore_ascii_case("true"))
+    env::var(key)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(default)
 }

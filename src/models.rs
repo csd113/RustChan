@@ -4,13 +4,16 @@
 // NOTE: When writing rusqlite FromRow impls for wide structs like Board (18+
 // fields), prefer named-column access (`row.get("col")?`) over positional
 // indices to avoid silent mis-binding when columns are reordered.
+
 use serde::{Deserialize, Serialize};
+
 // ─── Media type classification ────────────────────────────────────────────────
+
 /// Classifies an uploaded file as image, video, or audio.
 /// Stored as a TEXT column in posts ("image", "video", "audio").
 ///
 /// The serde `rename_all = "lowercase"` representation **must** stay in sync
-/// with `as_str()` / `from_db_str()`. Add a round-trip unit test whenever a
+/// with `as_str()` / `from_db_str()`.  Add a round-trip unit test whenever a
 /// new variant is introduced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -19,6 +22,7 @@ pub enum MediaType {
     Video,
     Audio,
 }
+
 impl MediaType {
     /// Infer `MediaType` from a MIME type string.
     #[must_use]
@@ -33,6 +37,7 @@ impl MediaType {
             None
         }
     }
+
     /// Infer `MediaType` from a file extension (lowercase, no dot).
     /// Used during the backfill migration for pre-existing posts.
     #[must_use]
@@ -47,6 +52,7 @@ impl MediaType {
             _ => None,
         }
     }
+
     /// Serialise to the TEXT value stored in the database.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
@@ -56,6 +62,7 @@ impl MediaType {
             Self::Audio => "audio",
         }
     }
+
     /// Deserialise from the TEXT value stored in the database.
     #[must_use]
     pub fn from_db_str(s: &str) -> Option<Self> {
@@ -67,11 +74,13 @@ impl MediaType {
         }
     }
 }
+
 impl std::fmt::Display for MediaType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
+
 /// A board, e.g. /tech/ — Technology
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
@@ -95,6 +104,7 @@ pub struct Board {
     pub post_cooldown_secs: i64,  // seconds a user must wait between posts (0 = disabled)
     pub created_at: i64,          // Unix timestamp
 }
+
 /// A thread (the OP post + its replies share this record for metadata)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Thread {
@@ -116,6 +126,7 @@ pub struct Thread {
     pub op_tripcode: Option<String>,
     pub op_id: Option<i64>,
 }
+
 /// A single post (OP or reply)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Post {
@@ -148,6 +159,7 @@ pub struct Post {
     /// Set when the post body has been edited; None means never edited.
     pub edited_at: Option<i64>,
 }
+
 /// Admin user record
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
@@ -155,10 +167,10 @@ pub struct AdminUser {
     pub id: i64,
     pub username: String,
     /// Excluded from Serialize in practice — be careful not to expose this.
-    #[serde(skip_serializing)]
     pub password_hash: String,
     pub created_at: i64,
 }
+
 /// Active admin session
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
@@ -168,6 +180,7 @@ pub struct AdminSession {
     pub created_at: i64,
     pub expires_at: i64,
 }
+
 /// A banned IP hash
 #[derive(Debug, Clone, Serialize)]
 pub struct Ban {
@@ -178,6 +191,7 @@ pub struct Ban {
     #[allow(dead_code)]
     pub created_at: i64,
 }
+
 /// A word filter rule
 #[derive(Debug, Clone, Serialize)]
 pub struct WordFilter {
@@ -185,12 +199,14 @@ pub struct WordFilter {
     pub pattern: String,
     pub replacement: String,
 }
+
 /// Board with live thread count, used on the home page
 #[derive(Debug, Clone, Serialize)]
 pub struct BoardStats {
     pub board: Board,
     pub thread_count: i64,
 }
+
 /// Summary used on board index: thread + its last few reply counts
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreadSummary {
@@ -200,6 +216,7 @@ pub struct ThreadSummary {
     /// How many replies are hidden (total - preview shown)
     pub omitted: i64,
 }
+
 /// Form data for posting a new thread or reply (parsed from multipart)
 #[derive(Debug, Default, Deserialize)]
 #[allow(dead_code)]
@@ -210,6 +227,7 @@ pub struct PostForm {
     pub deletion_token: String,
     // File fields are handled separately in multipart parsing
 }
+
 /// Form data for deleting a post
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -218,6 +236,7 @@ pub struct DeleteForm {
     pub deletion_token: String,
     pub board: String,
 }
+
 /// Admin ban form
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -226,6 +245,7 @@ pub struct BanForm {
     pub reason: String,
     pub duration_hours: Option<i64>,
 }
+
 /// Admin login form
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -233,6 +253,7 @@ pub struct LoginForm {
     pub username: String,
     pub password: String,
 }
+
 /// A poll attached to a thread's OP
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
@@ -243,6 +264,7 @@ pub struct Poll {
     pub expires_at: i64,
     pub created_at: i64,
 }
+
 /// A single poll option with live vote count (joined from `poll_votes`)
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
@@ -253,6 +275,7 @@ pub struct PollOption {
     pub position: i64,
     pub vote_count: i64,
 }
+
 /// Full poll data passed to templates
 #[derive(Debug, Clone, Serialize)]
 pub struct PollData {
@@ -264,6 +287,7 @@ pub struct PollData {
     /// true when `expires_at` <= now
     pub is_expired: bool,
 }
+
 /// Search query
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
@@ -271,9 +295,11 @@ pub struct SearchQuery {
     #[serde(default = "default_page")]
     pub page: i64,
 }
+
 const fn default_page() -> i64 {
     1
 }
+
 /// Pagination helper
 #[derive(Debug, Clone, Serialize)]
 pub struct Pagination {
@@ -281,6 +307,7 @@ pub struct Pagination {
     pub per_page: i64,
     pub total: i64,
 }
+
 impl Pagination {
     /// Create a new Pagination, clamping all values to sane minimums.
     ///
@@ -295,6 +322,7 @@ impl Pagination {
             total: total.max(0),
         }
     }
+
     /// Total number of pages. Always returns at least 1 so templates can
     /// safely display "page 1 of 1" even on empty result sets.
     #[must_use]
@@ -306,6 +334,7 @@ impl Pagination {
         let t = self.total.max(0);
         ((t + pp - 1) / pp).max(1)
     }
+
     #[must_use]
     pub fn offset(&self) -> i64 {
         self.page
@@ -313,15 +342,18 @@ impl Pagination {
             .saturating_sub(1)
             .saturating_mul(self.per_page.max(1))
     }
+
     #[must_use]
     pub const fn has_prev(&self) -> bool {
         self.page > 1
     }
+
     #[must_use]
     pub fn has_next(&self) -> bool {
         self.page < self.total_pages()
     }
 }
+
 /// Aggregate site-wide statistics shown on the home page.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SiteStats {
@@ -336,6 +368,7 @@ pub struct SiteStats {
     /// Total bytes of currently stored files (still on disk)
     pub active_bytes: i64,
 }
+
 /// A user-filed report against a post
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
@@ -351,6 +384,7 @@ pub struct Report {
     pub resolved_at: Option<i64>,
     pub resolved_by: Option<i64>,
 }
+
 /// Report enriched with context from joined tables (used in admin inbox)
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportWithContext {
@@ -362,6 +396,7 @@ pub struct ReportWithContext {
     /// `None` for gateway-inserted federation posts which have no client IP.
     pub post_ip_hash: Option<String>,
 }
+
 /// A single entry in the moderation action log
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
@@ -379,6 +414,7 @@ pub struct ModLogEntry {
     pub detail: String,
     pub created_at: i64,
 }
+
 /// Represents a saved backup file on disk (shown in admin panel).
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupInfo {
@@ -389,6 +425,7 @@ pub struct BackupInfo {
     /// Human-readable last-modified timestamp (UTC).
     pub modified: String,
 }
+
 /// A user-submitted ban appeal
 #[derive(Debug, Clone, Serialize)]
 pub struct BanAppeal {
@@ -399,6 +436,7 @@ pub struct BanAppeal {
     pub status: String, // "open" | "dismissed"
     pub created_at: i64,
 }
+
 // ─── ChanNet federation snapshot types ───────────────────────────────────────
 //
 // Defined here (not in chan_net::snapshot) so that src/db/chan_net.rs can
@@ -408,6 +446,7 @@ pub struct BanAppeal {
 //
 // chan_net::snapshot re-exports these types so that all existing call-sites
 // (snapshot::SnapshotPost, etc.) continue to compile without change.
+
 /// A single board entry in a federation snapshot.
 /// `id` is the board's `short_name` (e.g. "tech", "b").
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -415,6 +454,7 @@ pub struct SnapshotBoard {
     pub id: String,
     pub title: String,
 }
+
 /// A single post in a federation snapshot.
 ///
 /// SECURITY: Text content only. File paths, MIME types, thumbnail paths, and
@@ -427,6 +467,7 @@ pub struct SnapshotPost {
     pub content: String,
     pub timestamp: u64,
 }
+
 /// Metadata block written into every federation snapshot ZIP.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SnapshotMetadata {
@@ -440,11 +481,15 @@ pub struct SnapshotMetadata {
     pub is_delta: bool,
     pub includes_archive: bool,
 }
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     // ── MediaType serde ↔ DB string parity ────────────────────────────────
+
     #[test]
     #[allow(clippy::expect_used)]
     fn media_type_serde_matches_db_str() {
@@ -464,12 +509,14 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn media_type_display_matches_as_str() {
         for mt in [MediaType::Image, MediaType::Video, MediaType::Audio] {
             assert_eq!(format!("{mt}"), mt.as_str());
         }
     }
+
     #[test]
     fn media_type_from_mime() {
         assert_eq!(MediaType::from_mime("image/png"), Some(MediaType::Image));
@@ -477,6 +524,7 @@ mod tests {
         assert_eq!(MediaType::from_mime("audio/ogg"), Some(MediaType::Audio));
         assert_eq!(MediaType::from_mime("application/json"), None);
     }
+
     #[test]
     fn media_type_from_ext() {
         assert_eq!(MediaType::from_ext("jpg"), Some(MediaType::Image));
@@ -484,7 +532,9 @@ mod tests {
         assert_eq!(MediaType::from_ext("flac"), Some(MediaType::Audio));
         assert_eq!(MediaType::from_ext("exe"), None);
     }
+
     // ── Pagination ────────────────────────────────────────────────────────
+
     #[test]
     fn pagination_clamps_inputs() {
         let p = Pagination::new(0, 0, -5);
@@ -492,11 +542,13 @@ mod tests {
         assert_eq!(p.per_page, 1);
         assert_eq!(p.total, 0);
     }
+
     #[test]
     fn pagination_total_pages_at_least_one() {
         let p = Pagination::new(1, 10, 0);
         assert_eq!(p.total_pages(), 1);
     }
+
     #[test]
     fn pagination_total_pages_normal() {
         assert_eq!(Pagination::new(1, 10, 1).total_pages(), 1);
@@ -505,12 +557,14 @@ mod tests {
         assert_eq!(Pagination::new(1, 10, 20).total_pages(), 2);
         assert_eq!(Pagination::new(1, 10, 21).total_pages(), 3);
     }
+
     #[test]
     fn pagination_offset() {
         assert_eq!(Pagination::new(1, 10, 100).offset(), 0);
         assert_eq!(Pagination::new(2, 10, 100).offset(), 10);
         assert_eq!(Pagination::new(3, 25, 100).offset(), 50);
     }
+
     #[test]
     fn pagination_offset_clamped_for_bad_page() {
         // Even if someone bypasses new() and manually sets page = -1
@@ -521,18 +575,22 @@ mod tests {
         };
         assert_eq!(p.offset(), 0);
     }
+
     #[test]
     fn pagination_has_prev_and_next() {
         let p = Pagination::new(1, 10, 30);
         assert!(!p.has_prev());
         assert!(p.has_next());
+
         let p = Pagination::new(2, 10, 30);
         assert!(p.has_prev());
         assert!(p.has_next());
+
         let p = Pagination::new(3, 10, 30);
         assert!(p.has_prev());
         assert!(!p.has_next());
     }
+
     #[test]
     fn pagination_single_page() {
         let p = Pagination::new(1, 10, 5);
@@ -540,6 +598,7 @@ mod tests {
         assert!(!p.has_next());
         assert_eq!(p.total_pages(), 1);
     }
+
     #[test]
     fn pagination_empty_results() {
         let p = Pagination::new(1, 10, 0);

@@ -4,22 +4,17 @@
 // response automatically, so handlers never need to manually build error pages.
 //
 // Variants map 1-to-1 to HTTP status codes so the right code is always returned:
-// NotFound          → 404
-// BadRequest        → 400
-// Forbidden         → 403
-// BannedUser        → 403 (with special ban appeal page)
-// Conflict          → 409
-// UploadTooLarge    → 413 (Payload Too Large)
-// InvalidMediaType  → 415 (Unsupported Media Type)
-// RateLimited       → 429
-// DbBusy            → 503 (Service Unavailable, with Retry-After: 1)
-// Internal          → 500
-// Api               → 502 (Bad Gateway)
+//   NotFound          → 404
+//   BadRequest        → 400
+//   Forbidden         → 403
+//   UploadTooLarge    → 413  (Content Too Large)
+//   InvalidMediaType  → 415  (Unsupported Media Type)
+//   RateLimited       → 429  (Too Many Requests)
+//   DbBusy            → 503  (Service Unavailable, with Retry-After)
+//   Internal          → 500
+
 use axum::{
-    http::{
-        header::{HeaderValue, RETRY_AFTER},
-        StatusCode,
-    },
+    http::StatusCode,
     response::{Html, IntoResponse, Response},
 };
 use thiserror::Error;
@@ -30,34 +25,44 @@ pub enum AppError {
     /// 404 — board or thread not found
     #[error("Not found: {0}")]
     NotFound(String),
+
     /// 400 — bad input from user
     #[error("Bad request: {0}")]
     BadRequest(String),
+
     /// 403 — forbidden (banned, CSRF failure, etc.)
     #[error("Forbidden: {0}")]
     Forbidden(String),
+
     /// 403 — user is banned; carries the ban reason and their CSRF token so the
     /// appeal form can be rendered with a valid token (fixes FIX[M-T1]).
     #[error("You are banned. Reason: {reason}")]
     BannedUser { reason: String, csrf_token: String },
+
     /// 413 — upload body too large
     #[error("Upload too large: {0}")]
     UploadTooLarge(String),
+
     /// 415 — MIME type not accepted
     #[error("Invalid media type: {0}")]
     InvalidMediaType(String),
+
     /// 409 — resource already exists or snapshot already imported
     #[error("Conflict: {0}")]
     Conflict(String),
+
     /// 429 — rate limited
     #[error("Rate limited: posting too fast")]
     RateLimited,
+
     /// 503 — database write contention; client should retry
     #[error("Database busy — please retry")]
     DbBusy,
+
     /// 500 — internal error (database failure, IO error, etc.)
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
+
     /// Structured error for future API integration.
     ///
     /// Carries the HTTP status returned by the remote API, a human-readable
@@ -167,16 +172,7 @@ impl IntoResponse for AppError {
         };
 
         let html = crate::templates::error_page(status.as_u16(), &message);
-        let mut response = (status, Html(html)).into_response();
-
-        // Fulfill documented contract for DbBusy.
-        if matches!(&self, Self::DbBusy) {
-            response
-                .headers_mut()
-                .insert(RETRY_AFTER, HeaderValue::from_static("1"));
-        }
-
-        response
+        (status, Html(html)).into_response()
     }
 }
 

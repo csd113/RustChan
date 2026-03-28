@@ -6,8 +6,6 @@ All notable changes to RustChan will be documented in this file.
 
 ## [1.1.0 alpha 3]
 
-<<<<<<< HEAD
-=======
 ### Full-Screen TUI Console
 
 The operator-facing terminal console has been rewritten from a scrolling line-input shell into a full-screen static TUI, matching the dashboard style introduced in RustHost.

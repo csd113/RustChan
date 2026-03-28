@@ -37,14 +37,6 @@ const AUDIO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" 
   <text x="125" y="215" text-anchor="middle" fill="#3a4a3a" font-family="monospace" font-size="12">AUDIO</text>
 </svg>"##;
 
-const IMAGE_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="250" height="250" viewBox="0 0 250 250">
-  <rect width="250" height="250" fill="#0a0f0a"/>
-  <rect x="70" y="70" width="110" height="110" rx="4" fill="#0d120d" stroke="#00c840" stroke-width="2"/>
-  <circle cx="105" cy="105" r="12" fill="#00c840"/>
-  <polygon points="80,165 115,130 140,150 155,135 170,165" fill="#00c840"/>
-  <text x="125" y="215" text-anchor="middle" fill="#3a4a3a" font-family="monospace" font-size="12">IMAGE</text>
-</svg>"##;
-
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// What kind of static placeholder to write when the real thumbnail cannot be
@@ -53,7 +45,6 @@ const IMAGE_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" 
 pub enum PlaceholderKind {
     Video,
     Audio,
-    Image,
 }
 
 /// Generate a thumbnail for a media file and write it to `output_path`.
@@ -83,14 +74,15 @@ pub enum PlaceholderKind {
 /// Returns an error only if all strategies (including placeholder writing)
 /// fail.  Individual strategy failures are demoted to warnings so that a
 /// thumbnail failure never causes the upload to fail.
+/// Generate a thumbnail and return the **actual path written**.
 ///
-/// # Return value
 /// The returned path may differ from `output_path` when a fallback SVG
-/// placeholder is written for a source whose thumbnail extraction failed.
-/// `thumbnail_output_path` selects `.webp` when it expects extraction to
-/// succeed.  If extraction fails, writing SVG bytes into a `.webp` file
+/// placeholder is written for a video whose thumbnail extraction failed.
+/// `thumbnail_output_path` selects `.webp` for video when ffmpeg+libwebp are
+/// both present (because it cannot know ahead of time whether ffmpeg will
+/// succeed).  If extraction fails, writing SVG bytes into a `.webp` file
 /// produces a file whose content and extension disagree — browsers reject it
-/// and show a broken thumbnail.  To avoid this, the fallback writes the
+/// and show a broken thumbnail.  To avoid this, the video fallback writes the
 /// placeholder to a `.svg` sibling path instead and returns that path, so the
 /// caller can store the correct path in the database.
 pub fn generate_thumbnail(
@@ -101,17 +93,14 @@ pub fn generate_thumbnail(
     ffmpeg_available: bool,
     ffmpeg_webp_available: bool,
 ) -> Result<PathBuf> {
-    // Ensure max_dim is at least 1 to avoid division-by-zero in scaling.
-    let max_dim = max_dim.max(1);
-
     match mime {
         // ── SVG and audio: always use static placeholder ──────────────────
-        "image/svg+xml" => write_placeholder(output_path, PlaceholderKind::Image)
+        "image/svg+xml" => write_placeholder(output_path, PlaceholderKind::Video)
             .map(|()| output_path.to_path_buf()),
         m if m.starts_with("audio/") => write_placeholder(output_path, PlaceholderKind::Audio)
             .map(|()| output_path.to_path_buf()),
 
-        // ── Video (WebM, MP4, and any other video/*): requires ffmpeg AND libwebp ─
+        // ── Video (WebM, MP4, and any other video/*): requires ffmpeg AND libwebp ─────────────────────
         // `thumbnail_output_path` pre-selects `.webp` when both are present.
         // If ffmpeg_thumbnail then fails, write the SVG placeholder to the
         // `.svg`-extension sibling so the file content and extension match.
@@ -124,8 +113,6 @@ pub fn generate_thumbnail(
                     Ok(()) => Ok(output_path.to_path_buf()),
                     Err(e) => {
                         tracing::warn!("ffmpeg video thumbnail failed ({}); using placeholder", e);
-                        // Clean up any partial file left by ffmpeg.
-                        let _ = std::fs::remove_file(output_path);
                         // Write the SVG placeholder with a .svg extension so its
                         // content and file extension agree.  Browsers that receive
                         // SVG bytes served as image/webp silently show nothing.
@@ -143,20 +130,11 @@ pub fn generate_thumbnail(
         // ── WebP: skip ffmpeg entirely — use image crate directly ─────────
         // ffmpeg fails on animated WebP (VP8L) and emits a spurious warning
         // even though the image crate handles all WebP variants correctly.
-        "image/webp" => match image_crate_thumbnail(input_path, mime, output_path, max_dim) {
-            Ok(()) => Ok(output_path.to_path_buf()),
-            Err(e) => {
-                tracing::warn!(
-                    "image crate WebP thumbnail failed ({}); using placeholder",
-                    e
-                );
-                let svg_path = output_path.with_extension("svg");
-                write_placeholder(&svg_path, PlaceholderKind::Image).map(|()| svg_path)
-            }
-        },
+        "image/webp" => image_crate_thumbnail(input_path, mime, output_path, max_dim)
+            .map(|()| output_path.to_path_buf()),
 
         // ── Other images: try ffmpeg, fall back to image crate ────────────
-        m if m.starts_with("image/") => {
+        _ if mime.starts_with("image/") => {
             if ffmpeg_available {
                 match ffmpeg::ffmpeg_thumbnail(input_path, output_path, max_dim) {
                     Ok(()) => Ok(output_path.to_path_buf()),
@@ -165,49 +143,26 @@ pub fn generate_thumbnail(
                             "ffmpeg image thumbnail failed ({}); falling back to image crate",
                             e
                         );
-                        // Clean up any partial file left by ffmpeg.
-                        let _ = std::fs::remove_file(output_path);
-                        match image_crate_thumbnail(input_path, m, output_path, max_dim) {
-                            Ok(()) => Ok(output_path.to_path_buf()),
-                            Err(e2) => {
-                                tracing::warn!(
-                                    "image crate fallback also failed ({}); using placeholder",
-                                    e2
-                                );
-                                let svg_path = output_path.with_extension("svg");
-                                write_placeholder(&svg_path, PlaceholderKind::Image)
-                                    .map(|()| svg_path)
-                            }
-                        }
+                        image_crate_thumbnail(input_path, mime, output_path, max_dim)
+                            .map(|()| output_path.to_path_buf())
                     }
                 }
             } else {
-                match image_crate_thumbnail(input_path, m, output_path, max_dim) {
-                    Ok(()) => Ok(output_path.to_path_buf()),
-                    Err(e) => {
-                        tracing::warn!("image crate thumbnail failed ({}); using placeholder", e);
-                        let svg_path = output_path.with_extension("svg");
-                        write_placeholder(&svg_path, PlaceholderKind::Image).map(|()| svg_path)
-                    }
-                }
+                image_crate_thumbnail(input_path, mime, output_path, max_dim)
+                    .map(|()| output_path.to_path_buf())
             }
         }
 
         // ── Unknown MIME: placeholder ─────────────────────────────────────
-        _ => {
-            // thumbnail_extension returns "svg" for unknown MIME types now,
-            // so output_path should already have .svg extension. But be safe:
-            let svg_path = output_path.with_extension("svg");
-            write_placeholder(&svg_path, PlaceholderKind::Video).map(|()| svg_path)
-        }
+        _ => write_placeholder(output_path, PlaceholderKind::Video)
+            .map(|()| output_path.to_path_buf()),
     }
 }
 
 /// Determine the correct output path for a thumbnail given the media MIME type.
 ///
 /// Always returns a `.webp` path, except for types that produce an
-/// SVG placeholder (video without ffmpeg or libwebp, audio, svg source,
-/// unknown MIME types).
+/// SVG placeholder (video without ffmpeg or libwebp, audio, svg source).
 ///
 /// # Arguments
 /// * `thumb_dir`              — The `thumbs/` directory (absolute path).
@@ -227,7 +182,7 @@ pub fn thumbnail_output_path(
     thumb_dir.join(format!("{file_stem}.{ext}"))
 }
 
-/// Write a static SVG placeholder for video, audio, or image media.
+/// Write a static SVG placeholder for video or audio media.
 ///
 /// # Errors
 /// Returns an error if the file cannot be written to `output_path`.
@@ -235,7 +190,6 @@ pub fn write_placeholder(output_path: &Path, kind: PlaceholderKind) -> Result<()
     let svg = match kind {
         PlaceholderKind::Video => VIDEO_PLACEHOLDER_SVG,
         PlaceholderKind::Audio => AUDIO_PLACEHOLDER_SVG,
-        PlaceholderKind::Image => IMAGE_PLACEHOLDER_SVG,
     };
     std::fs::write(output_path, svg).with_context(|| {
         format!(
@@ -261,31 +215,24 @@ fn image_crate_thumbnail(
     let format = mime_to_image_format(mime)
         .ok_or_else(|| anyhow::anyhow!("unsupported image MIME for thumbnail: {mime}"))?;
 
-    // Read and decode in a block so the raw bytes are freed before we resize.
-    let img = {
-        let data = std::fs::read(input_path)
-            .with_context(|| format!("failed to read {} for thumbnailing", input_path.display()))?;
-        image::load_from_memory_with_format(&data, format)
-            .context("failed to decode image for thumbnail")?
-    };
+    let data = std::fs::read(input_path)
+        .with_context(|| format!("failed to read {} for thumbnailing", input_path.display()))?;
+
+    let img = image::load_from_memory_with_format(&data, format)
+        .context("failed to decode image for thumbnail")?;
 
     let (w, h) = img.dimensions();
-
-    // Guard against degenerate images with zero dimensions.
-    if w == 0 || h == 0 {
-        anyhow::bail!("image has degenerate dimensions ({w}×{h}), cannot generate thumbnail");
-    }
-
-    // Use f64 to avoid precision loss for images with dimensions > 16M pixels.
-    // The `u32 → f64` conversions are infallible (via From), while the final
-    // `f64 → u32` truncation is intentional and covered by the allow attribute.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let (tw, th) = if w >= h {
-        let r = f64::from(max_dim) / f64::from(w);
-        (max_dim, (f64::from(h) * r).round().max(1.0) as u32)
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let (tw, th) = if w > h {
+        let r = max_dim as f32 / w as f32;
+        (max_dim, (h as f32 * r) as u32)
     } else {
-        let r = f64::from(max_dim) / f64::from(h);
-        ((f64::from(w) * r).round().max(1.0) as u32, max_dim)
+        let r = max_dim as f32 / h as f32;
+        ((w as f32 * r) as u32, max_dim)
     };
 
     let thumb = if w <= tw && h <= th {
@@ -318,7 +265,7 @@ fn mime_to_image_format(mime: &str) -> Option<ImageFormat> {
 /// Return the file extension to use for a thumbnail.
 ///
 /// All thumbnails are `.webp` unless the source requires a static SVG
-/// placeholder (video without ffmpeg, audio, SVG sources, unknown MIME types).
+/// placeholder (video without ffmpeg, audio, SVG sources).
 ///
 /// For `video/webm`, a WebP thumbnail can only be produced when ffmpeg is
 /// available AND the `libwebp` encoder is compiled in.  When either is
@@ -341,12 +288,7 @@ fn thumbnail_extension(
         // not just WebM — MP4 and any other video format go through ffmpeg the
         // same way and need the same extension pre-selection logic.
         m if m.starts_with("video/") && (!ffmpeg_available || !ffmpeg_webp_available) => "svg",
-        // Known image types that the image crate can handle → webp.
-        m if m.starts_with("image/") => "webp",
-        m if m.starts_with("video/") => "webp",
-        // Unknown MIME types will get an SVG placeholder, so pre-select .svg
-        // to avoid content/extension mismatch.
-        _ => "svg",
+        _ => "webp",
     }
 }
 
@@ -391,15 +333,5 @@ mod tests {
     fn thumbnail_ext_is_svg_for_svg_source() {
         assert_eq!(thumbnail_extension("image/svg+xml", true, true), "svg");
         assert_eq!(thumbnail_extension("image/svg+xml", false, false), "svg");
-    }
-
-    #[test]
-    fn thumbnail_ext_is_svg_for_unknown_mime() {
-        // Unknown MIME types get SVG placeholders; extension must match.
-        assert_eq!(thumbnail_extension("application/pdf", true, true), "svg");
-        assert_eq!(
-            thumbnail_extension("application/octet-stream", false, false),
-            "svg"
-        );
     }
 }

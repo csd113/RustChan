@@ -13,48 +13,6 @@ use crate::middleware::validate_csrf;
 use crate::workers::JobQueue;
 use axum::extract::Multipart;
 
-// ─── FIX[C-3]: Bounded text field reader ─────────────────────────────────────
-//
-// The previous implementation called `field.text().await` which buffers the
-// entire field body in memory with no per-field size cap. An attacker
-// submitting a single `body` field equal to max_video_size (e.g. 50 MiB of
-// text) exhausts the body limit in one field and allocates a 50 MiB String
-// before any validation fires. Multiple concurrent requests cause OOM.
-//
-// `read_field_bytes` / `read_field_text` enforce a hard per-field cap and
-// abort with 400 Bad Request the moment the running total exceeds it.
-
-/// Maximum bytes accepted for any single text field in a multipart form.
-/// Covers post body (max 32 KiB) + generous margin for name, subject, etc.
-const MAX_TEXT_FIELD_BYTES: usize = 65_536;
-
-/// Read a multipart field as raw bytes, rejecting if it exceeds `limit`.
-async fn read_field_bytes_limited(
-    mut field: axum::extract::multipart::Field<'_>,
-    limit: usize,
-) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|e| AppError::BadRequest(e.to_string()))?
-    {
-        buf.extend_from_slice(&chunk);
-        if buf.len() > limit {
-            return Err(AppError::BadRequest(format!(
-                "Text field exceeds {limit} byte limit.",
-            )));
-        }
-    }
-    Ok(buf)
-}
-
-/// Read a multipart field as a UTF-8 string, rejecting if it exceeds `MAX_TEXT_FIELD_BYTES`.
-async fn read_field_text(field: axum::extract::multipart::Field<'_>) -> Result<String> {
-    let bytes = read_field_bytes_limited(field, MAX_TEXT_FIELD_BYTES).await?;
-    String::from_utf8(bytes).map_err(|_| AppError::BadRequest("Field is not valid UTF-8.".into()))
-}
-
 // ─── Streaming multipart size limit ──────────────────────────────────────────
 //
 // 3.1: The previous implementation called `field.bytes().await` which buffers
@@ -66,8 +24,8 @@ async fn read_field_text(field: axum::extract::multipart::Field<'_>) -> Result<S
 // configured limit.  The limit used is the largest allowed media size so that
 // any single field is capped.
 //
-// Text fields (CSRF token, post body, …) are now routed through read_field_text
-// which enforces MAX_TEXT_FIELD_BYTES per field.
+// Text fields (CSRF token, post body, …) are routed through `field.text()`
+// which is bounded by axum's body length limit set in the router layer.
 
 #[allow(clippy::arithmetic_side_effects)]
 async fn read_field_bytes(
@@ -141,24 +99,22 @@ pub async fn parse_post_multipart(
     {
         match field.name() {
             Some("_csrf") => {
-                let v = read_field_text(field).await.unwrap_or_default();
+                let v = field.text().await.unwrap_or_default();
                 if validate_csrf(csrf_cookie, &v) {
                     csrf_verified = true;
                 }
             }
-            Some("name") => name = read_field_text(field).await.unwrap_or_default(),
-            Some("subject") => subject = read_field_text(field).await.unwrap_or_default(),
-            Some("body") => body = read_field_text(field).await?,
-            Some("deletion_token") => {
-                deletion_token = read_field_text(field).await.unwrap_or_default();
-            }
+            Some("name") => name = field.text().await.unwrap_or_default(),
+            Some("subject") => subject = field.text().await.unwrap_or_default(),
+            Some("body") => body = field.text().await.unwrap_or_default(),
+            Some("deletion_token") => deletion_token = field.text().await.unwrap_or_default(),
             Some("sage") => {
-                let v = read_field_text(field).await.unwrap_or_default();
+                let v = field.text().await.unwrap_or_default();
                 sage = v == "1" || v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true");
             }
-            Some("pow_nonce") => pow_nonce = read_field_text(field).await.unwrap_or_default(),
+            Some("pow_nonce") => pow_nonce = field.text().await.unwrap_or_default(),
             Some("poll_question") => {
-                let v = read_field_text(field).await.unwrap_or_default();
+                let v = field.text().await.unwrap_or_default();
                 // CRIT-8: Enforce server-side length cap on poll question.
                 if v.chars().count() > 500 {
                     return Err(AppError::BadRequest(
@@ -168,7 +124,7 @@ pub async fn parse_post_multipart(
                 poll_question = v;
             }
             Some("poll_option") => {
-                let v = read_field_text(field).await.unwrap_or_default();
+                let v = field.text().await.unwrap_or_default();
                 let trimmed = v.trim().to_string();
                 // CRIT-8: Enforce server-side caps on option count and length.
                 if !trimmed.is_empty() {
@@ -186,11 +142,11 @@ pub async fn parse_post_multipart(
                 }
             }
             Some("poll_duration_value") => {
-                let v = read_field_text(field).await.unwrap_or_default();
+                let v = field.text().await.unwrap_or_default();
                 poll_duration_value = v.trim().parse::<i64>().ok();
             }
             Some("poll_duration_unit") => {
-                poll_duration_unit = read_field_text(field).await.unwrap_or_default();
+                poll_duration_unit = field.text().await.unwrap_or_default();
             }
             Some("file") => {
                 let fname = field.file_name().unwrap_or("upload").to_string();
