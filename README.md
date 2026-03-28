@@ -145,7 +145,7 @@ RustChan is a fully-featured imageboard engine compiled into a **single Rust bin
 - **Site subtitle** — `site_subtitle` in `settings.toml` customises the home page tagline at install time
 - **Live stats** — total posts, uploads, and content size displayed on the home page
 - **Background worker system** — video transcoding, waveform generation, and thread cleanup run asynchronously; duplicate media jobs coalesced; configurable ffmpeg timeout; exponential backoff on retries
-- **Interactive keyboard console** — `[s]` stats · `[l]` boards · `[c]` create · `[d]` delete · `[q]` quit
+- **Full-screen TUI console** — replaces the old scrolling line-input shell with a static full-screen dashboard; live panels for server status, request rate, online users, content counts, per-board breakdowns, storage sizes, and active upload progress; keyboard shortcuts: `[H]` help · `[R]` force-reload stats · `[L]` log view · `[B]` board list · `[C]` create board · `[A]` create admin · `[D]` delete thread · `[Q]` quit (with confirmation); wizard flows for board/admin creation and thread deletion temporarily exit raw mode for line-input, then restore the dashboard cleanly on completion; panic hook and graceful shutdown both call `cleanup()` to guarantee terminal restoration
 
 </td>
 </tr>
@@ -560,7 +560,11 @@ src/
 ├── workers/mod.rs       — background job queue, media transcoding, cache eviction
 ├── server/
 │   ├── server.rs       — HTTP router, background task spawns, graceful shutdown
-│   ├── console.rs      — terminal stats, keyboard console, startup banner
+│   ├── console/
+│   │   ├── mod.rs      — alternate screen lifecycle, RAW_MODE_ACTIVE, ConsoleMode, render loop
+│   │   ├── dashboard.rs — pure render functions: dashboard, log view, help, board list, confirm quit
+│   │   ├── input.rs    — crossterm key reader, KeyEvent enum, spawn()
+│   │   └── wizard.rs   — interactive admin wizards (create board/admin, delete thread)
 │   └── cli.rs          — Cli / Command / AdminAction clap types, run_admin()
 ├── media/
 │   ├── mod.rs          — MediaProcessor, ProcessedMedia; public API
@@ -667,8 +671,11 @@ Six built-in themes, selectable via the floating picker on every page. Persisted
 
 See **[CHANGELOG.md](CHANGELOG.md)** for the full version history.
 
-**Latest — v1.1.0-alpha.2:**
-**Tor migrated to Arti (built-in, no system `tor` required)** — Arti bootstraps in-process at startup, derives a `.onion` address from a persistent keypair in `arti_state/keys/`, and proxies onion connections to the local HTTP port; no subprocess, no `torrc`, no hostname file polling · Critical fix: ChanNet gateway posts have no IP — `ip_hash` changed to `Option<String>` throughout (no more 500s on pages with gateway posts) · Log files now written to `rustchan-data/` (not the binary directory) · Log file names fixed (`rustchan.2024-01-15.log` format) · Logs changed from dense JSON to human-readable text · Per-field multipart size caps (~100 KB body, ~4 KB name/subject) eliminate OOM risk from oversized form submissions · Poll duration overflow hardened · Backup system rewrites: `rusqlite::backup` API replaces fragile SQL string, RAII temp-file cleanup, pool exhaustion → 503 · DB pool size configurable; `r2d2::Error` correctly maps to 503 · All write transactions upgraded from DEFERRED to `BEGIN IMMEDIATE` · Rotating log files prevent disk exhaustion · 304 response builders fixed · Atomic `settings.toml` writes · Request timeout middleware (slowloris protection) · Worker `JoinHandle`s persisted; graceful shutdown via `CancellationToken` + bounded await · Job recovery on startup for interrupted jobs · ChanNet server graceful shutdown unified with main HTTP server · Background tasks use `tokio::select!` for clean cancellation
+**Latest — v1.1.0-alpha.3:**
+**Full-screen TUI console** — `src/server/console.rs` replaced by a four-file `console/` module; enters alternate screen on startup; live dashboard panels for uptime, request rate, in-flight count, online users, per-board thread/post counts (with `+N` delta colouring), storage sizes, and an active-upload spinner; `ConsoleMode` state machine (Dashboard / LogView / Help / BoardList / ConfirmQuit / Wizard) drives all screen transitions; wizard flows (create board, create admin, delete thread) exit raw mode for line-input and restore the dashboard on completion; `cleanup()` registered in the panic hook and graceful shutdown path; new `crossterm` dependency · Native HTTPS/TLS (self-signed or Let's Encrypt ACME, runs alongside HTTP, no proxy required) · optional HTTP→HTTPS redirect listener · automatic HSTS when TLS is active · secure cookies enforced automatically under TLS · auto-terminal launch on double-click (Windows, Linux, macOS) · various hardening fixes: orphaned file cleanup on DB errors, stuck-job auto-reset on startup, 64 KB text field cap, backup concurrency lock, strict ZIP path validation, safe temp folder for SQL, 4 GB per-entry restore cap, 8 MB ZIP-bomb limit per entry, 2-minute ffmpeg timeout with kill, startup cleanup of leftover backup temp files
+
+**v1.1.0-alpha.2:**
+Tor migrated to Arti (built-in, no system `tor` required) · per-stream Tor IP isolation (`TOR_STREAM_TOKENS`) — each Tor stream now has its own rate-limit bucket and ban entry · `tor_only` mode (bind to loopback when Tor-only is desired) · graceful Tor task shutdown via `CancellationToken` · configurable `tor_bootstrap_timeout_secs`, `tor_max_concurrent_streams`, `tor_service_nickname` · `Onion-Location` response header for Tor Browser auto-redirect · critical fix: `ip_hash` changed to `Option<String>` throughout — no more 500s on pages with ChanNet gateway posts · multipart per-field size caps (~100 KB body, ~4 KB name/subject) · `rusqlite::backup` API replaces fragile SQL string in backup system · RAII temp-file cleanup in backup · `BEGIN IMMEDIATE` transactions throughout · configurable DB pool size · rotating log files · atomic `settings.toml` writes · request timeout middleware
 
 **v1.1.0-alpha.1:**
 ChanNet API on port 7070 (federation + RustWave gateway) · Major codebase refactor: `main.rs` shrunk from 1,757 → ~50 lines; `handlers/admin.rs` split into 6 focused files; new `server/` module (server, console, CLI); new `src/media/` module (ffmpeg, convert, thumbnail, exif) · BMP, TIFF, SVG upload support · GIF→WebM inline conversion · All thumbnails output as WebP · SVG placeholders for video/audio/SVG sources · PNG→WebP with size-check fallback · Atomic temp-then-rename for all conversions

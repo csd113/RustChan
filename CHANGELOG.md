@@ -6,6 +6,116 @@ All notable changes to RustChan will be documented in this file.
 
 ## [1.1.0 alpha 3]
 
+### Full-Screen TUI Console
+
+The operator-facing terminal console has been rewritten from a scrolling line-input shell into a full-screen static TUI, matching the dashboard style introduced in RustHost.
+
+#### Architecture
+
+`src/server/console.rs` is deleted and replaced by a four-file module at `src/server/console/`:
+
+| File | Responsibility |
+|------|---------------|
+| `mod.rs` | Alternate screen lifecycle, `RAW_MODE_ACTIVE` atomic, `ConsoleMode` / `WizardKind` enums, `start()`, `cleanup()`, `render()` loop |
+| `dashboard.rs` | Pure render functions — no I/O, no DB calls; takes a `&ChanStats` snapshot and returns a formatted `String` |
+| `input.rs` | Crossterm key reader (`50 ms` poll), `KeyEvent` enum, `spawn()` |
+| `wizard.rs` | Interactive admin wizards; exits raw mode for `read_line`, re-enters it on completion |
+
+A new `crossterm = "0.27"` dependency is added to `Cargo.toml`.
+
+#### Dashboard Layout
+
+On startup the terminal switches to the alternate screen and displays a live dashboard refreshed every 3 seconds (or immediately on `[R]`):
+
+```
+────────────────────────────────
+ RustChan
+────────────────────────────────
+
+Status
+ Server  : RUNNING (0.0.0.0:8080)
+ Uptime  : 2h 14m 33s
+ Memory  : 42.1 MiB
+
+Activity
+ Requests : 18 402    1.2/s    in-flight 3
+ Online   : 7
+
+Content
+ Boards  : 4
+ Threads : 831 (+2)
+ Posts   : 12 047 (+8)
+
+Storage
+ Database : 94.3 MiB
+ Uploads  : 1.22 GiB
+
+  /g/  204t 3021p    /tech/  91t 1204p
+  ⠹  2 file(s) uploading
+
+────────────────────────────────
+[H] Help [B] Boards [C] Create board [A] Admin [D] Del thread [L] Logs [Q] Quit
+────────────────────────────────
+```
+
+Delta counts (`+N`) are coloured yellow. The upload spinner uses a Braille frame array. All ANSI helpers (`green`, `yellow`, `red`, `dim`, `bold`, `cyan`) are pure functions with no side effects.
+
+#### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `H` | Help screen — full key reference |
+| `R` | Force immediate stats refresh |
+| `L` | Toggle log view (40 most recent lines) |
+| `B` | Board list (ID / slug / name / NSFW / thread count / post count) |
+| `C` | Create board wizard |
+| `A` | Create admin wizard |
+| `D` | Delete thread wizard |
+| `Q` / `Esc` | Confirm-quit prompt |
+| `Y` | Confirm quit |
+| `N` | Cancel — return to dashboard |
+| `Ctrl-C` | Force quit (no confirmation) |
+
+#### ConsoleMode State Machine
+
+```
+Dashboard ──[L]──▶ LogView ──[L]──▶ Dashboard
+         ──[H]──▶ Help
+         ──[B]──▶ BoardList
+         ──[Q]──▶ ConfirmQuit ──[Y]──▶ shutdown
+                              ──[N]──▶ Dashboard
+         ──[C/A/D]──▶ Wizard(_) ──(done)──▶ Dashboard
+```
+
+While any `Wizard(_)` mode is active, the render task skips frame output entirely — the wizard thread owns the terminal.
+
+#### Wizard Flows
+
+`kb_create_board`, `kb_create_admin`, and `kb_delete_thread` move from the old `console.rs` to `wizard.rs` unchanged. `run_wizard()` handles the terminal hand-off:
+
+1. Disable raw mode, leave alternate screen
+2. Run the wizard (blocking, `spawn_blocking`)
+3. Re-enable raw mode, re-enter alternate screen, clear for a clean frame
+4. Reset `ConsoleMode` to `Dashboard`
+
+#### Stats Refresh
+
+A background task in `server.rs` polls the database every 3 seconds and writes into `SharedStats` (`Arc<RwLock<ChanStats>>`). `KeyEvent::Reload` triggers an immediate refresh outside the timer. `render()` takes a read lock on `SharedStats` — no DB calls ever happen on the render path.
+
+#### Terminal Safety
+
+- `RAW_MODE_ACTIVE` atomic prevents double-cleanup
+- `cleanup()` is called from both the `std::panic` hook (registered in `main.rs`) and the graceful shutdown path
+- The terminal is always restored even on unexpected exits
+
+### 🔄 Changed
+
+- `src/server/mod.rs` — `pub mod console` now resolves to the sub-directory; `pub use console::cleanup` added for the panic hook path in `main.rs`
+- `src/server/server.rs` — `spawn_keyboard_handler()` replaced by `console::start()`; `match cmd.as_str()` loop replaced by typed `match key_event` loop; stats refresh background task added
+- `src/main.rs` — panic hook registers `crate::server::cleanup()`; explicit `console::cleanup()` call added after server future resolves
+
+---
+
 ### Native HTTPS / TLS Support
 
 RustChan can now serve itself directly over HTTPS without needing a reverse proxy in front of it. Two modes are available:

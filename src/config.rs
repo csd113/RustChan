@@ -1,16 +1,15 @@
 // config.rs — Runtime configuration.
 //
 // Priority (highest → lowest):
-//   1. Environment variables  (CHAN_BIND, CHAN_DB, …)
-//   2. settings.toml          (<exe-dir>/rustchan-data/settings.toml)
-//   3. Hard-coded defaults
+// 1. Environment variables (CHAN_BIND, CHAN_DB, …)
+// 2. settings.toml (<exe-dir>/rustchan-data/settings.toml)
+// 3. Hard-coded defaults
 //
 // On first run, settings.toml is generated next to the binary with all
-// default values and explanatory comments.  Edit it, restart the server.
+// default values and explanatory comments. Edit it, restart the server.
 //
 // SECURITY: The cookie_secret is auto-generated on first run and persisted
 // to settings.toml. It is never left at a well-known default value.
-
 use rand_core::{OsRng, RngCore};
 use serde::Deserialize;
 use std::env;
@@ -41,7 +40,6 @@ fn settings_file_path() -> PathBuf {
 }
 
 // ─── Settings file structure ──────────────────────────────────────────────────
-
 #[derive(Deserialize, Default)]
 struct SettingsFile {
     forum_name: Option<String>,
@@ -146,16 +144,13 @@ pub fn generate_settings_file_if_missing() {
     if path.exists() {
         return;
     }
-
     // Generate a random 64-hex-char secret (32 bytes of entropy).
     let mut secret_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut secret_bytes);
     let secret = hex::encode(secret_bytes);
-
     let content = settings_template(&secret);
-
     match std::fs::write(&path, content) {
-        Ok(()) => println!("Created  settings.toml  ({})", path.display()),
+        Ok(()) => println!("Created settings.toml ({})", path.display()),
         Err(e) => eprintln!("Warning: could not write settings.toml: {e}"),
     }
 }
@@ -169,158 +164,144 @@ fn settings_template(secret: &str) -> String {
         r#"# RustChan — Instance Settings
 # Edit this file to configure your imageboard.
 # Restart the server after making changes.
-
 # Name shown in the browser tab, page header, and home page title.
 forum_name = "RustChan"
-
 # Subtitle shown below the site name on the home page.
 # Can also be changed at any time from the admin panel → Site Settings.
 site_subtitle = "select board to proceed"
-
 # Default theme for first-time visitors (before they choose their own).
 # Valid values: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
 # Leave as "terminal" (or empty) for the default dark terminal look.
 # Can also be changed at any time from the admin panel → Site Settings.
 default_theme = "terminal"
-
 # Port the server listens on (binds to 0.0.0.0:<port>).
 port = 8080
-
 # Maximum size for image uploads in megabytes (jpg, png, gif, webp).
 max_image_size_mb = 8
-
 # Maximum size for video uploads in megabytes (mp4, webm).
 max_video_size_mb = 50
-
 # Maximum size for audio uploads in megabytes (mp3, ogg, flac, wav, m4a, aac).
 max_audio_size_mb = 150
+{server_section}
+# Secret key for IP hashing.
+# AUTO-GENERATED on first run — do NOT change after your first post,
+# or all existing IP hashes become invalid (bans will stop working).
+# If you must rotate it, also clear the bans table.
+cookie_secret = "{secret}"
+# ── ChanNet / RustWave gateway ────────────────────────────────────────────────
+# Uncomment and configure these to enable the ChanNet API (--chan-net flag).
+# Base URL of the connected RustWave instance.
+# Must begin with http:// or https://.
+# rustwave_url = "http://localhost:7071"
+# Address to bind the second ChanNet TCP listener.
+# Keep on loopback unless RustWave runs on a different host.
+# chan_net_bind = "127.0.0.1:7070"
+{tls_section}"#,
+        server_section = settings_template_server_section(),
+        tls_section = settings_template_tls_section(),
+    )
+}
 
+/// Tor, `FFmpeg`, maintenance, and worker settings portion of the default
+/// settings template.
+///
+/// Extracted from [`settings_template`] to keep all functions under the
+/// line-count lint threshold.
+const fn settings_template_server_section() -> &'static str {
+    r#"
 # Tor Onion Service support (powered by Arti — no system tor required).
 # When true, Arti bootstraps at startup and hosts a .onion hidden service.
 # First run downloads ~2 MB of directory data and takes ~30 s.
 # The service keypair lives in rustchan-data/arti_state/keys/ — back it up.
 # Delete that directory to rotate to a new .onion address.
 enable_tor_support = true
-
 # When true, the HTTP server binds exclusively to 127.0.0.1 so the site is
 # reachable ONLY through the Tor hidden service — clearnet access is blocked.
 # Requires enable_tor_support = true. Default: false (dual-stack: both
 # clearnet and Tor are active simultaneously).
 # tor_only = false
-
 # Seconds to wait for Tor to connect to the network before giving up and
 # retrying. The default (120 s) works on open networks. On censored networks
 # or when using bridges, increase this to 300 or more.
 # tor_bootstrap_timeout_secs = 120
-
 # Maximum number of simultaneous inbound Tor connections.
 # Each connection holds one file descriptor. Reduce if you hit FD limits.
 # tor_max_concurrent_streams = 512
-
 # Nickname for this instance's Tor hidden service key.
 # Only needs changing when multiple rustchan instances share the same
 # rustchan-data/arti_state/ directory — identical nicknames cause key
 # collisions and one instance will fail to start its onion service.
 # tor_service_nickname = "rustchan"
-
 # Set to true to hard-exit at startup when ffmpeg is not found.
 # When false (default), the server starts normally and video thumbnails
 # are replaced with SVG placeholders.
 require_ffmpeg = false
-
 # How often (in seconds) to run PRAGMA wal_checkpoint(TRUNCATE) to keep
 # the SQLite WAL file from growing unbounded under write load.
 # Set to 0 to disable. Default: 3600 (hourly).
 wal_checkpoint_interval_secs = 3600
-
 # How often (in hours) to run VACUUM automatically to reclaim disk space
 # freed by deleted posts and threads. Set to 0 to disable. Default: 24.
 auto_vacuum_interval_hours = 24
-
 # How often (in hours) to purge vote records for polls that have expired.
 # The poll question and options are kept for display; only per-IP vote rows
 # are deleted. Set to 0 to disable. Default: 72.
 poll_cleanup_interval_hours = 72
-
 # Database file size (MiB) above which a warning banner appears in the admin
 # panel. Set to 0 to disable. Default: 2048 (2 GiB).
 db_warn_threshold_mb = 2048
-
 # Maximum number of pending background jobs (video transcode, waveform, etc.)
 # allowed in the queue at once. When this limit is reached, new jobs are
 # silently dropped (with a warning log) rather than accepted. Default: 1000.
 job_queue_capacity = 1000
-
 # Maximum seconds a single FFmpeg transcode or waveform job may run before
 # it is killed. Prevents pathological media files from stalling the worker
 # pool indefinitely. Default: 120.
 ffmpeg_timeout_secs = 120
-
 # When true, threads that would be hard-deleted by the prune worker are instead
 # moved to the archive table, even on boards where archiving is disabled. This
 # acts as a global safety net against silent data loss when a board hits its
 # thread limit. Default: true.
 archive_before_prune = true
-
 # Maximum total size (MiB) of all thumbnail/waveform cache files across all
 # boards. A background task periodically evicts the oldest files when the
 # total exceeds this value. Set to 0 to disable. Default: 200.
 waveform_cache_max_mb = 200
-
 # Number of threads in Tokio's blocking pool (spawn_blocking). Every page
 # render and DB write goes through this pool; sizing it to CPUs × 4 prevents
 # it from becoming a bottleneck under concurrent load.
 # Default: logical CPUs × 4 (auto-detected at startup; leave 0 for auto).
 blocking_threads = 0
+"#
+}
 
-# Secret key for IP hashing.
-# AUTO-GENERATED on first run — do NOT change after your first post,
-# or all existing IP hashes become invalid (bans will stop working).
-# If you must rotate it, also clear the bans table.
-cookie_secret = "{secret}"
-
-# ── ChanNet / RustWave gateway ────────────────────────────────────────────────
-# Uncomment and configure these to enable the ChanNet API (--chan-net flag).
-
-# Base URL of the connected RustWave instance.
-# Must begin with http:// or https://.
-# rustwave_url = "http://localhost:7071"
-
-# Address to bind the second ChanNet TCP listener.
-# Keep on loopback unless RustWave runs on a different host.
-# chan_net_bind = "127.0.0.1:7070"
-
+/// TLS/HTTPS portion of the default settings template.
+///
+/// Extracted from [`settings_template`] to keep both functions under the
+/// line-count lint threshold.
+const fn settings_template_tls_section() -> &'static str {
+    r#"
 # ── TLS / HTTPS ───────────────────────────────────────────────────────────────
 # HTTPS is enabled by default on port 8443. On first run a self-signed
 # localhost certificate is generated automatically in rustchan-data/tls/dev/.
 # For production, configure [tls.acme] (Let's Encrypt) or [tls.manual_cert].
-
 [tls]
 enabled = true
-port    = 8443
-
+port = 8443
 # Redirect plain HTTP → HTTPS (binds an extra listener on http_port).
 # redirect_http = true
-# http_port     = 8080
-
+# http_port = 8080
 # Let's Encrypt via ACME (requires the tls-acme Cargo feature):
 # [tls.acme]
-# enabled   = true
-# staging   = true
-# domains   = ["example.com"]
-# email     = "admin@example.com"
+# enabled = true
+# staging = true
+# domains = ["example.com"]
+# email = "admin@example.com"
 # cache_dir = "tls/acme"
-
-# Manual PEM certificate (paths relative to rustchan-data/):
-# [tls.manual_cert]
-# cert_path = "tls/cert.pem"
-# key_path  = "tls/key.pem"
 "#
-    )
 }
 
 // ─── TLS configuration ───────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct TlsConfig {
     #[serde(default)]
@@ -353,13 +334,22 @@ impl Default for TlsConfig {
 pub struct AcmeConfig {
     #[serde(default)]
     pub enabled: bool,
+
+    // These fields are only read when the `tls-acme` Cargo feature is enabled
+    // (the Let's Encrypt implementation lives in a separate module).
+    // They are intentionally kept here so the `[tls.acme]` section in
+    // settings.toml deserializes cleanly even when the feature is off.
     #[serde(default)]
+    #[allow(dead_code)]
     pub domains: Vec<String>,
     #[serde(default)]
-    pub email: String,
+    #[allow(dead_code)]
+    pub email: Option<String>,
     #[serde(default = "default_true")]
+    #[allow(dead_code)]
     pub staging: bool,
     #[serde(default = "default_acme_dir")]
+    #[allow(dead_code)]
     pub cache_dir: String,
 }
 
@@ -369,13 +359,23 @@ pub struct ManualCertConfig {
     pub key_path: String,
 }
 
-fn default_https_port() -> u16  { 8443 }
-fn default_http_port()  -> u16  { 8080 }
-fn default_true()       -> bool { true }
-fn default_acme_dir()   -> String { "tls/acme".into() }
+const fn default_https_port() -> u16 {
+    8443
+}
+
+const fn default_http_port() -> u16 {
+    8080
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+fn default_acme_dir() -> String {
+    "tls/acme".into()
+}
 
 // ─── Runtime config ───────────────────────────────────────────────────────────
-
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
 
 #[allow(clippy::struct_excessive_bools)]
@@ -391,11 +391,13 @@ pub struct Config {
     pub port: u16,
     pub max_image_size: usize, // bytes
     pub max_video_size: usize, // bytes
-    pub max_audio_size: usize, // bytes
-
+    pub max_audio_size: usize, // bytes,
     // ── External tool settings ────────────────────────────────────────────────
     /// When true, Tor is probed at startup and hints are printed.
     pub enable_tor_support: bool,
+    /// When true, the server binds to loopback only and is reachable exclusively
+    /// via the Tor hidden service. Requires `enable_tor_support = true`.
+    pub tor_only: bool,
     /// Seconds before a bootstrap attempt is considered failed and retried.
     pub tor_bootstrap_timeout_secs: u64,
     /// Maximum simultaneous inbound Tor proxy tasks.
@@ -404,7 +406,6 @@ pub struct Config {
     pub tor_service_nickname: String,
     /// When true, the server exits if ffmpeg is missing.
     pub require_ffmpeg: bool,
-
     // ── Internal / env-only settings ─────────────────────────────────────────
     pub bind_addr: String,
     pub database_path: String,
@@ -443,7 +444,6 @@ pub struct Config {
     pub blocking_threads: usize,
     /// `SQLite` `r2d2` connection pool size (default 8).
     pub db_pool_size: u32,
-
     // ── ChanNet / RustWave gateway (Step 1.2) ────────────────────────────────
     /// Base URL of the connected `RustWave` instance (must begin with http:// or https://).
     /// Validated at startup by `Config::validate()`.
@@ -458,7 +458,6 @@ pub struct Config {
     /// Pre-shared key required on X-ChanNet-Key header for /chan/refresh and
     /// /chan/poll. An empty string means those endpoints are disabled entirely.
     pub chan_net_api_key: String,
-
     // ── TLS / HTTPS ───────────────────────────────────────────────────────────
     /// TLS configuration. Defaults to disabled so existing installs are unaffected.
     pub tls: TlsConfig,
@@ -470,10 +469,8 @@ impl Config {
     pub fn from_env() -> Self {
         let s = load_settings_file();
         let data_dir = binary_dir().join("rustchan-data");
-
         let default_db = data_dir.join("chan.db").to_string_lossy().into_owned();
         let default_uploads = data_dir.join("boards").to_string_lossy().into_owned();
-
         let forum_name = env_str(
             "CHAN_FORUM_NAME",
             s.forum_name.as_deref().unwrap_or("RustChan"),
@@ -492,15 +489,12 @@ impl Config {
         let max_image_mb: u32 = env_parse("CHAN_MAX_IMAGE_MB", s.max_image_size_mb.unwrap_or(8));
         let max_video_mb: u32 = env_parse("CHAN_MAX_VIDEO_MB", s.max_video_size_mb.unwrap_or(50));
         let max_audio_mb: u32 = env_parse("CHAN_MAX_AUDIO_MB", s.max_audio_size_mb.unwrap_or(150));
-
         let bind_addr = env_str(
             "CHAN_BIND",
             &format!("{}:{}", env_str("CHAN_HOST", "0.0.0.0"), port),
         );
-
         let tor_only = env_bool("CHAN_TOR_ONLY", s.tor_only.unwrap_or(false));
         let enable_tor_support = env_bool("CHAN_TOR_SUPPORT", s.enable_tor_support.unwrap_or(true));
-
         // When tor_only=true, force the bind host to 127.0.0.1 regardless of
         // what bind_addr or CHAN_HOST are set to. The configured port is kept.
         let bind_addr = if tor_only && enable_tor_support {
@@ -514,9 +508,7 @@ impl Config {
         } else {
             bind_addr
         };
-
         let behind_proxy = env_bool("CHAN_BEHIND_PROXY", false);
-
         // Resolve cookie_secret from env > settings.toml.
         // generate_settings_file_if_missing() ensures settings.toml always has
         // a generated secret, so this fallback should only fire in abnormal cases.
@@ -536,7 +528,6 @@ impl Config {
             OsRng.fill_bytes(&mut b);
             hex::encode(b)
         };
-
         // ── ChanNet fields (Step 1.2) — computed after cookie_secret ──────────
         // Use as_deref() to borrow rather than move the Option<String> fields.
         let rustwave_url = env::var("CHAN_RUSTWAVE_URL").unwrap_or_else(|_| {
@@ -559,7 +550,6 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8 * 1024); // 8 KiB default — commands are raw JSON, never ZIPs
-
         Self {
             forum_name,
             initial_site_subtitle,
@@ -574,8 +564,8 @@ impl Config {
             max_audio_size: (max_audio_mb as usize)
                 .saturating_mul(1024)
                 .saturating_mul(1024),
-
             enable_tor_support,
+            tor_only: tor_only && enable_tor_support,
             tor_bootstrap_timeout_secs: env_parse(
                 "CHAN_TOR_BOOTSTRAP_TIMEOUT",
                 s.tor_bootstrap_timeout_secs.unwrap_or(120),
@@ -589,7 +579,6 @@ impl Config {
                 .or(s.tor_service_nickname)
                 .unwrap_or_else(|| "rustchan".to_string()),
             require_ffmpeg: env_bool("CHAN_REQUIRE_FFMPEG", s.require_ffmpeg.unwrap_or(false)),
-
             bind_addr,
             database_path: env_str("CHAN_DB", &default_db),
             upload_dir: env_str("CHAN_UPLOADS", &default_uploads),
@@ -652,9 +641,7 @@ impl Config {
                     configured
                 }
             },
-
             db_pool_size: env_parse("CHAN_DB_POOL_SIZE", s.db_pool_size.unwrap_or(8)),
-
             // ChanNet fields
             rustwave_url,
             chan_net_bind,
@@ -664,14 +651,13 @@ impl Config {
                 .ok()
                 .or(s.chan_net_api_key)
                 .unwrap_or_default(),
-
             // TLS — loaded from [tls] section in settings.toml; defaults to disabled.
             tls: s.tls.unwrap_or_default(),
         }
     }
 
     /// Validate critical configuration values and abort with a clear error
-    /// message if any are out of range.  Called once at startup so operators
+    /// message if any are out of range. Called once at startup so operators
     /// catch misconfiguration immediately rather than discovering it at runtime.
     ///
     /// # Errors
@@ -682,7 +668,6 @@ impl Config {
         const MAX_IMAGE_MIB: usize = 100;
         const MAX_VIDEO_MIB: usize = 2048;
         const MAX_AUDIO_MIB: usize = 512;
-
         // cookie_secret is hex-encoded: 64 hex chars = 32 bytes of entropy.
         if self.cookie_secret.len() < 64 {
             anyhow::bail!(
@@ -692,7 +677,6 @@ impl Config {
                 self.cookie_secret.len()
             );
         }
-
         if self.max_image_size < MIB || self.max_image_size > MAX_IMAGE_MIB * MIB {
             anyhow::bail!(
                 "CONFIG ERROR: max_image_size_mb must be between 1 and {} MiB (got {} MiB).",
@@ -714,18 +698,15 @@ impl Config {
                 self.max_audio_size / MIB
             );
         }
-
         if self.port == 0 {
             anyhow::bail!("CONFIG ERROR: port must not be 0.");
         }
-
         if self.tls.enabled && self.tls.port == 0 {
             anyhow::bail!(
                 "CONFIG ERROR: tls.port must not be 0. \
                  Add `port = 8443` under [tls] in settings.toml, or remove the explicit `port = 0`."
             );
         }
-
         // Verify the upload directory is writable.
         let upload_path = std::path::Path::new(&self.upload_dir);
         if upload_path.exists() {
@@ -738,7 +719,6 @@ impl Config {
             }
             let _ = std::fs::remove_file(probe);
         }
-
         // F-13: Pre-flight writability check for Arti data directories.
         // Without this, a permissions error on these dirs only surfaces ~30 s
         // into bootstrap as a cryptic internal error — invisible at startup.
@@ -753,7 +733,6 @@ impl Config {
                 std::fs::create_dir_all(&dir).map_err(|e| {
                     anyhow::anyhow!("CONFIG ERROR: cannot create Tor dir {}: {e}", dir.display())
                 })?;
-
                 // Arti requires arti_state/ to have permissions 0700 (no group
                 // or other read access) for its key material. create_dir_all
                 // respects the process umask, typically yielding 0755, which
@@ -772,7 +751,6 @@ impl Config {
                         )
                     })?;
                 }
-
                 let probe = dir.join(".write_probe");
                 std::fs::write(&probe, b"").map_err(|_| {
                     anyhow::anyhow!(
@@ -783,7 +761,6 @@ impl Config {
                 let _ = std::fs::remove_file(probe);
             }
         }
-
         // Step 1.2: Validate rustwave_url scheme so operators catch
         // misconfiguration at startup rather than at first federation call.
         if !self.rustwave_url.starts_with("http://") && !self.rustwave_url.starts_with("https://") {
@@ -792,7 +769,6 @@ impl Config {
                 self.rustwave_url
             ));
         }
-
         Ok(())
     }
 }
@@ -806,7 +782,7 @@ impl Config {
 ///
 /// If the key is not yet present in the file the function is a no-op for that
 /// key (it won't append new lines — the file is only updated if the key already
-/// exists).  On a fresh install `generate_settings_file_if_missing` always
+/// exists). On a fresh install `generate_settings_file_if_missing` always
 /// writes both keys, so this is only a concern for manually-crafted files.
 pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
     // Escape backslash and double-quote, then wrap in double quotes.
@@ -814,7 +790,6 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
         let inner = s.replace('\\', "\\\\").replace('"', "\\\"");
         format!("\"{inner}\"")
     }
-
     let path = settings_file_path();
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -828,11 +803,9 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
             return;
         }
     };
-
     // Replace the value portion of `key = "..."` lines while preserving
     // indentation, comments on the same line, and surrounding whitespace.
     // We use a simple line-by-line scan so that file comments are untouched.
-
     let trailing_newline = content.ends_with('\n');
     let updated: Vec<String> = content
         .lines()
@@ -847,12 +820,10 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
             line.to_string()
         })
         .collect();
-
     let mut out = updated.join("\n");
     if trailing_newline {
         out.push('\n');
     }
-
     // Atomic write: write to a temp file in the same directory, then rename
     // over the target. This prevents a partial write from corrupting settings.toml
     // if the process is killed mid-write (rename(2) is atomic on POSIX).
@@ -895,7 +866,6 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
 }
 
 // ─── Cookie secret rotation check ────────────────────────────────────────────
-
 /// Check whether the `cookie_secret` has changed since the last run by comparing
 /// a SHA-256 hash stored in the DB against the currently loaded secret.
 ///
@@ -905,13 +875,11 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
 pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
     use sha2::{Digest, Sha256};
     const KEY: &str = "cookie_secret_hash";
-
     let current_hash = {
         let mut h = Sha256::new();
         h.update(CONFIG.cookie_secret.as_bytes());
         hex::encode(h.finalize())
     };
-
     let stored = conn
         .query_row(
             "SELECT value FROM site_settings WHERE key = ?1",
@@ -919,7 +887,6 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
             |r| r.get::<_, String>(0),
         )
         .ok();
-
     if let Some(ref h) = stored {
         if h == &current_hash {
             return; // Secret unchanged — nothing to do.
@@ -932,7 +899,6 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
              DELETE FROM bans; DELETE FROM ban_appeals;"
         );
     }
-
     // First run (None) or rotated secret (Some) — store the current hash.
     let _ = conn.execute(
         "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
@@ -942,7 +908,6 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
 }
 
 // ─── Env helpers ──────────────────────────────────────────────────────────────
-
 fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }

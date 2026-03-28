@@ -18,7 +18,7 @@
 //
 // All HTTP server logic lives in server/server.rs.
 // CLI types and admin commands live in server/cli.rs.
-// Terminal console and startup banner live in server/console.rs.
+// Terminal console and startup banner live in server/console/.
 // ChanNet / RustWave gateway lives in chan_net/mod.rs (second listener, port 7070).
 
 use clap::Parser;
@@ -35,7 +35,7 @@ mod middleware;
 mod models;
 mod server;
 mod templates;
-mod tls;
+pub(crate) mod tls;
 mod utils;
 mod workers;
 
@@ -120,6 +120,18 @@ fn main() -> anyhow::Result<()> {
 
     logging::init_logging(&data_dir);
 
+    // Install a panic hook that restores the terminal before printing the
+    // panic message.  Without this, a panic while the TUI is active leaves
+    // the terminal in raw/alternate-screen mode and the operator sees nothing.
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // cleanup() is a no-op if the TUI was never started or already cleaned up.
+            crate::server::cleanup();
+            default_hook(info);
+        }));
+    }
+
     tracing::info!(
         target: "startup",
         version = env!("CARGO_PKG_VERSION"),
@@ -150,7 +162,11 @@ fn main() -> anyhow::Result<()> {
         match cli.command {
             // Default (no subcommand) or explicit `serve`: start the server.
             None | Some(server::cli::Command::Serve) => {
-                server::run_server(cli.port, cli.chan_net).await
+                let result = server::run_server(cli.port, cli.chan_net).await;
+                // Restore terminal unconditionally after the server exits
+                // (graceful shutdown, SIGTERM, etc.).  cleanup() is idempotent.
+                crate::server::cleanup();
+                result
             }
 
             Some(server::cli::Command::Admin { action }) => {

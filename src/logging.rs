@@ -87,6 +87,20 @@ pub fn is_tty() -> bool {
     IS_TTY.load(Ordering::Relaxed)
 }
 
+/// Set to `true` once the full-screen TUI alternate screen is active.
+/// Any code that would print banners or boxes to stdout (e.g. the Tor onion
+/// address box in detect.rs) must check this and skip its output — the TUI
+/// dashboard owns the screen and will display the information itself.
+static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_tui_active(v: bool) {
+    TUI_ACTIVE.store(v, Ordering::SeqCst);
+}
+
+pub fn is_tui_active() -> bool {
+    TUI_ACTIVE.load(Ordering::Relaxed)
+}
+
 // ─── Component name extraction ────────────────────────────────────────────────
 
 /// Extract the useful short name from a tracing target (module path).

@@ -118,7 +118,7 @@ impl From<r2d2::Error> for AppError {
 // so they produce a clear message without a full anyhow backtrace.
 impl From<std::io::Error> for AppError {
     fn from(e: std::io::Error) -> Self {
-        AppError::Tls(e.to_string())
+        Self::Tls(e.to_string())
     }
 }
 

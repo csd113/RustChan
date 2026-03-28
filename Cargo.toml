@@ -133,6 +133,9 @@ sha3          = "0.10"
 data-encoding = "2"
 
 # ── TLS ───────────────────────────────────────────────────────────────────────
+# rustls-pki-types: standalone PKI types crate split out of rustls 0.23+.
+# Required directly by src/tls/mod.rs (CertificateDer, PrivateKeyDer, PemObject).
+rustls-pki-types = "1"
 tokio-rustls   = "0.26"
 rustls         = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
@@ -147,6 +150,11 @@ x509-cert      = { version = "0.2",  optional = true }
 axum-server    = { version = "0.7", features = ["tls-rustls-no-provider"] }
 hyper          = { version = "1",   features = ["http1", "http2", "server"] }
 hyper-util     = { version = "0.1", features = ["tokio", "server"] }
+
+# ── Terminal UI ───────────────────────────────────────────────────────────────
+# crossterm: required by src/server/console/ (wizard.rs, input.rs, mod.rs).
+# Provides cross-platform terminal control (cursor, events, raw mode).
+crossterm = "0.28"
 
 [features]
 default         = ["tls-self-signed"]

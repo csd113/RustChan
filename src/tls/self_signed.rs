@@ -1,8 +1,8 @@
 //! `src/tls/self_signed.rs`
 use crate::error::AppError;
 use crate::error::Result;
-use std::{path::Path, sync::Arc, time::SystemTime};
 use rustls::ServerConfig;
+use std::{path::Path, sync::Arc, time::SystemTime};
 use tokio_rustls::TlsAcceptor;
 
 /// Number of days before expiry at which the cert is considered stale and

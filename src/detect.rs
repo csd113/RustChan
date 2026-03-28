@@ -528,7 +528,11 @@ async fn publish_onion_address(
 
     *onion_address.write().await = Some(onion_name.to_string());
 
-    if crate::logging::is_tty() {
+    // When the full-screen TUI is active the dashboard shows the onion address
+    // on its next render tick.  Printing the banner box here would corrupt the
+    // alternate screen, so we skip it.  In non-TUI mode (piped/systemd) or when
+    // the user is on a plain TTY without the TUI, print the full box as before.
+    if crate::logging::is_tty() && !crate::logging::is_tui_active() {
         crate::logging::console_print_raw(&format!(
             "\n\
             ╔══════════════════════════════════════════════════════╗\n\

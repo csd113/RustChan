@@ -1,5 +1,5 @@
 //! src/tls/acme.rs
-use crate::Result;
+use crate::error::Result;
 use crate::{config::AcmeConfig, error::AppError};
 use rustls::ServerConfig;
 use rustls_acme::AcmeAcceptor;
@@ -60,12 +60,12 @@ pub fn build_acme_acceptor(
     }
 
     if cfg.staging {
-        log::warn!(
+        tracing::warn!(
             "TLS/ACME: staging=true is set — certificates will NOT be trusted by browsers. \n Set staging = false in [tls.acme] once you have verified the ACME flow."
         );
     }
 
-    log::info!(
+    tracing::info!(
         "TLS/ACME: configuring for domains {:?} (staging={})",
         cfg.domains,
         cfg.staging
@@ -74,7 +74,7 @@ pub fn build_acme_acceptor(
     let cache = rustls_acme::caches::DirCache::new(cache_dir);
     let domains: Vec<&str> = cfg.domains.iter().map(String::as_str).collect();
 
-    // Modern builder API (rustls-acme ≥ 0.15+)
+    // Modern builder API (rustls-acme >= 0.15+)
     // Note: directory_lets_encrypt now takes a *production* bool.
     let mut acme_cfg = rustls_acme::AcmeConfig::new(domains)
         .cache(cache)
@@ -84,7 +84,7 @@ pub fn build_acme_acceptor(
     if let Some(email) = &cfg.email {
         acme_cfg = acme_cfg.contact_push(format!("mailto:{email}"));
     } else {
-        log::warn!(
+        tracing::warn!(
             "TLS/ACME: no contact email configured;
              Let's Encrypt recommends providing one for expiry notifications"
         );
@@ -135,21 +135,21 @@ where
     EA: Debug + Send + 'static,
 {
     use futures::StreamExt as _;
-    log::info!("TLS/ACME: event loop started ({env_label})");
+    tracing::info!("TLS/ACME: event loop started ({env_label})");
     loop {
         match state.next().await {
             Some(Ok(event)) => {
-                log::info!("TLS/ACME [{env_label}]: {event:?}");
+                tracing::info!("TLS/ACME [{env_label}]: {event:?}");
             }
             Some(Err(err)) => {
                 // Log at warn — ACME errors are often transient (DNS not
                 // propagated yet, rate limit briefly exceeded, etc.). The
                 // state machine will retry automatically.
-                log::warn!("TLS/ACME [{env_label}] error: {err:?}");
+                tracing::warn!("TLS/ACME [{env_label}] error: {err:?}");
             }
             None => {
                 // Stream closed — this is normal during a clean shutdown.
-                log::info!("TLS/ACME [{env_label}]: event loop terminated");
+                tracing::info!("TLS/ACME [{env_label}]: event loop terminated");
                 break;
             }
         }
