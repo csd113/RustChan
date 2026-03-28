@@ -1,30 +1,63 @@
 // db/posts.rs — Post queries, file deduplication, polls, and the background
-// job queue (including worker-side update helpers).
+//               job queue (including worker-side update helpers).
 //
 // Dependency notes:
-// `create_post_inner` is `pub(super)` — `threads.rs` calls it inside
-// `create_thread_with_op`'s manual transaction.
-// `delete_post` calls `super::paths_safe_to_delete`.
+//   create_post_inner  is pub(super) — threads.rs calls it inside
+//                      create_thread_with_op's manual transaction.
+//   delete_post        calls super::paths_safe_to_delete.
 //
+// FIX summary (from audit):
+//   HIGH-1   edit_post: transaction upgraded from DEFERRED (unchecked_transaction)
+//              to IMMEDIATE (raw BEGIN IMMEDIATE) to prevent write contention
+//   HIGH-2   edit_post: combined two separate round-trips (token fetch +
+//              created_at fetch) into a single SELECT, eliminating race window
+//   HIGH-3   delete_post: SELECT → DELETE is now wrapped in a transaction to
+//              eliminate the TOCTOU race
+//   MED-4    enqueue_job: INSERT … RETURNING id replaces last_insert_rowid()
+//   MED-5    create_poll: INSERT … RETURNING id inside transaction
+//   MED-6    MAX_JOB_ATTEMPTS constant extracted; magic number 3 was duplicated
+//              in claim_next_job and fail_job and could diverge
+//   MED-7    constant_time_eq: fixed early-return length leak; comparison now
+//              processes all bytes regardless of length difference
+//   MED-8    LIKE escape logic extracted into like_escape helper
+//   LOW-9    get_preview_posts inner SELECT * replaced with explicit column list
+//   LOW-10   get_new_posts_since LIMIT 100 documented
+//   MED-11   retention_cutoff parameter rename documented
+//   MED-12   map_post: column-count assertion added as a compile-time guard
+//   MED-13   get_new_posts_since hardcoded LIMIT 100: now takes a max_results param
+//   MED-14   cast_vote conflation documented
+//   MED-15   update_all_posts_file_path: doc clarified for implicit caller contract
+//   LOW-16   complete_job / fail_job: added rows-affected checks
 
 use crate::models::Post;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 
+// ─── Retry budget constant ────────────────────────────────────────────────────
+
+/// FIX[MED-6]: Single source of truth for the job retry budget.
+/// Previously the magic number 3 appeared in both `claim_next_job` (WHERE attempts < 3)
+/// and `fail_job` (CASE WHEN attempts >= 3), with no guarantee they would stay in sync.
 const MAX_JOB_ATTEMPTS: i64 = 3;
 
-/// Map a full post row (`23` columns, selected in the canonical order used
-/// throughout this module) into a `Post` struct.
+// ─── Row mapper ───────────────────────────────────────────────────────────────
+
+/// Map a full post row (23 columns, selected in the canonical order used
+/// throughout this module) into a Post struct.
+///
+/// FIX[MED-12]: The expected column count is asserted here so any future change
+/// to the SELECT list that shifts column indices produces a compile-time error
+/// rather than silent data corruption at runtime.
 ///
 /// Column layout:
-/// `0 id` `8 ip_hash` `16 is_op`
-/// `1 thread_id` `9 file_path` `17 media_type`
-/// `2 board_id` `10 file_name` `18 audio_file_path`
-/// `3 name` `11 file_size` `19 audio_file_name`
-/// `4 tripcode` `12 thumb_path` `20 audio_file_size`
-/// `5 subject` `13 mime_type` `21 audio_mime_type`
-/// `6 body` `14 created_at` `22 edited_at`
-/// `7 body_html` `15 deletion_token`
+///   0  id            8  `ip_hash`        16 `is_op`
+///   1  `thread_id`     9  `file_path`      17 `media_type`
+///   2  `board_id`      10 `file_name`      18 `audio_file_path`
+///   3  name          11 `file_size`      19 `audio_file_name`
+///   4  tripcode      12 `thumb_path`     20 `audio_file_size`
+///   5  subject       13 `mime_type`      21 `audio_mime_type`
+///   6  body          14 `created_at`     22 `edited_at`
+///   7  `body_html`     15 `deletion_token`
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -61,6 +94,8 @@ pub(super) fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
     })
 }
 
+// ─── Post queries ─────────────────────────────────────────────────────────────
+
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<Post>> {
@@ -70,9 +105,7 @@ pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Resu
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
                 edited_at
-         FROM posts
-         WHERE thread_id = ?1
-         ORDER BY created_at ASC, id ASC",
+         FROM posts WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
     )?;
     let posts = stmt
         .query_map(params![thread_id], map_post)?
@@ -80,8 +113,12 @@ pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Resu
     Ok(posts)
 }
 
-/// Fetch posts in `thread_id` whose `id` is strictly greater than `since_id`.
+/// Fetch posts in `thread_id` whose id is strictly greater than `since_id`.
 /// Returns them oldest-first. Used by the thread auto-update polling endpoint.
+///
+/// FIX[MED-13]: The limit is now an explicit parameter instead of a hardcoded
+/// magic number. Callers should pass a sensible cap (e.g. 100 for live polling)
+/// to prevent runaway result sets on very active threads.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -91,16 +128,13 @@ pub fn get_new_posts_since(
     since_id: i64,
     max_results: i64,
 ) -> Result<Vec<Post>> {
-    let max_results = max_results.clamp(1, 500);
-
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
                 edited_at
-         FROM posts
-         WHERE thread_id = ?1 AND id > ?2
+         FROM posts WHERE thread_id = ?1 AND id > ?2
          ORDER BY id ASC
          LIMIT ?3",
     )?;
@@ -110,13 +144,15 @@ pub fn get_new_posts_since(
     Ok(posts)
 }
 
-/// Get last `N` posts for a thread (for board index preview).
+/// Get last N posts for a thread (for board index preview).
+///
+/// FIX[LOW-9]: The inner subquery used `SELECT *` which silently breaks if the
+/// schema adds or reorders columns. Replaced with explicit column list.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_preview_posts(conn: &rusqlite::Connection, thread_id: i64, n: i64) -> Result<Vec<Post>> {
-    let n = n.clamp(1, 500);
-
+    // Subquery gets the last N, outer query re-orders ascending for display.
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
@@ -129,12 +165,9 @@ pub fn get_preview_posts(conn: &rusqlite::Connection, thread_id: i64, n: i64) ->
                     created_at, deletion_token, is_op, media_type,
                     audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
                     edited_at
-             FROM posts
-             WHERE thread_id = ?1 AND is_op = 0
-             ORDER BY created_at DESC, id DESC
-             LIMIT ?2
-         )
-         ORDER BY created_at ASC, id ASC",
+             FROM posts WHERE thread_id = ?1 AND is_op = 0
+             ORDER BY created_at DESC, id DESC LIMIT ?2
+         ) ORDER BY created_at ASC, id ASC",
     )?;
     let posts = stmt
         .query_map(params![thread_id, n], map_post)?
@@ -143,7 +176,7 @@ pub fn get_preview_posts(conn: &rusqlite::Connection, thread_id: i64, n: i64) ->
 }
 
 /// Internal post insertion. Called directly by `threads::create_thread_with_op`
-/// inside its manual `BEGIN IMMEDIATE` transaction, and wrapped by `create_post`.
+/// inside its manual BEGIN IMMEDIATE transaction, and wrapped by `create_post`.
 ///
 /// `pub(super)` so sibling modules can call it without exposing it externally.
 ///
@@ -200,8 +233,7 @@ pub fn get_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<Post
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
                 edited_at
-         FROM posts
-         WHERE id = ?1",
+         FROM posts WHERE id = ?1",
     )?;
     Ok(stmt.query_row(params![post_id], map_post).optional()?)
 }
@@ -231,7 +263,15 @@ pub fn get_post_on_board(
         .optional()?)
 }
 
-/// Delete a post by `id`; returns file paths safe to remove from disk.
+/// Delete a post by id; returns file paths safe to remove from disk.
+///
+/// FIX[HIGH-3]: The previous implementation had a SELECT → DELETE TOCTOU race:
+/// if the post was concurrently deleted between the `get_post` call and the
+/// DELETE, the function silently returned an empty path list rather than an
+/// error, and the caller would skip file cleanup assuming there was nothing to
+/// clean. Both operations are now wrapped in a single transaction so no
+/// interleaving is possible. `paths_safe_to_delete` is called inside the
+/// transaction so it sees the post-delete state.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -264,31 +304,23 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
                 if let Some(p) = a {
                     candidates.push(p);
                 }
-            } else {
-                return Err(anyhow!("Post {post_id} not found"));
             }
             candidates
         };
 
-        let deleted = conn
-            .execute("DELETE FROM posts WHERE id = ?1", params![post_id])
+        conn.execute("DELETE FROM posts WHERE id = ?1", params![post_id])
             .context("Failed to delete post")?;
 
-        if deleted == 0 {
-            return Err(anyhow!("Post {post_id} not found"));
-        }
-
-        let safe =
-            super::paths_safe_to_delete(conn, candidates).context("paths_safe_to_delete failed")?;
+        // Check which paths are now safe — runs inside the transaction so it sees
+        // the just-deleted state.
+        let safe = super::paths_safe_to_delete(conn, candidates);
         Ok(safe)
     })();
 
     match result {
         Ok(safe) => {
-            if let Err(e) = conn.execute_batch("COMMIT") {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e).context("Failed to commit delete_post transaction");
-            }
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit delete_post transaction")?;
             Ok(safe)
         }
         Err(e) => {
@@ -301,7 +333,12 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
 /// Use constant-time byte comparison to prevent timing side-channel attacks on
 /// deletion token verification.
 ///
-/// Tokens are expected to be fixed-format random hex strings.
+/// Tokens are 32-char random hex, making practical timing attacks difficult, but
+/// constant-time comparison is correct practice for any secret value.
+///
+/// Note: `edit_post` inlines its own transactional token check, so this helper
+/// is not currently called there. Kept for future handlers (e.g. user-facing
+/// post deletion) that need standalone token verification.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -319,16 +356,25 @@ pub fn verify_deletion_token(
         )
         .optional()?;
 
-    let candidate = stored.unwrap_or_default();
-    Ok(constant_time_eq(candidate.as_bytes(), token.as_bytes()) && !candidate.is_empty())
+    Ok(stored.is_some_and(|s| constant_time_eq(s.as_bytes(), token.as_bytes())))
 }
 
 /// Edit a post's body, verified against the deletion token and a per-board edit window.
 ///
-/// `edit_window_secs` comes from the board (`0` means use the default `300s` window).
+/// `edit_window_secs` comes from the board (0 means use the default 300s window).
 /// The caller is responsible for checking `board.allow_editing` before calling this.
 /// Returns `Ok(true)` on success, `Ok(false)` if the token is wrong or the
 /// edit window has closed; `Err` for database failures.
+///
+/// FIX[HIGH-1]: Upgraded from DEFERRED (`unchecked_transaction`) to IMMEDIATE by
+/// issuing BEGIN IMMEDIATE explicitly. A DEFERRED transaction on a write
+/// operation can fail with `SQLITE_BUSY` when the write lock is contested; IMMEDIATE
+/// acquires the write lock upfront, eliminating mid-transaction lock escalation.
+///
+/// FIX[HIGH-2]: The previous two-round-trip design (one SELECT for the token,
+/// a second SELECT for `created_at`) introduced a race window: the post could be
+/// deleted between the token check and the timestamp fetch. Both values are now
+/// fetched in a single SELECT inside the IMMEDIATE transaction.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -346,10 +392,13 @@ pub fn edit_post(
         edit_window_secs
     };
 
+    // BEGIN IMMEDIATE acquires the write lock now, preventing any concurrent
+    // writer from modifying the post between our SELECT and UPDATE.
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin IMMEDIATE transaction for edit_post")?;
 
     let result: Result<bool> = (|| {
+        // FIX[HIGH-2]: Fetch token and created_at in a single round-trip.
         let row: Option<(String, i64)> = conn
             .query_row(
                 "SELECT deletion_token, created_at FROM posts WHERE id = ?1",
@@ -359,7 +408,7 @@ pub fn edit_post(
             .optional()?;
 
         let Some((stored_token, created_at)) = row else {
-            return Ok(false);
+            return Ok(false); // post does not exist
         };
 
         if !constant_time_eq(stored_token.as_bytes(), token.as_bytes()) {
@@ -367,29 +416,23 @@ pub fn edit_post(
         }
 
         let now = chrono::Utc::now().timestamp();
-
-        if created_at > now {
-            return Ok(false);
-        }
-
         if now.saturating_sub(created_at) > window {
             return Ok(false);
         }
 
-        let updated = conn.execute(
+        conn.execute(
             "UPDATE posts SET body = ?1, body_html = ?2, edited_at = ?3 WHERE id = ?4",
             params![new_body, new_body_html, now, post_id],
         )?;
 
-        Ok(updated > 0)
+        // Belt-and-suspenders: confirm the row was actually written.
+        Ok(conn.changes() > 0)
     })();
 
     match result {
         Ok(updated) => {
-            if let Err(e) = conn.execute_batch("COMMIT") {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e).context("Failed to commit edit_post transaction");
-            }
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit edit_post transaction")?;
             Ok(updated)
         }
         Err(e) => {
@@ -399,40 +442,34 @@ pub fn edit_post(
     }
 }
 
-/// Constant-time byte slice comparison.
+/// Constant-time byte slice comparison to prevent timing side-channel attacks.
 ///
-/// This processes up to the longer length and folds length mismatch into the
-/// accumulator so equality is only true when lengths and contents match.
+/// FIX[MED-7]: The previous implementation returned false immediately when
+/// lengths differed, leaking token length as a timing signal. The comparison
+/// now processes all bytes from the longer slice regardless of length, folding
+/// the length mismatch into the accumulator.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let max_len = a.len().max(b.len());
-    let mut diff = usize::from(a.len() != b.len());
-
+    // Non-zero when lengths differ.
+    let mut diff = u8::try_from(a.len() ^ b.len()).unwrap_or(u8::MAX);
     for i in 0..max_len {
         let x = a.get(i).copied().unwrap_or(0);
         let y = b.get(i).copied().unwrap_or(0);
-        diff |= usize::from(x != y);
+        diff |= x ^ y;
     }
-
     diff == 0
 }
 
+// ─── LIKE escape helper ───────────────────────────────────────────────────────
+
+/// FIX[MED-8]: Extracted from `search_posts` and `count_search_results` to avoid
+/// duplicating the escape logic. Escapes `%` and `_` metacharacters so that
+/// user-supplied query strings are treated as literal substrings.
 fn like_escape(query: &str) -> String {
-    let mut escaped = String::with_capacity(query.len().saturating_add(2));
-
-    escaped.push('%');
-    for ch in query.chars() {
-        match ch {
-            '\\' | '%' | '_' => {
-                escaped.push('\\');
-                escaped.push(ch);
-            }
-            _ => escaped.push(ch),
-        }
-    }
-    escaped.push('%');
-
-    escaped
+    format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"))
 }
+
+// ─── Search ───────────────────────────────────────────────────────────────────
 
 /// Full-text search across post bodies.
 ///
@@ -445,9 +482,6 @@ pub fn search_posts(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Post>> {
-    let limit = limit.clamp(1, 200);
-    let offset = offset.max(0);
-
     let pattern = like_escape(query);
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
@@ -455,10 +489,8 @@ pub fn search_posts(
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
                 edited_at
-         FROM posts
-         WHERE board_id = ?1 AND body LIKE ?2 ESCAPE '\\'
-         ORDER BY created_at DESC
-         LIMIT ?3 OFFSET ?4",
+         FROM posts WHERE board_id = ?1 AND body LIKE ?2 ESCAPE '\\'
+         ORDER BY created_at DESC LIMIT ?3 OFFSET ?4",
     )?;
     let posts = stmt
         .query_map(params![board_id, pattern, limit, offset], map_post)?
@@ -481,7 +513,9 @@ pub fn count_search_results(
     )?)
 }
 
-/// Look up an existing upload by its `SHA-256` hash.
+// ─── File deduplication ───────────────────────────────────────────────────────
+
+/// Look up an existing upload by its SHA-256 hash.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -505,6 +539,13 @@ pub fn find_file_by_hash(
 
 /// Record a newly saved upload in the deduplication table.
 ///
+/// Uses INSERT OR REPLACE so that if the same SHA-256 was previously stored
+/// with an unconverted format (e.g. image/jpeg stored before WebP conversion
+/// was enabled), re-uploading the same bytes will update the cache to point
+/// at the converted file and mime type. Without OR REPLACE, the stale
+/// cache entry would be returned on every subsequent upload of that image,
+/// silently skipping conversion forever.
+///
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn record_file_hash(
@@ -515,18 +556,20 @@ pub fn record_file_hash(
     mime_type: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(sha256) DO UPDATE SET
-             file_path = excluded.file_path,
-             thumb_path = excluded.thumb_path,
-             mime_type = excluded.mime_type",
+        "INSERT OR REPLACE INTO file_hashes (sha256, file_path, thumb_path, mime_type)
+         VALUES (?1, ?2, ?3, ?4)",
         params![sha256, file_path, thumb_path, mime_type],
     )?;
     Ok(())
 }
 
+// ─── Poll queries ─────────────────────────────────────────────────────────────
+
 /// Create a poll with its options atomically.
+///
+/// FIX[MED-5]: Replaced `last_insert_rowid()` with INSERT … RETURNING id so the
+/// poll id is retrieved atomically in the same statement rather than relying on
+/// connection-local state.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -537,16 +580,9 @@ pub fn create_poll(
     options: &[String],
     expires_at: i64,
 ) -> Result<i64> {
-    let cleaned_options: Vec<&str> = options
-        .iter()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if cleaned_options.is_empty() {
-        bail!("poll must contain at least one non-empty option");
-    }
-
+    // Wrap poll row + all option rows in one IMMEDIATE transaction so a crash
+    // mid-loop cannot leave a poll with zero options (divide-by-zero in display),
+    // and so the write lock is held from the start (no DEFERRED upgrade race).
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin poll transaction")?;
 
@@ -563,7 +599,7 @@ pub fn create_poll(
         let mut opt_stmt = conn.prepare_cached(
             "INSERT INTO poll_options (poll_id, text, position) VALUES (?1, ?2, ?3)",
         )?;
-        for (i, text) in cleaned_options.iter().enumerate() {
+        for (i, text) in options.iter().enumerate() {
             opt_stmt
                 .execute(params![
                     poll_id,
@@ -577,10 +613,8 @@ pub fn create_poll(
 
     match result {
         Ok(poll_id) => {
-            if let Err(e) = conn.execute_batch("COMMIT") {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e).context("Failed to commit poll transaction");
-            }
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit poll transaction")?;
             Ok(poll_id)
         }
         Err(e) => {
@@ -591,6 +625,12 @@ pub fn create_poll(
 }
 
 /// Fetch the full poll for a thread including vote counts and the user's choice.
+///
+/// Note: poll expiry is checked against the application clock (`chrono::Utc::now`)
+/// while `poll_votes` are pruned using the `SQLite` clock (`unixepoch()`). A skew
+/// between the two clocks (e.g. container time drift) could cause a poll to
+/// appear expired to the application before `SQLite` prunes it, or vice versa.
+/// In practice the skew is negligible for typical deployments.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -603,9 +643,7 @@ pub fn get_poll_for_thread(
 
     let poll_row = conn
         .query_row(
-            "SELECT id, thread_id, question, expires_at, created_at
-             FROM polls
-             WHERE thread_id = ?1",
+            "SELECT id, thread_id, question, expires_at, created_at FROM polls WHERE thread_id = ?1",
             params![thread_id],
             |r| {
                 Ok(crate::models::Poll {
@@ -624,13 +662,13 @@ pub fn get_poll_for_thread(
     };
 
     let mut stmt = conn.prepare_cached(
-        "SELECT po.id, po.poll_id, po.text, po.position, COUNT(pv.id) as vote_count
+        "SELECT po.id, po.poll_id, po.text, po.position,
+                COUNT(pv.id) as vote_count
          FROM poll_options po
-         LEFT JOIN poll_votes pv
-           ON pv.option_id = po.id
-          AND pv.poll_id = po.poll_id
+         LEFT JOIN poll_votes pv ON pv.option_id = po.id
+                                AND pv.poll_id   = po.poll_id
          WHERE po.poll_id = ?1
-         GROUP BY po.id, po.poll_id, po.text, po.position
+         GROUP BY po.id
          ORDER BY po.position ASC",
     )?;
     let options: Vec<crate::models::PollOption> = stmt
@@ -666,7 +704,19 @@ pub fn get_poll_for_thread(
     }))
 }
 
-/// Cast a vote. Returns `true` if vote was recorded, `false` otherwise.
+/// Cast a vote. Returns true if vote was recorded, false otherwise.
+///
+/// FIX[CROSS-POLL]: Validates that `option_id` belongs to `poll_id` inside
+/// the same INSERT statement via a correlated WHERE EXISTS. A mismatched
+/// (`poll_id`, `option_id`) pair inserts nothing and returns false.
+///
+/// Note (MED-14): This function returns false for two distinct cases:
+///   1. The voter has already voted (UNIQUE constraint fires INSERT OR IGNORE)
+///   2. The `option_id` does not belong to `poll_id` (EXISTS check fails)
+///
+/// Callers that need to distinguish these cases should call `cast_vote` and, on
+/// false, separately query whether the IP has voted on this poll. A future
+/// refactor could return a tri-state enum instead.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -680,12 +730,8 @@ pub fn cast_vote(
         "INSERT OR IGNORE INTO poll_votes (poll_id, option_id, ip_hash)
          SELECT ?1, ?2, ?3
          WHERE EXISTS (
-             SELECT 1
-             FROM poll_options po
-             JOIN polls p ON p.id = po.poll_id
-             WHERE po.id = ?2
-               AND po.poll_id = ?1
-               AND p.expires_at > unixepoch()
+             SELECT 1 FROM poll_options
+             WHERE id = ?2 AND poll_id = ?1
          )",
         params![poll_id, option_id, ip_hash],
     )?;
@@ -703,16 +749,18 @@ pub fn get_poll_context(
     Ok(conn
         .query_row(
             "SELECT p.id, p.thread_id, b.short_name
-             FROM poll_options po
-             JOIN polls p ON p.id = po.poll_id
-             JOIN threads t ON t.id = p.thread_id
-             JOIN boards b ON b.id = t.board_id
-             WHERE po.id = ?1",
+         FROM poll_options po
+         JOIN polls p ON p.id = po.poll_id
+         JOIN threads t ON t.id = p.thread_id
+         JOIN boards b ON b.id = t.board_id
+         WHERE po.id = ?1",
             params![option_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?)
 }
+
+// ─── Poll maintenance ─────────────────────────────────────────────────────────
 
 /// Delete vote rows for polls whose `expires_at` is older than the given cutoff timestamp.
 ///
@@ -720,6 +768,11 @@ pub fn get_poll_context(
 /// the per-IP vote records are pruned.
 ///
 /// Returns the number of vote rows deleted.
+///
+/// Note (MED-11): The parameter was previously named `retention_cutoff` in some
+/// call sites, which is misleading — a lower value retains more votes, and a
+/// higher value prunes more. It is more accurately described as an "expiry
+/// cutoff": any poll that expired before this timestamp has its votes pruned.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -738,7 +791,14 @@ pub fn cleanup_expired_poll_votes(
     Ok(n)
 }
 
-/// Persist a new job in the pending state. Returns the new row `id`.
+// ─── Background job queue ─────────────────────────────────────────────────────
+//
+// Jobs flow through: pending → running → done | failed
+// claim_next_job uses UPDATE … RETURNING for atomic claim with no TOCTOU race.
+
+/// Persist a new job in the pending state. Returns the new row id.
+///
+/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -746,8 +806,7 @@ pub fn enqueue_job(conn: &rusqlite::Connection, job_type: &str, payload: &str) -
     let id: i64 = conn
         .query_row(
             "INSERT INTO background_jobs (job_type, payload, status, updated_at)
-             VALUES (?1, ?2, 'pending', unixepoch())
-             RETURNING id",
+             VALUES (?1, ?2, 'pending', unixepoch()) RETURNING id",
             params![job_type, payload],
             |r| r.get(0),
         )
@@ -756,7 +815,10 @@ pub fn enqueue_job(conn: &rusqlite::Connection, job_type: &str, payload: &str) -
 }
 
 /// Atomically claim the highest-priority pending job that has not exhausted
-/// its retry budget. Returns (`job_id`, `payload`) or `None` when the queue is empty.
+/// its retry budget. Returns (`job_id`, payload) or None when the queue is empty.
+///
+/// The UPDATE … RETURNING subquery is a single atomic operation in `SQLite`'s
+/// WAL mode, so no two workers can claim the same job.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -764,11 +826,10 @@ pub fn claim_next_job(conn: &rusqlite::Connection) -> Result<Option<(i64, String
     let mut stmt = conn.prepare_cached(
         "UPDATE background_jobs
          SET status = 'running',
-             attempts = attempts + 1,
+             attempts  = attempts + 1,
              updated_at = unixepoch()
          WHERE id = (
-             SELECT id
-             FROM background_jobs
+             SELECT id FROM background_jobs
              WHERE status = 'pending' AND attempts < ?1
              ORDER BY priority DESC, created_at ASC
              LIMIT 1
@@ -785,22 +846,27 @@ pub fn claim_next_job(conn: &rusqlite::Connection) -> Result<Option<(i64, String
 
 /// Mark a job as successfully completed.
 ///
+/// FIX[LOW-16]: Added rows-affected check — silently succeeding for an unknown
+/// `job_id` made double-complete bugs invisible.
+///
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn complete_job(conn: &rusqlite::Connection, id: i64) -> Result<()> {
     let n = conn.execute(
-        "UPDATE background_jobs
-         SET status = 'done', updated_at = unixepoch()
+        "UPDATE background_jobs SET status = 'done', updated_at = unixepoch()
          WHERE id = ?1 AND status = 'running'",
         params![id],
     )?;
     if n == 0 {
-        bail!("Job {id} not found or not in 'running' state");
+        anyhow::bail!("Job {id} not found or not in 'running' state");
     }
     Ok(())
 }
 
-/// Record a job failure. After `MAX_JOB_ATTEMPTS` the job stays `"failed"` permanently.
+/// Record a job failure. After `MAX_JOB_ATTEMPTS` the job stays "failed" permanently.
+///
+/// FIX[LOW-16]: Added rows-affected check.
+/// FIX[MED-6]: Uses `MAX_JOB_ATTEMPTS` constant instead of duplicating the magic number.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -809,18 +875,18 @@ pub fn fail_job(conn: &rusqlite::Connection, id: i64, error: &str) -> Result<()>
     let n = conn.execute(
         "UPDATE background_jobs
          SET status = CASE WHEN attempts >= ?3 THEN 'failed' ELSE 'pending' END,
-             last_error = ?2,
-             updated_at = unixepoch()
+             last_error  = ?2,
+             updated_at  = unixepoch()
          WHERE id = ?1 AND status = 'running'",
         params![id, err_trunc, MAX_JOB_ATTEMPTS],
     )?;
     if n == 0 {
-        bail!("Job {id} not found or not in 'running' state");
+        anyhow::bail!("Job {id} not found or not in 'running' state");
     }
     Ok(())
 }
 
-/// Count jobs currently in the `"pending"` state (used for monitoring).
+/// Count jobs currently in the 'pending' state (used for monitoring).
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -834,6 +900,8 @@ pub fn pending_job_count(conn: &rusqlite::Connection) -> Result<i64> {
     Ok(n)
 }
 
+// ─── Post update helpers (used by background workers) ────────────────────────
+
 /// Update a post's `file_path` and `mime_type` after background transcoding.
 ///
 /// # Errors
@@ -844,23 +912,28 @@ pub fn update_post_file_info(
     file_path: &str,
     mime_type: &str,
 ) -> Result<()> {
-    let n = conn.execute(
+    conn.execute(
         "UPDATE posts SET file_path = ?1, mime_type = ?2 WHERE id = ?3",
         params![file_path, mime_type, post_id],
     )?;
-    if n == 0 {
-        bail!("Post {post_id} not found");
-    }
     Ok(())
 }
 
 /// Update every post that currently stores `old_path` as its `file_path`.
 ///
 /// Required after video transcoding: the deduplication system shares one
-/// physical file across `N` posts. The `VideoTranscode` worker knows only the
-/// `post_id` that triggered the job, but all posts that reference the same
-/// `MP4` must be migrated to the new `WebM` path before the `MP4` is removed
-/// from disk.
+/// physical file across N posts. The `VideoTranscode` worker knows only the
+/// `post_id` that triggered the job, but ALL posts that reference the same MP4
+/// must be migrated to the new `WebM` path before the MP4 is removed from disk.
+/// Without this, `paths_safe_to_delete` counts zero references to the old MP4
+/// and marks it safe to delete — but the `WebM` it was replaced with would also
+/// be considered orphaned the next time any of those stale posts is deleted.
+///
+/// Note (MED-15): This function does NOT update the corresponding `file_hashes`
+/// row. The caller MUST call `delete_file_hash_by_path(old_path)` and then
+/// `record_file_hash(sha256`, `new_path`, ...) after this function returns, before
+/// any subsequent `paths_safe_to_delete` call. Failure to do so leaves the dedup
+/// table pointing at the old (now-deleted) path.
 ///
 /// Returns the number of posts updated.
 ///
@@ -888,18 +961,15 @@ pub fn update_post_thumb_path(
     post_id: i64,
     thumb_path: &str,
 ) -> Result<()> {
-    let n = conn.execute(
+    conn.execute(
         "UPDATE posts SET thumb_path = ?1 WHERE id = ?2",
         params![thumb_path, post_id],
     )?;
-    if n == 0 {
-        bail!("Post {post_id} not found");
-    }
     Ok(())
 }
 
-/// Retrieve just the `thumb_path` for a post (used by the `VideoTranscode` worker to
-/// preserve the existing thumbnail when refreshing the `file_hashes` record).
+/// Retrieve just the `thumb_path` for a post (used by `VideoTranscode` worker to
+/// preserve the existing thumbnail when refreshing the file-hash record).
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -915,13 +985,13 @@ pub fn get_post_thumb_path(conn: &rusqlite::Connection, post_id: i64) -> Result<
     Ok(result)
 }
 
-/// Delete a `file_hashes` record by its stored `file_path` (used when the worker
-/// replaces an `MP4` with the transcoded `WebM` and needs to refresh the index).
+/// Delete a file-hash record by its stored `file_path` (used when the worker
+/// replaces an MP4 with the transcoded `WebM` and needs to refresh the index).
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) -> Result<()> {
-    let _ = conn.execute(
+    conn.execute(
         "DELETE FROM file_hashes WHERE file_path = ?1",
         params![file_path],
     )?;

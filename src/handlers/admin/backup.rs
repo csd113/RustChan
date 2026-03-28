@@ -30,53 +30,6 @@ use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::ReaderStream;
 use tracing::warn;
 
-// FIX[H-9]: RAII guard that clears backup_in_progress on drop, whether the
-// handler returns normally or panics. Defined at file scope so it can be used
-// in multiple handler functions.
-struct BackupGuard<'a>(&'a std::sync::atomic::AtomicBool);
-impl Drop for BackupGuard<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, std::sync::atomic::Ordering::Release);
-    }
-}
-
-// FIX[RF-2 / C-4]: safe_join — resolve `rel` against `base` and verify the
-// result does not escape `base`. Replaces the four independent traversal guards
-// that each ran on the raw ZIP entry name *before* prefix stripping, allowing
-// paths like "uploads/foo/../../../etc/evil" to bypass the check.
-//
-// Returns None if any component of `rel` would leave `base` (e.g. "..", absolute
-// segments, Windows drive prefixes). This is the authoritative traversal guard;
-// the existing outer check (name.contains("..")) can remain for defence-in-depth.
-fn safe_join(base: &std::path::Path, rel: &str) -> Option<PathBuf> {
-    let rel_path = std::path::Path::new(rel);
-    for component in rel_path.components() {
-        match component {
-            std::path::Component::ParentDir
-            | std::path::Component::RootDir
-            | std::path::Component::Prefix(_) => return None,
-            _ => {}
-        }
-    }
-    let joined = base.join(rel_path);
-    // Belt-and-suspenders: canonicalise to resolve any symlinks or edge cases.
-    let canonical_base = base.canonicalize().ok()?;
-    let canonical_joined = joined.canonicalize().ok().or_else(|| {
-        let parent = joined.parent()?;
-        let file_name = joined.file_name()?;
-        parent.canonicalize().ok().map(|p| p.join(file_name))
-    })?;
-    if canonical_joined.starts_with(&canonical_base) {
-        Some(joined)
-    } else {
-        None
-    }
-}
-
-// FIX[H-7]: Maximum backup file size accepted during restore.
-// 4 GiB is generous for any real RustChan instance.
-const RESTORE_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-
 // ─── URL query-string encoder ─────────────────────────────────────────────────
 //
 // FIX[#30]: `encode_q` was previously defined as an inner function inside two
@@ -135,21 +88,6 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
     let upload_dir = CONFIG.upload_dir.clone();
     let progress = state.backup_progress.clone();
 
-    // FIX[H-9]: Reject concurrent backup/restore requests.
-    // compare_exchange(false→true): only one handler may run at a time.
-    // BackupGuard clears the flag on drop (success or panic).
-    if state
-        .backup_progress
-        .backup_in_progress
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        return Err(AppError::Forbidden(
-            "A backup or restore is already in progress. Please wait for it to complete.".into(),
-        ));
-    }
-    let _backup_guard = BackupGuard(&state.backup_progress.backup_in_progress);
-
     let (tmp_path, filename, file_size) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<(PathBuf, String, u64)> {
@@ -158,26 +96,13 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
 
-            // FIX[C-5]: Write the temp DB next to the data directory, not into
-            // $TMPDIR. std::env::temp_dir() respects $TMPDIR/$TMP/$TEMP, so an
-            // operator or deployment script setting TMPDIR=/attacker's/dir'
-            // injects an apostrophe that breaks the SQL literal escaping.
-            let temp_dir = std::path::Path::new(&crate::config::CONFIG.database_path)
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
-                .to_path_buf();
+            let temp_dir = std::env::temp_dir();
             let tmp_id = uuid::Uuid::new_v4().simple().to_string();
             let temp_db = temp_dir.join(format!("chan_backup_{tmp_id}.db"));
             let temp_db_str = temp_db
                 .to_str()
-                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp DB path is non-UTF-8")))?;
-
-            // Guard: reject paths containing characters that are unsafe in SQLite literals.
-            if temp_db_str.contains('\'') || temp_db_str.contains('\0') {
-                return Err(AppError::Internal(anyhow::anyhow!(
-                    "Temp DB path contains characters unsafe for SQL interpolation: {temp_db_str}"
-                )));
-            }
+                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path is non-UTF-8")))?
+                .replace('\'', "''");
 
             conn.execute_batch(&format!("VACUUM INTO '{temp_db_str}'"))
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO failed: {e}")))?;
@@ -192,19 +117,14 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                 .files_total
                 .store(file_count.saturating_add(1), Ordering::Relaxed);
 
-            // FIX[H-8]: Write zip to known backups dir instead of $TMPDIR.
-            // The startup sweep in server.rs can then clean up stale files after a crash.
-            let backups_dir_dl = full_backup_dir();
-            std::fs::create_dir_all(&backups_dir_dl)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create backups dir: {e}")))?;
-            let dl_tmp_name = format!("backup_{}.zip", uuid::Uuid::new_v4().simple());
-            let zip_tmp_path = backups_dir_dl.join(&dl_tmp_name);
-            let zip_tmp_file = std::fs::File::create(&zip_tmp_path)
+            // MEM-FIX: write zip directly to a NamedTempFile instead of Vec<u8>.
+            let zip_tmp = tempfile::NamedTempFile::new()
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp zip: {e}")))?;
             {
-                let out_file = std::io::BufWriter::new(zip_tmp_file.try_clone().map_err(|e| {
-                    AppError::Internal(anyhow::anyhow!("Clone temp file handle: {e}"))
-                })?);
+                let out_file =
+                    std::io::BufWriter::new(zip_tmp.as_file().try_clone().map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Clone temp file handle: {e}"))
+                    })?);
                 let mut zip = zip::ZipWriter::new(out_file);
                 let opts = zip::write::SimpleFileOptions::default()
                     .compression_method(zip::CompressionMethod::Deflated);
@@ -243,10 +163,14 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {e}")))?;
             }
 
-            let file_size = std::fs::metadata(&zip_tmp_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            let final_path = zip_tmp_path;
+            let file_size = zip_tmp.as_file().metadata().map(|m| m.len()).unwrap_or(0);
+
+            // Persist the temp file (prevents auto-delete on drop).
+            // We delete it manually in the background after serving.
+            let (_, tmp_path_obj) = zip_tmp.into_parts();
+            let final_path = tmp_path_obj
+                .keep()
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Persist temp zip: {e}")))?;
 
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
             let fname = format!("rustchan-backup-{ts}.zip");
@@ -428,21 +352,11 @@ pub async fn admin_restore(
                 let async_file = tokio::fs::File::from_std(std_clone);
                 let mut writer = tokio::io::BufWriter::new(async_file);
                 let mut field = field;
-                // FIX[H-7]: Enforce per-field size cap to prevent a crafted
-                // multipart request from writing RESTORE_MAX_BYTES to disk.
-                let mut written: u64 = 0;
                 while let Some(chunk) = field
                     .chunk()
                     .await
                     .map_err(|e| AppError::BadRequest(e.to_string()))?
                 {
-                    written = written.saturating_add(chunk.len() as u64);
-                    if written > RESTORE_MAX_BYTES {
-                        return Err(AppError::UploadTooLarge(format!(
-                            "Backup file exceeds {} GiB restore limit.",
-                            RESTORE_MAX_BYTES / 1_073_741_824
-                        )));
-                    }
                     writer
                         .write_all(&chunk)
                         .await
@@ -481,21 +395,6 @@ pub async fn admin_restore(
     }
 
     let upload_dir = CONFIG.upload_dir.clone();
-
-    // FIX[H-9]: Reject concurrent backup/restore requests.
-    // compare_exchange(false→true): only one handler may run at a time.
-    // BackupGuard clears the flag on drop (success or panic).
-    if state
-        .backup_progress
-        .backup_in_progress
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        return Err(AppError::Forbidden(
-            "A backup or restore is already in progress. Please wait for it to complete.".into(),
-        ));
-    }
-    let _backup_guard = BackupGuard(&state.backup_progress.backup_in_progress);
 
     let fresh_sid: String = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -581,14 +480,7 @@ pub async fn admin_restore(
 
                 } else if let Some(rel) = name.strip_prefix("uploads/") {
                     if rel.is_empty() { continue; }
-                    // FIX[C-4]: Use safe_join instead of PathBuf::join(rel).
-                    // The old guard ran on the raw name before stripping, so a path
-                    // like "uploads/foo/../../../etc/evil" passed the ".." check but
-                    // resolved outside the upload directory after stripping.
-                    let Some(target) = safe_join(std::path::Path::new(&upload_dir), rel) else {
-                        warn!("Restore: skipping path-traversal attempt in ZIP entry '{name}'");
-                        continue;
-                    };
+                    let target = PathBuf::from(&upload_dir).join(rel);
 
                     if entry.is_dir() {
                         std::fs::create_dir_all(&target)
@@ -906,7 +798,7 @@ pub fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
 /// `BufWriter`, so peak RAM usage is O(compression-buffer) not O(zip-size).
 /// A `.tmp` suffix is used during writing; the file is renamed on success so
 /// the backup list never shows a partial/corrupt zip.
-#[allow(clippy::too_many_lines, clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -920,21 +812,6 @@ pub async fn create_full_backup(
     let upload_dir = CONFIG.upload_dir.clone();
     let progress = state.backup_progress.clone();
 
-    // FIX[H-9]: Reject concurrent backup/restore requests.
-    // compare_exchange(false→true): only one handler may run at a time.
-    // BackupGuard clears the flag on drop (success or panic).
-    if state
-        .backup_progress
-        .backup_in_progress
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        return Err(AppError::Forbidden(
-            "A backup or restore is already in progress. Please wait for it to complete.".into(),
-        ));
-    }
-    let _backup_guard = BackupGuard(&state.backup_progress.backup_in_progress);
-
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
@@ -943,22 +820,14 @@ pub async fn create_full_backup(
 
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
 
-            // FIX[C-5]: Use data dir adjacent temp path, not $TMPDIR (see admin_backup).
-            let temp_dir = std::path::Path::new(&crate::config::CONFIG.database_path)
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
-                .to_path_buf();
+            // VACUUM INTO for a consistent snapshot.
+            let temp_dir = std::env::temp_dir();
             let tmp_id = uuid::Uuid::new_v4().simple().to_string();
             let temp_db = temp_dir.join(format!("chan_backup_{tmp_id}.db"));
             let temp_db_str = temp_db
                 .to_str()
-                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path non-UTF-8")))?;
-
-            if temp_db_str.contains('\'') || temp_db_str.contains('\0') {
-                return Err(AppError::Internal(anyhow::anyhow!(
-                    "Temp DB path contains characters unsafe for SQL interpolation: {temp_db_str}"
-                )));
-            }
+                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path non-UTF-8")))?
+                .replace('\'', "''");
 
             conn.execute_batch(&format!("VACUUM INTO '{temp_db_str}'"))
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {e}")))?;
@@ -995,7 +864,7 @@ pub async fn create_full_backup(
                     .files_total
                     .store(file_count.saturating_add(1), Ordering::Relaxed);
 
-                // ── Database snapshot (streamed, not read into RAM) ────────────────
+                // ── Database snapshot (streamed, not read into RAM) ────────
                 zip.start_file("chan.db", opts)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip DB: {e}")))?;
                 let mut db_src = std::fs::File::open(&temp_db)
@@ -1007,7 +876,7 @@ pub async fn create_full_backup(
                 progress.files_done.fetch_add(1, Ordering::Relaxed);
                 progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
 
-                // ── Upload files (streamed via io::copy) ───────────────────────────
+                // ── Upload files (streamed via io::copy) ───────────────────
                 if uploads_base.exists() {
                     add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
                 }
@@ -1592,22 +1461,6 @@ pub async fn restore_saved_full_backup(
     }
 
     let path = full_backup_dir().join(&safe_filename);
-
-    // FIX[H-9]: Reject concurrent backup/restore requests.
-    // compare_exchange(false→true): only one handler may run at a time.
-    // BackupGuard clears the flag on drop (success or panic).
-    if state
-        .backup_progress
-        .backup_in_progress
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        return Err(AppError::Forbidden(
-            "A backup or restore is already in progress. Please wait for it to complete.".into(),
-        ));
-    }
-    let _backup_guard = BackupGuard(&state.backup_progress.backup_in_progress);
-
     // FIX[A3]: Do NOT read the file in the async context before auth is verified.
     // std::fs::read() blocks the Tokio runtime and an unauthenticated caller could
     // force the server to read gigabytes off disk before being rejected.  The read
@@ -1685,13 +1538,7 @@ pub async fn restore_saved_full_backup(
                     if rel.is_empty() {
                         continue;
                     }
-                    // FIX[C-4]: safe_join prevents traversal after prefix strip.
-                    let Some(target) = safe_join(std::path::Path::new(&upload_dir), rel) else {
-                        warn!(
-                            "Restore-saved: skipping path-traversal attempt in ZIP entry '{name}'"
-                        );
-                        continue;
-                    };
+                    let target = PathBuf::from(&upload_dir).join(rel);
                     if entry.is_dir() {
                         std::fs::create_dir_all(&target)
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {e}")))?;
@@ -1795,22 +1642,6 @@ pub async fn restore_saved_board_backup(
     }
 
     let path = board_backup_dir().join(&safe_filename);
-
-    // FIX[H-9]: Reject concurrent backup/restore requests.
-    // compare_exchange(false→true): only one handler may run at a time.
-    // BackupGuard clears the flag on drop (success or panic).
-    if state
-        .backup_progress
-        .backup_in_progress
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        return Err(AppError::Forbidden(
-            "A backup or restore is already in progress. Please wait for it to complete.".into(),
-        ));
-    }
-    let _backup_guard = BackupGuard(&state.backup_progress.backup_in_progress);
-
     // FIX[A4]: Defer the blocking file read until after auth is verified inside
     // spawn_blocking — mirrors the fix applied to restore_saved_full_backup (A3).
     let upload_dir = CONFIG.upload_dir.clone();
@@ -2066,11 +1897,7 @@ pub async fn restore_saved_board_backup(
                     if rel.is_empty() {
                         continue;
                     }
-                    // FIX[C-4]: safe_join prevents traversal after prefix strip.
-                    let Some(target) = safe_join(std::path::Path::new(&upload_dir), rel) else {
-                        warn!("Board restore-saved: skipping path-traversal attempt in ZIP entry '{name}'");
-                        continue;
-                    };
+                    let target = PathBuf::from(&upload_dir).join(rel);
                     if entry.is_dir() {
                         std::fs::create_dir_all(&target)
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {e}")))?;
@@ -2420,17 +2247,11 @@ pub async fn board_backup(
             progress.reset(crate::middleware::backup_phase::COMPRESS);
             progress.files_total.store(file_count.saturating_add(1), Ordering::Relaxed);
 
-            // FIX[H-8]: Write zip to known board-backups dir instead of $TMPDIR.
-            let bbu_dir = board_backup_dir();
-            std::fs::create_dir_all(&bbu_dir)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create board-backups dir: {e}")))?;
-            let bbu_tmp_name = format!("board_backup_{}.zip", uuid::Uuid::new_v4().simple());
-            let bbu_zip_path = bbu_dir.join(&bbu_tmp_name);
-            let bbu_zip_file = std::fs::File::create(&bbu_zip_path)
+            let zip_tmp = tempfile::NamedTempFile::new()
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp zip: {e}")))?;
             {
                 let out_file = std::io::BufWriter::new(
-                    bbu_zip_file.try_clone().map_err(|e| {
+                    zip_tmp.as_file().try_clone().map_err(|e| {
                         AppError::Internal(anyhow::anyhow!("Clone temp file handle: {e}"))
                     })?,
                 );
@@ -2461,8 +2282,12 @@ pub async fn board_backup(
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {e}")))?;
             }
 
-            let file_size = std::fs::metadata(&bbu_zip_path).map(|m| m.len()).unwrap_or(0);
-            let final_path = bbu_zip_path;
+            let file_size = zip_tmp.as_file().metadata().map(|m| m.len()).unwrap_or(0);
+
+            let (_, tmp_path_obj) = zip_tmp.into_parts();
+            let final_path = tmp_path_obj.keep().map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("Persist temp zip: {e}"))
+            })?;
 
             let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
             let fname = format!("rustchan-board-{board_short}-{ts}.zip");
@@ -2550,20 +2375,11 @@ pub async fn board_restore(
                     let async_file = tokio::fs::File::from_std(std_clone);
                     let mut writer = tokio::io::BufWriter::new(async_file);
                     let mut field = field;
-                    // FIX[H-7]: Enforce per-field size cap (board_restore).
-                    let mut written: u64 = 0;
                     while let Some(chunk) = field
                         .chunk()
                         .await
                         .map_err(|e| AppError::BadRequest(e.to_string()))?
                     {
-                        written = written.saturating_add(chunk.len() as u64);
-                        if written > RESTORE_MAX_BYTES {
-                            return Err(AppError::UploadTooLarge(format!(
-                                "Backup file exceeds {} GiB restore limit.",
-                                RESTORE_MAX_BYTES / 1_073_741_824
-                            )));
-                        }
                         writer
                             .write_all(&chunk)
                             .await
@@ -3000,11 +2816,7 @@ pub async fn board_restore(
                             if rel.is_empty() {
                                 continue;
                             }
-                            // FIX[C-4]: safe_join prevents traversal after prefix strip.
-                            let Some(target) = safe_join(std::path::Path::new(&upload_dir), rel) else {
-                                warn!("Board restore: skipping path-traversal attempt in ZIP entry '{name}'");
-                                continue;
-                            };
+                            let target = PathBuf::from(&upload_dir).join(rel);
                             if entry.is_dir() {
                                 std::fs::create_dir_all(&target).map_err(|e| {
                                     AppError::Internal(anyhow::anyhow!("mkdir: {e}"))

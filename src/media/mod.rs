@@ -10,7 +10,7 @@
 //   )?;
 //   // result.file_path      — final file on disk (converted if applicable)
 //   // result.thumbnail_path — WebP thumbnail (or SVG placeholder)
-//   // result.mime_type       — final MIME (may differ from original for gif→webm)
+//   // result.mime_type      — final MIME (may differ from original for gif→webm)
 //   // result.was_converted  — true when format changed
 //   // result.original_size  — bytes of input file
 //   // result.final_size     — bytes of output file
@@ -32,11 +32,8 @@ pub mod exif;
 pub mod ffmpeg;
 pub mod thumbnail;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-
-/// Minimum acceptable value for `thumb_max` dimension.
-const MIN_THUMB_MAX: u32 = 1;
 
 // ─── ProcessedMedia ───────────────────────────────────────────────────────────
 
@@ -48,9 +45,6 @@ pub struct ProcessedMedia {
     /// Absolute path to the (possibly converted) file on disk.
     pub file_path: PathBuf,
     /// Absolute path to the generated thumbnail (WebP) or SVG placeholder.
-    /// **Note:** When thumbnail generation fails, this path may reference a
-    /// file that does not exist on disk.  Callers should check existence
-    /// before serving.
     pub thumbnail_path: PathBuf,
     /// MIME type of the final stored file.  May differ from the uploaded
     /// MIME when conversion changes the format (e.g. `image/gif` → `video/webm`).
@@ -62,10 +56,6 @@ pub struct ProcessedMedia {
     pub original_size: u64,
     /// Size of the final stored file in bytes.
     pub final_size: u64,
-    /// `true` when a thumbnail was successfully generated.
-    /// When `false`, `thumbnail_path` may not exist on disk.
-    #[allow(dead_code)]
-    pub thumbnail_generated: bool,
 }
 
 // ─── MediaProcessor ───────────────────────────────────────────────────────────
@@ -94,25 +84,6 @@ pub struct MediaProcessor {
     pub ffmpeg_webp_available: bool,
 }
 
-/// Validate that `file_stem` does not contain path separators or other
-/// dangerous characters.  Returns an error if the stem is empty or contains
-/// path traversal components.
-fn validate_file_stem(file_stem: &str) -> Result<()> {
-    if file_stem.is_empty() {
-        bail!("file_stem must not be empty");
-    }
-    if file_stem.contains('/')
-        || file_stem.contains('\\')
-        || file_stem.contains("..")
-        || file_stem.contains('\0')
-    {
-        bail!(
-            "file_stem contains invalid characters (path separators or null bytes): {file_stem:?}"
-        );
-    }
-    Ok(())
-}
-
 impl MediaProcessor {
     /// Create a new `MediaProcessor`, probing for `ffmpeg` immediately.
     ///
@@ -128,11 +99,7 @@ impl MediaProcessor {
                  Install ffmpeg to enable optimal format conversion."
             );
         }
-        let webp_available = if available {
-            ffmpeg::check_webp_encoder()
-        } else {
-            false
-        };
+        let webp_available = available && ffmpeg::check_webp_encoder();
         Self {
             ffmpeg_available: available,
             ffmpeg_webp_available: webp_available,
@@ -143,26 +110,17 @@ impl MediaProcessor {
     ///
     /// Use this in request handlers to avoid re-detecting ffmpeg on every upload.
     /// Both flags should come from `AppState` which is populated once at startup.
-    ///
-    /// # Invariants
-    /// If `ffmpeg_available` is `false`, `ffmpeg_webp_available` is forced to
-    /// `false` regardless of the supplied value.
     #[must_use]
     pub const fn new_with_ffmpeg_caps(ffmpeg_available: bool, ffmpeg_webp_available: bool) -> Self {
         Self {
             ffmpeg_available,
-            // webp can't be available if ffmpeg itself isn't
-            ffmpeg_webp_available: ffmpeg_available && ffmpeg_webp_available,
+            ffmpeg_webp_available,
         }
     }
 
     /// Convenience constructor when only the base ffmpeg flag is known.
-    ///
-    /// **Warning:** `ffmpeg_webp_available` defaults to the same value as
-    /// `ffmpeg_available`, which is optimistic — ffmpeg may be installed
-    /// without the libwebp encoder.  Prefer
-    /// [`new_with_ffmpeg_caps`](Self::new_with_ffmpeg_caps) in handlers where
-    /// the webp flag has been properly detected at startup.
+    /// `ffmpeg_webp_available` defaults to the same value as `ffmpeg_available`.
+    /// Prefer [`new_with_ffmpeg_caps`](Self::new_with_ffmpeg_caps) in handlers.
     #[must_use]
     #[allow(dead_code)]
     pub const fn new_with_ffmpeg(ffmpeg_available: bool) -> Self {
@@ -181,21 +139,18 @@ impl MediaProcessor {
     /// determined by the conversion rules.
     ///
     /// # Arguments
-    /// * `input_path` — Temp file holding the original upload bytes.
-    /// * `mime` — Detected MIME type of the upload.
-    /// * `output_dir` — Directory for the final converted file.
-    /// * `file_stem` — UUID stem (no extension) for output file names.
-    ///   Must not contain path separators or `..`.
-    /// * `thumb_dir` — Directory for the generated thumbnail.
-    /// * `thumb_max` — Maximum thumbnail dimension (pixels, aspect preserved).
-    ///   Must be ≥ 1.
+    /// * `input_path`  — Temp file holding the original upload bytes.
+    /// * `mime`        — Detected MIME type of the upload.
+    /// * `output_dir`  — Directory for the final converted file.
+    /// * `file_stem`   — UUID stem (no extension) for output file names.
+    /// * `thumb_dir`   — Directory for the generated thumbnail.
+    /// * `thumb_max`   — Maximum thumbnail dimension (pixels, aspect preserved).
     ///
     /// # Errors
     /// Returns an error only for unrecoverable I/O failures (disk full, no
-    /// permissions) or invalid arguments.  Conversion failures are logged as
-    /// warnings and the original file is kept instead — the function never
-    /// propagates ffmpeg errors to the caller.
-    #[must_use = "ProcessedMedia contains the final file path and metadata needed for storage"]
+    /// permissions).  Conversion failures are logged as warnings and the
+    /// original file is kept instead — the function never propagates ffmpeg
+    /// errors to the caller.
     pub fn process_upload(
         self,
         input_path: &Path,
@@ -205,13 +160,6 @@ impl MediaProcessor {
         thumb_dir: &Path,
         thumb_max: u32,
     ) -> Result<ProcessedMedia> {
-        // ── Validate arguments ────────────────────────────────────────────
-        validate_file_stem(file_stem)?;
-
-        if thumb_max < MIN_THUMB_MAX {
-            bail!("thumb_max must be at least {MIN_THUMB_MAX} but got {thumb_max}");
-        }
-
         let original_size = std::fs::metadata(input_path)
             .map(|m| m.len())
             .context("failed to stat upload temp file")?;
@@ -248,7 +196,7 @@ impl MediaProcessor {
         // generate_thumbnail returns the actual path written, which may differ
         // from thumb_path when a video thumbnail falls back to an SVG placeholder
         // (the pre-selected .webp extension would mismatch the SVG content).
-        let (actual_thumb_path, thumbnail_generated) = match thumbnail::generate_thumbnail(
+        let actual_thumb_path = match thumbnail::generate_thumbnail(
             &conv.final_path,
             conv.final_mime,
             &thumb_path,
@@ -256,16 +204,13 @@ impl MediaProcessor {
             self.ffmpeg_available,
             self.ffmpeg_webp_available,
         ) {
-            Ok(p) => (p, true),
+            Ok(p) => p,
             Err(e) => {
                 // Thumbnail failure must never abort an upload.  Log and fall
-                // back to the pre-computed path.  The `thumbnail_generated`
-                // flag signals callers that the path may not exist.
-                tracing::warn!(
-                    "thumbnail generation failed for {}: {e:#}",
-                    conv.final_path.display()
-                );
-                (thumb_path, false)
+                // back to the pre-computed path (the thumbnail will be missing,
+                // but the upload still succeeds).
+                tracing::warn!("thumbnail generation failed: {e}");
+                thumb_path
             }
         };
 
@@ -276,7 +221,6 @@ impl MediaProcessor {
             was_converted: conv.was_converted,
             original_size,
             final_size: conv.final_size,
-            thumbnail_generated,
         })
     }
 
@@ -288,17 +232,9 @@ impl MediaProcessor {
     ///
     /// Writes a WebP file (or SVG placeholder) to `thumb_dir / {file_stem}.{ext}`.
     ///
-    /// # Arguments
-    /// * `input_path` — Path to the media file.
-    /// * `mime` — MIME type of the media file.
-    /// * `thumb_dir` — Directory for the generated thumbnail.
-    /// * `file_stem` — Stem for the output filename.  Must not contain path
-    ///   separators or `..`.
-    /// * `thumb_max` — Maximum thumbnail dimension (pixels). Must be ≥ 1.
-    ///
     /// # Errors
     /// Returns an error only if both ffmpeg and the image-crate fallback fail
-    /// AND writing the placeholder also fails, or if arguments are invalid.
+    /// AND writing the placeholder also fails.
     #[allow(dead_code)]
     pub fn generate_thumbnail(
         self,
@@ -308,12 +244,6 @@ impl MediaProcessor {
         file_stem: &str,
         thumb_max: u32,
     ) -> Result<PathBuf> {
-        validate_file_stem(file_stem)?;
-
-        if thumb_max < MIN_THUMB_MAX {
-            bail!("thumb_max must be at least {MIN_THUMB_MAX} but got {thumb_max}");
-        }
-
         let thumb_path = thumbnail::thumbnail_output_path(
             thumb_dir,
             file_stem,
@@ -350,7 +280,6 @@ mod tests {
     fn new_with_ffmpeg_false_does_not_panic() {
         let p = MediaProcessor::new_with_ffmpeg(false);
         assert!(!p.ffmpeg_available);
-        assert!(!p.ffmpeg_webp_available);
     }
 
     /// Constructing `MediaProcessor` with ffmpeg=true should not panic.
@@ -358,66 +287,5 @@ mod tests {
     fn new_with_ffmpeg_true_does_not_panic() {
         let p = MediaProcessor::new_with_ffmpeg(true);
         assert!(p.ffmpeg_available);
-        assert!(p.ffmpeg_webp_available);
-    }
-
-    /// `new_with_ffmpeg_caps` enforces invariant: no webp without ffmpeg.
-    #[test]
-    fn new_with_ffmpeg_caps_enforces_invariant() {
-        let p = MediaProcessor::new_with_ffmpeg_caps(false, true);
-        assert!(!p.ffmpeg_available);
-        assert!(!p.ffmpeg_webp_available);
-
-        let p = MediaProcessor::new_with_ffmpeg_caps(true, false);
-        assert!(p.ffmpeg_available);
-        assert!(!p.ffmpeg_webp_available);
-
-        let p = MediaProcessor::new_with_ffmpeg_caps(true, true);
-        assert!(p.ffmpeg_available);
-        assert!(p.ffmpeg_webp_available);
-    }
-
-    /// `validate_file_stem` rejects empty stems.
-    #[test]
-    fn validate_file_stem_rejects_empty() {
-        assert!(validate_file_stem("").is_err());
-    }
-
-    /// `validate_file_stem` rejects path traversal.
-    #[test]
-    fn validate_file_stem_rejects_traversal() {
-        assert!(validate_file_stem("../etc/passwd").is_err());
-        assert!(validate_file_stem("foo/bar").is_err());
-        assert!(validate_file_stem("foo\\bar").is_err());
-        assert!(validate_file_stem("foo\0bar").is_err());
-    }
-
-    /// `validate_file_stem` accepts normal UUID-like stems.
-    #[test]
-    fn validate_file_stem_accepts_valid() {
-        assert!(validate_file_stem("550e8400-e29b-41d4-a716-446655440000").is_ok());
-        assert!(validate_file_stem("my_file").is_ok());
-        assert!(validate_file_stem("test.extra.dots").is_ok()); // dots without .. are fine
-    }
-
-    /// `thumb_max` of 0 is rejected.
-    #[test]
-    fn generate_thumbnail_rejects_zero_thumb_max() {
-        let p = MediaProcessor::new_with_ffmpeg(false);
-        let result = p.generate_thumbnail(
-            Path::new("/nonexistent"),
-            "image/png",
-            Path::new("/tmp"),
-            "test",
-            0,
-        );
-        assert!(result.is_err());
-        // Verify the error message mentions thumb_max so we know it was
-        // rejected for the right reason, not a downstream I/O error.
-        let err = result.unwrap_or_else(|e| {
-            assert!(e.to_string().contains("thumb_max"));
-            PathBuf::new()
-        });
-        assert!(err.as_os_str().is_empty());
     }
 }

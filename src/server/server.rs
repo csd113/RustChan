@@ -36,41 +36,6 @@ static STYLE_CSS: &str = include_str!("../../static/style.css");
 static MAIN_JS: &str = include_str!("../../static/main.js");
 static THEME_INIT_JS: &str = include_str!("../../static/theme-init.js");
 
-// FIX[MED-4]: Compute a stable ETag for each static asset at startup so that
-// browsers can send If-None-Match on subsequent requests and receive a 304 Not
-// Modified instead of the full asset body.  Without an ETag the 24-hour
-// Cache-Control max-age causes browsers to serve stale CSS/JS for up to a day
-// after a redeploy.  The ETag is the first 16 hex digits of the SHA-256 of the
-// file content — stable across restarts for the same binary, changes whenever
-// the file changes.
-use std::sync::OnceLock;
-
-static STYLE_CSS_ETAG: OnceLock<String> = OnceLock::new();
-static MAIN_JS_ETAG: OnceLock<String> = OnceLock::new();
-static THEME_INIT_JS_ETAG: OnceLock<String> = OnceLock::new();
-
-fn compute_etag(content: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(content.as_bytes());
-    let digest = h.finalize();
-    let full_hex = hex::encode(digest.as_slice());
-    // SHA-256 always produces 64 hex chars; take the first 16 safely.
-    format!("\"{}\"", full_hex.get(..16).unwrap_or(&full_hex))
-}
-
-fn style_css_etag() -> &'static str {
-    STYLE_CSS_ETAG.get_or_init(|| compute_etag(STYLE_CSS))
-}
-
-fn main_js_etag() -> &'static str {
-    MAIN_JS_ETAG.get_or_init(|| compute_etag(MAIN_JS))
-}
-
-fn theme_init_js_etag() -> &'static str {
-    THEME_INIT_JS_ETAG.get_or_init(|| compute_etag(THEME_INIT_JS))
-}
-
 // ─── Global terminal state ─────────────────────────────────────────────────────
 /// Total HTTP requests handled since startup.
 pub static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -88,14 +53,6 @@ pub static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 pub static ACTIVE_UPLOADS: AtomicU64 = AtomicU64::new(0);
 /// Monotonic tick used to animate the upload spinner.
 pub static SPINNER_TICK: AtomicU64 = AtomicU64::new(0);
-/// Atomic count of entries currently in `ACTIVE_IPS`.
-///
-/// FIX[MED-2]: The previous TOCTOU race — checking `ACTIVE_IPS.len() < 10_000`
-/// then inserting in two separate operations — allowed concurrent threads to
-/// all pass the check simultaneously and push the map well beyond the cap.
-/// This counter is decremented by the IP-prune task and used as the
-/// single authoritative gate for new insertions via `fetch_update`.
-static ACTIVE_IPS_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Recently active client IPs (last ~5 min); maps SHA-256(IP) → last-seen Instant.
 /// CRIT-5: Keys are hashed so raw IP addresses are never retained in process
 /// memory (or coredumps). The count is used for the "users online" display.
@@ -115,17 +72,10 @@ struct ScopedDecrement<'a>(&'a AtomicU64);
 
 impl Drop for ScopedDecrement<'_> {
     fn drop(&mut self) {
-        // FIX[LOW-2]: Use AcqRel/Acquire instead of Relaxed so that the
-        // decrement is visible to any thread that subsequently reads the
-        // counter with at least Acquire ordering.  Relaxed provides no
-        // ordering guarantee — if IN_FLIGHT or ACTIVE_UPLOADS are ever used
-        // for load-shedding decisions ("reject if in-flight > N"), a Relaxed
-        // decrement could remain invisible to the decision thread long enough
-        // to cause incorrect rejections.  The cost of the stronger ordering
-        // on the hot Drop path is negligible.
+        // Saturating decrement: fetch_update retries on spurious failure.
         let _ = self
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
             });
     }
@@ -134,6 +84,7 @@ impl Drop for ScopedDecrement<'_> {
 // ─── Server mode ─────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::Result<()> {
     // rustls 0.23 requires an explicit process-wide crypto provider.
     // install_default() is idempotent — a second call (e.g. in tests) returns
@@ -169,64 +120,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&CONFIG.upload_dir)?;
-
-    // FIX[H-8]: Sweep stale backup temp files left by a previous crashed process.
-    // Any .zip file in the backups directories older than 2 hours is considered stale.
-    // The normal 600-second deferred cleanup in admin_backup cannot run after a crash,
-    // so this sweep handles the crash-recovery case at startup.
-    {
-        let cutoff = std::time::SystemTime::now()
-            .checked_sub(std::time::Duration::from_secs(7200))
-            .unwrap_or(std::time::UNIX_EPOCH);
-        for backup_dir in [
-            crate::handlers::admin::full_backup_dir(),
-            crate::handlers::admin::board_backup_dir(),
-        ] {
-            if let Err(e) = std::fs::create_dir_all(&backup_dir) {
-                tracing::warn!(path = %backup_dir.display(), error = %e, "Could not create backup dir at startup");
-                continue;
-            }
-            if let Ok(entries) = std::fs::read_dir(&backup_dir) {
-                for entry in entries.flatten() {
-                    // Only sweep files whose names start with our temp prefix
-                    // AND have the .zip extension we write.
-                    let fname = entry.file_name();
-                    let fname_str = fname.to_string_lossy();
-                    // FIX[LOW-1]: The previous predicate matched any file whose
-                    // name started with "backup_" or "board_backup_", regardless
-                    // of extension.  A stray "backup_notes.txt" in the backup
-                    // directory would be silently deleted after 2 hours.  Also
-                    // require the .zip extension to match the stated intent.
-                    let is_tmp = (fname_str.starts_with("backup_")
-                        || fname_str.starts_with("board_backup_"))
-                        && fname_str.ends_with(".zip");
-                    if !is_tmp {
-                        continue;
-                    }
-                    if let Ok(meta) = entry.metadata() {
-                        if meta.is_file() {
-                            if let Ok(modified) = meta.modified() {
-                                if modified < cutoff {
-                                    if let Err(e) = std::fs::remove_file(entry.path()) {
-                                        tracing::warn!(
-                                            path = %entry.path().display(),
-                                            error = %e,
-                                            "Failed to remove stale backup temp file"
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            path = %entry.path().display(),
-                                            "Removed stale backup temp file from previous crash"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     super::console::print_banner();
 
@@ -413,12 +306,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         tokio::spawn(async move {
             // Stagger the first run by half the interval so it doesn't fire
             // immediately at startup alongside the session purge.
-            // Computed before select! — attributes are not valid inside macro
-            // invocations. interval_secs is config-validated so no overflow.
-            #[allow(clippy::arithmetic_side_effects)]
-            let stagger = Duration::from_secs(interval_secs / 2 + 1);
             tokio::select! {
-                () = tokio::time::sleep(stagger) => {}
+                () = tokio::time::sleep(Duration::from_secs(interval_secs / 2 + 1)) => {}
                 () = cancel_clone.cancelled() => { return; }
             }
             let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -458,16 +347,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                         let cutoff = Instant::now()
                             .checked_sub(Duration::from_secs(300))
                             .unwrap_or_else(Instant::now);
-                        // FIX[MED-2]: Count removed entries and decrement
-                        // ACTIVE_IPS_COUNT atomically so the insertion gate
-                        // stays accurate after each prune sweep.
-                        let before = ACTIVE_IPS.len() as u64;
                         ACTIVE_IPS.retain(|_, last_seen| *last_seen > cutoff);
-                        let after = ACTIVE_IPS.len() as u64;
-                        let removed = before.saturating_sub(after);
-                        if removed > 0 {
-                            ACTIVE_IPS_COUNT.fetch_sub(removed, Ordering::AcqRel);
-                        }
                     }
                     () = cancel_clone.cancelled() => {
                         tracing::debug!("Active IP prune task shutting down");
@@ -504,15 +384,13 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // and threads without requiring manual admin intervention.
     if CONFIG.auto_vacuum_interval_hours > 0 {
         let bg = pool.clone();
-        let interval_secs = CONFIG.auto_vacuum_interval_hours.saturating_mul(3600);
+        let interval_secs = CONFIG.auto_vacuum_interval_hours * 3600;
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
             // Stagger the first run by half the interval to avoid hammering the
             // DB immediately at startup alongside WAL checkpoint and session purge.
-            #[allow(clippy::arithmetic_side_effects)]
-            let stagger = Duration::from_secs(interval_secs / 2 + 7);
             tokio::select! {
-                () = tokio::time::sleep(stagger) => {}
+                () = tokio::time::sleep(Duration::from_secs(interval_secs / 2 + 7)) => {}
                 () = cancel_clone.cancelled() => { return; }
             }
             let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -556,7 +434,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // poll_votes table from growing indefinitely.
     if CONFIG.poll_cleanup_interval_hours > 0 {
         let bg = pool.clone();
-        let interval_secs = CONFIG.poll_cleanup_interval_hours.saturating_mul(3600);
+        let interval_secs = CONFIG.poll_cleanup_interval_hours * 3600;
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
             tokio::select! {
@@ -568,18 +446,10 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 tokio::select! {
                     _ = iv.tick() => {
                         let bg2 = bg.clone();
-                        // FIX[MED-1]: Replace cast_signed() with i64::try_from so
-                        // that a misconfigured (very large) poll_cleanup_interval_hours
-                        // cannot overflow into a negative retention value.  A negative
-                        // retention_cutoff_secs would put `cutoff` in the future and
-                        // cause cleanup_expired_poll_votes to delete *all* vote rows.
-                        // On overflow we saturate to i64::MAX, effectively disabling
-                        // cleanup for that tick rather than corrupting data.
-                        let retention_cutoff_secs =
-                            i64::try_from(interval_secs).unwrap_or(i64::MAX);
+                        let retention_cutoff_secs = interval_secs.cast_signed();
                         tokio::task::spawn_blocking(move || {
                             if let Ok(conn) = bg2.get() {
-                                let cutoff = chrono::Utc::now().timestamp().saturating_sub(retention_cutoff_secs);
+                                let cutoff = chrono::Utc::now().timestamp() - retention_cutoff_secs;
                                 match crate::db::cleanup_expired_poll_votes(&conn, cutoff) {
                                     Ok(n) if n > 0 => {
                                         tracing::info!(target: "polls", removed = n, "Expired poll vote rows purged");
@@ -836,30 +706,24 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
-    // CRIT-2 FIX: Wire the same shutdown signal so in-flight federation
-    // requests are drained before the runtime is dropped. Without this the
-    // ChanNet task was detached and forcibly killed on SIGTERM, potentially
-    // corrupting a streaming snapshot response mid-transfer.
-    //
-    // FIX[MED-5]: Capture the JoinHandle so panics and listener errors in the
-    // ChanNet task are not silently swallowed.  The handle is joined alongside
-    // the worker handles in the shutdown sequence below.
-    let chan_handle = if chan_net {
+    if chan_net {
         let chan_addr = crate::config::CONFIG.chan_net_bind.clone();
         let chan_app = crate::chan_net::chan_router(state.clone());
         let chan_listener = tokio::net::TcpListener::bind(&chan_addr).await?;
         tracing::info!(target: "chan_net", addr = %chan_addr, "ChanNet API listening");
-        Some(tokio::spawn(async move {
+        // CRIT-2 FIX: Wire the same shutdown signal so in-flight federation
+        // requests are drained before the runtime is dropped. Without this the
+        // ChanNet task was detached and forcibly killed on SIGTERM, potentially
+        // corrupting a streaming snapshot response mid-transfer.
+        tokio::spawn(async move {
             if let Err(e) = axum::serve(chan_listener, chan_app.into_make_service())
                 .with_graceful_shutdown(shutdown_signal())
                 .await
             {
                 tracing::error!(target: "chan_net", error = %e, "ChanNet server error");
             }
-        }))
-    } else {
-        None
-    };
+        });
+    }
 
     // ── TLS / HTTPS listener ──────────────────────────────────────────────────
     // Spawned as a background task so the HTTP listener below can start
@@ -971,15 +835,9 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // given up to (ffmpeg_timeout + 10)s to finish its in-flight job.
     tracing::info!(target: "server", "Signalling background workers to shut down…");
     worker_cancel.cancel();
-    let shutdown_timeout = Duration::from_secs(CONFIG.ffmpeg_timeout_secs.saturating_add(10));
+    let shutdown_timeout = Duration::from_secs(CONFIG.ffmpeg_timeout_secs + 10);
     for handle in worker_handles {
         let _ = tokio::time::timeout(shutdown_timeout, handle).await;
-    }
-
-    // FIX[MED-5]: Await the ChanNet task so any panic is surfaced and the task
-    // is cleanly joined before the runtime shuts down.
-    if let Some(h) = chan_handle {
-        let _ = tokio::time::timeout(Duration::from_secs(15), h).await;
     }
 
     // CRIT-3 FIX: worker_cancel.cancel() above already signals the Tor task's
@@ -1218,27 +1076,9 @@ fn build_router(state: AppState) -> Router {
         .route("/{board}", get(crate::handlers::board::board_index))
         .route(
             "/{board}",
-            // FIX[HIGH-1]: Upload routes get a generous 10-minute wall-clock
-            // timeout so slow connections can finish large file transfers.
-            // The global 30-second timeout on all other routes still applies
-            // for slow-loris protection on non-upload endpoints.
-            //
-            // Both the body-limit and the timeout are combined in one
-            // ServiceBuilder so rustc can resolve the NewError type parameter
-            // unambiguously (two separate .layer() calls on MethodRouter
-            // produce E0283).
-            post(crate::handlers::board::create_thread).layer(
-                tower::ServiceBuilder::new()
-                    .layer(axum::error_handling::HandleErrorLayer::new(
-                        |_err: tower::BoxError| async {
-                            (axum::http::StatusCode::REQUEST_TIMEOUT, "Upload timed out")
-                        },
-                    ))
-                    .layer(tower::timeout::TimeoutLayer::new(Duration::from_secs(600)))
-                    .layer(DefaultBodyLimit::max(
-                        CONFIG.max_video_size.max(CONFIG.max_audio_size),
-                    )),
-            ),
+            post(crate::handlers::board::create_thread).layer(DefaultBodyLimit::max(
+                CONFIG.max_video_size.max(CONFIG.max_audio_size),
+            )),
         )
         .route("/{board}/catalog", get(crate::handlers::board::catalog))
         .route(
@@ -1252,19 +1092,9 @@ fn build_router(state: AppState) -> Router {
         )
         .route(
             "/{board}/thread/{id}",
-            // FIX[HIGH-1]: Same generous upload timeout as create_thread.
-            post(crate::handlers::thread::post_reply).layer(
-                tower::ServiceBuilder::new()
-                    .layer(axum::error_handling::HandleErrorLayer::new(
-                        |_err: tower::BoxError| async {
-                            (axum::http::StatusCode::REQUEST_TIMEOUT, "Upload timed out")
-                        },
-                    ))
-                    .layer(tower::timeout::TimeoutLayer::new(Duration::from_secs(600)))
-                    .layer(DefaultBodyLimit::max(
-                        CONFIG.max_video_size.max(CONFIG.max_audio_size),
-                    )),
-            ),
+            post(crate::handlers::thread::post_reply).layer(DefaultBodyLimit::max(
+                CONFIG.max_video_size.max(CONFIG.max_audio_size),
+            )),
         )
         .route(
             "/{board}/post/{id}/edit",
@@ -1380,14 +1210,6 @@ fn build_router(state: AppState) -> Router {
         // Admin restore routes have no body-size cap — backups can be multi-GB
         // and these endpoints require a valid admin session, so there is no
         // anonymous upload risk.
-        //
-        // FIX[MED-3]: Authentication is enforced inside the handler, but as
-        // defence in depth these routes should also be covered by a
-        // router-level admin-session middleware layer.  A dedicated
-        // `require_admin_session` middleware layer should be applied to all
-        // /admin/* mutation routes so that the 20 GiB body is never accepted
-        // before the session is verified.  TODO: add that layer here once
-        // the middleware is extracted from the handler into a standalone fn.
         .route(
             "/admin/restore",
             post(crate::handlers::admin::admin_restore)
@@ -1464,23 +1286,12 @@ fn build_router(state: AppState) -> Router {
         // /static/theme-init.js.  Inline event handlers (onclick= etc.) have
         // been replaced with data-* attributes handled by main.js event
         // delegation, so no inline script execution is required.
-        //
-        // FIX[HIGH-2]: 'unsafe-inline' removed from style-src.  With
-        // user-generated content on the page, CSS injection via a separate
-        // vulnerability could be used to exfiltrate data (CSRF tokens, hidden
-        // form values) via CSS attribute-selector side-channels even without JS.
-        // All styles are served from /static/style.css ('self').  Any dynamic
-        // per-request theming should use a nonce instead of 'unsafe-inline'.
-        //
-        // FIX[LOW-5]: Added upgrade-insecure-requests to automatically upgrade
-        // any HTTP sub-resource URLs (e.g. legacy image embeds in old posts) to
-        // HTTPS, preventing mixed-content leakage to network observers.
         .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
             header::HeaderName::from_static("content-security-policy"),
             header::HeaderValue::from_static(
                 "default-src 'self'; \
                  script-src 'self'; \
-                 style-src 'self'; \
+                 style-src 'self' 'unsafe-inline'; \
                  img-src 'self' data: blob: https://img.youtube.com; \
                  media-src 'self' blob:; \
                  font-src 'self'; \
@@ -1488,8 +1299,7 @@ fn build_router(state: AppState) -> Router {
                  frame-src https://www.youtube-nocookie.com https://streamable.com; \
                  frame-ancestors 'none'; \
                  object-src 'none'; \
-                 base-uri 'self'; \
-                 upgrade-insecure-requests",
+                 base-uri 'self'",
             ),
         ))
         .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
@@ -1504,27 +1314,11 @@ fn build_router(state: AppState) -> Router {
         // checks both the request scheme and the X-Forwarded-Proto header
         // (set by TLS-terminating proxies) before adding the header.
         .layer(axum_middleware::from_fn(hsts_middleware))
-        // FIX[HIGH-1]: The previous single 30-second TimeoutLayer applied to
-        // ALL routes including file uploads.  A user on a slow connection
-        // uploading a large video would be cut off before the body was received,
-        // because the timer fires on wall-clock elapsed time, not on inactivity.
-        //
-        // Slow-loris protection (never finishing *sending* the request) and
-        // legitimate slow-upload tolerance are separate requirements.  The
-        // correct fix is:
-        //
-        //   • Upload routes (/{board} POST, /{board}/thread/{id} POST):
-        //     No hard wall-clock timeout here.  Rate-of-arrival is enforced
-        //     by the OS TCP receive buffer and the body-size cap
-        //     (DefaultBodyLimit).  The ffmpeg processing timeout
-        //     (CONFIG.ffmpeg_timeout_secs) bounds the back-end work.
-        //
-        //   • All other routes: 30-second timeout is appropriate and kept.
-        //
-        // Because axum's layer order means a route-level layer wins over the
-        // router-level layer, we apply a permissive 10-minute timeout on the
-        // two upload routes via .route_layer() (see build_router), and keep the
-        // 30-second global timeout here for everything else.
+        // MED-4 FIX: Hard per-request timeout to prevent slow-loris style
+        // attacks from holding async tasks indefinitely. Clients that open a
+        // connection but never finish sending the request body will be cut off
+        // after 30 seconds. This covers all routes including file upload
+        // endpoints where the multipart streaming loop could block forever.
         //
         // TimeoutLayer injects Box<dyn Error> into the service error type when
         // a timeout fires. Axum's Router::layer requires all errors to be
@@ -1637,152 +1431,42 @@ async fn onion_location_middleware(
     resp
 }
 
-/// Returns true if `ip` falls within any of the trusted proxy CIDRs.
-///
-/// FIX[HIGH-3]: The list is read from `CONFIG.trusted_proxy_cidrs` when that
-/// field exists.  Because the field has not yet been added to the Config
-/// struct, we fall back to a hardcoded default of loopback-only
-/// (`127.0.0.0/8` and `::1/128`).  Add `trusted_proxy_cidrs` to `Config` and
-/// populate it with your reverse-proxy CIDR(s) to allow non-loopback proxies.
-///
-/// Pure-std implementation — no extra crate dependency required.
-fn is_from_trusted_proxy(ip: std::net::IpAddr) -> bool {
-    // Default loopback-only list used until trusted_proxy_cidrs is added to Config.
-    let default_cidrs: &[&str] = &["127.0.0.0/8", "::1/128"];
-
-    for cidr in default_cidrs {
-        if cidr_contains(cidr, ip) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Returns true if `ip` falls within the given CIDR string (e.g. "10.0.0.0/8").
-/// Both IPv4 and IPv6 are supported.  Unparseable entries return false.
-fn cidr_contains(cidr: &str, ip: std::net::IpAddr) -> bool {
-    use std::net::IpAddr;
-
-    // Split at the last '/' to separate address from prefix length.
-    let (addr_str, prefix_len) = match cidr.rfind('/') {
-        Some(pos) => {
-            let a = &cidr[..pos];
-            let p: u32 = match cidr[pos.saturating_add(1)..].parse() {
-                Ok(n) => n,
-                Err(_) => return false,
-            };
-            (a, p)
-        }
-        // No slash — treat as a host address (/32 or /128).
-        None => {
-            return cidr.parse::<IpAddr>().is_ok_and(|a| a == ip);
-        }
-    };
-
-    let net_addr: IpAddr = match addr_str.parse() {
-        Ok(a) => a,
-        Err(_) => return false,
-    };
-
-    match (ip, net_addr) {
-        (IpAddr::V4(client), IpAddr::V4(network)) => {
-            if prefix_len > 32 {
-                return false;
-            }
-            let shift = 32u32.saturating_sub(prefix_len);
-            let mask: u32 = if shift == 32 { 0u32 } else { !0u32 << shift };
-            u32::from(client) & mask == u32::from(network) & mask
-        }
-        (IpAddr::V6(client), IpAddr::V6(network)) => {
-            if prefix_len > 128 {
-                return false;
-            }
-            let shift = 128u32.saturating_sub(prefix_len);
-            let mask: u128 = if shift == 128 { 0u128 } else { !0u128 << shift };
-            u128::from(client) & mask == u128::from(network) & mask
-        }
-        // Mismatched address families never match.
-        _ => false,
-    }
-}
-
 /// Middleware that adds `Strict-Transport-Security` only when the connection
 /// is confirmed to be HTTPS (RFC 6797 §7.2).  Checks both the URI scheme
 /// (set by some reverse proxies) and the `X-Forwarded-Proto` header.
-///
-/// FIX[HIGH-3]: `X-Forwarded-Proto` is only trusted when the socket peer
-/// address falls within `CONFIG.trusted_proxy_cidrs`.  Trusting the header
-/// unconditionally allows any client to inject an HSTS header on a plain HTTP
-/// response (RFC 6797 §7.2 violation) and to spoof HTTPS context.
-///
-/// `CONFIG.trusted_proxy_cidrs` should be set to the loopback addresses and
-/// any known reverse-proxy CIDRs, e.g. `["127.0.0.1/8", "::1/128"]`.
-/// It defaults to loopback-only when not configured.
 async fn hsts_middleware(
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    // Always trust the URI scheme (set by the server itself or by a trusted
-    // reverse proxy that rewrites the request URI before forwarding).
-    let scheme_is_https = req.uri().scheme_str() == Some("https");
-
-    // Only honour X-Forwarded-Proto when the TCP peer is a known proxy.
-    let forwarded_proto_is_https = is_from_trusted_proxy(peer.ip())
-        && req
+    let is_https = req.uri().scheme_str() == Some("https")
+        || req
             .headers()
             .get("x-forwarded-proto")
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.eq_ignore_ascii_case("https"));
 
-    let is_https = scheme_is_https || forwarded_proto_is_https;
-
     let mut resp = next.run(req).await;
     if is_https {
         resp.headers_mut().insert(
             header::HeaderName::from_static("strict-transport-security"),
-            // FIX[LOW-3]: Added `preload` so the domain can be submitted to
-            // browser HSTS preload lists, protecting first-visit requests.
-            header::HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
+            header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
         );
     }
     resp
 }
 
-async fn serve_css(req: axum::extract::Request) -> axum::response::Response {
-    let etag = style_css_etag();
-    // Return 304 Not Modified if the client already has this version.
-    if req
-        .headers()
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v == etag)
-    {
-        return StatusCode::NOT_MODIFIED.into_response();
-    }
+async fn serve_css() -> impl IntoResponse {
     (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            // max-age=31536000 (1 year) is safe because the ETag changes with content.
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-            (header::ETAG, etag),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         STYLE_CSS,
     )
-        .into_response()
 }
 
-async fn serve_main_js(req: axum::extract::Request) -> axum::response::Response {
-    let etag = main_js_etag();
-    if req
-        .headers()
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v == etag)
-    {
-        return StatusCode::NOT_MODIFIED.into_response();
-    }
+async fn serve_main_js() -> impl IntoResponse {
     (
         StatusCode::OK,
         [
@@ -1790,24 +1474,13 @@ async fn serve_main_js(req: axum::extract::Request) -> axum::response::Response 
                 header::CONTENT_TYPE,
                 "application/javascript; charset=utf-8",
             ),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-            (header::ETAG, etag),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         MAIN_JS,
     )
-        .into_response()
 }
 
-async fn serve_theme_init_js(req: axum::extract::Request) -> axum::response::Response {
-    let etag = theme_init_js_etag();
-    if req
-        .headers()
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v == etag)
-    {
-        return StatusCode::NOT_MODIFIED.into_response();
-    }
+async fn serve_theme_init_js() -> impl IntoResponse {
     (
         StatusCode::OK,
         [
@@ -1815,12 +1488,10 @@ async fn serve_theme_init_js(req: axum::extract::Request) -> axum::response::Res
                 header::CONTENT_TYPE,
                 "application/javascript; charset=utf-8",
             ),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-            (header::ETAG, etag),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         THEME_INIT_JS,
     )
-        .into_response()
 }
 
 // ─── Request tracking middleware ──────────────────────────────────────────────
@@ -1853,41 +1524,17 @@ async fn track_requests(
     // retaining PII in process memory and coredumps.
     // CRIT-2: Use extract_ip() so proxy-forwarded real IPs are used instead
     // of the raw socket address (which would always be the proxy's IP).
-    // FIX[MED-2]: Use ACTIVE_IPS_COUNT with fetch_update as a single atomic
-    // gate so concurrent threads cannot all pass a .len() check simultaneously
-    // and overshoot the 10 000-entry cap (TOCTOU race).  The insert is only
-    // attempted after successfully incrementing the counter below the cap; if
-    // the key already exists we undo the increment immediately.
+    // Cap at 10,000 entries to prevent unbounded memory growth under a
+    // Sybil/bot attack rotating IPs (#11). The count is cosmetic so
+    // dropping inserts beyond the cap has no functional impact.
     {
         use sha2::{Digest, Sha256};
         let real_ip = crate::middleware::extract_ip(&req);
         let mut h = Sha256::new();
         h.update(real_ip.as_bytes());
         let ip_hash = hex::encode(h.finalize());
-
-        // Try to claim a slot: increment only if count < 10_000.
-        let claimed = ACTIVE_IPS_COUNT
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                if c < 10_000 {
-                    c.checked_add(1)
-                } else {
-                    None
-                }
-            })
-            .is_ok();
-
-        if claimed {
-            // insert() returns the old value if the key existed.
-            // If the key was already present we didn't actually add a new
-            // entry, so release the slot we just claimed.
-            if ACTIVE_IPS.insert(ip_hash, Instant::now()).is_some() {
-                ACTIVE_IPS_COUNT.fetch_sub(1, Ordering::AcqRel);
-            }
-        } else {
-            // Cap reached — update timestamp for existing entries only.
-            if let Some(mut entry) = ACTIVE_IPS.get_mut(&ip_hash) {
-                *entry = Instant::now();
-            }
+        if ACTIVE_IPS.len() < 10_000 {
+            ACTIVE_IPS.insert(ip_hash, Instant::now());
         }
     }
 

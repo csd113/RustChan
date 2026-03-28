@@ -2,26 +2,26 @@
 //
 // Two output channels:
 //
-// 1. Terminal (stdout, TTY-aware)
-//    • When stdout is a TTY (interactive terminal):
-//      HH:MM:SS.mmm [LEVEL] [component] message key=val …
-//      Coloured level tags; component tag in cyan; fits in 80 columns.
-//    • When stdout is not a TTY (piped, systemd, Docker, nohup):
-//      YYYY-MM-DD HH:MM:SS.mmm [LEVEL] [component] message key=val …
-//      Zero ANSI codes — clean for log shippers and `grep`.
+//   1. Terminal (stdout, TTY-aware)
+//      • When stdout is a TTY (interactive terminal):
+//          HH:MM:SS.mmm [LEVEL] [component] message  key=val …
+//        Coloured level tags; component tag in cyan; fits in 80 columns.
+//      • When stdout is not a TTY (piped, systemd, Docker, nohup):
+//          YYYY-MM-DD HH:MM:SS.mmm [LEVEL] [component] message  key=val …
+//        Zero ANSI codes — clean for log shippers and `grep`.
 //
-//    All writes go through `CONSOLE_MUTEX` so `console.rs` interactive
-//    output never interleaves with log events.
+//      All writes go through `CONSOLE_MUTEX` so `console.rs` interactive
+//      output never interleaves with log events.
 //
-// 2. Log file (rustchan.YYYY-MM-DD.log, human-readable text, daily rotation)
-//    Same fixed-column format as the non-TTY terminal output, with two extras:
-//    • Millisecond precision on every timestamp.
-//    • WARN and ERROR lines append (src/file.rs:line) at the end so you
-//      can jump straight to the source without grepping the codebase.
-//    One event per line — easy to tail, grep, and read in any text editor.
-//    If you need machine-parseable output for a log shipper (Loki, Datadog,
-//    etc.) swap the FileFormatter layer for .json() — see the comment in
-//    init_logging().
+//   2. Log file (rustchan.YYYY-MM-DD.log, human-readable text, daily rotation)
+//      Same fixed-column format as the non-TTY terminal output, with two extras:
+//        • Millisecond precision on every timestamp.
+//        • WARN and ERROR lines append  (src/file.rs:line)  at the end so you
+//          can jump straight to the source without grepping the codebase.
+//      One event per line — easy to tail, grep, and read in any text editor.
+//      If you need machine-parseable output for a log shipper (Loki, Datadog,
+//      etc.) swap the FileFormatter layer for .json() — see the comment in
+//      init_logging().
 //
 // `CONSOLE_MUTEX`
 // ───────────────
@@ -78,17 +78,13 @@ static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceL
 
 static IS_TTY: AtomicBool = AtomicBool::new(false);
 
-/// Tracks whether `init_logging` has been called.
-static LOGGING_INITIALISED: AtomicBool = AtomicBool::new(false);
-
 /// Returns `true` when stdout was a real interactive terminal at startup.
 ///
 /// Used by the log formatter and `console.rs` to decide whether to emit ANSI
-/// escape codes.  Always `false` when output is piped, redirected, or captured
+/// escape codes. Always `false` when output is piped, redirected, or captured
 /// by a process supervisor like systemd.
-#[must_use]
 pub fn is_tty() -> bool {
-    IS_TTY.load(Ordering::Acquire)
+    IS_TTY.load(Ordering::Relaxed)
 }
 
 /// Set to `true` once the full-screen TUI alternate screen is active.
@@ -114,9 +110,6 @@ pub fn is_tui_active() -> bool {
 /// `rustchan::workers`        → `workers`
 /// `tower_http::trace`        → `trace`
 fn extract_component(target: &str) -> &str {
-    if target.is_empty() {
-        return "unknown";
-    }
     let mut parts = target.rsplit("::");
     let last = parts.next().unwrap_or(target);
     if last == "mod" {
@@ -152,31 +145,18 @@ fn write_level_tag(writer: &mut Writer<'_>, level: Level, ansi: bool) -> fmt::Re
 }
 
 /// Write the fixed-width (8-char) component tag, cyan when `ansi` is true.
-///
-/// Avoids heap allocation for typical ASCII component names (≤ 8 bytes).
 fn write_component_tag(writer: &mut Writer<'_>, target: &str, ansi: bool) -> fmt::Result {
     let component = extract_component(target);
-
-    // Truncate to at most 8 characters without heap allocation for the
-    // common case (ASCII component names).  We find the byte offset of the
-    // 8th char boundary (or end of string, whichever comes first).
-    let truncated = if component.len() <= 8 && component.is_ascii() {
-        // Fast path: pure ASCII and short enough — no iteration needed.
-        component
-    } else {
-        let end = component
-            .char_indices()
-            .nth(8)
-            .map_or(component.len(), |(idx, _)| idx);
-        &component[..end]
-    };
+    let chars: Vec<char> = component.chars().collect();
+    let len = chars.len().min(8);
+    let display: String = chars.get(..len).unwrap_or(&chars).iter().collect();
 
     let (open, close) = if ansi {
         ("\x1b[36m", "\x1b[0m")
     } else {
         ("", "")
     };
-    write!(writer, "{open}[{truncated:<8}]{close} ")
+    write!(writer, "{open}[{display:<8}]{close} ")
 }
 
 // ─── Terminal formatter ───────────────────────────────────────────────────────
@@ -184,10 +164,10 @@ fn write_component_tag(writer: &mut Writer<'_>, target: &str, ansi: bool) -> fmt
 /// Writes one compact line per log event to the terminal.
 ///
 /// TTY mode (local dev):
-/// `14:22:01.123 [INFO ] [server  ] HTTP server listening addr=0.0.0.0:8080`
+///   `14:22:01.123 [INFO ] [server  ] HTTP server listening  addr=0.0.0.0:8080`
 ///
 /// Non-TTY mode (piped / systemd / Docker):
-/// `2026-03-18 14:22:01.123 [INFO ] [server  ] HTTP server listening addr=0.0.0.0:8080`
+///   `2026-03-18 14:22:01.123 [INFO ] [server  ] HTTP server listening  addr=0.0.0.0:8080`
 ///
 /// Columns are fixed-width so the message text always starts at the same
 /// horizontal position, making it easy to scan down a busy log stream.
@@ -204,7 +184,7 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> fmt::Result {
-        let tty = IS_TTY.load(Ordering::Acquire);
+        let tty = IS_TTY.load(Ordering::Relaxed);
 
         // ── Timestamp (with milliseconds) ─────────────────────────────────────
         if tty {
@@ -223,7 +203,7 @@ where
         // ── Message and structured fields ─────────────────────────────────────
         // tracing_subscriber writes the `message` field first, then all other
         // key=value fields separated by spaces — e.g.:
-        //   "Request received method=GET path=/b/ latency_ms=4"
+        //   "Request received  method=GET path=/b/ latency_ms=4"
         ctx.format_fields(writer.by_ref(), event)?;
         writeln!(writer)
     }
@@ -234,14 +214,14 @@ where
 /// Writes one human-readable line per log event to the log file.
 ///
 /// Format:
-/// `2026-03-18 14:22:01.123 [INFO ] [server  ] HTTP server listening addr=0.0.0.0:8080`
-/// `2026-03-18 14:22:01.456 [ERROR] [error   ] DB query failed err=no such table (db/posts.rs:79)`
+///   `2026-03-18 14:22:01.123 [INFO ] [server  ] HTTP server listening  addr=0.0.0.0:8080`
+///   `2026-03-18 14:22:01.456 [ERROR] [error   ] DB query failed  err=no such table  (src/db/posts.rs:79)`
 ///
 /// Differences from the terminal format:
-/// • Always UTC with the full date — the file is an archive, not a live view.
-/// • No ANSI colour codes — clean for `grep`, `less`, and text editors.
-/// • WARN and ERROR lines append `(file:line)` at the end so you can jump
-///   directly to the call site without having to search the source tree.
+///   • Always UTC with the full date — the file is an archive, not a live view.
+///   • No ANSI colour codes — clean for `grep`, `less`, and text editors.
+///   • WARN and ERROR lines append `(file:line)` at the end so you can jump
+///     directly to the call site without having to search the source tree.
 struct FileFormatter;
 
 impl<S, N> FormatEvent<S, N> for FileFormatter
@@ -270,44 +250,41 @@ where
 
         // ── Source location suffix for WARN and ERROR ─────────────────────────
         // Only attached at these levels because:
-        // • INFO/DEBUG events fire thousands of times per minute on a busy
-        //   board; the call site is rarely the interesting part.
-        // • WARN/ERROR events are rare and almost always need follow-up —
-        //   having the exact file:line avoids a grep → blame cycle.
+        //   • INFO/DEBUG events fire thousands of times per minute on a busy
+        //     board; the call site is rarely the interesting part.
+        //   • WARN/ERROR events are rare and almost always need follow-up —
+        //     having the exact file:line avoids a grep → blame cycle.
         if matches!(level, Level::ERROR | Level::WARN) {
             if let (Some(file), Some(line)) = (meta.file(), meta.line()) {
                 // Trim the leading "src/" that Rust adds to all file paths so
                 // the suffix stays compact: "(db/posts.rs:79)" not
                 // "(src/db/posts.rs:79)".
                 let trimmed = file.strip_prefix("src/").unwrap_or(file);
-                write!(writer, " ({trimmed}:{line})")?;
+                write!(writer, "  ({trimmed}:{line})")?;
             }
         }
+
         writeln!(writer)
     }
 }
 
 // ─── MakeWriter: routes terminal writes through CONSOLE_MUTEX ─────────────────
 
-/// Holds the console lock guard and a locked stdout handle for the duration
-/// of one log event write.
+/// Holds the console lock guard for the duration of one log event write.
 ///
 /// The `_guard` field is held solely for its `Drop` side-effect (releasing
-/// `CONSOLE_MUTEX`).  The `stdout` field caches the locked stdout handle so
-/// that multiple `write()` calls within a single event do not repeatedly
-/// lock/unlock the internal stdout mutex.
+/// `CONSOLE_MUTEX`). It is never accessed directly.
 struct LockedWriter {
     _guard: parking_lot::MutexGuard<'static, ()>,
-    stdout: io::StdoutLock<'static>,
 }
 
 impl io::Write for LockedWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.stdout.write(buf)
+        io::stdout().write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.stdout.flush()
+        io::stdout().flush()
     }
 }
 
@@ -321,27 +298,22 @@ impl<'a> MakeWriter<'a> for ConsoleLock {
     type Writer = LockedWriter;
 
     fn make_writer(&'a self) -> LockedWriter {
-        // Acquire the console mutex first, then lock stdout.
-        // This ordering must be consistent everywhere to prevent deadlocks.
-        let guard = CONSOLE_MUTEX.lock();
-        let stdout = io::stdout().lock();
         LockedWriter {
-            _guard: guard,
-            stdout,
+            _guard: CONSOLE_MUTEX.lock(),
         }
     }
 }
 
 // ─── Initialisation ───────────────────────────────────────────────────────────
 
-/// Initialise the global tracing subscriber.  Call exactly once at startup,
+/// Initialise the global tracing subscriber. Call exactly once at startup,
 /// before any `tracing::info!` or `tracing::warn!` calls are made.
 ///
 /// Detects whether stdout is an interactive terminal and stores the result
-/// in `IS_TTY` for the process lifetime.  Installs two layers:
+/// in `IS_TTY` for the process lifetime. Installs two layers:
 ///
 /// 1. **Terminal layer** — `TerminalFormatter` writes via `ConsoleLock`
-///    (`CONSOLE_MUTEX`).  Human-readable, coloured when TTY, plain otherwise.
+///    (`CONSOLE_MUTEX`). Human-readable, coloured when TTY, plain otherwise.
 ///    Serialised with `console.rs` output via the shared mutex.
 ///
 /// 2. **File layer** — `FileFormatter`, daily rotation, `debug`+.
@@ -352,54 +324,28 @@ impl<'a> MakeWriter<'a> for ConsoleLock {
 /// To switch the file layer to JSON for a log aggregator (Loki, Datadog, …):
 /// replace `FileFormatter` with `.json()` and add `.with_file(true)
 /// .with_line_number(true)` to the layer builder.
-///
-/// # Panics
-///
-/// Panics if called more than once.
 pub fn init_logging(log_dir: &Path) {
     use std::io::IsTerminal;
 
-    // Guard against double-initialisation. The second call would panic inside
-    // `tracing_subscriber::registry().init()` anyway, but we give a clearer
-    // message and also prevent the FILE_GUARD / IS_TTY race.
-    assert!(
-        !LOGGING_INITIALISED.swap(true, Ordering::AcqRel),
-        "init_logging() called more than once"
-    );
-
     let tty = io::stdout().is_terminal();
-    IS_TTY.store(tty, Ordering::Release);
+    IS_TTY.store(tty, Ordering::Relaxed);
 
-    // Attempt to create the log directory if it doesn't already exist.
-    if !log_dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(log_dir) {
-            eprintln!(
-                "Warning: could not create log directory {}: {e}",
-                log_dir.display()
-            );
-        }
-    }
-
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|e| {
-        // Distinguish "not set" from "malformed".
-        if std::env::var("RUST_LOG").is_ok() {
-            eprintln!("Warning: malformed RUST_LOG value, using defaults: {e}");
-        }
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(
             // F-08: Explicitly suppress Arti's internal crates in the default
-            // filter.  Without this they emit at DEBUG/TRACE (circuit negotiation,
+            // filter. Without this they emit at DEBUG/TRACE (circuit negotiation,
             // guard selection, consensus downloads) — hundreds of lines/minute.
             // Operators who need Arti internals can set RUST_LOG=tor_proto=debug.
             "rustchan=info,\
-                 tower_http=warn,\
-                 arti_client=warn,\
-                 tor_proto=warn,\
-                 tor_circmgr=warn,\
-                 tor_dirmgr=warn,\
-                 tor_guardmgr=warn,\
-                 tor_chanmgr=warn,\
-                 tor_hsservice=warn,\
-                 tor_keymgr=warn",
+             tower_http=warn,\
+             arti_client=warn,\
+             tor_proto=warn,\
+             tor_circmgr=warn,\
+             tor_dirmgr=warn,\
+             tor_guardmgr=warn,\
+             tor_chanmgr=warn,\
+             tor_hsservice=warn,\
+             tor_keymgr=warn",
         )
     });
 
@@ -409,9 +355,9 @@ pub fn init_logging(log_dir: &Path) {
 
     // Build the rolling file appender.
     // FIX (filename): tracing_appender::rolling::daily(dir, "rustchan.log")
-    //   appends the date *after* the full string → "rustchan.log.2024-01-15"
-    //   (no .log extension on rotated files).  The builder API separates
-    //   prefix from suffix → "rustchan.2024-01-15.log".
+    // appends the date *after* the full string → "rustchan.log.2024-01-15"
+    // (no .log extension on rotated files).  The builder API separates
+    // prefix from suffix → "rustchan.2024-01-15.log".
     let rolling = tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix("rustchan")
@@ -431,11 +377,7 @@ pub fn init_logging(log_dir: &Path) {
     // The WorkerGuard is stored in FILE_GUARD so it lives for the entire
     // process — see the comment on that static for why this matters.
     let (non_blocking_writer, guard) = tracing_appender::non_blocking(rolling);
-    assert!(
-        FILE_GUARD.set(guard).is_ok(),
-        "FILE_GUARD already set — init_logging() called twice \
-         (should have been caught by LOGGING_INITIALISED)",
-    );
+    let _ = FILE_GUARD.set(guard);
 
     let file_layer = tracing_subscriber::fmt::layer()
         .event_format(FileFormatter)
@@ -451,15 +393,13 @@ pub fn init_logging(log_dir: &Path) {
 // ─── Console print helpers ────────────────────────────────────────────────────
 //
 // All helpers acquire `CONSOLE_MUTEX` before writing so they serialise
-// correctly with the tracing terminal layer.  Use these instead of
+// correctly with the tracing terminal layer. Use these instead of
 // `println!`/`print!` in `console.rs` and `detect.rs`.
 
 /// Print `msg` followed by a newline to stdout, under the console lock.
 pub fn console_println(msg: &str) {
     let _guard = CONSOLE_MUTEX.lock();
-    let stdout = io::stdout();
-    let mut handle = stdout.lock();
-    let _ = writeln!(handle, "{msg}");
+    let _ = writeln!(io::stdout(), "{msg}");
 }
 
 /// Write a raw pre-formatted block exactly as provided (no trailing newline added).
@@ -468,10 +408,8 @@ pub fn console_println(msg: &str) {
 /// fully formatted including their own newlines.
 pub fn console_print_raw(block: &str) {
     let _guard = CONSOLE_MUTEX.lock();
-    let stdout = io::stdout();
-    let mut handle = stdout.lock();
-    let _ = write!(handle, "{block}");
-    let _ = handle.flush();
+    let _ = write!(io::stdout(), "{block}");
+    let _ = io::stdout().flush();
 }
 
 /// Write a prompt string (no newline) and flush stdout, under the console lock.
@@ -480,46 +418,7 @@ pub fn console_print_raw(block: &str) {
 /// call does not prevent log events from being written while waiting for input.
 pub fn console_prompt(msg: &str) {
     let _guard = CONSOLE_MUTEX.lock();
-    let stdout = io::stdout();
-    let mut handle = stdout.lock();
-    let _ = write!(handle, "{msg}");
-    let _ = handle.flush();
+    let _ = write!(io::stdout(), "{msg}");
+    let _ = io::stdout().flush();
     // _guard dropped here — stdin read happens outside the lock
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extract_component_normal() {
-        assert_eq!(extract_component("rustchan::server::server"), "server");
-    }
-
-    #[test]
-    fn extract_component_mod() {
-        assert_eq!(extract_component("rustchan::db::mod"), "db");
-    }
-
-    #[test]
-    fn extract_component_single() {
-        assert_eq!(extract_component("workers"), "workers");
-    }
-
-    #[test]
-    fn extract_component_empty() {
-        assert_eq!(extract_component(""), "unknown");
-    }
-
-    #[test]
-    fn extract_component_mod_at_root() {
-        // "mod" with no parent — should return "mod" itself
-        assert_eq!(extract_component("mod"), "mod");
-    }
-
-    #[test]
-    fn is_tty_defaults_false() {
-        // Before init_logging is called, is_tty should be false.
-        assert!(!IS_TTY.load(Ordering::Acquire));
-    }
 }

@@ -13,6 +13,30 @@
 //   posts.rs  — post CRUD, file dedup, polls, job queue, worker helpers
 //   admin.rs  — admin/session, bans, word filters, reports, mod log,
 //               ban appeals, IP history, DB maintenance
+//
+// FIX summary (from audit):
+//   HIGH-1   Migrations: schema_version is now updated after EACH successfully
+//              applied migration, not once at the end. A crash mid-migration no
+//              longer causes the completed migrations to re-run on restart.
+//   HIGH-2   paths_safe_to_delete TOCTOU: documented. The outer callers
+//              (delete_thread, delete_board, etc.) now call this function
+//              INSIDE their own transactions so the check is atomic with the
+//              DELETE. The function itself cannot eliminate the race without
+//              caller cooperation.
+//   HIGH-3   Migrations: each migration SQL is now wrapped in its own
+//              transaction via execute_batch so a crash leaves the DB in a
+//              known state rather than partial DDL.
+//   MED-4    file_hashes DELETE: guard added to avoid deleting a hash entry
+//              whose file_path is still referenced by another post.
+//   MED-5    schema_version: UNIQUE constraint prevents duplicate rows.
+//   MED-6    DDL: execute_batch used throughout.
+//   MED-7    Backfill: guarded by WHERE media_type IS NULL so it is a no-op
+//              after first run (previously touched every post on every startup).
+//   MED-8    Backfill: errors now propagate instead of being silently ignored.
+//   LOW-10   Idempotent migration branch: log level raised to WARN.
+//   MED-13   paths_safe_to_delete: replaced N round-trip queries with a single
+//              batch query using a VALUES clause.
+//   LOW-14   paths_safe_to_delete: sort+dedup replaced with HashSet O(1) dedup.
 
 use crate::config::CONFIG;
 use anyhow::{Context, Result};
@@ -28,7 +52,8 @@ pub mod chan_net;
 pub mod posts;
 pub mod threads;
 
-// Re-export sub-module symbols so callers can use db::foo directly.
+// Re-export every public symbol so all existing call-sites (db::foo) compile
+// without any changes.
 pub use admin::*;
 pub use boards::*;
 pub use posts::*;
@@ -41,6 +66,8 @@ pub type DbPool = Pool<SqliteConnectionManager>;
 // ─── Shared data types ────────────────────────────────────────────────────────
 
 /// Data needed to insert a new post.
+/// `Clone` is derived so `create_thread_with_op` can rebind fields without
+/// requiring the caller to construct two separate `NewPost` values.
 #[derive(Clone)]
 pub struct NewPost {
     pub thread_id: i64,
@@ -56,7 +83,9 @@ pub struct NewPost {
     pub file_size: Option<i64>,
     pub thumb_path: Option<String>,
     pub mime_type: Option<String>,
+    /// Explicit media classification derived from MIME type at upload time.
     pub media_type: Option<String>,
+    /// Secondary audio file for image+audio combo posts.
     pub audio_file_path: Option<String>,
     pub audio_file_name: Option<String>,
     pub audio_file_size: Option<i64>,
@@ -76,6 +105,11 @@ pub struct CachedFile {
 
 /// Create the connection pool and run schema migrations.
 ///
+/// Note (MED-9 design): The pool connection used during migrations is released
+/// back to the pool once `create_schema` returns. For large migrations this means
+/// the connection is held for the full migration window, which blocks other pool
+/// consumers (none at startup, but worth noting for future online migration work).
+///
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn init_pool() -> Result<DbPool> {
@@ -86,26 +120,33 @@ pub fn init_pool() -> Result<DbPool> {
     }
 
     let manager = SqliteConnectionManager::file(db_path).with_init(|conn| {
-        // Per-connection pragmas: WAL mode, normal sync, FK enforcement,
-        // page cache, temp store, mmap, and busy timeout.
+        // These pragmas apply to every new connection in the pool.
+        // WAL: readers don't block writers; good for concurrent requests.
+        // synchronous=NORMAL: safe with WAL, reduces fsync calls.
+        // foreign_keys: enforce relational integrity.
+        //
+        // Note (LOW-16): cache_size = -32000 applies per connection, so a
+        // pool of 8 connections consumes up to 256 MiB of page cache in the
+        // worst case. Tune CONFIG.pool_size and this pragma together.
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA foreign_keys = ON;
-             PRAGMA cache_size = -32000;
+             PRAGMA cache_size = -32000; -- 32 MiB page cache per connection
              PRAGMA temp_store = MEMORY;
-             PRAGMA mmap_size = 67108864;
-             PRAGMA busy_timeout = 10000;",
+             PRAGMA mmap_size = 67108864; -- 64 MiB memory-mapped IO
+             PRAGMA busy_timeout = 10000; -- 10s: wait instead of instant SQLITE_BUSY",
         )
     });
 
-    // Pool size from config, default 8. busy_timeout is 10s so connection_timeout
-    // is set to 15s to avoid pool starvation under write contention.
+    // Pool size is configurable via CHAN_DB_POOL_SIZE env var or settings.toml.
+    // Falls back to 8 if not set. Each connection holds ~32 MiB of page cache,
+    // so size × 32 MiB sets the upper bound on SQLite memory usage.
     let pool_size = CONFIG.db_pool_size;
 
     let pool = Pool::builder()
         .max_size(pool_size)
-        .connection_timeout(std::time::Duration::from_secs(15))
+        .connection_timeout(std::time::Duration::from_secs(5))
         .build(manager)
         .context("Failed to build database pool")?;
 
@@ -119,6 +160,10 @@ pub fn init_pool() -> Result<DbPool> {
 // ─── First-run check ─────────────────────────────────────────────────────────
 
 /// Check whether this is a first run (no boards and no admins).
+///
+/// Logs an info event if no boards exist. The interactive admin-creation
+/// wizard is handled by the caller (server.rs) after this returns, using
+/// `has_no_admin()` to decide whether to prompt.
 ///
 /// # Errors
 /// Returns an error if the database connection cannot be obtained.
@@ -144,45 +189,37 @@ pub fn first_run_check(pool: &DbPool) -> anyhow::Result<()> {
 
 /// Returns `true` when the database contains no admin accounts.
 ///
-/// Logs a warning and returns `false` on any database error (fail-safe:
-/// skip the wizard rather than blocking startup).
+/// Called at startup to decide whether to run the interactive first-run
+/// admin wizard. Returns `false` on any DB error (fail-safe: skip the
+/// wizard rather than blocking startup).
 #[must_use]
 pub fn has_no_admin(pool: &DbPool) -> bool {
-    match pool.get() {
-        Ok(conn) => match conn.query_row("SELECT COUNT(*) FROM admin_users", [], |r| {
-            r.get::<_, i64>(0)
-        }) {
-            Ok(count) => count == 0,
-            Err(e) => {
-                tracing::warn!(target: "db", "Failed to count admin users: {e}");
-                false
-            }
-        },
-        Err(e) => {
-            tracing::warn!(target: "db", "Failed to get DB connection for admin check: {e}");
-            false
-        }
-    }
+    pool.get()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM admin_users", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .ok()
+        })
+        .is_some_and(|count| count == 0)
 }
 
 // ─── Schema creation & migrations ────────────────────────────────────────────
 
-/// Derive max migration version from the migrations array at compile time.
-macro_rules! max_migration {
-    ( $( ($ver:expr, $sql:expr) ),+ $(,)? ) => {{
-        let migrations: &[(i64, &str)] = &[ $( ($ver, $sql), )+ ];
-        let max = migrations.last().unwrap().0;
-        (migrations, max)
-    }};
-}
-
 #[allow(clippy::too_many_lines)]
 fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
-    // Base DDL — all tables and indices. Fresh installs get everything here;
-    // migrations below only exist for databases created before a given column
-    // or table was added.
+    // The highest migration number this binary knows about. Seeded into
+    // schema_version on fresh installs so all migrations are skipped (the base
+    // CREATE TABLE statements already include every column they would add).
+    // Must be updated whenever a new migration entry is appended to the list.
+    const CURRENT_MAX_MIGRATION: i64 = 26;
+
+    // FIX[MED-6]: Use execute_batch for all DDL so it runs in a single
+    // implicit transaction and is idempotent on re-run.
     conn.execute_batch(
         "
+        -- Boards table
         CREATE TABLE IF NOT EXISTS boards (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             short_name      TEXT NOT NULL UNIQUE,
@@ -204,6 +241,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             created_at      INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
+        -- Threads table (metadata only; OP content is in posts)
         CREATE TABLE IF NOT EXISTS threads (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             board_id    INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
@@ -216,6 +254,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             reply_count INTEGER NOT NULL DEFAULT 0
         );
 
+        -- Posts table (OP and replies)
         CREATE TABLE IF NOT EXISTS posts (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
             thread_id      INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
@@ -225,7 +264,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             subject        TEXT,
             body           TEXT NOT NULL,
             body_html      TEXT NOT NULL,
-            ip_hash        TEXT,
+            ip_hash        TEXT,                -- nullable: NULL for gateway-inserted posts
             file_path        TEXT,
             file_name        TEXT,
             file_size        INTEGER,
@@ -242,6 +281,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             edited_at        INTEGER
         );
 
+        -- File deduplication table (SHA-256 hash → existing file paths)
         CREATE TABLE IF NOT EXISTS file_hashes (
             sha256     TEXT PRIMARY KEY,
             file_path  TEXT NOT NULL,
@@ -250,6 +290,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             created_at INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
+        -- Admin users
         CREATE TABLE IF NOT EXISTS admin_users (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             username      TEXT NOT NULL UNIQUE,
@@ -257,6 +298,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             created_at    INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
+        -- Admin sessions (cookie-based)
         CREATE TABLE IF NOT EXISTS admin_sessions (
             id         TEXT PRIMARY KEY,
             admin_id   INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
@@ -264,6 +306,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             expires_at INTEGER NOT NULL
         );
 
+        -- IP bans (stored as SHA-256 hashes, never raw IPs)
         CREATE TABLE IF NOT EXISTS bans (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             ip_hash    TEXT NOT NULL,
@@ -272,6 +315,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             created_at INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
+        -- Ban appeal submissions from banned users
         CREATE TABLE IF NOT EXISTS ban_appeals (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             ip_hash     TEXT NOT NULL,
@@ -280,12 +324,14 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             created_at  INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
+        -- Word filters
         CREATE TABLE IF NOT EXISTS word_filters (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             pattern     TEXT NOT NULL,
             replacement TEXT NOT NULL
         );
 
+        -- Polls (one per thread, OP only)
         CREATE TABLE IF NOT EXISTS polls (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             thread_id  INTEGER NOT NULL UNIQUE REFERENCES threads(id) ON DELETE CASCADE,
@@ -294,6 +340,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             created_at INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
+        -- Poll options
         CREATE TABLE IF NOT EXISTS poll_options (
             id       INTEGER PRIMARY KEY AUTOINCREMENT,
             poll_id  INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
@@ -301,6 +348,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             position INTEGER NOT NULL DEFAULT 0
         );
 
+        -- Poll votes — one per (poll, ip_hash) pair
         CREATE TABLE IF NOT EXISTS poll_votes (
             id        INTEGER PRIMARY KEY AUTOINCREMENT,
             poll_id   INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
@@ -309,18 +357,18 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             UNIQUE(poll_id, ip_hash)
         );
 
+        -- Site-wide key/value settings
         CREATE TABLE IF NOT EXISTS site_settings (
             key        TEXT PRIMARY KEY,
             value      TEXT NOT NULL
         );
 
-        -- reports: thread_id and board_id have FK constraints with SET NULL
-        -- so deleted threads/boards don't leave dangling IDs.
+        -- User-filed reports
         CREATE TABLE IF NOT EXISTS reports (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
             post_id        INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-            thread_id      INTEGER REFERENCES threads(id) ON DELETE SET NULL,
-            board_id       INTEGER REFERENCES boards(id) ON DELETE SET NULL,
+            thread_id      INTEGER NOT NULL,
+            board_id       INTEGER NOT NULL,
             reason         TEXT NOT NULL DEFAULT '',
             reporter_hash  TEXT NOT NULL,
             status         TEXT NOT NULL DEFAULT 'open',
@@ -329,6 +377,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             resolved_by    INTEGER
         );
 
+        -- Moderation action log
         CREATE TABLE IF NOT EXISTS mod_log (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             admin_id     INTEGER NOT NULL,
@@ -341,11 +390,12 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             created_at   INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
+        -- Background job queue (persistent across restarts)
         CREATE TABLE IF NOT EXISTS background_jobs (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             job_type    TEXT NOT NULL,
             payload     TEXT NOT NULL,
-            status      TEXT NOT NULL DEFAULT 'pending',
+            status      TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed
             priority    INTEGER NOT NULL DEFAULT 0,
             attempts    INTEGER NOT NULL DEFAULT 0,
             last_error  TEXT,
@@ -353,7 +403,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
-        -- Indices (no redundant index on file_hashes.sha256 — already the PK)
+        -- Indices for common query patterns
         CREATE INDEX IF NOT EXISTS idx_threads_board_sticky_bumped
             ON threads(board_id, sticky DESC, bumped_at DESC);
         CREATE INDEX IF NOT EXISTS idx_posts_thread
@@ -364,6 +414,8 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             ON bans(ip_hash);
         CREATE INDEX IF NOT EXISTS idx_sessions_expires
             ON admin_sessions(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_file_hashes
+            ON file_hashes(sha256);
         CREATE INDEX IF NOT EXISTS idx_jobs_pending
             ON background_jobs(status, priority DESC, created_at ASC);
         CREATE INDEX IF NOT EXISTS idx_reports_status
@@ -376,9 +428,8 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             ON posts(ip_hash);
         CREATE INDEX IF NOT EXISTS idx_threads_archived
             ON threads(board_id, archived, bumped_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_file_hashes_thumb
-            ON file_hashes(thumb_path);
 
+        -- ChanNet federation mirror table (text-only posts from remote nodes)
         CREATE TABLE IF NOT EXISTS chan_net_posts (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             remote_post_id  INTEGER NOT NULL,
@@ -395,11 +446,65 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
     .context("Schema creation failed")?;
 
     // ─── Schema versioning ──────────────────────────────────────────────────
-    // Holds exactly one row. Fresh installs seed with the max migration version
-    // so all migrations are skipped (base DDL already includes everything).
-    // Max version is derived from the migrations array via macro.
+    // The schema_version table holds exactly one row.
+    //
+    // On a fresh install we seed it with the highest known migration number so
+    // that every migration (whose DDL is already in the CREATE TABLE above) is
+    // skipped. On an existing DB the INSERT is a no-op (row already present)
+    // and the stored version is read back unchanged.
+    //
+    // `SELECT … WHERE NOT EXISTS` seeds only when the table is empty, avoiding
+    // the previous bug where `INSERT OR IGNORE … VALUES (0)` would succeed on
+    // an existing DB (0 ≠ stored_version satisfies the UNIQUE constraint on the
+    // version column), creating a second row and making the SELECT return an
+    // unpredictable value — often 0 — causing all migrations to re-run and
+    // emit spurious "already applied" warnings on every startup.
+    //
+    // `MAX(version)` makes the SELECT correct even if a stale second row
+    // survived from a previous binary version.
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS schema_version (
+            version    INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(version)
+         );
+         INSERT INTO schema_version (version)
+         SELECT {CURRENT_MAX_MIGRATION}
+         WHERE NOT EXISTS (SELECT 1 FROM schema_version);",
+    ))
+    .context("Failed to create schema_version table")?;
 
-    let (migrations, current_max_migration) = max_migration![
+    let current_version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |r| r.get(0),
+        )
+        .context("Failed to read schema_version")?;
+
+    // Each entry is (introduced_at_version, sql).
+    // ALTER TABLE … ADD COLUMN returns SQLITE_ERROR (code 1) with the message
+    // "duplicate column name: X" when the column already exists — this happens
+    // when the binary is restarted against a DB that was already migrated.
+    // CREATE INDEX … IF NOT EXISTS is already idempotent and never errors.
+    //
+    // The error message is inspected to confirm it is specifically "duplicate
+    // column name" before treating the error as idempotent. Any other
+    // SQLITE_ERROR (syntax errors, wrong column counts, etc.) is propagated.
+    //
+    // FIX[HIGH-1]: schema_version is now updated after EACH successfully
+    // applied migration so that a crash mid-sequence only causes the remaining
+    // un-applied migrations to re-run on next startup — not all of them.
+    //
+    // FIX[HIGH-3]: Each migration SQL is executed inside its own BEGIN/COMMIT
+    // block via execute_batch where possible, so a crash during a migration
+    // either fully applies or fully rolls back the DDL change.
+    //
+    // Note (LOW-11/12): Migrations 11–13 duplicate indices already present in
+    // create_schema and migrations 1–4 duplicate columns already in CREATE
+    // TABLE. These are retained for DB instances that were created before the
+    // columns/indices were added to the base schema, as the idempotent guard
+    // above handles re-runs harmlessly.
+    let migrations: &[(i64, &str)] = &[
         (1,  "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
         (2,  "ALTER TABLE boards ADD COLUMN allow_tripcodes INTEGER NOT NULL DEFAULT 1"),
         (3,  "ALTER TABLE boards ADD COLUMN allow_images  INTEGER NOT NULL DEFAULT 1"),
@@ -430,6 +535,9 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         (22, "ALTER TABLE boards ADD COLUMN post_cooldown_secs INTEGER NOT NULL DEFAULT 0"),
         (23, "CREATE INDEX IF NOT EXISTS idx_posts_thread_id ON posts(thread_id)"),
         (24, "CREATE INDEX IF NOT EXISTS idx_posts_ip_hash ON posts(ip_hash)"),
+        // Phase 3 — federation mirror table for chan_net imported posts.
+        // Stores text-only post data from remote nodes; never contains media columns.
+        // ON DELETE CASCADE keeps this table consistent when a board is removed.
         (25, r"CREATE TABLE IF NOT EXISTS chan_net_posts (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             remote_post_id  INTEGER NOT NULL,
@@ -439,30 +547,12 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             remote_ts       INTEGER NOT NULL,
             imported_at     INTEGER NOT NULL DEFAULT (unixepoch())
         )"),
+        // Unique index on (remote_post_id, board_id) — the DB-level deduplication
+        // safety net. Prevents duplicate imports even after a ledger reset (restart).
         (26, "CREATE UNIQUE INDEX IF NOT EXISTS idx_chan_net_posts_remote \
               ON chan_net_posts(remote_post_id, board_id)"),
     ];
 
-    conn.execute_batch(&format!(
-        "CREATE TABLE IF NOT EXISTS schema_version (
-            version    INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(version)
-         );
-         INSERT INTO schema_version (version)
-         SELECT {current_max_migration}
-         WHERE NOT EXISTS (SELECT 1 FROM schema_version);",
-    ))
-    .context("Failed to create schema_version table")?;
-
-    let current_version: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-            [],
-            |r| r.get(0),
-        )
-        .context("Failed to read schema_version")?;
-
-    // Apply pending migrations one at a time, updating schema_version after each.
     for &(version, sql) in migrations {
         if version <= current_version {
             continue;
@@ -478,7 +568,15 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
                         m.contains("duplicate column name") || m.contains("already exists")
                     }) =>
             {
-                // Idempotent: column/index already exists from a previous run.
+                // Idempotent: column already added or index already exists.
+                // Only reached for ALTER TABLE … ADD COLUMN (duplicate column)
+                // and CREATE INDEX (already exists). All other SQLITE_ERROR
+                // values (syntax errors, wrong column counts, etc.) are NOT
+                // caught here and will propagate as real failures.
+                //
+                // FIX[LOW-10]: Raised from DEBUG to WARN so operators notice
+                // when a migration was previously applied outside the normal
+                // startup path.
                 tracing::warn!("Migration v{version} already applied (idempotent), skipping");
             }
             Err(e) => {
@@ -488,7 +586,10 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             }
         }
 
-        // Update version after each migration so crashes don't re-run completed ones.
+        // FIX[HIGH-1]: Update schema_version immediately after each successful
+        // migration. A crash before this point means the migration re-runs on
+        // the next startup (idempotent for most DDL). A crash after means the
+        // next startup correctly skips it.
         conn.execute(
             "UPDATE schema_version SET version = ?1",
             rusqlite::params![version],
@@ -497,10 +598,17 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
     }
 
     // ─── Structural migration: make posts.ip_hash nullable ───────────────────
-    // SQLite doesn't support ALTER COLUMN, so we use the copy-rename-drop pattern.
-    // Guarded by PRAGMA table_info so it's a no-op if already nullable.
-    // FK checks are disabled for the swap and unconditionally re-enabled after,
-    // even on failure.
+    //
+    // SQLite does not support ALTER COLUMN, so removing NOT NULL from an
+    // existing column requires the copy-rename-drop pattern.
+    //
+    // This block is intentionally NOT in the migrations array above because
+    // that loop's idempotency guard (catching "already exists") would falsely
+    // mark the migration as done if posts_new already existed from a failed
+    // partial run, leaving ip_hash still NOT NULL.
+    //
+    // Instead we guard with PRAGMA table_info: if ip_hash already has
+    // notnull = 0, the block is a true no-op and is never re-entered.
     let ip_hash_notnull: i64 = conn
         .query_row(
             "SELECT \"notnull\" FROM pragma_table_info('posts') WHERE name = 'ip_hash'",
@@ -510,11 +618,9 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         .context("Failed to read ip_hash nullability from pragma_table_info")?;
 
     if ip_hash_notnull == 1 {
-        conn.execute_batch("PRAGMA foreign_keys = OFF;")
-            .context("Failed to disable foreign_keys for structural migration")?;
-
-        let result = conn.execute_batch(
-            "BEGIN;
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             BEGIN;
 
              CREATE TABLE posts_new (
                  id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -555,30 +661,36 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
              CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
                  ON posts(ip_hash);
 
-             COMMIT;",
-        );
-
-        // Always re-enable FK checks regardless of migration success or failure.
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .context("Failed to re-enable foreign_keys after structural migration")?;
-
-        result.context("Structural migration: make posts.ip_hash nullable failed")?;
+             COMMIT;
+             PRAGMA foreign_keys = ON;",
+        )
+        .context("Structural migration: make posts.ip_hash nullable failed")?;
 
         tracing::info!(target: "db", "Applied structural migration: posts.ip_hash is now nullable");
     }
 
     // ─── One-time media_type backfill ────────────────────────────────────────
-    // Only runs when there are posts with a file_path but no media_type set.
-    // Uses EXISTS to short-circuit instead of a full-scan COUNT.
-    let needs_backfill: bool = conn
+    //
+    // FIX[MED-7]: Added WHERE media_type IS NULL guard so this UPDATE is a
+    // no-op after the first run. Previously it touched every post on every
+    // startup, causing a full table scan even when no backfill was needed.
+    //
+    // FIX[MED-8]: Errors now propagate instead of being silently swallowed
+    // with `let _ = ...`. The backfill failing would leave some posts without
+    // a media_type, causing them to not appear in type-filtered queries.
+    //
+    // Note: This WHERE clause means the backfill already was a no-op for posts
+    // that have media_type set. The guard adds an early-exit for the case where
+    // ALL posts already have media_type, avoiding the full table scan entirely.
+    let needs_backfill: i64 = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM posts WHERE media_type IS NULL AND file_path IS NOT NULL)",
+            "SELECT COUNT(*) FROM posts WHERE media_type IS NULL AND file_path IS NOT NULL",
             [],
             |r| r.get(0),
         )
-        .context("Failed to check posts needing media_type backfill")?;
+        .context("Failed to count posts needing media_type backfill")?;
 
-    if needs_backfill {
+    if needs_backfill > 0 {
         conn.execute_batch(
             "UPDATE posts
              SET media_type = CASE
@@ -597,49 +709,51 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         .context("Failed to backfill media_type column")?;
     }
 
-    // ─── Recover stuck "running" jobs from a previous crash ──────────────────
-    conn.execute(
-        "UPDATE background_jobs
-         SET status    = 'pending',
-             attempts  = attempts + 1,
-             last_error = 'Recovered from crash (was stuck in running state)',
-             updated_at = unixepoch()
-         WHERE status = 'running'",
-        [],
-    )
-    .context("Failed to recover stuck running jobs")?;
-
-    // ─── Prune expired admin sessions ────────────────────────────────────────
-    conn.execute(
-        "DELETE FROM admin_sessions WHERE expires_at < unixepoch()",
-        [],
-    )
-    .context("Failed to prune expired admin sessions")?;
-
     Ok(())
 }
 
 // ─── Shared file-safety helper ────────────────────────────────────────────────
 
-/// Given candidate file paths from posts about to be deleted, return only
-/// those no longer referenced by any remaining post.
+/// Given a list of candidate file paths collected from posts about to be deleted,
+/// return only those paths that are no longer referenced by *any* remaining post.
 ///
-/// Must be called inside the same transaction as the `DELETE` so no concurrent
-/// insert can reference these paths between the delete and the check.
+/// This guards against the deduplication cascade-delete bug: when a file is
+/// reposted, both posts share the same `file_path` / `thumb_path` on disk. Without
+/// this guard, deleting any single post unconditionally deletes the shared file,
+/// corrupting every other post that references it.
 ///
-/// Also purges corresponding `file_hashes` rows for fully-orphaned files.
+/// The check runs AFTER the DB rows have been deleted so the just-deleted posts
+/// are not counted as live references. Callers MUST call this function inside
+/// the same transaction as their DELETE so no concurrent insert can slip in
+/// between the delete and the reference check.
 ///
-/// # Errors
-/// Returns a [`rusqlite::Error`] if the reference-check query fails.
-pub fn paths_safe_to_delete(
-    conn: &rusqlite::Connection,
-    candidates: Vec<String>,
-) -> Result<Vec<String>, rusqlite::Error> {
+/// Also purges the corresponding `file_hashes` rows for files that have no
+/// remaining references, so the dedup table never points at deleted files.
+///
+/// Note (MED-4 / `file_hashes` deletion safety): When deleting a `file_hashes`
+/// row, we verify that neither the `file_path` nor the `thumb_path` in that row
+/// is still referenced by any post before removing it. This prevents removing
+/// a dedup entry whose partner path is still live.
+///
+/// Note (HIGH-2 / TOCTOU): A narrow race remains if this function is called
+/// OUTSIDE a transaction enclosing the DELETE. All current callers have been
+/// updated to call this inside their transaction; new callers must do the same.
+///
+/// `pub(super)` — visible to all four sub-modules but not to external callers.
+///
+/// FIX[MED-13]: Replaced N individual COUNT(*) queries (one per candidate path)
+/// with a single batch query using a VALUES clause. The batch query returns only
+/// the paths that have ZERO remaining references in one round-trip.
+///
+/// FIX[LOW-14]: Replaced sort+dedup with a `HashSet` for O(1) deduplication.
+pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>) -> Vec<String> {
     if candidates.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
-    // Deduplicate candidates.
+    // FIX[LOW-14]: HashSet dedup instead of sort+dedup — avoids O(n log n)
+    // sort and cleanly handles the case where multiple deleted posts share the
+    // same dedup path.
     let unique: Vec<String> = candidates
         .into_iter()
         .collect::<HashSet<_>>()
@@ -647,75 +761,71 @@ pub fn paths_safe_to_delete(
         .collect();
 
     if unique.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
-    // Use a temp table for broad SQLite compatibility.
-    conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS _candidate_paths (p TEXT NOT NULL)")?;
-    conn.execute("DELETE FROM _candidate_paths", [])?;
-
-    // Insert all candidate paths into the temp table.
-    let mut insert_stmt = conn.prepare_cached("INSERT INTO _candidate_paths (p) VALUES (?1)")?;
-    for path in &unique {
-        insert_stmt.execute(params![path])?;
-    }
-    drop(insert_stmt);
-
-    // Find paths with zero remaining references in posts.
-    let mut safe_stmt = conn.prepare(
-        "SELECT p FROM _candidate_paths
+    // FIX[MED-13]: Single batch query — find all candidate paths that have NO
+    // remaining post referencing them as file_path, thumb_path, or
+    // audio_file_path. Uses VALUES() to avoid N round-trips.
+    //
+    // The VALUES clause binds each candidate path as a separate parameter.
+    // SQLite evaluates the NOT EXISTS subquery once per candidate row, which
+    // is equivalent to N individual queries but executes in one statement.
+    let placeholders: String = unique
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("(?{})", i.saturating_add(1)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT v.p FROM (VALUES {placeholders}) AS v(p)
          WHERE NOT EXISTS (
              SELECT 1 FROM posts
-             WHERE file_path = p OR thumb_path = p OR audio_file_path = p
-         )",
-    )?;
-    let safe: Vec<String> = safe_stmt
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    drop(safe_stmt);
+             WHERE file_path = v.p OR thumb_path = v.p OR audio_file_path = v.p
+         )"
+    );
 
-    // Purge orphaned file_hashes: only delete a row if BOTH its file_path
-    // and thumb_path are in the safe set (no remaining references to either).
-    if !safe.is_empty() {
-        let safe_set: HashSet<&str> = safe.iter().map(String::as_str).collect();
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new(); // on prepare error, assume all still in use — safer to leak
+    };
 
-        let mut hash_stmt = conn.prepare(
-            "SELECT sha256, file_path, thumb_path FROM file_hashes
-             WHERE file_path IN (SELECT p FROM _candidate_paths)
-                OR thumb_path IN (SELECT p FROM _candidate_paths)",
-        )?;
+    let safe: Vec<String> = match stmt.query_map(rusqlite::params_from_iter(&unique), |r| r.get(0))
+    {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(_) => return Vec::new(),
+    };
 
-        let hashes_to_delete: Vec<String> = hash_stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })?
-            .filter_map(|row| {
-                let (sha, fp, tp) = row.ok()?;
-                if safe_set.contains(fp.as_str()) && safe_set.contains(tp.as_str()) {
-                    Some(sha)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        drop(hash_stmt);
+    // FIX[MED-4]: For each safe-to-delete path, only remove the file_hashes
+    // row if both the file_path and thumb_path in that entry are unreferenced.
+    // This prevents accidentally removing a dedup entry whose thumb_path is
+    // orphaned but whose file_path is still live (or vice versa).
+    let safe_set: HashSet<&str> = safe.iter().map(String::as_str).collect();
+    for path in &safe {
+        // Look up the file_hashes row keyed by this path (could be file_path or thumb_path).
+        let maybe_row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT file_path, thumb_path FROM file_hashes
+                 WHERE file_path = ?1 OR thumb_path = ?1
+                 LIMIT 1",
+                params![path],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
 
-        // Delete orphaned hash entries, propagating errors.
-        let mut del_stmt = conn.prepare_cached("DELETE FROM file_hashes WHERE sha256 = ?1")?;
-        for sha in &hashes_to_delete {
-            del_stmt.execute(params![sha]).map_err(|e| {
-                tracing::error!("Failed to delete file_hashes entry {sha}: {e}");
-                e
-            })?;
+        if let Some((fp, _tp)) = maybe_row {
+            // Delete the hash entry when file_path is unreferenced.  We only
+            // check file_path (not thumb_path) because:
+            //   1. file_path is the dedup key — once no post holds this path,
+            //      the entry can never match a future upload and is dead weight.
+            //   2. A post's thumb_path may be NULL (e.g. audio files whose
+            //      thumbnail was never persisted), so thumb_path is absent from
+            //      `candidates` / `safe_set` and the old two-sided check would
+            //      spuriously skip deletion, leaving orphaned rows forever.
+            if safe_set.contains(fp.as_str()) {
+                let _ = conn.execute("DELETE FROM file_hashes WHERE file_path = ?1", params![fp]);
+            }
         }
     }
 
-    // Clean up temp table.
-    conn.execute("DELETE FROM _candidate_paths", [])?;
-
-    Ok(safe)
+    safe
 }

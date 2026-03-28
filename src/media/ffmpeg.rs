@@ -14,24 +14,8 @@
 //     operators can diagnose codec or format issues without reading raw logs.
 
 use anyhow::{Context, Result};
-use std::io::Read as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-
-/// Maximum bytes we will read from ffmpeg's stderr to prevent unbounded
-/// memory consumption from a misbehaving or adversarial subprocess.
-const MAX_STDERR_BYTES: u64 = 64 * 1024; // 64 KiB
-
-/// Maximum bytes we will read from ffprobe's stdout (codec name is tiny).
-const MAX_STDOUT_BYTES: u64 = 4096;
-
-/// Fallback deadline offset used when the configured timeout is so large that
-/// `Instant::checked_add` returns `None`.
-const FALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
-
-/// Default initial capacity for read buffers.
-const DEFAULT_BUF_CAPACITY: usize = 4096;
 
 /// Probe whether the `ffmpeg` binary is reachable on the current PATH.
 ///
@@ -61,129 +45,23 @@ pub fn detect_ffmpeg() -> bool {
 /// Returns `Ok(())` on exit code 0, or an `Err` containing the trimmed
 /// stderr output on any non-zero exit.
 ///
-/// FIX[C-7]: The previous implementation used `Command::output()`, a blocking
-/// wait with no timeout. If ffmpeg hangs (malformed input, stuck on degenerate
-/// GIF, I/O wait on a full filesystem), the `spawn_blocking` thread is held
-/// forever. With enough concurrent stuck uploads, `Tokio`'s blocking thread pool
-/// exhausts and all subsequent `spawn_blocking` calls — including DB queries —
-/// queue indefinitely.
-///
-/// The new implementation polls `try_wait()` in a loop and kills the child
-/// process if it exceeds `CONFIG.ffmpeg_timeout_secs`.
-///
 /// # Errors
 /// Returns an error if ffmpeg cannot be spawned (binary missing, permission
-/// denied), if the process exits with a non-zero status code, or if it times out.
+/// denied) or if the process exits with a non-zero status code.
 pub fn run_ffmpeg(args: &[&str]) -> Result<()> {
-    let timeout = Duration::from_secs(crate::config::CONFIG.ffmpeg_timeout_secs);
-
-    run_command_with_timeout("ffmpeg", args, timeout)
-}
-
-/// Compute a deadline `Instant` from now, falling back to [`FALLBACK_TIMEOUT`]
-/// if the requested duration overflows `Instant`.
-fn deadline_from_now(timeout: Duration) -> Instant {
-    let now = Instant::now();
-    now.checked_add(timeout)
-        .unwrap_or_else(|| now.checked_add(FALLBACK_TIMEOUT).unwrap_or(now))
-}
-
-/// Read up to `limit` bytes from a reader into a `Vec<u8>`.
-///
-/// Uses `Read::take` to enforce the cap without risking panics from manual
-/// index arithmetic.
-fn read_capped(reader: impl std::io::Read, limit: u64) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(DEFAULT_BUF_CAPACITY);
-    let mut limited = reader.take(limit);
-    let _ = limited.read_to_end(&mut buf);
-    buf
-}
-
-/// Spawn a background thread that drains a piped stream up to `limit` bytes.
-///
-/// Returns a `JoinHandle` whose `join()` yields the captured bytes.  If the
-/// handle is `None` (pipe was not opened), the thread immediately returns an
-/// empty `Vec`.
-fn spawn_drain_thread(
-    handle: Option<impl std::io::Read + Send + 'static>,
-    limit: u64,
-) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || handle.map_or_else(Vec::new, |s| read_capped(s, limit)))
-}
-
-/// Poll a child process until it exits or the deadline is reached.
-///
-/// Returns the collected bytes from the join handle on normal exit.
-/// Kills and reaps the child on timeout.  `extra_threads` are joined on
-/// timeout to prevent thread leaks.
-fn poll_child(
-    child: &mut std::process::Child,
-    deadline: Instant,
-    timeout: Duration,
-    program: &str,
-) -> Result<std::process::ExitStatus> {
-    let pid = child.id();
-    let mut poll_interval = Duration::from_millis(5);
-    let max_poll_interval = Duration::from_millis(100);
-
-    loop {
-        match child.try_wait().context("try_wait failed")? {
-            Some(status) => return Ok(status),
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                anyhow::bail!(
-                    "{program} timed out after {}s (pid {})",
-                    timeout.as_secs(),
-                    pid
-                );
-            }
-            None => {
-                std::thread::sleep(poll_interval);
-                poll_interval = std::cmp::min(poll_interval.saturating_mul(2), max_poll_interval);
-            }
-        }
-    }
-}
-
-/// Execute an arbitrary command with the given argument slice and a timeout.
-///
-/// Stderr is captured (up to [`MAX_STDERR_BYTES`]) and included in any error
-/// message. Stdout is discarded. The child process is killed and reaped if
-/// the deadline is exceeded.
-///
-/// Stderr is drained in a background thread to prevent pipe-buffer deadlocks.
-fn run_command_with_timeout(program: &str, args: &[&str], timeout: Duration) -> Result<()> {
-    let mut child = Command::new(program)
+    let output = Command::new("ffmpeg")
         .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("failed to spawn {program} — is it installed and on PATH?"))?;
+        .output()
+        .context("failed to spawn ffmpeg — is it installed and on PATH?")?;
 
-    // Drain stderr in a background thread to avoid deadlocking when the OS
-    // pipe buffer fills up.
-    let stderr_thread = spawn_drain_thread(child.stderr.take(), MAX_STDERR_BYTES);
-
-    let deadline = deadline_from_now(timeout);
-
-    match poll_child(&mut child, deadline, timeout, program) {
-        Ok(status) => {
-            let stderr = stderr_thread.join().unwrap_or_default();
-            if status.success() {
-                return Ok(());
-            }
-            Err(anyhow::anyhow!(
-                "{program} exited with {}: {}",
-                status,
-                String::from_utf8_lossy(&stderr).trim()
-            ))
-        }
-        Err(e) => {
-            // Timeout or try_wait failure — join the drain thread to avoid leaks.
-            let _ = stderr_thread.join();
-            Err(e)
-        }
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "ffmpeg exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 
@@ -264,11 +142,8 @@ pub fn ffmpeg_gif_to_webm(input: &Path, output: &Path) -> Result<()> {
 /// Works for both static images and video/animation sources.
 ///
 /// # Errors
-/// Returns an error if `max_dim` is zero, or if ffmpeg exits non-zero or
-/// cannot be spawned.
+/// Returns an error if ffmpeg exits non-zero or cannot be spawned.
 pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
-    anyhow::ensure!(max_dim > 0, "max_dim must be > 0 for thumbnail generation");
-
     let in_str = path_to_str(input)?;
     let out_str = path_to_str(output)?;
     let scale = format!("scale='if(gt(iw,ih),{max_dim},-2)':'if(gt(iw,ih),-2,{max_dim})'");
@@ -297,23 +172,11 @@ pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()>
 /// Returns the lowercase codec name (e.g. `"vp9"`, `"av1"`, `"h264"`) on
 /// success.  `ffprobe` must be on the same PATH as `ffmpeg`.
 ///
-/// Accepts anything that can be referenced as a `Path` — including `&str`,
-/// `&String`, `&Path`, and `&PathBuf`.
-///
 /// # Errors
-/// Returns an error if `ffprobe` cannot be spawned, exits non-zero, times
-/// out, or its output contains no recognisable codec name.
-pub fn probe_video_codec(path: impl AsRef<Path>) -> Result<String> {
-    let path = path.as_ref();
-    let path_str = path_to_str(path)?;
-    let timeout = Duration::from_secs(crate::config::CONFIG.ffmpeg_timeout_secs);
-
-    run_probe_with_timeout(path_str, timeout)
-}
-
-/// Inner implementation of [`probe_video_codec`] with timeout support.
-fn run_probe_with_timeout(path: &str, timeout: Duration) -> Result<String> {
-    let mut child = Command::new("ffprobe")
+/// Returns an error if `ffprobe` cannot be spawned, exits non-zero, or its
+/// output contains no recognisable codec name.
+pub fn probe_video_codec(path: &str) -> Result<String> {
+    let output = std::process::Command::new("ffprobe")
         .args([
             "-v",
             "quiet",
@@ -325,48 +188,28 @@ fn run_probe_with_timeout(path: &str, timeout: Duration) -> Result<String> {
             "default=noprint_wrappers=1:nokey=1",
             path,
         ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .output()
         .context("failed to spawn ffprobe — is it installed and on PATH?")?;
 
-    // Drain stdout and stderr in background threads.
-    let stdout_thread = spawn_drain_thread(child.stdout.take(), MAX_STDOUT_BYTES);
-    let stderr_thread = spawn_drain_thread(child.stderr.take(), MAX_STDERR_BYTES);
-
-    let deadline = deadline_from_now(timeout);
-
-    match poll_child(&mut child, deadline, timeout, "ffprobe") {
-        Ok(status) => {
-            let stdout_bytes = stdout_thread.join().unwrap_or_default();
-            let stderr_bytes = stderr_thread.join().unwrap_or_default();
-
-            if !status.success() {
-                return Err(anyhow::anyhow!(
-                    "ffprobe exited with {}: {}",
-                    status,
-                    String::from_utf8_lossy(&stderr_bytes).trim()
-                ));
-            }
-
-            let codec = String::from_utf8_lossy(&stdout_bytes)
-                .trim()
-                .to_ascii_lowercase();
-
-            if codec.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "ffprobe returned no codec name for: {path}"
-                ));
-            }
-
-            Ok(codec)
-        }
-        Err(e) => {
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
-            Err(e)
-        }
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "ffprobe exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
+
+    let codec = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_ascii_lowercase();
+
+    if codec.is_empty() {
+        return Err(anyhow::anyhow!(
+            "ffprobe returned no codec name for: {path}"
+        ));
+    }
+
+    Ok(codec)
 }
 
 /// Transcode a video file to `WebM` (VP9 video + Opus audio) using ffmpeg.
@@ -412,15 +255,9 @@ pub fn ffmpeg_transcode_to_webm(input: &Path, output: &Path) -> Result<()> {
 /// page themes.
 ///
 /// # Errors
-/// Returns an error if `width` or `height` is zero, or if ffmpeg exits
-/// non-zero or cannot be spawned.
+/// Returns an error if ffmpeg exits non-zero or cannot be spawned.
 #[allow(dead_code)]
 pub fn ffmpeg_audio_waveform(input: &Path, output: &Path, width: u32, height: u32) -> Result<()> {
-    anyhow::ensure!(
-        width > 0 && height > 0,
-        "waveform dimensions must be > 0 (got {width}x{height})"
-    );
-
     let in_str = path_to_str(input)?;
     let out_str = path_to_str(output)?;
     let filter = format!("showwavespic=s={width}x{height}:colors=0x888888");
@@ -449,31 +286,6 @@ fn path_to_str(p: &Path) -> Result<&str> {
         .ok_or_else(|| anyhow::anyhow!("path contains non-UTF-8 characters: {}", p.display()))
 }
 
-/// Run `ffmpeg -encoders` once and return the raw stdout as a `String`.
-///
-/// Returns `None` if ffmpeg cannot be spawned or fails.
-fn query_encoders() -> Option<String> {
-    Command::new("ffmpeg")
-        .args(["-encoders"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-}
-
-/// Check whether a specific encoder name appears in `ffmpeg -encoders` output.
-///
-/// Parses each line into whitespace-delimited tokens and checks the second
-/// token (the encoder name) for an exact match, avoiding false substring hits.
-fn has_encoder(stdout: &str, name: &str) -> bool {
-    stdout.lines().any(|line| {
-        let mut tokens = line.split_whitespace();
-        tokens.next(); // skip flags column
-        tokens.next().is_some_and(|n| n == name)
-    })
-}
-
 /// Probe whether the current ffmpeg binary has the `libwebp` encoder compiled in.
 ///
 /// Runs `ffmpeg -encoders` and scans stdout for a line containing `libwebp`.
@@ -484,7 +296,19 @@ fn has_encoder(stdout: &str, name: &str) -> bool {
 /// where blocking is acceptable.
 #[must_use]
 pub fn check_webp_encoder() -> bool {
-    query_encoders().is_some_and(|s| has_encoder(&s, "libwebp") || has_encoder(&s, "libwebp_anim"))
+    let output = Command::new("ffmpeg")
+        .args(["-encoders"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.lines().any(|line| line.contains("libwebp"))
+        }
+        Err(_) => false,
+    }
 }
 
 /// Probe whether the current ffmpeg binary has the `libvpx-vp9` encoder compiled in.
@@ -496,7 +320,19 @@ pub fn check_webp_encoder() -> bool {
 /// This is a synchronous, blocking call intended for use at server startup.
 #[must_use]
 pub fn check_vp9_encoder() -> bool {
-    query_encoders().is_some_and(|s| has_encoder(&s, "libvpx-vp9"))
+    let output = Command::new("ffmpeg")
+        .args(["-encoders"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.lines().any(|line| line.contains("libvpx-vp9"))
+        }
+        Err(_) => false,
+    }
 }
 
 /// Probe whether the current ffmpeg binary has the `libopus` encoder compiled in.
@@ -508,5 +344,17 @@ pub fn check_vp9_encoder() -> bool {
 /// This is a synchronous, blocking call intended for use at server startup.
 #[must_use]
 pub fn check_opus_encoder() -> bool {
-    query_encoders().is_some_and(|s| has_encoder(&s, "libopus"))
+    let output = Command::new("ffmpeg")
+        .args(["-encoders"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.lines().any(|line| line.contains("libopus"))
+        }
+        Err(_) => false,
+    }
 }

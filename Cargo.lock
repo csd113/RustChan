@@ -479,17 +479,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "atty"
-version = "0.2.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9b39be18770d11421cdb1b9947a45dd3f37e93092cbf377614828a319d5fee8"
-dependencies = [
- "hermit-abi",
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1897,21 +1886,10 @@ dependencies = [
 ]
 
 [[package]]
-<<<<<<< HEAD
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi",
-]
-=======
 name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
->>>>>>> origin/indev-1.1.0-alpha-4
 
 [[package]]
 name = "fslock"
@@ -2242,18 +2220,9 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hermit-abi"
-<<<<<<< HEAD
-version = "0.1.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62b467343b94ba476dcb2500d242dadbb39557df889310ac77c5d99100aaac33"
-dependencies = [
- "libc",
-]
-=======
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
->>>>>>> origin/indev-1.1.0-alpha-4
 
 [[package]]
 name = "hex"
@@ -4069,7 +4038,6 @@ dependencies = [
  "anyhow",
  "argon2",
  "arti-client",
- "atty",
  "axum",
  "axum-extra",
  "axum-server",
@@ -4078,7 +4046,6 @@ dependencies = [
  "crossterm",
  "dashmap",
  "data-encoding",
- "fs2",
  "futures",
  "hex",
  "hyper",
@@ -4114,7 +4081,6 @@ dependencies = [
  "toml 1.1.0+spec-1.1.0",
  "tor-cell",
  "tor-hsservice",
- "tor-rtcompat",
  "tower",
  "tower-http",
  "tracing",
