@@ -513,6 +513,7 @@ async fn publish_onion_address(
     tracing::info!(target: "rustchan::detect", "Tor: hidden service active");
     *onion_address.write().await = Some(onion_name.to_string());
 
+<<<<<<< HEAD
     if crate::logging::is_tty() {
         let keys_path = data_dir.join("arti_state/keys");
         let keys_display = keys_path.display().to_string();
@@ -526,6 +527,13 @@ async fn publish_onion_address(
         let url_line = format!("http://{onion_name}");
 
         // Inner width between ║ and ║ is 78 characters (80 total with borders)
+=======
+    // When the full-screen TUI is active the dashboard shows the onion address
+    // on its next render tick.  Printing the banner box here would corrupt the
+    // alternate screen, so we skip it.  In non-TUI mode (piped/systemd) or when
+    // the user is on a plain TTY without the TUI, print the full box as before.
+    if crate::logging::is_tty() && !crate::logging::is_tui_active() {
+>>>>>>> origin/indev-1.1.0-alpha-4
         crate::logging::console_print_raw(&format!(
             "\n\
             ╔══════════════════════════════════════════════════════════════════════════════╗\n\

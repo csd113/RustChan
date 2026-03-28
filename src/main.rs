@@ -18,7 +18,7 @@
 //
 // All HTTP server logic lives in server/server.rs.
 // CLI types and admin commands live in server/cli.rs.
-// Terminal console and startup banner live in server/console.rs.
+// Terminal console and startup banner live in server/console/.
 // ChanNet / RustWave gateway lives in chan_net/mod.rs (second listener, port 7070).
 //
 // ─── Architecture notes (tech debt) ─────────────────────────────────────────
@@ -50,7 +50,11 @@ mod middleware;
 mod models;
 mod server;
 mod templates;
+<<<<<<< HEAD
 mod terminal;
+=======
+pub(crate) mod tls;
+>>>>>>> origin/indev-1.1.0-alpha-4
 mod utils;
 mod workers;
 
@@ -259,6 +263,7 @@ fn load_blocking_threads() -> anyhow::Result<usize> {
 // every `spawn_blocking` call — page renders, DB queries, file I/O.
 
 fn main() -> anyhow::Result<()> {
+<<<<<<< HEAD
     // ── Auto-terminal relaunch (double-click / no-TTY support) ───────────
     //
     // Must be the very first thing in main() — before arg parsing, logging,
@@ -268,6 +273,72 @@ fn main() -> anyhow::Result<()> {
     // the current headless process immediately.
     if terminal::relaunch_in_terminal_if_needed()? {
         return Ok(());
+=======
+    // ── Double-click / no-TTY guard ───────────────────────────────────────────
+    // When launched from a file manager (Linux) or Explorer (Windows), stdout
+    // is not a TTY. Re-attach to a terminal so the banner, first-run wizard,
+    // and keyboard console are visible to the user.
+    //
+    // RUSTCHAN_SPAWNED prevents the child from looping back here.
+    {
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() && std::env::var("RUSTCHAN_SPAWNED").is_err() {
+            #[cfg(target_os = "linux")]
+            {
+                let exe = std::env::current_exe()?;
+                let exe_str = exe.to_string_lossy();
+                // Try terminal emulators in order of likelihood.
+                // CRITICAL: Command::new takes the *binary name only*.
+                // Passing "env RUSTCHAN_SPAWNED=1 /path/to/bin" as one string
+                // to Command::new is the execve bug — the Linux kernel does not
+                // tokenise it; it looks for a file literally named that string.
+                for term in [
+                    "xterm",
+                    "gnome-terminal",
+                    "konsole",
+                    "xfce4-terminal",
+                    "x-terminal-emulator",
+                ] {
+                    if std::process::Command::new(term) // ← binary name only
+                        .arg("-e")
+                        .arg(exe_str.as_ref()) // ← separate arg
+                        .env("RUSTCHAN_SPAWNED", "1") // ← env set on child, not in arg string
+                        .spawn()
+                        .is_ok()
+                    {
+                        return Ok(());
+                    }
+                }
+                // No terminal emulator found — fall through and run headless.
+            }
+            #[cfg(target_os = "windows")]
+            {
+                // On Windows, AllocConsole() attaches a new console window
+                // in-process. No re-exec needed; execution continues below
+                // with stdout now connected to the new window.
+                unsafe {
+                    windows_sys::Win32::System::Console::AllocConsole();
+                }
+            }
+        }
+    }
+
+    // Resolve the binary directory, then derive rustchan-data/ so the log
+    // file lands in <exe-dir>/rustchan-data/ alongside the database and
+    // uploads.  Falls back to "./rustchan-data" if the exe path cannot be
+    // determined.
+    let binary_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::PathBuf::from))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    // Create rustchan-data/ before init_logging so the rolling file appender
+    // can open the directory immediately on startup.  run_server() also calls
+    // create_dir_all on this path; calling it twice is safe.
+    let data_dir = binary_dir.join("rustchan-data");
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!("Warning: could not create rustchan-data directory: {e}");
+>>>>>>> origin/indev-1.1.0-alpha-4
     }
 
     // ── Parse CLI arguments first ────────────────────────────────────────
@@ -317,6 +388,18 @@ fn main() -> anyhow::Result<()> {
     // ── Initialise logging ───────────────────────────────────────────────
     logging::init_logging(&data_dir);
 
+    // Install a panic hook that restores the terminal before printing the
+    // panic message.  Without this, a panic while the TUI is active leaves
+    // the terminal in raw/alternate-screen mode and the operator sees nothing.
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // cleanup() is a no-op if the TUI was never started or already cleaned up.
+            crate::server::cleanup();
+            default_hook(info);
+        }));
+    }
+
     tracing::info!(
         target: "startup",
         version = env!("CARGO_PKG_VERSION"),
@@ -348,9 +431,31 @@ fn main() -> anyhow::Result<()> {
         tokio::select! {
             biased; // prefer checking shutdown first when both are ready
 
+<<<<<<< HEAD
             // FIX 7: Use `()` instead of `_` since shutdown_signal() returns `()`.
             () = shutdown_signal() => {
                 tracing::info!("Shutdown signal received — draining connections");
+=======
+    rt.block_on(async move {
+        // Install the ring crypto provider once before anything else accesses
+        // rustls. ok() = harmless if already installed (tests, re-runs).
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+
+        match cli.command {
+            // Default (no subcommand) or explicit `serve`: start the server.
+            None | Some(server::cli::Command::Serve) => {
+                let result = server::run_server(cli.port, cli.chan_net).await;
+                // Restore terminal unconditionally after the server exits
+                // (graceful shutdown, SIGTERM, etc.).  cleanup() is idempotent.
+                crate::server::cleanup();
+                result
+            }
+
+            Some(server::cli::Command::Admin { action }) => {
+                server::cli::run_admin(action)?;
+>>>>>>> origin/indev-1.1.0-alpha-4
                 Ok(())
             }
             server_result = server::run_server(port, chan_net) => {

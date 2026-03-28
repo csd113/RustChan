@@ -112,6 +112,10 @@ impl IntoResponse for ChanError {
                     format!("API error {status}: {detail}"),
                 )
             }
+            AppError::Tls(msg) => {
+                tracing::error!("ChanNet TLS error: {msg}");
+                (StatusCode::INTERNAL_SERVER_ERROR, msg)
+            }
         };
 
         (status, Json(json!({ "error": message }))).into_response()

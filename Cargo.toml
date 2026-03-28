@@ -2,18 +2,18 @@
 name = "rustchan"
 version = "1.1.0-alpha-3"
 edition = "2021"
-# axum 0.8 requires Rust 1.75; that is the effective floor for this project.
+# axum 0.8 requires Rust 1.75; arti-client 0.40 bumps the effective floor to
+# 1.90 — keep both fields in sync.
 rust-version = "1.90"
 license = "MIT"
-# FIX[LOW-1]: Removed hardware-specific description. This binary is portable
-# and targets any architecture/OS that Rust supports.
 description = "Self-contained imageboard — single binary, zero runtime dependencies"
 
 # cargo-msrv <0.16 reads package.metadata.msrv instead of the Cargo-standard
-# rust-version field; keep both so `cargo msrv verify` works regardless of
-# which version of cargo-msrv is installed.
+# rust-version field; keep both in sync so `cargo msrv verify` works regardless
+# of which version of cargo-msrv is installed.
 [package.metadata]
-msrv = "1.75"
+# FIX[MSRV]: was "1.75" — updated to match rust-version above.
+msrv = "1.90"
 
 [profile.release]
 opt-level      = 3
@@ -83,7 +83,18 @@ regex     = "1"
 # by_index_raw which is now by_index_without_decompression in zip 8).
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
+# ── HTTP client ────────────────────────────────────────────────────────────────
+# reqwest for federation push (chan_refresh) and pull (chan_poll).
+# default-features = false  →  prevents the default "native-tls" backend from
+#                               being compiled in.
+# rustls-tls-webpki-roots   →  bundles the Mozilla root store; avoids any
+#                               dependency on the OS certificate store at
+#                               compile time or runtime — required for
+#                               aarch64-unknown-linux-gnu cross-compilation.
+# Verify: cargo tree --edges features | grep -iE "openssl|native.tls"
+reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "rustls-tls-webpki-roots"] }
 
+<<<<<<< HEAD
 openssl = { version = "0.10", features = ["vendored"] }
 fs2 = "0.4"
 tor-rtcompat = "0.40"
@@ -92,8 +103,10 @@ tor-rtcompat = "0.40"
 # Step 1.1: reqwest for federation push (chan_refresh) and pull (chan_poll).
 # rustls-tls avoids a native OpenSSL dependency — single static binary stays intact.
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "rustls-tls"] }
+=======
+>>>>>>> origin/indev-1.1.0-alpha-4
 # Pin to patched version — fixes RUSTSEC-2026-0049 (CRL distribution point
-# matching bug). Transitive dep via reqwest/arti-client.
+# matching bug). Transitive dep via reqwest / arti-client.
 rustls-webpki = "0.103.10"
 
 tracing            = "0.1"
@@ -104,16 +117,74 @@ thiserror = "2"
 tempfile  = "3"
 libc      = "0.2"
 
-# F-09: Use rustls instead of native-tls to keep the binary self-contained.
-# native-tls pulls in OpenSSL as a transitive dep, causing a dynamic link
-# against libssl/libcrypto — contradicting the rustls-tls choice on reqwest.
-# Verify post-change: cargo tree --edges features | grep openssl (expect nothing)
-arti-client   = { version = "0.40", features = ["tokio", "rustls", "onion-service-service"] }
-tor-hsservice = { version = "0.40" }
-tor-cell      = { version = "0.40" }
+# ── Tor / onion-service stack ──────────────────────────────────────────────────
+# F-09: Use rustls throughout — native-tls would pull in OpenSSL as a
+# transitive dep, causing a dynamic link against libssl/libcrypto and breaking
+# cross-compilation to aarch64-unknown-linux-gnu.
+#
+# CRITICAL: `default-features = false` is REQUIRED on every arti crate.
+# Cargo features are purely additive — without it, `arti-client`'s default
+# feature set enables `native-tls` IN ADDITION TO `rustls`, pulling in
+# openssl-sys even though rustls is also listed. The `rustls` feature alone
+# does not prevent the native-tls default from activating.
+#
+# Post-change verification:
+#   cargo tree --edges features | grep -iE "openssl|native.tls"   # expect nothing
+#   cargo tree -i openssl-sys                                       # expect error: not found
+arti-client = { version = "0.40", default-features = false, features = ["tokio", "rustls", "onion-service-service"] }
+
+# tor-hsservice / tor-cell: also part of the arti workspace.  Their `full`
+# default feature bundle can activate the native-tls TLS backend through
+# tor-rtcompat.  Disable defaults; add back only what the build requires.
+# If compilation fails with "feature X not found", re-add that feature here.
+tor-hsservice = { version = "0.40", default-features = false }
+tor-cell      = { version = "0.40", default-features = false }
+
 futures       = "0.3"
 sha3          = "0.10"
 data-encoding = "2"
+
+# ── TLS ───────────────────────────────────────────────────────────────────────
+# rustls-pki-types: standalone PKI types crate split out of rustls 0.23+.
+# Required directly by src/tls/mod.rs (CertificateDer, PrivateKeyDer, PemObject).
+rustls-pki-types = "1.9"
+tokio-rustls   = "0.26"
+rustls         = { version = "0.23", features = ["ring"] }
+
+# Optional — gated by Cargo features
+rustls-acme    = { version = "0.12", features = ["tokio"], optional = true }
+rcgen          = { version = "0.13", optional = true }
+pem-rfc7468    = { version = "0.7",  optional = true }
+x509-cert      = { version = "0.2",  optional = true }
+
+# HTTPS listen integration for Axum (handles Static cert path)
+axum-server    = { version = "0.8", features = ["tls-rustls-no-provider"] }
+hyper          = { version = "1",   features = ["http1", "http2", "server"] }
+hyper-util     = { version = "0.1", features = ["tokio", "server"] }
+
+# ── Terminal UI ───────────────────────────────────────────────────────────────
+# crossterm: required by src/server/console/ (wizard.rs, input.rs, mod.rs).
+# Provides cross-platform terminal control (cursor, events, raw mode).
+crossterm = "0.28"
+
+[features]
+default         = ["tls-self-signed"]
+tls-self-signed = ["dep:rcgen", "dep:pem-rfc7468", "dep:x509-cert"]
+tls-acme        = ["dep:rustls-acme"]
+
+[target.'cfg(windows)'.dependencies]
+# AllocConsole — used by the double-click / no-TTY re-launch guard in main.rs
+# to attach a visible console window when the binary is started from Explorer.
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
+# ── Safety net ────────────────────────────────────────────────────────────────
+# If a future dependency version change re-introduces openssl-sys as a
+# transitive dep, the build will fail here with a clear error rather than
+# silently linking a dynamic libssl.  Uncomment and point at a stub crate if
+# `cargo tree -i openssl-sys` ever returns a result:
+#
+# [patch.crates-io]
+# openssl-sys = { path = "patches/openssl-sys-stub" }
 
 [lints.clippy]
 too_many_arguments             = "allow"

@@ -15,5 +15,9 @@ target
 /clippy_reports
 build-release.sh
 tor_audit_report.md
+<<<<<<< HEAD
 rustchan_implementation_plan_fixes.md
 src/main copy.rs
+=======
+rustchan-console-conversion.md
+>>>>>>> origin/indev-1.1.0-alpha-4

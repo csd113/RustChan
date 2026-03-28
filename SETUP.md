@@ -13,16 +13,17 @@ Complete setup instructions for Linux, macOS, and Windows.
 5. [System Setup (Linux)](#system-setup-linux)
 6. [Running as a Service](#running-as-a-service)
 7. [First-Run Configuration](#first-run-configuration)
-8. [nginx + TLS](#nginx--tls)
-9. [Tor Hidden Service](#tor-hidden-service)
-10. [ChanNet API](#channet-api)
-11. [Configuration Reference](#configuration-reference)
-12. [Admin Panel](#admin-panel)
-13. [Backups](#backups)
-14. [Raspberry Pi Tips](#raspberry-pi-tips)
-15. [Security Checklist](#security-checklist)
-16. [Updating](#updating)
-17. [Troubleshooting](#troubleshooting)
+8. [Console Interface](#console-interface)
+9. [nginx + TLS](#nginx--tls)
+10. [Tor Hidden Service](#tor-hidden-service)
+11. [ChanNet API](#channet-api)
+12. [Configuration Reference](#configuration-reference)
+13. [Admin Panel](#admin-panel)
+14. [Backups](#backups)
+15. [Raspberry Pi Tips](#raspberry-pi-tips)
+16. [Security Checklist](#security-checklist)
+17. [Updating](#updating)
+18. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -273,6 +274,58 @@ sudo -u chan CHAN_DB=/var/lib/chan/rustchan-data/chan.db \
 ```
 
 Boards can also be created from the admin panel at `/admin`.
+
+---
+
+## Console Interface
+
+When RustChan starts in a terminal it enters the alternate screen and displays a full-screen live dashboard. The original scrolling line-input shell has been replaced by this static TUI.
+
+### Dashboard panels
+
+| Panel | Contents |
+|-------|----------|
+| **Status** | Bind address, uptime, memory usage |
+| **Activity** | Total requests, requests/second, in-flight count, online users (unique IPs last 5 min) |
+| **Content** | Board count, thread count, post count; delta values (`+N`) coloured yellow |
+| **Storage** | Database size, uploads directory size |
+| **Board breakdown** | Per-board thread and post counts across one row |
+| **Uploads** | Spinner + count of active in-progress uploads |
+| **Footer** | Key reference |
+
+Stats refresh automatically every 3 seconds. Press `R` for an immediate update.
+
+### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `H` | Help — full key reference screen |
+| `R` | Force immediate stats refresh |
+| `L` | Toggle log view (40 most recent lines, optional timestamps) |
+| `B` | Board list table (slug / name / NSFW / thread count / post count) |
+| `C` | Create board wizard |
+| `A` | Create admin wizard |
+| `D` | Delete thread wizard |
+| `Q` or `Esc` | Quit prompt (`[Y]` to confirm, `[N]` to cancel) |
+| `Ctrl-C` | Force quit immediately |
+
+### Wizard flows
+
+`[C]`, `[A]`, and `[D]` launch interactive admin wizards. While a wizard is active the dashboard pauses and the terminal reverts to normal line-input mode so you can type freely. When the wizard completes (or is cancelled), the dashboard resumes automatically with a clean frame.
+
+These wizards perform the same operations as the `rustchan-cli admin` subcommands — use whichever is more convenient.
+
+### Running as a systemd service
+
+When RustChan runs under systemd it has no attached TTY, so the TUI is not displayed. All output goes to the journal (`journalctl -u rustchan-cli -f`) and to the rotating log file in `rustchan-data/`. This is the recommended production configuration — the console is intended for development and single-operator setups where you are watching the process directly.
+
+If you want to interact with the console on a production server, attach with:
+
+```bash
+sudo -u chan /usr/local/bin/rustchan-cli
+```
+
+in a separate terminal session (with the environment variables set), or use the `rustchan-cli admin` subcommands instead.
 
 ---
 
@@ -768,6 +821,13 @@ ls -la /var/lib/chan/rustchan-data/boards/   # check ownership
 sudo nginx -T | grep client_max_body_size    # check nginx limit
 ```
 Large uploads rejected mid-stream indicate the nginx `client_max_body_size` is lower than RustChan's configured limit. Text field rejections (413) indicate the post body exceeded ~100 KB or name/subject fields exceeded ~4 KB.
+
+**Console / TUI not rendering correctly:**
+The full-screen dashboard requires a terminal that supports ANSI escape codes and alternate screen mode. Most modern terminals (gnome-terminal, iTerm2, Windows Terminal, alacritty, xterm) work without any configuration. If the display looks garbled:
+- Ensure `TERM` is set to `xterm-256color` or similar: `export TERM=xterm-256color`
+- On Windows, use Windows Terminal rather than the legacy `cmd.exe` console host
+- If the terminal is left in a broken state after an unclean exit (e.g. `kill -9`), run `reset` to restore it
+- The dashboard is suppressed automatically when stdout is not a TTY (e.g. under systemd or when piped); log output continues normally in that case
 
 **Admin login fails:**
 ```bash

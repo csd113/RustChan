@@ -135,6 +135,11 @@ impl Drop for ScopedDecrement<'_> {
 
 #[allow(clippy::too_many_lines)]
 pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::Result<()> {
+    // rustls 0.23 requires an explicit process-wide crypto provider.
+    // install_default() is idempotent — a second call (e.g. in tests) returns
+    // Err but never panics, so the let _ discard is intentional.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let early_data_dir = {
         let exe = std::env::current_exe()
             .ok()
@@ -655,12 +660,66 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         }
     }
 
-    // Tor: spawn Arti in-process AFTER the first-run wizard so that Arti's
-    // bootstrapping log events do not interleave with wizard prompts.
-    // console_prompt() releases CONSOLE_MUTEX before blocking on read_line,
-    // so any concurrent tracing::info! from the Tor task would print mid-prompt.
-    // Arti bootstrapping takes ~30 s regardless, so starting it here costs nothing.
-    // F-04: Store the handle so it can be awaited during graceful shutdown.
+    // ── Full-screen TUI console ───────────────────────────────────────────────
+    // Build shared state for the TUI.
+    let shared_stats: super::console::SharedStats = std::sync::Arc::new(tokio::sync::RwLock::new(
+        super::console::ChanStats::default(),
+    ));
+    let shared_mode: super::console::SharedConsoleMode = std::sync::Arc::new(
+        tokio::sync::RwLock::new(super::console::ConsoleMode::Dashboard),
+    );
+
+    // Stats refresh task — polls DB every 3 s (or immediately on [R]).
+    // block_in_place keeps &mut delta locals on the same stack frame so
+    // req/s and other deltas are correctly accumulated across calls.
+    let force_reload_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    {
+        let pool_stats = pool.clone();
+        let stats_w = shared_stats.clone();
+        let cancel_stats = worker_cancel.clone();
+        let onion_addr = state.onion_address.clone();
+        let force_reload = force_reload_notify.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(3));
+            let mut prev_req = REQUEST_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+            let mut prev_tick = std::time::Instant::now();
+            let mut prev_threads: i64 = 0;
+            let mut prev_posts: i64 = 0;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    () = force_reload.notified() => {
+                        interval.reset();
+                    }
+                    () = cancel_stats.cancelled() => {
+                        tracing::debug!("Stats refresh task shutting down");
+                        return;
+                    }
+                }
+                let onion = onion_addr.read().await.clone();
+                let snap = tokio::task::block_in_place(|| {
+                    super::console::collect_stats(
+                        &pool_stats,
+                        start_time,
+                        &mut prev_req,
+                        &mut prev_tick,
+                        &mut prev_threads,
+                        &mut prev_posts,
+                        onion,
+                    )
+                });
+                *stats_w.write().await = snap;
+            }
+        });
+    }
+
+    // Enter the alternate screen BEFORE spawning Tor so Tor bootstrap log
+    // events go to the file log rather than scrolling the normal terminal.
+    // detect.rs checks is_tui_active() and skips its onion-address banner
+    // box — the dashboard shows the address on its next render tick instead.
+    let (mut key_rx, _force_reload_render) = super::console::start(&shared_stats, &shared_mode);
+
+    // Tor: spawned after the TUI is up. F-04: handle awaited on shutdown.
     let tor_handle = crate::detect::detect_tor(
         CONFIG.enable_tor_support,
         bind_port,
@@ -669,7 +728,113 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         worker_cancel.clone(),
     );
 
-    super::console::spawn_keyboard_handler(pool, start_time);
+    // Event dispatch — translate KeyEvents into mode changes and wizard launches.
+    {
+        let mode_d = shared_mode.clone();
+        let pool_d = pool.clone();
+        let cancel_d = worker_cancel.clone();
+        let shutdown_tx = worker_cancel.clone();
+        let force_reload = force_reload_notify.clone();
+        tokio::spawn(async move {
+            while let Some(key) = key_rx.recv().await {
+                use super::console::input::KeyEvent;
+                use super::console::{ConsoleMode, WizardKind};
+
+                let current = mode_d.read().await.clone();
+
+                match key {
+                    KeyEvent::Reload => {
+                        force_reload.notify_one();
+                    }
+                    KeyEvent::ToggleLogs => {
+                        let next = if current == ConsoleMode::LogView {
+                            ConsoleMode::Dashboard
+                        } else {
+                            ConsoleMode::LogView
+                        };
+                        *mode_d.write().await = next;
+                    }
+                    KeyEvent::BoardList => {
+                        let next = if current == ConsoleMode::BoardList {
+                            ConsoleMode::Dashboard
+                        } else {
+                            ConsoleMode::BoardList
+                        };
+                        *mode_d.write().await = next;
+                    }
+                    KeyEvent::Help => {
+                        let next = if current == ConsoleMode::Help {
+                            ConsoleMode::Dashboard
+                        } else {
+                            ConsoleMode::Help
+                        };
+                        *mode_d.write().await = next;
+                    }
+                    KeyEvent::Quit => {
+                        *mode_d.write().await = ConsoleMode::ConfirmQuit;
+                    }
+                    KeyEvent::Cancel => {
+                        *mode_d.write().await = ConsoleMode::Dashboard;
+                    }
+                    KeyEvent::Confirm => {
+                        if current == ConsoleMode::ConfirmQuit {
+                            tracing::info!(target: "server", "Graceful shutdown initiated from console");
+                            super::console::cleanup();
+                            shutdown_tx.cancel();
+                            return;
+                        }
+                    }
+                    KeyEvent::ForceQuit => {
+                        tracing::info!(target: "server", "Force quit from console (Ctrl-C)");
+                        super::console::cleanup();
+                        shutdown_tx.cancel();
+                        return;
+                    }
+                    KeyEvent::CreateBoard => {
+                        *mode_d.write().await = ConsoleMode::Wizard(WizardKind::CreateBoard);
+                        let pool_w = pool_d.clone();
+                        let mode_w = mode_d.clone();
+                        tokio::task::spawn_blocking(move || {
+                            super::console::wizard::run_wizard(
+                                &WizardKind::CreateBoard,
+                                &pool_w,
+                                &mode_w,
+                            );
+                        });
+                    }
+                    KeyEvent::CreateAdmin => {
+                        *mode_d.write().await = ConsoleMode::Wizard(WizardKind::CreateAdmin);
+                        let pool_w = pool_d.clone();
+                        let mode_w = mode_d.clone();
+                        tokio::task::spawn_blocking(move || {
+                            super::console::wizard::run_wizard(
+                                &WizardKind::CreateAdmin,
+                                &pool_w,
+                                &mode_w,
+                            );
+                        });
+                    }
+                    KeyEvent::DeleteThread => {
+                        *mode_d.write().await = ConsoleMode::Wizard(WizardKind::DeleteThread);
+                        let pool_w = pool_d.clone();
+                        let mode_w = mode_d.clone();
+                        tokio::task::spawn_blocking(move || {
+                            super::console::wizard::run_wizard(
+                                &WizardKind::DeleteThread,
+                                &pool_w,
+                                &mode_w,
+                            );
+                        });
+                    }
+                    KeyEvent::Other => {}
+                }
+
+                if cancel_d.is_cancelled() {
+                    break;
+                }
+            }
+        });
+    }
 
     // CRIT-2 FIX: Wire the same shutdown signal so in-flight federation
     // requests are drained before the runtime is dropped. Without this the
@@ -696,11 +861,109 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         None
     };
 
+    // ── TLS / HTTPS listener ──────────────────────────────────────────────────
+    // Spawned as a background task so the HTTP listener below can start
+    // immediately. Both share the same AppState (Arc'd internally).
+    // build_acceptor() returns None when tls.enabled = false — existing
+    // HTTP-only deployments are completely unaffected.
+    //
+    // FIX[TLS-1]: The TCP socket is pre-bound here on the *main* task (before
+    // spawning) so that any bind failure (port in use, missing CAP_NET_BIND_SERVICE,
+    // etc.) is caught immediately with `?` propagation and a clear error message,
+    // rather than silently dying inside a spawned future where the error is easy
+    // to miss.  The "HTTPS server listening" log is emitted here — after the
+    // successful bind — so it is never printed for a socket that wasn't actually
+    // bound.  axum_server::from_tcp_rustls accepts the pre-bound std::TcpListener
+    // and does not attempt a second bind.
+    //
+    // FIX[TLS-2]: build_acceptor failure is now a hard error (return Err) instead
+    // of a silent log-and-continue.  If TLS is enabled in config but the acceptor
+    // cannot be constructed (missing cert files, bad PEM, permission denied on
+    // tls/dev/, etc.), the process exits with a clear message rather than running
+    // silently as HTTP-only with no indication that HTTPS is absent.
+    if CONFIG.tls.enabled {
+        let data_dir_tls = data_dir.clone();
+        let cancel_tls = worker_cancel.clone();
+        let app_tls = build_router(state.clone());
+
+        let https_addr: std::net::SocketAddr = format!("0.0.0.0:{}", CONFIG.tls.port)
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid HTTPS bind address: {e}"))?;
+
+        // FIX[TLS-2]: propagate build_acceptor errors as hard failures.
+        let acceptor = crate::tls::build_acceptor(&CONFIG.tls, &data_dir_tls)
+            .map_err(|e| anyhow::anyhow!("TLS init failed — cannot start HTTPS listener: {e}"))?;
+
+        match acceptor {
+            Some(crate::tls::Acceptor::Static(_arc_acceptor, server_cfg)) => {
+                // Acceptor::Static now carries Arc<ServerConfig> directly alongside
+                // the TlsAcceptor — pass it straight to axum-server.
+                let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_cfg);
+
+                // FIX[TLS-1]: pre-bind on the main task so failures surface here.
+                let https_tcp = tokio::net::TcpListener::bind(https_addr)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to bind HTTPS listener on {https_addr}: {e}")
+                    })?;
+
+                tracing::info!(target: "server", addr = %https_addr, "HTTPS server listening");
+                tracing::info!(
+                    target: "server",
+                    url = %format!("https://{https_addr}/admin"),
+                    "Admin panel (HTTPS)"
+                );
+
+                tokio::spawn(async move {
+                    run_https_static(https_tcp, rustls_cfg, app_tls, cancel_tls).await;
+                });
+            }
+
+            #[cfg(feature = "tls-acme")]
+            Some(crate::tls::Acceptor::Acme(acme_acceptor, server_cfg)) => {
+                tokio::spawn(async move {
+                    run_https_acme(https_addr, acme_acceptor, server_cfg, app_tls, cancel_tls)
+                        .await;
+                });
+            }
+
+            None => { /* tls.enabled = false — unreachable here but exhaustive */ }
+
+            // Suppress unreachable-pattern warning when tls-acme feature is off.
+            #[allow(unreachable_patterns)]
+            Some(_) => {
+                return Err(anyhow::anyhow!(
+                    "ACME acceptor built but tls-acme feature is not enabled — \
+                     rebuild with: cargo build --features tls-acme"
+                ));
+            }
+        }
+    }
+
+    // ── HTTP→HTTPS redirect listener (optional) ───────────────────────────────
+    if CONFIG.tls.enabled && CONFIG.tls.redirect_http {
+        let http_addr: std::net::SocketAddr =
+            format!("0.0.0.0:{}", CONFIG.tls.http_port)
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid HTTP redirect bind address: {e}"))?;
+        let https_port = CONFIG.tls.port;
+        let cancel_redirect = worker_cancel.clone();
+        tokio::spawn(async move {
+            run_http_redirect(http_addr, https_port, cancel_redirect).await;
+        });
+    }
+
+    let serve_cancel = worker_cancel.clone();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(async move {
+        tokio::select! {
+            () = shutdown_signal() => {}
+            () = serve_cancel.cancelled() => {}
+        }
+    })
     .await?;
 
     // CRIT-1 FIX: Signal workers and then await each handle with a per-worker
@@ -731,6 +994,218 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     tracing::info!(target: "server", "Server shut down gracefully.");
     Ok(())
+}
+
+// ── HTTPS listener (Static path: self-signed or manual PEM) ──────────────────
+//
+// Uses axum-server which preserves ConnectInfo<SocketAddr> so the IP-banning
+// and rate-limiting middleware in middleware/mod.rs continues to work correctly.
+//
+// FIX[TLS-1]: Accepts a pre-bound TcpListener instead of a SocketAddr so the
+// actual socket bind (and any OS-level failure) happens on the main task in
+// run_server() where errors propagate with `?`.  axum_server::from_tcp_rustls
+// takes ownership of the already-bound std::TcpListener and does not re-bind.
+// The "HTTPS server listening" log is emitted by run_server() after the pre-bind
+// succeeds, so it is never printed for a socket that wasn't actually bound.
+pub async fn run_https_static(
+    listener: tokio::net::TcpListener,
+    tls_config: axum_server::tls_rustls::RustlsConfig,
+    app: axum::Router,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let handle = axum_server::Handle::new();
+    let handle_clone = handle.clone();
+
+    // Wire graceful shutdown to the same CancellationToken that controls
+    // background workers and the HTTP listener.
+    tokio::spawn(async move {
+        cancel.cancelled().await;
+        handle_clone.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+    });
+
+    // Convert tokio TcpListener → std TcpListener for axum_server::from_tcp_rustls.
+    // set_nonblocking(true) is required — axum-server expects a non-blocking socket.
+    let std_listener = match listener.into_std() {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(target: "server", error = %e, "Failed to convert HTTPS listener");
+            return;
+        }
+    };
+
+    let server = match axum_server::from_tcp_rustls(std_listener, tls_config) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(target: "server", error = %e, "Failed to create HTTPS server");
+            return;
+        }
+    };
+
+    if let Err(e) = server
+        .handle(handle)
+        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .await
+    {
+        tracing::error!(target: "server", error = %e, "HTTPS server error");
+    }
+}
+
+// ── HTTPS listener (ACME / Let's Encrypt path) ────────────────────────────────
+//
+// ACME requires a manual accept loop because AcmeAcceptor::accept() must
+// inspect each connection for TLS-ALPN-01 challenges before the TLS handshake
+// completes. axum-server cannot intercept at that level.
+//
+// ConnectInfo<SocketAddr> is injected manually into each request so that the
+// IP-banning and rate-limiting middleware in middleware/mod.rs continues to work.
+#[cfg(feature = "tls-acme")]
+pub async fn run_https_acme(
+    https_addr: std::net::SocketAddr,
+    acme_acceptor: std::sync::Arc<rustls_acme::AcmeAcceptor>,
+    server_cfg: std::sync::Arc<rustls::ServerConfig>,
+    app: axum::Router,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    use hyper::server::conn::http1;
+    use hyper_util::rt::TokioIo;
+    use tower::Service as _;
+
+    let listener = match tokio::net::TcpListener::bind(https_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(target: "server", error = %e, "Failed to bind HTTPS/ACME listener");
+            return;
+        }
+    };
+    tracing::info!(target: "server", addr = %https_addr, "HTTPS/ACME server listening");
+    tracing::info!(
+        target: "server",
+        url = %format!("https://{https_addr}/admin"),
+        "Admin panel (HTTPS/ACME)"
+    );
+
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => {
+                tracing::info!(target: "server", "HTTPS/ACME listener shutting down");
+                break;
+            }
+            result = listener.accept() => {
+                let (tcp, peer_addr) = match result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(target: "server", error = %e, "ACME TCP accept error");
+                        continue;
+                    }
+                };
+
+                let acme_acceptor = acme_acceptor.clone();
+                let server_cfg    = server_cfg.clone();
+                let svc           = app.clone();
+
+                tokio::spawn(async move {
+                    use tokio_util::compat::{TokioAsyncReadCompatExt, FuturesAsyncReadCompatExt};
+                    // rustls-acme requires futures::{AsyncRead, AsyncWrite}; wrap
+                    // the tokio TcpStream with the tokio-util compat shim.
+                    let tcp = tcp.compat();
+                    match acme_acceptor.accept(tcp).await {
+                        Ok(Some(start)) => {
+                            match start.into_stream(server_cfg).await {
+                                Ok(tls_stream) => {
+                                    // Convert the futures-io TLS stream back to a
+                                    // tokio-io stream so TokioIo / hyper can use it.
+                                    let io = TokioIo::new(tls_stream.compat());
+                                    // hyper::service::service_fn requires Fn (not FnMut), but
+                                    // Tower's Service::call takes &mut self. Clone the router
+                                    // per-request — axum::Router is Arc-backed so this is cheap.
+                                    let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                                        let (mut parts, body) = req.into_parts();
+                                        parts.extensions.insert(axum::extract::ConnectInfo(peer_addr));
+                                        let req = axum::extract::Request::from_parts(
+                                            parts,
+                                            axum::body::Body::new(body),
+                                        );
+                                        svc.clone().call(req)
+                                    });
+                                    if let Err(e) = http1::Builder::new()
+                                        .serve_connection(io, svc)
+                                        .await
+                                    {
+                                        tracing::debug!(
+                                            target: "server",
+                                            peer = %peer_addr,
+                                            error = %e,
+                                            "ACME HTTPS connection error"
+                                        );
+                                    }
+                                }
+                                Err(e) => tracing::debug!(
+                                    target: "server",
+                                    peer = %peer_addr,
+                                    error = %e,
+                                    "TLS handshake failed"
+                                ),
+                            }
+                        }
+                        Ok(None) => { /* ACME challenge — handled internally, no action needed */ }
+                        Err(e)   => tracing::debug!(
+                            target: "server",
+                            peer = %peer_addr,
+                            error = %e,
+                            "ACME acceptor error"
+                        ),
+                    }
+                });
+            }
+        }
+    }
+}
+
+// ── HTTP→HTTPS redirect listener ─────────────────────────────────────────────
+//
+// Issues a 301 permanent redirect to the HTTPS equivalent of every request.
+// Only spawned when `tls.enabled = true` and `tls.redirect_http = true`.
+pub async fn run_http_redirect(
+    http_addr: std::net::SocketAddr,
+    https_port: u16,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    use axum::{extract::Request, response::Redirect, routing::any};
+
+    let redirect_app = axum::Router::new().route(
+        "/{*path}",
+        any(move |req: Request| async move {
+            let path = req
+                .uri()
+                .path_and_query()
+                .map_or("/", axum::http::uri::PathAndQuery::as_str);
+            let host = req
+                .headers()
+                .get(axum::http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|h| h.split(':').next())
+                .unwrap_or("localhost");
+            Redirect::permanent(&format!("https://{host}:{https_port}{path}"))
+        }),
+    );
+
+    let listener = match tokio::net::TcpListener::bind(http_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(
+                target: "server",
+                error = %e,
+                "Failed to bind HTTP→HTTPS redirect listener"
+            );
+            return;
+        }
+    };
+    tracing::info!(target: "server", addr = %http_addr, "HTTP→HTTPS redirect listening");
+
+    axum::serve(listener, redirect_app)
+        .with_graceful_shutdown(async move { cancel.cancelled().await })
+        .await
+        .ok();
 }
 
 #[allow(clippy::too_many_lines)]
