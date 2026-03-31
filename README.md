@@ -17,7 +17,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-WAL_Mode-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Axum](https://img.shields.io/badge/Axum-0.8-7c3aed?style=for-the-badge)](https://github.com/tokio-rs/axum)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.1.0--alpha.2-0ea5e9?style=for-the-badge)](#changelog)
+[![Version](https://img.shields.io/badge/Version-1.1.0-0ea5e9?style=for-the-badge)](#changelog)
 
 <br>
 
@@ -671,14 +671,8 @@ Six built-in themes, selectable via the floating picker on every page. Persisted
 
 See **[CHANGELOG.md](CHANGELOG.md)** for the full version history.
 
-**Latest — v1.1.0-alpha.3:**
-**Full-screen TUI console** — `src/server/console.rs` replaced by a four-file `console/` module; enters alternate screen on startup; live dashboard panels for uptime, request rate, in-flight count, online users, per-board thread/post counts (with `+N` delta colouring), storage sizes, and an active-upload spinner; `ConsoleMode` state machine (Dashboard / LogView / Help / BoardList / ConfirmQuit / Wizard) drives all screen transitions; wizard flows (create board, create admin, delete thread) exit raw mode for line-input and restore the dashboard on completion; `cleanup()` registered in the panic hook and graceful shutdown path; new `crossterm` dependency · Native HTTPS/TLS (self-signed or Let's Encrypt ACME, runs alongside HTTP, no proxy required) · optional HTTP→HTTPS redirect listener · automatic HSTS when TLS is active · secure cookies enforced automatically under TLS · auto-terminal launch on double-click (Windows, Linux, macOS) · various hardening fixes: orphaned file cleanup on DB errors, stuck-job auto-reset on startup, 64 KB text field cap, backup concurrency lock, strict ZIP path validation, safe temp folder for SQL, 4 GB per-entry restore cap, 8 MB ZIP-bomb limit per entry, 2-minute ffmpeg timeout with kill, startup cleanup of leftover backup temp files
-
-**v1.1.0-alpha.2:**
-Tor migrated to Arti (built-in, no system `tor` required) · per-stream Tor IP isolation (`TOR_STREAM_TOKENS`) — each Tor stream now has its own rate-limit bucket and ban entry · `tor_only` mode (bind to loopback when Tor-only is desired) · graceful Tor task shutdown via `CancellationToken` · configurable `tor_bootstrap_timeout_secs`, `tor_max_concurrent_streams`, `tor_service_nickname` · `Onion-Location` response header for Tor Browser auto-redirect · critical fix: `ip_hash` changed to `Option<String>` throughout — no more 500s on pages with ChanNet gateway posts · multipart per-field size caps (~100 KB body, ~4 KB name/subject) · `rusqlite::backup` API replaces fragile SQL string in backup system · RAII temp-file cleanup in backup · `BEGIN IMMEDIATE` transactions throughout · configurable DB pool size · rotating log files · atomic `settings.toml` writes · request timeout middleware
-
-**v1.1.0-alpha.1:**
-ChanNet API on port 7070 (federation + RustWave gateway) · Major codebase refactor: `main.rs` shrunk from 1,757 → ~50 lines; `handlers/admin.rs` split into 6 focused files; new `server/` module (server, console, CLI); new `src/media/` module (ffmpeg, convert, thumbnail, exif) · BMP, TIFF, SVG upload support · GIF→WebM inline conversion · All thumbnails output as WebP · SVG placeholders for video/audio/SVG sources · PNG→WebP with size-check fallback · Atomic temp-then-rename for all conversions
+**Latest — v1.1.0:**
+ChanNet API on port `7070` · full-screen operator dashboard · native HTTPS with self-signed or Let's Encrypt support · optional HTTP to HTTPS redirects and HSTS · stronger Tor support with per-stream isolation and Tor-only mode · optional arbitrary file uploads with safe download handling · faster search, previews, and thread updates · safer posting, restore, upload, and background-job flows · cleaner server, admin, backup, middleware, and media internals
 
 **v1.0.13:**
 Scheduled VACUUM · expired poll vote cleanup · DB size warning banner · job queue back-pressure · duplicate media job coalescing · configurable ffmpeg timeout · global `archive_before_prune` flag · waveform cache eviction · streaming multipart · ETag / Conditional GET (304) · gzip/Brotli/zstd response compression · manual Tokio blocking pool sizing · EXIF orientation correction · streaming backup I/O (peak RAM ~64 KiB) · **ChanClassic** theme · `default_theme` + `site_subtitle` in `settings.toml` · default theme selector in admin panel · admin panel reorganised · prepared statement caching audit · `RETURNING` clause for inserts · 32 MiB SQLite page cache · two new DB indexes (`idx_posts_thread_id`, `idx_posts_ip_hash`)

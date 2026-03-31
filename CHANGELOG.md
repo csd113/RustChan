@@ -4,319 +4,45 @@ All notable changes to RustChan will be documented in this file.
 
 ---
 
-## [Unreleased]
+## [1.1.0]
+
+### Added
+
+- ChanNet API for federation and RustWave gateway commands on port `7070`.
+- Full-screen operator dashboard with live stats, logs, boards, shortcuts, and setup flows.
+- Native HTTPS support with self-signed and Let's Encrypt options, plus optional HTTP to HTTPS redirects and HSTS.
+- Stronger Tor support with per-stream isolation, Tor-only mode, better startup and shutdown handling, and `Onion-Location`.
+- Optional arbitrary file uploads with safe download-only handling for non-media files.
+
+### Improved
+
+- Faster board search, batched thread previews, cached thread updates, and lower job-queue overhead.
+- Safer posting, polling, replies, restores, uploads, and ChanNet imports through better transactions and rollback handling.
+- Cleaner internals across server, admin, backup, middleware, media, and schema code, with a new in-memory route test harness.
+- Better operator tooling with `/healthz`, `/readyz`, `/metrics`, `X-Request-ID`, cleaner logs, and more reliable FFmpeg and bind-address handling.
 
 ### Fixed
 
-- Critical: proxy-aware client IP extraction now ignores `X-Real-IP` and `X-Forwarded-For` unless the TCP peer is a trusted local/private proxy, preventing direct clients from spoofing bans, cooldowns, login lockouts, and other IP-based controls.
-- High: the global request rate limiter now covers mutating requests and the previously unthrottled public update/preview endpoints, closing an easy unauthenticated DoS path.
-- High: board-index preview loading now batches reply previews for the whole page instead of issuing one extra query per thread, which removes an N+1 pattern from both normal renders and inline error rerenders.
-- High: board search now uses a maintained SQLite FTS5 index instead of repeated `%LIKE%` scans across post bodies, keeping search and pagination responsive as post volume grows.
-- High: full-site and board restore flows now roll the database back to a pre-restore snapshot if the upload-tree swap fails, avoiding partially restored live state.
-- High: board restore now validates backup-manifest board slugs before using them in filesystem paths or board records, blocking restore-time path traversal.
-- Medium: ban appeals are now filed under a single `BEGIN IMMEDIATE` transaction, which closes the duplicate-appeal race between the 24-hour spam check and the insert.
-- High: direct HTTPS deployments now default admin and CSRF cookies to `Secure`, validate HTTP→HTTPS redirect hosts more defensively, and emit HSTS correctly for direct TLS listeners.
-- High: thread creation, poll creation, reply posting, and video-transcode DB rewrites are now transactional, preventing orphaned uploads, stale dedup rows, and broken file references on partial failures.
-- Medium: ChanNet gateway replies now update thread counters transactionally, and the durable import ledger survives restarts.
-- Medium: file-deletion safety checks now propagate database failures instead of silently returning partial results.
-- Medium: thread auto-update responses now use a typed payload and cached board-nav fragments, reducing repeated string rebuilding on active threads.
-- Medium: background job queue capacity is now enforced from an in-memory pending gauge instead of a fresh DB count on every enqueue, lowering write-path contention under posting bursts.
-- Medium: the server now exposes `/healthz`, `/readyz`, and `/metrics`, and every HTTP response carries an `X-Request-ID` header so operators can correlate incidents across logs, backups, workers, and Tor state more reliably.
-- Low: upstream API and TLS failures now render generic user-facing messages while keeping full details in the logs, reducing accidental backend detail leakage.
-- Low: boards with uploads fully disabled now hide the file picker and show a clear explanatory message instead of inviting avoidable 4xx errors.
-- Low: admin panel mutations now redirect back with consistent flash feedback for common board, backup, ban, filter, appeal, and report actions.
-- Low: failed admin-login logs now redact attacker-controlled usernames instead of writing the raw submitted value.
+- Proxy-aware IP handling now blocks spoofed `X-Real-IP` and `X-Forwarded-For` values from untrusted clients.
+- Rate limiting now covers more write and preview paths, closing easy abuse and DoS gaps.
+- HTTPS deployments now enforce secure cookies, safer redirects, and more consistent HSTS behavior.
+- Restore, upload, temp-file, and background-job edge cases were cleaned up to avoid partial state, stuck jobs, and unsafe paths.
+- Admin feedback, upload-disabled UI, error messages, and login logging are now more consistent and safer.
 
-### Refactors
+### Security
 
-- Split schema creation into table/index helpers and broke admin route registration into smaller subrouters.
-- Split board/thread page hydration into shared render helpers so full renders and inline error rerenders reuse the same loading path.
-- Moved backup creation handlers into a dedicated backup submodule and extracted config-template and sanitize-formatting helpers to shrink several hotspot files.
-- Reworked upload storage into smaller planning and persistence helpers, added rollback support for newly written files, and removed leftover refactor shims and dead wrappers.
-- Unified board-aware upload accept/hint generation across new-thread and reply forms.
-- Removed duplicate admin backup route registration and promoted board list plus greentext-collapse settings to the live in-memory cache used by page renders.
-- Added an in-memory test harness for handler and router tests so route-level coverage can exercise real CSRF, multipart, DB, and admin-session flows without touching the configured production database.
-
-### Security Improvements
-
-- `Onion-Location` is now suppressed for requests already served from the onion host.
-- CAPTCHA labeling and board documentation now match runtime behavior for both threads and replies.
-- README security notes now reflect the actual HTTPS-only scope of HSTS.
+- Restore validation, upload serving, backup handling, and appeal flows were tightened to reduce traversal, duplication, and data-leak risks.
+- `Onion-Location`, CAPTCHA wording, and HTTPS documentation now match real runtime behavior.
 
 ### Breaking Changes
 
-- HTTP→HTTPS redirects now fall back to configured/trusted hosts instead of blindly echoing arbitrary `Host` headers.
+- HTTP to HTTPS redirects now use configured and trusted hosts instead of echoing arbitrary `Host` headers.
 
 ### Validation
 
 - `cargo fmt --all`
 - `cargo clippy --all-targets --all-features -- -D warnings -W clippy::all -W clippy::pedantic -W clippy::nursery`
 - `cargo test`
-
----
-
-## [1.1.0 alpha 4]
-
-### Code Cleanup And Reliability
-
-This release focuses on cleaning up the codebase, making the project easier to maintain, and tightening up a number of safety checks.
-
-### What changed
-
-- The backup system was cleaned up and split into smaller pieces, so backup and restore code is easier to follow and safer to change.
-- The database layer was reorganized into clearer modules for setup, schema creation, migrations, and shared types.
-- Server startup and routing were split into smaller parts, which makes the web server easier to read and maintain.
-- Middleware was split up so rate limiting, CSRF checks, IP handling, backup progress, and URL cleanup are no longer all mixed together.
-- File upload and media handling were broken into smaller helpers, including safer handling for JPEG cleanup and disk-space checks.
-- Posting logic for new threads and replies was simplified by moving shared steps into common helper code.
-- Startup now goes straight into the improved full-screen terminal dashboard, so the old console box no longer shows behind the new TUI on boot.
-- FFmpeg and ffprobe can now be configured with explicit paths, which makes media processing setup more reliable across macOS, Linux, and Windows.
-- HTTPS, HTTP-to-HTTPS redirect, and Tor proxying now follow the configured address family instead of assuming IPv4-only bind addresses.
-- RustChan now has better groundwork for IPv6 because the shared bind-address logic is used across the main server, HTTPS, redirects, and Tor loopback proxying.
-- Optional arbitrary file uploads were added behind a config gate that is off by default.
-- When arbitrary uploads are enabled globally and turned on for a board, non-media files are served as safe downloads instead of being rendered inline in the browser.
-- Source files were cleaned up with consistent file-path headers at the top and old audit-style fix markers removed.
-
-### Safety and quality fixes
-
-- Multipart form parsing now fails cleanly instead of silently treating broken fields as empty.
-- Backup restore helper code was moved into shared modules so the same safety checks are used consistently.
-- Several internal code paths were simplified to satisfy strict Clippy checks and reduce maintenance risk.
-- Generic uploaded files now fall back to download-safe handling instead of being forced through the image, video, or audio pipeline.
-- Download-only responses now set safer headers for unknown file types so browsers do not try to guess and render them.
-- The project now builds cleanly with strict warning enforcement after the refactor.
-
-### Validation
-
-- `cargo fmt`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test`
-
----
-
-## [1.1.0 alpha 3]
-
-### Better Operator Experience
-
-This release made RustChan much nicer to run and manage.
-
-### What changed
-
-- The old scrolling terminal console was replaced with a full-screen dashboard.
-- The new console shows live stats, boards, uploads, logs, and admin shortcuts in one place.
-- RustChan can now serve HTTPS directly, including self-signed certificates and Let's Encrypt support.
-- Optional HTTP-to-HTTPS redirects were added.
-- Browsers are told to prefer HTTPS automatically once it is enabled.
-- The app can now open more cleanly when launched directly from the desktop.
-
-### Fixes
-
-- IP bans and rate limits now work properly when HTTPS is enabled.
-- Secure cookies are enforced when the site is running over HTTPS.
-- Several backup, restore, upload, and background-job edge cases were fixed.
-- Large text uploads, broken temp-file handling, and stuck jobs were all cleaned up.
-
----
-
-## [1.1.0 alpha 2]
-
-### Tor And Reliability Hardening
-
-This release focused on making Tor support safer and making the server more reliable under failure conditions.
-
-### What changed
-
-- Tor users are now separated properly, so one Tor user no longer shares the same identity bucket as every other Tor user.
-- A Tor-only mode was added for operators who want the site reachable only through the hidden service.
-- Tor startup, reconnect behavior, and shutdown were made more reliable.
-- More Tor settings were made configurable instead of being hardcoded.
-- RustChan now sends the `Onion-Location` header so Tor Browser can suggest switching to the onion address.
-
-### Reliability improvements
-
-- Shutdown handling was improved for workers, background jobs, and the ChanNet server.
-- Request timeout protection was added for slow or stalled requests.
-- Multipart form parsing was hardened to avoid memory pressure from oversized input.
-- Backup handling was made safer and more reliable.
-- Database pool handling, locking, and error reporting were improved.
-- Logging was improved so log files rotate cleanly instead of growing forever.
-
-### Fixes
-
-- Pages no longer break when gateway-imported posts do not have an IP hash.
-- Config writes are safer.
-- Several HTTP edge cases were cleaned up.
-
----
-
-## [1.1.0 alpha 1]
-
-## 🌐 New: ChanNet API (Port 7070)
-
-RustChan can now talk to other RustChans. Introducing the **ChanNet API** — a two-layer federation and gateway system living entirely on port 7070.
-
-**Layer 1 — Federation** (`/chan/export`, `/chan/import`, `/chan/refresh`, `/chan/poll`): nodes sync with each other via ZIP snapshots. Push your posts out, pull theirs in, keep your mirror fresh.
-
-**Layer 2 — RustWave Gateway** (`/chan/command`): the [RustWave](https://github.com/a2kiti/rustwave) audio transport client gets its own command interface. Send a typed JSON command, get a ZIP back. Supported commands: `full_export`, `board_export`, `thread_export`, `archive_export`, `force_refresh`, and `reply_push` (the only one that actually writes anything).
-
-Text only — no images, no media, no binary data cross this interface by design. Full schema docs in `channet_api_reference.docx`.
-
----
-
-## Architecture Refactor
-
-This release restructures the codebase for maintainability. No user-facing
-behavior has changed. Every route, every feature, every pixel is identical.
-The only difference is where the code lives.
-
-### The problem
-
-`main.rs` had grown to 1,757 lines and owned everything from the HTTP router
-to the ASCII startup banner. `handlers/admin.rs` hit 4,576 lines with 33
-handler functions covering auth, backups, bans, reports, settings, and more.
-Both files were becoming difficult to navigate and risky to modify.
-
-### What changed
-
-**Phase 1 — Cleanup**
-
-- Removed unused `src/theme-init.js` (dead duplicate of `static/theme-init.js`)
-- Moved `validate_password()` from `main.rs` to `utils/crypto.rs` alongside
-  the other credential helpers
-- Moved `first_run_check()` and `get_per_board_stats()` from `main.rs` into
-  the `db` module, eliminating the only raw SQL that lived outside `db/`
-
-**Phase 2 — Background work**
-
-- Moved `evict_thumb_cache()` from `main.rs` to `workers/mod.rs` where it
-  belongs alongside the other background maintenance operations
-
-**Phase 3 — Console extraction**
-
-- Created `src/server/` directory for server infrastructure
-- Extracted terminal stats, keyboard console, startup banner, and all `kb_*`
-  helpers to `server/console.rs` (~350 lines)
-
-**Phase 4 — CLI extraction**
-
-- Moved `Cli`, `Command`, `AdminAction` clap types and `run_admin()` to
-  `server/cli.rs` (~250 lines)
-
-**Phase 5 — Server extraction**
-
-- Moved `run_server()`, `build_router()`, all 7 background task spawns,
-  static asset handlers, HSTS middleware, request tracking, `ScopedDecrement`,
-  and global atomics to `server/server.rs` (~800 lines)
-- `main.rs` is now ~50 lines: runtime construction, CLI parsing, dispatch
-
-**Phase 6 — Admin handler decomposition**
-
-- Converted `handlers/admin.rs` to a module folder (`handlers/admin/`)
-- Extracted `backup.rs` — all backup and restore handlers (~2,500 lines)
-- Extracted `auth.rs` — login, logout, session management
-- Extracted `moderation.rs` — bans, reports, appeals, word filters, mod log
-- Extracted `content.rs` — post/thread actions, board management
-- Extracted `settings.rs` — site settings, VACUUM, admin panel
-- `admin/mod.rs` now contains only shared session helpers and re-exports
-
-### By the numbers
-
-```
-File                Before        After
-main.rs             1,757 lines   ~50 lines
-handlers/admin.rs   4,576 lines   split across 6 files
-server/ (new)       —             ~1,400 lines total
-db/                 unchanged     + 2 functions from main.rs
-workers/            unchanged     + evict_thumb_cache
-utils/crypto.rs     unchanged     + validate_password
-```
-
-### What was not changed
-
-`db/`, `templates/`, `utils/`, `media/`, `config.rs`, `error.rs`, `models.rs`,
-`detect.rs`, `handlers/board.rs`, `handlers/thread.rs`, and `middleware/` are
-all untouched. They were already well-structured.
-```
-
-## New Module: src/media/
-
-### media/ffmpeg.rs — FFmpeg detection and subprocess execution
-
-- Added detect_ffmpeg() for checking FFmpeg availability (synchronous, suitable for spawn_blocking)
-- Added run_ffmpeg() shared executor used by all FFmpeg calls
-- Added ffmpeg_image_to_webp() with quality 85 and metadata stripping
-- Added ffmpeg_gif_to_webm() using VP9 codec, CRF 30, zero bitrate target, metadata stripped
-- Added ffmpeg_thumbnail() extracting first frame as WebP at quality 80 with aspect-preserving scale
-- Added probe_video_codec() via ffprobe subprocess (moved from utils/files.rs)
-- Added ffmpeg_transcode_to_webm() using path-based API (replaces old bytes-in/bytes-out version)
-- Added ffmpeg_audio_waveform() using path-based API (same refactor as above)
-
-### media/convert.rs — Per-format conversion logic
-
-- Added ConversionAction enum: ToWebp, ToWebm, ToWebpIfSmaller, KeepAsIs
-- Added conversion_action() mapping each MIME type to the correct action
-- Added convert_file() as the main entry point for all conversions
-- PNG to WebP is attempted but original PNG is kept if WebP is larger
-- All conversions use atomic temp-then-rename strategy
-- FFmpeg failures fall back to original file with a warning (never panics, never returns 500)
-
-### media/thumbnail.rs — WebP thumbnail generation
-
-- All thumbnails output as .webp
-- SVG placeholders used for video without FFmpeg, audio, and SVG sources
-- Added generate_thumbnail() as unified entry point
-- Added image crate fallback path for when FFmpeg is unavailable (decode, resize, save as WebP)
-- Added thumbnail_output_path() for determining correct output path and extension
-- Added write_placeholder() for generating static SVG placeholders by kind
-
-### media/exif.rs — EXIF orientation handling (new file)
-
-- Moved read_exif_orientation and apply_exif_orientation from utils/files.rs
-
-### media/mod.rs — Public API
-
-- Added ProcessedMedia struct with file_path, thumbnail_path, mime_type, was_converted, original_size, final_size
-- Added MediaProcessor::new() with FFmpeg detection and warning log if not found
-- Added MediaProcessor::new_with_ffmpeg() as lightweight constructor for request handlers
-- Added MediaProcessor::process_upload() for conversion and thumbnail generation (never propagates FFmpeg errors)
-- Added MediaProcessor::generate_thumbnail() for standalone thumbnail regeneration
-- Registered submodules: convert, ffmpeg, thumbnail, exif
-
----
-
-## Modified Files
-
-### src/utils/files.rs
-
-- Extended detect_mime_type with BMP, TIFF (LE and BE), and SVG detection including BOM stripping
-- Rewrote save_upload to delegate conversion and thumbnailing to MediaProcessor
-- GIF to WebM conversions now set processing_pending = false (converted inline, no background job)
-- MP4 and WebM uploads still set processing_pending = true as before
-- Removed dead functions: generate_video_thumb, ffmpeg_first_frame, generate_video_placeholder, generate_audio_placeholder, generate_image_thumb
-- Removed relocated functions: ffprobe_video_codec, probe_video_codec, ffmpeg_transcode_webm, transcode_to_webm, ffmpeg_audio_waveform, gen_waveform_png
-- EXIF functions kept as thin private delegates to crate::media::exif for backward compatibility
-- Added mime_to_ext_pub() public wrapper for use by media/convert.rs
-- Added apply_thumb_exif_orientation() for post-hoc EXIF correction on image crate thumbnails
-- Added tests for BMP, TIFF LE, TIFF BE, SVG detection and new mime_to_ext mappings
-
-### src/models.rs
-
-- Updated from_ext to include bmp, tiff, tif, and svg
-
-### src/lib.rs and src/main.rs
-
-- Registered new media module
-
-### src/workers/mod.rs
-
-- Updated probe_video_codec call to use crate::media::ffmpeg::probe_video_codec
-- Replaced in-memory transcode_to_webm with path-based ffmpeg_transcode_to_webm using temp file persist
-- Replaced in-memory gen_waveform_png with path-based ffmpeg_audio_waveform using temp file persist
-- File bytes now read from disk only for SHA-256 dedup step
-
-### Cargo.toml
-
-- Added bmp and tiff features to the image crate dependency
 
 
 ## [1.0.13] — 2026-03-08
