@@ -455,7 +455,7 @@ fn render_inline(text: &str) -> String {
     result = RE_SPOILER
         .replace_all(&result, |caps: &regex::Captures| {
             format!(
-                r#"<span class="spoiler" onclick="this.classList.toggle('revealed')">{}</span>"#,
+                r#"<span class="spoiler" data-action="toggle-spoiler">{}</span>"#,
                 &caps[1]
             )
         })

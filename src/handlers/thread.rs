@@ -9,15 +9,10 @@ use crate::{
     config::CONFIG,
     db::{self, NewPost},
     error::{AppError, Result},
-    handlers::{board::ensure_csrf, parse_post_multipart},
+    handlers::{board::ensure_csrf, parse_post_multipart, posting},
     middleware::{validate_csrf, AppState},
     utils::{
-        crypto::{hash_ip, new_deletion_token, verify_pow},
-        sanitize::{
-            apply_word_filters, escape_html, render_post_body, validate_body,
-            validate_body_with_file, validate_name,
-        },
-        tripcode::parse_name_tripcode,
+        crypto::{hash_ip, verify_pow},
     },
 };
 use axum::{
@@ -202,9 +197,7 @@ pub async fn post_reply(
 
             // Per-board post cooldown — the SOLE post rate control.
             // Verify admin session first; admins bypass the cooldown entirely.
-            let is_admin = admin_session_id
-                .as_deref()
-                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
+            let is_admin = posting::is_admin_session(&conn, admin_session_id.as_deref());
 
             // post_cooldown_secs = 0 means no cooldown at all on this board.
             if board.post_cooldown_secs > 0 && !is_admin {
@@ -226,35 +219,12 @@ pub async fn post_reply(
                 ));
             }
 
-            let filters: Vec<(String, String)> = db::get_word_filters(&conn)?
-                .into_iter()
-                .map(|f| (f.pattern, f.replacement))
-                .collect();
-
-            let (name, tripcode) = parse_name_tripcode(&validate_name(&name_val));
-            // Respect per-board tripcode setting
-            let tripcode = if board.allow_tripcodes {
-                tripcode
-            } else {
-                None
-            };
-
-            // Validate body: a file may substitute for text on media-enabled boards,
-            // but at least one of body or file must be present.
+            let filters = posting::load_word_filters(&conn)?;
+            let (name, tripcode) = posting::resolve_post_identity(&name_val, board.allow_tripcodes);
             let board_allows_media = board.allow_images || board.allow_video || board.allow_audio;
             let has_file = file_data.is_some();
-            let body_text = if board_allows_media {
-                validate_body_with_file(&raw_body, has_file).map_err(AppError::BadRequest)?
-            } else {
-                validate_body(&raw_body)
-                    .map_err(AppError::BadRequest)?
-                    .to_string()
-            };
-
-            // FIX[MEDIUM-8]: Apply word filters BEFORE HTML escaping.
-            let filtered_body = apply_word_filters(&body_text, &filters);
-            let escaped_body = escape_html(&filtered_body);
-            let body_html = render_post_body(&escaped_body);
+            let (body_text, body_html) =
+                posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;
 
             let uploaded = crate::handlers::process_primary_upload(
                 file_data,
@@ -278,11 +248,7 @@ pub async fn post_reply(
                 max_audio_size,
             )?;
 
-            let deletion_token = if del_token_val.trim().is_empty() {
-                new_deletion_token()
-            } else {
-                del_token_val.trim().chars().take(64).collect()
-            };
+            let deletion_token = posting::resolve_deletion_token(&del_token_val);
 
             // Sage suppresses the bump regardless of reply count.
             let should_bump = !form_sage && thread.reply_count < board.bump_limit;

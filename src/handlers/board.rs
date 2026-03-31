@@ -12,17 +12,13 @@ use crate::{
     config::CONFIG,
     db::{self, NewPost},
     error::{AppError, Result},
-    handlers::parse_post_multipart,
+    handlers::{parse_post_multipart, posting},
     middleware::{validate_csrf, AppState},
     models::{Pagination, SearchQuery, ThreadSummary},
     templates,
     utils::{
-        crypto::{hash_ip, new_csrf_token, new_deletion_token, verify_pow},
-        sanitize::{
-            apply_word_filters, escape_html, render_post_body, validate_body,
-            validate_body_with_file, validate_name, validate_subject,
-        },
-        tripcode::parse_name_tripcode,
+        crypto::{hash_ip, new_csrf_token, verify_pow},
+        sanitize::{validate_subject},
     },
 };
 use axum::{
@@ -247,9 +243,7 @@ pub async fn create_thread(
             }
 
             // Verify admin session — admins bypass the per-board cooldown entirely.
-            let is_admin = admin_session_id
-                .as_deref()
-                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
+            let is_admin = posting::is_admin_session(&conn, admin_session_id.as_deref());
 
             // Per-board post cooldown — the SOLE post rate control.
             // post_cooldown_secs = 0 means no cooldown at all; admins always bypass it.
@@ -270,37 +264,14 @@ pub async fn create_thread(
                 ));
             }
 
-            let filters: Vec<(String, String)> = db::get_word_filters(&conn)?
-                .into_iter()
-                .map(|f| (f.pattern, f.replacement))
-                .collect();
-
-            let (name, tripcode) = parse_name_tripcode(&validate_name(&name_val));
-            // Respect per-board tripcode setting
-            let tripcode = if board.allow_tripcodes {
-                tripcode
-            } else {
-                None
-            };
+            let filters = posting::load_word_filters(&conn)?;
+            let (name, tripcode) = posting::resolve_post_identity(&name_val, board.allow_tripcodes);
             let subject = validate_subject(&subject_val);
 
-            // Validate body: if the board allows media uploads a file may substitute
-            // for text, but at least one of the two must be non-empty.
             let board_allows_media = board.allow_images || board.allow_video || board.allow_audio;
             let has_file = file_data.is_some();
-            let body_text = if board_allows_media {
-                validate_body_with_file(&raw_body, has_file).map_err(AppError::BadRequest)?
-            } else {
-                validate_body(&raw_body)
-                    .map_err(AppError::BadRequest)?
-                    .to_string()
-            };
-
-            // FIX[MEDIUM-8]: Apply word filters BEFORE HTML escaping so that
-            // filter patterns are plain text, not HTML-entity strings.
-            let filtered_body = apply_word_filters(&body_text, &filters);
-            let escaped_body = escape_html(&filtered_body);
-            let body_html = render_post_body(&escaped_body);
+            let (body_text, body_html) =
+                posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;
 
             let uploaded = crate::handlers::process_primary_upload(
                 file_data,
@@ -324,13 +295,7 @@ pub async fn create_thread(
                 max_audio_size,
             )?;
 
-            let deletion_token = if del_token_val.trim().is_empty() {
-                new_deletion_token()
-            } else {
-                // Cap at 64 chars to prevent abuse; anything longer is almost
-                // certainly not a legitimate user-chosen token.
-                del_token_val.trim().chars().take(64).collect()
-            };
+            let deletion_token = posting::resolve_deletion_token(&del_token_val);
 
             // FIX[MEDIUM-3]: Thread creation and OP post insertion are now
             // wrapped in a single transaction via create_thread_with_op.

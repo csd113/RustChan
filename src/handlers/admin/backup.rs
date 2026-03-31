@@ -23,7 +23,7 @@ use rusqlite::{backup::Backup, params};
 use serde::Deserialize;
 use serde_json;
 use std::io::{Seek, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use time;
 use tokio::io::AsyncWriteExt as _;
@@ -429,6 +429,24 @@ pub async fn admin_restore(
             let temp_dir = std::env::temp_dir();
             let tmp_id = uuid::Uuid::new_v4().simple().to_string();
             let temp_db = temp_dir.join(format!("chan_restore_{tmp_id}.db"));
+            let upload_root = PathBuf::from(&upload_dir);
+            let staged_upload_root = create_staging_dir(&upload_root, "restore-stage")?;
+            let previous_upload_root = upload_root
+                .parent()
+                .map_or_else(
+                    || PathBuf::from(format!("{}.restore-old", upload_root.display())),
+                    |parent| {
+                        parent.join(format!(
+                            ".{}.restore-old.{}",
+                            upload_root
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("uploads"),
+                            uuid::Uuid::new_v4().simple()
+                        ))
+                    },
+                );
+            let db_snapshot = temp_dir.join(format!("chan_restore_live_before_{tmp_id}.db"));
             let mut db_extracted = false;
 
             for i in 0..archive.len() {
@@ -479,21 +497,35 @@ pub async fn admin_restore(
                     db_extracted = true;
 
                 } else if let Some(rel) = name.strip_prefix("uploads/") {
-                    if rel.is_empty() { continue; }
-                    let target = PathBuf::from(&upload_dir).join(rel);
+                    if rel.is_empty() {
+                        continue;
+                    }
+                    let rel_path = Path::new(rel);
+                    if rel_path
+                        .components()
+                        .any(|component| component == std::path::Component::ParentDir)
+                    {
+                        warn!("Restore: skipping suspicious zip entry '{name}'");
+                        continue;
+                    }
+                    let target = staged_upload_root.join(rel_path);
 
                     if entry.is_dir() {
-                        std::fs::create_dir_all(&target)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir {}: {}", target.display(), e)))?;
+                        std::fs::create_dir_all(&target).map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("mkdir {}: {}", target.display(), e))
+                        })?;
                     } else {
                         if let Some(parent) = target.parent() {
-                            std::fs::create_dir_all(parent)
-                                .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir parent: {e}")))?;
+                            std::fs::create_dir_all(parent).map_err(|e| {
+                                AppError::Internal(anyhow::anyhow!("mkdir parent: {e}"))
+                            })?;
                         }
-                        let mut out = std::fs::File::create(&target)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Create {}: {}", target.display(), e)))?;
-                        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {}", target.display(), e)))?;
+                        let mut out = std::fs::File::create(&target).map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Create {}: {}", target.display(), e))
+                        })?;
+                        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Write {}: {}", target.display(), e))
+                        })?;
                     }
                 }
             }
@@ -506,18 +538,64 @@ pub async fn admin_restore(
             }
 
             // ── SQLite backup API: copy temp DB → live DB ─────────────────
+            let db_snapshot_str = db_snapshot
+                .to_str()
+                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Snapshot path is non-UTF-8")))?
+                .replace('\'', "''");
+            live_conn
+                .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {e}")))?;
+
+            let had_live_uploads = swap_staged_path_into_place(
+                &staged_upload_root,
+                &upload_root,
+                &previous_upload_root,
+            )?;
+
             let backup_result = (|| -> Result<()> {
                 let src = rusqlite::Connection::open(&temp_db)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Open backup source: {e}")))?;
-                                let backup = Backup::new(&src, &mut live_conn)
+                let backup = Backup::new(&src, &mut live_conn)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup init: {e}")))?;
-                backup.run_to_completion(100, std::time::Duration::from_millis(0), None)
+                backup
+                    .run_to_completion(100, std::time::Duration::from_millis(0), None)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup copy: {e}")))?;
                 Ok(())
             })();
 
+            if let Err(e) = backup_result {
+                let _ = rollback_swapped_path(&upload_root, &previous_upload_root, had_live_uploads);
+                let restore_db_result = (|| -> Result<()> {
+                    let src = rusqlite::Connection::open(&db_snapshot).map_err(|restore_err| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Open DB rollback snapshot {}: {restore_err}",
+                            db_snapshot.display()
+                        ))
+                    })?;
+                    let backup = Backup::new(&src, &mut live_conn).map_err(|restore_err| {
+                        AppError::Internal(anyhow::anyhow!("Rollback init: {restore_err}"))
+                    })?;
+                    backup
+                        .run_to_completion(100, std::time::Duration::from_millis(0), None)
+                        .map_err(|restore_err| {
+                            AppError::Internal(anyhow::anyhow!("Rollback copy: {restore_err}"))
+                        })?;
+                    Ok(())
+                })();
+                let _ = std::fs::remove_file(&temp_db);
+                let _ = std::fs::remove_file(&db_snapshot);
+                let _ = remove_path_if_exists(&staged_upload_root);
+                if let Err(restore_err) = restore_db_result {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Restore failed and rollback failed: {e}; rollback error: {restore_err}"
+                    )));
+                }
+                return Err(e);
+            }
+
             let _ = std::fs::remove_file(&temp_db);
-            backup_result?;
+            let _ = std::fs::remove_file(&db_snapshot);
+            let _ = remove_path_if_exists(&previous_upload_root);
 
             // ── Re-issue session cookie ───────────────────────────────────
             //
@@ -584,9 +662,9 @@ pub async fn admin_restore(
 //
 // When a board backup is restored, posts receive new auto-incremented IDs
 // because other boards' posts already occupy the original IDs in the global
-// `posts` table.  `remap_body_quotelinks` and `remap_body_html_quotelinks`
-// rewrite the raw text and rendered HTML of each restored post so that in-board
-// quotelinks point to the new IDs instead of the now-stale original ones.
+// `posts` table. `remap_body_quotelinks` rewrites the raw text of each restored
+// post so that in-board quotelinks point to the new IDs instead of the now-stale
+// original ones; HTML is then re-rendered from the trusted raw body.
 //
 // Design constraints:
 //
@@ -606,14 +684,6 @@ pub async fn admin_restore(
 //    is used: for each (old, new) pair, replace `>>{old}` followed by a
 //    non-digit (or end-of-string) to avoid `>>100` matching inside `>>1000`.
 //
-// 4. `body_html` stores pre-rendered HTML.  In-board quotelinks look like:
-//      <a href="#p{N}" class="quotelink" data-pid="{N}">&gt;&gt;{N}</a>
-//    Cross-board quotelinks look like:
-//      <a href="/board/post/{N}" class="quotelink crosslink" ...>&gt;&gt;&gt;/…</a>
-//    We replace `href="#p{old}"` (exclusively in-board) and
-//    `data-pid="{old}">&gt;&gt;{old}</a>` (display text also exclusive to
-//    in-board links — cross-board display text has `&gt;&gt;&gt;/` prefix).
-
 // Rewrite in-board `>>{old_id}` references in the raw post body.
 // `pairs` must be pre-sorted by old-ID string length descending.
 #[allow(clippy::arithmetic_side_effects)]
@@ -663,38 +733,12 @@ fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> String {
     result
 }
 
-/// Rewrite in-board quotelink IDs in pre-rendered `body_html`.
-///
-/// Targets two patterns that are exclusive to same-board quotelinks:
-///   • `href="#p{old}"` — the anchor href
-///   • `data-pid="{old}">&gt;&gt;{old}</a>` — the data attribute + display text
-///
-/// Cross-board links use `href="/board/post/{N}"` and display `&gt;&gt;&gt;/…`
-/// so neither pattern matches them.
-///
-/// `pairs` must be pre-sorted by old-ID string length descending.
-fn remap_body_html_quotelinks(body_html: &str, pairs: &[(String, String)]) -> String {
-    if pairs.is_empty() {
-        return body_html.to_string();
-    }
-    let mut result = body_html.to_string();
-    for (old, new) in pairs {
-        // Pattern 1: href="#p{old}" → href="#p{new}"
-        let old_href = format!("href=\"#p{old}\"");
-        let new_href = format!("href=\"#p{new}\"");
-        result = result.replace(&old_href, &new_href);
-
-        // Pattern 2: data-pid="{old}">&gt;&gt;{old}</a>
-        // This uniquely identifies in-board quotelinks: cross-board links have
-        // "&gt;&gt;&gt;/" as their display text, never bare "&gt;&gt;{N}".
-        let old_tail = format!("data-pid=\"{old}\">&gt;&gt;{old}</a>");
-        let new_tail = format!("data-pid=\"{new}\">&gt;&gt;{new}</a>");
-        result = result.replace(&old_tail, &new_tail);
-    }
-    result
-}
-
 const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+fn render_restored_body_html(body: &str) -> String {
+    let escaped = crate::utils::sanitize::escape_html(body);
+    crate::utils::sanitize::render_post_body(&escaped)
+}
 
 /// Like `std::io::copy` but returns `InvalidData` if more than `max_bytes`
 /// would be written.  Reads in 64 KiB chunks; aborts as soon as the limit
@@ -727,6 +771,120 @@ fn copy_limited<R: std::io::Read, W: std::io::Write>(
         }
     }
     Ok(total)
+}
+
+fn create_staging_dir(base_path: &Path, label: &str) -> Result<PathBuf> {
+    let parent = base_path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let file_name = base_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(label);
+    let staging = parent.join(format!(
+        ".{file_name}.{label}.{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&staging)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Create staging dir: {e}")))?;
+    Ok(staging)
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Remove dir {}: {e}", path.display())))
+    } else {
+        std::fs::remove_file(path)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Remove file {}: {e}", path.display())))
+    }
+}
+
+fn swap_staged_path_into_place(staged: &Path, live: &Path, backup: &Path) -> Result<bool> {
+    let had_live = live.exists();
+    if had_live {
+        std::fs::rename(live, backup).map_err(|e| {
+            AppError::Internal(anyhow::anyhow!(
+                "Move live path {} aside: {e}",
+                live.display()
+            ))
+        })?;
+    }
+
+    if let Err(e) = std::fs::rename(staged, live) {
+        if had_live {
+            let _ = std::fs::rename(backup, live);
+        }
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "Move staged path {} into place: {e}",
+            live.display()
+        )));
+    }
+
+    Ok(had_live)
+}
+
+fn rollback_swapped_path(live: &Path, backup: &Path, had_live: bool) -> Result<()> {
+    remove_path_if_exists(live)?;
+    if had_live {
+        std::fs::rename(backup, live).map_err(|e| {
+            AppError::Internal(anyhow::anyhow!(
+                "Restore backup path {}: {e}",
+                live.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn extract_uploads_to_dir<R: std::io::Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    destination_root: &Path,
+) -> Result<()> {
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
+        let name = entry.name().to_string();
+        if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
+            warn!("Restore: skipping suspicious entry '{name}'");
+            continue;
+        }
+        let Some(rel) = name.strip_prefix("uploads/") else {
+            continue;
+        };
+        if rel.is_empty() {
+            continue;
+        }
+        let rel_path = Path::new(rel);
+        if rel_path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+        {
+            warn!("Restore: skipping suspicious entry '{name}'");
+            continue;
+        }
+        let target = destination_root.join(rel_path);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir {}: {e}", target.display())))?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("mkdir parent {}: {e}", parent.display()))
+            })?;
+        }
+        let mut out = std::fs::File::create(&target).map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("Create {}: {e}", target.display()))
+        })?;
+        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {e}", target.display())))?;
+    }
+    Ok(())
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -1493,6 +1651,24 @@ pub async fn restore_saved_full_backup(
             let temp_dir = std::env::temp_dir();
             let tmp_id = uuid::Uuid::new_v4().simple().to_string();
             let temp_db = temp_dir.join(format!("chan_restore_{tmp_id}.db"));
+            let upload_root = PathBuf::from(&upload_dir);
+            let staged_upload_root = create_staging_dir(&upload_root, "restore-stage")?;
+            let previous_upload_root = upload_root
+                .parent()
+                .map_or_else(
+                    || PathBuf::from(format!("{}.restore-old", upload_root.display())),
+                    |parent| {
+                        parent.join(format!(
+                            ".{}.restore-old.{}",
+                            upload_root
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("uploads"),
+                            uuid::Uuid::new_v4().simple()
+                        ))
+                    },
+                );
+            let db_snapshot = temp_dir.join(format!("chan_restore_live_before_{tmp_id}.db"));
             let mut db_extracted = false;
 
             for i in 0..archive.len() {
@@ -1538,7 +1714,15 @@ pub async fn restore_saved_full_backup(
                     if rel.is_empty() {
                         continue;
                     }
-                    let target = PathBuf::from(&upload_dir).join(rel);
+                    let rel_path = Path::new(rel);
+                    if rel_path
+                        .components()
+                        .any(|component| component == std::path::Component::ParentDir)
+                    {
+                        warn!("Restore-saved: skipping suspicious entry '{name}'");
+                        continue;
+                    }
+                    let target = staged_upload_root.join(rel_path);
                     if entry.is_dir() {
                         std::fs::create_dir_all(&target)
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {e}")))?;
@@ -1567,6 +1751,20 @@ pub async fn restore_saved_full_backup(
                 return Err(AppError::Internal(anyhow::anyhow!("chan.db not extracted")));
             }
 
+            let db_snapshot_str = db_snapshot
+                .to_str()
+                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Snapshot path is non-UTF-8")))?
+                .replace('\'', "''");
+            live_conn
+                .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {e}")))?;
+
+            let had_live_uploads = swap_staged_path_into_place(
+                &staged_upload_root,
+                &upload_root,
+                &previous_upload_root,
+            )?;
+
             let backup_result = (|| -> Result<()> {
                 let src = rusqlite::Connection::open(&temp_db)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Open source: {e}")))?;
@@ -1577,8 +1775,38 @@ pub async fn restore_saved_full_backup(
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup copy: {e}")))?;
                 Ok(())
             })();
+            if let Err(e) = backup_result {
+                let _ = rollback_swapped_path(&upload_root, &previous_upload_root, had_live_uploads);
+                let restore_db_result = (|| -> Result<()> {
+                    let src = rusqlite::Connection::open(&db_snapshot).map_err(|restore_err| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Open DB rollback snapshot {}: {restore_err}",
+                            db_snapshot.display()
+                        ))
+                    })?;
+                    let backup = Backup::new(&src, &mut live_conn).map_err(|restore_err| {
+                        AppError::Internal(anyhow::anyhow!("Rollback init: {restore_err}"))
+                    })?;
+                    backup
+                        .run_to_completion(100, std::time::Duration::from_millis(0), None)
+                        .map_err(|restore_err| {
+                            AppError::Internal(anyhow::anyhow!("Rollback copy: {restore_err}"))
+                        })?;
+                    Ok(())
+                })();
+                let _ = std::fs::remove_file(&temp_db);
+                let _ = std::fs::remove_file(&db_snapshot);
+                let _ = remove_path_if_exists(&staged_upload_root);
+                if let Err(restore_err) = restore_db_result {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Restore failed and rollback failed: {e}; rollback error: {restore_err}"
+                    )));
+                }
+                return Err(e);
+            }
             let _ = std::fs::remove_file(&temp_db);
-            backup_result?;
+            let _ = std::fs::remove_file(&db_snapshot);
+            let _ = remove_path_if_exists(&previous_upload_root);
 
             let fresh_sid = new_session_id();
             let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
@@ -1681,6 +1909,17 @@ pub async fn restore_saved_board_backup(
             };
 
             let board_short = manifest.board.short_name.clone();
+            let upload_root = PathBuf::from(&upload_dir);
+            let staged_upload_root = create_staging_dir(&upload_root, "board-restore-stage")?;
+            extract_uploads_to_dir(&mut archive, &staged_upload_root)?;
+            let staged_board_dir = staged_upload_root.join(&board_short);
+            std::fs::create_dir_all(&staged_board_dir)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create staged board dir: {e}")))?;
+            let live_board_dir = upload_root.join(&board_short);
+            let previous_board_dir = upload_root.join(format!(
+                ".{board_short}.restore-old.{}",
+                uuid::Uuid::new_v4().simple()
+            ));
 
             let existing_id: Option<i64> = conn
                 .query_row(
@@ -1796,7 +2035,7 @@ pub async fn restore_saved_board_backup(
                             p.tripcode,
                             p.subject,
                             p.body,
-                            p.body_html,
+                            render_restored_body_html(&p.body),
                             p.ip_hash,
                             p.file_path,
                             p.file_name,
@@ -1874,46 +2113,25 @@ pub async fn restore_saved_board_backup(
 
             match restore_result {
                 Ok(()) => {
-                    conn.execute("COMMIT", [])
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit: {e}")))?;
+                    let had_live_board =
+                        swap_staged_path_into_place(&staged_board_dir, &live_board_dir, &previous_board_dir)?;
+                    if let Err(e) = conn.execute("COMMIT", []) {
+                        let _ = rollback_swapped_path(
+                            &live_board_dir,
+                            &previous_board_dir,
+                            had_live_board,
+                        );
+                        return Err(AppError::Internal(anyhow::anyhow!("Commit: {e}")));
+                    }
+                    let _ = remove_path_if_exists(&previous_board_dir);
                 }
                 Err(e) => {
                     let _ = conn.execute("ROLLBACK", []);
+                    let _ = remove_path_if_exists(&staged_upload_root);
                     return Err(e);
                 }
             }
-
-            // Extract upload files.
-            for i in 0..archive.len() {
-                let mut entry = archive
-                    .by_index(i)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
-                let name = entry.name().to_string();
-                if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
-                    warn!("Board restore-saved: skipping suspicious entry '{name}'");
-                    continue;
-                }
-                if let Some(rel) = name.strip_prefix("uploads/") {
-                    if rel.is_empty() {
-                        continue;
-                    }
-                    let target = PathBuf::from(&upload_dir).join(rel);
-                    if entry.is_dir() {
-                        std::fs::create_dir_all(&target)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {e}")))?;
-                    } else {
-                        if let Some(p) = target.parent() {
-                            std::fs::create_dir_all(p).map_err(|e| {
-                                AppError::Internal(anyhow::anyhow!("mkdir parent: {e}"))
-                            })?;
-                        }
-                        let mut out = std::fs::File::create(&target)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Create: {e}")))?;
-                        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write: {e}")))?;
-                    }
-                }
-            }
+            let _ = remove_path_if_exists(&staged_upload_root);
 
             tracing::info!(target: "admin", board = %board_short, "Board restore-saved completed");
             let safe_short: String = board_short
@@ -2506,6 +2724,21 @@ pub async fn board_restore(
                 };
 
                 let board_short = manifest.board.short_name.clone();
+                let upload_root = PathBuf::from(&upload_dir);
+                let staged_upload_root =
+                    create_staging_dir(&upload_root, "board-restore-stage")?;
+                if let Some(ref mut archive) = archive_opt {
+                    extract_uploads_to_dir(archive, &staged_upload_root)?;
+                }
+                let staged_board_dir = staged_upload_root.join(&board_short);
+                std::fs::create_dir_all(&staged_board_dir).map_err(|e| {
+                    AppError::Internal(anyhow::anyhow!("Create staged board dir: {e}"))
+                })?;
+                let live_board_dir = upload_root.join(&board_short);
+                let previous_board_dir = upload_root.join(format!(
+                    ".{board_short}.restore-old.{}",
+                    uuid::Uuid::new_v4().simple()
+                ));
 
                 let existing_id: Option<i64> = conn
                     .query_row(
@@ -2641,7 +2874,7 @@ pub async fn board_restore(
                                 p.tripcode,
                                 p.subject,
                                 p.body,
-                                p.body_html,
+                                render_restored_body_html(&p.body),
                                 p.ip_hash,
                                 p.file_path,
                                 p.file_name,
@@ -2688,12 +2921,12 @@ pub async fn board_restore(
                             };
 
                             let new_body = remap_body_quotelinks(&p.body, &pairs);
-                            let new_body_html = remap_body_html_quotelinks(&p.body_html, &pairs);
+                            let new_body_html = render_restored_body_html(&new_body);
 
                             // Only issue the UPDATE when the text actually
                             // changed — avoids unnecessary I/O when none of
                             // the post IDs appear in this post's body.
-                            if new_body != p.body || new_body_html != p.body_html {
+                            if new_body != p.body {
                                 conn.execute(
                                     "UPDATE posts SET body = ?1, body_html = ?2 WHERE id = ?3",
                                     params![new_body, new_body_html, new_post_id],
@@ -2793,50 +3026,25 @@ pub async fn board_restore(
 
                 match restore_result {
                     Ok(()) => {
-                        conn.execute("COMMIT", [])
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit tx: {e}")))?;
+                        let had_live_board =
+                            swap_staged_path_into_place(&staged_board_dir, &live_board_dir, &previous_board_dir)?;
+                        if let Err(e) = conn.execute("COMMIT", []) {
+                            let _ = rollback_swapped_path(
+                                &live_board_dir,
+                                &previous_board_dir,
+                                had_live_board,
+                            );
+                            return Err(AppError::Internal(anyhow::anyhow!("Commit tx: {e}")));
+                        }
+                        let _ = remove_path_if_exists(&previous_board_dir);
                     }
                     Err(e) => {
                         let _ = conn.execute("ROLLBACK", []);
+                        let _ = remove_path_if_exists(&staged_upload_root);
                         return Err(e);
                     }
                 }
-
-                if let Some(ref mut archive) = archive_opt {
-                    for i in 0..archive.len() {
-                        let mut entry = archive
-                            .by_index(i)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
-                        let name = entry.name().to_string();
-                        if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
-                            warn!("Board restore: skipping suspicious entry '{name}'");
-                            continue;
-                        }
-                        if let Some(rel) = name.strip_prefix("uploads/") {
-                            if rel.is_empty() {
-                                continue;
-                            }
-                            let target = PathBuf::from(&upload_dir).join(rel);
-                            if entry.is_dir() {
-                                std::fs::create_dir_all(&target).map_err(|e| {
-                                    AppError::Internal(anyhow::anyhow!("mkdir: {e}"))
-                                })?;
-                            } else {
-                                if let Some(p) = target.parent() {
-                                    std::fs::create_dir_all(p).map_err(|e| {
-                                        AppError::Internal(anyhow::anyhow!("mkdir parent: {e}"))
-                                    })?;
-                                }
-                                let mut out = std::fs::File::create(&target).map_err(|e| {
-                                    AppError::Internal(anyhow::anyhow!("Create file: {e}"))
-                                })?;
-                                copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(
-                                    |e| AppError::Internal(anyhow::anyhow!("Write file: {e}")),
-                                )?;
-                            }
-                        }
-                    }
-                }
+                let _ = remove_path_if_exists(&staged_upload_root);
 
                 tracing::info!(target: "admin", board = %board_short, "Board restore completed");
                 // Refresh live board list — board_restore may have created a

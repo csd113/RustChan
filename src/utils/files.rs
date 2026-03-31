@@ -33,6 +33,12 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+mod disk_space;
+mod mime;
+
+use disk_space::check_disk_space;
+pub use mime::detect_mime_type;
+
 // ─── Output type ─────────────────────────────────────────────────────────────
 
 pub struct UploadedFile {
@@ -56,209 +62,6 @@ pub struct UploadedFile {
     pub processing_pending: bool,
 }
 
-// ─── MIME / type detection ────────────────────────────────────────────────────
-
-/// Validate file bytes against known magic signatures and return the detected
-/// MIME type string.  Returns an error when the file type is not on the allowlist.
-///
-/// We check magic bytes rather than trusting the user-supplied Content-Type
-/// header.  This prevents executables disguised as media from being served.
-///
-/// # Errors
-/// Returns an error if the data is empty or the file type is not on the allowlist.
-#[allow(clippy::arithmetic_side_effects)]
-pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
-    if data.is_empty() {
-        return Err(anyhow::anyhow!("File is empty."));
-    }
-    let header = data.get(..data.len().min(12)).unwrap_or(data);
-
-    // ── MP4 / M4A disambiguation ──────────────────────────────────────────────
-    if data.get(4..8) == Some(b"ftyp") {
-        if let Some(brand) = data.get(8..12) {
-            if brand == b"M4A " || brand == b"m4a " {
-                return Ok("audio/mp4");
-            }
-        }
-        return Ok("video/mp4");
-    }
-
-    // ── RIFF container — disambiguate WebP vs WAV ────────────────────────────
-    if header.starts_with(b"RIFF") {
-        return match data.get(8..12) {
-            Some(b"WEBP") => Ok("image/webp"),
-            Some(b"WAVE") => Ok("audio/wav"),
-            _ => Err(anyhow::anyhow!(
-                "RIFF container with unknown subtype. Accepted: WebP, WAV"
-            )),
-        };
-    }
-
-    // ── EBML container — distinguish WebM (video or audio-only) from MKV ────
-    //
-    // Both WebM and Matroska (.mkv) start with the same EBML magic bytes
-    // (1A 45 DF A3), so checking only the magic is insufficient — MKV files
-    // containing H.264/HEVC/etc. would be accepted and stored as .webm, then
-    // silently fail to play in any browser.
-    //
-    // The EBML header always begins with the EBML ID (1A 45 DF A3) followed
-    // immediately by the header size (variable-length VINT), then a sequence
-    // of EBML elements.  The DocType element has ID 0x4282.  Its value is the
-    // ASCII string "webm" (browser-compatible) or "matroska" (reject).
-    //
-    // We scan the first 64 bytes for 0x42 0x82, read the 1-byte size that
-    // follows, then compare that many bytes to "webm" or "matroska".
-    // If DocType is absent or unrecognised we reject.
-    //
-    // For audio-only WebM (Opus/Vorbis streams, no video track) the docType
-    // is still "webm", but none of the subsequent EBML Track elements contain
-    // a video codec ID.  We do not probe track types here — that would require
-    // parsing the full Segment element, which can be megabytes in.  Instead we
-    // accept all valid "webm" docType files and rely on the background worker's
-    // ffprobe call to detect audio-only containers and classify them correctly.
-    // To give the handler a usable MIME type up front we return "video/webm"
-    // for now; the worker will update the post's mime_type to "audio/webm" if
-    // ffprobe finds no video stream.  This is safe because both share the same
-    // file extension (.webm) and the browser media element handles both.
-    if data.get(..4) == Some(b"\x1a\x45\xdf\xa3") {
-        // Scan first 64 bytes for DocType element (ID = 0x42 0x82).
-        let scan_len = data.len().min(64);
-        let scan = data.get(..scan_len).unwrap_or(data);
-        let mut pos = 4usize;
-        let mut found_doctype: Option<&[u8]> = None;
-        // Use slice patterns so every access goes through bounds-checked .get(),
-        // satisfying clippy::indexing_slicing while keeping the loop readable.
-        while let Some([b0, b1, b2, ..]) = scan.get(pos..) {
-            if *b0 == 0x42 && *b1 == 0x82 {
-                // Next byte is the 1-byte DataSize (short form, bit 7 set -> size = byte & 0x7F).
-                let value_len = (*b2 & 0x7f) as usize;
-                let value_start = pos + 3;
-                if value_start + value_len <= scan.len() {
-                    found_doctype = scan.get(value_start..value_start + value_len);
-                }
-                break;
-            }
-            pos += 1;
-        }
-        return match found_doctype {
-            Some(b"webm") => Ok("video/webm"), // audio-only WebM also uses docType "webm"
-            Some(b"matroska") => Err(anyhow::anyhow!(
-                "Matroska (.mkv) files are not accepted. Please upload a WebM file instead."
-            )),
-            _ => Err(anyhow::anyhow!(
-                "Unrecognised EBML container. Accepted: WebM (video/webm)."
-            )),
-        };
-    }
-
-    // ── Image formats ─────────────────────────────────────────────────────────
-    if header.starts_with(b"\xff\xd8\xff") {
-        return Ok("image/jpeg");
-    }
-    if header.starts_with(b"\x89PNG") {
-        return Ok("image/png");
-    }
-    if header.starts_with(b"GIF8") {
-        return Ok("image/gif");
-    }
-    // ── BMP ───────────────────────────────────────────────────────────────────
-    // Magic: 'BM' (0x42 0x4D).  BMP uploads are immediately converted to WebP
-    // by the media pipeline when ffmpeg is available.
-    if header.starts_with(b"BM") {
-        return Ok("image/bmp");
-    }
-    // ── TIFF (little-endian and big-endian) ───────────────────────────────────
-    // LE: 49 49 2A 00  ("II*\0")
-    // BE: 4D 4D 00 2A  ("MM\0*")
-    // TIFF uploads are converted to WebP by the media pipeline when ffmpeg is
-    // available.
-    if header.starts_with(b"\x49\x49\x2a\x00") || header.starts_with(b"\x4d\x4d\x00\x2a") {
-        return Ok("image/tiff");
-    }
-    // ── SVG — detected but not accepted as an upload ──────────────────────────
-    // Rejection is enforced in save_upload(); detect_mime_type() returns the
-    // correct MIME type so callers can identify SVGs before deciding what to do.
-    {
-        let text_peek = data.get(..data.len().min(512)).unwrap_or(data);
-        let text_peek = text_peek.strip_prefix(b"\xef\xbb\xbf").unwrap_or(text_peek);
-        if text_peek.starts_with(b"<svg")
-            || text_peek.starts_with(b"<SVG")
-            || text_peek.starts_with(b"<?xml")
-        {
-            return Ok("image/svg+xml");
-        }
-    }
-
-    // ── Audio: ID3-tagged MP3 ─────────────────────────────────────────────────
-    if header.starts_with(b"ID3") {
-        return Ok("audio/mpeg");
-    }
-    if header.starts_with(b"OggS") {
-        return Ok("audio/ogg");
-    }
-    if header.starts_with(b"fLaC") {
-        return Ok("audio/flac");
-    }
-
-    // ── Audio: sync-word detection (0xFF prefix) ──────────────────────────────
-    // MP3 and AAC ADTS both start with 0xFF.  Merge both checks into a single
-    // `if let` block to avoid redundant pattern-matching overhead and clearly
-    // express that the two detections are mutually exclusive branches.
-    if let (Some(&0xff), Some(&b1)) = (data.first(), data.get(1)) {
-        // Raw MP3 frame sync: FF FB / FF F3 / FF F2
-        if b1 == 0xfb || b1 == 0xf3 || b1 == 0xf2 {
-            return Ok("audio/mpeg");
-        }
-        // AAC ADTS sync word: FF F0–FF FE (high nibble = 0xF, not 0xFF itself).
-        // The MP3 bytes above are already handled, so only true ADTS words reach here.
-        if b1 & 0xf0 == 0xf0 && b1 != 0xff {
-            return Ok("audio/aac");
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, BMP, TIFF, \
-         MP4, WebM, MP3, OGG, FLAC, WAV, M4A, AAC"
-    ))
-}
-
-// ─── Disk-space guard ────────────────────────────────────────────────────────
-
-/// Verify at least `2 × needed_bytes` of free space in `dir` before writing.
-/// Uses `statvfs` on Unix; is a no-op (always Ok) on other platforms so Windows
-/// dev environments still compile and run.
-///
-/// Requiring 2× headroom means a crash mid-rename still leaves the original
-/// temp file and will not fill the volume to 100 %.
-#[cfg(unix)]
-fn check_disk_space(dir: &Path, needed_bytes: usize) -> Result<()> {
-    unsafe {
-        let dir_bytes = dir.to_string_lossy();
-        if let Ok(path_cstr) = std::ffi::CString::new(dir_bytes.as_bytes()) {
-            let mut stat: libc::statvfs = std::mem::zeroed();
-            if libc::statvfs(path_cstr.as_ptr(), &raw mut stat) == 0 {
-                #[allow(clippy::unnecessary_cast)]
-                #[allow(clippy::useless_conversion, clippy::cast_lossless)]
-                let free_bytes = u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize));
-                let needed = (needed_bytes as u64).saturating_mul(2);
-                if free_bytes < needed {
-                    return Err(anyhow::anyhow!(
-                        "Insufficient disk space: need ~{} MiB free, only ~{} MiB available.",
-                        needed / (1024 * 1024),
-                        free_bytes / (1024 * 1024)
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn check_disk_space(_dir: &Path, _needed_bytes: usize) -> Result<()> {
-    Ok(())
-}
-
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
 /// Save an uploaded file to disk and generate its thumbnail (or audio placeholder).
@@ -274,12 +77,10 @@ fn check_disk_space(_dir: &Path, _needed_bytes: usize) -> Result<()> {
 /// All thumbnails are produced as WebP.  If ffmpeg is unavailable, image
 /// thumbnails use the `image` crate as a fallback; video/audio thumbnails
 /// fall back to static SVG placeholders.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-/// # Errors
-/// Returns an error if the file type is unsupported, too large, disk space is
-/// insufficient, or any I/O operation fails.
-pub fn save_upload(
-    data: &[u8],
+pub fn save_upload_from_path(
+    input_path: &Path,
+    sniff_bytes: &[u8],
+    original_size: usize,
     original_filename: &str,
     boards_dir: &str,
     board_short: &str,
@@ -290,16 +91,11 @@ pub fn save_upload(
     ffmpeg_available: bool,
     ffmpeg_webp_available: bool,
 ) -> Result<UploadedFile> {
-    if data.is_empty() {
+    if original_size == 0 {
         return Err(anyhow::anyhow!("File is empty."));
     }
 
-    // Detect MIME type first so we can apply the correct size limit.
-    let mime_type = detect_mime_type(data)?;
-
-    // SVG files can embed <script> tags and onload= handlers; reject them here
-    // with a clear message rather than letting them fall through to the generic
-    // "unsupported type" error.
+    let mime_type = detect_mime_type(sniff_bytes)?;
     if mime_type == "image/svg+xml" {
         return Err(anyhow::anyhow!(
             "File type not allowed. SVG files are not accepted because they can contain executable JavaScript."
@@ -313,8 +109,7 @@ pub fn save_upload(
         crate::models::MediaType::Audio => max_audio_size,
         crate::models::MediaType::Image => max_image_size,
     };
-
-    if data.len() > max_size {
+    if original_size > max_size {
         return Err(anyhow::anyhow!(
             "File too large. Maximum {} size is {} MiB.",
             match media_type {
@@ -326,53 +121,13 @@ pub fn save_upload(
         ));
     }
 
-    // FIX[BUG]: Read the EXIF orientation from the ORIGINAL bytes BEFORE EXIF
-    // stripping.  strip_jpeg_exif() re-encodes the JPEG, discarding all metadata
-    // including the Orientation tag.  If we read orientation from the stripped
-    // bytes (as the previous code did) we always get orientation=1 (no rotation)
-    // and phone photos appear sideways in thumbnails.
     let jpeg_orientation = if mime_type == "image/jpeg" {
-        crate::media::exif::read_exif_orientation(data)
+        read_exif_orientation_from_file(input_path)?
     } else {
         1
     };
 
     let file_id = Uuid::new_v4().simple().to_string();
-
-    // ── JPEG EXIF stripping ───────────────────────────────────────────────────
-    // Re-encoding a JPEG through the `image` crate produces a clean output with
-    // no EXIF, IPTC, XMP, or any other metadata segment — only the pixel data
-    // is retained.  We replace `data` with the stripped bytes so every
-    // downstream step (MediaProcessor, size check, disk write) sees clean data.
-    let stripped_jpeg: Option<Vec<u8>> = if mime_type == "image/jpeg" {
-        match strip_jpeg_exif(data) {
-            Ok(clean) => {
-                tracing::debug!(
-                    "EXIF stripped from JPEG ({} → {} bytes)",
-                    data.len(),
-                    clean.len()
-                );
-                Some(clean)
-            }
-            Err(e) => {
-                tracing::warn!("JPEG EXIF strip failed ({}); saving original", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Use the EXIF-stripped bytes when available, otherwise the original.
-    let data: &[u8] = stripped_jpeg.as_deref().unwrap_or(data);
-
-    // ── Async processing flag ─────────────────────────────────────────────────
-    // Heavy CPU work (MP4→WebM transcoding, audio waveform) is deferred to the
-    // background worker pool so HTTP responses return immediately.
-    //   • Video (MP4) + ffmpeg → save as-is now; worker transcodes to WebM.
-    //   • Audio       + ffmpeg → use SVG placeholder now; worker adds PNG waveform.
-    // GIF→WebM conversion is done inline by MediaProcessor (not deferred) because
-    // GIFs are images not videos, and the spec requires immediate conversion.
     let processing_pending = ffmpeg_available
         && matches!(
             media_type,
@@ -382,60 +137,25 @@ pub fn save_upload(
             || mime_type == "video/mp4"
             || mime_type == "video/webm");
 
-    // ── Ensure per-board directories ──────────────────────────────────────────
     let dest_dir = PathBuf::from(boards_dir).join(board_short);
     let thumbs_dir = dest_dir.join("thumbs");
     std::fs::create_dir_all(&thumbs_dir).context("Failed to create board thumbs directory")?;
+    check_disk_space(&dest_dir, original_size)?;
 
-    // Disk-space pre-check: verify at least 2× the file size is available.
-    check_disk_space(&dest_dir, data.len())?;
-
-    // ── Write upload bytes to a temp file for MediaProcessor ─────────────────
-    // MediaProcessor works on disk paths so ffmpeg can read/write files.
-    // The temp file is in the same directory so any in-place rename is atomic
-    // (same filesystem partition guaranteed).
-    let tmp_input = {
-        use std::io::Write as _;
-        // Give the temp file the correct extension so ffmpeg can reliably
-        // detect the input format by extension (in addition to magic bytes).
-        // Without an extension, some ffmpeg builds fail to select a demuxer
-        // for formats like JPEG even when the magic bytes are valid.
-        let ext = mime_to_ext(mime_type);
-        let mut tmp = tempfile::Builder::new()
-            .suffix(&format!(".{ext}"))
-            .tempfile_in(&dest_dir)
-            .context("Failed to create temp input file for media processing")?;
-        tmp.write_all(data)
-            .context("Failed to write upload bytes to temp file")?;
-        tmp.flush().context("Failed to flush temp input file")?;
-        tmp
-    };
-
-    // ── Run media conversion + thumbnail generation via MediaProcessor ────────
+    let processor_input = prepare_processor_input(input_path, &dest_dir, mime_type)?;
     let processor =
         crate::media::MediaProcessor::new_with_ffmpeg_caps(ffmpeg_available, ffmpeg_webp_available);
+    let processed = processor
+        .process_upload(
+            processor_input.path(),
+            mime_type,
+            &dest_dir,
+            &file_id,
+            &thumbs_dir,
+            thumb_size,
+        )
+        .context("Media processing pipeline failed")?;
 
-    let processed = processor.process_upload(
-        tmp_input.path(),
-        mime_type,
-        &dest_dir,
-        &file_id,
-        &thumbs_dir,
-        thumb_size,
-    );
-
-    // The temp input file is no longer needed after process_upload; drop it
-    // (NamedTempFile auto-deletes the underlying file on drop).
-    drop(tmp_input);
-
-    let processed = processed.context("Media processing pipeline failed")?;
-
-    // ── Apply EXIF orientation to the stored image thumbnail ─────────────────
-    // When ffmpeg is unavailable and the image crate generated the thumbnail,
-    // EXIF orientation is applied by `apply_exif_orientation` below.
-    // When ffmpeg generated the thumbnail it reads EXIF automatically.
-    // If orientation != 1 and the thumbnail is WebP and ffmpeg was NOT used,
-    // we need to re-orient the generated thumbnail.
     if jpeg_orientation > 1
         && !ffmpeg_available
         && processed.thumbnail_path.exists()
@@ -448,16 +168,10 @@ pub fn save_upload(
         apply_thumb_exif_orientation(&processed.thumbnail_path, jpeg_orientation);
     }
 
-    // ── Determine final MIME and media type ───────────────────────────────────
-    // GIF → WebM changes the media type from Image to Video.
     let final_mime: String = processed.mime_type.clone();
     let final_media_type = crate::models::MediaType::from_mime(&final_mime).unwrap_or(media_type);
-
-    // ── File size from actual bytes on disk ───────────────────────────────────
     let file_size = i64::try_from(processed.final_size).context("File size overflows i64")?;
 
-    // ── Build relative paths for DB storage ───────────────────────────────────
-    // Paths are relative to `boards_dir`, e.g. "b/abc123.webp".
     let filename = processed
         .file_path
         .file_name()
@@ -472,19 +186,11 @@ pub fn save_upload(
         .context("Thumbnail file has non-UTF-8 name")?;
     let rel_thumb = format!("{board_short}/thumbs/{thumb_filename}");
 
-    // ── processing_pending: always false for inline-converted GIF→WebM ────────
-    // The media pipeline converted GIF→WebM synchronously, so no background job
-    // is needed.  MP4/WebM still use the existing background transcoding path.
     let final_processing_pending = if processed.was_converted {
         false
     } else {
         processing_pending
     };
-
-    // ── Audio SVG placeholder path (not affected by MediaProcessor) ───────────
-    // Audio files are handled as a special case: the media processor emits an
-    // SVG placeholder thumbnail, and the background AudioWaveform worker
-    // replaces it later.  The rel_thumb already points to the SVG placeholder.
 
     Ok(UploadedFile {
         file_path: rel_file,
@@ -520,6 +226,34 @@ fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {
     }
 }
 
+fn prepare_processor_input(
+    input_path: &Path,
+    dest_dir: &Path,
+    mime_type: &str,
+) -> Result<tempfile::NamedTempFile> {
+    let ext = mime_to_ext(mime_type);
+    let tmp = tempfile::Builder::new()
+        .suffix(&format!(".{ext}"))
+        .tempfile_in(dest_dir)
+        .context("Failed to create temp input file for media processing")?;
+
+    if mime_type == "image/jpeg" {
+        match strip_jpeg_exif_file(input_path, tmp.path()) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!("JPEG EXIF strip failed ({e}); using original bytes");
+                std::fs::copy(input_path, tmp.path())
+                    .context("Failed to copy original JPEG into processor temp file")?;
+            }
+        }
+    } else {
+        std::fs::copy(input_path, tmp.path())
+            .context("Failed to copy upload into processor temp file")?;
+    }
+
+    Ok(tmp)
+}
+
 // ─── Image+audio combo: save audio with an existing image as its thumbnail ───
 
 /// Save an audio file to disk for an image+audio combo post.
@@ -532,29 +266,28 @@ fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {
 ///
 /// # Errors
 /// Returns an error if the audio is empty, unsupported type, too large, or any I/O fails.
-#[allow(clippy::too_many_arguments)]
-pub fn save_audio_with_image_thumb(
-    audio_data: &[u8],
+pub fn save_audio_with_image_thumb_from_path(
+    input_path: &Path,
+    sniff_bytes: &[u8],
+    original_size: usize,
     original_filename: &str,
     boards_dir: &str,
     board_short: &str,
     max_audio_size: usize,
 ) -> Result<UploadedFile> {
-    if audio_data.is_empty() {
+    if original_size == 0 {
         return Err(anyhow::anyhow!("Audio file is empty."));
     }
 
-    let mime_type = detect_mime_type(audio_data)?;
+    let mime_type = detect_mime_type(sniff_bytes)?;
     let media_type = crate::models::MediaType::from_mime(mime_type)
         .ok_or_else(|| anyhow::anyhow!("Not an audio file: {mime_type}"))?;
-
     if !matches!(media_type, crate::models::MediaType::Audio) {
         return Err(anyhow::anyhow!(
             "Expected an audio file for the audio slot; got {mime_type}"
         ));
     }
-
-    if audio_data.len() > max_audio_size {
+    if original_size > max_audio_size {
         return Err(anyhow::anyhow!(
             "Audio file too large. Maximum size is {} MiB.",
             max_audio_size / 1024 / 1024
@@ -564,37 +297,27 @@ pub fn save_audio_with_image_thumb(
     let file_id = Uuid::new_v4().simple().to_string();
     let ext = mime_to_ext(mime_type);
     let filename = format!("{file_id}.{ext}");
-
     let dest_dir = PathBuf::from(boards_dir).join(board_short);
     std::fs::create_dir_all(&dest_dir).context("Failed to create board directory")?;
-
-    // Apply the same 2× disk-space pre-check used by save_upload.
-    check_disk_space(&dest_dir, audio_data.len())?;
+    check_disk_space(&dest_dir, original_size)?;
 
     let file_path_abs = dest_dir.join(&filename);
-    {
-        use std::io::Write as _;
-        let mut tmp = tempfile::NamedTempFile::new_in(&dest_dir)
-            .context("Failed to create temp file for audio upload")?;
-        tmp.write_all(audio_data)
-            .context("Failed to write audio data to temp file")?;
-        tmp.persist(&file_path_abs)
-            .context("Failed to atomically rename audio temp file")?;
-    }
+    let tmp = tempfile::NamedTempFile::new_in(&dest_dir)
+        .context("Failed to create temp file for audio upload")?;
+    std::fs::copy(input_path, tmp.path()).context("Failed to copy audio upload to temp file")?;
+    tmp.persist(&file_path_abs)
+        .context("Failed to atomically rename audio temp file")?;
 
     let rel_file = format!("{board_short}/{filename}");
-    let file_size = i64::try_from(audio_data.len()).context("File size overflows i64")?;
-
-    // The thumb_path is intentionally left empty here; the caller sets it to
-    // the companion image's thumb path when constructing the NewPost record.
+    let file_size = i64::try_from(original_size).context("File size overflows i64")?;
     Ok(UploadedFile {
         file_path: rel_file,
-        thumb_path: String::new(), // filled in by caller from the image UploadedFile
+        thumb_path: String::new(),
         original_name: crate::utils::sanitize::sanitize_filename(original_filename),
         mime_type: mime_type.to_string(),
         file_size,
         media_type,
-        processing_pending: false, // image serves as thumb; no waveform needed
+        processing_pending: false,
     })
 }
 
@@ -621,6 +344,18 @@ fn strip_jpeg_exif(data: &[u8]) -> Result<Vec<u8>> {
     img.write_to(&mut cursor, image::ImageFormat::Jpeg)
         .context("Failed to re-encode JPEG after EXIF strip")?;
     Ok(cursor.into_inner())
+}
+
+fn strip_jpeg_exif_file(input_path: &Path, output_path: &Path) -> Result<()> {
+    let data = std::fs::read(input_path).context("Failed to read JPEG for EXIF strip")?;
+    let clean = strip_jpeg_exif(&data)?;
+    std::fs::write(output_path, clean).context("Failed to write stripped JPEG temp file")?;
+    Ok(())
+}
+
+fn read_exif_orientation_from_file(path: &Path) -> Result<u32> {
+    let data = std::fs::read(path).context("Failed to read JPEG EXIF data")?;
+    Ok(crate::media::exif::read_exif_orientation(&data))
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod board;
+pub mod posting;
 pub mod thread;
 
 // ─── Shared multipart form parsing ───────────────────────────────────────────
@@ -12,6 +13,9 @@ use crate::error::{AppError, Result};
 use crate::middleware::validate_csrf;
 use crate::workers::JobQueue;
 use axum::extract::Multipart;
+use tokio::io::AsyncWriteExt as _;
+
+const MIME_SNIFF_BYTES: usize = 512;
 
 // ─── Streaming multipart size limit ──────────────────────────────────────────
 //
@@ -28,25 +32,59 @@ use axum::extract::Multipart;
 // which is bounded by axum's body length limit set in the router layer.
 
 #[allow(clippy::arithmetic_side_effects)]
-async fn read_field_bytes(
+async fn stream_field_to_temp_file(
     mut field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
-) -> Result<Vec<u8>> {
-    let mut buf: Vec<u8> = Vec::new();
+) -> Result<TempUpload> {
+    let temp_file = tempfile::Builder::new()
+        .prefix("rustchan-upload-")
+        .tempfile()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp upload file: {e}")))?;
+    let std_file = temp_file
+        .reopen()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen temp upload file: {e}")))?;
+    let mut file = tokio::fs::File::from_std(std_file);
+    let mut sniff_bytes = Vec::with_capacity(MIME_SNIFF_BYTES);
+    let mut size_bytes = 0usize;
+
     while let Some(chunk) = field
         .chunk()
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))?
     {
-        if buf.len() + chunk.len() > max_bytes {
+        if size_bytes.saturating_add(chunk.len()) > max_bytes {
             return Err(AppError::UploadTooLarge(format!(
                 "File too large. Maximum upload size is {} MiB.",
                 max_bytes / 1024 / 1024
             )));
         }
-        buf.extend_from_slice(&chunk);
+        if sniff_bytes.len() < MIME_SNIFF_BYTES {
+            let remaining = MIME_SNIFF_BYTES.saturating_sub(sniff_bytes.len());
+            let take = remaining.min(chunk.len());
+            if let Some(prefix) = chunk.get(..take) {
+                sniff_bytes.extend_from_slice(prefix);
+            }
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp upload file: {e}")))?;
+        size_bytes = size_bytes.saturating_add(chunk.len());
     }
-    Ok(buf)
+    file.flush()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush temp upload file: {e}")))?;
+
+    Ok(TempUpload {
+        temp_file,
+        sniff_bytes,
+        size_bytes,
+    })
+}
+
+pub struct TempUpload {
+    pub temp_file: tempfile::NamedTempFile,
+    pub sniff_bytes: Vec<u8>,
+    pub size_bytes: usize,
 }
 
 /// Parsed fields from a post/thread creation multipart form.
@@ -56,10 +94,10 @@ pub struct PostFormData {
     pub subject: String,
     pub body: String,
     pub deletion_token: String,
-    /// Raw bytes + original filename if a file was attached.
-    pub file: Option<(Vec<u8>, String)>,
+    /// Temp file + original filename if a file was attached.
+    pub file: Option<(TempUpload, String)>,
     /// Secondary audio file for image+audio combo uploads.
-    pub audio_file: Option<(Vec<u8>, String)>,
+    pub audio_file: Option<(TempUpload, String)>,
     // ── Poll fields (only used when creating a new thread) ────────────────
     pub poll_question: String,
     pub poll_options: Vec<String>,
@@ -83,8 +121,8 @@ pub async fn parse_post_multipart(
     let mut subject = String::new();
     let mut body = String::new();
     let mut deletion_token = String::new();
-    let mut file: Option<(Vec<u8>, String)> = None;
-    let mut audio_file: Option<(Vec<u8>, String)> = None;
+    let mut file: Option<(TempUpload, String)> = None;
+    let mut audio_file: Option<(TempUpload, String)> = None;
     let mut poll_question = String::new();
     let mut poll_options: Vec<String> = Vec::new();
     let mut poll_duration_value: Option<i64> = None;
@@ -151,16 +189,16 @@ pub async fn parse_post_multipart(
             Some("file") => {
                 let fname = field.file_name().unwrap_or("upload").to_string();
                 let max = CONFIG.max_video_size.max(CONFIG.max_audio_size);
-                let data = read_field_bytes(field, max).await?;
-                if !data.is_empty() {
-                    file = Some((data, fname));
+                let upload = stream_field_to_temp_file(field, max).await?;
+                if upload.size_bytes > 0 {
+                    file = Some((upload, fname));
                 }
             }
             Some("audio_file") => {
                 let fname = field.file_name().unwrap_or("audio").to_string();
-                let data = read_field_bytes(field, CONFIG.max_audio_size).await?;
-                if !data.is_empty() {
-                    audio_file = Some((data, fname));
+                let upload = stream_field_to_temp_file(field, CONFIG.max_audio_size).await?;
+                if upload.size_bytes > 0 {
+                    audio_file = Some((upload, fname));
                 }
             }
             _ => {
@@ -253,7 +291,7 @@ use crate::models::Board;
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::arithmetic_side_effects)]
 pub fn process_primary_upload(
-    file_data: Option<(Vec<u8>, String)>,
+    file_data: Option<(TempUpload, String)>,
     board: &Board,
     conn: &rusqlite::Connection,
     upload_dir: &str,
@@ -264,10 +302,10 @@ pub fn process_primary_upload(
     ffmpeg_available: bool,
     ffmpeg_webp_available: bool,
 ) -> Result<Option<crate::utils::files::UploadedFile>> {
-    let Some((data, fname)) = file_data else {
+    let Some((upload, fname)) = file_data else {
         return Ok(None);
     };
-    let detected_mime = crate::utils::files::detect_mime_type(&data)
+    let detected_mime = crate::utils::files::detect_mime_type(&upload.sniff_bytes)
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
     let detected_media = crate::models::MediaType::from_mime(detected_mime)
         .ok_or_else(|| AppError::BadRequest("Unsupported file type.".into()))?;
@@ -305,7 +343,7 @@ pub fn process_primary_upload(
     // If either path is missing we fall through to re-process the upload.
     // record_file_hash uses INSERT OR REPLACE, so the cache entry is
     // automatically refreshed to point at the newly saved files.
-    let hash = crate::utils::crypto::sha256_hex(&data);
+    let hash = sha256_file_hex(upload.temp_file.path())?;
     if let Some(cached) = crate::db::find_file_by_hash(conn, &hash)? {
         let file_ok = std::path::Path::new(upload_dir)
             .join(&cached.file_path)
@@ -323,7 +361,7 @@ pub fn process_primary_upload(
                 thumb_path: cached.thumb_path,
                 original_name: crate::utils::sanitize::sanitize_filename(&fname),
                 mime_type: cached.mime_type,
-                file_size: i64::try_from(data.len()).unwrap_or(0),
+                file_size: i64::try_from(upload.size_bytes).unwrap_or(0),
                 media_type: cached_media,
                 processing_pending: false,
             }));
@@ -337,8 +375,10 @@ pub fn process_primary_upload(
         );
     }
 
-    let f = crate::utils::files::save_upload(
-        &data,
+    let f = crate::utils::files::save_upload_from_path(
+        upload.temp_file.path(),
+        &upload.sniff_bytes,
+        upload.size_bytes,
         &fname,
         upload_dir,
         &board.short_name,
@@ -360,13 +400,13 @@ pub fn process_primary_upload(
 /// Returns `Ok(None)` when `audio_file_data` is `None`.
 /// Must be called from inside a `spawn_blocking` closure.
 pub fn process_audio_combo(
-    audio_file_data: Option<(Vec<u8>, String)>,
+    audio_file_data: Option<(TempUpload, String)>,
     primary_upload: Option<&crate::utils::files::UploadedFile>,
     board: &Board,
     upload_dir: &str,
     max_audio_size: usize,
 ) -> Result<Option<crate::utils::files::UploadedFile>> {
-    let Some((aud_data, aud_fname)) = audio_file_data else {
+    let Some((audio_upload, aud_fname)) = audio_file_data else {
         return Ok(None);
     };
 
@@ -386,7 +426,7 @@ pub fn process_audio_combo(
     }
 
     // Confirm the secondary file is actually audio.
-    let aud_mime = crate::utils::files::detect_mime_type(&aud_data)
+    let aud_mime = crate::utils::files::detect_mime_type(&audio_upload.sniff_bytes)
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
     let aud_media = crate::models::MediaType::from_mime(aud_mime)
         .ok_or_else(|| AppError::BadRequest("Unsupported audio type.".into()))?;
@@ -396,8 +436,10 @@ pub fn process_audio_combo(
         ));
     }
 
-    let mut aud_file = crate::utils::files::save_audio_with_image_thumb(
-        &aud_data,
+    let mut aud_file = crate::utils::files::save_audio_with_image_thumb_from_path(
+        audio_upload.temp_file.path(),
+        &audio_upload.sniff_bytes,
+        audio_upload.size_bytes,
         &aud_fname,
         upload_dir,
         &board.short_name,
@@ -410,6 +452,25 @@ pub fn process_audio_combo(
         aud_file.thumb_path.clone_from(&img.thumb_path);
     }
     Ok(Some(aud_file))
+}
+
+fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
+    use sha2::Digest as _;
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Open temp upload for hash: {e}")))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buf)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Hash temp upload: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        if let Some(bytes) = buf.get(..read) {
+            hasher.update(bytes);
+        }
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Enqueue background media-processing and spam-check jobs for a newly created

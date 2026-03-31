@@ -194,29 +194,6 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
         return next.run(req).await;
     }
 
-    // Skip if the request carries a valid-looking admin session cookie.
-    // We only check presence here (no DB round-trip in middleware); the actual
-    // session validation happens inside admin handlers.  This is sufficient
-    // for rate-limiting purposes since the cookie is HttpOnly+SameSite=Strict.
-    //
-    // FIX[RED-1]: The previous bare `.contains("chan_admin_session=")` matched
-    // any substring of the raw Cookie header, allowing two trivial bypasses:
-    //   • `Cookie: x=chan_admin_session=forged`  (value embeds the string)
-    //   • `Cookie: xchan_admin_session=anything` (name is a prefix)
-    // We now split on ';', trim each pair, and require the segment to *start*
-    // with exactly "chan_admin_session=" — an exact cookie-name match.
-    let has_admin_cookie = req
-        .headers()
-        .get(axum::http::header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|s| {
-            s.split(';')
-                .any(|pair| pair.trim().starts_with("chan_admin_session="))
-        });
-    if has_admin_cookie {
-        return next.run(req).await;
-    }
-
     let ip = extract_ip(&req);
     // Hash the IP so raw addresses are never kept in process memory.
     let ip_key = {
@@ -359,22 +336,13 @@ fn rate_limited_toast_page() -> String {
   }}
 </style>
 </head>
-<body>
+<body data-rate-limit-page="1">
 <div class="toast">
   <h2>&#9888; Slow down</h2>
   <p>You are navigating too fast.<br>Taking you back in a moment…</p>
   <div class="bar"></div>
 </div>
-<script>
-  // Go back as soon as the animation finishes (3 s).
-  setTimeout(function () {{
-    if (document.referrer) {{
-      window.location.href = document.referrer;
-    }} else {{
-      window.history.back();
-    }}
-  }}, 3000);
-</script>
+<script src="/static/main.js" defer></script>
 </body>
 </html>"#
     )
