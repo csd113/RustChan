@@ -1,6 +1,7 @@
 use crate::{
     db,
     error::{AppError, Result},
+    models::Board,
     utils::{
         crypto::new_deletion_token,
         sanitize::{
@@ -11,12 +12,25 @@ use crate::{
     },
 };
 
-pub fn is_admin_session(
-    conn: &rusqlite::Connection,
-    admin_session_id: Option<&str>,
-) -> bool {
-    admin_session_id
-        .is_some_and(|sid| db::get_session(conn, sid).ok().flatten().is_some())
+use crate::db::NewPost;
+
+pub struct UploadConfig<'a> {
+    pub upload_dir: &'a str,
+    pub thumb_size: u32,
+    pub max_image_size: usize,
+    pub max_video_size: usize,
+    pub max_audio_size: usize,
+    pub ffmpeg_available: bool,
+    pub ffmpeg_webp_available: bool,
+}
+
+pub struct ProcessedUploads {
+    pub primary: Option<crate::utils::files::UploadedFile>,
+    pub audio: Option<crate::utils::files::UploadedFile>,
+}
+
+pub fn is_admin_session(conn: &rusqlite::Connection, admin_session_id: Option<&str>) -> bool {
+    admin_session_id.is_some_and(|sid| db::get_session(conn, sid).ok().flatten().is_some())
 }
 
 pub fn load_word_filters(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>> {
@@ -56,5 +70,77 @@ pub fn resolve_deletion_token(raw_token: &str) -> String {
         new_deletion_token()
     } else {
         raw_token.trim().chars().take(64).collect()
+    }
+}
+
+pub fn process_uploads(
+    file_data: Option<(crate::handlers::TempUpload, String)>,
+    audio_file_data: Option<(crate::handlers::TempUpload, String)>,
+    board: &Board,
+    conn: &rusqlite::Connection,
+    config: &UploadConfig<'_>,
+) -> Result<ProcessedUploads> {
+    let primary = crate::handlers::process_primary_upload(
+        file_data,
+        board,
+        conn,
+        config.upload_dir,
+        config.thumb_size,
+        config.max_image_size,
+        config.max_video_size,
+        config.max_audio_size,
+        config.ffmpeg_available,
+        config.ffmpeg_webp_available,
+    )?;
+
+    let audio = crate::handlers::process_audio_combo(
+        audio_file_data,
+        primary.as_ref(),
+        board,
+        config.upload_dir,
+        config.max_audio_size,
+    )?;
+
+    Ok(ProcessedUploads { primary, audio })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_new_post(
+    thread_id: i64,
+    board_id: i64,
+    name: String,
+    tripcode: Option<String>,
+    subject: Option<String>,
+    body: String,
+    body_html: String,
+    ip_hash: String,
+    uploads: &ProcessedUploads,
+    deletion_token: String,
+    is_op: bool,
+) -> NewPost {
+    NewPost {
+        thread_id,
+        board_id,
+        name,
+        tripcode,
+        subject,
+        body,
+        body_html,
+        ip_hash,
+        file_path: uploads.primary.as_ref().map(|u| u.file_path.clone()),
+        file_name: uploads.primary.as_ref().map(|u| u.original_name.clone()),
+        file_size: uploads.primary.as_ref().map(|u| u.file_size),
+        thumb_path: uploads.primary.as_ref().map(|u| u.thumb_path.clone()),
+        mime_type: uploads.primary.as_ref().map(|u| u.mime_type.clone()),
+        media_type: uploads
+            .primary
+            .as_ref()
+            .map(|u| u.media_type.as_str().to_string()),
+        audio_file_path: uploads.audio.as_ref().map(|u| u.file_path.clone()),
+        audio_file_name: uploads.audio.as_ref().map(|u| u.original_name.clone()),
+        audio_file_size: uploads.audio.as_ref().map(|u| u.file_size),
+        audio_mime_type: uploads.audio.as_ref().map(|u| u.mime_type.clone()),
+        deletion_token,
+        is_op,
     }
 }

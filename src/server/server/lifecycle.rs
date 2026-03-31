@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tracing::Instrument as _;
 
-use super::{ACTIVE_IPS, ACTIVE_UPLOADS, IN_FLIGHT, REQUEST_COUNT, ScopedDecrement};
+use super::{ScopedDecrement, ACTIVE_IPS, ACTIVE_UPLOADS, IN_FLIGHT, REQUEST_COUNT};
 
 pub(super) async fn track_requests(
     req: axum::extract::Request,

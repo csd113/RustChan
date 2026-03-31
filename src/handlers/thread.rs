@@ -7,13 +7,11 @@
 
 use crate::{
     config::CONFIG,
-    db::{self, NewPost},
+    db::{self},
     error::{AppError, Result},
     handlers::{board::ensure_csrf, parse_post_multipart, posting},
     middleware::{validate_csrf, AppState},
-    utils::{
-        crypto::{hash_ip, verify_pow},
-    },
+    utils::crypto::{hash_ip, verify_pow},
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
@@ -226,26 +224,20 @@ pub async fn post_reply(
             let (body_text, body_html) =
                 posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;
 
-            let uploaded = crate::handlers::process_primary_upload(
+            let uploads = posting::process_uploads(
                 file_data,
+                audio_file_data,
                 &board,
                 &conn,
-                &upload_dir,
-                thumb_size,
-                max_image_size,
-                max_video_size,
-                max_audio_size,
-                ffmpeg_available,
-                ffmpeg_webp_available,
-            )?;
-
-            // ── Image+audio combo ─────────────────────────────────────────────
-            let audio_uploaded = crate::handlers::process_audio_combo(
-                audio_file_data,
-                uploaded.as_ref(),
-                &board,
-                &upload_dir,
-                max_audio_size,
+                &posting::UploadConfig {
+                    upload_dir: &upload_dir,
+                    thumb_size,
+                    max_image_size,
+                    max_video_size,
+                    max_audio_size,
+                    ffmpeg_available,
+                    ffmpeg_webp_available,
+                },
             )?;
 
             let deletion_token = posting::resolve_deletion_token(&del_token_val);
@@ -253,28 +245,19 @@ pub async fn post_reply(
             // Sage suppresses the bump regardless of reply count.
             let should_bump = !form_sage && thread.reply_count < board.bump_limit;
 
-            let new_post = NewPost {
+            let new_post = posting::build_new_post(
                 thread_id,
-                board_id: board.id,
+                board.id,
                 name,
                 tripcode,
-                subject: None,
-                body: body_text.clone(),
+                None,
+                body_text.clone(),
                 body_html,
-                ip_hash: ip_hash.clone(),
-                file_path: uploaded.as_ref().map(|u| u.file_path.clone()),
-                file_name: uploaded.as_ref().map(|u| u.original_name.clone()),
-                file_size: uploaded.as_ref().map(|u| u.file_size),
-                thumb_path: uploaded.as_ref().map(|u| u.thumb_path.clone()),
-                mime_type: uploaded.as_ref().map(|u| u.mime_type.clone()),
-                media_type: uploaded.as_ref().map(|u| u.media_type.as_str().to_string()),
-                audio_file_path: audio_uploaded.as_ref().map(|u| u.file_path.clone()),
-                audio_file_name: audio_uploaded.as_ref().map(|u| u.original_name.clone()),
-                audio_file_size: audio_uploaded.as_ref().map(|u| u.file_size),
-                audio_mime_type: audio_uploaded.as_ref().map(|u| u.mime_type.clone()),
+                ip_hash.clone(),
+                &uploads,
                 deletion_token,
-                is_op: false,
-            };
+                false,
+            );
             let post_id = db::create_post(&conn, &new_post)?;
 
             if should_bump {
@@ -291,7 +274,7 @@ pub async fn post_reply(
                 post_id,
                 &ip_hash,
                 body_text.len(),
-                uploaded.as_ref(),
+                uploads.primary.as_ref(),
                 &board.short_name,
             );
 

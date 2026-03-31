@@ -10,7 +10,7 @@
 
 use crate::{
     config::CONFIG,
-    db::{self, NewPost},
+    db::{self},
     error::{AppError, Result},
     handlers::{parse_post_multipart, posting},
     middleware::{validate_csrf, AppState},
@@ -18,7 +18,7 @@ use crate::{
     templates,
     utils::{
         crypto::{hash_ip, new_csrf_token, verify_pow},
-        sanitize::{validate_subject},
+        sanitize::validate_subject,
     },
 };
 use axum::{
@@ -273,26 +273,20 @@ pub async fn create_thread(
             let (body_text, body_html) =
                 posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;
 
-            let uploaded = crate::handlers::process_primary_upload(
+            let uploads = posting::process_uploads(
                 file_data,
+                audio_file_data,
                 &board,
                 &conn,
-                &upload_dir,
-                thumb_size,
-                max_image_size,
-                max_video_size,
-                max_audio_size,
-                ffmpeg_available,
-                ffmpeg_webp_available,
-            )?;
-
-            // ── Image+audio combo ─────────────────────────────────────────────
-            let audio_uploaded = crate::handlers::process_audio_combo(
-                audio_file_data,
-                uploaded.as_ref(),
-                &board,
-                &upload_dir,
-                max_audio_size,
+                &posting::UploadConfig {
+                    upload_dir: &upload_dir,
+                    thumb_size,
+                    max_image_size,
+                    max_video_size,
+                    max_audio_size,
+                    ffmpeg_available,
+                    ffmpeg_webp_available,
+                },
             )?;
 
             let deletion_token = posting::resolve_deletion_token(&del_token_val);
@@ -300,28 +294,19 @@ pub async fn create_thread(
             // FIX[MEDIUM-3]: Thread creation and OP post insertion are now
             // wrapped in a single transaction via create_thread_with_op.
             // Previously, a crash between the two calls left an orphaned thread.
-            let new_post = NewPost {
-                thread_id: 0, // will be overwritten by create_thread_with_op
-                board_id: board.id,
+            let new_post = posting::build_new_post(
+                0,
+                board.id,
                 name,
                 tripcode,
-                subject: subject.clone(),
-                body: body_text.clone(),
+                subject.clone(),
+                body_text.clone(),
                 body_html,
-                ip_hash: ip_hash.clone(),
-                file_path: uploaded.as_ref().map(|u| u.file_path.clone()),
-                file_name: uploaded.as_ref().map(|u| u.original_name.clone()),
-                file_size: uploaded.as_ref().map(|u| u.file_size),
-                thumb_path: uploaded.as_ref().map(|u| u.thumb_path.clone()),
-                mime_type: uploaded.as_ref().map(|u| u.mime_type.clone()),
-                media_type: uploaded.as_ref().map(|u| u.media_type.as_str().to_string()),
-                audio_file_path: audio_uploaded.as_ref().map(|u| u.file_path.clone()),
-                audio_file_name: audio_uploaded.as_ref().map(|u| u.original_name.clone()),
-                audio_file_size: audio_uploaded.as_ref().map(|u| u.file_size),
-                audio_mime_type: audio_uploaded.as_ref().map(|u| u.mime_type.clone()),
+                ip_hash.clone(),
+                &uploads,
                 deletion_token,
-                is_op: true,
-            };
+                true,
+            );
             let (thread_id, post_id) =
                 db::create_thread_with_op(&conn, board.id, subject.as_deref(), &new_post)?;
 
@@ -350,7 +335,7 @@ pub async fn create_thread(
                 post_id,
                 &ip_hash,
                 body_text.len(),
-                uploaded.as_ref(),
+                uploads.primary.as_ref(),
                 &board.short_name,
             );
 

@@ -1,0 +1,189 @@
+use axum::{
+    extract::DefaultBodyLimit,
+    routing::{get, post},
+    Router,
+};
+
+use crate::config::CONFIG;
+use crate::middleware::AppState;
+
+pub(super) fn public_routes() -> Router<AppState> {
+    Router::new()
+        .route("/", get(crate::handlers::board::index))
+        .route("/{board}", get(crate::handlers::board::board_index))
+        .route(
+            "/{board}",
+            post(crate::handlers::board::create_thread).layer(DefaultBodyLimit::max(
+                CONFIG.max_video_size.max(CONFIG.max_audio_size),
+            )),
+        )
+        .route("/{board}/catalog", get(crate::handlers::board::catalog))
+        .route(
+            "/{board}/archive",
+            get(crate::handlers::board::board_archive),
+        )
+        .route("/{board}/search", get(crate::handlers::board::search))
+        .route(
+            "/{board}/thread/{id}",
+            get(crate::handlers::thread::view_thread),
+        )
+        .route(
+            "/{board}/thread/{id}",
+            post(crate::handlers::thread::post_reply).layer(DefaultBodyLimit::max(
+                CONFIG.max_video_size.max(CONFIG.max_audio_size),
+            )),
+        )
+        .route(
+            "/{board}/post/{id}/edit",
+            get(crate::handlers::thread::edit_post_get),
+        )
+        .route(
+            "/{board}/post/{id}/edit",
+            post(crate::handlers::thread::edit_post_post),
+        )
+        .route(
+            "/report",
+            post(crate::handlers::board::file_report).layer(DefaultBodyLimit::max(65_536)),
+        )
+        .route(
+            "/appeal",
+            post(crate::handlers::board::submit_appeal).layer(DefaultBodyLimit::max(65_536)),
+        )
+        .route(
+            "/vote",
+            post(crate::handlers::thread::vote_handler).layer(DefaultBodyLimit::max(65_536)),
+        )
+        .route(
+            "/api/post/{board}/{post_id}",
+            get(crate::handlers::board::api_post_preview),
+        )
+        .route(
+            "/{board}/post/{post_id}",
+            get(crate::handlers::board::redirect_to_post),
+        )
+        .route(
+            "/{board}/thread/{id}/updates",
+            get(crate::handlers::thread::thread_updates),
+        )
+        .route(
+            "/boards/{*media_path}",
+            get(crate::handlers::board::serve_board_media),
+        )
+}
+
+pub(super) fn admin_routes() -> Router<AppState> {
+    Router::new()
+        .route("/admin", get(crate::handlers::admin::admin_index))
+        .route(
+            "/admin/login",
+            post(crate::handlers::admin::admin_login).layer(DefaultBodyLimit::max(65_536)),
+        )
+        .route("/admin/logout", post(crate::handlers::admin::admin_logout))
+        .route("/admin/panel", get(crate::handlers::admin::admin_panel))
+        .route(
+            "/admin/board/create",
+            post(crate::handlers::admin::create_board),
+        )
+        .route(
+            "/admin/board/delete",
+            post(crate::handlers::admin::delete_board),
+        )
+        .route(
+            "/admin/board/settings",
+            post(crate::handlers::admin::update_board_settings),
+        )
+        .route(
+            "/admin/thread/action",
+            post(crate::handlers::admin::thread_action),
+        )
+        .route(
+            "/admin/thread/delete",
+            post(crate::handlers::admin::admin_delete_thread),
+        )
+        .route(
+            "/admin/post/delete",
+            post(crate::handlers::admin::admin_delete_post),
+        )
+        .route("/admin/ban/add", post(crate::handlers::admin::add_ban))
+        .route(
+            "/admin/ban/remove",
+            post(crate::handlers::admin::remove_ban),
+        )
+        .route(
+            "/admin/report/resolve",
+            post(crate::handlers::admin::resolve_report),
+        )
+        .route("/admin/mod-log", get(crate::handlers::admin::mod_log_page))
+        .route(
+            "/admin/filter/add",
+            post(crate::handlers::admin::add_filter),
+        )
+        .route(
+            "/admin/filter/remove",
+            post(crate::handlers::admin::remove_filter),
+        )
+        .route(
+            "/admin/site/settings",
+            post(crate::handlers::admin::update_site_settings),
+        )
+        .route("/admin/vacuum", post(crate::handlers::admin::admin_vacuum))
+        .route(
+            "/admin/ip/{ip_hash}",
+            get(crate::handlers::admin::admin_ip_history),
+        )
+        .route("/admin/backup", get(crate::handlers::admin::admin_backup))
+        .route(
+            "/admin/restore",
+            post(crate::handlers::admin::admin_restore)
+                .layer(DefaultBodyLimit::max(20 * 1024 * 1024 * 1024)),
+        )
+        .route(
+            "/admin/board/backup/{board}",
+            get(crate::handlers::admin::board_backup),
+        )
+        .route(
+            "/admin/board/restore",
+            post(crate::handlers::admin::board_restore)
+                .layer(DefaultBodyLimit::max(20 * 1024 * 1024 * 1024)),
+        )
+        .route(
+            "/admin/backup/create",
+            post(crate::handlers::admin::create_full_backup),
+        )
+        .route(
+            "/admin/board/backup/create",
+            post(crate::handlers::admin::create_board_backup),
+        )
+        .route(
+            "/admin/backup/download/{kind}/{filename}",
+            get(crate::handlers::admin::download_backup),
+        )
+        .route(
+            "/admin/backup/progress",
+            get(crate::handlers::admin::backup_progress_json),
+        )
+        .route(
+            "/admin/backup/delete",
+            post(crate::handlers::admin::delete_backup),
+        )
+        .route(
+            "/admin/backup/restore-saved",
+            post(crate::handlers::admin::restore_saved_full_backup),
+        )
+        .route(
+            "/admin/board/backup/restore-saved",
+            post(crate::handlers::admin::restore_saved_board_backup),
+        )
+        .route(
+            "/admin/post/ban-delete",
+            post(crate::handlers::admin::admin_ban_and_delete),
+        )
+        .route(
+            "/admin/appeal/dismiss",
+            post(crate::handlers::admin::dismiss_appeal),
+        )
+        .route(
+            "/admin/appeal/accept",
+            post(crate::handlers::admin::accept_appeal),
+        )
+}

@@ -17,6 +17,13 @@ use tokio::io::AsyncWriteExt as _;
 
 const MIME_SNIFF_BYTES: usize = 512;
 
+async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String> {
+    field
+        .text()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))
+}
+
 // ─── Streaming multipart size limit ──────────────────────────────────────────
 //
 // 3.1: The previous implementation called `field.bytes().await` which buffers
@@ -137,22 +144,22 @@ pub async fn parse_post_multipart(
     {
         match field.name() {
             Some("_csrf") => {
-                let v = field.text().await.unwrap_or_default();
+                let v = read_text_field(field).await?;
                 if validate_csrf(csrf_cookie, &v) {
                     csrf_verified = true;
                 }
             }
-            Some("name") => name = field.text().await.unwrap_or_default(),
-            Some("subject") => subject = field.text().await.unwrap_or_default(),
-            Some("body") => body = field.text().await.unwrap_or_default(),
-            Some("deletion_token") => deletion_token = field.text().await.unwrap_or_default(),
+            Some("name") => name = read_text_field(field).await?,
+            Some("subject") => subject = read_text_field(field).await?,
+            Some("body") => body = read_text_field(field).await?,
+            Some("deletion_token") => deletion_token = read_text_field(field).await?,
             Some("sage") => {
-                let v = field.text().await.unwrap_or_default();
+                let v = read_text_field(field).await?;
                 sage = v == "1" || v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true");
             }
-            Some("pow_nonce") => pow_nonce = field.text().await.unwrap_or_default(),
+            Some("pow_nonce") => pow_nonce = read_text_field(field).await?,
             Some("poll_question") => {
-                let v = field.text().await.unwrap_or_default();
+                let v = read_text_field(field).await?;
                 // CRIT-8: Enforce server-side length cap on poll question.
                 if v.chars().count() > 500 {
                     return Err(AppError::BadRequest(
@@ -162,7 +169,7 @@ pub async fn parse_post_multipart(
                 poll_question = v;
             }
             Some("poll_option") => {
-                let v = field.text().await.unwrap_or_default();
+                let v = read_text_field(field).await?;
                 let trimmed = v.trim().to_string();
                 // CRIT-8: Enforce server-side caps on option count and length.
                 if !trimmed.is_empty() {
@@ -180,11 +187,11 @@ pub async fn parse_post_multipart(
                 }
             }
             Some("poll_duration_value") => {
-                let v = field.text().await.unwrap_or_default();
+                let v = read_text_field(field).await?;
                 poll_duration_value = v.trim().parse::<i64>().ok();
             }
             Some("poll_duration_unit") => {
-                poll_duration_unit = field.text().await.unwrap_or_default();
+                poll_duration_unit = read_text_field(field).await?;
             }
             Some("file") => {
                 let fname = field.file_name().unwrap_or("upload").to_string();

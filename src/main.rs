@@ -148,7 +148,7 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .max_blocking_threads(blocking_threads)
         .build()
-        .expect("Failed to build Tokio runtime");
+        .map_err(|e| anyhow::anyhow!("Failed to build Tokio runtime: {e}"))?;
 
     let cli = server::cli::Cli::parse();
 

@@ -60,9 +60,7 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
         return Ok("image/gif");
     }
-    if header.starts_with(b"ID3")
-        || matches!(header.get(..2), Some([0xFF, 0xFB | 0xF3 | 0xF2]))
-    {
+    if header.starts_with(b"ID3") || matches!(header.get(..2), Some([0xFF, 0xFB | 0xF3 | 0xF2])) {
         return Ok("audio/mpeg");
     }
     if header.starts_with(&[0xFF, 0xF1]) || header.starts_with(&[0xFF, 0xF9]) {

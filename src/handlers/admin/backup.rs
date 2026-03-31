@@ -30,6 +30,16 @@ use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::ReaderStream;
 use tracing::warn;
 
+mod common;
+mod types;
+
+use common::{
+    copy_limited, create_staging_dir, db_dir, extract_uploads_to_dir, remap_body_quotelinks,
+    remove_path_if_exists, render_restored_body_html, rollback_swapped_path,
+    swap_staged_path_into_place, ZIP_ENTRY_MAX_BYTES,
+};
+use types::board_backup_types;
+
 // ─── URL query-string encoder ─────────────────────────────────────────────────
 //
 // FIX[#30]: `encode_q` was previously defined as an inner function inside two
@@ -686,218 +696,6 @@ pub async fn admin_restore(
 //
 // Rewrite in-board `>>{old_id}` references in the raw post body.
 // `pairs` must be pre-sorted by old-ID string length descending.
-#[allow(clippy::arithmetic_side_effects)]
-fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> String {
-    // Avoid cloning when there is nothing to change.
-    if pairs.is_empty() {
-        return body.to_string();
-    }
-    let mut result = body.to_string();
-    for (old, new) in pairs {
-        // Match `>>{old}` only when NOT immediately followed by another digit,
-        // so we don't turn `>>1000` into `>>new_id_for_1000` when processing
-        // the `>>100` entry first.
-        //
-        // Implementation: scan for every occurrence of `>>{old}` in the string
-        // and check the next character.  Replace left-to-right using byte indices
-        // to avoid re-scanning already-replaced sections.
-        let needle = format!(">>{old}");
-        let mut out = String::with_capacity(result.len());
-        let mut pos = 0;
-        let bytes = result.as_bytes();
-        while pos < bytes.len() {
-            match result[pos..].find(&needle) {
-                None => {
-                    out.push_str(&result[pos..]);
-                    break;
-                }
-                Some(rel) => {
-                    let abs = pos + rel;
-                    let after = abs + needle.len();
-                    // Only replace when the char after the match is not a digit.
-                    let next_is_digit = bytes.get(after).is_some_and(u8::is_ascii_digit);
-                    out.push_str(&result[pos..abs]);
-                    if next_is_digit {
-                        // Not the right match — keep the original text.
-                        out.push_str(&needle);
-                    } else {
-                        out.push_str(">>");
-                        out.push_str(new);
-                    }
-                    pos = after;
-                }
-            }
-        }
-        result = out;
-    }
-    result
-}
-
-const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-
-fn render_restored_body_html(body: &str) -> String {
-    let escaped = crate::utils::sanitize::escape_html(body);
-    crate::utils::sanitize::render_post_body(&escaped)
-}
-
-/// Like `std::io::copy` but returns `InvalidData` if more than `max_bytes`
-/// would be written.  Reads in 64 KiB chunks; aborts as soon as the limit
-/// is exceeded so disk space is not wasted.
-#[allow(clippy::arithmetic_side_effects)]
-fn copy_limited<R: std::io::Read, W: std::io::Write>(
-    reader: &mut R,
-    writer: &mut W,
-    max_bytes: u64,
-) -> std::io::Result<u64> {
-    let mut buf = vec![0u8; 65536];
-    let mut total: u64 = 0;
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        if total > max_bytes {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Decompressed entry exceeds {} MiB limit — possible zip bomb",
-                    max_bytes / 1024 / 1024
-                ),
-            ));
-        }
-        if let Some(slice) = buf.get(..n) {
-            writer.write_all(slice)?;
-        }
-    }
-    Ok(total)
-}
-
-fn create_staging_dir(base_path: &Path, label: &str) -> Result<PathBuf> {
-    let parent = base_path
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let file_name = base_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(label);
-    let staging = parent.join(format!(
-        ".{file_name}.{label}.{}",
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&staging)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Create staging dir: {e}")))?;
-    Ok(staging)
-}
-
-fn remove_path_if_exists(path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    if path.is_dir() {
-        std::fs::remove_dir_all(path)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Remove dir {}: {e}", path.display())))
-    } else {
-        std::fs::remove_file(path)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Remove file {}: {e}", path.display())))
-    }
-}
-
-fn swap_staged_path_into_place(staged: &Path, live: &Path, backup: &Path) -> Result<bool> {
-    let had_live = live.exists();
-    if had_live {
-        std::fs::rename(live, backup).map_err(|e| {
-            AppError::Internal(anyhow::anyhow!(
-                "Move live path {} aside: {e}",
-                live.display()
-            ))
-        })?;
-    }
-
-    if let Err(e) = std::fs::rename(staged, live) {
-        if had_live {
-            let _ = std::fs::rename(backup, live);
-        }
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "Move staged path {} into place: {e}",
-            live.display()
-        )));
-    }
-
-    Ok(had_live)
-}
-
-fn rollback_swapped_path(live: &Path, backup: &Path, had_live: bool) -> Result<()> {
-    remove_path_if_exists(live)?;
-    if had_live {
-        std::fs::rename(backup, live).map_err(|e| {
-            AppError::Internal(anyhow::anyhow!(
-                "Restore backup path {}: {e}",
-                live.display()
-            ))
-        })?;
-    }
-    Ok(())
-}
-
-fn extract_uploads_to_dir<R: std::io::Read + Seek>(
-    archive: &mut zip::ZipArchive<R>,
-    destination_root: &Path,
-) -> Result<()> {
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
-        let name = entry.name().to_string();
-        if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
-            warn!("Restore: skipping suspicious entry '{name}'");
-            continue;
-        }
-        let Some(rel) = name.strip_prefix("uploads/") else {
-            continue;
-        };
-        if rel.is_empty() {
-            continue;
-        }
-        let rel_path = Path::new(rel);
-        if rel_path
-            .components()
-            .any(|component| component == std::path::Component::ParentDir)
-        {
-            warn!("Restore: skipping suspicious entry '{name}'");
-            continue;
-        }
-        let target = destination_root.join(rel_path);
-        if entry.is_dir() {
-            std::fs::create_dir_all(&target)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir {}: {e}", target.display())))?;
-            continue;
-        }
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                AppError::Internal(anyhow::anyhow!("mkdir parent {}: {e}", parent.display()))
-            })?;
-        }
-        let mut out = std::fs::File::create(&target).map_err(|e| {
-            AppError::Internal(anyhow::anyhow!("Create {}: {e}", target.display()))
-        })?;
-        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {e}", target.display())))?;
-    }
-    Ok(())
-}
-
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
-/// Check CSRF using the cookie jar. Returns error on mismatch.
-/// Verify admin session and also return the admin's username.
-/// For use inside `spawn_blocking` closures.
-fn db_dir() -> PathBuf {
-    PathBuf::from(&CONFIG.database_path)
-        .parent()
-        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf)
-}
-
 /// rustchan-data/full-backups/
 pub fn full_backup_dir() -> PathBuf {
     db_dir().join("full-backups")
@@ -1653,21 +1451,19 @@ pub async fn restore_saved_full_backup(
             let temp_db = temp_dir.join(format!("chan_restore_{tmp_id}.db"));
             let upload_root = PathBuf::from(&upload_dir);
             let staged_upload_root = create_staging_dir(&upload_root, "restore-stage")?;
-            let previous_upload_root = upload_root
-                .parent()
-                .map_or_else(
-                    || PathBuf::from(format!("{}.restore-old", upload_root.display())),
-                    |parent| {
-                        parent.join(format!(
-                            ".{}.restore-old.{}",
-                            upload_root
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("uploads"),
-                            uuid::Uuid::new_v4().simple()
-                        ))
-                    },
-                );
+            let previous_upload_root = upload_root.parent().map_or_else(
+                || PathBuf::from(format!("{}.restore-old", upload_root.display())),
+                |parent| {
+                    parent.join(format!(
+                        ".{}.restore-old.{}",
+                        upload_root
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("uploads"),
+                        uuid::Uuid::new_v4().simple()
+                    ))
+                },
+            );
             let db_snapshot = temp_dir.join(format!("chan_restore_live_before_{tmp_id}.db"));
             let mut db_extracted = false;
 
@@ -1776,7 +1572,8 @@ pub async fn restore_saved_full_backup(
                 Ok(())
             })();
             if let Err(e) = backup_result {
-                let _ = rollback_swapped_path(&upload_root, &previous_upload_root, had_live_uploads);
+                let _ =
+                    rollback_swapped_path(&upload_root, &previous_upload_root, had_live_uploads);
                 let restore_db_result = (|| -> Result<()> {
                     let src = rusqlite::Connection::open(&db_snapshot).map_err(|restore_err| {
                         AppError::Internal(anyhow::anyhow!(
@@ -2161,135 +1958,6 @@ pub async fn restore_saved_board_backup(
 }
 
 // ─── Board-level backup / restore ─────────────────────────────────────────────
-
-/// Flat structs used exclusively for board-level backup serialisation.
-mod board_backup_types {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Serialize, Deserialize)]
-    #[allow(clippy::struct_excessive_bools)]
-    pub struct BoardRow {
-        pub id: i64,
-        pub short_name: String,
-        pub name: String,
-        pub description: String,
-        pub nsfw: bool,
-        pub max_threads: i64,
-        pub bump_limit: i64,
-        /// Added via ALTER TABLE — absent in oldest backups; default true.
-        #[serde(default = "default_true")]
-        pub allow_images: bool,
-        /// Added via ALTER TABLE — absent in oldest backups; default true.
-        #[serde(default = "default_true")]
-        pub allow_video: bool,
-        /// Added via ALTER TABLE — absent in oldest backups; default false.
-        #[serde(default)]
-        pub allow_audio: bool,
-        /// Added via ALTER TABLE — absent in oldest backups; default true.
-        #[serde(default = "default_true")]
-        pub allow_tripcodes: bool,
-        /// Added in a later version — absent in older backups; default to 300 s.
-        #[serde(default = "default_edit_window_secs")]
-        pub edit_window_secs: i64,
-        /// Added in a later version — absent in older backups; default to false.
-        #[serde(default)]
-        pub allow_editing: bool,
-        /// Added in a later version — absent in older backups; default to true.
-        #[serde(default = "default_true")]
-        pub allow_archive: bool,
-        /// Added in v1.0.10 — absent in older backups; default to false.
-        #[serde(default)]
-        pub allow_video_embeds: bool,
-        /// Added in v1.0.10 — absent in older backups; default to false.
-        #[serde(default)]
-        pub allow_captcha: bool,
-        /// Added for per-board post cooldowns — absent in older backups; default 0 (disabled).
-        #[serde(default)]
-        pub post_cooldown_secs: i64,
-        pub created_at: i64,
-    }
-
-    const fn default_true() -> bool {
-        true
-    }
-
-    const fn default_edit_window_secs() -> i64 {
-        300
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct ThreadRow {
-        pub id: i64,
-        pub board_id: i64,
-        pub subject: Option<String>,
-        pub created_at: i64,
-        pub bumped_at: i64,
-        pub locked: bool,
-        pub sticky: bool,
-        pub reply_count: i64,
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct PostRow {
-        pub id: i64,
-        pub thread_id: i64,
-        pub board_id: i64,
-        pub name: String,
-        pub tripcode: Option<String>,
-        pub subject: Option<String>,
-        pub body: String,
-        pub body_html: String,
-        pub ip_hash: Option<String>,
-        pub file_path: Option<String>,
-        pub file_name: Option<String>,
-        pub file_size: Option<i64>,
-        pub thumb_path: Option<String>,
-        pub mime_type: Option<String>,
-        pub media_type: Option<String>,
-        pub created_at: i64,
-        pub deletion_token: String,
-        pub is_op: bool,
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct PollRow {
-        pub id: i64,
-        pub thread_id: i64,
-        pub question: String,
-        pub expires_at: i64,
-        pub created_at: i64,
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct PollOptionRow {
-        pub id: i64,
-        pub poll_id: i64,
-        pub text: String,
-        pub position: i64,
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct PollVoteRow {
-        pub id: i64,
-        pub poll_id: i64,
-        pub option_id: i64,
-        pub ip_hash: String,
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct FileHashRow {
-        pub sha256: String,
-        pub file_path: String,
-        pub thumb_path: String,
-        pub mime_type: String,
-        pub created_at: i64,
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct BoardBackupManifest {
-        pub version: u32,
-        pub board: BoardRow,
-        pub threads: Vec<ThreadRow>,
-        pub posts: Vec<PostRow>,
-        pub polls: Vec<PollRow>,
-        pub poll_options: Vec<PollOptionRow>,
-        pub poll_votes: Vec<PollVoteRow>,
-        pub file_hashes: Vec<FileHashRow>,
-    }
-}
 
 /// Stream a board-level backup zip: manifest JSON + that board's upload files.
 ///
@@ -2725,8 +2393,7 @@ pub async fn board_restore(
 
                 let board_short = manifest.board.short_name.clone();
                 let upload_root = PathBuf::from(&upload_dir);
-                let staged_upload_root =
-                    create_staging_dir(&upload_root, "board-restore-stage")?;
+                let staged_upload_root = create_staging_dir(&upload_root, "board-restore-stage")?;
                 if let Some(ref mut archive) = archive_opt {
                     extract_uploads_to_dir(archive, &staged_upload_root)?;
                 }
@@ -3026,8 +2693,11 @@ pub async fn board_restore(
 
                 match restore_result {
                     Ok(()) => {
-                        let had_live_board =
-                            swap_staged_path_into_place(&staged_board_dir, &live_board_dir, &previous_board_dir)?;
+                        let had_live_board = swap_staged_path_into_place(
+                            &staged_board_dir,
+                            &live_board_dir,
+                            &previous_board_dir,
+                        )?;
                         if let Err(e) = conn.execute("COMMIT", []) {
                             let _ = rollback_swapped_path(
                                 &live_board_dir,

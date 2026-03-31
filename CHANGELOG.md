@@ -4,6 +4,36 @@ All notable changes to RustChan will be documented in this file.
 
 ---
 
+## [1.1.0 alpha 4]
+
+### Code Cleanup And Reliability
+
+This release focuses on cleaning up the codebase, making the project easier to maintain, and tightening up a number of safety checks.
+
+### What changed
+
+- The backup system was cleaned up and split into smaller pieces, so backup and restore code is easier to follow and safer to change.
+- The database layer was reorganized into clearer modules for setup, schema creation, migrations, and shared types.
+- Server startup and routing were split into smaller parts, which makes the web server easier to read and maintain.
+- Middleware was split up so rate limiting, CSRF checks, IP handling, backup progress, and URL cleanup are no longer all mixed together.
+- File upload and media handling were broken into smaller helpers, including safer handling for JPEG cleanup and disk-space checks.
+- Posting logic for new threads and replies was simplified by moving shared steps into common helper code.
+
+### Safety and quality fixes
+
+- Multipart form parsing now fails cleanly instead of silently treating broken fields as empty.
+- Backup restore helper code was moved into shared modules so the same safety checks are used consistently.
+- Several internal code paths were simplified to satisfy strict Clippy checks and reduce maintenance risk.
+- The project now builds cleanly with strict warning enforcement after the refactor.
+
+### Validation
+
+- `cargo fmt`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+
+---
+
 ## [1.1.0 alpha 3]
 
 ### Full-Screen TUI Console
