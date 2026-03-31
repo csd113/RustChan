@@ -9,26 +9,13 @@
 //   prune_old_threads      → super::paths_safe_to_delete       (file safety)
 //
 // FIX summary (from audit):
-//   HIGH-1   delete_thread: SELECT+DELETE now atomic inside a transaction
-//   HIGH-2   prune_old_threads: paths_safe_to_delete moved inside transaction
 //              so it sees the post-delete DB state before any concurrent insert
-//   HIGH-3   archive_old_threads / prune_old_threads: ID collection query
 //              moved inside the transaction to close the TOCTOU race
-//   MED-4    create_thread_with_op: raw BEGIN/COMMIT replaced with structured
 //              helper using execute_batch for cleaner error flow
-//   MED-5    prune_old_threads: prepare_cached inside loop is now a single
 //              prepare_cached outside the loop (was documented as fixed but
 //              was not actually implemented)
-//   MED-6    bump_thread: not co-transactional with post insert — documented
-//   MED-7    set_thread_archived(false): no longer unconditionally unlocks;
 //              locked state is only changed when archiving
-//   MED-8    image_count correlated subquery: replaced with LEFT JOIN + COUNT
-//   MED-9    map_thread helper: extracted from 3 copy-pasted closures
-//   LOW-10   LIMIT -1 OFFSET ?: documented as SQLite-specific idiom
-//   LOW-11   File-path collection: extracted into collect_thread_file_paths helper
-//   MED-13   archive_old_threads / prune_old_threads: N single-row operations
 //              replaced with bulk WHERE id IN (...)
-//   MED-17   prune_old_threads: N per-thread file-path queries replaced with
 //              a single JOIN query
 
 use crate::models::Thread;
@@ -43,7 +30,7 @@ use rusqlite::{params, OptionalExtension};
 ///   2  t.subject      6  t.sticky       10 `op.thumb_path` 14 t.archived
 ///   3  `t.created_at`   7  `t.reply_count`  11 op.name       15 `image_count`
 ///
-/// FIX[MED-9]: Extracted from three copy-pasted closures into a single helper,
+/// Extracted from three copy-pasted closures into a single helper,
 /// eliminating the risk of the three copies diverging.
 fn map_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     Ok(Thread {
@@ -71,9 +58,9 @@ fn map_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
 /// Collect all file paths (`file_path`, `thumb_path`, `audio_file_path`) for every
 /// post in the given set of thread ids. Returns a flat Vec of non-null paths.
 ///
-/// FIX[LOW-11]: Extracted from `delete_thread` and `prune_old_threads` to eliminate
+/// Extracted from `delete_thread` and `prune_old_threads` to eliminate
 ///   copy-pasted collection loops.
-/// FIX[MED-17]: Uses a single JOIN query instead of one query per thread.
+/// Uses a single JOIN query instead of one query per thread.
 ///
 /// IMPORTANT: This must be called BEFORE the thread rows are deleted so that
 /// the posts still exist. The CASCADE on threads→posts removes them atomically
@@ -124,7 +111,7 @@ fn collect_thread_file_paths(
 
 /// The canonical thread SELECT fragment shared by all listing queries.
 ///
-/// FIX[MED-8]: Replaced the correlated `image_count` subquery (which ran once
+/// Replaced the correlated `image_count` subquery (which ran once
 /// per thread row) with a LEFT JOIN aggregation so the count is computed in a
 /// single pass. The GROUP BY ensures one output row per thread.
 const THREAD_SELECT: &str = "
@@ -192,7 +179,7 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
 /// post with `is_op=1`. The previous design used two separate DB calls with no
 /// transaction, leaving orphaned threads on crash.
 ///
-/// FIX[MED-4]: Replaced the raw `conn.execute("BEGIN IMMEDIATE", [])?` /
+/// Replaced the raw `conn.execute("BEGIN IMMEDIATE", [])?` /
 /// `conn.execute("COMMIT", [])` pattern with `execute_batch` calls that keep the
 /// error handling structured and avoid the subtle issue of a raw string
 /// transaction leaking through rusqlite's normal transaction tracking.
@@ -250,7 +237,7 @@ pub fn create_thread_with_op(
 
 /// Bump a thread's `bumped_at` timestamp and increment `reply_count`.
 ///
-/// Note (MED-6): `bump_thread` is called from the route handler after
+/// Note (): `bump_thread` is called from the route handler after
 /// `create_post` returns, not inside the same transaction as the post insert.
 /// If the process crashes between the two calls, `reply_count` and `bumped_at`
 /// can be one behind reality. A full fix would require moving `bump_thread`
@@ -291,7 +278,7 @@ pub fn set_thread_locked(conn: &rusqlite::Connection, thread_id: i64, locked: bo
 
 /// Move a thread to (or out of) the board archive.
 ///
-/// FIX[MED-7]: The previous implementation used `SET archived = ?1, locked = ?1`
+/// The previous implementation used `SET archived = ?1, locked = ?1`
 /// which unconditionally unlocked threads when called with archived=false. If a
 /// moderator had explicitly locked a thread before archiving it, unarchiving
 /// would silently unlock it, discarding the moderator's intent.
@@ -319,7 +306,7 @@ pub fn set_thread_archived(
 
 /// Delete a thread and return on-disk paths that are now safe to remove.
 ///
-/// FIX[HIGH-1]: The previous SELECT → DELETE sequence was not wrapped in a
+/// The previous SELECT → DELETE sequence was not wrapped in a
 /// transaction. A concurrent delete (e.g. admin panel + prune running together)
 /// could delete the posts between our SELECT and DELETE, causing the returned
 /// path list to include paths that had already been cleaned up by the other
@@ -375,11 +362,11 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
 /// accessible via `/{board}/archive`. Returns the count of threads archived
 /// (no file deletion occurs).
 ///
-/// FIX[HIGH-3]: The ID collection query is now inside the same transaction as
+/// The ID collection query is now inside the same transaction as
 /// the UPDATEs, closing the TOCTOU race where a concurrent bump could change
 /// the ordering between the SELECT and the UPDATE loop.
 ///
-/// FIX[MED-13]: Replaced the N per-row UPDATE loop with a single bulk
+/// Replaced the N per-row UPDATE loop with a single bulk
 /// UPDATE … WHERE id IN (…), which is both faster and more crash-safe.
 ///
 /// Note: LIMIT -1 OFFSET ? is a SQLite-specific idiom for "skip the first
@@ -455,19 +442,19 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
 /// referenced by any remaining post after the prune). The caller is responsible
 /// for actually removing these files from disk.
 ///
-/// FIX[HIGH-3]: ID collection query is now inside the transaction (see above).
+/// ID collection query is now inside the transaction (see above).
 ///
-/// FIX[HIGH-2]: `paths_safe_to_delete` is called INSIDE the transaction before
+/// `paths_safe_to_delete` is called INSIDE the transaction before
 /// COMMIT so it sees the post-delete state atomically. Previously it ran after
 /// COMMIT, leaving a narrow window where a concurrent post insert could
 /// reference a just-pruned file before we checked it.
 ///
-/// FIX[MED-5]: `prepare_cached` is now used OUTSIDE the loop (was documented as
+/// `prepare_cached` is now used OUTSIDE the loop (was documented as
 /// fixed but the `prepare_cached` call was still inside the loop).
 ///
-/// FIX[MED-13]: Replaced the N per-row DELETE loop with a single bulk DELETE.
+/// Replaced the N per-row DELETE loop with a single bulk DELETE.
 ///
-/// FIX[MED-17]: File-path collection is now a single JOIN query instead of
+/// File-path collection is now a single JOIN query instead of
 /// one query per thread id.
 ///
 /// Note: LIMIT -1 OFFSET ? is a SQLite-specific idiom — see `archive_old_threads`.

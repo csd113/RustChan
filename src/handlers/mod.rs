@@ -1,3 +1,5 @@
+// src/handlers/mod.rs
+
 pub mod admin;
 pub mod board;
 pub mod posting;
@@ -160,7 +162,6 @@ pub async fn parse_post_multipart(
             Some("pow_nonce") => pow_nonce = read_text_field(field).await?,
             Some("poll_question") => {
                 let v = read_text_field(field).await?;
-                // CRIT-8: Enforce server-side length cap on poll question.
                 if v.chars().count() > 500 {
                     return Err(AppError::BadRequest(
                         "Poll question must be 500 characters or fewer.".into(),
@@ -171,7 +172,6 @@ pub async fn parse_post_multipart(
             Some("poll_option") => {
                 let v = read_text_field(field).await?;
                 let trimmed = v.trim().to_string();
-                // CRIT-8: Enforce server-side caps on option count and length.
                 if !trimmed.is_empty() {
                     if poll_options.len() >= 20 {
                         return Err(AppError::BadRequest(
@@ -312,9 +312,14 @@ pub fn process_primary_upload(
     let Some((upload, fname)) = file_data else {
         return Ok(None);
     };
-    let detected_mime = crate::utils::files::detect_mime_type(&upload.sniff_bytes)
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let detected_media = crate::models::MediaType::from_mime(detected_mime)
+    let allow_any_files =
+        crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
+    let detected_mime = match crate::utils::files::detect_mime_type(&upload.sniff_bytes) {
+        Ok(mime) => mime.to_string(),
+        Err(_) if allow_any_files => crate::utils::files::fallback_download_mime_type().to_string(),
+        Err(error) => return Err(AppError::BadRequest(error.to_string())),
+    };
+    let detected_media = crate::models::MediaType::from_mime(&detected_mime)
         .ok_or_else(|| AppError::BadRequest("Unsupported file type.".into()))?;
 
     match detected_media {
@@ -333,14 +338,20 @@ pub fn process_primary_upload(
                 "Audio uploads are disabled on this board.".into(),
             ))
         }
+        crate::models::MediaType::Other if !allow_any_files => {
+            return Err(AppError::BadRequest(
+                "This board only accepts image, video, or audio uploads.".into(),
+            ))
+        }
         crate::models::MediaType::Image
         | crate::models::MediaType::Video
-        | crate::models::MediaType::Audio => {}
+        | crate::models::MediaType::Audio
+        | crate::models::MediaType::Other => {}
     }
 
     // SHA-256 deduplication — serve the cached entry without re-saving.
     //
-    // FIX[BUG]: Validate that both the cached file and thumbnail still exist
+    // Validate that both the cached file and thumbnail still exist
     // on disk before returning the dedup hit.  When a thread or board is
     // deleted its files are removed from disk, but the file_hashes table is
     // not pruned.  Without this check, re-uploading the same image after its
@@ -362,7 +373,7 @@ pub fn process_primary_upload(
 
         if file_ok && thumb_ok {
             let cached_media = crate::models::MediaType::from_mime(&cached.mime_type)
-                .unwrap_or(crate::models::MediaType::Image);
+                .unwrap_or(crate::models::MediaType::Other);
             return Ok(Some(crate::utils::files::UploadedFile {
                 file_path: cached.file_path,
                 thumb_path: cached.thumb_path,
@@ -395,6 +406,7 @@ pub fn process_primary_upload(
         max_audio_size,
         ffmpeg_available,
         ffmpeg_webp_available,
+        allow_any_files,
     )
     .map_err(|e| classify_upload_error(&e))?;
     crate::db::record_file_hash(conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
@@ -504,7 +516,7 @@ pub fn enqueue_post_jobs(
                     file_path: up.file_path.clone(),
                     board_short: board_short.to_string(),
                 }),
-                crate::models::MediaType::Image => None,
+                crate::models::MediaType::Image | crate::models::MediaType::Other => None,
             };
             if let Some(j) = job {
                 if let Err(e) = job_queue.enqueue(&j) {

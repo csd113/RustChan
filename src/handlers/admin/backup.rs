@@ -42,7 +42,7 @@ use types::board_backup_types;
 
 // ─── URL query-string encoder ─────────────────────────────────────────────────
 //
-// FIX[#30]: `encode_q` was previously defined as an inner function inside two
+// `encode_q` was previously defined as an inner function inside two
 // separate async handlers, with one implementation slightly less efficient than
 // the other. Extracted here so both call sites share a single definition.
 //
@@ -86,7 +86,7 @@ fn encode_q(s: &str) -> String {
     out
 }
 
-// FIX[#19]: Module-level constant so it can be referenced inside closures and
+// Module-level constant so it can be referenced inside closures and
 // loops without triggering the "item after statements" clippy lint.
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
@@ -330,7 +330,7 @@ pub async fn admin_restore(
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
 
-    // FIX[A7]: Stream the uploaded zip to a NamedTempFile on disk instead of
+    // Stream the uploaded zip to a NamedTempFile on disk instead of
     // buffering the entire upload into a Vec<u8>.  Full-site backups can be
     // several GiB; loading them entirely into the heap exhausts available memory.
     let mut zip_tmp: Option<tempfile::NamedTempFile> = None;
@@ -417,7 +417,7 @@ pub async fn admin_restore(
             // in the restored DB once the backup completes.
             let admin_id = super::require_admin_session_sid(&live_conn, session_id.as_deref())?;
 
-            // ── Open the on-disk zip (FIX[A7]) ───────────────────────────
+            // ── Open the on-disk zip () ───────────────────────────
             // reopen() gives a fresh File descriptor seeked to position 0,
             // so ZipArchive can navigate entries without loading into RAM.
             let zip_file = zip_tmp
@@ -476,7 +476,7 @@ pub async fn admin_restore(
                     copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp DB: {e}")))?;
 
-                    // FIX[#19]: Validate SQLite magic bytes before handing this
+                    // Validate SQLite magic bytes before handing this
                     // file to the backup API. Without this check a malicious or
                     // corrupted "chan.db" inside the zip (e.g. a shell script or
                     // truncated file) would be opened by rusqlite, which could
@@ -652,14 +652,14 @@ pub async fn admin_restore(
     new_cookie.set_same_site(SameSite::Strict);
     new_cookie.set_path("/");
     new_cookie.set_secure(CONFIG.https_cookies);
-    // FIX[A5]: Set Max-Age so the browser expires the cookie after the configured
+    // Set Max-Age so the browser expires the cookie after the configured
     // session lifetime — matching the behaviour of the normal login handler.
     new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
     Ok((jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response())
 }
 
-// ─── CRIT-4: Zip decompression size limiter ────────────────────────────────────
+// ─── Zip decompression size limiter ────────────────────────────────────
 //
 // std::io::copy() has no bound on how much data it will write.  A malicious
 // 1 KiB zip (a "zip bomb") can expand to gigabytes, exhausting disk or memory.
@@ -913,9 +913,9 @@ pub async fn create_board_backup(
             let board: BoardRow = conn
                 .query_row(
                     "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                             allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                             allow_editing, allow_archive, allow_video_embeds, allow_captcha,
-                             post_cooldown_secs, created_at
+                             allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
+                             edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
+                             allow_captcha, post_cooldown_secs, created_at
                       FROM boards WHERE short_name = ?1",
                     params![board_short],
                     |r| {
@@ -930,14 +930,15 @@ pub async fn create_board_backup(
                             allow_images: r.get::<_, i64>(7)? != 0,
                             allow_video: r.get::<_, i64>(8)? != 0,
                             allow_audio: r.get::<_, i64>(9)? != 0,
-                            allow_tripcodes: r.get::<_, i64>(10)? != 0,
-                            edit_window_secs: r.get(11)?,
-                            allow_editing: r.get::<_, i64>(12)? != 0,
-                            allow_archive: r.get::<_, i64>(13)? != 0,
-                            allow_video_embeds: r.get::<_, i64>(14)? != 0,
-                            allow_captcha: r.get::<_, i64>(15)? != 0,
-                            post_cooldown_secs: r.get(16)?,
-                            created_at: r.get(17)?,
+                            allow_any_files: r.get::<_, i64>(10)? != 0,
+                            allow_tripcodes: r.get::<_, i64>(11)? != 0,
+                            edit_window_secs: r.get(12)?,
+                            allow_editing: r.get::<_, i64>(13)? != 0,
+                            allow_archive: r.get::<_, i64>(14)? != 0,
+                            allow_video_embeds: r.get::<_, i64>(15)? != 0,
+                            allow_captcha: r.get::<_, i64>(16)? != 0,
+                            post_cooldown_secs: r.get(17)?,
+                            created_at: r.get(18)?,
                         })
                     },
                 )
@@ -1417,7 +1418,7 @@ pub async fn restore_saved_full_backup(
     }
 
     let path = full_backup_dir().join(&safe_filename);
-    // FIX[A3]: Do NOT read the file in the async context before auth is verified.
+    // Do NOT read the file in the async context before auth is verified.
     // std::fs::read() blocks the Tokio runtime and an unauthenticated caller could
     // force the server to read gigabytes off disk before being rejected.  The read
     // is deferred into spawn_blocking where it runs only after the session check.
@@ -1431,7 +1432,7 @@ pub async fn restore_saved_full_backup(
             let admin_id = super::require_admin_session_sid(&live_conn, session_id.as_deref())?;
 
             // MEM-FIX: open the zip as a seekable BufReader<File> instead of
-            // reading the whole file into a Vec<u8>.  The FIX[A3] comment above
+            // reading the whole file into a Vec<u8>.  The comment above
             // correctly deferred the read to after auth, but std::fs::read still
             // loaded the entire zip into heap.  A 5 GiB backup would exhaust RAM.
             let zip_file = std::fs::File::open(&path)
@@ -1482,7 +1483,7 @@ pub async fn restore_saved_full_backup(
                     copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp DB: {e}")))?;
 
-                    // FIX[#19]: Validate SQLite magic bytes (same guard as admin_restore).
+                    // Validate SQLite magic bytes (same guard as admin_restore).
                     let mut header = [0u8; 16];
                     {
                         use std::io::Read;
@@ -1632,7 +1633,7 @@ pub async fn restore_saved_full_backup(
     new_cookie.set_same_site(SameSite::Strict);
     new_cookie.set_path("/");
     new_cookie.set_secure(CONFIG.https_cookies);
-    // FIX[A5]: Set Max-Age to match normal login behaviour.
+    // Set Max-Age to match normal login behaviour.
     new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
     Ok((jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response())
 }
@@ -1667,15 +1668,15 @@ pub async fn restore_saved_board_backup(
     }
 
     let path = board_backup_dir().join(&safe_filename);
-    // FIX[A4]: Defer the blocking file read until after auth is verified inside
+    // Defer the blocking file read until after auth is verified inside
     // spawn_blocking — mirrors the fix applied to restore_saved_full_backup (A3).
     let upload_dir = CONFIG.upload_dir.clone();
 
     let board_short_result: Result<Result<String>> = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
-    use board_backup_types::BoardBackupManifest;
-                        use std::collections::HashMap;
+            use board_backup_types::BoardBackupManifest;
+            use std::collections::HashMap;
 
             let conn = pool.get()?;
             // Auth check first — only read the file if the session is valid.
@@ -1726,7 +1727,7 @@ pub async fn restore_saved_board_backup(
                 )
                 .ok();
 
-            // FIX[A6]: BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
+            // BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
             // board row as well as the thread/post/poll inserts.  Previously those
             // DDL statements ran outside any transaction, so a crash between the
             // DELETE and the first INSERT left the board with zero threads and no way
@@ -1741,10 +1742,11 @@ pub async fn restore_saved_board_backup(
                     conn.execute(
                         "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                          max_threads=?4, bump_limit=?5,
-                         allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
-                         edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-                         allow_video_embeds=?13, allow_captcha=?14, post_cooldown_secs=?15
-                         WHERE id=?16",
+                         allow_images=?6, allow_video=?7, allow_audio=?8, allow_any_files=?9,
+                         allow_tripcodes=?10, edit_window_secs=?11, allow_editing=?12,
+                         allow_archive=?13, allow_video_embeds=?14, allow_captcha=?15,
+                         post_cooldown_secs=?16
+                         WHERE id=?17",
                         params![
                             manifest.board.name,
                             manifest.board.description,
@@ -1754,6 +1756,7 @@ pub async fn restore_saved_board_backup(
                             i64::from(manifest.board.allow_images),
                             i64::from(manifest.board.allow_video),
                             i64::from(manifest.board.allow_audio),
+                            i64::from(manifest.board.allow_any_files),
                             i64::from(manifest.board.allow_tripcodes),
                             manifest.board.edit_window_secs,
                             i64::from(manifest.board.allow_editing),
@@ -1769,10 +1772,10 @@ pub async fn restore_saved_board_backup(
                 } else {
                     conn.execute(
                         "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
-                         bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
-                         edit_window_secs, allow_editing, allow_archive, allow_video_embeds, allow_captcha,
-                         post_cooldown_secs, created_at)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                         bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
+                         allow_tripcodes, edit_window_secs, allow_editing, allow_archive,
+                         allow_video_embeds, allow_captcha, post_cooldown_secs, created_at)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                         params![
                             manifest.board.short_name,
                             manifest.board.name,
@@ -1783,6 +1786,7 @@ pub async fn restore_saved_board_backup(
                             i64::from(manifest.board.allow_images),
                             i64::from(manifest.board.allow_video),
                             i64::from(manifest.board.allow_audio),
+                            i64::from(manifest.board.allow_any_files),
                             i64::from(manifest.board.allow_tripcodes),
                             manifest.board.edit_window_secs,
                             i64::from(manifest.board.allow_editing),
@@ -1910,8 +1914,11 @@ pub async fn restore_saved_board_backup(
 
             match restore_result {
                 Ok(()) => {
-                    let had_live_board =
-                        swap_staged_path_into_place(&staged_board_dir, &live_board_dir, &previous_board_dir)?;
+                    let had_live_board = swap_staged_path_into_place(
+                        &staged_board_dir,
+                        &live_board_dir,
+                        &previous_board_dir,
+                    )?;
                     if let Err(e) = conn.execute("COMMIT", []) {
                         let _ = rollback_swapped_path(
                             &live_board_dir,
@@ -1987,9 +1994,9 @@ pub async fn board_backup(
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
             let board: BoardRow = conn.query_row(
                 "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                        allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                        allow_editing, allow_archive, allow_video_embeds, allow_captcha,
-                        post_cooldown_secs, created_at
+                        allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
+                        edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
+                        allow_captcha, post_cooldown_secs, created_at
                  FROM boards WHERE short_name = ?1",
                 params![board_short],
                 |r| Ok(BoardRow {
@@ -2003,14 +2010,15 @@ pub async fn board_backup(
                     allow_images: r.get::<_, i64>(7)? != 0,
                     allow_video: r.get::<_, i64>(8)? != 0,
                     allow_audio: r.get::<_, i64>(9)? != 0,
-                    allow_tripcodes: r.get::<_, i64>(10)? != 0,
-                    edit_window_secs: r.get(11)?,
-                    allow_editing: r.get::<_, i64>(12)? != 0,
-                    allow_archive: r.get::<_, i64>(13)? != 0,
-                    allow_video_embeds: r.get::<_, i64>(14)? != 0,
-                    allow_captcha: r.get::<_, i64>(15)? != 0,
-                    post_cooldown_secs: r.get(16)?,
-                    created_at: r.get(17)?,
+                    allow_any_files: r.get::<_, i64>(10)? != 0,
+                    allow_tripcodes: r.get::<_, i64>(11)? != 0,
+                    edit_window_secs: r.get(12)?,
+                    allow_editing: r.get::<_, i64>(13)? != 0,
+                    allow_archive: r.get::<_, i64>(14)? != 0,
+                    allow_video_embeds: r.get::<_, i64>(15)? != 0,
+                    allow_captcha: r.get::<_, i64>(16)? != 0,
+                    post_cooldown_secs: r.get(17)?,
+                    created_at: r.get(18)?,
                 }),
             ).map_err(|_| AppError::NotFound(format!("Board '{board_short}' not found")))?;
 
@@ -2415,7 +2423,7 @@ pub async fn board_restore(
                     )
                     .ok();
 
-                // FIX[A6]: BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
+                // BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
                 // board row.  Previously those statements ran outside any transaction.
                 conn.execute("BEGIN IMMEDIATE", [])
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Begin tx: {e}")))?;
@@ -2429,10 +2437,11 @@ pub async fn board_restore(
                         conn.execute(
                             "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                              max_threads=?4, bump_limit=?5,
-                             allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
-                             edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-                             allow_video_embeds=?13, allow_captcha=?14, post_cooldown_secs=?15
-                             WHERE id=?16",
+                             allow_images=?6, allow_video=?7, allow_audio=?8, allow_any_files=?9,
+                             allow_tripcodes=?10, edit_window_secs=?11, allow_editing=?12,
+                             allow_archive=?13, allow_video_embeds=?14, allow_captcha=?15,
+                             post_cooldown_secs=?16
+                             WHERE id=?17",
                             params![
                                 manifest.board.name,
                                 manifest.board.description,
@@ -2442,6 +2451,7 @@ pub async fn board_restore(
                                 i64::from(manifest.board.allow_images),
                                 i64::from(manifest.board.allow_video),
                                 i64::from(manifest.board.allow_audio),
+                                i64::from(manifest.board.allow_any_files),
                                 i64::from(manifest.board.allow_tripcodes),
                                 manifest.board.edit_window_secs,
                                 i64::from(manifest.board.allow_editing),
@@ -2457,10 +2467,10 @@ pub async fn board_restore(
                     } else {
                         conn.execute(
                             "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
-                             bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
-                             edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                             allow_captcha, post_cooldown_secs, created_at)
-                             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                             bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
+                             allow_tripcodes, edit_window_secs, allow_editing, allow_archive,
+                             allow_video_embeds, allow_captcha, post_cooldown_secs, created_at)
+                             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                             params![
                                 manifest.board.short_name,
                                 manifest.board.name,
@@ -2471,6 +2481,7 @@ pub async fn board_restore(
                                 i64::from(manifest.board.allow_images),
                                 i64::from(manifest.board.allow_video),
                                 i64::from(manifest.board.allow_audio),
+                                i64::from(manifest.board.allow_any_files),
                                 i64::from(manifest.board.allow_tripcodes),
                                 manifest.board.edit_window_secs,
                                 i64::from(manifest.board.allow_editing),

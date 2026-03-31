@@ -92,7 +92,7 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
 
     let db_path = std::path::Path::new(&crate::config::CONFIG.database_path);
 
-    // FIX[AUDIT-6]: Apply the same Fix #9 empty-parent guard used in
+    // Apply the same Fix #9 empty-parent guard used in
     // `run_server`.  The original code used a plain `if let Some(parent)`
     // check, which does NOT handle the case where `Path::parent()` returns
     // `Some("")` for a bare filename (e.g. "rustchan.db").
@@ -243,7 +243,7 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 );
                 println!("{}", "-".repeat(75));
                 for b in &bans {
-                    // FIX[AUDIT-3]: Use .get(..16) for the same defensive
+                    // Use .get(..16) for the same defensive
                     // safety as the ip_list slice above.
                     let partial = b.ip_hash.get(..16).unwrap_or(b.ip_hash.as_str());
                     let expires = b

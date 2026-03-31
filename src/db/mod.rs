@@ -1,3 +1,5 @@
+// src/db/mod.rs
+
 use rusqlite::params;
 use std::collections::HashSet;
 

@@ -192,14 +192,14 @@ pub fn thread_page(
     body.push_str(report_modal_script());
     body.push_str(thread_autoupdate_script());
 
-    // FIX[NEW-H1]: Quotelink script moved to /static/main.js
+    // Quotelink script moved to /static/main.js
 
     // ── Inline ban+delete prompt ───────────────────────────────────────────
     if is_admin {
-        // FIX[NEW-H1]: adminBanDelete moved to /static/main.js
+        // adminBanDelete moved to /static/main.js
     }
 
-    // FIX[YT-EMBED]: The previous approach used inline <script> blocks to inject
+    // The previous approach used inline <script> blocks to inject
     // board-specific values (EMBED_ENABLED, DRAFT_KEY) at render time.  Inline
     // scripts are blocked by the CSP `script-src 'self'` directive (which
     // deliberately omits 'unsafe-inline'), so neither buildEmbed nor the draft
@@ -276,7 +276,7 @@ fn render_poll(
         } else {
             "poll-open"
         },
-        // FIX[T-T2]: escape_html for defensive correctness — expires_str is
+        // escape_html for defensive correctness — expires_str is
         // derived from integer arithmetic and fmt_ts today, but this guard
         // ensures any future changes to expires_str can't inject HTML.
         expires = escape_html(&expires_str),
@@ -513,6 +513,24 @@ pub fn render_post(
         }
     }
 
+    if show_media && matches!(&post.media_type, Some(crate::models::MediaType::Other)) {
+        if let Some(file) = &post.file_path {
+            let size_str = post.file_size.map(format_file_size).unwrap_or_default();
+            let name_str = post.file_name.as_deref().unwrap_or("download");
+            let _ = write!(
+                html,
+                r#"<div class="file-container file-download">
+<div class="file-info">
+  <a href="/boards/{f}" rel="noreferrer">{orig}</a> ({sz})
+</div>
+</div>"#,
+                f = escape_html(file),
+                orig = escape_html(name_str),
+                sz = escape_html(&size_str)
+            );
+        }
+    }
+
     // Secondary audio for image+audio combo posts
     if show_media {
         if let (Some(aud_file), Some(aud_mime)) = (&post.audio_file_path, &post.audio_mime_type) {
@@ -546,7 +564,7 @@ pub fn render_post(
     // Edit link + report button (only on thread pages where show_delete=true)
     if show_delete {
         let now = chrono::Utc::now().timestamp();
-        // FIX[T-T1]: edit_window_secs = 0 means no time restriction (always
+        // edit_window_secs = 0 means no time restriction (always
         // editable while allow_editing is true — matches the handler-layer fix).
         // The previous guard had `> 0 && …` which suppressed the edit link
         // entirely when the board used the no-limit setting.

@@ -221,7 +221,7 @@ pub fn board_page(
         ));
     }
 
-    // FIX[B-T2]: escape_html on board.short_name before embedding in the URL.
+    // escape_html on board.short_name before embedding in the URL.
     body.push_str(&render_pagination(
         pagination,
         &format!("/{}", escape_html(&board.short_name)),
@@ -322,7 +322,7 @@ fn render_thread_summary(
     }
 
     if let Some(body) = &t.op_body {
-        // FIX[B-T1]: Count and slice by character, not by byte.
+        // Count and slice by character, not by byte.
         // body[..300] panics on any post whose 300th byte falls inside a
         // multi-byte codepoint (emoji, CJK, Arabic, etc.).
         let char_count = body.chars().count();
@@ -547,7 +547,7 @@ pub fn catalog_page(
     }
 
     body.push_str("</div>");
-    // FIX[NEW-H1]: sortCatalog moved to /static/main.js
+    // sortCatalog moved to /static/main.js
     body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
         crate::config::CONFIG.max_image_size,
@@ -708,7 +708,7 @@ pub fn archive_page(
             );
         }
         body.push_str("</div>");
-        // FIX[B-T2]: escape before embedding in pagination URL.
+        // escape before embedding in pagination URL.
         body.push_str(&render_pagination(
             pagination,
             &format!("/{}/archive", escape_html(&board.short_name)),

@@ -18,12 +18,21 @@ This release focuses on cleaning up the codebase, making the project easier to m
 - Middleware was split up so rate limiting, CSRF checks, IP handling, backup progress, and URL cleanup are no longer all mixed together.
 - File upload and media handling were broken into smaller helpers, including safer handling for JPEG cleanup and disk-space checks.
 - Posting logic for new threads and replies was simplified by moving shared steps into common helper code.
+- Startup now goes straight into the improved full-screen terminal dashboard, so the old console box no longer shows behind the new TUI on boot.
+- FFmpeg and ffprobe can now be configured with explicit paths, which makes media processing setup more reliable across macOS, Linux, and Windows.
+- HTTPS, HTTP-to-HTTPS redirect, and Tor proxying now follow the configured address family instead of assuming IPv4-only bind addresses.
+- RustChan now has better groundwork for IPv6 because the shared bind-address logic is used across the main server, HTTPS, redirects, and Tor loopback proxying.
+- Optional arbitrary file uploads were added behind a config gate that is off by default.
+- When arbitrary uploads are enabled globally and turned on for a board, non-media files are served as safe downloads instead of being rendered inline in the browser.
+- Source files were cleaned up with consistent file-path headers at the top and old audit-style fix markers removed.
 
 ### Safety and quality fixes
 
 - Multipart form parsing now fails cleanly instead of silently treating broken fields as empty.
 - Backup restore helper code was moved into shared modules so the same safety checks are used consistently.
 - Several internal code paths were simplified to satisfy strict Clippy checks and reduce maintenance risk.
+- Generic uploaded files now fall back to download-safe handling instead of being forced through the image, video, or audio pipeline.
+- Download-only responses now set safer headers for unknown file types so browsers do not try to guess and render them.
 - The project now builds cleanly with strict warning enforcement after the refactor.
 
 ### Validation

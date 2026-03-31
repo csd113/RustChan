@@ -10,7 +10,7 @@
 // Session cookie: HTTPOnly (not readable by JS), SameSite=Strict (prevents CSRF).
 // Secure=true when CHAN_HTTPS_COOKIES=true (default: same as CHAN_BEHIND_PROXY).
 //
-// FIX[HIGH-3] + FIX[MEDIUM-12]: All admin handlers now wrap DB and file I/O in
+// + All admin handlers now wrap DB and file I/O in
 // spawn_blocking to avoid blocking the Tokio event loop. Direct DB calls from
 // async context were stalling worker threads under concurrent load.
 
@@ -111,7 +111,7 @@ pub async fn admin_panel(
     jar: CookieJar,
     Query(params): Query<AdminPanelQuery>,
 ) -> Result<(CookieJar, Html<String>)> {
-    // FIX[HIGH-3]: Move auth check and all DB calls into spawn_blocking.
+    // Move auth check and all DB calls into spawn_blocking.
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
     let (jar, csrf) = ensure_csrf(jar);
     let csrf_clone = csrf.clone();

@@ -1,3 +1,5 @@
+// src/server/server/lifecycle.rs
+
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tracing::Instrument as _;

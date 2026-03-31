@@ -1,3 +1,5 @@
+// src/utils/files/jpeg.rs
+
 use anyhow::{Context, Result};
 use std::path::Path;
 

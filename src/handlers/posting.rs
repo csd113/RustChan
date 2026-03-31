@@ -1,3 +1,5 @@
+// src/handlers/posting.rs
+
 use crate::{
     db,
     error::{AppError, Result},
@@ -130,7 +132,10 @@ pub fn build_new_post(
         file_path: uploads.primary.as_ref().map(|u| u.file_path.clone()),
         file_name: uploads.primary.as_ref().map(|u| u.original_name.clone()),
         file_size: uploads.primary.as_ref().map(|u| u.file_size),
-        thumb_path: uploads.primary.as_ref().map(|u| u.thumb_path.clone()),
+        thumb_path: uploads
+            .primary
+            .as_ref()
+            .and_then(|u| (!u.thumb_path.is_empty()).then(|| u.thumb_path.clone())),
         mime_type: uploads.primary.as_ref().map(|u| u.mime_type.clone()),
         media_type: uploads
             .primary

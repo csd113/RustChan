@@ -7,10 +7,10 @@
 //   2. GET  /admin       → redirect to panel if already logged in, else show login form
 //   3. POST /admin/logout → delete session from DB → clear cookie
 //
-// Brute-force protection (CRIT-6):
+// Brute-force protection ():
 //   After LOGIN_FAIL_LIMIT failed attempts within LOGIN_FAIL_WINDOW seconds, the IP is
 //   locked out for the remainder of that window.  On success the counter is cleared.
-//   Keys are SHA-256(IP) to avoid retaining raw addresses in memory (CRIT-5).
+//   Keys are SHA-256(IP) to avoid retaining raw addresses in memory ().
 
 use crate::{
     config::CONFIG,
@@ -35,13 +35,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use time;
 use tracing::warn;
 
-// ─── CRIT-6: Admin login brute-force lockout ──────────────────────────────────
+// ─── Admin login brute-force lockout ──────────────────────────────────
 //
 // After LOGIN_FAIL_LIMIT failed attempts within LOGIN_FAIL_WINDOW seconds the
 // IP is locked out for the remainder of that window.  On success the counter
 // is cleared immediately so a genuine admin is never self-locked.
 //
-// Keys are SHA-256(IP) to avoid retaining raw addresses in memory (CRIT-5).
+// Keys are SHA-256(IP) to avoid retaining raw addresses in memory ().
 
 const LOGIN_FAIL_LIMIT: u32 = 5;
 const LOGIN_FAIL_WINDOW: u64 = 900; // 15 minutes
@@ -127,7 +127,7 @@ fn require_admin_sync(jar: &CookieJar, pool: &crate::db::DbPool) -> Result<i64> 
 
 /// Public helper — returns true if the jar contains a valid admin session.
 /// Used by other handlers to conditionally show admin controls.
-/// FIX[HIGH-2]/[HIGH-3]: Callers must invoke this from inside `spawn_blocking`.
+/// /[]: Callers must invoke this from inside `spawn_blocking`.
 #[allow(dead_code)]
 pub fn is_admin_session(jar: &CookieJar, pool: &crate::db::DbPool) -> bool {
     require_admin_sync(jar, pool).is_ok()
@@ -136,7 +136,7 @@ pub fn is_admin_session(jar: &CookieJar, pool: &crate::db::DbPool) -> bool {
 // ─── GET /admin ───────────────────────────────────────────────────────────────
 
 pub async fn admin_index(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
-    // FIX[HIGH-3]: Move DB I/O into spawn_blocking.
+    // Move DB I/O into spawn_blocking.
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
@@ -181,7 +181,6 @@ pub async fn admin_login(
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     Form(form): Form<LoginForm>,
 ) -> Result<Response> {
-    // CRIT-6: Reject IPs that are currently locked out due to repeated failures.
     let ip_key = login_ip_key(&client_ip);
     if is_login_locked(&ip_key) {
         warn!(
@@ -224,7 +223,7 @@ pub async fn admin_login(
     let pool = state.db.clone();
     let password = form.password.clone();
 
-    // FIX[HIGH-3]: Argon2 verification is CPU-intensive; always use spawn_blocking.
+    // Argon2 verification is CPU-intensive; always use spawn_blocking.
     let result = tokio::task::spawn_blocking(move || -> Result<Option<i64>> {
         let conn = pool.get()?;
         let user = db::get_admin_by_username(&conn, &username)?;
@@ -251,7 +250,6 @@ pub async fn admin_login(
             })
             .await
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-            // CRIT-6: Record failed attempt and check if now locked.
             let fails = record_login_fail(&ip_key);
             warn!(
                 "Failed admin login for '{}' (attempt {}/{})",
@@ -270,9 +268,8 @@ pub async fn admin_login(
                 .into_response())
         }
         Some(admin_id) => {
-            // CRIT-6: Successful login — reset any failure counter.
             clear_login_fails(&ip_key);
-            // Create session (FIX[HIGH-3]: in spawn_blocking)
+            // Create session (in spawn_blocking)
             let session_id = new_session_id();
             let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
             let sid_clone = session_id.clone();
@@ -291,9 +288,9 @@ pub async fn admin_login(
             cookie.set_http_only(true);
             cookie.set_same_site(SameSite::Strict);
             cookie.set_path("/");
-            // FIX[MEDIUM-11]: Derive Secure flag from config; true when CHAN_HTTPS_COOKIES=true.
+            // Derive Secure flag from config; true when CHAN_HTTPS_COOKIES=true.
             cookie.set_secure(CONFIG.https_cookies);
-            // FIX[HIGH-1]: Set Max-Age so browsers expire the cookie after the
+            // Set Max-Age so browsers expire the cookie after the
             // configured session lifetime instead of persisting it indefinitely.
             cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
@@ -319,7 +316,7 @@ pub async fn admin_logout(
 
     if let Some(session_cookie) = jar.get(super::SESSION_COOKIE) {
         let session_id = session_cookie.value().to_string();
-        // FIX[HIGH-3]: DB call in spawn_blocking
+        // DB call in spawn_blocking
         tokio::task::spawn_blocking({
             let pool = state.db.clone();
             move || -> Result<()> {
@@ -333,7 +330,7 @@ pub async fn admin_logout(
     }
     let jar = jar.remove(Cookie::from(super::SESSION_COOKIE));
     // Redirect back to the page where logout was triggered, or fall back to login.
-    // FIX[HIGH-4]: Reject backslash (and its percent-encoded form %5C) in
+    // Reject backslash (and its percent-encoded form %5C) in
     // addition to the existing checks.  On some browsers /\\evil.com and
     // /%5Cevil.com are treated as protocol-relative redirects to evil.com.
     let destination = form

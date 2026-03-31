@@ -1,3 +1,5 @@
+// src/middleware/csrf.rs
+
 pub fn validate_csrf(cookie_token: Option<&str>, form_token: &str) -> bool {
     match cookie_token {
         Some(cookie) => {

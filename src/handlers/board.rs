@@ -268,7 +268,10 @@ pub async fn create_thread(
             let (name, tripcode) = posting::resolve_post_identity(&name_val, board.allow_tripcodes);
             let subject = validate_subject(&subject_val);
 
-            let board_allows_media = board.allow_images || board.allow_video || board.allow_audio;
+            let board_allows_media = board.allow_images
+                || board.allow_video
+                || board.allow_audio
+                || (crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files);
             let has_file = file_data.is_some();
             let (body_text, body_html) =
                 posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;
@@ -291,7 +294,7 @@ pub async fn create_thread(
 
             let deletion_token = posting::resolve_deletion_token(&del_token_val);
 
-            // FIX[MEDIUM-3]: Thread creation and OP post insertion are now
+            // Thread creation and OP post insertion are now
             // wrapped in a single transaction via create_thread_with_op.
             // Previously, a crash between the two calls left an orphaned thread.
             let new_post = posting::build_new_post(
@@ -428,7 +431,7 @@ pub async fn catalog(
 ) -> Result<Response> {
     let (jar, csrf) = ensure_csrf(jar);
 
-    // FIX[High-8]: Add ETag caching to the catalog. Previously every request
+    // Add ETag caching to the catalog. Previously every request
     // fetched up to 200 full thread rows and re-rendered the entire page
     // regardless of whether anything changed. The ETag is derived from the
     // most-recently-bumped thread, mirroring the board index handler.
@@ -617,7 +620,7 @@ pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
     cookie.set_http_only(false);
     cookie.set_same_site(SameSite::Strict);
     cookie.set_path("/");
-    // FIX[MEDIUM-11]: set Secure flag based on config (true when behind proxy / HTTPS)
+    // set Secure flag based on config (true when behind proxy / HTTPS)
     cookie.set_secure(CONFIG.https_cookies);
     (jar.add(cookie), token)
 }
@@ -778,17 +781,30 @@ pub async fn serve_board_media(
         ServeFile::new(&target).oneshot(req).await.map_or_else(
             |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             |resp| {
-                use axum::http::header::{HeaderValue, CONTENT_TYPE};
+                use axum::http::header::{
+                    HeaderValue, CONTENT_DISPOSITION, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS,
+                };
                 let mut resp = resp.map(axum::body::Body::new);
-                // Override Content-Type using our own extension→MIME map.
-                // tower-http delegates to `mime_guess` which may return
-                // `application/octet-stream` for formats like `.webp` or `.svg`
-                // on some builds, causing browsers to download the file instead
-                // of displaying it inline.  An explicit map guarantees the
-                // correct type for every format we store.
                 if let Some(ct) = media_content_type(&target) {
                     resp.headers_mut()
                         .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+                } else {
+                    resp.headers_mut().insert(
+                        CONTENT_TYPE,
+                        HeaderValue::from_static("application/octet-stream"),
+                    );
+                    resp.headers_mut()
+                        .insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+                    let filename = target
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("download.bin")
+                        .replace(['\\', '"'], "_");
+                    if let Ok(value) =
+                        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+                    {
+                        resp.headers_mut().insert(CONTENT_DISPOSITION, value);
+                    }
                 }
                 resp.into_response()
             },

@@ -1,3 +1,5 @@
+// src/server/server/assets.rs
+
 use axum::{
     http::{header, StatusCode},
     response::IntoResponse,

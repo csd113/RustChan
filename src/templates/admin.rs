@@ -84,6 +84,7 @@ pub fn admin_panel_page(
   <label><input type="checkbox" name="allow_images"    value="1"{img_ck}>  Allow images</label>
   <label><input type="checkbox" name="allow_video"     value="1"{vid_ck}>  Allow video</label>
   <label><input type="checkbox" name="allow_audio"     value="1"{aud_ck}>  Allow audio</label>
+  {any_files_toggle}
   <label><input type="checkbox" name="allow_tripcodes" value="1"{trip_ck}> Allow tripcodes</label>
   <label><input type="checkbox" name="allow_archive"   value="1"{archive_ck}> Enable archive</label>
   <label><input type="checkbox" name="allow_video_embeds" value="1"{embeds_ck}> Embed video links (YouTube / Invidious / Streamable)</label>
@@ -105,7 +106,7 @@ pub fn admin_panel_page(
   <button type="submit">save settings</button>
 </div>
 </form>
-<!-- FIX[LOW-10]: Delete form is now OUTSIDE the settings form. -->
+<!-- Delete form is now OUTSIDE the settings form. -->
 <form method="POST" action="/admin/board/delete" style="display:inline;margin-top:4px">
   <input type="hidden" name="_csrf"     value="{csrf}">
   <input type="hidden" name="board_id"  value="{id}">
@@ -141,6 +142,14 @@ pub fn admin_panel_page(
             img_ck = checked(b.allow_images),
             vid_ck = checked(b.allow_video),
             aud_ck = checked(b.allow_audio),
+            any_files_toggle = if crate::config::CONFIG.enable_any_file_uploads_feature {
+                format!(
+                    r#"<label><input type="checkbox" name="allow_any_files" value="1"{}> Allow any file downloads</label>"#,
+                    checked(b.allow_any_files)
+                )
+            } else {
+                String::new()
+            },
             trip_ck = checked(b.allow_tripcodes),
             archive_ck = checked(b.allow_archive),
             edit_ck = checked(b.allow_editing),
@@ -166,7 +175,7 @@ pub fn admin_panel_page(
 </form>
 </td>
 </tr>"#,
-            // FIX[MEDIUM-13]: Use .get(..16) to avoid a panic if ip_hash < 16 chars.
+            // Use .get(..16) to avoid a panic if ip_hash < 16 chars.
             escape_html(ban.ip_hash.get(..16).unwrap_or(&ban.ip_hash)),
             escape_html(ban.reason.as_deref().unwrap_or("")),
             escape_html(&expires),
@@ -288,7 +297,7 @@ pub fn admin_panel_page(
         let preview = escape_html(rc.post_preview.trim());
         let reason = escape_html(&rc.report.reason);
         let age = fmt_ts(rc.report.created_at);
-        // FIX[A-T2]: ip_short was computed here but immediately discarded with
+        // ip_short was computed here but immediately discarded with
         // `let _ = ip_short` — dead code from an unfinished refactor.  Removed.
         let _ = write!(
             report_rows,
@@ -794,6 +803,7 @@ pub fn admin_ip_history_page(
             Some(MediaType::Image) => r#"<span style="color:var(--green-bright)">[img]</span>"#,
             Some(MediaType::Video) => r#"<span style="color:var(--text-dim)">[vid]</span>"#,
             Some(MediaType::Audio) => r#"<span style="color:var(--text-dim)">[aud]</span>"#,
+            Some(MediaType::Other) => r#"<span style="color:var(--text-dim)">[file]</span>"#,
             None => "",
         };
         let thread_link = format!(
@@ -808,7 +818,7 @@ pub fn admin_ip_history_page(
             ""
         };
         let body_preview: String = post.body.chars().take(120).collect();
-        // FIX[A-T1]: test character count, not byte count.  post.body.len()
+        // test character count, not byte count.  post.body.len()
         // measures UTF-8 bytes so multi-byte characters (emoji, CJK, …) can
         // cause the ellipsis to be added even when nothing was truncated, or
         // omitted even when content was.

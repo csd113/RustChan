@@ -74,6 +74,9 @@ struct SettingsFile {
     /// Default: "rustchan".
     tor_service_nickname: Option<String>,
     require_ffmpeg: Option<bool>,
+    ffmpeg_path: Option<String>,
+    ffprobe_path: Option<String>,
+    enable_any_file_uploads_feature: Option<bool>,
     /// How often to run PRAGMA `wal_checkpoint(TRUNCATE)`, in seconds.
     /// Set to 0 to disable. Default: 3600 (hourly).
     wal_checkpoint_interval_secs: Option<u64>,
@@ -236,6 +239,13 @@ enable_tor_support = true
 # When false (default), the server starts normally and video thumbnails
 # are replaced with SVG placeholders.
 require_ffmpeg = false
+# Optional explicit ffmpeg binary path. Leave unset to use PATH lookup.
+# ffmpeg_path = "/usr/local/bin/ffmpeg"
+# Optional explicit ffprobe binary path. Leave unset to use PATH lookup.
+# ffprobe_path = "/usr/local/bin/ffprobe"
+# Master switch for arbitrary file uploads. Default: false.
+# When false, boards cannot enable non-media uploads at all.
+enable_any_file_uploads_feature = false
 # How often (in seconds) to run PRAGMA wal_checkpoint(TRUNCATE) to keep
 # the SQLite WAL file from growing unbounded under write load.
 # Set to 0 to disable. Default: 3600 (hourly).
@@ -406,6 +416,13 @@ pub struct Config {
     pub tor_service_nickname: String,
     /// When true, the server exits if ffmpeg is missing.
     pub require_ffmpeg: bool,
+    /// Explicit ffmpeg binary path, or plain "ffmpeg" for PATH lookup.
+    pub ffmpeg_path: String,
+    /// Explicit ffprobe binary path, or plain "ffprobe" for PATH lookup.
+    pub ffprobe_path: String,
+    /// Global feature gate for arbitrary uploads. Boards can only enable the
+    /// per-board toggle when this is true.
+    pub enable_any_file_uploads_feature: bool,
     // ── Internal / env-only settings ─────────────────────────────────────────
     pub bind_addr: String,
     pub database_path: String,
@@ -495,16 +512,17 @@ impl Config {
         );
         let tor_only = env_bool("CHAN_TOR_ONLY", s.tor_only.unwrap_or(false));
         let enable_tor_support = env_bool("CHAN_TOR_SUPPORT", s.enable_tor_support.unwrap_or(true));
-        // When tor_only=true, force the bind host to 127.0.0.1 regardless of
-        // what bind_addr or CHAN_HOST are set to. The configured port is kept.
+        // When tor_only=true, force the bind host to loopback while preserving
+        // the configured address family and port.
         let bind_addr = if tor_only && enable_tor_support {
-            let port_str = bind_addr.rsplit_once(':').map_or("8080", |(_, p)| p);
+            let port_num = port_from_bind_addr(&bind_addr).unwrap_or(8080);
+            let tor_bind_addr = loopback_addr_for_family(&bind_addr, port_num);
             tracing::info!(
                 target: "config",
-                bind_addr = %format!("127.0.0.1:{port_str}"),
+                bind_addr = %tor_bind_addr,
                 "tor_only=true: overriding bind address to loopback"
             );
-            format!("127.0.0.1:{port_str}")
+            tor_bind_addr
         } else {
             bind_addr
         };
@@ -579,6 +597,18 @@ impl Config {
                 .or(s.tor_service_nickname)
                 .unwrap_or_else(|| "rustchan".to_string()),
             require_ffmpeg: env_bool("CHAN_REQUIRE_FFMPEG", s.require_ffmpeg.unwrap_or(false)),
+            ffmpeg_path: env::var("CHAN_FFMPEG_PATH")
+                .ok()
+                .or(s.ffmpeg_path)
+                .unwrap_or_else(|| "ffmpeg".to_string()),
+            ffprobe_path: env::var("CHAN_FFPROBE_PATH")
+                .ok()
+                .or(s.ffprobe_path)
+                .unwrap_or_else(|| "ffprobe".to_string()),
+            enable_any_file_uploads_feature: env_bool(
+                "CHAN_ENABLE_ANY_FILE_UPLOADS_FEATURE",
+                s.enable_any_file_uploads_feature.unwrap_or(false),
+            ),
             bind_addr,
             database_path: env_str("CHAN_DB", &default_db),
             upload_dir: env_str("CHAN_UPLOADS", &default_uploads),
@@ -707,6 +737,12 @@ impl Config {
                  Add `port = 8443` under [tls] in settings.toml, or remove the explicit `port = 0`."
             );
         }
+        if port_from_bind_addr(&self.bind_addr).is_none() {
+            anyhow::bail!(
+                "CONFIG ERROR: bind_addr '{}' is not a valid host:port address.",
+                self.bind_addr
+            );
+        }
         // Verify the upload directory is writable.
         let upload_path = std::path::Path::new(&self.upload_dir);
         if upload_path.exists() {
@@ -770,6 +806,16 @@ impl Config {
             ));
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn bind_addr_with_port(&self, port: u16) -> String {
+        bind_addr_for_port(&self.bind_addr, port)
+    }
+
+    #[must_use]
+    pub fn loopback_addr_with_port(&self, port: u16) -> String {
+        loopback_addr_for_family(&self.bind_addr, port)
     }
 }
 
@@ -923,4 +969,46 @@ fn env_bool(key: &str, default: bool) -> bool {
     env::var(key)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(default)
+}
+
+fn split_bind_addr(addr: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = addr.strip_prefix('[') {
+        let (host, port) = rest.split_once("]:")?;
+        Some((host, port))
+    } else {
+        addr.rsplit_once(':')
+    }
+}
+
+fn bind_host_for_family(addr: &str) -> &str {
+    split_bind_addr(addr).map_or("0.0.0.0", |(host, _)| host)
+}
+
+fn host_is_ipv6(host: &str) -> bool {
+    host.contains(':')
+}
+
+fn format_bind_addr(host: &str, port: u16) -> String {
+    if host_is_ipv6(host) {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+fn bind_addr_for_port(addr: &str, port: u16) -> String {
+    format_bind_addr(bind_host_for_family(addr), port)
+}
+
+fn loopback_addr_for_family(addr: &str, port: u16) -> String {
+    let host = if host_is_ipv6(bind_host_for_family(addr)) {
+        "::1"
+    } else {
+        "127.0.0.1"
+    };
+    format_bind_addr(host, port)
+}
+
+fn port_from_bind_addr(addr: &str) -> Option<u16> {
+    split_bind_addr(addr).and_then(|(_, port)| port.parse().ok())
 }

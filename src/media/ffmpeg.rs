@@ -17,6 +17,14 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+fn ffmpeg_command() -> Command {
+    Command::new(&crate::config::CONFIG.ffmpeg_path)
+}
+
+fn ffprobe_command() -> Command {
+    Command::new(&crate::config::CONFIG.ffprobe_path)
+}
+
 /// Probe whether the `ffmpeg` binary is reachable on the current PATH.
 ///
 /// Runs `ffmpeg -version` and returns `true` if the process exits successfully.
@@ -27,7 +35,7 @@ use std::process::{Command, Stdio};
 /// unavailable; all callers must degrade gracefully.
 #[must_use]
 pub fn detect_ffmpeg() -> bool {
-    Command::new("ffmpeg")
+    ffmpeg_command()
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -49,10 +57,12 @@ pub fn detect_ffmpeg() -> bool {
 /// Returns an error if ffmpeg cannot be spawned (binary missing, permission
 /// denied) or if the process exits with a non-zero status code.
 pub fn run_ffmpeg(args: &[&str]) -> Result<()> {
-    let output = Command::new("ffmpeg")
-        .args(args)
-        .output()
-        .context("failed to spawn ffmpeg — is it installed and on PATH?")?;
+    let output = ffmpeg_command().args(args).output().with_context(|| {
+        format!(
+            "failed to spawn ffmpeg binary '{}' — is it installed and executable?",
+            crate::config::CONFIG.ffmpeg_path
+        )
+    })?;
 
     if output.status.success() {
         Ok(())
@@ -176,7 +186,7 @@ pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()>
 /// Returns an error if `ffprobe` cannot be spawned, exits non-zero, or its
 /// output contains no recognisable codec name.
 pub fn probe_video_codec(path: &str) -> Result<String> {
-    let output = std::process::Command::new("ffprobe")
+    let output = ffprobe_command()
         .args([
             "-v",
             "quiet",
@@ -189,7 +199,12 @@ pub fn probe_video_codec(path: &str) -> Result<String> {
             path,
         ])
         .output()
-        .context("failed to spawn ffprobe — is it installed and on PATH?")?;
+        .with_context(|| {
+            format!(
+                "failed to spawn ffprobe binary '{}' — is it installed and executable?",
+                crate::config::CONFIG.ffprobe_path
+            )
+        })?;
 
     if !output.status.success() {
         return Err(anyhow::anyhow!(
@@ -296,7 +311,7 @@ fn path_to_str(p: &Path) -> Result<&str> {
 /// where blocking is acceptable.
 #[must_use]
 pub fn check_webp_encoder() -> bool {
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()
         .args(["-encoders"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -320,7 +335,7 @@ pub fn check_webp_encoder() -> bool {
 /// This is a synchronous, blocking call intended for use at server startup.
 #[must_use]
 pub fn check_vp9_encoder() -> bool {
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()
         .args(["-encoders"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -344,7 +359,7 @@ pub fn check_vp9_encoder() -> bool {
 /// This is a synchronous, blocking call intended for use at server startup.
 #[must_use]
 pub fn check_opus_encoder() -> bool {
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()
         .args(["-encoders"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

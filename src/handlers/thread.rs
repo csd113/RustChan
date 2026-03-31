@@ -148,7 +148,7 @@ pub async fn post_reply(
     let name_val = form.name;
     let del_token_val = form.deletion_token;
     let form_sage = form.sage;
-    let pow_nonce = form.pow_nonce; // FIX[NEW-C1]: needed for per-reply PoW check
+    let pow_nonce = form.pow_nonce; // needed for per-reply PoW check
                                     // Extract admin session before spawn_blocking so we can skip the per-board
                                     // cooldown for admins (the cookie value is !Send and can't cross the boundary).
     let admin_session_id = jar.get("chan_admin_session").map(|c| c.value().to_string());
@@ -208,7 +208,7 @@ pub async fn post_reply(
                 }
             }
 
-            // FIX[NEW-C1]: PoW CAPTCHA check for replies, mirroring create_thread().
+            // PoW CAPTCHA check for replies, mirroring create_thread().
             // Previously this check was absent, allowing bots to bypass CAPTCHA on
             // captcha-protected boards by posting replies instead of new threads.
             if board.allow_captcha && !verify_pow(&board_short, &pow_nonce) {
@@ -219,7 +219,10 @@ pub async fn post_reply(
 
             let filters = posting::load_word_filters(&conn)?;
             let (name, tripcode) = posting::resolve_post_identity(&name_val, board.allow_tripcodes);
-            let board_allows_media = board.allow_images || board.allow_video || board.allow_audio;
+            let board_allows_media = board.allow_images
+                || board.allow_video
+                || board.allow_audio
+                || (crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files);
             let has_file = file_data.is_some();
             let (body_text, body_html) =
                 posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;

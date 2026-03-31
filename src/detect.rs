@@ -28,7 +28,7 @@ pub enum ToolStatus {
 // ─── ffmpeg ───────────────────────────────────────────────────────────────────
 
 pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
-    let ok = Command::new("ffmpeg")
+    let ok = Command::new(&crate::config::CONFIG.ffmpeg_path)
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -43,6 +43,7 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
         tracing::error!(
             target: "rustchan::detect",
             available = false,
+            ffmpeg_path = %crate::config::CONFIG.ffmpeg_path,
             "ffmpeg required but not installed — set require_ffmpeg = false in settings.toml to disable this check"
         );
         crate::logging::console_print_raw(
@@ -53,6 +54,7 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
         tracing::warn!(
             target: "rustchan::detect",
             available = false,
+            ffmpeg_path = %crate::config::CONFIG.ffmpeg_path,
             "ffmpeg not detected — video thumbnails and transcoding disabled"
         );
         if crate::logging::is_tty() {
@@ -221,7 +223,6 @@ use tor_hsservice::{config::OnionServiceConfigBuilder, handle_rend_requests, HsI
 
 // ─── Per-stream identity map ──────────────────────────────────────────────────
 //
-// CRIT-2A fix: maps the ephemeral local port of each Tor proxy connection to a
 // random pseudonymous token.
 //
 // How it works:
@@ -256,7 +257,7 @@ impl Drop for TokenGuard {
 ///
 /// Returns `None` when `enable_tor_support` is false.
 ///
-/// # CRIT-3 fix
+/// # fix
 /// Accepts a `CancellationToken` so the retry loop and backoff sleep both
 /// respond to graceful shutdown. Without this the task had no cancel path and
 /// was abandoned with a hard 10-second timeout, leaving Tor circuits open.
@@ -275,7 +276,6 @@ pub fn detect_tor(
 
     // F-02: Retry loop with cancellation support.
     // Backoff: 30 s, 60 s, 120 s, 240 s, 480 s (capped at 2^4 × 30 s).
-    // HIGH-7 fix: attempt resets to 0 after a healthy long-running session so
     // clean exits don't accumulate backoff identically to crash loops.
     let handle = tokio::spawn(async move {
         // Yield briefly before emitting any output. detect_tor() is called
@@ -290,8 +290,6 @@ pub fn detect_tor(
         loop {
             tracing::info!(target: "rustchan::detect", attempt, "Tor: starting Arti");
             let run_start = std::time::Instant::now();
-
-            // CRIT-3: race run_arti against the shutdown token.
             let result = tokio::select! {
                 r = run_arti(data_dir.clone(), bind_port, onion_address.clone()) => r,
                 () = cancel.cancelled() => {
@@ -303,7 +301,6 @@ pub fn detect_tor(
 
             match result {
                 Ok(()) => {
-                    // HIGH-7: a clean exit after ≥60 s of healthy operation is not
                     // a crash — reset attempt so backoff stays short on reconnect.
                     if run_start.elapsed() >= std::time::Duration::from_secs(60) {
                         attempt = 0;
@@ -321,8 +318,6 @@ pub fn detect_tor(
             let backoff =
                 std::time::Duration::from_secs(30_u64.saturating_mul(1 << attempt.min(4)));
             tracing::warn!(target: "rustchan::detect", retry_in = ?backoff, "Tor: scheduling restart");
-
-            // CRIT-3: also cancel-aware during the backoff sleep.
             tokio::select! {
                 () = tokio::time::sleep(backoff) => {}
                 () = cancel.cancelled() => {
@@ -380,7 +375,6 @@ async fn run_arti(
 
     // F-01: Wrap bootstrap in a timeout. Without this, a captive portal,
     // strict firewall, or Tor directory downtime hangs this task forever.
-    // HIGH-2 fix: timeout sourced from CONFIG instead of a hardcoded constant
     // so operators on censored networks can increase it via settings.toml.
     let bootstrap_timeout =
         std::time::Duration::from_secs(crate::config::CONFIG.tor_bootstrap_timeout_secs);
@@ -404,7 +398,6 @@ async fn run_arti(
     //   .rate_limit_num_intro_points  — cap introduction point abuse
     // Currently left at defaults. Consider exposing these in settings.toml (F-18).
     //
-    // MED-3 fix: nickname sourced from CONFIG.tor_service_nickname (default
     // "rustchan") so operators running multiple instances with a shared
     // arti_state/ directory can assign distinct names and avoid key collisions.
     let svc_config = OnionServiceConfigBuilder::default()
@@ -439,13 +432,15 @@ async fn run_arti(
     // F-05: Cap concurrent proxy tasks to prevent file-descriptor exhaustion
     // under a connection flood. Excess connections are dropped (Arti sends
     // RELAY_END automatically when stream_req is dropped).
-    // HIGH-3 fix: limit sourced from CONFIG so operators can tune it without
     // recompiling, e.g. to reduce FD pressure on resource-constrained hosts.
     let max_streams = crate::config::CONFIG.tor_max_concurrent_streams;
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_streams));
 
-    // HIGH-5 fix: Arc<str> avoids a String heap allocation per connection.
-    let local_addr: Arc<str> = Arc::from(format!("127.0.0.1:{bind_port}").as_str());
+    let local_addr: Arc<str> = Arc::from(
+        crate::config::CONFIG
+            .loopback_addr_with_port(bind_port)
+            .into_boxed_str(),
+    );
 
     while let Some(stream_req) = stream_requests.next().await {
         match std::sync::Arc::clone(&sem).try_acquire_owned() {
@@ -453,7 +448,6 @@ async fn run_arti(
                 let addr = Arc::clone(&local_addr);
                 tokio::spawn(async move {
                     let _permit = permit; // released on drop
-                                          // HIGH-4 fix: distinguish infrastructure failures (axum
                                           // unreachable) from normal stream closure (client disconnect,
                                           // EOF). Infrastructure errors go to ERROR; everything else
                                           // stays at DEBUG so the log isn't flooded by normal traffic.
@@ -487,8 +481,6 @@ async fn run_arti(
             }
         }
     }
-
-    // CRIT-5/6: belt-and-suspenders keepalives. Named let-bindings in Rust
     // drop at end of their enclosing scope (the function body), not at
     // last-use — so tor_client and onion_service are already live here.
     // These explicit borrows make the intent unambiguous to future readers
@@ -509,7 +501,6 @@ async fn run_arti(
 /// TTY banner. Extracted from `run_arti` to keep that function under the
 /// clippy line-count limit.
 ///
-/// MED-7/MED-11: the address is logged at DEBUG only so it never appears in
 /// plaintext in JSON log files forwarded to aggregators. Set
 /// `RUST_LOG=detect=debug` to see it in logs; the TTY banner and admin panel
 /// always show the full address.
@@ -557,8 +548,6 @@ async fn proxy_tor_stream(
     local_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut tor_stream = stream_req.accept(Connected::new_empty()).await?;
-
-    // MED-10 fix: increased from 5 s to 15 s — under load the axum TCP accept
     // queue can fill and connect() can legitimately take several seconds.
     let mut local = tokio::time::timeout(
         std::time::Duration::from_secs(15),
@@ -567,8 +556,6 @@ async fn proxy_tor_stream(
     .await
     .map_err(|_| "timed out connecting to local HTTP server")?
     .map_err(|e| format!("local TCP connect failed: {e}"))?;
-
-    // CRIT-2A: Register a per-stream pseudonymous token keyed on the ephemeral
     // local port. axum's ConnectInfo sees this port as the peer port on the
     // incoming socket, so ClientIp / extract_ip can retrieve the token without
     // any HTTP parsing, through keep-alive, across all content types.
@@ -609,7 +596,6 @@ fn hsid_to_onion_address(hsid: HsId) -> String {
     hasher.update(b".onion checksum");
     hasher.update(pubkey);
     hasher.update([version]);
-    // HIGH-1 fix: use a typed [u8;32] array instead of an iterator with
     // unwrap_or(0). Sha3_256 always produces 32 bytes — the fallback was dead
     // code that masked potential logic errors if the digest size ever changed.
     let hash: [u8; 32] = hasher.finalize().into();

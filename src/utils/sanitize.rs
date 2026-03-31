@@ -68,7 +68,7 @@ pub fn extract_video_embed(url: &str) -> Option<(&'static str, String)> {
         }
     }
     // Invidious — any domain serving /watch?v=ID (11-char YouTube-style ID).
-    // FIX[INVIDIOUS]: The previous code matched ANY URL containing ?v= or &v=,
+    // The previous code matched ANY URL containing ?v= or &v=,
     // meaning a completely ordinary link like https://example.com/article?v=dQw4w9WgXcQ
     // would be silently replaced with a YouTube embed widget.  We now require
     // the URL path to contain "/watch" (case-sensitive, matching real Invidious

@@ -41,6 +41,10 @@ use tokio::time::{sleep, timeout, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
+fn ffmpeg_command() -> TokioCommand {
+    TokioCommand::new(&CONFIG.ffmpeg_path)
+}
+
 // How many times a job may be attempted before being permanently failed.
 #[allow(dead_code)]
 const MAX_ATTEMPTS: i64 = 3;
@@ -213,7 +217,7 @@ async fn worker_loop(
     ffmpeg_vp9_available: bool,
 ) {
     debug!("Worker {id} started");
-    // FIX[HIGH-6]: Track consecutive errors for exponential back-off.
+    // Track consecutive errors for exponential back-off.
     // Reset to 0 whenever a job is successfully claimed or the queue is empty.
     let mut consecutive_errors: u32 = 0;
     loop {
@@ -247,7 +251,7 @@ async fn worker_loop(
                     queue.in_progress.clone(),
                 )
                 .await;
-                // FIX[STUCK-RUNNING]: Previously pool_done.get() failures were
+                // Previously pool_done.get() failures were
                 // silently ignored (if let Ok(c) = ...), leaving the job row
                 // permanently stuck in "running" — claim_next_job only claims
                 // "pending" rows, so it would never be retried or cleaned up.
@@ -319,7 +323,7 @@ async fn worker_loop(
     }
 }
 
-/// FIX[HIGH-6]: Compute exponential back-off with random jitter.
+/// Compute exponential back-off with random jitter.
 ///
 /// Base: 500 ms × 2^n, capped at 60 s.
 /// Jitter: uniform random 0–500 ms added to spread simultaneous retries
@@ -434,7 +438,7 @@ async fn handle_job(
 /// (libvpx-vp9 + libopus compiled in).  If either flag is false the job is
 /// skipped gracefully — no error is returned and the file remains as-is.
 ///
-/// FIX[Critical-3]: The previous implementation wrapped `std::process::Command`
+/// The previous implementation wrapped `std::process::Command`
 /// in `spawn_blocking` and applied `tokio::time::timeout`. When the timeout
 /// fired, Tokio stopped polling the future but the OS process kept running,
 /// occupying a blocking thread until it finished. The log message "ffmpeg killed"
@@ -490,13 +494,13 @@ async fn transcode_video(
     // When the timeout future is dropped, the Child is dropped, and kill_on_drop
     // ensures the OS process receives SIGKILL immediately — unlike the previous
     // spawn_blocking approach where the OS process kept running after timeout.
-    let child = TokioCommand::new("ffmpeg")
+    let child = ffmpeg_command()
         .args(&args)
         .stderr(Stdio::piped())
         .stdout(Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to spawn ffmpeg: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to spawn ffmpeg '{}': {e}", CONFIG.ffmpeg_path))?;
 
     match timeout(ffmpeg_timeout, child.wait_with_output()).await {
         Ok(Ok(output)) => {
@@ -613,7 +617,7 @@ fn transcode_video_prepare(
     let webm_abs = board_dir.join(&webm_name);
     let webm_rel = format!("{board_short}/{webm_name}");
 
-    // FIX[ATOMIC-WRITE]: temp file in the same directory for POSIX-atomic rename.
+    // temp file in the same directory for POSIX-atomic rename.
     let tmp = tempfile::Builder::new()
         .suffix(".webm")
         .tempfile_in(&board_dir)
@@ -687,7 +691,7 @@ fn transcode_video_finalise(
 
     let conn = pool.get()?;
 
-    // FIX[LEAK]: clean up on DB failure.
+    // clean up on DB failure.
     let db_result = (|| -> Result<()> {
         let updated =
             crate::db::update_all_posts_file_path(&conn, file_path, webm_rel, "video/webm")?;
@@ -718,7 +722,7 @@ fn transcode_video_finalise(
 
 /// Generate a waveform PNG thumbnail for an audio upload via ffmpeg.
 ///
-/// FIX[Critical-3]: Same `kill_on_drop` fix as `transcode_video`. Uses
+/// Same `kill_on_drop` fix as `transcode_video`. Uses
 /// `tokio::process::Command` so the OS process is actually killed when the
 /// timeout fires, rather than continuing to run in an abandoned blocking thread.
 /// Parts produced by [`waveform_prepare`] that are consumed by the ffmpeg
@@ -755,13 +759,18 @@ async fn generate_waveform(
     };
 
     // Phase 2: run ffmpeg with kill_on_drop.
-    let child = TokioCommand::new("ffmpeg")
+    let child = ffmpeg_command()
         .args(&args)
         .stderr(Stdio::piped())
         .stdout(Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to spawn ffmpeg for waveform: {e}"))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to spawn ffmpeg '{}' for waveform: {e}",
+                CONFIG.ffmpeg_path
+            )
+        })?;
 
     match timeout(ffmpeg_timeout, child.wait_with_output()).await {
         Ok(Ok(output)) => {
@@ -866,7 +875,7 @@ fn waveform_finalise(
         .context("Failed to atomically rename waveform PNG into place")?;
     let conn = pool.get()?;
     crate::db::update_post_thumb_path(&conn, post_id, png_rel)?;
-    // FIX[DEDUP-STALE]: update dedup record with final thumb path.
+    // update dedup record with final thumb path.
     let audio_sha256 = crate::utils::crypto::sha256_hex(data);
     let _ = conn.execute(
         "UPDATE file_hashes SET thumb_path = ?1 WHERE sha256 = ?2",
@@ -965,7 +974,7 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
         }
     }
 
-    // FIX[AUDIT-7]: Dereference `sz` explicitly and annotate the sum type for
+    // Dereference `sz` explicitly and annotate the sum type for
     // clarity.  `Iterator<Item = &u64>` implements `Sum<&u64>` in std so this
     // compiled before, but the explicit form is more readable and avoids the
     // implicit coercion.
@@ -988,7 +997,7 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
             Ok(()) => {
                 remaining = remaining.saturating_sub(*size);
                 deleted += 1;
-                // FIX[AUDIT-7]: Dereference `size` for clarity.
+                // Dereference `size` for clarity.
                 deleted_bytes += *size;
             }
             Err(e) => {

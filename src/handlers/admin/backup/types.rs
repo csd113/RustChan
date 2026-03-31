@@ -1,3 +1,5 @@
+// src/handlers/admin/backup/types.rs
+
 pub(super) mod board_backup_types {
     use serde::{Deserialize, Serialize};
 
@@ -17,6 +19,8 @@ pub(super) mod board_backup_types {
         pub allow_video: bool,
         #[serde(default)]
         pub allow_audio: bool,
+        #[serde(default)]
+        pub allow_any_files: bool,
         #[serde(default = "default_true")]
         pub allow_tripcodes: bool,
         #[serde(default = "default_edit_window_secs")]

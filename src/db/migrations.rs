@@ -1,6 +1,8 @@
+// src/db/migrations.rs
+
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 26;
+pub(super) const CURRENT_MAX_MIGRATION: i64 = 27;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
@@ -76,6 +78,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         26,
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_chan_net_posts_remote \
          ON chan_net_posts(remote_post_id, board_id)",
+    ),
+    (
+        27,
+        "ALTER TABLE boards ADD COLUMN allow_any_files INTEGER NOT NULL DEFAULT 0",
     ),
 ];
 

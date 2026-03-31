@@ -1,3 +1,5 @@
+// src/middleware/state.rs
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: crate::db::DbPool,

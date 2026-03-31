@@ -147,7 +147,7 @@ async fn json_body_limit_error(req: axum::http::Request<axum::body::Body>, next:
 /// Middleware that enforces the pre-shared `X-ChanNet-Key` header on sensitive
 /// `ChanNet` endpoints (/chan/refresh and /chan/poll).
 ///
-/// FIX[High-9]: These endpoints were previously unauthenticated. Any process
+/// These endpoints were previously unauthenticated. Any process
 /// that could reach the `ChanNet` bind address could trigger a full DB snapshot
 /// push (refresh) or pull-and-import from a remote node (poll) with no
 /// credentials. The API key is configured via `CHAN_NET_API_KEY` / settings.toml.
@@ -207,7 +207,7 @@ pub fn chan_router(state: AppState) -> Router {
             "/chan/import",
             post(import::chan_import).layer(DefaultBodyLimit::max(CONFIG.chan_net_max_body)),
         )
-        // FIX[High-9]: /chan/refresh and /chan/poll now require X-ChanNet-Key.
+        // /chan/refresh and /chan/poll now require X-ChanNet-Key.
         .route(
             "/chan/refresh",
             post(refresh::chan_refresh).layer(middleware::from_fn(verify_chan_api_key)),

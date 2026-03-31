@@ -1,3 +1,5 @@
+// src/db/schema.rs
+
 use anyhow::{Context, Result};
 
 use super::migrations::{apply_migrations, CURRENT_MAX_MIGRATION};
@@ -17,6 +19,7 @@ pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             allow_tripcodes INTEGER NOT NULL DEFAULT 1,
             allow_images    INTEGER NOT NULL DEFAULT 1,
             allow_audio     INTEGER NOT NULL DEFAULT 0,
+            allow_any_files INTEGER NOT NULL DEFAULT 0,
             edit_window_secs    INTEGER NOT NULL DEFAULT 0,
             allow_editing       INTEGER NOT NULL DEFAULT 0,
             allow_archive       INTEGER NOT NULL DEFAULT 1,
@@ -305,7 +308,7 @@ fn backfill_media_type(conn: &rusqlite::Connection) -> Result<()> {
                       file_path LIKE '%.flac' OR file_path LIKE '%.wav'  OR
                       file_path LIKE '%.m4a'  OR file_path LIKE '%.aac'  OR
                       file_path LIKE '%.opus' THEN 'audio'
-                 ELSE NULL
+                 ELSE 'other'
              END
              WHERE media_type IS NULL AND file_path IS NOT NULL;",
         )

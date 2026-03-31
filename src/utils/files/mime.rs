@@ -1,3 +1,5 @@
+// src/utils/files/mime.rs
+
 use anyhow::Result;
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -93,4 +95,9 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
         "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, BMP, TIFF, \
          MP4, WebM, MP3, OGG, FLAC, WAV, M4A, AAC"
     ))
+}
+
+#[must_use]
+pub const fn fallback_download_mime_type() -> &'static str {
+    "application/octet-stream"
 }

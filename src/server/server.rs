@@ -36,7 +36,7 @@ use router::build_router;
 pub static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Requests currently being processed (in-flight).
 ///
-/// FIX[AUDIT-1]: Changed from `AtomicI64` to `AtomicU64`.  In-flight request
+/// Changed from `AtomicI64` to `AtomicU64`.  In-flight request
 /// counts are inherently non-negative; using a signed type required defensive
 /// `.max(0)` casts at every read site and masked counter underflow bugs.
 /// Decrements use `ScopedDecrement` RAII guards (see below) to prevent
@@ -44,18 +44,17 @@ pub static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 /// Multipart file uploads currently in progress.
 ///
-/// FIX[AUDIT-1]: Same signed→unsigned change as `IN_FLIGHT`.
+/// Same signed→unsigned change as `IN_FLIGHT`.
 pub static ACTIVE_UPLOADS: AtomicU64 = AtomicU64::new(0);
 /// Monotonic tick used to animate the upload spinner.
 pub static SPINNER_TICK: AtomicU64 = AtomicU64::new(0);
 /// Recently active client IPs (last ~5 min); maps SHA-256(IP) → last-seen Instant.
-/// CRIT-5: Keys are hashed so raw IP addresses are never retained in process
 /// memory (or coredumps). The count is used for the "users online" display.
 pub static ACTIVE_IPS: LazyLock<DashMap<String, Instant>> = LazyLock::new(DashMap::new);
 
 // ─── RAII counter guard ───────────────────────────────────────────────────────
 //
-// FIX[AUDIT-2]: `IN_FLIGHT` and `ACTIVE_UPLOADS` are decremented inside
+// `IN_FLIGHT` and `ACTIVE_UPLOADS` are decremented inside
 // `track_requests` *after* `.await`.  If the surrounding future is cancelled
 // (e.g. client disconnect, timeout, or panic in a handler), the post-await
 // code never runs and the counters permanently over-count.
@@ -116,21 +115,9 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&CONFIG.upload_dir)?;
 
-    super::console::print_banner();
-
     let bind_addr: String = port_override.map_or_else(
         || CONFIG.bind_addr.clone(),
-        |p| {
-            // rsplit_once splits at the LAST colon only, which correctly handles
-            // both IPv4 ("0.0.0.0:8080") and IPv6 ("[::1]:8080") bind addresses.
-            // rsplit(':').nth(1) was incorrect for IPv6 — it returned "1]" instead
-            // of "[::1]" because rsplit splits on every colon in the address.
-            let host = CONFIG
-                .bind_addr
-                .rsplit_once(':')
-                .map_or("0.0.0.0", |(h, _)| h);
-            format!("{host}:{p}")
-        },
+        |p| CONFIG.bind_addr_with_port(p),
     );
 
     let pool = crate::db::init_pool()?;
@@ -232,8 +219,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             );
             8080
         });
-
-    // CRIT-1 FIX: Capture JoinHandles from start_worker_pool so the shutdown
     // sequence can await each worker instead of blindly sleeping for 10 s.
     // Previously the return value was silently discarded, making it impossible
     // to know whether in-flight jobs had finished before the process exited.
@@ -706,7 +691,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let chan_app = crate::chan_net::chan_router(state.clone());
         let chan_listener = tokio::net::TcpListener::bind(&chan_addr).await?;
         tracing::info!(target: "chan_net", addr = %chan_addr, "ChanNet API listening");
-        // CRIT-2 FIX: Wire the same shutdown signal so in-flight federation
         // requests are drained before the runtime is dropped. Without this the
         // ChanNet task was detached and forcibly killed on SIGTERM, potentially
         // corrupting a streaming snapshot response mid-transfer.
@@ -726,7 +710,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // build_acceptor() returns None when tls.enabled = false — existing
     // HTTP-only deployments are completely unaffected.
     //
-    // FIX[TLS-1]: The TCP socket is pre-bound here on the *main* task (before
+    // The TCP socket is pre-bound here on the *main* task (before
     // spawning) so that any bind failure (port in use, missing CAP_NET_BIND_SERVICE,
     // etc.) is caught immediately with `?` propagation and a clear error message,
     // rather than silently dying inside a spawned future where the error is easy
@@ -735,7 +719,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // bound.  axum_server::from_tcp_rustls accepts the pre-bound std::TcpListener
     // and does not attempt a second bind.
     //
-    // FIX[TLS-2]: build_acceptor failure is now a hard error (return Err) instead
+    // build_acceptor failure is now a hard error (return Err) instead
     // of a silent log-and-continue.  If TLS is enabled in config but the acceptor
     // cannot be constructed (missing cert files, bad PEM, permission denied on
     // tls/dev/, etc.), the process exits with a clear message rather than running
@@ -745,11 +729,12 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let cancel_tls = worker_cancel.clone();
         let app_tls = build_router(state.clone());
 
-        let https_addr: std::net::SocketAddr = format!("0.0.0.0:{}", CONFIG.tls.port)
+        let https_addr: std::net::SocketAddr = CONFIG
+            .bind_addr_with_port(CONFIG.tls.port)
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid HTTPS bind address: {e}"))?;
 
-        // FIX[TLS-2]: propagate build_acceptor errors as hard failures.
+        // propagate build_acceptor errors as hard failures.
         let acceptor = crate::tls::build_acceptor(&CONFIG.tls, &data_dir_tls)
             .map_err(|e| anyhow::anyhow!("TLS init failed — cannot start HTTPS listener: {e}"))?;
 
@@ -759,7 +744,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 // the TlsAcceptor — pass it straight to axum-server.
                 let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_cfg);
 
-                // FIX[TLS-1]: pre-bind on the main task so failures surface here.
+                // pre-bind on the main task so failures surface here.
                 let https_tcp = tokio::net::TcpListener::bind(https_addr)
                     .await
                     .map_err(|e| {
@@ -801,10 +786,10 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     // ── HTTP→HTTPS redirect listener (optional) ───────────────────────────────
     if CONFIG.tls.enabled && CONFIG.tls.redirect_http {
-        let http_addr: std::net::SocketAddr =
-            format!("0.0.0.0:{}", CONFIG.tls.http_port)
-                .parse()
-                .map_err(|e| anyhow::anyhow!("invalid HTTP redirect bind address: {e}"))?;
+        let http_addr: std::net::SocketAddr = CONFIG
+            .bind_addr_with_port(CONFIG.tls.http_port)
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid HTTP redirect bind address: {e}"))?;
         let https_port = CONFIG.tls.port;
         let cancel_redirect = worker_cancel.clone();
         tokio::spawn(async move {
@@ -824,8 +809,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         }
     })
     .await?;
-
-    // CRIT-1 FIX: Signal workers and then await each handle with a per-worker
     // timeout, replacing the previous blind 10-second sleep. Each worker is
     // given up to (ffmpeg_timeout + 10)s to finish its in-flight job.
     tracing::info!(target: "server", "Signalling background workers to shut down…");
@@ -834,8 +817,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     for handle in worker_handles {
         let _ = tokio::time::timeout(shutdown_timeout, handle).await;
     }
-
-    // CRIT-3 FIX: worker_cancel.cancel() above already signals the Tor task's
     // CancellationToken, so it will exit its select! loop promptly instead of
     // sleeping through a multi-minute backoff. The 15-second safety-net timeout
     // below is only a last resort for the in-flight copy_bidirectional on any
@@ -854,7 +835,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 // Uses axum-server which preserves ConnectInfo<SocketAddr> so the IP-banning
 // and rate-limiting middleware in middleware/mod.rs continues to work correctly.
 //
-// FIX[TLS-1]: Accepts a pre-bound TcpListener instead of a SocketAddr so the
+// Accepts a pre-bound TcpListener instead of a SocketAddr so the
 // actual socket bind (and any OS-level failure) happens on the main task in
 // run_server() where errors propagate with `?`.  axum_server::from_tcp_rustls
 // takes ownership of the already-bound std::TcpListener and does not re-bind.
