@@ -30,6 +30,7 @@ pub struct BoardSettingsForm {
     allow_images: Option<String>,
     allow_video: Option<String>,
     allow_audio: Option<String>,
+    allow_any_files: Option<String>,
     allow_tripcodes: Option<String>,
     allow_editing: Option<String>,
     edit_window_secs: Option<String>,
@@ -102,6 +103,8 @@ pub async fn update_board_settings(
                 form.allow_images.as_deref() == Some("1"),
                 form.allow_video.as_deref() == Some("1"),
                 form.allow_audio.as_deref() == Some("1"),
+                CONFIG.enable_any_file_uploads_feature
+                    && form.allow_any_files.as_deref() == Some("1"),
                 form.allow_tripcodes.as_deref() == Some("1"),
                 edit_window_secs,
                 form.allow_editing.as_deref() == Some("1"),
@@ -314,7 +317,7 @@ pub async fn admin_panel(
     jar: CookieJar,
     Query(params): Query<AdminPanelQuery>,
 ) -> Result<(CookieJar, Html<String>)> {
-    // FIX[HIGH-3]: Move auth check and all DB calls into spawn_blocking.
+    // Move auth check and all DB calls into spawn_blocking.
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());

@@ -14,9 +14,25 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
     let image_mb = CONFIG.max_image_size / 1024 / 1024;
     let video_mb = CONFIG.max_video_size / 1024 / 1024;
     let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
+    let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
+    let file_accept = if allow_any_files {
+        String::new()
+    } else {
+        "image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac".to_string()
+    };
+    let file_hint = if allow_any_files {
+        format!(
+            "media uploads stay inline where supported; other files download safely as attachments · max {} MiB",
+            audio_mb.max(video_mb).max(image_mb)
+        )
+    } else {
+        format!(
+            "jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a · max {audio_mb} MiB"
+        )
+    };
 
     // PoW CAPTCHA block — only rendered when the board has it enabled.
-    // FIX[NEW-H1]: PoW config is passed via data-pow-board / data-pow-difficulty
+    // PoW config is passed via data-pow-board / data-pow-difficulty
     // attributes so main.js can start the solver without any inline <script>.
     let captcha_row = if board.allow_captcha {
         let difficulty: u32 = crate::utils::crypto::POW_DIFFICULTY;
@@ -34,7 +50,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         String::new()
     };
 
-    // FIX[NEW-H1]: captcha JS block removed — logic lives in /static/main.js.
+    // captcha JS block removed — logic lives in /static/main.js.
 
     // Secondary audio input — shown only when the board allows both images and audio.
     let audio_combo_row = if board.allow_images && board.allow_audio {
@@ -78,8 +94,8 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
             </div>
         </td></tr>
     <tr><td>file</td>
-        <td><input type="file" name="file" data-onchange-check-size="1" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
-            <span style="font-size:0.72rem;color:var(--text-dim)">jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a · max {audio_mb} MiB</span></td></tr>
+        <td><input type="file" name="file" data-onchange-check-size="1" accept="{file_accept}">
+            <span style="font-size:0.72rem;color:var(--text-dim)">{file_hint}</span></td></tr>
     {audio_combo_row}
     {edit_token_row}
     {captcha_row}
@@ -88,11 +104,11 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
           <summary>[ 📊 Add a Poll to this thread ]</summary>
           <div class="poll-creator-inner">
             <div class="poll-creator-row">
-              <!-- FIX[F-T1]: maxlength matches server limit of 500 chars (was 256) -->
+              <!-- maxlength matches server limit of 500 chars (was 256) -->
               <label>Question<input type="text" name="poll_question" placeholder="What do you think?" maxlength="500"></label>
             </div>
             <div id="poll-options-list">
-              <!-- FIX[F-T1]: maxlength matches server limit of 200 chars (was 128) -->
+              <!-- maxlength matches server limit of 200 chars (was 128) -->
               <div class="poll-option-row"><input type="text" name="poll_option" placeholder="Option 1" maxlength="200"><button type="button" class="poll-remove-btn" data-action="remove-poll-option" style="display:none">✕</button></div>
               <div class="poll-option-row"><input type="text" name="poll_option" placeholder="Option 2" maxlength="200"><button type="button" class="poll-remove-btn" data-action="remove-poll-option" style="display:none">✕</button></div>
             </div>
@@ -100,7 +116,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
             <div class="poll-creator-row poll-duration-row">
               <label>Duration
                 <input type="number" name="poll_duration_value" value="24" min="1" max="720" class="poll-duration-input">
-                <!-- FIX[F-T2]: Added Days option — server now accepts "days" unit -->
+                <!-- Added Days option — server now accepts "days" unit -->
                 <select name="poll_duration_unit" class="poll-duration-unit">
                   <option value="hours">Hours</option>
                   <option value="minutes">Minutes</option>
@@ -115,12 +131,11 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
 </form>
 </div>
 "#,
-        // FIX[NEW-H1]: poll scripts moved to /static/main.js
+        // poll scripts moved to /static/main.js
         board = escape_html(board_short),
         csrf = escape_html(csrf_token),
-        image_mb = image_mb,
-        video_mb = video_mb,
-        audio_mb = audio_mb,
+        file_accept = file_accept,
+        file_hint = file_hint,
         audio_combo_row = audio_combo_row,
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
@@ -137,6 +152,7 @@ pub(super) fn reply_form(
     let image_mb = CONFIG.max_image_size / 1024 / 1024;
     let video_mb = CONFIG.max_video_size / 1024 / 1024;
     let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
+    let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
 
     // Build the accept attribute and hint based on which media types are enabled.
     let mut accept_parts: Vec<&str> = Vec::new();
@@ -153,8 +169,19 @@ pub(super) fn reply_form(
         accept_parts.push("audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac");
         hint_parts.push(format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB"));
     }
-    let file_accept = accept_parts.join(",");
-    let file_hint = hint_parts.join(" &nbsp;|&nbsp; ");
+    let file_accept = if allow_any_files {
+        String::new()
+    } else {
+        accept_parts.join(",")
+    };
+    let file_hint = if allow_any_files {
+        format!(
+            "{} &nbsp;|&nbsp; other file types download as attachments",
+            hint_parts.join(" &nbsp;|&nbsp; ")
+        )
+    } else {
+        hint_parts.join(" &nbsp;|&nbsp; ")
+    };
 
     // Secondary audio-alongside-image row.
     let audio_combo_row = if board.allow_images && board.allow_audio {

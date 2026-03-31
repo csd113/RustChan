@@ -5,22 +5,10 @@
 // and the list_admins helper used by CLI tooling.
 //
 // FIX summary (from audit):
-//   HIGH-1   is_banned: switched to prepare_cached (hot path on every post submission)
-//   HIGH-2   get_word_filters: switched to prepare_cached (hot path on every post submission)
-//   HIGH-3   get_posts_by_ip_hash: removed unnecessary threads join; posts already carries board_id
-//   MED-4    create_admin, add_ban, add_word_filter, file_report, file_ban_appeal:
 //              INSERT … RETURNING id replaces execute + last_insert_rowid()
-//   MED-5    update_admin_password, remove_ban, resolve_report, dismiss_ban_appeal:
 //              added rows-affected checks so missing targets surface as errors
-//   MED-6    accept_ban_appeal: status='accepted' (was duplicating 'dismissed')
 //              already correct; doc comment clarified
-//   MED-7    file_report: added has_reported_post guard to prevent spam reports
-//   MED-8    has_recent_appeal / file_ban_appeal TOCTOU: documented; full fix
 //              requires a schema-level UNIQUE constraint
-//   LOW-9    Remaining bare prepare → prepare_cached throughout
-//   LOW-10   Added .context() on key operations
-//   LOW-11   get_db_size_bytes: added doc comment noting WAL file not included
-//   LOW-12   is_banned NULLS FIRST: added doc comment for SQLite ≥ 3.30.0 requirement
 
 use crate::models::{AdminSession, AdminUser, Ban, WordFilter};
 use anyhow::{Context, Result};
@@ -49,7 +37,7 @@ pub fn get_admin_by_username(
         .optional()?)
 }
 
-/// FIX[MED-4]: Replaced execute + `last_insert_rowid()` with INSERT … RETURNING id
+/// Replaced execute + `last_insert_rowid()` with INSERT … RETURNING id
 /// to retrieve the new row id atomically in the same statement.
 ///
 /// # Errors
@@ -65,7 +53,7 @@ pub fn create_admin(conn: &rusqlite::Connection, username: &str, hash: &str) -> 
     Ok(id)
 }
 
-/// FIX[MED-5]: Added rows-affected check — silently succeeding when the target
+/// Added rows-affected check — silently succeeding when the target
 /// username doesn't exist made password-reset errors invisible to the operator.
 ///
 /// # Errors
@@ -88,7 +76,7 @@ pub fn update_admin_password(
 }
 
 /// List all admin users (for CLI tooling).
-/// FIX[LOW-9]: Switched from bare prepare to `prepare_cached`.
+/// Switched from bare prepare to `prepare_cached`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -180,10 +168,10 @@ pub fn purge_expired_sessions(conn: &rusqlite::Connection) -> Result<usize> {
 
 /// Check whether `ip_hash` is currently banned. Returns the ban reason if so.
 ///
-/// FIX[HIGH-1]: Switched to `prepare_cached` — this is called on every post
+/// Switched to `prepare_cached` — this is called on every post
 /// submission and was recompiling the statement on every call.
 ///
-/// FIX[BAN-ORDER]: ORDER BY `expires_at` DESC NULLS FIRST ensures a permanent
+/// ORDER BY `expires_at` DESC NULLS FIRST ensures a permanent
 /// ban (NULL `expires_at`) always surfaces before any timed ban.
 ///
 /// Note: NULLS FIRST requires `SQLite` ≥ 3.30.0 (released 2019-10-04).
@@ -205,7 +193,7 @@ pub fn is_banned(conn: &rusqlite::Connection, ip_hash: &str) -> Result<Option<St
     Ok(result.map(Option::unwrap_or_default))
 }
 
-/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -225,7 +213,7 @@ pub fn add_ban(
     Ok(id)
 }
 
-/// FIX[MED-5]: Returns an error when the target ban row does not exist,
+/// Returns an error when the target ban row does not exist,
 /// making double-removes and stale ban-ids visible rather than silently succeeding.
 ///
 /// # Errors
@@ -240,7 +228,7 @@ pub fn remove_ban(conn: &rusqlite::Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// FIX[LOW-9]: Switched from bare prepare to `prepare_cached`.
+/// Switched from bare prepare to `prepare_cached`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -264,7 +252,7 @@ pub fn list_bans(conn: &rusqlite::Connection) -> Result<Vec<Ban>> {
 
 // ─── Word filter queries ──────────────────────────────────────────────────────
 
-/// FIX[HIGH-2]: Switched to `prepare_cached` — called on every post submission
+/// Switched to `prepare_cached` — called on every post submission
 /// to apply word filters; recompiling the statement every time was wasteful.
 ///
 /// # Errors
@@ -283,7 +271,7 @@ pub fn get_word_filters(conn: &rusqlite::Connection) -> Result<Vec<WordFilter>> 
     Ok(filters)
 }
 
-/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -314,7 +302,7 @@ pub fn remove_word_filter(conn: &rusqlite::Connection, id: i64) -> Result<()> {
 /// Guard helper: returns true if `reporter_hash` has already filed a report
 /// against `post_id` that is still open.
 ///
-/// FIX[MED-7]: Prevents a user from spamming the report queue with duplicate
+/// Prevents a user from spamming the report queue with duplicate
 /// reports on the same post. Called inside `file_report` before the INSERT.
 ///
 /// Note: There is a TOCTOU race between `has_reported_post` and the INSERT in
@@ -339,8 +327,8 @@ fn has_reported_post(
 
 /// File a new report against a post. Returns the new report id.
 ///
-/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
-/// FIX[MED-7]: Duplicate-report guard added via `has_reported_post`.
+/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+/// Duplicate-report guard added via `has_reported_post`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -367,7 +355,7 @@ pub fn file_report(
 }
 
 /// Return all open reports enriched with board name and post preview.
-/// FIX[LOW-9]: Switched from bare prepare to `prepare_cached`.
+/// Switched from bare prepare to `prepare_cached`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -413,7 +401,7 @@ pub fn get_open_reports(
 }
 
 /// Resolve a report (mark it closed).
-/// FIX[MED-5]: Added rows-affected check.
+/// Added rows-affected check.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -479,7 +467,7 @@ pub fn log_mod_action(
 }
 
 /// Retrieve a page of mod log entries, newest first.
-/// FIX[LOW-9]: Switched from bare prepare to `prepare_cached`.
+/// Switched from bare prepare to `prepare_cached`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -523,7 +511,7 @@ pub fn count_mod_log(conn: &rusqlite::Connection) -> Result<i64> {
 
 /// Insert a new ban appeal. Returns the new appeal id.
 ///
-/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///
 /// Note (TOCTOU): `has_recent_appeal` and `file_ban_appeal` have a race — two
 /// concurrent requests from the same IP can both pass the check and both
@@ -567,7 +555,7 @@ pub fn get_open_ban_appeals(conn: &rusqlite::Connection) -> Result<Vec<crate::mo
 }
 
 /// Dismiss a ban appeal (mark it closed without unbanning).
-/// FIX[MED-5]: Added rows-affected check.
+/// Added rows-affected check.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -586,7 +574,7 @@ pub fn dismiss_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64) -> Result
 
 /// Dismiss appeal AND lift the ban for this `ip_hash`.
 ///
-/// FIX[MED-6]: Accepted appeals now set status='accepted' (not 'dismissed')
+/// Accepted appeals now set status='accepted' (not 'dismissed')
 /// so the moderation history accurately distinguishes denied vs granted appeals.
 /// The valid status values for `BanAppeal` are: "open" | "dismissed" | "accepted".
 ///
@@ -672,13 +660,13 @@ pub fn count_posts_by_ip_hash(conn: &rusqlite::Connection, ip_hash: &str) -> Res
 /// Return paginated posts by IP hash, newest first, across all boards.
 /// Each post is joined with its board `short_name` for display.
 ///
-/// FIX[HIGH-3]: Replaced the three-way join (posts → threads → boards) with a
+/// Replaced the three-way join (posts → threads → boards) with a
 /// direct two-way join (posts → boards). The posts table already carries `board_id`,
 /// making the threads join unnecessary. The old join also silently hid any posts
 /// whose thread had been deleted (orphaned posts) because the INNER JOIN on
 /// threads would exclude them.
 ///
-/// FIX[LOW-9]: Switched from bare prepare to `prepare_cached`.
+/// Switched from bare prepare to `prepare_cached`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -748,7 +736,7 @@ pub fn run_wal_checkpoint(conn: &rusqlite::Connection) -> Result<(i64, i64, i64)
 /// Return the current on-disk size of the database in bytes
 /// (`page_count` × `page_size`, as reported by `SQLite`).
 ///
-/// FIX[LOW-11]: Note that this does NOT include the WAL file size. When the
+/// Note that this does NOT include the WAL file size. When the
 /// database is in WAL mode, the total on-disk footprint is this value plus the
 /// size of the .db-wal file. Call `run_wal_checkpoint` before `get_db_size_bytes`
 /// if you need a reliable post-checkpoint size.

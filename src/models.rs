@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 // ─── Media type classification ────────────────────────────────────────────────
 
-/// Classifies an uploaded file as image, video, or audio.
-/// Stored as a TEXT column in posts ("image", "video", "audio").
+/// Classifies an uploaded file as image, video, audio, or a generic download.
+/// Stored as a TEXT column in posts ("image", "video", "audio", "other").
 ///
 /// The serde `rename_all = "lowercase"` representation **must** stay in sync
 /// with `as_str()` / `from_db_str()`.  Add a round-trip unit test whenever a
@@ -21,6 +21,7 @@ pub enum MediaType {
     Image,
     Video,
     Audio,
+    Other,
 }
 
 impl MediaType {
@@ -34,7 +35,7 @@ impl MediaType {
         } else if mime.starts_with("audio/") {
             Some(Self::Audio)
         } else {
-            None
+            Some(Self::Other)
         }
     }
 
@@ -49,7 +50,7 @@ impl MediaType {
             }
             "mp4" | "webm" => Some(Self::Video),
             "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "opus" => Some(Self::Audio),
-            _ => None,
+            _ => Some(Self::Other),
         }
     }
 
@@ -60,6 +61,7 @@ impl MediaType {
             Self::Image => "image",
             Self::Video => "video",
             Self::Audio => "audio",
+            Self::Other => "other",
         }
     }
 
@@ -70,6 +72,7 @@ impl MediaType {
             "image" => Some(Self::Image),
             "video" => Some(Self::Video),
             "audio" => Some(Self::Audio),
+            "other" => Some(Self::Other),
             _ => None,
         }
     }
@@ -92,9 +95,10 @@ pub struct Board {
     pub nsfw: bool,
     pub max_threads: i64,
     pub bump_limit: i64,
-    pub allow_images: bool, // per-board image upload toggle (default: true)
-    pub allow_video: bool,  // per-board video upload toggle (default: true)
-    pub allow_audio: bool,  // per-board audio upload toggle (default: true)
+    pub allow_images: bool,    // per-board image upload toggle (default: true)
+    pub allow_video: bool,     // per-board video upload toggle (default: true)
+    pub allow_audio: bool,     // per-board audio upload toggle (default: true)
+    pub allow_any_files: bool, // per-board arbitrary file upload toggle (default: off)
     pub allow_tripcodes: bool,
     pub allow_editing: bool,   // per-board post editing toggle (default: off)
     pub edit_window_secs: i64, // seconds users can edit their posts (0 = use board default 300)
@@ -493,7 +497,12 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn media_type_serde_matches_db_str() {
-        for mt in [MediaType::Image, MediaType::Video, MediaType::Audio] {
+        for mt in [
+            MediaType::Image,
+            MediaType::Video,
+            MediaType::Audio,
+            MediaType::Other,
+        ] {
             let json =
                 serde_json::to_string(&mt).expect("MediaType always serialises to a JSON string");
             let json_str = json.trim_matches('"');
@@ -512,7 +521,12 @@ mod tests {
 
     #[test]
     fn media_type_display_matches_as_str() {
-        for mt in [MediaType::Image, MediaType::Video, MediaType::Audio] {
+        for mt in [
+            MediaType::Image,
+            MediaType::Video,
+            MediaType::Audio,
+            MediaType::Other,
+        ] {
             assert_eq!(format!("{mt}"), mt.as_str());
         }
     }
@@ -522,7 +536,10 @@ mod tests {
         assert_eq!(MediaType::from_mime("image/png"), Some(MediaType::Image));
         assert_eq!(MediaType::from_mime("video/mp4"), Some(MediaType::Video));
         assert_eq!(MediaType::from_mime("audio/ogg"), Some(MediaType::Audio));
-        assert_eq!(MediaType::from_mime("application/json"), None);
+        assert_eq!(
+            MediaType::from_mime("application/json"),
+            Some(MediaType::Other)
+        );
     }
 
     #[test]
@@ -530,7 +547,7 @@ mod tests {
         assert_eq!(MediaType::from_ext("jpg"), Some(MediaType::Image));
         assert_eq!(MediaType::from_ext("mp4"), Some(MediaType::Video));
         assert_eq!(MediaType::from_ext("flac"), Some(MediaType::Audio));
-        assert_eq!(MediaType::from_ext("exe"), None);
+        assert_eq!(MediaType::from_ext("exe"), Some(MediaType::Other));
     }
 
     // ── Pagination ────────────────────────────────────────────────────────

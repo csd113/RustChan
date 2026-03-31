@@ -7,27 +7,11 @@
 //   delete_post        calls super::paths_safe_to_delete.
 //
 // FIX summary (from audit):
-//   HIGH-1   edit_post: transaction upgraded from DEFERRED (unchecked_transaction)
 //              to IMMEDIATE (raw BEGIN IMMEDIATE) to prevent write contention
-//   HIGH-2   edit_post: combined two separate round-trips (token fetch +
 //              created_at fetch) into a single SELECT, eliminating race window
-//   HIGH-3   delete_post: SELECT → DELETE is now wrapped in a transaction to
 //              eliminate the TOCTOU race
-//   MED-4    enqueue_job: INSERT … RETURNING id replaces last_insert_rowid()
-//   MED-5    create_poll: INSERT … RETURNING id inside transaction
-//   MED-6    MAX_JOB_ATTEMPTS constant extracted; magic number 3 was duplicated
 //              in claim_next_job and fail_job and could diverge
-//   MED-7    constant_time_eq: fixed early-return length leak; comparison now
 //              processes all bytes regardless of length difference
-//   MED-8    LIKE escape logic extracted into like_escape helper
-//   LOW-9    get_preview_posts inner SELECT * replaced with explicit column list
-//   LOW-10   get_new_posts_since LIMIT 100 documented
-//   MED-11   retention_cutoff parameter rename documented
-//   MED-12   map_post: column-count assertion added as a compile-time guard
-//   MED-13   get_new_posts_since hardcoded LIMIT 100: now takes a max_results param
-//   MED-14   cast_vote conflation documented
-//   MED-15   update_all_posts_file_path: doc clarified for implicit caller contract
-//   LOW-16   complete_job / fail_job: added rows-affected checks
 
 use crate::models::Post;
 use anyhow::{Context, Result};
@@ -35,7 +19,7 @@ use rusqlite::{params, OptionalExtension};
 
 // ─── Retry budget constant ────────────────────────────────────────────────────
 
-/// FIX[MED-6]: Single source of truth for the job retry budget.
+/// Single source of truth for the job retry budget.
 /// Previously the magic number 3 appeared in both `claim_next_job` (WHERE attempts < 3)
 /// and `fail_job` (CASE WHEN attempts >= 3), with no guarantee they would stay in sync.
 const MAX_JOB_ATTEMPTS: i64 = 3;
@@ -45,7 +29,7 @@ const MAX_JOB_ATTEMPTS: i64 = 3;
 /// Map a full post row (23 columns, selected in the canonical order used
 /// throughout this module) into a Post struct.
 ///
-/// FIX[MED-12]: The expected column count is asserted here so any future change
+/// The expected column count is asserted here so any future change
 /// to the SELECT list that shifts column indices produces a compile-time error
 /// rather than silent data corruption at runtime.
 ///
@@ -116,7 +100,7 @@ pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Resu
 /// Fetch posts in `thread_id` whose id is strictly greater than `since_id`.
 /// Returns them oldest-first. Used by the thread auto-update polling endpoint.
 ///
-/// FIX[MED-13]: The limit is now an explicit parameter instead of a hardcoded
+/// The limit is now an explicit parameter instead of a hardcoded
 /// magic number. Callers should pass a sensible cap (e.g. 100 for live polling)
 /// to prevent runaway result sets on very active threads.
 ///
@@ -146,7 +130,7 @@ pub fn get_new_posts_since(
 
 /// Get last N posts for a thread (for board index preview).
 ///
-/// FIX[LOW-9]: The inner subquery used `SELECT *` which silently breaks if the
+/// The inner subquery used `SELECT *` which silently breaks if the
 /// schema adds or reorders columns. Replaced with explicit column list.
 ///
 /// # Errors
@@ -265,7 +249,7 @@ pub fn get_post_on_board(
 
 /// Delete a post by id; returns file paths safe to remove from disk.
 ///
-/// FIX[HIGH-3]: The previous implementation had a SELECT → DELETE TOCTOU race:
+/// The previous implementation had a SELECT → DELETE TOCTOU race:
 /// if the post was concurrently deleted between the `get_post` call and the
 /// DELETE, the function silently returned an empty path list rather than an
 /// error, and the caller would skip file cleanup assuming there was nothing to
@@ -366,12 +350,12 @@ pub fn verify_deletion_token(
 /// Returns `Ok(true)` on success, `Ok(false)` if the token is wrong or the
 /// edit window has closed; `Err` for database failures.
 ///
-/// FIX[HIGH-1]: Upgraded from DEFERRED (`unchecked_transaction`) to IMMEDIATE by
+/// Upgraded from DEFERRED (`unchecked_transaction`) to IMMEDIATE by
 /// issuing BEGIN IMMEDIATE explicitly. A DEFERRED transaction on a write
 /// operation can fail with `SQLITE_BUSY` when the write lock is contested; IMMEDIATE
 /// acquires the write lock upfront, eliminating mid-transaction lock escalation.
 ///
-/// FIX[HIGH-2]: The previous two-round-trip design (one SELECT for the token,
+/// The previous two-round-trip design (one SELECT for the token,
 /// a second SELECT for `created_at`) introduced a race window: the post could be
 /// deleted between the token check and the timestamp fetch. Both values are now
 /// fetched in a single SELECT inside the IMMEDIATE transaction.
@@ -398,7 +382,7 @@ pub fn edit_post(
         .context("Failed to begin IMMEDIATE transaction for edit_post")?;
 
     let result: Result<bool> = (|| {
-        // FIX[HIGH-2]: Fetch token and created_at in a single round-trip.
+        // Fetch token and created_at in a single round-trip.
         let row: Option<(String, i64)> = conn
             .query_row(
                 "SELECT deletion_token, created_at FROM posts WHERE id = ?1",
@@ -444,7 +428,7 @@ pub fn edit_post(
 
 /// Constant-time byte slice comparison to prevent timing side-channel attacks.
 ///
-/// FIX[MED-7]: The previous implementation returned false immediately when
+/// The previous implementation returned false immediately when
 /// lengths differed, leaking token length as a timing signal. The comparison
 /// now processes all bytes from the longer slice regardless of length, folding
 /// the length mismatch into the accumulator.
@@ -462,7 +446,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 // ─── LIKE escape helper ───────────────────────────────────────────────────────
 
-/// FIX[MED-8]: Extracted from `search_posts` and `count_search_results` to avoid
+/// Extracted from `search_posts` and `count_search_results` to avoid
 /// duplicating the escape logic. Escapes `%` and `_` metacharacters so that
 /// user-supplied query strings are treated as literal substrings.
 fn like_escape(query: &str) -> String {
@@ -567,7 +551,7 @@ pub fn record_file_hash(
 
 /// Create a poll with its options atomically.
 ///
-/// FIX[MED-5]: Replaced `last_insert_rowid()` with INSERT … RETURNING id so the
+/// Replaced `last_insert_rowid()` with INSERT … RETURNING id so the
 /// poll id is retrieved atomically in the same statement rather than relying on
 /// connection-local state.
 ///
@@ -706,11 +690,11 @@ pub fn get_poll_for_thread(
 
 /// Cast a vote. Returns true if vote was recorded, false otherwise.
 ///
-/// FIX[CROSS-POLL]: Validates that `option_id` belongs to `poll_id` inside
+/// Validates that `option_id` belongs to `poll_id` inside
 /// the same INSERT statement via a correlated WHERE EXISTS. A mismatched
 /// (`poll_id`, `option_id`) pair inserts nothing and returns false.
 ///
-/// Note (MED-14): This function returns false for two distinct cases:
+/// Note (): This function returns false for two distinct cases:
 ///   1. The voter has already voted (UNIQUE constraint fires INSERT OR IGNORE)
 ///   2. The `option_id` does not belong to `poll_id` (EXISTS check fails)
 ///
@@ -769,7 +753,7 @@ pub fn get_poll_context(
 ///
 /// Returns the number of vote rows deleted.
 ///
-/// Note (MED-11): The parameter was previously named `retention_cutoff` in some
+/// Note (): The parameter was previously named `retention_cutoff` in some
 /// call sites, which is misleading — a lower value retains more votes, and a
 /// higher value prunes more. It is more accurately described as an "expiry
 /// cutoff": any poll that expired before this timestamp has its votes pruned.
@@ -798,7 +782,7 @@ pub fn cleanup_expired_poll_votes(
 
 /// Persist a new job in the pending state. Returns the new row id.
 ///
-/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -846,7 +830,7 @@ pub fn claim_next_job(conn: &rusqlite::Connection) -> Result<Option<(i64, String
 
 /// Mark a job as successfully completed.
 ///
-/// FIX[LOW-16]: Added rows-affected check — silently succeeding for an unknown
+/// Added rows-affected check — silently succeeding for an unknown
 /// `job_id` made double-complete bugs invisible.
 ///
 /// # Errors
@@ -865,8 +849,8 @@ pub fn complete_job(conn: &rusqlite::Connection, id: i64) -> Result<()> {
 
 /// Record a job failure. After `MAX_JOB_ATTEMPTS` the job stays "failed" permanently.
 ///
-/// FIX[LOW-16]: Added rows-affected check.
-/// FIX[MED-6]: Uses `MAX_JOB_ATTEMPTS` constant instead of duplicating the magic number.
+/// Added rows-affected check.
+/// Uses `MAX_JOB_ATTEMPTS` constant instead of duplicating the magic number.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -929,7 +913,7 @@ pub fn update_post_file_info(
 /// and marks it safe to delete — but the `WebM` it was replaced with would also
 /// be considered orphaned the next time any of those stale posts is deleted.
 ///
-/// Note (MED-15): This function does NOT update the corresponding `file_hashes`
+/// Note (): This function does NOT update the corresponding `file_hashes`
 /// row. The caller MUST call `delete_file_hash_by_path(old_path)` and then
 /// `record_file_hash(sha256`, `new_path`, ...) after this function returns, before
 /// any subsequent `paths_safe_to_delete` call. Failure to do so leaves the dedup

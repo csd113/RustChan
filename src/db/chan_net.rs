@@ -64,7 +64,7 @@ pub fn insert_board_if_absent(conn: &Connection, short_name: &str, title: &str) 
         return Ok(id);
     }
 
-    // FIX[High-7]: Use INSERT … RETURNING id instead of last_insert_rowid().
+    // Use INSERT … RETURNING id instead of last_insert_rowid().
     // last_insert_rowid() is connection-local; in a multi-connection pool another
     // write on the same connection between the INSERT and this call would return
     // the wrong row ID.
@@ -223,7 +223,6 @@ pub fn insert_reply_into_thread(
     // Mirror the normal post-creation path: advance bumped_at and increment
     // reply_count. This call is not co-transactional with the INSERT above
     // (same documented limitation as the main post-creation path in threads.rs
-    // MED-6). A crash between the two statements leaves reply_count one behind,
     // which is an advisory counter — not a data integrity failure.
     conn.execute(
         "UPDATE threads

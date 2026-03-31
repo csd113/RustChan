@@ -35,7 +35,7 @@ pub enum AppError {
     Forbidden(String),
 
     /// 403 — user is banned; carries the ban reason and their CSRF token so the
-    /// appeal form can be rendered with a valid token (fixes FIX[M-T1]).
+    /// appeal form can be rendered with a valid token (fixes ).
     #[error("You are banned. Reason: {reason}")]
     BannedUser { reason: String, csrf_token: String },
 

@@ -7,18 +7,11 @@
 
 use crate::{
     config::CONFIG,
-    db::{self, NewPost},
+    db::{self},
     error::{AppError, Result},
-    handlers::{board::ensure_csrf, parse_post_multipart},
+    handlers::{board::ensure_csrf, parse_post_multipart, posting},
     middleware::{validate_csrf, AppState},
-    utils::{
-        crypto::{hash_ip, new_deletion_token, verify_pow},
-        sanitize::{
-            apply_word_filters, escape_html, render_post_body, validate_body,
-            validate_body_with_file, validate_name,
-        },
-        tripcode::parse_name_tripcode,
-    },
+    utils::crypto::{hash_ip, verify_pow},
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
@@ -155,7 +148,7 @@ pub async fn post_reply(
     let name_val = form.name;
     let del_token_val = form.deletion_token;
     let form_sage = form.sage;
-    let pow_nonce = form.pow_nonce; // FIX[NEW-C1]: needed for per-reply PoW check
+    let pow_nonce = form.pow_nonce; // needed for per-reply PoW check
                                     // Extract admin session before spawn_blocking so we can skip the per-board
                                     // cooldown for admins (the cookie value is !Send and can't cross the boundary).
     let admin_session_id = jar.get("chan_admin_session").map(|c| c.value().to_string());
@@ -202,9 +195,7 @@ pub async fn post_reply(
 
             // Per-board post cooldown — the SOLE post rate control.
             // Verify admin session first; admins bypass the cooldown entirely.
-            let is_admin = admin_session_id
-                .as_deref()
-                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
+            let is_admin = posting::is_admin_session(&conn, admin_session_id.as_deref());
 
             // post_cooldown_secs = 0 means no cooldown at all on this board.
             if board.post_cooldown_secs > 0 && !is_admin {
@@ -217,7 +208,7 @@ pub async fn post_reply(
                 }
             }
 
-            // FIX[NEW-C1]: PoW CAPTCHA check for replies, mirroring create_thread().
+            // PoW CAPTCHA check for replies, mirroring create_thread().
             // Previously this check was absent, allowing bots to bypass CAPTCHA on
             // captcha-protected boards by posting replies instead of new threads.
             if board.allow_captcha && !verify_pow(&board_short, &pow_nonce) {
@@ -226,89 +217,50 @@ pub async fn post_reply(
                 ));
             }
 
-            let filters: Vec<(String, String)> = db::get_word_filters(&conn)?
-                .into_iter()
-                .map(|f| (f.pattern, f.replacement))
-                .collect();
-
-            let (name, tripcode) = parse_name_tripcode(&validate_name(&name_val));
-            // Respect per-board tripcode setting
-            let tripcode = if board.allow_tripcodes {
-                tripcode
-            } else {
-                None
-            };
-
-            // Validate body: a file may substitute for text on media-enabled boards,
-            // but at least one of body or file must be present.
-            let board_allows_media = board.allow_images || board.allow_video || board.allow_audio;
+            let filters = posting::load_word_filters(&conn)?;
+            let (name, tripcode) = posting::resolve_post_identity(&name_val, board.allow_tripcodes);
+            let board_allows_media = board.allow_images
+                || board.allow_video
+                || board.allow_audio
+                || (crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files);
             let has_file = file_data.is_some();
-            let body_text = if board_allows_media {
-                validate_body_with_file(&raw_body, has_file).map_err(AppError::BadRequest)?
-            } else {
-                validate_body(&raw_body)
-                    .map_err(AppError::BadRequest)?
-                    .to_string()
-            };
+            let (body_text, body_html) =
+                posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;
 
-            // FIX[MEDIUM-8]: Apply word filters BEFORE HTML escaping.
-            let filtered_body = apply_word_filters(&body_text, &filters);
-            let escaped_body = escape_html(&filtered_body);
-            let body_html = render_post_body(&escaped_body);
-
-            let uploaded = crate::handlers::process_primary_upload(
+            let uploads = posting::process_uploads(
                 file_data,
+                audio_file_data,
                 &board,
                 &conn,
-                &upload_dir,
-                thumb_size,
-                max_image_size,
-                max_video_size,
-                max_audio_size,
-                ffmpeg_available,
-                ffmpeg_webp_available,
+                &posting::UploadConfig {
+                    upload_dir: &upload_dir,
+                    thumb_size,
+                    max_image_size,
+                    max_video_size,
+                    max_audio_size,
+                    ffmpeg_available,
+                    ffmpeg_webp_available,
+                },
             )?;
 
-            // ── Image+audio combo ─────────────────────────────────────────────
-            let audio_uploaded = crate::handlers::process_audio_combo(
-                audio_file_data,
-                uploaded.as_ref(),
-                &board,
-                &upload_dir,
-                max_audio_size,
-            )?;
-
-            let deletion_token = if del_token_val.trim().is_empty() {
-                new_deletion_token()
-            } else {
-                del_token_val.trim().chars().take(64).collect()
-            };
+            let deletion_token = posting::resolve_deletion_token(&del_token_val);
 
             // Sage suppresses the bump regardless of reply count.
             let should_bump = !form_sage && thread.reply_count < board.bump_limit;
 
-            let new_post = NewPost {
+            let new_post = posting::build_new_post(
                 thread_id,
-                board_id: board.id,
+                board.id,
                 name,
                 tripcode,
-                subject: None,
-                body: body_text.clone(),
+                None,
+                body_text.clone(),
                 body_html,
-                ip_hash: ip_hash.clone(),
-                file_path: uploaded.as_ref().map(|u| u.file_path.clone()),
-                file_name: uploaded.as_ref().map(|u| u.original_name.clone()),
-                file_size: uploaded.as_ref().map(|u| u.file_size),
-                thumb_path: uploaded.as_ref().map(|u| u.thumb_path.clone()),
-                mime_type: uploaded.as_ref().map(|u| u.mime_type.clone()),
-                media_type: uploaded.as_ref().map(|u| u.media_type.as_str().to_string()),
-                audio_file_path: audio_uploaded.as_ref().map(|u| u.file_path.clone()),
-                audio_file_name: audio_uploaded.as_ref().map(|u| u.original_name.clone()),
-                audio_file_size: audio_uploaded.as_ref().map(|u| u.file_size),
-                audio_mime_type: audio_uploaded.as_ref().map(|u| u.mime_type.clone()),
+                ip_hash.clone(),
+                &uploads,
                 deletion_token,
-                is_op: false,
-            };
+                false,
+            );
             let post_id = db::create_post(&conn, &new_post)?;
 
             if should_bump {
@@ -325,7 +277,7 @@ pub async fn post_reply(
                 post_id,
                 &ip_hash,
                 body_text.len(),
-                uploaded.as_ref(),
+                uploads.primary.as_ref(),
                 &board.short_name,
             );
 

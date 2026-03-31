@@ -10,19 +10,15 @@
 
 use crate::{
     config::CONFIG,
-    db::{self, NewPost},
+    db::{self},
     error::{AppError, Result},
-    handlers::parse_post_multipart,
+    handlers::{parse_post_multipart, posting},
     middleware::{validate_csrf, AppState},
     models::{Pagination, SearchQuery, ThreadSummary},
     templates,
     utils::{
-        crypto::{hash_ip, new_csrf_token, new_deletion_token, verify_pow},
-        sanitize::{
-            apply_word_filters, escape_html, render_post_body, validate_body,
-            validate_body_with_file, validate_name, validate_subject,
-        },
-        tripcode::parse_name_tripcode,
+        crypto::{hash_ip, new_csrf_token, verify_pow},
+        sanitize::validate_subject,
     },
 };
 use axum::{
@@ -247,9 +243,7 @@ pub async fn create_thread(
             }
 
             // Verify admin session — admins bypass the per-board cooldown entirely.
-            let is_admin = admin_session_id
-                .as_deref()
-                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
+            let is_admin = posting::is_admin_session(&conn, admin_session_id.as_deref());
 
             // Per-board post cooldown — the SOLE post rate control.
             // post_cooldown_secs = 0 means no cooldown at all; admins always bypass it.
@@ -270,93 +264,52 @@ pub async fn create_thread(
                 ));
             }
 
-            let filters: Vec<(String, String)> = db::get_word_filters(&conn)?
-                .into_iter()
-                .map(|f| (f.pattern, f.replacement))
-                .collect();
-
-            let (name, tripcode) = parse_name_tripcode(&validate_name(&name_val));
-            // Respect per-board tripcode setting
-            let tripcode = if board.allow_tripcodes {
-                tripcode
-            } else {
-                None
-            };
+            let filters = posting::load_word_filters(&conn)?;
+            let (name, tripcode) = posting::resolve_post_identity(&name_val, board.allow_tripcodes);
             let subject = validate_subject(&subject_val);
 
-            // Validate body: if the board allows media uploads a file may substitute
-            // for text, but at least one of the two must be non-empty.
-            let board_allows_media = board.allow_images || board.allow_video || board.allow_audio;
+            let board_allows_media = board.allow_images
+                || board.allow_video
+                || board.allow_audio
+                || (crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files);
             let has_file = file_data.is_some();
-            let body_text = if board_allows_media {
-                validate_body_with_file(&raw_body, has_file).map_err(AppError::BadRequest)?
-            } else {
-                validate_body(&raw_body)
-                    .map_err(AppError::BadRequest)?
-                    .to_string()
-            };
+            let (body_text, body_html) =
+                posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;
 
-            // FIX[MEDIUM-8]: Apply word filters BEFORE HTML escaping so that
-            // filter patterns are plain text, not HTML-entity strings.
-            let filtered_body = apply_word_filters(&body_text, &filters);
-            let escaped_body = escape_html(&filtered_body);
-            let body_html = render_post_body(&escaped_body);
-
-            let uploaded = crate::handlers::process_primary_upload(
+            let uploads = posting::process_uploads(
                 file_data,
+                audio_file_data,
                 &board,
                 &conn,
-                &upload_dir,
-                thumb_size,
-                max_image_size,
-                max_video_size,
-                max_audio_size,
-                ffmpeg_available,
-                ffmpeg_webp_available,
+                &posting::UploadConfig {
+                    upload_dir: &upload_dir,
+                    thumb_size,
+                    max_image_size,
+                    max_video_size,
+                    max_audio_size,
+                    ffmpeg_available,
+                    ffmpeg_webp_available,
+                },
             )?;
 
-            // ── Image+audio combo ─────────────────────────────────────────────
-            let audio_uploaded = crate::handlers::process_audio_combo(
-                audio_file_data,
-                uploaded.as_ref(),
-                &board,
-                &upload_dir,
-                max_audio_size,
-            )?;
+            let deletion_token = posting::resolve_deletion_token(&del_token_val);
 
-            let deletion_token = if del_token_val.trim().is_empty() {
-                new_deletion_token()
-            } else {
-                // Cap at 64 chars to prevent abuse; anything longer is almost
-                // certainly not a legitimate user-chosen token.
-                del_token_val.trim().chars().take(64).collect()
-            };
-
-            // FIX[MEDIUM-3]: Thread creation and OP post insertion are now
+            // Thread creation and OP post insertion are now
             // wrapped in a single transaction via create_thread_with_op.
             // Previously, a crash between the two calls left an orphaned thread.
-            let new_post = NewPost {
-                thread_id: 0, // will be overwritten by create_thread_with_op
-                board_id: board.id,
+            let new_post = posting::build_new_post(
+                0,
+                board.id,
                 name,
                 tripcode,
-                subject: subject.clone(),
-                body: body_text.clone(),
+                subject.clone(),
+                body_text.clone(),
                 body_html,
-                ip_hash: ip_hash.clone(),
-                file_path: uploaded.as_ref().map(|u| u.file_path.clone()),
-                file_name: uploaded.as_ref().map(|u| u.original_name.clone()),
-                file_size: uploaded.as_ref().map(|u| u.file_size),
-                thumb_path: uploaded.as_ref().map(|u| u.thumb_path.clone()),
-                mime_type: uploaded.as_ref().map(|u| u.mime_type.clone()),
-                media_type: uploaded.as_ref().map(|u| u.media_type.as_str().to_string()),
-                audio_file_path: audio_uploaded.as_ref().map(|u| u.file_path.clone()),
-                audio_file_name: audio_uploaded.as_ref().map(|u| u.original_name.clone()),
-                audio_file_size: audio_uploaded.as_ref().map(|u| u.file_size),
-                audio_mime_type: audio_uploaded.as_ref().map(|u| u.mime_type.clone()),
+                ip_hash.clone(),
+                &uploads,
                 deletion_token,
-                is_op: true,
-            };
+                true,
+            );
             let (thread_id, post_id) =
                 db::create_thread_with_op(&conn, board.id, subject.as_deref(), &new_post)?;
 
@@ -385,7 +338,7 @@ pub async fn create_thread(
                 post_id,
                 &ip_hash,
                 body_text.len(),
-                uploaded.as_ref(),
+                uploads.primary.as_ref(),
                 &board.short_name,
             );
 
@@ -478,7 +431,7 @@ pub async fn catalog(
 ) -> Result<Response> {
     let (jar, csrf) = ensure_csrf(jar);
 
-    // FIX[High-8]: Add ETag caching to the catalog. Previously every request
+    // Add ETag caching to the catalog. Previously every request
     // fetched up to 200 full thread rows and re-rendered the entire page
     // regardless of whether anything changed. The ETag is derived from the
     // most-recently-bumped thread, mirroring the board index handler.
@@ -667,7 +620,7 @@ pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
     cookie.set_http_only(false);
     cookie.set_same_site(SameSite::Strict);
     cookie.set_path("/");
-    // FIX[MEDIUM-11]: set Secure flag based on config (true when behind proxy / HTTPS)
+    // set Secure flag based on config (true when behind proxy / HTTPS)
     cookie.set_secure(CONFIG.https_cookies);
     (jar.add(cookie), token)
 }
@@ -828,17 +781,30 @@ pub async fn serve_board_media(
         ServeFile::new(&target).oneshot(req).await.map_or_else(
             |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             |resp| {
-                use axum::http::header::{HeaderValue, CONTENT_TYPE};
+                use axum::http::header::{
+                    HeaderValue, CONTENT_DISPOSITION, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS,
+                };
                 let mut resp = resp.map(axum::body::Body::new);
-                // Override Content-Type using our own extension→MIME map.
-                // tower-http delegates to `mime_guess` which may return
-                // `application/octet-stream` for formats like `.webp` or `.svg`
-                // on some builds, causing browsers to download the file instead
-                // of displaying it inline.  An explicit map guarantees the
-                // correct type for every format we store.
                 if let Some(ct) = media_content_type(&target) {
                     resp.headers_mut()
                         .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+                } else {
+                    resp.headers_mut().insert(
+                        CONTENT_TYPE,
+                        HeaderValue::from_static("application/octet-stream"),
+                    );
+                    resp.headers_mut()
+                        .insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+                    let filename = target
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("download.bin")
+                        .replace(['\\', '"'], "_");
+                    if let Ok(value) =
+                        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+                    {
+                        resp.headers_mut().insert(CONTENT_DISPOSITION, value);
+                    }
                 }
                 resp.into_response()
             },

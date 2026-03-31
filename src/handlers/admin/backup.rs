@@ -23,16 +23,26 @@ use rusqlite::{backup::Backup, params};
 use serde::Deserialize;
 use serde_json;
 use std::io::{Seek, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use time;
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::ReaderStream;
 use tracing::warn;
 
+mod common;
+mod types;
+
+use common::{
+    copy_limited, create_staging_dir, db_dir, extract_uploads_to_dir, remap_body_quotelinks,
+    remove_path_if_exists, render_restored_body_html, rollback_swapped_path,
+    swap_staged_path_into_place, ZIP_ENTRY_MAX_BYTES,
+};
+use types::board_backup_types;
+
 // ─── URL query-string encoder ─────────────────────────────────────────────────
 //
-// FIX[#30]: `encode_q` was previously defined as an inner function inside two
+// `encode_q` was previously defined as an inner function inside two
 // separate async handlers, with one implementation slightly less efficient than
 // the other. Extracted here so both call sites share a single definition.
 //
@@ -76,7 +86,7 @@ fn encode_q(s: &str) -> String {
     out
 }
 
-// FIX[#19]: Module-level constant so it can be referenced inside closures and
+// Module-level constant so it can be referenced inside closures and
 // loops without triggering the "item after statements" clippy lint.
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
@@ -320,7 +330,7 @@ pub async fn admin_restore(
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
 
-    // FIX[A7]: Stream the uploaded zip to a NamedTempFile on disk instead of
+    // Stream the uploaded zip to a NamedTempFile on disk instead of
     // buffering the entire upload into a Vec<u8>.  Full-site backups can be
     // several GiB; loading them entirely into the heap exhausts available memory.
     let mut zip_tmp: Option<tempfile::NamedTempFile> = None;
@@ -407,7 +417,7 @@ pub async fn admin_restore(
             // in the restored DB once the backup completes.
             let admin_id = super::require_admin_session_sid(&live_conn, session_id.as_deref())?;
 
-            // ── Open the on-disk zip (FIX[A7]) ───────────────────────────
+            // ── Open the on-disk zip () ───────────────────────────
             // reopen() gives a fresh File descriptor seeked to position 0,
             // so ZipArchive can navigate entries without loading into RAM.
             let zip_file = zip_tmp
@@ -429,6 +439,24 @@ pub async fn admin_restore(
             let temp_dir = std::env::temp_dir();
             let tmp_id = uuid::Uuid::new_v4().simple().to_string();
             let temp_db = temp_dir.join(format!("chan_restore_{tmp_id}.db"));
+            let upload_root = PathBuf::from(&upload_dir);
+            let staged_upload_root = create_staging_dir(&upload_root, "restore-stage")?;
+            let previous_upload_root = upload_root
+                .parent()
+                .map_or_else(
+                    || PathBuf::from(format!("{}.restore-old", upload_root.display())),
+                    |parent| {
+                        parent.join(format!(
+                            ".{}.restore-old.{}",
+                            upload_root
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("uploads"),
+                            uuid::Uuid::new_v4().simple()
+                        ))
+                    },
+                );
+            let db_snapshot = temp_dir.join(format!("chan_restore_live_before_{tmp_id}.db"));
             let mut db_extracted = false;
 
             for i in 0..archive.len() {
@@ -448,7 +476,7 @@ pub async fn admin_restore(
                     copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp DB: {e}")))?;
 
-                    // FIX[#19]: Validate SQLite magic bytes before handing this
+                    // Validate SQLite magic bytes before handing this
                     // file to the backup API. Without this check a malicious or
                     // corrupted "chan.db" inside the zip (e.g. a shell script or
                     // truncated file) would be opened by rusqlite, which could
@@ -479,21 +507,35 @@ pub async fn admin_restore(
                     db_extracted = true;
 
                 } else if let Some(rel) = name.strip_prefix("uploads/") {
-                    if rel.is_empty() { continue; }
-                    let target = PathBuf::from(&upload_dir).join(rel);
+                    if rel.is_empty() {
+                        continue;
+                    }
+                    let rel_path = Path::new(rel);
+                    if rel_path
+                        .components()
+                        .any(|component| component == std::path::Component::ParentDir)
+                    {
+                        warn!("Restore: skipping suspicious zip entry '{name}'");
+                        continue;
+                    }
+                    let target = staged_upload_root.join(rel_path);
 
                     if entry.is_dir() {
-                        std::fs::create_dir_all(&target)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir {}: {}", target.display(), e)))?;
+                        std::fs::create_dir_all(&target).map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("mkdir {}: {}", target.display(), e))
+                        })?;
                     } else {
                         if let Some(parent) = target.parent() {
-                            std::fs::create_dir_all(parent)
-                                .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir parent: {e}")))?;
+                            std::fs::create_dir_all(parent).map_err(|e| {
+                                AppError::Internal(anyhow::anyhow!("mkdir parent: {e}"))
+                            })?;
                         }
-                        let mut out = std::fs::File::create(&target)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Create {}: {}", target.display(), e)))?;
-                        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {}", target.display(), e)))?;
+                        let mut out = std::fs::File::create(&target).map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Create {}: {}", target.display(), e))
+                        })?;
+                        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("Write {}: {}", target.display(), e))
+                        })?;
                     }
                 }
             }
@@ -506,18 +548,64 @@ pub async fn admin_restore(
             }
 
             // ── SQLite backup API: copy temp DB → live DB ─────────────────
+            let db_snapshot_str = db_snapshot
+                .to_str()
+                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Snapshot path is non-UTF-8")))?
+                .replace('\'', "''");
+            live_conn
+                .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {e}")))?;
+
+            let had_live_uploads = swap_staged_path_into_place(
+                &staged_upload_root,
+                &upload_root,
+                &previous_upload_root,
+            )?;
+
             let backup_result = (|| -> Result<()> {
                 let src = rusqlite::Connection::open(&temp_db)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Open backup source: {e}")))?;
-                                let backup = Backup::new(&src, &mut live_conn)
+                let backup = Backup::new(&src, &mut live_conn)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup init: {e}")))?;
-                backup.run_to_completion(100, std::time::Duration::from_millis(0), None)
+                backup
+                    .run_to_completion(100, std::time::Duration::from_millis(0), None)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup copy: {e}")))?;
                 Ok(())
             })();
 
+            if let Err(e) = backup_result {
+                let _ = rollback_swapped_path(&upload_root, &previous_upload_root, had_live_uploads);
+                let restore_db_result = (|| -> Result<()> {
+                    let src = rusqlite::Connection::open(&db_snapshot).map_err(|restore_err| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Open DB rollback snapshot {}: {restore_err}",
+                            db_snapshot.display()
+                        ))
+                    })?;
+                    let backup = Backup::new(&src, &mut live_conn).map_err(|restore_err| {
+                        AppError::Internal(anyhow::anyhow!("Rollback init: {restore_err}"))
+                    })?;
+                    backup
+                        .run_to_completion(100, std::time::Duration::from_millis(0), None)
+                        .map_err(|restore_err| {
+                            AppError::Internal(anyhow::anyhow!("Rollback copy: {restore_err}"))
+                        })?;
+                    Ok(())
+                })();
+                let _ = std::fs::remove_file(&temp_db);
+                let _ = std::fs::remove_file(&db_snapshot);
+                let _ = remove_path_if_exists(&staged_upload_root);
+                if let Err(restore_err) = restore_db_result {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Restore failed and rollback failed: {e}; rollback error: {restore_err}"
+                    )));
+                }
+                return Err(e);
+            }
+
             let _ = std::fs::remove_file(&temp_db);
-            backup_result?;
+            let _ = std::fs::remove_file(&db_snapshot);
+            let _ = remove_path_if_exists(&previous_upload_root);
 
             // ── Re-issue session cookie ───────────────────────────────────
             //
@@ -564,14 +652,14 @@ pub async fn admin_restore(
     new_cookie.set_same_site(SameSite::Strict);
     new_cookie.set_path("/");
     new_cookie.set_secure(CONFIG.https_cookies);
-    // FIX[A5]: Set Max-Age so the browser expires the cookie after the configured
+    // Set Max-Age so the browser expires the cookie after the configured
     // session lifetime — matching the behaviour of the normal login handler.
     new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
     Ok((jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response())
 }
 
-// ─── CRIT-4: Zip decompression size limiter ────────────────────────────────────
+// ─── Zip decompression size limiter ────────────────────────────────────
 //
 // std::io::copy() has no bound on how much data it will write.  A malicious
 // 1 KiB zip (a "zip bomb") can expand to gigabytes, exhausting disk or memory.
@@ -584,9 +672,9 @@ pub async fn admin_restore(
 //
 // When a board backup is restored, posts receive new auto-incremented IDs
 // because other boards' posts already occupy the original IDs in the global
-// `posts` table.  `remap_body_quotelinks` and `remap_body_html_quotelinks`
-// rewrite the raw text and rendered HTML of each restored post so that in-board
-// quotelinks point to the new IDs instead of the now-stale original ones.
+// `posts` table. `remap_body_quotelinks` rewrites the raw text of each restored
+// post so that in-board quotelinks point to the new IDs instead of the now-stale
+// original ones; HTML is then re-rendered from the trusted raw body.
 //
 // Design constraints:
 //
@@ -606,140 +694,8 @@ pub async fn admin_restore(
 //    is used: for each (old, new) pair, replace `>>{old}` followed by a
 //    non-digit (or end-of-string) to avoid `>>100` matching inside `>>1000`.
 //
-// 4. `body_html` stores pre-rendered HTML.  In-board quotelinks look like:
-//      <a href="#p{N}" class="quotelink" data-pid="{N}">&gt;&gt;{N}</a>
-//    Cross-board quotelinks look like:
-//      <a href="/board/post/{N}" class="quotelink crosslink" ...>&gt;&gt;&gt;/…</a>
-//    We replace `href="#p{old}"` (exclusively in-board) and
-//    `data-pid="{old}">&gt;&gt;{old}</a>` (display text also exclusive to
-//    in-board links — cross-board display text has `&gt;&gt;&gt;/` prefix).
-
 // Rewrite in-board `>>{old_id}` references in the raw post body.
 // `pairs` must be pre-sorted by old-ID string length descending.
-#[allow(clippy::arithmetic_side_effects)]
-fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> String {
-    // Avoid cloning when there is nothing to change.
-    if pairs.is_empty() {
-        return body.to_string();
-    }
-    let mut result = body.to_string();
-    for (old, new) in pairs {
-        // Match `>>{old}` only when NOT immediately followed by another digit,
-        // so we don't turn `>>1000` into `>>new_id_for_1000` when processing
-        // the `>>100` entry first.
-        //
-        // Implementation: scan for every occurrence of `>>{old}` in the string
-        // and check the next character.  Replace left-to-right using byte indices
-        // to avoid re-scanning already-replaced sections.
-        let needle = format!(">>{old}");
-        let mut out = String::with_capacity(result.len());
-        let mut pos = 0;
-        let bytes = result.as_bytes();
-        while pos < bytes.len() {
-            match result[pos..].find(&needle) {
-                None => {
-                    out.push_str(&result[pos..]);
-                    break;
-                }
-                Some(rel) => {
-                    let abs = pos + rel;
-                    let after = abs + needle.len();
-                    // Only replace when the char after the match is not a digit.
-                    let next_is_digit = bytes.get(after).is_some_and(u8::is_ascii_digit);
-                    out.push_str(&result[pos..abs]);
-                    if next_is_digit {
-                        // Not the right match — keep the original text.
-                        out.push_str(&needle);
-                    } else {
-                        out.push_str(">>");
-                        out.push_str(new);
-                    }
-                    pos = after;
-                }
-            }
-        }
-        result = out;
-    }
-    result
-}
-
-/// Rewrite in-board quotelink IDs in pre-rendered `body_html`.
-///
-/// Targets two patterns that are exclusive to same-board quotelinks:
-///   • `href="#p{old}"` — the anchor href
-///   • `data-pid="{old}">&gt;&gt;{old}</a>` — the data attribute + display text
-///
-/// Cross-board links use `href="/board/post/{N}"` and display `&gt;&gt;&gt;/…`
-/// so neither pattern matches them.
-///
-/// `pairs` must be pre-sorted by old-ID string length descending.
-fn remap_body_html_quotelinks(body_html: &str, pairs: &[(String, String)]) -> String {
-    if pairs.is_empty() {
-        return body_html.to_string();
-    }
-    let mut result = body_html.to_string();
-    for (old, new) in pairs {
-        // Pattern 1: href="#p{old}" → href="#p{new}"
-        let old_href = format!("href=\"#p{old}\"");
-        let new_href = format!("href=\"#p{new}\"");
-        result = result.replace(&old_href, &new_href);
-
-        // Pattern 2: data-pid="{old}">&gt;&gt;{old}</a>
-        // This uniquely identifies in-board quotelinks: cross-board links have
-        // "&gt;&gt;&gt;/" as their display text, never bare "&gt;&gt;{N}".
-        let old_tail = format!("data-pid=\"{old}\">&gt;&gt;{old}</a>");
-        let new_tail = format!("data-pid=\"{new}\">&gt;&gt;{new}</a>");
-        result = result.replace(&old_tail, &new_tail);
-    }
-    result
-}
-
-const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-
-/// Like `std::io::copy` but returns `InvalidData` if more than `max_bytes`
-/// would be written.  Reads in 64 KiB chunks; aborts as soon as the limit
-/// is exceeded so disk space is not wasted.
-#[allow(clippy::arithmetic_side_effects)]
-fn copy_limited<R: std::io::Read, W: std::io::Write>(
-    reader: &mut R,
-    writer: &mut W,
-    max_bytes: u64,
-) -> std::io::Result<u64> {
-    let mut buf = vec![0u8; 65536];
-    let mut total: u64 = 0;
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        if total > max_bytes {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Decompressed entry exceeds {} MiB limit — possible zip bomb",
-                    max_bytes / 1024 / 1024
-                ),
-            ));
-        }
-        if let Some(slice) = buf.get(..n) {
-            writer.write_all(slice)?;
-        }
-    }
-    Ok(total)
-}
-
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
-/// Check CSRF using the cookie jar. Returns error on mismatch.
-/// Verify admin session and also return the admin's username.
-/// For use inside `spawn_blocking` closures.
-fn db_dir() -> PathBuf {
-    PathBuf::from(&CONFIG.database_path)
-        .parent()
-        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf)
-}
-
 /// rustchan-data/full-backups/
 pub fn full_backup_dir() -> PathBuf {
     db_dir().join("full-backups")
@@ -957,9 +913,9 @@ pub async fn create_board_backup(
             let board: BoardRow = conn
                 .query_row(
                     "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                             allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                             allow_editing, allow_archive, allow_video_embeds, allow_captcha,
-                             post_cooldown_secs, created_at
+                             allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
+                             edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
+                             allow_captcha, post_cooldown_secs, created_at
                       FROM boards WHERE short_name = ?1",
                     params![board_short],
                     |r| {
@@ -974,14 +930,15 @@ pub async fn create_board_backup(
                             allow_images: r.get::<_, i64>(7)? != 0,
                             allow_video: r.get::<_, i64>(8)? != 0,
                             allow_audio: r.get::<_, i64>(9)? != 0,
-                            allow_tripcodes: r.get::<_, i64>(10)? != 0,
-                            edit_window_secs: r.get(11)?,
-                            allow_editing: r.get::<_, i64>(12)? != 0,
-                            allow_archive: r.get::<_, i64>(13)? != 0,
-                            allow_video_embeds: r.get::<_, i64>(14)? != 0,
-                            allow_captcha: r.get::<_, i64>(15)? != 0,
-                            post_cooldown_secs: r.get(16)?,
-                            created_at: r.get(17)?,
+                            allow_any_files: r.get::<_, i64>(10)? != 0,
+                            allow_tripcodes: r.get::<_, i64>(11)? != 0,
+                            edit_window_secs: r.get(12)?,
+                            allow_editing: r.get::<_, i64>(13)? != 0,
+                            allow_archive: r.get::<_, i64>(14)? != 0,
+                            allow_video_embeds: r.get::<_, i64>(15)? != 0,
+                            allow_captcha: r.get::<_, i64>(16)? != 0,
+                            post_cooldown_secs: r.get(17)?,
+                            created_at: r.get(18)?,
                         })
                     },
                 )
@@ -1461,7 +1418,7 @@ pub async fn restore_saved_full_backup(
     }
 
     let path = full_backup_dir().join(&safe_filename);
-    // FIX[A3]: Do NOT read the file in the async context before auth is verified.
+    // Do NOT read the file in the async context before auth is verified.
     // std::fs::read() blocks the Tokio runtime and an unauthenticated caller could
     // force the server to read gigabytes off disk before being rejected.  The read
     // is deferred into spawn_blocking where it runs only after the session check.
@@ -1475,7 +1432,7 @@ pub async fn restore_saved_full_backup(
             let admin_id = super::require_admin_session_sid(&live_conn, session_id.as_deref())?;
 
             // MEM-FIX: open the zip as a seekable BufReader<File> instead of
-            // reading the whole file into a Vec<u8>.  The FIX[A3] comment above
+            // reading the whole file into a Vec<u8>.  The comment above
             // correctly deferred the read to after auth, but std::fs::read still
             // loaded the entire zip into heap.  A 5 GiB backup would exhaust RAM.
             let zip_file = std::fs::File::open(&path)
@@ -1493,6 +1450,22 @@ pub async fn restore_saved_full_backup(
             let temp_dir = std::env::temp_dir();
             let tmp_id = uuid::Uuid::new_v4().simple().to_string();
             let temp_db = temp_dir.join(format!("chan_restore_{tmp_id}.db"));
+            let upload_root = PathBuf::from(&upload_dir);
+            let staged_upload_root = create_staging_dir(&upload_root, "restore-stage")?;
+            let previous_upload_root = upload_root.parent().map_or_else(
+                || PathBuf::from(format!("{}.restore-old", upload_root.display())),
+                |parent| {
+                    parent.join(format!(
+                        ".{}.restore-old.{}",
+                        upload_root
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("uploads"),
+                        uuid::Uuid::new_v4().simple()
+                    ))
+                },
+            );
+            let db_snapshot = temp_dir.join(format!("chan_restore_live_before_{tmp_id}.db"));
             let mut db_extracted = false;
 
             for i in 0..archive.len() {
@@ -1510,7 +1483,7 @@ pub async fn restore_saved_full_backup(
                     copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Write temp DB: {e}")))?;
 
-                    // FIX[#19]: Validate SQLite magic bytes (same guard as admin_restore).
+                    // Validate SQLite magic bytes (same guard as admin_restore).
                     let mut header = [0u8; 16];
                     {
                         use std::io::Read;
@@ -1538,7 +1511,15 @@ pub async fn restore_saved_full_backup(
                     if rel.is_empty() {
                         continue;
                     }
-                    let target = PathBuf::from(&upload_dir).join(rel);
+                    let rel_path = Path::new(rel);
+                    if rel_path
+                        .components()
+                        .any(|component| component == std::path::Component::ParentDir)
+                    {
+                        warn!("Restore-saved: skipping suspicious entry '{name}'");
+                        continue;
+                    }
+                    let target = staged_upload_root.join(rel_path);
                     if entry.is_dir() {
                         std::fs::create_dir_all(&target)
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {e}")))?;
@@ -1567,6 +1548,20 @@ pub async fn restore_saved_full_backup(
                 return Err(AppError::Internal(anyhow::anyhow!("chan.db not extracted")));
             }
 
+            let db_snapshot_str = db_snapshot
+                .to_str()
+                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Snapshot path is non-UTF-8")))?
+                .replace('\'', "''");
+            live_conn
+                .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {e}")))?;
+
+            let had_live_uploads = swap_staged_path_into_place(
+                &staged_upload_root,
+                &upload_root,
+                &previous_upload_root,
+            )?;
+
             let backup_result = (|| -> Result<()> {
                 let src = rusqlite::Connection::open(&temp_db)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Open source: {e}")))?;
@@ -1577,8 +1572,39 @@ pub async fn restore_saved_full_backup(
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup copy: {e}")))?;
                 Ok(())
             })();
+            if let Err(e) = backup_result {
+                let _ =
+                    rollback_swapped_path(&upload_root, &previous_upload_root, had_live_uploads);
+                let restore_db_result = (|| -> Result<()> {
+                    let src = rusqlite::Connection::open(&db_snapshot).map_err(|restore_err| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Open DB rollback snapshot {}: {restore_err}",
+                            db_snapshot.display()
+                        ))
+                    })?;
+                    let backup = Backup::new(&src, &mut live_conn).map_err(|restore_err| {
+                        AppError::Internal(anyhow::anyhow!("Rollback init: {restore_err}"))
+                    })?;
+                    backup
+                        .run_to_completion(100, std::time::Duration::from_millis(0), None)
+                        .map_err(|restore_err| {
+                            AppError::Internal(anyhow::anyhow!("Rollback copy: {restore_err}"))
+                        })?;
+                    Ok(())
+                })();
+                let _ = std::fs::remove_file(&temp_db);
+                let _ = std::fs::remove_file(&db_snapshot);
+                let _ = remove_path_if_exists(&staged_upload_root);
+                if let Err(restore_err) = restore_db_result {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Restore failed and rollback failed: {e}; rollback error: {restore_err}"
+                    )));
+                }
+                return Err(e);
+            }
             let _ = std::fs::remove_file(&temp_db);
-            backup_result?;
+            let _ = std::fs::remove_file(&db_snapshot);
+            let _ = remove_path_if_exists(&previous_upload_root);
 
             let fresh_sid = new_session_id();
             let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
@@ -1607,7 +1633,7 @@ pub async fn restore_saved_full_backup(
     new_cookie.set_same_site(SameSite::Strict);
     new_cookie.set_path("/");
     new_cookie.set_secure(CONFIG.https_cookies);
-    // FIX[A5]: Set Max-Age to match normal login behaviour.
+    // Set Max-Age to match normal login behaviour.
     new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
     Ok((jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response())
 }
@@ -1642,15 +1668,15 @@ pub async fn restore_saved_board_backup(
     }
 
     let path = board_backup_dir().join(&safe_filename);
-    // FIX[A4]: Defer the blocking file read until after auth is verified inside
+    // Defer the blocking file read until after auth is verified inside
     // spawn_blocking — mirrors the fix applied to restore_saved_full_backup (A3).
     let upload_dir = CONFIG.upload_dir.clone();
 
     let board_short_result: Result<Result<String>> = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
-    use board_backup_types::BoardBackupManifest;
-                        use std::collections::HashMap;
+            use board_backup_types::BoardBackupManifest;
+            use std::collections::HashMap;
 
             let conn = pool.get()?;
             // Auth check first — only read the file if the session is valid.
@@ -1681,6 +1707,17 @@ pub async fn restore_saved_board_backup(
             };
 
             let board_short = manifest.board.short_name.clone();
+            let upload_root = PathBuf::from(&upload_dir);
+            let staged_upload_root = create_staging_dir(&upload_root, "board-restore-stage")?;
+            extract_uploads_to_dir(&mut archive, &staged_upload_root)?;
+            let staged_board_dir = staged_upload_root.join(&board_short);
+            std::fs::create_dir_all(&staged_board_dir)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create staged board dir: {e}")))?;
+            let live_board_dir = upload_root.join(&board_short);
+            let previous_board_dir = upload_root.join(format!(
+                ".{board_short}.restore-old.{}",
+                uuid::Uuid::new_v4().simple()
+            ));
 
             let existing_id: Option<i64> = conn
                 .query_row(
@@ -1690,7 +1727,7 @@ pub async fn restore_saved_board_backup(
                 )
                 .ok();
 
-            // FIX[A6]: BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
+            // BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
             // board row as well as the thread/post/poll inserts.  Previously those
             // DDL statements ran outside any transaction, so a crash between the
             // DELETE and the first INSERT left the board with zero threads and no way
@@ -1705,10 +1742,11 @@ pub async fn restore_saved_board_backup(
                     conn.execute(
                         "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                          max_threads=?4, bump_limit=?5,
-                         allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
-                         edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-                         allow_video_embeds=?13, allow_captcha=?14, post_cooldown_secs=?15
-                         WHERE id=?16",
+                         allow_images=?6, allow_video=?7, allow_audio=?8, allow_any_files=?9,
+                         allow_tripcodes=?10, edit_window_secs=?11, allow_editing=?12,
+                         allow_archive=?13, allow_video_embeds=?14, allow_captcha=?15,
+                         post_cooldown_secs=?16
+                         WHERE id=?17",
                         params![
                             manifest.board.name,
                             manifest.board.description,
@@ -1718,6 +1756,7 @@ pub async fn restore_saved_board_backup(
                             i64::from(manifest.board.allow_images),
                             i64::from(manifest.board.allow_video),
                             i64::from(manifest.board.allow_audio),
+                            i64::from(manifest.board.allow_any_files),
                             i64::from(manifest.board.allow_tripcodes),
                             manifest.board.edit_window_secs,
                             i64::from(manifest.board.allow_editing),
@@ -1733,10 +1772,10 @@ pub async fn restore_saved_board_backup(
                 } else {
                     conn.execute(
                         "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
-                         bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
-                         edit_window_secs, allow_editing, allow_archive, allow_video_embeds, allow_captcha,
-                         post_cooldown_secs, created_at)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                         bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
+                         allow_tripcodes, edit_window_secs, allow_editing, allow_archive,
+                         allow_video_embeds, allow_captcha, post_cooldown_secs, created_at)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                         params![
                             manifest.board.short_name,
                             manifest.board.name,
@@ -1747,6 +1786,7 @@ pub async fn restore_saved_board_backup(
                             i64::from(manifest.board.allow_images),
                             i64::from(manifest.board.allow_video),
                             i64::from(manifest.board.allow_audio),
+                            i64::from(manifest.board.allow_any_files),
                             i64::from(manifest.board.allow_tripcodes),
                             manifest.board.edit_window_secs,
                             i64::from(manifest.board.allow_editing),
@@ -1796,7 +1836,7 @@ pub async fn restore_saved_board_backup(
                             p.tripcode,
                             p.subject,
                             p.body,
-                            p.body_html,
+                            render_restored_body_html(&p.body),
                             p.ip_hash,
                             p.file_path,
                             p.file_name,
@@ -1874,46 +1914,28 @@ pub async fn restore_saved_board_backup(
 
             match restore_result {
                 Ok(()) => {
-                    conn.execute("COMMIT", [])
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit: {e}")))?;
+                    let had_live_board = swap_staged_path_into_place(
+                        &staged_board_dir,
+                        &live_board_dir,
+                        &previous_board_dir,
+                    )?;
+                    if let Err(e) = conn.execute("COMMIT", []) {
+                        let _ = rollback_swapped_path(
+                            &live_board_dir,
+                            &previous_board_dir,
+                            had_live_board,
+                        );
+                        return Err(AppError::Internal(anyhow::anyhow!("Commit: {e}")));
+                    }
+                    let _ = remove_path_if_exists(&previous_board_dir);
                 }
                 Err(e) => {
                     let _ = conn.execute("ROLLBACK", []);
+                    let _ = remove_path_if_exists(&staged_upload_root);
                     return Err(e);
                 }
             }
-
-            // Extract upload files.
-            for i in 0..archive.len() {
-                let mut entry = archive
-                    .by_index(i)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
-                let name = entry.name().to_string();
-                if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
-                    warn!("Board restore-saved: skipping suspicious entry '{name}'");
-                    continue;
-                }
-                if let Some(rel) = name.strip_prefix("uploads/") {
-                    if rel.is_empty() {
-                        continue;
-                    }
-                    let target = PathBuf::from(&upload_dir).join(rel);
-                    if entry.is_dir() {
-                        std::fs::create_dir_all(&target)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {e}")))?;
-                    } else {
-                        if let Some(p) = target.parent() {
-                            std::fs::create_dir_all(p).map_err(|e| {
-                                AppError::Internal(anyhow::anyhow!("mkdir parent: {e}"))
-                            })?;
-                        }
-                        let mut out = std::fs::File::create(&target)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Create: {e}")))?;
-                        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write: {e}")))?;
-                    }
-                }
-            }
+            let _ = remove_path_if_exists(&staged_upload_root);
 
             tracing::info!(target: "admin", board = %board_short, "Board restore-saved completed");
             let safe_short: String = board_short
@@ -1944,135 +1966,6 @@ pub async fn restore_saved_board_backup(
 
 // ─── Board-level backup / restore ─────────────────────────────────────────────
 
-/// Flat structs used exclusively for board-level backup serialisation.
-mod board_backup_types {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Serialize, Deserialize)]
-    #[allow(clippy::struct_excessive_bools)]
-    pub struct BoardRow {
-        pub id: i64,
-        pub short_name: String,
-        pub name: String,
-        pub description: String,
-        pub nsfw: bool,
-        pub max_threads: i64,
-        pub bump_limit: i64,
-        /// Added via ALTER TABLE — absent in oldest backups; default true.
-        #[serde(default = "default_true")]
-        pub allow_images: bool,
-        /// Added via ALTER TABLE — absent in oldest backups; default true.
-        #[serde(default = "default_true")]
-        pub allow_video: bool,
-        /// Added via ALTER TABLE — absent in oldest backups; default false.
-        #[serde(default)]
-        pub allow_audio: bool,
-        /// Added via ALTER TABLE — absent in oldest backups; default true.
-        #[serde(default = "default_true")]
-        pub allow_tripcodes: bool,
-        /// Added in a later version — absent in older backups; default to 300 s.
-        #[serde(default = "default_edit_window_secs")]
-        pub edit_window_secs: i64,
-        /// Added in a later version — absent in older backups; default to false.
-        #[serde(default)]
-        pub allow_editing: bool,
-        /// Added in a later version — absent in older backups; default to true.
-        #[serde(default = "default_true")]
-        pub allow_archive: bool,
-        /// Added in v1.0.10 — absent in older backups; default to false.
-        #[serde(default)]
-        pub allow_video_embeds: bool,
-        /// Added in v1.0.10 — absent in older backups; default to false.
-        #[serde(default)]
-        pub allow_captcha: bool,
-        /// Added for per-board post cooldowns — absent in older backups; default 0 (disabled).
-        #[serde(default)]
-        pub post_cooldown_secs: i64,
-        pub created_at: i64,
-    }
-
-    const fn default_true() -> bool {
-        true
-    }
-
-    const fn default_edit_window_secs() -> i64 {
-        300
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct ThreadRow {
-        pub id: i64,
-        pub board_id: i64,
-        pub subject: Option<String>,
-        pub created_at: i64,
-        pub bumped_at: i64,
-        pub locked: bool,
-        pub sticky: bool,
-        pub reply_count: i64,
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct PostRow {
-        pub id: i64,
-        pub thread_id: i64,
-        pub board_id: i64,
-        pub name: String,
-        pub tripcode: Option<String>,
-        pub subject: Option<String>,
-        pub body: String,
-        pub body_html: String,
-        pub ip_hash: Option<String>,
-        pub file_path: Option<String>,
-        pub file_name: Option<String>,
-        pub file_size: Option<i64>,
-        pub thumb_path: Option<String>,
-        pub mime_type: Option<String>,
-        pub media_type: Option<String>,
-        pub created_at: i64,
-        pub deletion_token: String,
-        pub is_op: bool,
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct PollRow {
-        pub id: i64,
-        pub thread_id: i64,
-        pub question: String,
-        pub expires_at: i64,
-        pub created_at: i64,
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct PollOptionRow {
-        pub id: i64,
-        pub poll_id: i64,
-        pub text: String,
-        pub position: i64,
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct PollVoteRow {
-        pub id: i64,
-        pub poll_id: i64,
-        pub option_id: i64,
-        pub ip_hash: String,
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct FileHashRow {
-        pub sha256: String,
-        pub file_path: String,
-        pub thumb_path: String,
-        pub mime_type: String,
-        pub created_at: i64,
-    }
-    #[derive(Serialize, Deserialize)]
-    pub struct BoardBackupManifest {
-        pub version: u32,
-        pub board: BoardRow,
-        pub threads: Vec<ThreadRow>,
-        pub posts: Vec<PostRow>,
-        pub polls: Vec<PollRow>,
-        pub poll_options: Vec<PollOptionRow>,
-        pub poll_votes: Vec<PollVoteRow>,
-        pub file_hashes: Vec<FileHashRow>,
-    }
-}
-
 /// Stream a board-level backup zip: manifest JSON + that board's upload files.
 ///
 /// MEM-FIX: Same approach as `admin_backup` — build zip into a `NamedTempFile` on
@@ -2101,9 +1994,9 @@ pub async fn board_backup(
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
             let board: BoardRow = conn.query_row(
                 "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                        allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                        allow_editing, allow_archive, allow_video_embeds, allow_captcha,
-                        post_cooldown_secs, created_at
+                        allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
+                        edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
+                        allow_captcha, post_cooldown_secs, created_at
                  FROM boards WHERE short_name = ?1",
                 params![board_short],
                 |r| Ok(BoardRow {
@@ -2117,14 +2010,15 @@ pub async fn board_backup(
                     allow_images: r.get::<_, i64>(7)? != 0,
                     allow_video: r.get::<_, i64>(8)? != 0,
                     allow_audio: r.get::<_, i64>(9)? != 0,
-                    allow_tripcodes: r.get::<_, i64>(10)? != 0,
-                    edit_window_secs: r.get(11)?,
-                    allow_editing: r.get::<_, i64>(12)? != 0,
-                    allow_archive: r.get::<_, i64>(13)? != 0,
-                    allow_video_embeds: r.get::<_, i64>(14)? != 0,
-                    allow_captcha: r.get::<_, i64>(15)? != 0,
-                    post_cooldown_secs: r.get(16)?,
-                    created_at: r.get(17)?,
+                    allow_any_files: r.get::<_, i64>(10)? != 0,
+                    allow_tripcodes: r.get::<_, i64>(11)? != 0,
+                    edit_window_secs: r.get(12)?,
+                    allow_editing: r.get::<_, i64>(13)? != 0,
+                    allow_archive: r.get::<_, i64>(14)? != 0,
+                    allow_video_embeds: r.get::<_, i64>(15)? != 0,
+                    allow_captcha: r.get::<_, i64>(16)? != 0,
+                    post_cooldown_secs: r.get(17)?,
+                    created_at: r.get(18)?,
                 }),
             ).map_err(|_| AppError::NotFound(format!("Board '{board_short}' not found")))?;
 
@@ -2506,6 +2400,20 @@ pub async fn board_restore(
                 };
 
                 let board_short = manifest.board.short_name.clone();
+                let upload_root = PathBuf::from(&upload_dir);
+                let staged_upload_root = create_staging_dir(&upload_root, "board-restore-stage")?;
+                if let Some(ref mut archive) = archive_opt {
+                    extract_uploads_to_dir(archive, &staged_upload_root)?;
+                }
+                let staged_board_dir = staged_upload_root.join(&board_short);
+                std::fs::create_dir_all(&staged_board_dir).map_err(|e| {
+                    AppError::Internal(anyhow::anyhow!("Create staged board dir: {e}"))
+                })?;
+                let live_board_dir = upload_root.join(&board_short);
+                let previous_board_dir = upload_root.join(format!(
+                    ".{board_short}.restore-old.{}",
+                    uuid::Uuid::new_v4().simple()
+                ));
 
                 let existing_id: Option<i64> = conn
                     .query_row(
@@ -2515,7 +2423,7 @@ pub async fn board_restore(
                     )
                     .ok();
 
-                // FIX[A6]: BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
+                // BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
                 // board row.  Previously those statements ran outside any transaction.
                 conn.execute("BEGIN IMMEDIATE", [])
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Begin tx: {e}")))?;
@@ -2529,10 +2437,11 @@ pub async fn board_restore(
                         conn.execute(
                             "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                              max_threads=?4, bump_limit=?5,
-                             allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
-                             edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-                             allow_video_embeds=?13, allow_captcha=?14, post_cooldown_secs=?15
-                             WHERE id=?16",
+                             allow_images=?6, allow_video=?7, allow_audio=?8, allow_any_files=?9,
+                             allow_tripcodes=?10, edit_window_secs=?11, allow_editing=?12,
+                             allow_archive=?13, allow_video_embeds=?14, allow_captcha=?15,
+                             post_cooldown_secs=?16
+                             WHERE id=?17",
                             params![
                                 manifest.board.name,
                                 manifest.board.description,
@@ -2542,6 +2451,7 @@ pub async fn board_restore(
                                 i64::from(manifest.board.allow_images),
                                 i64::from(manifest.board.allow_video),
                                 i64::from(manifest.board.allow_audio),
+                                i64::from(manifest.board.allow_any_files),
                                 i64::from(manifest.board.allow_tripcodes),
                                 manifest.board.edit_window_secs,
                                 i64::from(manifest.board.allow_editing),
@@ -2557,10 +2467,10 @@ pub async fn board_restore(
                     } else {
                         conn.execute(
                             "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
-                             bump_limit, allow_images, allow_video, allow_audio, allow_tripcodes,
-                             edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                             allow_captcha, post_cooldown_secs, created_at)
-                             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                             bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
+                             allow_tripcodes, edit_window_secs, allow_editing, allow_archive,
+                             allow_video_embeds, allow_captcha, post_cooldown_secs, created_at)
+                             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                             params![
                                 manifest.board.short_name,
                                 manifest.board.name,
@@ -2571,6 +2481,7 @@ pub async fn board_restore(
                                 i64::from(manifest.board.allow_images),
                                 i64::from(manifest.board.allow_video),
                                 i64::from(manifest.board.allow_audio),
+                                i64::from(manifest.board.allow_any_files),
                                 i64::from(manifest.board.allow_tripcodes),
                                 manifest.board.edit_window_secs,
                                 i64::from(manifest.board.allow_editing),
@@ -2641,7 +2552,7 @@ pub async fn board_restore(
                                 p.tripcode,
                                 p.subject,
                                 p.body,
-                                p.body_html,
+                                render_restored_body_html(&p.body),
                                 p.ip_hash,
                                 p.file_path,
                                 p.file_name,
@@ -2688,12 +2599,12 @@ pub async fn board_restore(
                             };
 
                             let new_body = remap_body_quotelinks(&p.body, &pairs);
-                            let new_body_html = remap_body_html_quotelinks(&p.body_html, &pairs);
+                            let new_body_html = render_restored_body_html(&new_body);
 
                             // Only issue the UPDATE when the text actually
                             // changed — avoids unnecessary I/O when none of
                             // the post IDs appear in this post's body.
-                            if new_body != p.body || new_body_html != p.body_html {
+                            if new_body != p.body {
                                 conn.execute(
                                     "UPDATE posts SET body = ?1, body_html = ?2 WHERE id = ?3",
                                     params![new_body, new_body_html, new_post_id],
@@ -2793,50 +2704,28 @@ pub async fn board_restore(
 
                 match restore_result {
                     Ok(()) => {
-                        conn.execute("COMMIT", [])
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit tx: {e}")))?;
+                        let had_live_board = swap_staged_path_into_place(
+                            &staged_board_dir,
+                            &live_board_dir,
+                            &previous_board_dir,
+                        )?;
+                        if let Err(e) = conn.execute("COMMIT", []) {
+                            let _ = rollback_swapped_path(
+                                &live_board_dir,
+                                &previous_board_dir,
+                                had_live_board,
+                            );
+                            return Err(AppError::Internal(anyhow::anyhow!("Commit tx: {e}")));
+                        }
+                        let _ = remove_path_if_exists(&previous_board_dir);
                     }
                     Err(e) => {
                         let _ = conn.execute("ROLLBACK", []);
+                        let _ = remove_path_if_exists(&staged_upload_root);
                         return Err(e);
                     }
                 }
-
-                if let Some(ref mut archive) = archive_opt {
-                    for i in 0..archive.len() {
-                        let mut entry = archive
-                            .by_index(i)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
-                        let name = entry.name().to_string();
-                        if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
-                            warn!("Board restore: skipping suspicious entry '{name}'");
-                            continue;
-                        }
-                        if let Some(rel) = name.strip_prefix("uploads/") {
-                            if rel.is_empty() {
-                                continue;
-                            }
-                            let target = PathBuf::from(&upload_dir).join(rel);
-                            if entry.is_dir() {
-                                std::fs::create_dir_all(&target).map_err(|e| {
-                                    AppError::Internal(anyhow::anyhow!("mkdir: {e}"))
-                                })?;
-                            } else {
-                                if let Some(p) = target.parent() {
-                                    std::fs::create_dir_all(p).map_err(|e| {
-                                        AppError::Internal(anyhow::anyhow!("mkdir parent: {e}"))
-                                    })?;
-                                }
-                                let mut out = std::fs::File::create(&target).map_err(|e| {
-                                    AppError::Internal(anyhow::anyhow!("Create file: {e}"))
-                                })?;
-                                copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(
-                                    |e| AppError::Internal(anyhow::anyhow!("Write file: {e}")),
-                                )?;
-                            }
-                        }
-                    }
-                }
+                let _ = remove_path_if_exists(&staged_upload_root);
 
                 tracing::info!(target: "admin", board = %board_short, "Board restore completed");
                 // Refresh live board list — board_restore may have created a

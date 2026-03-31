@@ -222,7 +222,7 @@ pub async fn admin_ban_and_delete(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    // FIX[A1]: form.board is user-supplied; sanitise to alphanumeric only before
+    // form.board is user-supplied; sanitise to alphanumeric only before
     // embedding in the redirect URL to prevent open-redirect via "//" prefixes.
     let safe_board: String = form
         .board

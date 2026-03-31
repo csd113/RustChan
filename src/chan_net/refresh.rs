@@ -18,12 +18,18 @@ use std::sync::LazyLock;
 /// Shared reqwest client — initialised once, reused for all outgoing calls
 /// (refresh + poll). The 30-second timeout covers slow `RustWave` responses
 /// during high-load broadcast operations.
-#[allow(clippy::expect_used)] // LazyLock static init — no error-propagation path available
 pub static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    let mut builder = reqwest::Client::builder();
+    builder = builder.timeout(std::time::Duration::from_secs(30));
+    if let Ok(client) = builder.build() {
+        return client;
+    }
+
+    tracing::error!("Failed to build reqwest client with configured timeout; falling back");
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .expect("Failed to build reqwest client")
+        .unwrap_or_default()
 });
 
 /// POST /chan/refresh

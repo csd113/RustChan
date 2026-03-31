@@ -1121,6 +1121,9 @@ document.addEventListener('click', function (e) {
         e.preventDefault();
         appendReply(t.dataset.id);
         break;
+      case 'toggle-spoiler':
+        t.classList.toggle('revealed');
+        break;
       case 'expand-media':        expandMedia(t); break;
       case 'collapse-media':      collapseMedia(t); break;
       case 'fetch-updates':       window.fetchUpdates && window.fetchUpdates(); break;
@@ -1342,6 +1345,18 @@ document.addEventListener('click', function (e) {
   if (!field) return;
   var c = document.cookie.split('; ').find(function (r) { return r.startsWith('csrf_token='); });
   if (c) field.value = c.split('=')[1];
+})();
+
+// ─── Rate-limit page redirect ────────────────────────────────────────────────
+(function () {
+  if (!document.body || document.body.dataset.rateLimitPage !== '1') return;
+  setTimeout(function () {
+    if (document.referrer) {
+      window.location.href = document.referrer;
+    } else {
+      window.history.back();
+    }
+  }, 3000);
 })();
 
 // ─── File input size check (data-onchange-check-size) ────────────────────────

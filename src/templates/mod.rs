@@ -138,7 +138,7 @@ pub fn live_site_subtitle() -> Arc<str> {
 
 // ─── Shared JS injected once per page ────────────────────────────────────────
 
-// FIX[NEW-H1]: All JavaScript has been moved to /static/main.js.
+// All JavaScript has been moved to /static/main.js.
 // Kept as an empty constant to avoid touching every call-site.
 pub const TOGGLE_SCRIPT: &str = "";
 
@@ -146,7 +146,7 @@ pub const TOGGLE_SCRIPT: &str = "";
 
 /// Returns the compress-modal overlay HTML.
 /// Dynamic size limits are embedded as data-max-image / data-max-video attributes
-/// on the modal element and read by main.js at runtime (FIX[NEW-H1]).
+/// on the modal element and read by main.js at runtime ().
 #[must_use]
 pub fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> String {
     format!(
@@ -176,7 +176,7 @@ pub fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> 
 // ─── Report modal ─────────────────────────────────────────────────────────────
 
 /// Returns the report overlay HTML. Injected once per thread page.
-// FIX[NEW-H1]: JS functions live in /static/main.js.
+// JS functions live in /static/main.js.
 #[must_use]
 pub const fn report_modal_script() -> &'static str {
     r#"
@@ -205,7 +205,7 @@ pub const fn report_modal_script() -> &'static str {
 
 // ─── Thread auto-update script ────────────────────────────────────────────────
 
-// FIX[NEW-H1]: All auto-update logic lives in /static/main.js.
+// All auto-update logic lives in /static/main.js.
 #[must_use]
 pub const fn thread_autoupdate_script() -> &'static str {
     ""
@@ -254,7 +254,7 @@ pub fn render_pagination(p: &Pagination, base_url: &str) -> String {
         return String::new();
     }
     let sep = if base_url.contains('?') { "&" } else { "?" };
-    // FIX[M-T2]: escape base_url once here so every href it appears in is safe,
+    // escape base_url once here so every href it appears in is safe,
     // regardless of what any caller passes.  All current callers pass trusted
     // values, but this makes the helper defensively correct for future callers.
     let safe_base = escape_html(base_url);
@@ -284,7 +284,7 @@ pub fn render_pagination(p: &Pagination, base_url: &str) -> String {
     html
 }
 
-// FIX[LOW-9]: Encode each UTF-8 *byte*, not each Unicode codepoint.
+// Encode each UTF-8 *byte*, not each Unicode codepoint.
 // RFC 3986 percent-encoding operates on bytes.
 #[must_use]
 pub fn urlencoding_simple(s: &str) -> String {
@@ -377,7 +377,7 @@ pub fn base_layout(
   <p>{forum_name} &mdash; <a href="/">home</a></p>
 </footer>
 
-<!-- Theme Picker — FIX[NEW-H1]: onclick= replaced with data-action= attributes -->
+<!-- Theme Picker — onclick= replaced with data-action= attributes -->
 <button id="theme-picker-btn" data-action="toggle-theme-picker" title="Select Theme">&#127912; Theme</button>
 <div id="theme-picker-panel">
   <div class="tp-title">// SELECT THEME</div>
@@ -422,7 +422,7 @@ pub fn base_layout(
 
 // ─── Standalone error/ban pages (no board context) ────────────────────────────
 
-// FIX[M-T1]: ban_page must accept a csrf_token so the appeal form works.
+// ban_page must accept a csrf_token so the appeal form works.
 // Previously the field was always empty and every appeal was rejected by the
 // server's CSRF check, making the appeal feature completely non-functional.
 #[must_use]

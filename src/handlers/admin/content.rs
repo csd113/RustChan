@@ -34,7 +34,7 @@ pub async fn create_board(
     jar: CookieJar,
     Form(form): Form<CreateBoardForm>,
 ) -> Result<Response> {
-    // FIX[HIGH-3]: auth + DB write in spawn_blocking
+    // auth + DB write in spawn_blocking
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
@@ -215,7 +215,7 @@ pub async fn thread_action(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    // FIX[MEDIUM-10]: Use the board name from the DB (via the thread's board_id),
+    // Use the board name from the DB (via the thread's board_id),
     // not the user-supplied form.board, to prevent path-confusion redirects.
     let redirect_url = {
         let pool = state.db.clone();
@@ -285,7 +285,7 @@ pub async fn admin_delete_post(
             let post = db::get_post(&conn, post_id)?
                 .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
 
-            // FIX[MEDIUM-10]: Resolve board name from DB, not user-supplied form field.
+            // Resolve board name from DB, not user-supplied form field.
             // Fallback sanitizes the user-supplied value to alphanumeric only.
             let board_name = db::get_all_boards(&conn)?
                 .into_iter()
@@ -375,7 +375,7 @@ pub async fn admin_delete_thread(
             let (admin_id, admin_name) =
                 super::require_admin_session_with_name(&conn, session_id.as_deref())?;
 
-            // FIX[MEDIUM-10]: Resolve board name from DB.
+            // Resolve board name from DB.
             // Fallback sanitizes the user-supplied value to alphanumeric only.
             let board_name = db::get_thread(&conn, thread_id)?
                 .and_then(|t| {

@@ -8,7 +8,6 @@
 //   • cleanup()                 — restores terminal; safe to call multiple times
 //   • render()                  — async, interval-driven, skips identical frames
 //   • collect_stats()           — pure DB+atomics snapshot, called from server.rs
-//   • print_banner()            — startup box printed before TUI begins
 //   • prompt_create_first_admin() — first-run wizard (pre-TUI, normal terminal mode)
 //
 // Wizard flows (CreateBoard / CreateAdmin / DeleteThread) exit raw mode, run the
@@ -372,77 +371,6 @@ fn process_rss_kb() -> u64 {
         }
     }
     0
-}
-
-// ─── print_banner() ──────────────────────────────────────────────────────────
-
-/// Startup banner printed before the TUI begins. Includes reactive HTTPS and
-/// Tor status lines so operators immediately know which listeners are active.
-#[allow(clippy::arithmetic_side_effects)]
-pub fn print_banner() {
-    use crate::config::CONFIG;
-    const INNER: usize = 53;
-
-    let cell = |s: String, width: usize| -> String {
-        let n = s.chars().count();
-        if n >= width {
-            s.chars().take(width).collect()
-        } else {
-            format!("{s}{}", " ".repeat(width - n))
-        }
-    };
-
-    let title = cell(
-        format!("{} v{}", CONFIG.forum_name, env!("CARGO_PKG_VERSION")),
-        INNER - 2,
-    );
-    let bind = cell(CONFIG.bind_addr.clone(), INNER - 10);
-    let db = cell(CONFIG.database_path.clone(), INNER - 10);
-    let upl = cell(CONFIG.upload_dir.clone(), INNER - 10);
-    let img_mib = CONFIG.max_image_size / 1024 / 1024;
-    let vid_mib = CONFIG.max_video_size / 1024 / 1024;
-    let aud_mib = CONFIG.max_audio_size / 1024 / 1024;
-    let limits = cell(
-        format!("img {img_mib} MiB  vid {vid_mib} MiB  audio {aud_mib} MiB"),
-        INNER - 4,
-    );
-
-    let https_raw = if CONFIG.tls.enabled {
-        let redirect = if CONFIG.tls.redirect_http {
-            "  redirect HTTP→HTTPS"
-        } else {
-            ""
-        };
-        format!("HTTPS :{}{}", CONFIG.tls.port, redirect)
-    } else {
-        "HTTPS disabled".to_string()
-    };
-    let https_line = cell(https_raw, INNER - 10);
-
-    let tor_raw = if CONFIG.enable_tor_support {
-        if CONFIG.tor_only {
-            "Tor   enabled  [tor-only mode]".to_string()
-        } else {
-            "Tor   enabled".to_string()
-        }
-    } else {
-        "Tor   disabled".to_string()
-    };
-    let tor_line = cell(tor_raw, INNER - 10);
-
-    let block = format!(
-        "\x1b[36m┌─────────────────────────────────────────────────────┐\n\
-         │  {title}│\n\
-         ├─────────────────────────────────────────────────────┤\n\
-         │  Bind    {bind}│\n\
-         │  DB      {db}│\n\
-         │  Uploads {upl}│\n\
-         │  {limits}  │\n\
-         │  {https_line}│\n\
-         │  {tor_line}│\n\
-         └─────────────────────────────────────────────────────┘\x1b[0m\n",
-    );
-    crate::logging::console_print_raw(&block);
 }
 
 // ─── prompt_create_first_admin() helpers ─────────────────────────────────────

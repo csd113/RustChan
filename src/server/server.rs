@@ -13,35 +13,30 @@
 //   • hsts_middleware         — HSTS header (HTTPS-only)
 //   • shutdown_signal()       — Ctrl-C / SIGTERM waiter
 
-use axum::{
-    extract::DefaultBodyLimit,
-    http::{header, StatusCode},
-    middleware as axum_middleware,
-    response::IntoResponse,
-    routing::{get, post},
-    Router,
-};
+use axum::http::header;
 use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use tracing::Instrument as _;
 
 use crate::config::{check_cookie_secret_rotation, generate_settings_file_if_missing, CONFIG};
 use crate::middleware::AppState;
 
-// ─── Embedded static assets ───────────────────────────────────────────────────
-static STYLE_CSS: &str = include_str!("../../static/style.css");
-static MAIN_JS: &str = include_str!("../../static/main.js");
-static THEME_INIT_JS: &str = include_str!("../../static/theme-init.js");
+mod assets;
+mod headers;
+mod lifecycle;
+mod router;
+
+use lifecycle::shutdown_signal;
+use router::build_router;
 
 // ─── Global terminal state ─────────────────────────────────────────────────────
 /// Total HTTP requests handled since startup.
 pub static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Requests currently being processed (in-flight).
 ///
-/// FIX[AUDIT-1]: Changed from `AtomicI64` to `AtomicU64`.  In-flight request
+/// Changed from `AtomicI64` to `AtomicU64`.  In-flight request
 /// counts are inherently non-negative; using a signed type required defensive
 /// `.max(0)` casts at every read site and masked counter underflow bugs.
 /// Decrements use `ScopedDecrement` RAII guards (see below) to prevent
@@ -49,18 +44,17 @@ pub static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 /// Multipart file uploads currently in progress.
 ///
-/// FIX[AUDIT-1]: Same signed→unsigned change as `IN_FLIGHT`.
+/// Same signed→unsigned change as `IN_FLIGHT`.
 pub static ACTIVE_UPLOADS: AtomicU64 = AtomicU64::new(0);
 /// Monotonic tick used to animate the upload spinner.
 pub static SPINNER_TICK: AtomicU64 = AtomicU64::new(0);
 /// Recently active client IPs (last ~5 min); maps SHA-256(IP) → last-seen Instant.
-/// CRIT-5: Keys are hashed so raw IP addresses are never retained in process
 /// memory (or coredumps). The count is used for the "users online" display.
 pub static ACTIVE_IPS: LazyLock<DashMap<String, Instant>> = LazyLock::new(DashMap::new);
 
 // ─── RAII counter guard ───────────────────────────────────────────────────────
 //
-// FIX[AUDIT-2]: `IN_FLIGHT` and `ACTIVE_UPLOADS` are decremented inside
+// `IN_FLIGHT` and `ACTIVE_UPLOADS` are decremented inside
 // `track_requests` *after* `.await`.  If the surrounding future is cancelled
 // (e.g. client disconnect, timeout, or panic in a handler), the post-await
 // code never runs and the counters permanently over-count.
@@ -68,7 +62,7 @@ pub static ACTIVE_IPS: LazyLock<DashMap<String, Instant>> = LazyLock::new(DashMa
 // `ScopedDecrement` ties the decrement to the guard's lifetime so it fires
 // unconditionally via `Drop`, even when the future is dropped mid-flight.
 // The decrement is saturating to prevent underflow on `AtomicU64`.
-struct ScopedDecrement<'a>(&'a AtomicU64);
+pub(super) struct ScopedDecrement<'a>(pub(super) &'a AtomicU64);
 
 impl Drop for ScopedDecrement<'_> {
     fn drop(&mut self) {
@@ -121,21 +115,9 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&CONFIG.upload_dir)?;
 
-    super::console::print_banner();
-
     let bind_addr: String = port_override.map_or_else(
         || CONFIG.bind_addr.clone(),
-        |p| {
-            // rsplit_once splits at the LAST colon only, which correctly handles
-            // both IPv4 ("0.0.0.0:8080") and IPv6 ("[::1]:8080") bind addresses.
-            // rsplit(':').nth(1) was incorrect for IPv6 — it returned "1]" instead
-            // of "[::1]" because rsplit splits on every colon in the address.
-            let host = CONFIG
-                .bind_addr
-                .rsplit_once(':')
-                .map_or("0.0.0.0", |(h, _)| h);
-            format!("{host}:{p}")
-        },
+        |p| CONFIG.bind_addr_with_port(p),
     );
 
     let pool = crate::db::init_pool()?;
@@ -237,8 +219,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             );
             8080
         });
-
-    // CRIT-1 FIX: Capture JoinHandles from start_worker_pool so the shutdown
     // sequence can await each worker instead of blindly sleeping for 10 s.
     // Previously the return value was silently discarded, making it impossible
     // to know whether in-flight jobs had finished before the process exited.
@@ -711,7 +691,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let chan_app = crate::chan_net::chan_router(state.clone());
         let chan_listener = tokio::net::TcpListener::bind(&chan_addr).await?;
         tracing::info!(target: "chan_net", addr = %chan_addr, "ChanNet API listening");
-        // CRIT-2 FIX: Wire the same shutdown signal so in-flight federation
         // requests are drained before the runtime is dropped. Without this the
         // ChanNet task was detached and forcibly killed on SIGTERM, potentially
         // corrupting a streaming snapshot response mid-transfer.
@@ -731,7 +710,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // build_acceptor() returns None when tls.enabled = false — existing
     // HTTP-only deployments are completely unaffected.
     //
-    // FIX[TLS-1]: The TCP socket is pre-bound here on the *main* task (before
+    // The TCP socket is pre-bound here on the *main* task (before
     // spawning) so that any bind failure (port in use, missing CAP_NET_BIND_SERVICE,
     // etc.) is caught immediately with `?` propagation and a clear error message,
     // rather than silently dying inside a spawned future where the error is easy
@@ -740,7 +719,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // bound.  axum_server::from_tcp_rustls accepts the pre-bound std::TcpListener
     // and does not attempt a second bind.
     //
-    // FIX[TLS-2]: build_acceptor failure is now a hard error (return Err) instead
+    // build_acceptor failure is now a hard error (return Err) instead
     // of a silent log-and-continue.  If TLS is enabled in config but the acceptor
     // cannot be constructed (missing cert files, bad PEM, permission denied on
     // tls/dev/, etc.), the process exits with a clear message rather than running
@@ -750,11 +729,12 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let cancel_tls = worker_cancel.clone();
         let app_tls = build_router(state.clone());
 
-        let https_addr: std::net::SocketAddr = format!("0.0.0.0:{}", CONFIG.tls.port)
+        let https_addr: std::net::SocketAddr = CONFIG
+            .bind_addr_with_port(CONFIG.tls.port)
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid HTTPS bind address: {e}"))?;
 
-        // FIX[TLS-2]: propagate build_acceptor errors as hard failures.
+        // propagate build_acceptor errors as hard failures.
         let acceptor = crate::tls::build_acceptor(&CONFIG.tls, &data_dir_tls)
             .map_err(|e| anyhow::anyhow!("TLS init failed — cannot start HTTPS listener: {e}"))?;
 
@@ -764,7 +744,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 // the TlsAcceptor — pass it straight to axum-server.
                 let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_cfg);
 
-                // FIX[TLS-1]: pre-bind on the main task so failures surface here.
+                // pre-bind on the main task so failures surface here.
                 let https_tcp = tokio::net::TcpListener::bind(https_addr)
                     .await
                     .map_err(|e| {
@@ -806,10 +786,10 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     // ── HTTP→HTTPS redirect listener (optional) ───────────────────────────────
     if CONFIG.tls.enabled && CONFIG.tls.redirect_http {
-        let http_addr: std::net::SocketAddr =
-            format!("0.0.0.0:{}", CONFIG.tls.http_port)
-                .parse()
-                .map_err(|e| anyhow::anyhow!("invalid HTTP redirect bind address: {e}"))?;
+        let http_addr: std::net::SocketAddr = CONFIG
+            .bind_addr_with_port(CONFIG.tls.http_port)
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid HTTP redirect bind address: {e}"))?;
         let https_port = CONFIG.tls.port;
         let cancel_redirect = worker_cancel.clone();
         tokio::spawn(async move {
@@ -829,8 +809,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         }
     })
     .await?;
-
-    // CRIT-1 FIX: Signal workers and then await each handle with a per-worker
     // timeout, replacing the previous blind 10-second sleep. Each worker is
     // given up to (ffmpeg_timeout + 10)s to finish its in-flight job.
     tracing::info!(target: "server", "Signalling background workers to shut down…");
@@ -839,8 +817,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     for handle in worker_handles {
         let _ = tokio::time::timeout(shutdown_timeout, handle).await;
     }
-
-    // CRIT-3 FIX: worker_cancel.cancel() above already signals the Tor task's
     // CancellationToken, so it will exit its select! loop promptly instead of
     // sleeping through a multi-minute backoff. The 15-second safety-net timeout
     // below is only a last resort for the in-flight copy_bidirectional on any
@@ -859,7 +835,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 // Uses axum-server which preserves ConnectInfo<SocketAddr> so the IP-banning
 // and rate-limiting middleware in middleware/mod.rs continues to work correctly.
 //
-// FIX[TLS-1]: Accepts a pre-bound TcpListener instead of a SocketAddr so the
+// Accepts a pre-bound TcpListener instead of a SocketAddr so the
 // actual socket bind (and any OS-level failure) happens on the main task in
 // run_server() where errors propagate with `?`.  axum_server::from_tcp_rustls
 // takes ownership of the already-bound std::TcpListener and does not re-bind.
@@ -1066,323 +1042,6 @@ pub async fn run_http_redirect(
         .ok();
 }
 
-#[allow(clippy::too_many_lines)]
-fn build_router(state: AppState) -> Router {
-    Router::new()
-        .route("/static/style.css", get(serve_css))
-        .route("/static/main.js", get(serve_main_js))
-        .route("/static/theme-init.js", get(serve_theme_init_js))
-        .route("/", get(crate::handlers::board::index))
-        .route("/{board}", get(crate::handlers::board::board_index))
-        .route(
-            "/{board}",
-            post(crate::handlers::board::create_thread).layer(DefaultBodyLimit::max(
-                CONFIG.max_video_size.max(CONFIG.max_audio_size),
-            )),
-        )
-        .route("/{board}/catalog", get(crate::handlers::board::catalog))
-        .route(
-            "/{board}/archive",
-            get(crate::handlers::board::board_archive),
-        )
-        .route("/{board}/search", get(crate::handlers::board::search))
-        .route(
-            "/{board}/thread/{id}",
-            get(crate::handlers::thread::view_thread),
-        )
-        .route(
-            "/{board}/thread/{id}",
-            post(crate::handlers::thread::post_reply).layer(DefaultBodyLimit::max(
-                CONFIG.max_video_size.max(CONFIG.max_audio_size),
-            )),
-        )
-        .route(
-            "/{board}/post/{id}/edit",
-            get(crate::handlers::thread::edit_post_get),
-        )
-        .route(
-            "/{board}/post/{id}/edit",
-            post(crate::handlers::thread::edit_post_post),
-        )
-        .route(
-            "/report",
-            post(crate::handlers::board::file_report).layer(DefaultBodyLimit::max(65_536)),
-        )
-        .route(
-            "/appeal",
-            post(crate::handlers::board::submit_appeal).layer(DefaultBodyLimit::max(65_536)),
-        )
-        .route(
-            "/vote",
-            post(crate::handlers::thread::vote_handler).layer(DefaultBodyLimit::max(65_536)),
-        )
-        .route(
-            "/api/post/{board}/{post_id}",
-            get(crate::handlers::board::api_post_preview),
-        )
-        .route(
-            "/{board}/post/{post_id}",
-            get(crate::handlers::board::redirect_to_post),
-        )
-        .route(
-            "/admin/post/ban-delete",
-            post(crate::handlers::admin::admin_ban_and_delete),
-        )
-        .route(
-            "/admin/appeal/dismiss",
-            post(crate::handlers::admin::dismiss_appeal),
-        )
-        .route(
-            "/admin/appeal/accept",
-            post(crate::handlers::admin::accept_appeal),
-        )
-        .route(
-            "/{board}/thread/{id}/updates",
-            get(crate::handlers::thread::thread_updates),
-        )
-        // Wildcard board media route: handles all /boards/** requests.
-        // For .mp4 files that have been transcoded away to .webm, issues a
-        // permanent redirect. All other paths are served directly from disk
-        // via tower-http ServeFile (Range, ETag, Content-Type handled correctly).
-        .route(
-            "/boards/{*media_path}",
-            get(crate::handlers::board::serve_board_media),
-        )
-        .route("/admin", get(crate::handlers::admin::admin_index))
-        .route(
-            "/admin/login",
-            post(crate::handlers::admin::admin_login).layer(DefaultBodyLimit::max(65_536)),
-        )
-        .route("/admin/logout", post(crate::handlers::admin::admin_logout))
-        .route("/admin/panel", get(crate::handlers::admin::admin_panel))
-        .route(
-            "/admin/board/create",
-            post(crate::handlers::admin::create_board),
-        )
-        .route(
-            "/admin/board/delete",
-            post(crate::handlers::admin::delete_board),
-        )
-        .route(
-            "/admin/board/settings",
-            post(crate::handlers::admin::update_board_settings),
-        )
-        .route(
-            "/admin/thread/action",
-            post(crate::handlers::admin::thread_action),
-        )
-        .route(
-            "/admin/thread/delete",
-            post(crate::handlers::admin::admin_delete_thread),
-        )
-        .route(
-            "/admin/post/delete",
-            post(crate::handlers::admin::admin_delete_post),
-        )
-        .route("/admin/ban/add", post(crate::handlers::admin::add_ban))
-        .route(
-            "/admin/ban/remove",
-            post(crate::handlers::admin::remove_ban),
-        )
-        .route(
-            "/admin/report/resolve",
-            post(crate::handlers::admin::resolve_report),
-        )
-        .route("/admin/mod-log", get(crate::handlers::admin::mod_log_page))
-        .route(
-            "/admin/filter/add",
-            post(crate::handlers::admin::add_filter),
-        )
-        .route(
-            "/admin/filter/remove",
-            post(crate::handlers::admin::remove_filter),
-        )
-        .route(
-            "/admin/site/settings",
-            post(crate::handlers::admin::update_site_settings),
-        )
-        .route("/admin/vacuum", post(crate::handlers::admin::admin_vacuum))
-        .route(
-            "/admin/ip/{ip_hash}",
-            get(crate::handlers::admin::admin_ip_history),
-        )
-        .route("/admin/backup", get(crate::handlers::admin::admin_backup))
-        // Admin restore routes have no body-size cap — backups can be multi-GB
-        // and these endpoints require a valid admin session, so there is no
-        // anonymous upload risk.
-        .route(
-            "/admin/restore",
-            post(crate::handlers::admin::admin_restore)
-                .layer(DefaultBodyLimit::max(20 * 1024 * 1024 * 1024)), // 20 GiB — large but bounded
-        )
-        .route(
-            "/admin/board/backup/{board}",
-            get(crate::handlers::admin::board_backup),
-        )
-        .route(
-            "/admin/board/restore",
-            post(crate::handlers::admin::board_restore)
-                .layer(DefaultBodyLimit::max(20 * 1024 * 1024 * 1024)), // 20 GiB — large but bounded
-        )
-        // ── Disk-based backup management routes ──────────────────────────────
-        .route(
-            "/admin/backup/create",
-            post(crate::handlers::admin::create_full_backup),
-        )
-        .route(
-            "/admin/board/backup/create",
-            post(crate::handlers::admin::create_board_backup),
-        )
-        .route(
-            "/admin/backup/download/{kind}/{filename}",
-            get(crate::handlers::admin::download_backup),
-        )
-        .route(
-            "/admin/backup/progress",
-            get(crate::handlers::admin::backup_progress_json),
-        )
-        .route(
-            "/admin/backup/delete",
-            post(crate::handlers::admin::delete_backup),
-        )
-        .route(
-            "/admin/backup/restore-saved",
-            post(crate::handlers::admin::restore_saved_full_backup),
-        )
-        .route(
-            "/admin/board/backup/restore-saved",
-            post(crate::handlers::admin::restore_saved_board_backup),
-        )
-        .layer(axum_middleware::from_fn(
-            crate::middleware::rate_limit_middleware,
-        ))
-        .layer(DefaultBodyLimit::max(CONFIG.max_video_size))
-        .layer(axum_middleware::from_fn(track_requests))
-        // 3.3: Gzip/Brotli/Zstd response compression.  HTML pages compress 5–10×
-        // with gzip and even better with Brotli.  tower-http respects the client's
-        // Accept-Encoding header and negotiates the best supported algorithm.
-        // Applied before the trailing-slash normaliser so compressed responses
-        // are served correctly for all paths including redirects.
-        .layer(tower_http::compression::CompressionLayer::new())
-        // Normalize trailing slashes before routing: redirect /path/ → /path (301).
-        // Applied last (outermost) so it fires before any other middleware sees the URI.
-        .layer(axum_middleware::from_fn(
-            crate::middleware::normalize_trailing_slash,
-        ))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-            header::HeaderName::from_static("x-content-type-options"),
-            header::HeaderValue::from_static("nosniff"),
-        ))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-            header::HeaderName::from_static("x-frame-options"),
-            header::HeaderValue::from_static("SAMEORIGIN"),
-        ))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-            header::HeaderName::from_static("referrer-policy"),
-            header::HeaderValue::from_static("same-origin"),
-        ))
-        // FIX[NEW-H1]: 'unsafe-inline' removed from script-src.  All JavaScript
-        // has been moved to /static/main.js (loaded with 'self') and
-        // /static/theme-init.js.  Inline event handlers (onclick= etc.) have
-        // been replaced with data-* attributes handled by main.js event
-        // delegation, so no inline script execution is required.
-        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-            header::HeaderName::from_static("content-security-policy"),
-            header::HeaderValue::from_static(
-                "default-src 'self'; \
-                 script-src 'self'; \
-                 style-src 'self' 'unsafe-inline'; \
-                 img-src 'self' data: blob: https://img.youtube.com; \
-                 media-src 'self' blob:; \
-                 font-src 'self'; \
-                 connect-src 'self'; \
-                 frame-src https://www.youtube-nocookie.com https://streamable.com; \
-                 frame-ancestors 'none'; \
-                 object-src 'none'; \
-                 base-uri 'self'",
-            ),
-        ))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-            header::HeaderName::from_static("permissions-policy"),
-            header::HeaderValue::from_static(
-                "geolocation=(), camera=(), microphone=(), payment=()",
-            ),
-        ))
-        // Fix #8: HSTS (RFC 6797 §7.2) MUST only be sent over HTTPS.
-        // Sending it over plain HTTP (localhost dev, Tor .onion) is incorrect
-        // and can cause Tor-aware clients to misbehave.  The middleware below
-        // checks both the request scheme and the X-Forwarded-Proto header
-        // (set by TLS-terminating proxies) before adding the header.
-        .layer(axum_middleware::from_fn(hsts_middleware))
-        // MED-4 FIX: Hard per-request timeout to prevent slow-loris style
-        // attacks from holding async tasks indefinitely. Clients that open a
-        // connection but never finish sending the request body will be cut off
-        // after 30 seconds. This covers all routes including file upload
-        // endpoints where the multipart streaming loop could block forever.
-        //
-        // TimeoutLayer injects Box<dyn Error> into the service error type when
-        // a timeout fires. Axum's Router::layer requires all errors to be
-        // Into<Infallible>, so HandleErrorLayer must wrap TimeoutLayer and both
-        // must be bundled inside a ServiceBuilder — applying them as separate
-        // .layer() calls leaves the intermediate error type unresolved and
-        // causes E0277. ServiceBuilder fuses them into a single layer whose
-        // output error type is Infallible.
-        .layer(
-            tower::ServiceBuilder::new()
-                .layer(axum::error_handling::HandleErrorLayer::new(
-                    |_err: tower::BoxError| async {
-                        (axum::http::StatusCode::REQUEST_TIMEOUT, "Request timed out")
-                    },
-                ))
-                .layer(tower::timeout::TimeoutLayer::new(Duration::from_secs(30))),
-        )
-        // HTTP tracing: silent for normal responses, loud for failures.
-        //
-        // on_response is intentionally omitted — logging every 200/304 at INFO
-        // floods the terminal with one line per user action and buries real events.
-        // Operators who want per-request access logs can set RUST_LOG=tower_http=debug.
-        //
-        // on_failure fires for 5xx responses and transport errors at ERROR level.
-        // on_eos fires when a streaming response body closes unexpectedly.
-        // make_span_with creates a DEBUG span so req_id / method / uri are available
-        // in the file log for correlation without appearing on the terminal at INFO.
-        .layer(
-            tower_http::trace::TraceLayer::new_for_http()
-                .make_span_with(|request: &axum::http::Request<_>| {
-                    tracing::debug_span!(
-                        "http",
-                        method = %request.method(),
-                        uri    = %request.uri(),
-                    )
-                })
-                // No on_response — 200/304/etc. are completely silent at INFO level.
-                .on_response(
-                    tower_http::trace::DefaultOnResponse::new().level(tracing::Level::TRACE),
-                )
-                .on_failure(
-                    |error: tower_http::classify::ServerErrorsFailureClass,
-                     latency: std::time::Duration,
-                     _span: &tracing::Span| {
-                        tracing::error!(
-                            target: "server",
-                            %error,
-                            latency_ms = latency.as_millis(),
-                            "request failed",
-                        );
-                    },
-                ),
-        )
-        // HIGH-9: Inject `Onion-Location` response header when the onion service
-        // is active. Tor Browser reads this header on clearnet responses and
-        // prompts the user to switch to the .onion address automatically.
-        // Only injected when enable_tor_support=true and the address is known.
-        .layer(axum_middleware::from_fn_with_state(
-            state.clone(),
-            onion_location_middleware,
-        ))
-        .with_state(state)
-}
-
 /// Inject the `Onion-Location` response header when the Tor hidden service is
 /// active and the request arrived over clearnet (not already via .onion).
 ///
@@ -1429,157 +1088,4 @@ async fn onion_location_middleware(
     }
 
     resp
-}
-
-/// Middleware that adds `Strict-Transport-Security` only when the connection
-/// is confirmed to be HTTPS (RFC 6797 §7.2).  Checks both the URI scheme
-/// (set by some reverse proxies) and the `X-Forwarded-Proto` header.
-async fn hsts_middleware(
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let is_https = req.uri().scheme_str() == Some("https")
-        || req
-            .headers()
-            .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.eq_ignore_ascii_case("https"));
-
-    let mut resp = next.run(req).await;
-    if is_https {
-        resp.headers_mut().insert(
-            header::HeaderName::from_static("strict-transport-security"),
-            header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
-        );
-    }
-    resp
-}
-
-async fn serve_css() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
-        STYLE_CSS,
-    )
-}
-
-async fn serve_main_js() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [
-            (
-                header::CONTENT_TYPE,
-                "application/javascript; charset=utf-8",
-            ),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
-        MAIN_JS,
-    )
-}
-
-async fn serve_theme_init_js() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [
-            (
-                header::CONTENT_TYPE,
-                "application/javascript; charset=utf-8",
-            ),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
-        THEME_INIT_JS,
-    )
-}
-
-// ─── Request tracking middleware ──────────────────────────────────────────────
-
-async fn track_requests(
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
-
-    // FIX[AUDIT-2]: Bind the in-flight decrement to a RAII guard so it fires
-    // even if this future is cancelled (e.g. client disconnect, handler panic).
-    let _in_flight_guard = ScopedDecrement(&IN_FLIGHT);
-
-    // Attach a per-request UUID to every tracing span so correlated log lines
-    // can be grouped by request even under concurrent load (#12).
-    let req_id = uuid::Uuid::new_v4();
-    let method = req.method().clone();
-    let path = req.uri().path().to_owned();
-    let span = tracing::info_span!(
-        "request",
-        req_id = %req_id,
-        method = %method,
-        path  = %path,
-    );
-
-    // Record the client IP for the "users online" display.
-    // CRIT-5: Store a SHA-256 hash of the IP (not the raw address) to avoid
-    // retaining PII in process memory and coredumps.
-    // CRIT-2: Use extract_ip() so proxy-forwarded real IPs are used instead
-    // of the raw socket address (which would always be the proxy's IP).
-    // Cap at 10,000 entries to prevent unbounded memory growth under a
-    // Sybil/bot attack rotating IPs (#11). The count is cosmetic so
-    // dropping inserts beyond the cap has no functional impact.
-    {
-        use sha2::{Digest, Sha256};
-        let real_ip = crate::middleware::extract_ip(&req);
-        let mut h = Sha256::new();
-        h.update(real_ip.as_bytes());
-        let ip_hash = hex::encode(h.finalize());
-        if ACTIVE_IPS.len() < 10_000 {
-            ACTIVE_IPS.insert(ip_hash, Instant::now());
-        }
-    }
-
-    // Detect file uploads by Content-Type
-    let is_upload = req
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.contains("multipart/form-data"));
-
-    // FIX[AUDIT-2]: Bind upload decrement to a RAII guard for the same reason.
-    // Option<ScopedDecrement> is None when is_upload is false — zero-cost branch.
-    let _upload_guard = is_upload.then(|| {
-        ACTIVE_UPLOADS.fetch_add(1, Ordering::Relaxed);
-        ScopedDecrement(&ACTIVE_UPLOADS)
-    });
-
-    next.run(req).instrument(span).await
-}
-
-// ─── Graceful shutdown ────────────────────────────────────────────────────────
-
-async fn shutdown_signal() {
-    use tokio::signal;
-    let ctrl_c = async {
-        if let Err(e) = signal::ctrl_c().await {
-            tracing::error!("Failed to listen for Ctrl+C: {e}");
-        }
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
-            Ok(mut sig) => {
-                sig.recv().await;
-            }
-            Err(e) => {
-                tracing::error!("Failed to register SIGTERM handler: {e}");
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        () = ctrl_c =>   tracing::info!(target: "server", signal = "SIGINT",  "Shutdown signal received"),
-        () = terminate => tracing::info!(target: "server", signal = "SIGTERM", "Shutdown signal received"),
-    }
 }

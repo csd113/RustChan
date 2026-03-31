@@ -4,22 +4,9 @@
 // guard via super::paths_safe_to_delete), and aggregate site statistics.
 //
 // FIX summary (from audit):
-//   HIGH-1   get_all_boards_with_stats: eliminated N+1 — replaced per-board
 //              COUNT loop with a single query using a correlated subquery
-//   HIGH-2   get_site_stats: collapsed 5 separate full-table scans into a
 //              single aggregate query pass
-//   HIGH-3   get_site_stats: active_bytes now sums audio_file_size too
-//   MED-4    create_board, create_board_with_media_flags:
 //              INSERT … RETURNING id replaces execute + last_insert_rowid()
-//   MED-5    update_board, update_board_settings: rows-affected checks added
-//   MED-6    delete_board: wrapped in transaction to close TOCTOU race
-//   MED-7    delete_board: simplified to direct posts.board_id join
-//   MED-8    delete_board: added affected-rows check to verify board existed
-//   MED-9    get_site_setting: switched to prepare_cached (hot path)
-//   MED-10   get_seconds_since_last_post: switched to prepare_cached (hot path)
-//   LOW-11   set_site_setting and other bare execute calls: context strings added
-//   LOW-12   .context() added on key operations
-//   LOW-13   Note: unixepoch() requires SQLite ≥ 3.38.0 (2022-02-22)
 
 use crate::models::Board;
 use anyhow::{Context, Result};
@@ -39,14 +26,15 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         allow_images: row.get::<_, i32>(7)? != 0,
         allow_video: row.get::<_, i32>(8)? != 0,
         allow_audio: row.get::<_, i32>(9)? != 0,
-        allow_tripcodes: row.get::<_, i32>(10)? != 0,
-        edit_window_secs: row.get(11)?,
-        allow_editing: row.get::<_, i32>(12)? != 0,
-        allow_archive: row.get::<_, i32>(13)? != 0,
-        allow_video_embeds: row.get::<_, i32>(14)? != 0,
-        allow_captcha: row.get::<_, i32>(15)? != 0,
-        post_cooldown_secs: row.get(16)?,
-        created_at: row.get(17)?,
+        allow_any_files: row.get::<_, i32>(10)? != 0,
+        allow_tripcodes: row.get::<_, i32>(11)? != 0,
+        edit_window_secs: row.get(12)?,
+        allow_editing: row.get::<_, i32>(13)? != 0,
+        allow_archive: row.get::<_, i32>(14)? != 0,
+        allow_video_embeds: row.get::<_, i32>(15)? != 0,
+        allow_captcha: row.get::<_, i32>(16)? != 0,
+        post_cooldown_secs: row.get(17)?,
+        created_at: row.get(18)?,
     })
 }
 
@@ -54,7 +42,7 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
 
 /// Read a site-wide setting by key. Returns None if the key has never been set.
 ///
-/// FIX[MED-9]: Switched to `prepare_cached` — convenience helpers (`get_site_name`,
+/// Switched to `prepare_cached` — convenience helpers (`get_site_name`,
 /// `get_site_subtitle`, etc.) call this on every page render.
 ///
 /// # Errors
@@ -121,9 +109,9 @@ pub fn get_collapse_greentext(conn: &rusqlite::Connection) -> bool {
 pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                allow_editing, allow_archive, allow_video_embeds, allow_captcha,
-                post_cooldown_secs, created_at
+                allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
+                edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
+                allow_captcha, post_cooldown_secs, created_at
          FROM boards ORDER BY id ASC",
     )?;
     let boards = stmt
@@ -134,7 +122,7 @@ pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
 
 /// Like `get_all_boards` but also returns live thread count for each board.
 ///
-/// FIX[HIGH-1]: Previously issued one COUNT(*) query per board (N+1). Replaced
+/// Previously issued one COUNT(*) query per board (N+1). Replaced
 /// with a single LEFT JOIN query that computes all counts in one pass.
 ///
 /// # Errors
@@ -145,8 +133,9 @@ pub fn get_all_boards_with_stats(
     let mut stmt = conn.prepare_cached(
         "SELECT b.id, b.short_name, b.name, b.description, b.nsfw, b.max_threads,
                 b.bump_limit, b.allow_images, b.allow_video, b.allow_audio,
-                b.allow_tripcodes, b.edit_window_secs, b.allow_editing, b.allow_archive,
-                b.allow_video_embeds, b.allow_captcha, b.post_cooldown_secs, b.created_at,
+                b.allow_any_files, b.allow_tripcodes, b.edit_window_secs, b.allow_editing,
+                b.allow_archive, b.allow_video_embeds, b.allow_captcha, b.post_cooldown_secs,
+                b.created_at,
                 COUNT(t.id) AS thread_count
          FROM boards b
          LEFT JOIN threads t ON t.board_id = b.id AND t.archived = 0
@@ -156,7 +145,7 @@ pub fn get_all_boards_with_stats(
     let out = stmt
         .query_map([], |row| {
             let board = map_board(row)?;
-            let thread_count: i64 = row.get(18)?;
+            let thread_count: i64 = row.get(19)?;
             Ok(crate::models::BoardStats {
                 board,
                 thread_count,
@@ -171,15 +160,15 @@ pub fn get_all_boards_with_stats(
 pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Option<Board>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                allow_images, allow_video, allow_audio, allow_tripcodes, edit_window_secs,
-                allow_editing, allow_archive, allow_video_embeds, allow_captcha,
-                post_cooldown_secs, created_at
+                allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
+                edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
+                allow_captcha, post_cooldown_secs, created_at
          FROM boards WHERE short_name = ?1",
     )?;
     Ok(stmt.query_row(params![short], map_board).optional()?)
 }
 
-/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -205,7 +194,7 @@ pub fn create_board(
 /// Create a board with explicit per-media-type toggles.
 /// Used by the CLI `--no-images / --no-videos / --no-audio` flags.
 ///
-/// FIX[MED-4]: INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -234,7 +223,7 @@ pub fn create_board_with_media_flags(
     Ok(id)
 }
 
-/// FIX[MED-5]: Added rows-affected check — silently succeeding when the board
+/// Added rows-affected check — silently succeeding when the board
 /// id doesn't exist made update errors invisible.
 ///
 /// # Errors
@@ -261,7 +250,7 @@ pub fn update_board(
 
 /// Update all per-board settings from the admin panel.
 ///
-/// FIX[MED-5]: Added rows-affected check.
+/// Added rows-affected check.
 ///
 /// # Errors
 /// Returns an error if the database operation fails or the board id is not found.
@@ -277,6 +266,7 @@ pub fn update_board_settings(
     allow_images: bool,
     allow_video: bool,
     allow_audio: bool,
+    allow_any_files: bool,
     allow_tripcodes: bool,
     edit_window_secs: i64,
     allow_editing: bool,
@@ -289,10 +279,11 @@ pub fn update_board_settings(
         .execute(
             "UPDATE boards SET name=?1, description=?2, nsfw=?3,
              bump_limit=?4, max_threads=?5,
-             allow_images=?6, allow_video=?7, allow_audio=?8, allow_tripcodes=?9,
-             edit_window_secs=?10, allow_editing=?11, allow_archive=?12,
-             allow_video_embeds=?13, allow_captcha=?14, post_cooldown_secs=?15
-             WHERE id=?16",
+             allow_images=?6, allow_video=?7, allow_audio=?8, allow_any_files=?9,
+             allow_tripcodes=?10, edit_window_secs=?11, allow_editing=?12,
+             allow_archive=?13, allow_video_embeds=?14, allow_captcha=?15,
+             post_cooldown_secs=?16
+             WHERE id=?17",
             params![
                 name,
                 description,
@@ -302,6 +293,7 @@ pub fn update_board_settings(
                 i32::from(allow_images),
                 i32::from(allow_video),
                 i32::from(allow_audio),
+                i32::from(allow_any_files),
                 i32::from(allow_tripcodes),
                 edit_window_secs,
                 i32::from(allow_editing),
@@ -322,7 +314,7 @@ pub fn update_board_settings(
 /// Returns how many seconds have elapsed since `ip_hash` last posted on `board_id`.
 /// Returns None if they have never posted on this board.
 ///
-/// FIX[MED-10]: Switched to `prepare_cached` — this is on the hot path (called
+/// Switched to `prepare_cached` — this is on the hot path (called
 /// for every post submission when a cooldown is configured).
 ///
 /// Note: `unixepoch()` requires `SQLite` ≥ 3.38.0 (2022-02-22).
@@ -347,15 +339,15 @@ pub fn get_seconds_since_last_post(
 
 /// Delete a board and return on-disk paths that are now safe to remove.
 ///
-/// FIX[MED-6]: Wrapped the entire operation in a transaction. Previously,
+/// Wrapped the entire operation in a transaction. Previously,
 /// file paths were collected before the CASCADE DELETE with no transaction
 /// guard, so a concurrent insert could race between the SELECT and the DELETE.
 ///
-/// FIX[MED-7]: Replaced the three-way join (posts → threads → boards) with a
+/// Replaced the three-way join (posts → threads → boards) with a
 /// direct query on `posts.board_id`. Posts already carry `board_id` so the threads
 /// join was both unnecessary and could hide orphaned posts.
 ///
-/// FIX[MED-8]: Added an affected-rows check so callers see an error when
+/// Added an affected-rows check so callers see an error when
 /// trying to delete a board that doesn't exist.
 ///
 /// # Errors
@@ -423,7 +415,7 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>>
 
 /// Per-board thread and post counts for the terminal stats display.
 pub fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64)> {
-    // FIX[High-11]: Replace N+1 correlated subqueries (2 subqueries × boards)
+    // Replace N+1 correlated subqueries (2 subqueries × boards)
     // with a single LEFT JOIN … GROUP BY pass. For a forum with 20 boards the
     // old query executed 41 SQL statements; this executes 1.
     let Ok(mut stmt) = conn.prepare(
@@ -453,11 +445,11 @@ pub fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64
 
 /// Gather aggregate site-wide statistics for the home page.
 ///
-/// FIX[HIGH-2]: Previously issued five separate full-table scans (one COUNT(*)
+/// Previously issued five separate full-table scans (one COUNT(*)
 /// overall, three filtered COUNTs by `media_type`, one SUM). All five are now
 /// computed in a single aggregate pass over the posts table.
 ///
-/// FIX[HIGH-3]: `active_bytes` now sums both `file_size` and `audio_file_size` so
+/// `active_bytes` now sums both `file_size` and `audio_file_size` so
 /// image+audio combo posts are fully accounted for. The previous query only
 /// summed `file_size` and silently under-reported disk usage.
 ///

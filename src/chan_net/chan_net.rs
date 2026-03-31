@@ -203,7 +203,6 @@ pub fn insert_reply_into_thread(
     // Mirror the normal post-creation path: advance bumped_at and increment
     // reply_count. This call is not co-transactional with the INSERT above
     // (same documented limitation as the main post-creation path in threads.rs
-    // MED-6). A crash between the two statements leaves reply_count one behind,
     // which is an advisory counter — not a data integrity failure.
     conn.execute(
         "UPDATE threads
