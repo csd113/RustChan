@@ -47,6 +47,35 @@ pub fn init_pool() -> Result<DbPool> {
     Ok(pool)
 }
 
+#[cfg(test)]
+/// Build an isolated in-memory `SQLite` pool with the full schema installed.
+///
+/// # Errors
+/// Returns an error if the temporary pool cannot be created or initialised.
+pub fn init_test_pool() -> Result<DbPool> {
+    let manager = SqliteConnectionManager::memory().with_init(|conn| {
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;
+             PRAGMA cache_size = -32000;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA mmap_size = 67108864;
+             PRAGMA busy_timeout = 10000;",
+        )
+    });
+
+    let pool = Pool::builder()
+        .max_size(4)
+        .connection_timeout(std::time::Duration::from_secs(5))
+        .build(manager)
+        .context("Failed to build test database pool")?;
+
+    let conn = pool.get().context("Failed to get test DB connection")?;
+    create_schema(&conn)?;
+    Ok(pool)
+}
+
 /// Emit first-run operator guidance when the site has not been configured yet.
 ///
 /// # Errors

@@ -9,7 +9,7 @@ use crate::{
     config::CONFIG,
     db::{self},
     error::{AppError, Result},
-    handlers::{board::ensure_csrf, parse_post_multipart, posting},
+    handlers::{board::ensure_csrf, parse_post_multipart, posting, render},
     middleware::{validate_csrf, AppState},
     utils::crypto::{hash_ip, verify_pow},
 };
@@ -35,53 +35,30 @@ pub async fn view_thread(
 
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let csrf_clone = csrf.clone();
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
         move || -> Result<(String, String, bool)> {
             let conn = pool.get()?;
-
-            let is_admin = jar_session
-                .as_deref()
-                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
-
-            let board = db::get_board_by_short(&conn, &board_short)?
-                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-
-            let thread = db::get_thread(&conn, thread_id)?
-                .ok_or_else(|| AppError::NotFound(format!("Thread {thread_id} not found")))?;
-
-            if thread.board_id != board.id {
-                return Err(AppError::NotFound("Thread not found in this board.".into()));
-            }
+            let page_data = render::load_thread_page_data(
+                &conn,
+                &board_short,
+                thread_id,
+                &client_ip,
+                jar_session.as_deref(),
+                &crate::config::CONFIG.cookie_secret,
+            )?;
 
             // ETag derived from the thread's last-bump timestamp, the current
             // board-list version, and whether the viewer is an admin.  Including
             // admin status prevents a browser from serving a cached non-admin
             // page (without delete controls) to a user who has since logged in.
             let boards_ver = crate::templates::live_boards_version();
-            let admin_tag = if is_admin { "-a" } else { "" };
-            let etag = format!("\"{}-b{boards_ver}{admin_tag}\"", thread.bumped_at);
-
-            let posts = db::get_posts_for_thread(&conn, thread_id)?;
-            let all_boards = db::get_all_boards(&conn)?;
-
-            let ip_hash =
-                crate::utils::crypto::hash_ip(&client_ip, &crate::config::CONFIG.cookie_secret);
-            let thread_poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)?;
-
-            let collapse_greentext = db::get_collapse_greentext(&conn);
-            let html = crate::templates::thread_page(
-                &board,
-                &thread,
-                &posts,
-                &csrf_clone,
-                &all_boards,
-                is_admin,
-                thread_poll.as_ref(),
-                None,
-                collapse_greentext,
+            let admin_tag = if page_data.is_admin { "-a" } else { "" };
+            let etag = format!(
+                "\"{}-b{boards_ver}{admin_tag}\"",
+                page_data.thread.bumped_at
             );
-            Ok((etag, html, is_admin))
+            let html = render::render_thread_page(&page_data, &csrf, None);
+            Ok((etag, html, page_data.is_admin))
         }
     })
     .await
@@ -301,29 +278,18 @@ pub async fn post_reply(
             let db_pool = state.db.clone();
             let html = tokio::task::spawn_blocking(move || -> Result<String> {
                 let conn = db_pool.get()?;
-                let is_admin = admin_session_err
-                    .as_deref()
-                    .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
-                let board = db::get_board_by_short(&conn, &board_short_err)?.ok_or_else(|| {
-                    AppError::NotFound(format!("Board /{board_short_err}/ not found"))
-                })?;
-                let thread = db::get_thread(&conn, thread_id)?
-                    .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
-                let posts = db::get_posts_for_thread(&conn, thread_id)?;
-                let all_boards = db::get_all_boards(&conn)?;
-                let ip_hash = hash_ip(&client_ip_err, &CONFIG.cookie_secret);
-                let poll = db::get_poll_for_thread(&conn, thread_id, &ip_hash)?;
-                let collapse_greentext = db::get_collapse_greentext(&conn);
-                Ok(crate::templates::thread_page(
-                    &board,
-                    &thread,
-                    &posts,
+                let page_data = render::load_thread_page_data(
+                    &conn,
+                    &board_short_err,
+                    thread_id,
+                    &client_ip_err,
+                    admin_session_err.as_deref(),
+                    &CONFIG.cookie_secret,
+                )?;
+                Ok(render::render_thread_page(
+                    &page_data,
                     &csrf_for_error,
-                    &all_boards,
-                    is_admin,
-                    poll.as_ref(),
                     Some(&msg),
-                    collapse_greentext,
                 ))
             })
             .await
@@ -388,14 +354,14 @@ pub async fn edit_post_get(
                 }
             }
 
-            let all_boards = db::get_all_boards(&conn)?;
-            let collapse_greentext = db::get_collapse_greentext(&conn);
+            let all_boards = crate::templates::live_boards();
+            let collapse_greentext = crate::templates::live_collapse_greentext();
 
             Ok(crate::templates::edit_post_page(
                 &board,
                 &post,
                 &csrf,
-                &all_boards,
+                all_boards.as_slice(),
                 &prefill_token,
                 None,
                 collapse_greentext,
@@ -490,8 +456,8 @@ pub async fn edit_post_post(
             // enforced; we only distinguish "window closed" vs "wrong token" when a
             // window is actually configured.
             if !success {
-                let all_boards = db::get_all_boards(&conn)?;
-                let collapse_greentext = db::get_collapse_greentext(&conn);
+                let all_boards = crate::templates::live_boards();
+                let collapse_greentext = crate::templates::live_collapse_greentext();
                 let err_msg = if board.edit_window_secs > 0 {
                     let now = chrono::Utc::now().timestamp();
                     if now - post.created_at > board.edit_window_secs {
@@ -506,7 +472,7 @@ pub async fn edit_post_post(
                     &board,
                     &post,
                     &csrf_clone,
-                    &all_boards,
+                    all_boards.as_slice(),
                     &token,
                     Some(err_msg),
                     collapse_greentext,
@@ -626,13 +592,24 @@ pub struct UpdatesQuery {
     since: i64,
 }
 
+#[derive(serde::Serialize)]
+struct ThreadUpdatesPayload {
+    html: String,
+    last_id: i64,
+    count: usize,
+    reply_count: i64,
+    bump_time: i64,
+    locked: bool,
+    sticky: bool,
+    boards_version: u64,
+    nav_html: String,
+}
+
 pub async fn thread_updates(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
     Query(params): Query<UpdatesQuery>,
 ) -> Result<Response> {
-    use axum::http::header;
-
     let since = params.since;
 
     let (html, last_id, count, reply_count, bump_time, locked, sticky) =
@@ -688,39 +665,121 @@ pub async fn thread_updates(
     // Current board-list version + rendered nav links — lets the JS refresh
     // the nav bar when boards are added or deleted while a thread is open,
     // without requiring a full page reload.
-    let boards_version = crate::templates::live_boards_version();
-    let boards = crate::templates::live_boards_snapshot();
-    let nav_inner: String = boards
-        .iter()
-        .map(|b| {
-            format!(
-                r#"<a href="/{s}/catalog">{s}</a>"#,
-                s = crate::utils::sanitize::escape_html(&b.short_name)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" / ");
-    let nav_html = if nav_inner.is_empty() {
-        String::new()
-    } else {
-        format!("[ {nav_inner} ]")
+    let (boards_version, nav_html) = crate::templates::live_board_nav();
+    let payload = ThreadUpdatesPayload {
+        html,
+        last_id,
+        count,
+        reply_count,
+        bump_time,
+        locked,
+        sticky,
+        boards_version,
+        nav_html: nav_html.as_ref().to_string(),
     };
 
-    // Build a JSON envelope with new-post HTML plus current thread state.
-    // boards_version / nav_html let the client keep the nav bar in sync when
-    // boards are added or deleted while the user has a thread open.
-    let json = format!(
-        r#"{{"html":{html_json},"last_id":{last_id},"count":{count},"reply_count":{reply_count},"bump_time":{bump_time},"locked":{locked},"sticky":{sticky},"boards_version":{boards_version},"nav_html":{nav_html_json}}}"#,
-        html_json = serde_json::to_string(&html).unwrap_or_else(|_| "\"\"".to_string()),
-        last_id = last_id,
-        count = count,
-        reply_count = reply_count,
-        bump_time = bump_time,
-        locked = locked,
-        sticky = sticky,
-        boards_version = boards_version,
-        nav_html_json = serde_json::to_string(&nav_html).unwrap_or_else(|_| "\"\"".to_string()),
-    );
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&payload)
+            .map_err(|error| crate::error::AppError::Internal(anyhow::anyhow!(error)))?,
+    )
+        .into_response())
+}
 
-    Ok(([(header::CONTENT_TYPE, "application/json")], json).into_response())
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+        routing::post,
+        Router,
+    };
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn post_reply_persists_quote_markup() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/{board}", post(crate::handlers::board::create_thread))
+            .route("/{board}/thread/{id}", post(super::post_reply))
+            .with_state(state.clone());
+
+        let (create_boundary, create_body) =
+            crate::test_support::multipart_body(&[("_csrf", "csrf123"), ("body", "op body")], None);
+        let create_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/test")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={create_boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(create_body))
+                    .expect("create request"),
+            )
+            .await
+            .expect("create response");
+        assert_eq!(create_response.status(), StatusCode::SEE_OTHER);
+
+        let (thread_id, op_post_id) = {
+            let conn = state.db.get().expect("db connection");
+            let thread_id = conn
+                .query_row("SELECT id FROM threads LIMIT 1", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("thread id");
+            let op_post_id = conn
+                .query_row(
+                    "SELECT id FROM posts WHERE thread_id = ?1 AND is_op = 1",
+                    rusqlite::params![thread_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("op post id");
+            (thread_id, op_post_id)
+        };
+
+        let quoted_body = format!(">>{op_post_id}\nreply body");
+        let (reply_boundary, reply_body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", &quoted_body)],
+            None,
+        );
+        let reply_response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/test/thread/{thread_id}"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={reply_boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(reply_body))
+                    .expect("reply request"),
+            )
+            .await
+            .expect("reply response");
+        assert_eq!(reply_response.status(), StatusCode::SEE_OTHER);
+
+        let reply_html = {
+            let conn = state.db.get().expect("db connection");
+            conn.query_row(
+                "SELECT body_html FROM posts WHERE thread_id = ?1 AND is_op = 0 ORDER BY id DESC LIMIT 1",
+                rusqlite::params![thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("reply body html")
+        };
+        assert!(reply_html.contains("class=\"quotelink\""));
+        assert!(reply_html.contains(&format!("data-pid=\"{op_post_id}\"")));
+    }
 }

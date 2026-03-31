@@ -6,6 +6,8 @@ use tracing::Instrument as _;
 
 use super::{ScopedDecrement, ACTIVE_IPS, ACTIVE_UPLOADS, IN_FLIGHT, REQUEST_COUNT};
 
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
 pub(super) async fn track_requests(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -14,9 +16,11 @@ pub(super) async fn track_requests(
     IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
     let _in_flight_guard = ScopedDecrement(&IN_FLIGHT);
 
-    let req_id = uuid::Uuid::new_v4();
+    let req_id = uuid::Uuid::new_v4().to_string();
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
+    let mut req = req;
+    req.extensions_mut().insert(req_id.clone());
     let span = tracing::info_span!(
         "request",
         req_id = %req_id,
@@ -46,7 +50,11 @@ pub(super) async fn track_requests(
         ScopedDecrement(&ACTIVE_UPLOADS)
     });
 
-    next.run(req).instrument(span).await
+    let mut response = next.run(req).instrument(span).await;
+    if let Ok(value) = axum::http::HeaderValue::from_str(&req_id) {
+        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    response
 }
 
 pub(super) async fn shutdown_signal() {

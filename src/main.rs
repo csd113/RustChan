@@ -36,6 +36,8 @@ mod models;
 mod pending_fs;
 mod server;
 mod templates;
+#[cfg(test)]
+mod test_support;
 pub(crate) mod tls;
 mod utils;
 mod workers;

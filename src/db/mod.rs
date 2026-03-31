@@ -18,6 +18,9 @@ mod types;
 pub use pool::{first_run_check, has_no_admin, init_pool};
 pub use types::{CachedFile, DbPool, NewPost};
 
+#[cfg(test)]
+pub use pool::init_test_pool;
+
 pub use admin::*;
 pub use boards::*;
 pub use fs_ops::*;

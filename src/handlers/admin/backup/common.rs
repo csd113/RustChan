@@ -11,6 +11,19 @@ use tracing::warn;
 pub(super) const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub(super) const BOARD_MANIFEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
+pub(super) fn validate_board_short_name(short_name: &str) -> Result<()> {
+    let valid = !short_name.is_empty()
+        && short_name.len() <= 8
+        && short_name.bytes().all(|byte| byte.is_ascii_alphanumeric());
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "Invalid board short name in backup manifest.".into(),
+        ))
+    }
+}
+
 #[allow(clippy::arithmetic_side_effects)]
 pub(super) fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> String {
     if pairs.is_empty() {
@@ -177,4 +190,44 @@ pub(super) fn db_dir() -> PathBuf {
     PathBuf::from(&CONFIG.database_path)
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_uploads_to_dir, validate_board_short_name};
+
+    #[test]
+    fn validate_board_short_name_rejects_path_traversal() {
+        assert!(validate_board_short_name("test").is_ok());
+        assert!(validate_board_short_name("../bad").is_err());
+        assert!(validate_board_short_name("waytoolong").is_err());
+    }
+
+    #[test]
+    fn extract_uploads_to_dir_skips_suspicious_entries() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("uploads.zip");
+        {
+            let file = std::fs::File::create(&zip_path).expect("zip file");
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("uploads/test/ok.txt", options)
+                .expect("start valid file");
+            std::io::Write::write_all(&mut zip, b"ok").expect("write valid file");
+            zip.start_file("uploads/../../escape.txt", options)
+                .expect("start invalid file");
+            std::io::Write::write_all(&mut zip, b"bad").expect("write invalid file");
+            zip.finish().expect("finish zip");
+        }
+
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let dest = temp_dir.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("dest dir");
+
+        extract_uploads_to_dir(&mut archive, &dest).expect("extract uploads");
+
+        assert!(dest.join("test/ok.txt").exists());
+        assert!(!dest.join("escape.txt").exists());
+    }
 }

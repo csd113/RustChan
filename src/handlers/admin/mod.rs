@@ -39,7 +39,7 @@ use crate::{
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, Uri},
-    response::Html,
+    response::{Html, Redirect},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
@@ -117,12 +117,56 @@ fn require_same_origin_request(headers: &HeaderMap) -> Result<()> {
     }
 }
 
+fn encode_query_component(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            b' ' => encoded.push_str("%20"),
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+    }
+    encoded
+}
+
+fn admin_panel_redirect_with_status(
+    message: &str,
+    is_error: bool,
+    anchor: Option<&str>,
+) -> Redirect {
+    let key = if is_error { "flash_error" } else { "flash" };
+    let mut url = format!("/admin/panel?{key}={}", encode_query_component(message));
+    if let Some(anchor) = anchor.filter(|value| !value.is_empty()) {
+        url.push('#');
+        url.push_str(anchor);
+    }
+    Redirect::to(&url)
+}
+
+pub(super) fn admin_panel_redirect(message: &str) -> Redirect {
+    admin_panel_redirect_with_status(message, false, None)
+}
+
+pub(super) fn admin_panel_redirect_anchor(message: &str, anchor: &str) -> Redirect {
+    admin_panel_redirect_with_status(message, false, Some(anchor))
+}
+
 // ─── GET /admin/panel ─────────────────────────────────────────────────────────
 
 /// Query params accepted by GET /admin/panel.
 /// All fields are optional — missing = no flash message.
 #[derive(Deserialize, Default)]
 pub struct AdminPanelQuery {
+    pub flash: Option<String>,
+    pub flash_error: Option<String>,
+    pub backup_created: Option<String>,
+    pub backup_deleted: Option<String>,
+    pub restored: Option<String>,
     /// Set by `board_restore` on success: the `short_name` of the restored board.
     pub board_restored: Option<String>,
     /// Set by `board_restore` / `restore_saved_board_backup` on failure.
@@ -142,10 +186,20 @@ pub async fn admin_panel(
     let csrf_clone = csrf.clone();
 
     // Build the flash message from query params before entering spawn_blocking.
-    let flash: Option<(bool, String)> = if let Some(err) = params.restore_error {
+    let flash: Option<(bool, String)> = if let Some(err) = params.flash_error {
+        Some((true, err))
+    } else if let Some(msg) = params.flash {
+        Some((false, msg))
+    } else if let Some(err) = params.restore_error {
         Some((true, format!("Restore failed: {err}")))
     } else if let Some(board) = params.board_restored {
         Some((false, format!("Board /{board}/ restored successfully.")))
+    } else if params.backup_created.is_some() {
+        Some((false, "Backup saved on the server.".to_string()))
+    } else if params.backup_deleted.is_some() {
+        Some((false, "Backup deleted.".to_string()))
+    } else if params.restored.is_some() {
+        Some((false, "Restore completed successfully.".to_string()))
     } else if params.settings_saved.is_some() {
         Some((false, "Site settings saved.".to_string()))
     } else {

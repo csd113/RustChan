@@ -56,6 +56,7 @@ pub async fn create_board(
     if short.is_empty() {
         return Err(AppError::BadRequest("Invalid board name.".into()));
     }
+    let short_for_flash = short.clone();
 
     let nsfw = form.nsfw.as_deref() == Some("1");
     let name = form.name.trim().chars().take(64).collect::<String>();
@@ -82,7 +83,7 @@ pub async fn create_board(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to("/admin/panel").into_response())
+    Ok(super::admin_panel_redirect(&format!("Board /{short_for_flash}/ created.")).into_response())
 }
 
 // ─── POST /admin/board/delete ─────────────────────────────────────────────────
@@ -151,7 +152,7 @@ pub async fn delete_board(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to("/admin/panel").into_response())
+    Ok(super::admin_panel_redirect("Board deleted.").into_response())
 }
 
 // ─── POST /admin/thread/action ────────────────────────────────────────────────

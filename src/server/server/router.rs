@@ -91,3 +91,60 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
         ))
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::build_router;
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn health_endpoints_emit_request_id_and_metrics() {
+        let router = build_router(crate::test_support::app_state(), false);
+
+        let health = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("health response");
+        assert_eq!(health.status(), StatusCode::OK);
+        assert!(health.headers().contains_key("x-request-id"));
+
+        let ready = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("ready response");
+        assert_eq!(ready.status(), StatusCode::OK);
+
+        let metrics = router
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics.status(), StatusCode::OK);
+        let body = to_bytes(metrics.into_body(), usize::MAX)
+            .await
+            .expect("metrics body");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 metrics");
+        assert!(body.contains("rustchan_requests_total"));
+        assert!(body.contains("rustchan_job_queue_pending"));
+    }
+}

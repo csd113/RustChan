@@ -25,12 +25,8 @@ fn now_secs() -> u64 {
 
 #[allow(clippy::arithmetic_side_effects)]
 pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
-    if req.method() != axum::http::Method::GET {
-        return next.run(req).await;
-    }
-
     let path = req.uri().path();
-    if path.starts_with("/static/") || path.starts_with("/boards/") || path.starts_with("/api/") {
+    if path.starts_with("/static/") || path.starts_with("/boards/") {
         return next.run(req).await;
     }
 

@@ -8,17 +8,34 @@ All notable changes to RustChan will be documented in this file.
 
 ### Fixed
 
-- Critical: proxy-aware client IP extraction now trusts the leftmost `X-Forwarded-For` hop, restoring correct rate-limit and moderation identity behind reverse proxies.
+- Critical: proxy-aware client IP extraction now ignores `X-Real-IP` and `X-Forwarded-For` unless the TCP peer is a trusted local/private proxy, preventing direct clients from spoofing bans, cooldowns, login lockouts, and other IP-based controls.
+- High: the global request rate limiter now covers mutating requests and the previously unthrottled public update/preview endpoints, closing an easy unauthenticated DoS path.
+- High: board-index preview loading now batches reply previews for the whole page instead of issuing one extra query per thread, which removes an N+1 pattern from both normal renders and inline error rerenders.
+- High: board search now uses a maintained SQLite FTS5 index instead of repeated `%LIKE%` scans across post bodies, keeping search and pagination responsive as post volume grows.
+- High: full-site and board restore flows now roll the database back to a pre-restore snapshot if the upload-tree swap fails, avoiding partially restored live state.
+- High: board restore now validates backup-manifest board slugs before using them in filesystem paths or board records, blocking restore-time path traversal.
+- Medium: ban appeals are now filed under a single `BEGIN IMMEDIATE` transaction, which closes the duplicate-appeal race between the 24-hour spam check and the insert.
 - High: direct HTTPS deployments now default admin and CSRF cookies to `Secure`, validate HTTP→HTTPS redirect hosts more defensively, and emit HSTS correctly for direct TLS listeners.
 - High: thread creation, poll creation, reply posting, and video-transcode DB rewrites are now transactional, preventing orphaned uploads, stale dedup rows, and broken file references on partial failures.
 - Medium: ChanNet gateway replies now update thread counters transactionally, and the durable import ledger survives restarts.
 - Medium: file-deletion safety checks now propagate database failures instead of silently returning partial results.
+- Medium: thread auto-update responses now use a typed payload and cached board-nav fragments, reducing repeated string rebuilding on active threads.
+- Medium: background job queue capacity is now enforced from an in-memory pending gauge instead of a fresh DB count on every enqueue, lowering write-path contention under posting bursts.
+- Medium: the server now exposes `/healthz`, `/readyz`, and `/metrics`, and every HTTP response carries an `X-Request-ID` header so operators can correlate incidents across logs, backups, workers, and Tor state more reliably.
+- Low: upstream API and TLS failures now render generic user-facing messages while keeping full details in the logs, reducing accidental backend detail leakage.
+- Low: boards with uploads fully disabled now hide the file picker and show a clear explanatory message instead of inviting avoidable 4xx errors.
+- Low: admin panel mutations now redirect back with consistent flash feedback for common board, backup, ban, filter, appeal, and report actions.
+- Low: failed admin-login logs now redact attacker-controlled usernames instead of writing the raw submitted value.
 
 ### Refactors
 
 - Split schema creation into table/index helpers and broke admin route registration into smaller subrouters.
+- Split board/thread page hydration into shared render helpers so full renders and inline error rerenders reuse the same loading path.
+- Moved backup creation handlers into a dedicated backup submodule and extracted config-template and sanitize-formatting helpers to shrink several hotspot files.
 - Reworked upload storage into smaller planning and persistence helpers, added rollback support for newly written files, and removed leftover refactor shims and dead wrappers.
 - Unified board-aware upload accept/hint generation across new-thread and reply forms.
+- Removed duplicate admin backup route registration and promoted board list plus greentext-collapse settings to the live in-memory cache used by page renders.
+- Added an in-memory test harness for handler and router tests so route-level coverage can exercise real CSRF, multipart, DB, and admin-session flows without touching the configured production database.
 
 ### Security Improvements
 
