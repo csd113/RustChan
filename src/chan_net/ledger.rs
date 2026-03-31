@@ -8,26 +8,25 @@
 use std::collections::HashSet;
 use uuid::Uuid;
 
-// TODO: TxLedger is in-memory only. A server restart clears seen tx_ids,
-// allowing a re-import of the same snapshot. DB persistence is a future extension.
-// The unique DB index on chan_net_posts provides a DB-level deduplication
-// safety net regardless of ledger state.
+#[derive(Default)]
 pub struct TxLedger {
     seen: HashSet<Uuid>,
 }
 
 impl TxLedger {
-    pub fn new() -> Self {
-        Self {
-            seen: HashSet::new(),
-        }
-    }
-
     pub fn contains(&self, id: &Uuid) -> bool {
         self.seen.contains(id)
     }
 
     pub fn insert(&mut self, id: Uuid) {
         self.seen.insert(id);
+    }
+}
+
+impl FromIterator<Uuid> for TxLedger {
+    fn from_iter<T: IntoIterator<Item = Uuid>>(iter: T) -> Self {
+        Self {
+            seen: iter.into_iter().collect(),
+        }
     }
 }

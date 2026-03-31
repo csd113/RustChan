@@ -261,16 +261,20 @@ pub async fn post_reply(
                 deletion_token,
                 false,
             );
-            let post_id = db::create_post(&conn, &new_post)?;
-
-            if should_bump {
-                db::bump_thread(&conn, thread_id)?;
-            } else {
-                conn.execute(
-                    "UPDATE threads SET reply_count = reply_count + 1 WHERE id = ?1",
-                    rusqlite::params![thread_id],
-                )?;
-            }
+            let pending_upload_op = posting::build_pending_upload_op(&uploads)?;
+            let post_id = match db::create_reply_with_thread_update(
+                &conn,
+                &new_post,
+                should_bump,
+                pending_upload_op.as_ref(),
+            ) {
+                Ok(post_id) => post_id,
+                Err(error) => {
+                    uploads.rollback_new_files(&conn, &upload_dir)?;
+                    return Err(error.into());
+                }
+            };
+            posting::finalize_pending_uploads(&conn, &upload_dir, &uploads);
 
             crate::handlers::enqueue_post_jobs(
                 &job_queue,

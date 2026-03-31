@@ -22,6 +22,12 @@ use crate::models::Thread;
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 
+pub struct PollInsert<'a> {
+    pub question: &'a str,
+    pub options: &'a [String],
+    pub expires_at: i64,
+}
+
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
 /// Map a thread row. Column layout (must match every SELECT that calls this):
@@ -173,35 +179,26 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
 
 // ─── Thread creation (atomic with OP post) ────────────────────────────────────
 
-/// Create a thread AND its OP post atomically in a single transaction.
-///
-/// The invariant guaranteed here: every thread row has exactly one corresponding
-/// post with `is_op=1`. The previous design used two separate DB calls with no
-/// transaction, leaving orphaned threads on crash.
-///
-/// Replaced the raw `conn.execute("BEGIN IMMEDIATE", [])?` /
-/// `conn.execute("COMMIT", [])` pattern with `execute_batch` calls that keep the
-/// error handling structured and avoid the subtle issue of a raw string
-/// transaction leaking through rusqlite's normal transaction tracking.
-///
-/// Returns (`thread_id`, `post_id`).
+/// Create a thread, its OP post, and an optional poll atomically.
 ///
 /// # Errors
-/// Returns an error if the database operation fails.
-pub fn create_thread_with_op(
+/// Returns an error if any insert in the bundle fails.
+pub fn create_thread_with_optional_poll(
     conn: &rusqlite::Connection,
     board_id: i64,
     subject: Option<&str>,
     post: &super::NewPost,
-) -> Result<(i64, i64)> {
+    poll: Option<&PollInsert<'_>>,
+    pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
+) -> Result<(i64, i64, Option<i64>)> {
     // BEGIN IMMEDIATE acquires the write lock upfront to avoid SQLITE_BUSY
     // during the lock-upgrade step that DEFERRED transactions perform on first
     // write. With &Connection (not &mut Connection) we cannot use rusqlite's
     // typed Transaction::new(Immediate), so we issue the pragma directly.
     conn.execute_batch("BEGIN IMMEDIATE")
-        .context("Failed to begin IMMEDIATE transaction for create_thread_with_op")?;
+        .context("Failed to begin IMMEDIATE transaction for create_thread_with_optional_poll")?;
 
-    let result: Result<(i64, i64)> = (|| {
+    let result: Result<(i64, i64, Option<i64>)> = (|| {
         let thread_id: i64 = conn.query_row(
             "INSERT INTO threads (board_id, subject) VALUES (?1, ?2) RETURNING id",
             params![board_id, subject],
@@ -216,14 +213,29 @@ pub fn create_thread_with_op(
             ..post.clone()
         };
         let post_id = super::posts::create_post_inner(conn, &post_with_thread)?;
+        let poll_id = poll
+            .map(|poll_insert| {
+                super::posts::create_poll_inner(
+                    conn,
+                    thread_id,
+                    poll_insert.question,
+                    poll_insert.options,
+                    poll_insert.expires_at,
+                )
+            })
+            .transpose()?;
 
-        Ok((thread_id, post_id))
+        if let Some(op) = pending_fs_op {
+            super::insert_pending_fs_op(conn, op)?;
+        }
+
+        Ok((thread_id, post_id, poll_id))
     })();
 
     match result {
         Ok(ids) => {
             conn.execute_batch("COMMIT")
-                .context("Failed to commit create_thread_with_op transaction")?;
+                .context("Failed to commit create_thread_with_optional_poll transaction")?;
             Ok(ids)
         }
         Err(e) => {
@@ -235,25 +247,52 @@ pub fn create_thread_with_op(
 
 // ─── Thread mutation ──────────────────────────────────────────────────────────
 
-/// Bump a thread's `bumped_at` timestamp and increment `reply_count`.
-///
-/// Note (): `bump_thread` is called from the route handler after
-/// `create_post` returns, not inside the same transaction as the post insert.
-/// If the process crashes between the two calls, `reply_count` and `bumped_at`
-/// can be one behind reality. A full fix would require moving `bump_thread`
-/// into `create_post_inner`, which would change the API surface. Accepted as
-/// a known minor inconsistency; the `reply_count` column is advisory and a
-/// board reload corrects the displayed count.
+/// Insert a reply and update thread counters in one transaction.
 ///
 /// # Errors
-/// Returns an error if the database operation fails.
-pub fn bump_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE threads SET bumped_at = unixepoch(), reply_count = reply_count + 1
-         WHERE id = ?1",
-        params![thread_id],
-    )?;
-    Ok(())
+/// Returns an error if the reply insert or thread metadata update fails.
+pub fn create_reply_with_thread_update(
+    conn: &rusqlite::Connection,
+    post: &super::NewPost,
+    should_bump: bool,
+    pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
+) -> Result<i64> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin create_reply_with_thread_update transaction")?;
+
+    let result: Result<i64> = (|| {
+        let post_id = super::posts::create_post_inner(conn, post)?;
+        if should_bump {
+            conn.execute(
+                "UPDATE threads
+                 SET bumped_at = unixepoch(),
+                     reply_count = reply_count + 1
+                 WHERE id = ?1",
+                params![post.thread_id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE threads SET reply_count = reply_count + 1 WHERE id = ?1",
+                params![post.thread_id],
+            )?;
+        }
+        if let Some(op) = pending_fs_op {
+            super::insert_pending_fs_op(conn, op)?;
+        }
+        Ok(post_id)
+    })();
+
+    match result {
+        Ok(post_id) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit create_reply_with_thread_update transaction")?;
+            Ok(post_id)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 /// # Errors
@@ -337,7 +376,7 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
         // Step 3: determine which paths are now unreferenced.
         // paths_safe_to_delete sees the post-delete state because we're still
         // inside the same transaction.
-        let safe = super::paths_safe_to_delete(conn, candidates);
+        let safe = super::paths_safe_to_delete(conn, candidates)?;
         Ok(safe)
     })();
 
@@ -504,7 +543,7 @@ pub fn prune_old_threads(
 
         // Determine safe paths INSIDE the transaction so the check sees the
         // post-delete state before any concurrent writer can insert new references.
-        let safe = super::paths_safe_to_delete(conn, candidates);
+        let safe = super::paths_safe_to_delete(conn, candidates)?;
         Ok(safe)
     })();
 

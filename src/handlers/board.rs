@@ -310,26 +310,43 @@ pub async fn create_thread(
                 deletion_token,
                 true,
             );
-            let (thread_id, post_id) =
-                db::create_thread_with_op(&conn, board.id, subject.as_deref(), &new_post)?;
-
-            // Create poll if question + at least 2 options were supplied
             let q = poll_question.trim().to_string();
+            let pending_upload_op = posting::build_pending_upload_op(&uploads)?;
             let valid_opts: Vec<String> = poll_options
                 .iter()
                 .map(|o| o.trim().to_string())
                 .filter(|o| !o.is_empty())
                 .collect();
-            if !q.is_empty() && valid_opts.len() >= 2 {
+            let poll_insert = if !q.is_empty() && valid_opts.len() >= 2 {
                 let secs = poll_duration.ok_or_else(|| {
-                    AppError::BadRequest(
-                        "A duration is required when creating a poll.".into(),
-                    )
+                    AppError::BadRequest("A duration is required when creating a poll.".into())
                 })?;
                 let secs = secs.clamp(60, 30 * 24 * 3600); // clamp 1 min..30 days
                 let expires_at = chrono::Utc::now().timestamp().saturating_add(secs);
-                db::create_poll(&conn, thread_id, &q, &valid_opts, expires_at)?;
-            }
+                Some(db::threads::PollInsert {
+                    question: &q,
+                    options: &valid_opts,
+                    expires_at,
+                })
+            } else {
+                None
+            };
+            let create_result = db::create_thread_with_optional_poll(
+                &conn,
+                board.id,
+                subject.as_deref(),
+                &new_post,
+                poll_insert.as_ref(),
+                pending_upload_op.as_ref(),
+            );
+            let (thread_id, post_id, _) = match create_result {
+                Ok(ids) => ids,
+                Err(error) => {
+                    uploads.rollback_new_files(&conn, &upload_dir)?;
+                    return Err(error.into());
+                }
+            };
+            posting::finalize_pending_uploads(&conn, &upload_dir, &uploads);
 
             // ── Background jobs ───────────────────────────────────────────────
             // 1 & 2. Media post-processing + spam check (shared helper)

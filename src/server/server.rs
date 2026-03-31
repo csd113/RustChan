@@ -13,9 +13,12 @@
 //   • hsts_middleware         — HSTS header (HTTPS-only)
 //   • shutdown_signal()       — Ctrl-C / SIGTERM waiter
 
-use axum::http::header;
+use axum::{
+    http::header,
+    response::{IntoResponse, Redirect},
+};
 use dashmap::DashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -122,6 +125,15 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     let pool = crate::db::init_pool()?;
     crate::db::first_run_check(&pool)?;
+    {
+        let reconcile_pool = pool.clone();
+        let upload_dir = CONFIG.upload_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::pending_fs::reconcile_pending_fs_ops(&reconcile_pool, &upload_dir)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("pending_fs_ops reconciliation task failed: {error}"))??;
+    }
 
     // Check whether cookie_secret has changed since the last run (#19).
     // Must run after DB init so the site_settings table exists.
@@ -226,19 +238,23 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     let worker_handles =
         crate::workers::start_worker_pool(&worker_queue, ffmpeg_available, ffmpeg_vp9_available);
 
+    let chan_ledger = if chan_net {
+        let conn = pool.get()?;
+        let ledger = crate::db::chan_net::load_import_ledger(&conn)?
+            .into_iter()
+            .collect::<crate::chan_net::ledger::TxLedger>();
+        Some(std::sync::Arc::new(parking_lot::Mutex::new(ledger)))
+    } else {
+        None
+    };
+
     let state = AppState {
         db: pool.clone(),
         ffmpeg_available,
         ffmpeg_webp_available,
         job_queue: worker_queue,
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
-        chan_ledger: if chan_net {
-            Some(std::sync::Arc::new(parking_lot::Mutex::new(
-                std::collections::HashSet::<uuid::Uuid>::new(),
-            )))
-        } else {
-            None
-        },
+        chan_ledger,
         onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
     };
 
@@ -484,7 +500,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
-    let app = build_router(state.clone());
+    let app = build_router(state.clone(), false);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!(target: "server", addr = %bind_addr, "HTTP server listening");
     tracing::info!(target: "server", url = %format!("http://{bind_addr}/admin"), "Admin panel");
@@ -727,7 +743,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     if CONFIG.tls.enabled {
         let data_dir_tls = data_dir.clone();
         let cancel_tls = worker_cancel.clone();
-        let app_tls = build_router(state.clone());
+        let app_tls = build_router(state.clone(), true);
 
         let https_addr: std::net::SocketAddr = CONFIG
             .bind_addr_with_port(CONFIG.tls.port)
@@ -765,9 +781,21 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
             #[cfg(feature = "tls-acme")]
             Some(crate::tls::Acceptor::Acme(acme_acceptor, server_cfg)) => {
+                let https_tcp = tokio::net::TcpListener::bind(https_addr)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to bind HTTPS/ACME listener on {https_addr}: {e}")
+                    })?;
+
+                tracing::info!(target: "server", addr = %https_addr, "HTTPS/ACME server listening");
+                tracing::info!(
+                    target: "server",
+                    url = %format!("https://{https_addr}/admin"),
+                    "Admin panel (HTTPS/ACME)"
+                );
+
                 tokio::spawn(async move {
-                    run_https_acme(https_addr, acme_acceptor, server_cfg, app_tls, cancel_tls)
-                        .await;
+                    run_https_acme(https_tcp, acme_acceptor, server_cfg, app_tls, cancel_tls).await;
                 });
             }
 
@@ -792,8 +820,14 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             .map_err(|e| anyhow::anyhow!("invalid HTTP redirect bind address: {e}"))?;
         let https_port = CONFIG.tls.port;
         let cancel_redirect = worker_cancel.clone();
+        let http_listener = tokio::net::TcpListener::bind(http_addr)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to bind HTTP→HTTPS redirect listener on {http_addr}: {e}")
+            })?;
+        tracing::info!(target: "server", addr = %http_addr, "HTTP→HTTPS redirect listening");
         tokio::spawn(async move {
-            run_http_redirect(http_addr, https_port, cancel_redirect).await;
+            run_http_redirect(http_listener, https_port, cancel_redirect).await;
         });
     }
 
@@ -894,7 +928,7 @@ pub async fn run_https_static(
 // IP-banning and rate-limiting middleware in middleware/mod.rs continues to work.
 #[cfg(feature = "tls-acme")]
 pub async fn run_https_acme(
-    https_addr: std::net::SocketAddr,
+    listener: tokio::net::TcpListener,
     acme_acceptor: std::sync::Arc<rustls_acme::AcmeAcceptor>,
     server_cfg: std::sync::Arc<rustls::ServerConfig>,
     app: axum::Router,
@@ -903,20 +937,6 @@ pub async fn run_https_acme(
     use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
     use tower::Service as _;
-
-    let listener = match tokio::net::TcpListener::bind(https_addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(target: "server", error = %e, "Failed to bind HTTPS/ACME listener");
-            return;
-        }
-    };
-    tracing::info!(target: "server", addr = %https_addr, "HTTPS/ACME server listening");
-    tracing::info!(
-        target: "server",
-        url = %format!("https://{https_addr}/admin"),
-        "Admin panel (HTTPS/ACME)"
-    );
 
     loop {
         tokio::select! {
@@ -1000,46 +1020,128 @@ pub async fn run_https_acme(
 // Issues a 301 permanent redirect to the HTTPS equivalent of every request.
 // Only spawned when `tls.enabled = true` and `tls.redirect_http = true`.
 pub async fn run_http_redirect(
-    http_addr: std::net::SocketAddr,
+    listener: tokio::net::TcpListener,
     https_port: u16,
     cancel: tokio_util::sync::CancellationToken,
 ) {
-    use axum::{extract::Request, response::Redirect, routing::any};
+    use axum::{extract::Request, http::StatusCode, response::IntoResponse, routing::any};
 
     let redirect_app = axum::Router::new().route(
         "/{*path}",
         any(move |req: Request| async move {
-            let path = req
-                .uri()
-                .path_and_query()
-                .map_or("/", axum::http::uri::PathAndQuery::as_str);
-            let host = req
-                .headers()
-                .get(axum::http::header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|h| h.split(':').next())
-                .unwrap_or("localhost");
-            Redirect::permanent(&format!("https://{host}:{https_port}{path}"))
+            build_redirect_response(&req, https_port).unwrap_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Refusing HTTP redirect for untrusted host header",
+                )
+                    .into_response()
+            })
         }),
     );
-
-    let listener = match tokio::net::TcpListener::bind(http_addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(
-                target: "server",
-                error = %e,
-                "Failed to bind HTTP→HTTPS redirect listener"
-            );
-            return;
-        }
-    };
-    tracing::info!(target: "server", addr = %http_addr, "HTTP→HTTPS redirect listening");
 
     axum::serve(listener, redirect_app)
         .with_graceful_shutdown(async move { cancel.cancelled().await })
         .await
         .ok();
+}
+
+fn build_redirect_response(
+    req: &axum::extract::Request,
+    https_port: u16,
+) -> Option<axum::response::Response> {
+    let path = req
+        .uri()
+        .path_and_query()
+        .map_or("/", axum::http::uri::PathAndQuery::as_str);
+    let host = redirect_host(req)?;
+    Some(
+        Redirect::permanent(&format!(
+            "https://{}{path}",
+            format_redirect_authority(&host, https_port)
+        ))
+        .into_response(),
+    )
+}
+
+fn redirect_host(req: &axum::extract::Request) -> Option<String> {
+    let authority = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_authority_host);
+    let trusted_hosts = redirect_trusted_hosts();
+
+    if let Some(host) = authority.as_deref() {
+        if trusted_hosts
+            .iter()
+            .any(|trusted| trusted.eq_ignore_ascii_case(host))
+        {
+            return Some(host.to_string());
+        }
+
+        if trusted_hosts.is_empty() && is_local_redirect_host(host) {
+            return Some(host.to_string());
+        }
+    }
+
+    trusted_hosts.first().cloned()
+}
+
+fn redirect_trusted_hosts() -> Vec<String> {
+    let mut hosts = Vec::new();
+
+    if CONFIG.tls.acme.enabled {
+        hosts.extend(
+            CONFIG
+                .tls
+                .acme
+                .domains
+                .iter()
+                .filter(|domain| !domain.trim().is_empty())
+                .map(|domain| domain.trim().to_string()),
+        );
+    }
+
+    if let Some(bind_host) =
+        parse_bind_host(&CONFIG.bind_addr).filter(|host| !matches!(host.as_str(), "0.0.0.0" | "::"))
+    {
+        hosts.push(bind_host);
+    }
+
+    hosts.sort_unstable_by_key(|host| host.to_ascii_lowercase());
+    hosts.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    hosts
+}
+
+fn parse_bind_host(bind_addr: &str) -> Option<String> {
+    if let Some(rest) = bind_addr.strip_prefix('[') {
+        let (host, _) = rest.split_once("]:")?;
+        return Some(host.to_string());
+    }
+
+    bind_addr
+        .rsplit_once(':')
+        .map(|(host, _port)| host.to_string())
+}
+
+fn parse_authority_host(value: &str) -> Option<String> {
+    let authority = value.parse::<axum::http::uri::Authority>().ok()?;
+    Some(authority.host().to_string())
+}
+
+fn format_redirect_authority(host: &str, https_port: u16) -> String {
+    if host
+        .parse::<IpAddr>()
+        .is_ok_and(|address| matches!(address, IpAddr::V6(_)))
+    {
+        format!("[{host}]:{https_port}")
+    } else {
+        format!("{host}:{https_port}")
+    }
+}
+
+fn is_local_redirect_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok()
 }
 
 /// Inject the `Onion-Location` response header when the Tor hidden service is
@@ -1067,6 +1169,11 @@ async fn onion_location_middleware(
 
     // Read the onion address under a short-lived read lock before await.
     let maybe_addr = state.onion_address.read().await.clone();
+    let request_host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_authority_host);
 
     let mut resp = next.run(req).await;
 
@@ -1079,7 +1186,11 @@ async fn onion_location_middleware(
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.contains("text/html"));
 
-        if is_html {
+        let already_on_onion = request_host
+            .as_deref()
+            .is_some_and(|host| host.eq_ignore_ascii_case(&addr));
+
+        if is_html && !already_on_onion {
             if let Ok(val) = header::HeaderValue::from_str(&format!("http://{addr}")) {
                 resp.headers_mut()
                     .insert(header::HeaderName::from_static("onion-location"), val);
@@ -1088,4 +1199,36 @@ async fn onion_location_middleware(
     }
 
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_redirect_response, format_redirect_authority, redirect_host};
+    use axum::{body::Body, extract::Request, http::header};
+
+    fn request_with_host(host: &str) -> Request {
+        Request::builder()
+            .uri("/demo?x=1")
+            .header(header::HOST, host)
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    #[test]
+    fn redirect_rejects_untrusted_hosts_without_allowlist() {
+        let request = request_with_host("evil.example");
+        assert!(redirect_host(&request).is_none());
+        assert!(build_redirect_response(&request, 8443).is_none());
+    }
+
+    #[test]
+    fn redirect_allows_local_hosts_without_allowlist() {
+        let request = request_with_host("127.0.0.1");
+        assert_eq!(redirect_host(&request).as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn redirect_formats_ipv6_authorities_with_brackets() {
+        assert_eq!(format_redirect_authority("::1", 8443), "[::1]:8443");
+    }
 }

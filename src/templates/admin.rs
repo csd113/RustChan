@@ -88,7 +88,7 @@ pub fn admin_panel_page(
   <label><input type="checkbox" name="allow_tripcodes" value="1"{trip_ck}> Allow tripcodes</label>
   <label><input type="checkbox" name="allow_archive"   value="1"{archive_ck}> Enable archive</label>
   <label><input type="checkbox" name="allow_video_embeds" value="1"{embeds_ck}> Embed video links (YouTube / Invidious / Streamable)</label>
-  <label><input type="checkbox" name="allow_captcha"      value="1"{captcha_ck}> PoW CAPTCHA on new threads (hashcash, JS-solved)</label>
+  <label><input type="checkbox" name="allow_captcha"      value="1"{captcha_ck}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)</label>
   <label><input type="checkbox" name="allow_editing"   value="1"{edit_ck}>
     Allow post editing</label>
 </div>

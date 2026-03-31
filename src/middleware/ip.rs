@@ -3,6 +3,10 @@
 use crate::config::CONFIG;
 use axum::extract::Request;
 
+fn forwarded_client_ip(value: &str) -> Option<&str> {
+    value.split(',').map(str::trim).find(|ip| !ip.is_empty())
+}
+
 pub fn extract_ip(req: &Request) -> String {
     if CONFIG.behind_proxy {
         if let Some(real_ip) = req.headers().get("x-real-ip") {
@@ -16,11 +20,8 @@ pub fn extract_ip(req: &Request) -> String {
 
         if let Some(fwd) = req.headers().get("x-forwarded-for") {
             if let Ok(value) = fwd.to_str() {
-                if let Some(ip) = value.split(',').next_back() {
-                    let trimmed = ip.trim();
-                    if !trimmed.is_empty() {
-                        return trimmed.to_string();
-                    }
+                if let Some(ip) = forwarded_client_ip(value) {
+                    return ip.to_string();
                 }
             }
         }
@@ -71,9 +72,7 @@ where
                 .headers
                 .get("x-forwarded-for")
                 .and_then(|header_value| header_value.to_str().ok())
-                .and_then(|value| value.split(',').next_back())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
+                .and_then(forwarded_client_ip)
             {
                 return Ok(Self(value.to_string()));
             }
@@ -98,5 +97,26 @@ where
             || "unknown".to_string(),
             |addr| addr.ip().to_string(),
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::forwarded_client_ip;
+
+    #[test]
+    fn forwarded_ip_prefers_leftmost_hop() {
+        assert_eq!(
+            forwarded_client_ip("198.51.100.10, 203.0.113.7, 10.0.0.1"),
+            Some("198.51.100.10")
+        );
+    }
+
+    #[test]
+    fn forwarded_ip_skips_empty_entries() {
+        assert_eq!(
+            forwarded_client_ip(" , 198.51.100.10"),
+            Some("198.51.100.10")
+        );
     }
 }

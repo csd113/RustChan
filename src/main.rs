@@ -33,13 +33,14 @@ mod logging;
 mod media;
 mod middleware;
 mod models;
+mod pending_fs;
 mod server;
 mod templates;
 pub(crate) mod tls;
 mod utils;
 mod workers;
 
-use config::CONFIG;
+use config::{generate_settings_file_if_missing, CONFIG};
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 //
@@ -117,6 +118,7 @@ fn main() -> anyhow::Result<()> {
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         eprintln!("Warning: could not create rustchan-data directory: {e}");
     }
+    generate_settings_file_if_missing();
 
     logging::init_logging(&data_dir);
 

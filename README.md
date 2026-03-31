@@ -102,7 +102,7 @@ RustChan is a fully-featured imageboard engine compiled into a **single Rust bin
 
 ### 🔒 Security
 - **Argon2id** password hashing (`t=2, m=65536, p=2`)
-- **Security headers** — CSP (`script-src 'self'`, no `unsafe-inline`), HSTS (1 year + subdomains), and Permissions-Policy on all responses
+- **Security headers** — CSP (`script-src 'self'`, no `unsafe-inline`), HSTS (1 year + subdomains) on HTTPS responses, and Permissions-Policy on all responses
 - **Inline JS eliminated** — all JavaScript extracted to external `.js` files; CSP fully enforced
 - **CSRF** — double-submit cookie with constant-time token comparison (`subtle::ct_eq`)
 - `HttpOnly` + `SameSite=Strict` session cookies with configurable `Secure` flag and `Max-Age`
@@ -612,7 +612,7 @@ src/
 | **Brute-force** | Progressive lockout after 5 failed admin login attempts per IP |
 | **Sessions** | `HttpOnly`, `SameSite=Strict`, `Max-Age` aligned to server config |
 | **CSRF** | Double-submit cookie with constant-time token comparison (`subtle::ct_eq`) |
-| **Security headers** | CSP (`script-src 'self'`, no `unsafe-inline`), HSTS (1 year + subdomains), Permissions-Policy |
+| **Security headers** | CSP (`script-src 'self'`, no `unsafe-inline`), HSTS (1 year + subdomains) on HTTPS responses, Permissions-Policy |
 | **Inline JavaScript** | Fully eliminated — all JS in external files; CSP enforced with no `unsafe-inline` |
 | **IP privacy** | Raw IPs never stored or logged — HMAC-keyed SHA-256 hash used everywhere |
 | **Rate limiting** | Sliding-window per hashed IP: POST endpoints (10/min), page-load GETs (60/min); `/api/` routes excluded |

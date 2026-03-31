@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// The serde `rename_all = "lowercase"` representation **must** stay in sync
 /// with `as_str()` / `from_db_str()`.  Add a round-trip unit test whenever a
 /// new variant is introduced.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaType {
     Image,
@@ -27,15 +27,15 @@ pub enum MediaType {
 impl MediaType {
     /// Infer `MediaType` from a MIME type string.
     #[must_use]
-    pub fn from_mime(mime: &str) -> Option<Self> {
+    pub fn from_mime(mime: &str) -> Self {
         if mime.starts_with("image/") {
-            Some(Self::Image)
+            Self::Image
         } else if mime.starts_with("video/") {
-            Some(Self::Video)
+            Self::Video
         } else if mime.starts_with("audio/") {
-            Some(Self::Audio)
+            Self::Audio
         } else {
-            Some(Self::Other)
+            Self::Other
         }
     }
 
@@ -43,20 +43,18 @@ impl MediaType {
     /// Used during the backfill migration for pre-existing posts.
     #[must_use]
     #[allow(dead_code)]
-    pub fn from_ext(ext: &str) -> Option<Self> {
+    pub fn from_ext(ext: &str) -> Self {
         match ext {
-            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "svg" => {
-                Some(Self::Image)
-            }
-            "mp4" | "webm" => Some(Self::Video),
-            "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "opus" => Some(Self::Audio),
-            _ => Some(Self::Other),
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "svg" => Self::Image,
+            "mp4" | "webm" => Self::Video,
+            "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "opus" => Self::Audio,
+            _ => Self::Other,
         }
     }
 
     /// Serialise to the TEXT value stored in the database.
     #[must_use]
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Image => "image",
             Self::Video => "video",
@@ -104,7 +102,7 @@ pub struct Board {
     pub edit_window_secs: i64, // seconds users can edit their posts (0 = use board default 300)
     pub allow_archive: bool,   // when true, overflow threads are archived instead of deleted
     pub allow_video_embeds: bool, // per-board inline video embed unfurling (YouTube/Invidious/Streamable)
-    pub allow_captcha: bool,      // per-board PoW CAPTCHA on new threads only (hashcash-style)
+    pub allow_captcha: bool,      // per-board PoW CAPTCHA on threads and replies (hashcash-style)
     pub post_cooldown_secs: i64,  // seconds a user must wait between posts (0 = disabled)
     pub created_at: i64,          // Unix timestamp
 }
@@ -513,7 +511,7 @@ mod tests {
             );
             assert_eq!(
                 MediaType::from_db_str(json_str),
-                Some(mt.clone()),
+                Some(mt),
                 "from_db_str() round-trip failed for {mt:?}"
             );
         }
@@ -533,21 +531,18 @@ mod tests {
 
     #[test]
     fn media_type_from_mime() {
-        assert_eq!(MediaType::from_mime("image/png"), Some(MediaType::Image));
-        assert_eq!(MediaType::from_mime("video/mp4"), Some(MediaType::Video));
-        assert_eq!(MediaType::from_mime("audio/ogg"), Some(MediaType::Audio));
-        assert_eq!(
-            MediaType::from_mime("application/json"),
-            Some(MediaType::Other)
-        );
+        assert_eq!(MediaType::from_mime("image/png"), MediaType::Image);
+        assert_eq!(MediaType::from_mime("video/mp4"), MediaType::Video);
+        assert_eq!(MediaType::from_mime("audio/ogg"), MediaType::Audio);
+        assert_eq!(MediaType::from_mime("application/json"), MediaType::Other);
     }
 
     #[test]
     fn media_type_from_ext() {
-        assert_eq!(MediaType::from_ext("jpg"), Some(MediaType::Image));
-        assert_eq!(MediaType::from_ext("mp4"), Some(MediaType::Video));
-        assert_eq!(MediaType::from_ext("flac"), Some(MediaType::Audio));
-        assert_eq!(MediaType::from_ext("exe"), Some(MediaType::Other));
+        assert_eq!(MediaType::from_ext("jpg"), MediaType::Image);
+        assert_eq!(MediaType::from_ext("mp4"), MediaType::Video);
+        assert_eq!(MediaType::from_ext("flac"), MediaType::Audio);
+        assert_eq!(MediaType::from_ext("exe"), MediaType::Other);
     }
 
     // ── Pagination ────────────────────────────────────────────────────────

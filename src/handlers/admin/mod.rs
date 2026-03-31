@@ -8,29 +8,25 @@
 //   3. POST /admin/logout → delete session from DB → clear cookie
 //
 // Session cookie: HTTPOnly (not readable by JS), SameSite=Strict (prevents CSRF).
-// Secure=true when CHAN_HTTPS_COOKIES=true (default: same as CHAN_BEHIND_PROXY).
+// Secure=true when CHAN_HTTPS_COOKIES=true (default: enabled for proxy or direct TLS).
 //
 // + All admin handlers now wrap DB and file I/O in
 // spawn_blocking to avoid blocking the Tokio event loop. Direct DB calls from
 // async context were stalling worker threads under concurrent load.
 
 pub mod auth;
-#[allow(unused_imports)]
 pub use auth::*;
 
 pub mod backup;
 pub use backup::*;
 
 pub mod content;
-#[allow(unused_imports)]
 pub use content::*;
 
 pub mod moderation;
-#[allow(unused_imports)]
 pub use moderation::*;
 
 pub mod settings;
-#[allow(unused_imports)]
 pub use settings::*;
 
 use crate::{
@@ -42,6 +38,7 @@ use crate::{
 };
 use axum::{
     extract::{Query, State},
+    http::{header, HeaderMap, Uri},
     response::Html,
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -90,6 +87,34 @@ fn require_admin_session_sid(conn: &rusqlite::Connection, session_id: Option<&st
     let session = db::get_session(conn, sid)?
         .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
     Ok(session.admin_id)
+}
+
+fn require_same_origin_request(headers: &HeaderMap) -> Result<()> {
+    let request_host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+        .map(|authority| authority.host().to_string())
+        .ok_or_else(|| AppError::Forbidden("Missing Host header.".into()))?;
+
+    let source = headers
+        .get(header::ORIGIN)
+        .or_else(|| headers.get(header::REFERER))
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::Forbidden("Missing Origin/Referer header.".into()))?;
+    let source_uri = source
+        .parse::<Uri>()
+        .map_err(|_| AppError::Forbidden("Invalid Origin/Referer header.".into()))?;
+    let source_host = source_uri
+        .authority()
+        .map(axum::http::uri::Authority::host)
+        .ok_or_else(|| AppError::Forbidden("Origin/Referer header has no authority.".into()))?;
+
+    if source_host.eq_ignore_ascii_case(&request_host) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden("Origin/Referer host mismatch.".into()))
+    }
 }
 
 // ─── GET /admin/panel ─────────────────────────────────────────────────────────

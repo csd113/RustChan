@@ -1,11 +1,13 @@
 // src/db/mod.rs
 
+use anyhow::{Context, Result};
 use rusqlite::params;
 use std::collections::HashSet;
 
 pub mod admin;
 pub mod boards;
 pub mod chan_net;
+mod fs_ops;
 mod migrations;
 mod pool;
 pub mod posts;
@@ -18,6 +20,7 @@ pub use types::{CachedFile, DbPool, NewPost};
 
 pub use admin::*;
 pub use boards::*;
+pub use fs_ops::*;
 pub use posts::*;
 pub use threads::*;
 
@@ -26,9 +29,16 @@ pub use threads::*;
 ///
 /// Callers must invoke this inside the same transaction as their DELETE so no
 /// concurrent insert can slip in between the row removal and the reference check.
-pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>) -> Vec<String> {
+///
+/// # Errors
+/// Returns an error if the candidate lookup or stale deduplication-row cleanup
+/// fails.
+pub fn paths_safe_to_delete(
+    conn: &rusqlite::Connection,
+    candidates: Vec<String>,
+) -> Result<Vec<String>> {
     if candidates.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let unique: Vec<String> = candidates
@@ -38,7 +48,7 @@ pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>
         .collect();
 
     if unique.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let placeholders: String = unique
@@ -55,15 +65,15 @@ pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>
          )"
     );
 
-    let Ok(mut stmt) = conn.prepare(&sql) else {
-        return Vec::new();
-    };
+    let mut stmt = conn
+        .prepare(&sql)
+        .context("Prepare safe-delete candidate query failed")?;
 
-    let safe: Vec<String> = match stmt.query_map(rusqlite::params_from_iter(&unique), |r| r.get(0))
-    {
-        Ok(rows) => rows.filter_map(Result::ok).collect(),
-        Err(_) => return Vec::new(),
-    };
+    let safe: Vec<String> = stmt
+        .query_map(rusqlite::params_from_iter(&unique), |r| r.get(0))
+        .context("Query safe-delete candidates failed")?
+        .collect::<rusqlite::Result<_>>()
+        .context("Read safe-delete candidates failed")?;
 
     let safe_set: HashSet<&str> = safe.iter().map(String::as_str).collect();
     for path in &safe {
@@ -79,13 +89,14 @@ pub fn paths_safe_to_delete(conn: &rusqlite::Connection, candidates: Vec<String>
 
         if let Some((file_path, _thumb_path)) = maybe_row {
             if safe_set.contains(file_path.as_str()) {
-                let _ = conn.execute(
+                conn.execute(
                     "DELETE FROM file_hashes WHERE file_path = ?1",
                     params![file_path],
-                );
+                )
+                .context("Delete stale file_hashes row failed")?;
             }
         }
     }
 
-    safe
+    Ok(safe)
 }

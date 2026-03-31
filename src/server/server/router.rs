@@ -12,13 +12,13 @@ mod routes;
 
 use super::{
     assets::{serve_css, serve_main_js, serve_theme_init_js},
-    headers::{hsts_middleware, safe_timeout_middleware, CONTENT_SECURITY_POLICY},
+    headers::{hsts_middleware_with_mode, safe_timeout_middleware, CONTENT_SECURITY_POLICY},
     lifecycle::track_requests,
     onion_location_middleware,
 };
 use routes::{admin_routes, public_routes};
 
-pub(super) fn build_router(state: AppState) -> Router {
+pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
     Router::new()
         .route("/static/style.css", get(serve_css))
         .route("/static/main.js", get(serve_main_js))
@@ -56,7 +56,9 @@ pub(super) fn build_router(state: AppState) -> Router {
                 "geolocation=(), camera=(), microphone=(), payment=()",
             ),
         ))
-        .layer(axum_middleware::from_fn(hsts_middleware))
+        .layer(axum_middleware::from_fn(move |req, next| {
+            hsts_middleware_with_mode(req, next, direct_https)
+        }))
         .layer(axum_middleware::from_fn(safe_timeout_middleware))
         .layer(
             tower_http::trace::TraceLayer::new_for_http()

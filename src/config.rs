@@ -485,6 +485,7 @@ impl Config {
     #[allow(clippy::too_many_lines)]
     pub fn from_env() -> Self {
         let s = load_settings_file();
+        let tls = s.tls.clone().unwrap_or_default();
         let data_dir = binary_dir().join("rustchan-data");
         let default_db = data_dir.join("chan.db").to_string_lossy().into_owned();
         let default_uploads = data_dir.join("boards").to_string_lossy().into_owned();
@@ -527,6 +528,7 @@ impl Config {
             bind_addr
         };
         let behind_proxy = env_bool("CHAN_BEHIND_PROXY", false);
+        let https_cookies_default = behind_proxy || tls.enabled;
         // Resolve cookie_secret from env > settings.toml.
         // generate_settings_file_if_missing() ensures settings.toml always has
         // a generated secret, so this fallback should only fire in abnormal cases.
@@ -620,7 +622,7 @@ impl Config {
             cookie_secret,
             session_duration: env_parse("CHAN_SESSION_SECS", 8 * 3600),
             behind_proxy,
-            https_cookies: env_bool("CHAN_HTTPS_COOKIES", behind_proxy),
+            https_cookies: env_bool("CHAN_HTTPS_COOKIES", https_cookies_default),
             wal_checkpoint_interval: env_parse(
                 "CHAN_WAL_CHECKPOINT_SECS",
                 s.wal_checkpoint_interval_secs.unwrap_or(3600),
@@ -682,7 +684,7 @@ impl Config {
                 .or(s.chan_net_api_key)
                 .unwrap_or_default(),
             // TLS — loaded from [tls] section in settings.toml; defaults to disabled.
-            tls: s.tls.unwrap_or_default(),
+            tls,
         }
     }
 

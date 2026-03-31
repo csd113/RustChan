@@ -17,16 +17,18 @@ pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      object-src 'none'; \
      base-uri 'self'";
 
-pub(super) async fn hsts_middleware(
+pub(super) async fn hsts_middleware_with_mode(
     req: axum::extract::Request,
     next: axum::middleware::Next,
+    direct_https: bool,
 ) -> axum::response::Response {
-    let is_https = req.uri().scheme_str() == Some("https")
+    let is_https = direct_https
+        || req.uri().scheme_str() == Some("https")
         || req
             .headers()
             .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.eq_ignore_ascii_case("https"));
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("https"));
 
     let mut resp = next.run(req).await;
     if is_https {
@@ -47,15 +49,21 @@ pub(super) async fn safe_timeout_middleware(
         return next.run(req).await;
     }
 
-    match tokio::time::timeout(std::time::Duration::from_secs(30), next.run(req)).await {
-        Ok(response) => response,
-        Err(_) => (http::StatusCode::REQUEST_TIMEOUT, "Request timed out").into_response(),
-    }
+    tokio::time::timeout(std::time::Duration::from_secs(30), next.run(req))
+        .await
+        .unwrap_or_else(|_| {
+            (http::StatusCode::REQUEST_TIMEOUT, "Request timed out").into_response()
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CONTENT_SECURITY_POLICY;
+    use super::{hsts_middleware_with_mode, CONTENT_SECURITY_POLICY};
+    use axum::{
+        body::Body, http::Request, middleware::from_fn, response::IntoResponse, routing::get,
+        Router,
+    };
+    use tower::ServiceExt;
 
     #[test]
     fn csp_allows_core_end_user_media_features() {
@@ -74,5 +82,26 @@ mod tests {
         assert!(!CONTENT_SECURITY_POLICY.contains("script-src 'unsafe-inline'"));
         assert!(CONTENT_SECURITY_POLICY.contains("object-src 'none'"));
         assert!(CONTENT_SECURITY_POLICY.contains("frame-ancestors 'none'"));
+    }
+
+    #[tokio::test]
+    async fn hsts_is_added_for_direct_https_without_forwarded_proto() {
+        let app = Router::new()
+            .route("/", get(|| async { "ok".into_response() }))
+            .layer(from_fn(|req, next| {
+                hsts_middleware_with_mode(req, next, true)
+            }));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert!(response.headers().contains_key("strict-transport-security"));
     }
 }

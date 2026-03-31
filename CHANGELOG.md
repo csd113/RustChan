@@ -4,6 +4,40 @@ All notable changes to RustChan will be documented in this file.
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- Critical: proxy-aware client IP extraction now trusts the leftmost `X-Forwarded-For` hop, restoring correct rate-limit and moderation identity behind reverse proxies.
+- High: direct HTTPS deployments now default admin and CSRF cookies to `Secure`, validate HTTP→HTTPS redirect hosts more defensively, and emit HSTS correctly for direct TLS listeners.
+- High: thread creation, poll creation, reply posting, and video-transcode DB rewrites are now transactional, preventing orphaned uploads, stale dedup rows, and broken file references on partial failures.
+- Medium: ChanNet gateway replies now update thread counters transactionally, and the durable import ledger survives restarts.
+- Medium: file-deletion safety checks now propagate database failures instead of silently returning partial results.
+
+### Refactors
+
+- Split schema creation into table/index helpers and broke admin route registration into smaller subrouters.
+- Reworked upload storage into smaller planning and persistence helpers, added rollback support for newly written files, and removed leftover refactor shims and dead wrappers.
+- Unified board-aware upload accept/hint generation across new-thread and reply forms.
+
+### Security Improvements
+
+- `Onion-Location` is now suppressed for requests already served from the onion host.
+- CAPTCHA labeling and board documentation now match runtime behavior for both threads and replies.
+- README security notes now reflect the actual HTTPS-only scope of HSTS.
+
+### Breaking Changes
+
+- HTTP→HTTPS redirects now fall back to configured/trusted hosts instead of blindly echoing arbitrary `Host` headers.
+
+### Validation
+
+- `cargo fmt --all`
+- `cargo clippy --all-targets --all-features -- -D warnings -W clippy::all -W clippy::pedantic -W clippy::nursery`
+- `cargo test`
+
+---
+
 ## [1.1.0 alpha 4]
 
 ### Code Cleanup And Reliability

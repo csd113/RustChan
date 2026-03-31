@@ -115,6 +115,33 @@ pub fn insert_post_if_absent(
     Ok(())
 }
 
+/// Load the durable set of imported `ChanNet` transaction IDs.
+///
+/// # Errors
+/// Returns an error if the ledger table cannot be queried.
+pub fn load_import_ledger(conn: &Connection) -> Result<Vec<Uuid>> {
+    let mut stmt = conn.prepare_cached("SELECT tx_id FROM chan_net_import_ledger")?;
+    let tx_ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter_map(|raw| Uuid::parse_str(&raw).ok())
+        .collect();
+    Ok(tx_ids)
+}
+
+/// Record a successfully imported `ChanNet` transaction ID durably.
+///
+/// # Errors
+/// Returns an error if the ledger row cannot be inserted.
+pub fn record_import_tx_id(conn: &Connection, tx_id: &Uuid) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO chan_net_import_ledger (tx_id) VALUES (?1)",
+        rusqlite::params![tx_id.to_string()],
+    )?;
+    Ok(())
+}
+
 // ── insert_reply_into_thread ──────────────────────────────────────────────────
 
 /// Insert a reply from `RustWave` directly into the live `posts` table.
@@ -134,10 +161,8 @@ pub fn insert_post_if_absent(
 /// # Column mapping (verified against src/db/posts.rs)
 ///
 /// The `author` parameter is written to the `name` column.
-/// The `content` parameter is written to both the `body` and `body_html` columns.
-/// `body_html` is set to the plain-text content — the forum render pipeline is
-/// not invoked for gateway-inserted posts, so storing plain text here is safe
-/// and avoids introducing an HTML-injection risk.
+/// The `content` parameter is written to `body`, while `body_html` is generated
+/// by the standard escaped render pipeline used for local posts.
 /// `ip_hash` is NULL — no client IP is available for gateway posts.
 /// `deletion_token` is a freshly generated UUID v4 string.
 /// `is_op` is 0 — gateway posts are always replies.
@@ -163,6 +188,8 @@ pub fn insert_reply_into_thread(
     content: &str,
     _timestamp: i64,
 ) -> Result<i64> {
+    use crate::utils::sanitize::{escape_html, render_post_body};
+
     // ── Precondition check ────────────────────────────────────────────────────
     //
     // Verify the thread exists, belongs to the correct board, and is not
@@ -192,45 +219,81 @@ pub fn insert_reply_into_thread(
     // Only the text fields are written. No file paths, MIME types, thumbnail
     // paths, or binary data are accepted from the gateway.
     //
-    // `body_html` is set to the same value as `body`. Gateway posts bypass the
-    // normal Markdown/BBCode render pipeline; storing plain text in body_html
-    // is intentional and safe — the web layer will display it verbatim inside
-    // the pre-escaped template helper.
-    //
     // `deletion_token` is a fresh UUID v4 so that local admins can delete
     // gateway-inserted posts through the normal deletion interface.
     let deletion_token = Uuid::new_v4().to_string();
+    let body_html = render_post_body(&escape_html(content));
 
-    let post_id: i64 = conn.query_row(
-        "INSERT INTO posts
-             (thread_id, board_id, name, body, body_html,
-              ip_hash, deletion_token, is_op)
-         VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, 0)
-         RETURNING id",
-        rusqlite::params![
-            thread_id,
-            board_id,
-            author,
-            content,
-            content, // body_html = plain text content
-            deletion_token,
-        ],
-        |row| row.get(0),
-    )?;
+    let gateway_post = crate::db::NewPost {
+        thread_id,
+        board_id,
+        name: author.to_string(),
+        tripcode: None,
+        subject: None,
+        body: content.to_string(),
+        body_html,
+        ip_hash: None,
+        file_path: None,
+        file_name: None,
+        file_size: None,
+        thumb_path: None,
+        mime_type: None,
+        media_type: None,
+        audio_file_path: None,
+        audio_file_name: None,
+        audio_file_size: None,
+        audio_mime_type: None,
+        deletion_token,
+        is_op: false,
+    };
 
-    // ── Bump the thread ───────────────────────────────────────────────────────
-    //
-    // Mirror the normal post-creation path: advance bumped_at and increment
-    // reply_count. This call is not co-transactional with the INSERT above
-    // (same documented limitation as the main post-creation path in threads.rs
-    // which is an advisory counter — not a data integrity failure.
-    conn.execute(
-        "UPDATE threads
-         SET bumped_at    = unixepoch(),
-             reply_count  = reply_count + 1
-         WHERE id = ?1",
-        rusqlite::params![thread_id],
-    )?;
+    crate::db::threads::create_reply_with_thread_update(conn, &gateway_post, true, None)
+}
 
-    Ok(post_id)
+#[cfg(test)]
+mod tests {
+    use super::insert_reply_into_thread;
+
+    fn setup_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        super::super::schema::create_schema(&conn).expect("create schema");
+        conn.execute(
+            "INSERT INTO boards (id, name, short_name, description) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![1_i64, "Test", "test", "board"],
+        )
+        .expect("insert board");
+        conn.execute(
+            "INSERT INTO threads (id, board_id, subject, archived, reply_count) VALUES (?1, ?2, ?3, 0, 0)",
+            rusqlite::params![1_i64, 1_i64, "thread"],
+        )
+        .expect("insert thread");
+        conn
+    }
+
+    #[test]
+    fn gateway_replies_escape_html_and_preserve_null_ip_hash() {
+        let conn = setup_conn();
+        let post_id = insert_reply_into_thread(
+            &conn,
+            "test",
+            1,
+            "RustWave",
+            "<script>alert(1)</script>\n&gt;quoted",
+            0,
+        )
+        .expect("insert gateway reply");
+
+        let (body, body_html, ip_hash): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT body, body_html, ip_hash FROM posts WHERE id = ?1",
+                rusqlite::params![post_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("load post");
+
+        assert_eq!(body, "<script>alert(1)</script>\n&gt;quoted");
+        assert!(body_html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!body_html.contains("<script>alert(1)</script>"));
+        assert_eq!(ip_hash, None);
+    }
 }

@@ -7,7 +7,6 @@ pub struct AppState {
     pub ffmpeg_webp_available: bool,
     pub job_queue: std::sync::Arc<crate::workers::JobQueue>,
     pub backup_progress: std::sync::Arc<crate::middleware::BackupProgress>,
-    pub chan_ledger:
-        Option<std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<uuid::Uuid>>>>,
+    pub chan_ledger: Option<std::sync::Arc<parking_lot::Mutex<crate::chan_net::ledger::TxLedger>>>,
     pub onion_address: std::sync::Arc<tokio::sync::RwLock<Option<String>>>,
 }
