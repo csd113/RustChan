@@ -36,426 +36,56 @@ This release focuses on cleaning up the codebase, making the project easier to m
 
 ## [1.1.0 alpha 3]
 
-### Full-Screen TUI Console
+### Better Operator Experience
 
-The operator-facing terminal console has been rewritten from a scrolling line-input shell into a full-screen static TUI, matching the dashboard style introduced in RustHost.
+This release made RustChan much nicer to run and manage.
 
-#### Architecture
+### What changed
 
-`src/server/console.rs` is deleted and replaced by a four-file module at `src/server/console/`:
-
-| File | Responsibility |
-|------|---------------|
-| `mod.rs` | Alternate screen lifecycle, `RAW_MODE_ACTIVE` atomic, `ConsoleMode` / `WizardKind` enums, `start()`, `cleanup()`, `render()` loop |
-| `dashboard.rs` | Pure render functions — no I/O, no DB calls; takes a `&ChanStats` snapshot and returns a formatted `String` |
-| `input.rs` | Crossterm key reader (`50 ms` poll), `KeyEvent` enum, `spawn()` |
-| `wizard.rs` | Interactive admin wizards; exits raw mode for `read_line`, re-enters it on completion |
-
-A new `crossterm = "0.27"` dependency is added to `Cargo.toml`.
-
-#### Dashboard Layout
-
-On startup the terminal switches to the alternate screen and displays a live dashboard refreshed every 3 seconds (or immediately on `[R]`):
-
-```
-────────────────────────────────
- RustChan
-────────────────────────────────
-
-Status
- Server  : RUNNING (0.0.0.0:8080)
- Uptime  : 2h 14m 33s
- Memory  : 42.1 MiB
-
-Activity
- Requests : 18 402    1.2/s    in-flight 3
- Online   : 7
-
-Content
- Boards  : 4
- Threads : 831 (+2)
- Posts   : 12 047 (+8)
-
-Storage
- Database : 94.3 MiB
- Uploads  : 1.22 GiB
-
-  /g/  204t 3021p    /tech/  91t 1204p
-  ⠹  2 file(s) uploading
-
-────────────────────────────────
-[H] Help [B] Boards [C] Create board [A] Admin [D] Del thread [L] Logs [Q] Quit
-────────────────────────────────
-```
-
-Delta counts (`+N`) are coloured yellow. The upload spinner uses a Braille frame array. All ANSI helpers (`green`, `yellow`, `red`, `dim`, `bold`, `cyan`) are pure functions with no side effects.
-
-#### Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| `H` | Help screen — full key reference |
-| `R` | Force immediate stats refresh |
-| `L` | Toggle log view (40 most recent lines) |
-| `B` | Board list (ID / slug / name / NSFW / thread count / post count) |
-| `C` | Create board wizard |
-| `A` | Create admin wizard |
-| `D` | Delete thread wizard |
-| `Q` / `Esc` | Confirm-quit prompt |
-| `Y` | Confirm quit |
-| `N` | Cancel — return to dashboard |
-| `Ctrl-C` | Force quit (no confirmation) |
-
-#### ConsoleMode State Machine
-
-```
-Dashboard ──[L]──▶ LogView ──[L]──▶ Dashboard
-         ──[H]──▶ Help
-         ──[B]──▶ BoardList
-         ──[Q]──▶ ConfirmQuit ──[Y]──▶ shutdown
-                              ──[N]──▶ Dashboard
-         ──[C/A/D]──▶ Wizard(_) ──(done)──▶ Dashboard
-```
-
-While any `Wizard(_)` mode is active, the render task skips frame output entirely — the wizard thread owns the terminal.
-
-#### Wizard Flows
-
-`kb_create_board`, `kb_create_admin`, and `kb_delete_thread` move from the old `console.rs` to `wizard.rs` unchanged. `run_wizard()` handles the terminal hand-off:
-
-1. Disable raw mode, leave alternate screen
-2. Run the wizard (blocking, `spawn_blocking`)
-3. Re-enable raw mode, re-enter alternate screen, clear for a clean frame
-4. Reset `ConsoleMode` to `Dashboard`
-
-#### Stats Refresh
-
-A background task in `server.rs` polls the database every 3 seconds and writes into `SharedStats` (`Arc<RwLock<ChanStats>>`). `KeyEvent::Reload` triggers an immediate refresh outside the timer. `render()` takes a read lock on `SharedStats` — no DB calls ever happen on the render path.
-
-#### Terminal Safety
-
-- `RAW_MODE_ACTIVE` atomic prevents double-cleanup
-- `cleanup()` is called from both the `std::panic` hook (registered in `main.rs`) and the graceful shutdown path
-- The terminal is always restored even on unexpected exits
-
-### 🔄 Changed
-
-- `src/server/mod.rs` — `pub mod console` now resolves to the sub-directory; `pub use console::cleanup` added for the panic hook path in `main.rs`
-- `src/server/server.rs` — `spawn_keyboard_handler()` replaced by `console::start()`; `match cmd.as_str()` loop replaced by typed `match key_event` loop; stats refresh background task added
-- `src/main.rs` — panic hook registers `crate::server::cleanup()`; explicit `console::cleanup()` call added after server future resolves
-
----
-
-### Native HTTPS / TLS Support
-
-RustChan can now serve itself directly over HTTPS without needing a reverse proxy in front of it. Two modes are available:
-
-**Self-signed certificate** — enabled with two lines in `settings.toml`. A certificate is generated automatically on first run and saved to disk. Your browser will show a security warning (normal for self-signed), which you can accept. Good for local development and private installs.
-
-**Let's Encrypt (ACME)** — for public servers with a real domain name. RustChan contacts Let's Encrypt automatically, proves it owns the domain, and gets a trusted certificate. No browser warning. Renews itself before it expires.
-
-Both modes run alongside the existing HTTP server — adding HTTPS does not remove or break anything. Installs that do not add a `[tls]` section to `settings.toml` are completely unaffected.
-
-### HTTP → HTTPS Redirect
-
-When HTTPS is enabled, an optional redirect listener can be turned on. Any visitor who arrives on the plain HTTP port is automatically sent to the HTTPS address. Enable with `redirect_http = true` in the `[tls]` section.
-
-### HSTS (automatic)
-
-Once a visitor connects over HTTPS, their browser is instructed to always use HTTPS for future visits. No configuration needed — this activates automatically when TLS is running.
+- The old scrolling terminal console was replaced with a full-screen dashboard.
+- The new console shows live stats, boards, uploads, logs, and admin shortcuts in one place.
+- RustChan can now serve HTTPS directly, including self-signed certificates and Let's Encrypt support.
+- Optional HTTP-to-HTTPS redirects were added.
+- Browsers are told to prefer HTTPS automatically once it is enabled.
+- The app can now open more cleanly when launched directly from the desktop.
 
 ### Fixes
 
-- **IP banning and rate limiting now work correctly over HTTPS** — the security features that track visitor IPs continue to work on HTTPS connections the same way they do on HTTP. No bans or limits are bypassed by switching to HTTPS.
-- **Secure cookies enforced when TLS is active** — session and auth cookies are automatically marked `Secure` when HTTPS is enabled, preventing them from being sent over plain HTTP.
-
->>>>>>> origin/indev-1.1.0-alpha-4
-### Auto-Terminal Launch Support
-
-RustChan now automatically opens in a terminal window when double-clicked, instead of silently failing. If already running in a terminal, it behaves as normal. Works on Windows, Linux, and macOS.
-
-### fixes:
-
-- **Files left behind on DB errors:** Disk fills forever. *Fix:* Show errors clearly, handle deletions properly.
-- **Stuck tasks after crashes:** Jobs never restart. *Fix:* Auto-reset at startup, limit retries.
-- **Huge text uploads crash memory:** Attackers overload server. *Fix:* Cap text fields at 64KB.
-- **Multiple backups corrupt progress:** Overlapping runs mess up display. *Fix:* Add lock flag.
-- **ZIP files write to wrong folders:** Hackers escape safe areas. *Fix:* Strict path checks.
-- **Temp folder tricks break SQL:** Env vars inject bad chars. *Fix:* Use safe folder near DB.
-- **Restore uploads fill disk unchecked:** No per-file limits. *Fix:* Cap at 4GB per file.
-- **ZIP bombs explode RAM:** Bad peers unpack gigabytes. *Fix:* Limit entries to 8MB each.
-- **FFmpeg hangs block everything:** No timeouts tie up workers. *Fix:* Add 2-min timeout, kill if stuck.
-- **Leftover backup files after crashes:** Disk clogs on restart. *Fix:* Startup cleanup, use safe temp folder.
+- IP bans and rate limits now work properly when HTTPS is enabled.
+- Secure cookies are enforced when the site is running over HTTPS.
+- Several backup, restore, upload, and background-job edge cases were fixed.
+- Large text uploads, broken temp-file handling, and stuck jobs were all cleaned up.
 
 ---
 
 ## [1.1.0 alpha 2]
 
-The headline change in this release is a deep security and correctness audit of the Arti/Tor implementation introduced in alpha 1, resulting in six critical fixes, nine high-priority fixes, and a set of new operator-facing configuration options. Alongside that, this release includes reliability improvements to shutdown coordination, backup handling, multipart parsing, and the database layer.
+### Tor And Reliability Hardening
 
----
+This release focused on making Tor support safer and making the server more reliable under failure conditions.
 
-### 🔒 Tor / Arti — Security & Correctness Audit
+### What changed
 
-#### Architecture
+- Tor users are now separated properly, so one Tor user no longer shares the same identity bucket as every other Tor user.
+- A Tor-only mode was added for operators who want the site reachable only through the hidden service.
+- Tor startup, reconnect behavior, and shutdown were made more reliable.
+- More Tor settings were made configurable instead of being hardcoded.
+- RustChan now sends the `Onion-Location` header so Tor Browser can suggest switching to the onion address.
 
-The hidden service implementation from alpha 1 has been audited and corrected. The core architecture — bootstrapping Arti in-process, deriving a `.onion` address from a persistent Ed25519 keypair, and proxying inbound onion streams to the local HTTP port — is unchanged. What changed is correctness, isolation, and operational safety.
+### Reliability improvements
 
----
+- Shutdown handling was improved for workers, background jobs, and the ChanNet server.
+- Request timeout protection was added for slow or stalled requests.
+- Multipart form parsing was hardened to avoid memory pressure from oversized input.
+- Backup handling was made safer and more reliable.
+- Database pool handling, locking, and error reporting were improved.
+- Logging was improved so log files rotate cleanly instead of growing forever.
 
-#### 🔴 Critical fixes
+### Fixes
 
-**Per-stream IP isolation for Tor users**
-
-Previously every Tor user resolved to `127.0.0.1` as their client IP. The Arti proxy was a raw TCP passthrough (`copy_bidirectional`) with no HTTP awareness, so no header injection was possible. This meant all Tor users shared a single rate-limit bucket, ban entry, and post cooldown: banning one Tor user banned everyone on Tor simultaneously.
-
-Fixed by introducing `TOR_STREAM_TOKENS`, a `DashMap<u16, Arc<str>>` in `detect.rs` keyed by the ephemeral local port of each proxy connection. When `proxy_tor_stream` connects to the local axum socket, the OS assigns an ephemeral source port; axum's `ConnectInfo` sees this as the peer port on the accepted socket. A random `tor:<hex>` token is inserted into the map under that port, and a `TokenGuard` RAII struct removes it when the task ends. Both `ClientIp::from_request_parts` and `extract_ip` now look up the peer port in `TOR_STREAM_TOKENS` when the connection is from loopback with `enable_tor_support=true`, returning the per-stream token instead of `127.0.0.1`. Every Tor stream now has its own isolated bucket for rate limiting, bans, and post cooldowns.
-
-**Files:** `src/detect.rs`, `src/middleware/mod.rs`
-
----
-
-**Tor-only mode (`tor_only` setting)**
-
-With `enable_tor_support = true` and the default `bind_addr = 0.0.0.0:8080`, the HTTP server was reachable directly over clearnet simultaneously with the hidden service. An operator expecting a private Tor-only site had no way to enforce that without manually overriding `bind_addr`.
-
-Added a new `tor_only` setting to `settings.toml`. When `tor_only = true` and `enable_tor_support = true`, `bind_addr` is silently overridden to `127.0.0.1:{port}` during config loading — the port is preserved, only the host changes. The override is logged at startup. Default remains `false` (dual-stack: clearnet and Tor both active), which is the correct default for an imageboard that wants to be reachable both ways.
-
-```toml
-# Restrict to Tor-only (hidden service). Clearnet access blocked.
-# tor_only = false
-```
-
-**Files:** `src/config.rs`
-
----
-
-**Graceful shutdown for the Tor task**
-
-The Tor retry loop had no `CancellationToken`. During shutdown, `worker_cancel.cancel()` signaled every other background task but the Tor task continued running — sleeping through a backoff of up to 480 seconds. The shutdown code then hit a hard 10-second timeout and abandoned the task, leaving Tor circuits open without sending `RELAY_END` cells.
-
-Fixed by adding a `cancel: CancellationToken` parameter to `detect_tor()`. Both the `run_arti(...)` call and the backoff sleep now use `tokio::select!` against the token, so the task exits promptly when shutdown is signaled. The `worker_cancel` variable in `run_server()` is moved to before the `detect_tor` call so it is available to pass in. The shutdown timeout is extended from 10s to 15s as a safety net for any in-flight `copy_bidirectional` draining — in practice the task exits in milliseconds once the token fires.
-
-**Files:** `src/detect.rs`, `src/server/server.rs`
-
----
-
-**`tor_client` and `onion_service` explicit keepalive**
-
-`tor_client` is last used on the line that calls `launch_onion_service`. `onion_service` is last used inside the `HsId` retry block. Both have side-effectful `Drop` implementations: dropping `tor_client` closes all Tor circuits; dropping `onion_service` deregisters the hidden service from the Tor network. Both variables must stay alive through the entire stream loop.
-
-Rust named `let` bindings drop at end of their enclosing scope (the function body), not at last-use, so this was not a live bug — but it was invisible and fragile. Added explicit `let _ = &tor_client; let _ = &onion_service;` keepalive borrows at the end of `run_arti`, after the stream loop exits, making the intent unambiguous and guarding against any future tooling that might warn about "unused" bindings.
-
-**Files:** `src/detect.rs`
-
----
-
-#### 🟠 High-priority fixes
-
-**Onion address encoder: fixed checksum computation**
-
-In `hsid_to_onion_address`, the two checksum bytes were extracted from the `Sha3_256` digest using an iterator with `.unwrap_or(0)` fallbacks. `Sha3_256` always produces 32 bytes so the fallback was dead code, but it masked the logic and would silently produce a wrong checksum if the digest size ever changed. Replaced with direct array indexing: `let hash: [u8; 32] = hasher.finalize().into(); let checksum = [hash[0], hash[1]];`.
-
-Added a Python-verified cryptographic test vector for the all-zeros Ed25519 key:
-```
-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion
-```
-Verified with:
-```python
-import hashlib, base64
-pub = bytes(32); ver = bytes([3])
-chk = hashlib.sha3_256(b'.onion checksum' + pub + ver).digest()[:2]
-print(base64.b32encode(pub+chk+ver).decode().lower().rstrip('=')+'.onion')
-```
-
-**Files:** `src/detect.rs`
-
----
-
-**`Onion-Location` response header for Tor Browser**
-
-Tor Browser reads the `Onion-Location` response header and automatically prompts the user to switch to the `.onion` address when browsing the clearnet version of a site. The header was never set anywhere in the codebase.
-
-Added `onion_location_middleware` — an async middleware function that reads `state.onion_address`, and when the address is known and the response `Content-Type` is `text/html`, inserts `Onion-Location: http://<addr>` into the response headers. Wired into `build_router` via `axum_middleware::from_fn_with_state` at the outermost position so it fires on every HTML response. Non-HTML responses (static assets, JSON, media) are skipped.
-
-**Files:** `src/server/server.rs`
-
----
-
-**Configurable bootstrap timeout**
-
-The Tor bootstrap timeout was hardcoded at 120 seconds. On censored networks using bridges or pluggable transports, directory fetch is slow and 120 seconds is insufficient — the task would time out, wait through exponential backoff, and retry indefinitely without ever succeeding.
-
-Added `tor_bootstrap_timeout_secs` to `settings.toml` (default 120). The timeout error message now includes a hint to increase this value.
-
-```toml
-# Increase for censored networks or when using bridges.
-# tor_bootstrap_timeout_secs = 120
-```
-
-**Files:** `src/config.rs`, `src/detect.rs`
-
----
-
-**Configurable maximum concurrent Tor streams**
-
-`MAX_CONCURRENT_TOR_STREAMS` was a hardcoded compile-time constant (`512`). Operators on resource-constrained hosts (low FD limits, limited RAM) had no way to reduce it without recompiling.
-
-Added `tor_max_concurrent_streams` to `settings.toml` (default 512). When the limit is reached, `stream_req` is dropped explicitly — Arti sends a `RELAY_END` cell automatically on drop.
-
-```toml
-# Reduce if the process hits file descriptor limits.
-# tor_max_concurrent_streams = 512
-```
-
-**Files:** `src/config.rs`, `src/detect.rs`
-
----
-
-**Infrastructure errors distinguished from normal stream closure**
-
-All errors from `proxy_tor_stream` were logged at `DEBUG` with the message "Tor: stream closed". This made it impossible to distinguish a normal client disconnect (expected, routine) from "local TCP connect failed" (axum has crashed or is unrestarted — requires operator attention).
-
-Split error handling: connection failures to the local HTTP server now log at `ERROR` with a clear message ("Tor: cannot reach local HTTP server — is axum running?"). Normal stream closures (EOF, client disconnect, keep-alive expiry) continue to log at `DEBUG`.
-
-**Files:** `src/detect.rs`
-
----
-
-**Attempt counter reset after healthy session**
-
-The exponential backoff retry counter (`attempt`) incremented on both crash exits and clean exits. After 4 clean reconnect cycles, the service was waiting 480 seconds between restart attempts — identical behavior to a crash loop. A clean exit after ≥60 seconds of healthy operation now resets `attempt = 0`.
-
-**Files:** `src/detect.rs`
-
----
-
-**`Arc<str>` for the local address string**
-
-`local_addr` was a `String` cloned into every spawned proxy task — one heap allocation per Tor connection. Replaced with `Arc<str>`, making each clone an atomic reference count increment with no heap allocation.
-
-**Files:** `src/detect.rs`
-
----
-
-**Configurable service nickname**
-
-The Arti onion service nickname was hardcoded to `"rustchan"`. When multiple instances share the same `arti_state/` directory (e.g. Docker volume mounts, CI), identical nicknames cause key collisions and one instance fails to start its onion service.
-
-Added `tor_service_nickname` to `settings.toml` (default `"rustchan"`).
-
-```toml
-# Change when running multiple instances sharing the same arti_state/ directory.
-# tor_service_nickname = "rustchan"
-```
-
-**Files:** `src/config.rs`, `src/detect.rs`
-
----
-
-**Onion address omitted from structured INFO log**
-
-The onion address was logged as a structured field at `INFO` level, causing it to appear in plaintext in the JSON log file (`rustchan.log`) and any log aggregator or forwarding pipeline it feeds into. For operators running a sensitive hidden service, this is unwanted metadata exposure.
-
-The address is now logged as a structured field only at `DEBUG`. A bare `INFO` event ("Tor: hidden service active") fires without the address. The TTY banner and admin panel always show the full address.
-
-**Files:** `src/detect.rs`
-
----
-
-#### 🟡 Other Arti changes
-
-- **`yield_now()` in rendezvous loop** — `stream_requests.next().await` runs in a tight async loop. Under a connection flood, the task could monopolize the Tokio executor thread between `next()` returning and the `tokio::spawn` call. Added `tokio::task::yield_now().await` at the top of the loop body.
-- **Local connect timeout increased** — the timeout for `proxy_tor_stream` to connect to the local axum socket was 5 seconds. Under load the axum TCP accept queue fills and `connect()` can legitimately take longer. Increased to 15 seconds.
-- **Dead `ToolStatus::Spawning` variant removed** — `Spawning` was added for the old subprocess-based Tor launcher. `detect_tor` now returns `Option<JoinHandle<()>>` and never produces this variant. Removed to prevent future code from adding unreachable match arms.
-- **`stream_req.target()` call removed** — this method does not exist on `StreamRequest` in `tor-hsservice 0.40`. The diagnostic log line it produced has been removed.
-- **`run_arti` refactored for line-count compliance** — the onion address publication and TTY banner block extracted into `async fn publish_onion_address()`, keeping `run_arti` under the clippy line-count threshold.
-
----
-
-### 🔴 Critical — HTTP 500 errors on pages with gateway posts
-
-Posts inserted via the ChanNet gateway carry no IP address. Pages that attempted to display or process these posts were crashing because `ip_hash` was typed as `String` and the `NULL` database value caused a panic.
-
-Changed `ip_hash` to `Option<String>` throughout. `NULL` values are now handled gracefully — they render as an empty string in templates and are passed through backup/restore without modification.
-
-**Files:** `src/models.rs`, `src/db/posts.rs`, `src/db/admin.rs`, `src/templates/thread.rs`, `src/templates/admin.rs`, `src/handlers/admin/backup.rs`, `src/handlers/backup.rs`
-
----
-
-### 🟠 Reliability & Shutdown
-
-**Worker lifecycle**
-
-- Persisted `JoinHandle`s returned by the worker pool; shutdown now awaits each worker with a bounded per-worker timeout instead of a blind fixed sleep
-- Signaling via `CancellationToken` threaded through every worker task
-- Prevents corruption of in-progress FFmpeg transcodes during shutdown
-- Added startup recovery to reset jobs stuck in `running` state after an unclean exit
-
-**ChanNet server**
-
-- Added graceful shutdown support to the ChanNet listener (port 7070)
-- Unified shutdown signal with the main HTTP server so in-flight federation requests drain before the process exits
-
-**Background tasks**
-
-- All periodic background tasks (session purge, WAL checkpoint, IP prune, login-fail prune, VACUUM, poll cleanup, cache eviction) replaced infinite loops with `tokio::select!` against the worker cancel token
-- Ensures every task exits cleanly on shutdown with no orphaned async tasks
-
-**HTTP**
-
-- Added request timeout middleware (30 seconds) to protect against slow-loris style attacks and stalled client connections
-
----
-
-### 🟠 Multipart Handling
-
-- Added strict per-field size limits: post body capped at ~100 KB, name/subject/other fields at ~4 KB
-- Replaced unbounded `field.text()` calls with controlled byte-reading that returns `413` the moment the running total exceeds the limit
-- Eliminated OOM risk under concurrent large-form submissions
-- Hardened poll duration parsing: added overflow validation before the seconds multiplication step
-
-**Files:** `src/handlers/mod.rs`
-
----
-
-### 🟠 Backup System
-
-- Replaced `VACUUM INTO` string-based SQL with the `rusqlite::backup` API — eliminates manual SQL escaping and improves cross-platform correctness
-- Introduced RAII-style temporary file cleanup: backup artifacts are removed even on client disconnect, early termination, or runtime drop
-- Database pool exhaustion during backup now returns 503 (retryable) instead of 500
-
-**Files:** `src/handlers/admin/backup.rs`
-
----
-
-### 🟡 Database
-
-- Made connection pool size configurable; removed hardcoded pool limit
-- `r2d2::Error` (pool exhaustion) now maps to `503 Service Unavailable` instead of 500
-- Removed `unwrap_or(0)` silent fallback in DB initialization — replaced with proper error propagation
-- Replaced `unchecked_transaction()` (DEFERRED) with `BEGIN IMMEDIATE` across `threads.rs`, `posts.rs`, `admin.rs`, `boards.rs` — eliminates mid-transaction lock upgrade failures under concurrent write load
-
-**Files:** `src/db/mod.rs`, `src/db/threads.rs`, `src/db/posts.rs`, `src/db/admin.rs`, `src/db/boards.rs`
-
----
-
-### 🟡 Logging
-
-- Replaced rolling-never log strategy with a rotating appender to prevent unbounded disk growth
-- Fixed log directory: logs now write to `rustchan-data/` instead of the executable folder
-- Fixed log filename format: rotated files now named `rustchan.2024-01-15.log` instead of `rustchan.log.2024-01-15`
-
-**Files:** `src/main.rs`, `src/logging.rs`
-
----
-
-### 🟡 Other fixes
-
-- **HTTP 304 responses** — removed `.unwrap_or_default()` from 304 response builders; replaced with explicit safe construction
-- **Configuration file writes** — replaced non-atomic file writes with write-to-temp-then-rename pattern; prevents `settings.toml` corruption on crash
-
-**Files:** `src/handlers/thread.rs`, `src/handlers/board.rs`, `src/config.rs`
+- Pages no longer break when gateway-imported posts do not have an IP hash.
+- Config writes are safer.
+- Several HTTP edge cases were cleaned up.
 
 ---
 
