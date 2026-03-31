@@ -64,6 +64,27 @@ fn login_ip_key(ip: &str) -> String {
     hex::encode(h.finalize())
 }
 
+fn redact_login_username(username: &str) -> String {
+    let trimmed = username.trim();
+    if trimmed.is_empty() {
+        return "<empty>".to_string();
+    }
+
+    let safe_prefix = trimmed
+        .chars()
+        .take(3)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let char_len = trimmed.chars().count();
+    format!("{safe_prefix}… (len={char_len})")
+}
+
 /// Returns true if this IP is currently locked out.
 fn is_login_locked(ip_key: &str) -> bool {
     let now = login_now_secs();
@@ -198,6 +219,7 @@ pub async fn admin_login(
     }
 
     let username = form.username.trim().to_string();
+    let username_log = redact_login_username(&username);
     if username.is_empty() || username.len() > 64 {
         let (jar, csrf) = ensure_csrf(jar);
         let boards = tokio::task::spawn_blocking({
@@ -239,7 +261,7 @@ pub async fn admin_login(
 
     match result {
         None => {
-            warn!("Failed admin login attempt for '{}'", form.username.trim());
+            warn!(username = %username_log, "Failed admin login attempt");
             let (jar, csrf) = ensure_csrf(jar);
             let boards = tokio::task::spawn_blocking({
                 let pool = state.db.clone();
@@ -252,8 +274,8 @@ pub async fn admin_login(
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
             let fails = record_login_fail(&ip_key);
             warn!(
-                "Failed admin login for '{}' (attempt {}/{})",
-                form.username.trim(),
+                username = %username_log,
+                "Failed admin login (attempt {}/{})",
                 fails,
                 LOGIN_FAIL_LIMIT
             );
@@ -350,6 +372,13 @@ pub async fn admin_logout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+        routing::post,
+        Router,
+    };
+    use tower::ServiceExt as _;
 
     // ── login_ip_key ─────────────────────────────────────────────────────────
 
@@ -376,6 +405,14 @@ mod tests {
         // The raw IP should not appear anywhere in the hash output
         let key = login_ip_key("10.0.0.1");
         assert!(!key.contains("10.0.0.1"));
+    }
+
+    #[test]
+    fn redact_login_username_omits_full_attacker_input() {
+        let redacted = redact_login_username("bad<script>");
+        assert!(redacted.contains("bad"));
+        assert!(redacted.contains("len="));
+        assert!(!redacted.contains("<script>"));
     }
 
     // ── is_login_locked ──────────────────────────────────────────────────────
@@ -425,5 +462,44 @@ mod tests {
         assert!(!is_login_locked(&key));
 
         ADMIN_LOGIN_FAILS.remove(&key);
+    }
+
+    #[tokio::test]
+    async fn admin_login_sets_session_cookie_for_valid_credentials() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from("username=admin&password=hunter2&_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let session_cookie = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.contains(super::super::SESSION_COOKIE))
+            .expect("session cookie");
+        assert!(session_cookie.contains("HttpOnly"));
     }
 }

@@ -12,9 +12,9 @@ use crate::{
     config::CONFIG,
     db::{self},
     error::{AppError, Result},
-    handlers::{parse_post_multipart, posting},
+    handlers::{parse_post_multipart, posting, render},
     middleware::{validate_csrf, AppState},
-    models::{Pagination, SearchQuery, ThreadSummary},
+    models::{Pagination, SearchQuery},
     templates,
     utils::{
         crypto::{hash_ip, new_csrf_token, verify_pow},
@@ -90,57 +90,33 @@ pub async fn board_index(
 
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let csrf_clone = csrf.clone();
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
         move || -> Result<(String, String)> {
             let conn = pool.get()?;
-
-            let is_admin = jar_session
-                .as_deref()
-                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
-
-            let board = db::get_board_by_short(&conn, &board_short)?
-                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-
-            let total = db::count_threads_for_board(&conn, board.id)?;
-            let pagination = Pagination::new(page, THREADS_PER_PAGE, total);
-            let threads =
-                db::get_threads_for_board(&conn, board.id, THREADS_PER_PAGE, pagination.offset())?;
+            let page_data = render::load_board_page_data(
+                &conn,
+                &board_short,
+                page,
+                THREADS_PER_PAGE,
+                PREVIEW_REPLIES,
+                jar_session.as_deref(),
+            )?;
 
             // 3.2: Derive ETag from the most-recently-bumped thread on this page
             // combined with the page number.  This is a cheap proxy for "has
             // anything on this page changed?".
-            let max_bump = threads.iter().map(|t| t.bumped_at).max().unwrap_or(0);
+            let max_bump = page_data
+                .summaries
+                .iter()
+                .map(|summary| summary.thread.bumped_at)
+                .max()
+                .unwrap_or(0);
             // Include is_admin in the ETag so admin and non-admin responses
             // have distinct cache keys and the browser doesn't serve a cached
             // non-admin page (missing delete controls) to a logged-in admin.
-            let admin_tag = if is_admin { "-a" } else { "" };
+            let admin_tag = if page_data.is_admin { "-a" } else { "" };
             let etag = format!("\"{max_bump}-{page}{admin_tag}\"");
-
-            let mut summaries = Vec::with_capacity(threads.len());
-            for thread in threads {
-                let total_replies = thread.reply_count;
-                let preview = db::get_preview_posts(&conn, thread.id, PREVIEW_REPLIES)?;
-                let omitted = (total_replies - i64::try_from(preview.len()).unwrap_or(0)).max(0);
-                summaries.push(ThreadSummary {
-                    thread,
-                    preview_posts: preview,
-                    omitted,
-                });
-            }
-
-            let all_boards = db::get_all_boards(&conn)?;
-            let collapse_greentext = db::get_collapse_greentext(&conn);
-            let html = templates::board_page(
-                &board,
-                &summaries,
-                &pagination,
-                &csrf_clone,
-                &all_boards,
-                is_admin,
-                None,
-                collapse_greentext,
-            );
+            let html = render::render_board_page(&page_data, &csrf, None);
             Ok((etag, html))
         }
     })
@@ -384,45 +360,18 @@ pub async fn create_thread(
             let pool = state.db.clone();
             let html = tokio::task::spawn_blocking(move || -> Result<String> {
                 let conn = pool.get()?;
-                let is_admin = admin_session_err
-                    .as_deref()
-                    .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
-                let board =
-                    db::get_board_by_short(&conn, &board_short_render)?.ok_or_else(|| {
-                        AppError::NotFound(format!("Board /{board_short_render}/ not found"))
-                    })?;
-                let total = db::count_threads_for_board(&conn, board.id)?;
-                let pagination = crate::models::Pagination::new(1, THREADS_PER_PAGE, total);
-                let threads = db::get_threads_for_board(
+                let page_data = render::load_board_page_data(
                     &conn,
-                    board.id,
+                    &board_short_render,
+                    1,
                     THREADS_PER_PAGE,
-                    pagination.offset(),
+                    PREVIEW_REPLIES,
+                    admin_session_err.as_deref(),
                 )?;
-                let mut summaries = Vec::with_capacity(threads.len());
-                for thread in threads {
-                    let total_replies = thread.reply_count;
-                    let preview = db::get_preview_posts(&conn, thread.id, PREVIEW_REPLIES)?;
-                    #[allow(clippy::arithmetic_side_effects)]
-                    let omitted =
-                        (total_replies - i64::try_from(preview.len()).unwrap_or(0)).max(0);
-                    summaries.push(ThreadSummary {
-                        thread,
-                        preview_posts: preview,
-                        omitted,
-                    });
-                }
-                let all_boards = db::get_all_boards(&conn)?;
-                let collapse_greentext = db::get_collapse_greentext(&conn);
-                Ok(templates::board_page(
-                    &board,
-                    &summaries,
-                    &pagination,
+                Ok(render::render_board_page(
+                    &page_data,
                     &csrf_for_error,
-                    &all_boards,
-                    is_admin,
                     Some(&msg),
-                    collapse_greentext,
                 ))
             })
             .await
@@ -467,13 +416,13 @@ pub async fn catalog(
             let max_bump = threads.iter().map(|t| t.bumped_at).max().unwrap_or(0);
             let admin_tag = if is_admin { "-a" } else { "" };
             let etag = format!("\"{max_bump}-catalog{admin_tag}\"");
-            let all_boards = db::get_all_boards(&conn)?;
-            let collapse_greentext = db::get_collapse_greentext(&conn);
+            let all_boards = crate::templates::live_boards();
+            let collapse_greentext = crate::templates::live_collapse_greentext();
             let html = templates::catalog_page(
                 &board,
                 &threads,
                 &csrf_clone,
-                &all_boards,
+                all_boards.as_slice(),
                 is_admin,
                 collapse_greentext,
             );
@@ -549,14 +498,14 @@ pub async fn board_archive(
                 pagination.offset(),
             )?;
 
-            let all_boards = db::get_all_boards(&conn)?;
-            let collapse_greentext = db::get_collapse_greentext(&conn);
+            let all_boards = crate::templates::live_boards();
+            let collapse_greentext = crate::templates::live_collapse_greentext();
             Ok(templates::archive_page(
                 &board,
                 &threads,
                 &pagination,
                 &csrf_clone,
-                &all_boards,
+                all_boards.as_slice(),
                 collapse_greentext,
             ))
         }
@@ -600,15 +549,15 @@ pub async fn search(
                 pagination.offset(),
             )?;
 
-            let all_boards = db::get_all_boards(&conn)?;
-            let collapse_greentext = db::get_collapse_greentext(&conn);
+            let all_boards = crate::templates::live_boards();
+            let collapse_greentext = crate::templates::live_collapse_greentext();
             Ok(templates::search_page(
                 &board,
                 &query_str,
                 &posts,
                 &pagination,
                 &csrf_clone,
-                &all_boards,
+                all_boards.as_slice(),
                 collapse_greentext,
             ))
         }
@@ -997,26 +946,21 @@ pub async fn submit_appeal(
 
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> crate::error::Result<&'static str> {
+        move || -> crate::error::Result<db::BanAppealSubmission> {
             let conn = pool.get()?;
-            // Rate-limit: one appeal per IP per 24 hours
-            if db::has_recent_appeal(&conn, &ip_hash)? {
-                return Ok("already_filed");
-            }
-            // Only allow appeals from actually-banned IPs
-            if db::is_banned(&conn, &ip_hash)?.is_none() {
-                return Ok("not_banned");
-            }
-            db::file_ban_appeal(&conn, &ip_hash, &reason)?;
-            Ok("ok")
+            Ok(db::file_ban_appeal(&conn, &ip_hash, &reason)?)
         }
     })
     .await;
 
     let msg = match result {
-        Ok(Ok("ok")) => "Your appeal has been submitted. An admin will review it.",
-        Ok(Ok("already_filed")) => "You have already filed an appeal in the last 24 hours.",
-        Ok(Ok("not_banned")) => "Your IP is not currently banned.",
+        Ok(Ok(db::BanAppealSubmission::Filed)) => {
+            "Your appeal has been submitted. An admin will review it."
+        }
+        Ok(Ok(db::BanAppealSubmission::AlreadyFiled)) => {
+            "You have already filed an appeal in the last 24 hours."
+        }
+        Ok(Ok(db::BanAppealSubmission::NotBanned)) => "Your IP is not currently banned.",
         _ => "An error occurred. Please try again.",
     };
 
@@ -1033,4 +977,151 @@ pub async fn submit_appeal(
         msg = crate::utils::sanitize::escape_html(msg)
     );
     Html(html).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::{to_bytes, Body},
+        http::{header, Request, StatusCode},
+        routing::post,
+        Router,
+    };
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn create_thread_accepts_valid_multipart_submission() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/{board}", post(super::create_thread))
+            .with_state(state.clone());
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "hello world")],
+            None,
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/test")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("location header");
+        assert!(location.starts_with("/test/thread/"));
+    }
+
+    #[tokio::test]
+    async fn create_thread_rejects_uploads_on_upload_disabled_board() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            crate::db::update_board_settings(
+                &conn, 1, "Test", "", false, 500, 100, false, false, false, false, true, 0, false,
+                true, false, false, 0,
+            )
+            .expect("update board settings");
+        }
+
+        let router = Router::new()
+            .route("/{board}", post(super::create_thread))
+            .with_state(state);
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "file attempt")],
+            Some(("file", "image.png", b"\x89PNG\r\n\x1a\n", "image/png")),
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/test")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn submit_appeal_is_rate_limited_to_one_open_window() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::add_ban(
+                &conn,
+                &crate::utils::crypto::hash_ip("127.0.0.1", &crate::config::CONFIG.cookie_secret),
+                "test ban",
+                None,
+            )
+            .expect("add ban");
+        }
+
+        let router = Router::new()
+            .route("/appeal", post(super::submit_appeal))
+            .with_state(state);
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/appeal")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from("reason=please+unban&_csrf=csrf123"))
+                .expect("request")
+        };
+
+        let first = router
+            .clone()
+            .oneshot(request())
+            .await
+            .expect("first appeal");
+        let first_body = String::from_utf8(
+            to_bytes(first.into_body(), usize::MAX)
+                .await
+                .expect("first body")
+                .to_vec(),
+        )
+        .expect("first body utf8");
+        assert!(first_body.contains("appeal has been submitted"));
+
+        let second = router.oneshot(request()).await.expect("second appeal");
+        let second_body = String::from_utf8(
+            to_bytes(second.into_body(), usize::MAX)
+                .await
+                .expect("second body")
+                .to_vec(),
+        )
+        .expect("second body utf8");
+        assert!(second_body.contains("already filed an appeal"));
+    }
 }

@@ -52,6 +52,7 @@ static LIVE_SITE_SUBTITLE: LazyLock<RwLock<Arc<str>>> =
 /// change without requiring a server restart or extra DB round-trip per request.
 static LIVE_DEFAULT_THEME: LazyLock<RwLock<Arc<str>>> =
     LazyLock::new(|| RwLock::new(Arc::from("")));
+static LIVE_COLLAPSE_GREENTEXT: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(false));
 
 /// In-memory cache of the current board list, used by standalone pages (error
 /// pages, ban pages) that don't have DB access at render time.  Updated by
@@ -66,6 +67,8 @@ static LIVE_BOARDS: LazyLock<RwLock<Arc<Vec<crate::models::Board>>>> =
 /// changes.  Included in thread-page `ETags` so that adding or deleting a board
 /// correctly invalidates cached thread pages (fixing stale nav bars).
 static LIVE_BOARDS_VERSION: AtomicU64 = AtomicU64::new(0);
+static LIVE_BOARD_NAV: LazyLock<RwLock<(u64, Arc<str>)>> =
+    LazyLock::new(|| RwLock::new((0, Arc::from(""))));
 
 /// Replace the in-memory board list.  Call after any board create / delete /
 /// restore operation so that `error_page()` renders the correct top-bar links.
@@ -76,6 +79,7 @@ pub fn set_live_boards(boards: Vec<crate::models::Board>) {
     // fixing the stale nav bug where deleted boards persisted in the browser
     // cache until an unrelated reply bumped the thread.
     LIVE_BOARDS_VERSION.fetch_add(1, Ordering::Relaxed);
+    rebuild_live_board_nav();
 }
 
 pub fn live_boards() -> Arc<Vec<crate::models::Board>> {
@@ -95,6 +99,19 @@ pub fn live_boards_snapshot() -> Arc<Vec<crate::models::Board>> {
 /// mutations invalidate cached thread HTML (and thus stale nav bars).
 pub fn live_boards_version() -> u64 {
     LIVE_BOARDS_VERSION.load(Ordering::Relaxed)
+}
+
+pub fn set_live_collapse_greentext(enabled: bool) {
+    *LIVE_COLLAPSE_GREENTEXT.write() = enabled;
+}
+
+pub fn live_collapse_greentext() -> bool {
+    *LIVE_COLLAPSE_GREENTEXT.read()
+}
+
+pub fn live_board_nav() -> (u64, Arc<str>) {
+    let guard = LIVE_BOARD_NAV.read();
+    (guard.0, Arc::clone(&guard.1))
 }
 
 /// Call this at startup (after first DB read) and after admin saves a new name.
@@ -134,6 +151,27 @@ pub fn live_site_name() -> Arc<str> {
 
 pub fn live_site_subtitle() -> Arc<str> {
     Arc::clone(&*LIVE_SITE_SUBTITLE.read())
+}
+
+fn rebuild_live_board_nav() {
+    let boards = live_boards_snapshot();
+    let nav_inner = boards
+        .iter()
+        .map(|board| {
+            format!(
+                r#"<a href="/{short}/catalog">{short}</a>"#,
+                short = escape_html(&board.short_name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" / ");
+    let nav_html: Arc<str> = if nav_inner.is_empty() {
+        Arc::from("")
+    } else {
+        Arc::from(format!("[ {nav_inner} ]"))
+    };
+    let version = live_boards_version();
+    *LIVE_BOARD_NAV.write() = (version, nav_html);
 }
 
 // ─── Shared JS injected once per page ────────────────────────────────────────

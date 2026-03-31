@@ -16,6 +16,7 @@
 use crate::models::Post;
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
+use std::collections::HashMap;
 
 // ─── Retry budget constant ────────────────────────────────────────────────────
 
@@ -128,16 +129,30 @@ pub fn get_new_posts_since(
     Ok(posts)
 }
 
-/// Get last N posts for a thread (for board index preview).
+/// Fetch the latest `n` non-OP posts for every thread in `thread_ids`.
 ///
-/// The inner subquery used `SELECT *` which silently breaks if the
-/// schema adds or reorders columns. Replaced with explicit column list.
+/// The result is grouped by thread id and each thread's preview posts are
+/// ordered oldest-first for direct display on the board index.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-pub fn get_preview_posts(conn: &rusqlite::Connection, thread_id: i64, n: i64) -> Result<Vec<Post>> {
-    // Subquery gets the last N, outer query re-orders ascending for display.
-    let mut stmt = conn.prepare_cached(
+pub fn get_preview_posts_for_threads(
+    conn: &rusqlite::Connection,
+    thread_ids: &[i64],
+    n: i64,
+) -> Result<HashMap<i64, Vec<Post>>> {
+    if thread_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders = thread_ids
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let limit_param = thread_ids.len() + 1;
+    let sql = format!(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                 created_at, deletion_token, is_op, media_type,
@@ -148,15 +163,30 @@ pub fn get_preview_posts(conn: &rusqlite::Connection, thread_id: i64, n: i64) ->
                     ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                     created_at, deletion_token, is_op, media_type,
                     audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                    edited_at
-             FROM posts WHERE thread_id = ?1 AND is_op = 0
-             ORDER BY created_at DESC, id DESC LIMIT ?2
-         ) ORDER BY created_at ASC, id ASC",
-    )?;
+                    edited_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY thread_id
+                        ORDER BY created_at DESC, id DESC
+                    ) AS preview_rank
+             FROM posts
+             WHERE is_op = 0 AND thread_id IN ({placeholders})
+         )
+         WHERE preview_rank <= ?{limit_param}
+         ORDER BY thread_id ASC, created_at ASC, id ASC"
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let params = rusqlite::params_from_iter(thread_ids.iter().copied().chain(std::iter::once(n)));
     let posts = stmt
-        .query_map(params![thread_id, n], map_post)?
+        .query_map(params, map_post)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(posts)
+    let mut grouped = HashMap::with_capacity(thread_ids.len());
+    for post in posts {
+        grouped
+            .entry(post.thread_id)
+            .or_insert_with(Vec::new)
+            .push(post);
+    }
+    Ok(grouped)
 }
 
 /// Internal post insertion. Called directly by `threads::create_thread_with_op`
@@ -477,9 +507,19 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Extracted from `search_posts` and `count_search_results` to avoid
 /// duplicating the escape logic. Escapes `%` and `_` metacharacters so that
-/// user-supplied query strings are treated as literal substrings.
-fn like_escape(query: &str) -> String {
-    format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"))
+/// Build a conservative FTS5 query from free-form user input.
+///
+/// Each token becomes an `AND`-joined prefix term so searches remain fast on the FTS
+/// index without exposing raw FTS syntax to the user.
+fn to_fts_query(query: &str) -> Option<String> {
+    let terms = query
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .take(12)
+        .map(|term| format!(r#""{}"*"#, term.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    (!terms.is_empty()).then(|| terms.join(" AND "))
 }
 
 // ─── Search ───────────────────────────────────────────────────────────────────
@@ -495,18 +535,23 @@ pub fn search_posts(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Post>> {
-    let pattern = like_escape(query);
+    let Some(fts_query) = to_fts_query(query) else {
+        return Ok(Vec::new());
+    };
     let mut stmt = conn.prepare_cached(
         "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
                 edited_at
-         FROM posts WHERE board_id = ?1 AND body LIKE ?2 ESCAPE '\\'
-         ORDER BY created_at DESC LIMIT ?3 OFFSET ?4",
+         FROM posts
+         JOIN posts_fts ON posts_fts.rowid = posts.id
+         WHERE posts.board_id = ?1 AND posts_fts MATCH ?2
+         ORDER BY posts.created_at DESC, posts.id DESC
+         LIMIT ?3 OFFSET ?4",
     )?;
     let posts = stmt
-        .query_map(params![board_id, pattern, limit, offset], map_post)?
+        .query_map(params![board_id, fts_query, limit, offset], map_post)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(posts)
 }
@@ -518,10 +563,15 @@ pub fn count_search_results(
     board_id: i64,
     query: &str,
 ) -> Result<i64> {
-    let pattern = like_escape(query);
+    let Some(fts_query) = to_fts_query(query) else {
+        return Ok(0);
+    };
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM posts WHERE board_id = ?1 AND body LIKE ?2 ESCAPE '\\'",
-        params![board_id, pattern],
+        "SELECT COUNT(*)
+         FROM posts
+         JOIN posts_fts ON posts_fts.rowid = posts.id
+         WHERE posts.board_id = ?1 AND posts_fts MATCH ?2",
+        params![board_id, fts_query],
         |r| r.get(0),
     )?)
 }

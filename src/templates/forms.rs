@@ -9,6 +9,7 @@ use crate::models::Board;
 use crate::utils::sanitize::escape_html;
 
 struct UploadFormPolicy {
+    uploads_enabled: bool,
     file_accept: String,
     file_hint: String,
 }
@@ -36,6 +37,7 @@ fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
         hint_parts.push(format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB"));
     }
 
+    let uploads_enabled = allow_any_files || !accept_parts.is_empty();
     let file_accept = if allow_any_files {
         String::new()
     } else {
@@ -59,6 +61,7 @@ fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
     };
 
     UploadFormPolicy {
+        uploads_enabled,
         file_accept,
         file_hint,
     }
@@ -69,6 +72,19 @@ fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
 pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String {
     let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
     let upload_policy = build_upload_form_policy(board);
+    let file_row = if upload_policy.uploads_enabled {
+        format!(
+            r#"    <tr><td>file</td>
+        <td><input type="file" name="file" data-onchange-check-size="1" accept="{file_accept}">
+            <span style="font-size:0.72rem;color:var(--text-dim)">{file_hint}</span></td></tr>"#,
+            file_accept = upload_policy.file_accept,
+            file_hint = upload_policy.file_hint,
+        )
+    } else {
+        r#"    <tr><td>file</td>
+        <td><span style="font-size:0.8rem;color:var(--text-dim)">uploads are disabled on this board</span></td></tr>"#
+            .to_string()
+    };
 
     // PoW CAPTCHA block — only rendered when the board has it enabled.
     // PoW config is passed via data-pow-board / data-pow-difficulty
@@ -132,9 +148,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
               <span title="Emoji">:fire:</span>
             </div>
         </td></tr>
-    <tr><td>file</td>
-        <td><input type="file" name="file" data-onchange-check-size="1" accept="{file_accept}">
-            <span style="font-size:0.72rem;color:var(--text-dim)">{file_hint}</span></td></tr>
+    {file_row}
     {audio_combo_row}
     {edit_token_row}
     {captcha_row}
@@ -173,8 +187,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         // poll scripts moved to /static/main.js
         board = escape_html(board_short),
         csrf = escape_html(csrf_token),
-        file_accept = upload_policy.file_accept,
-        file_hint = upload_policy.file_hint,
+        file_row = file_row,
         audio_combo_row = audio_combo_row,
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
@@ -190,6 +203,19 @@ pub(super) fn reply_form(
 ) -> String {
     let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
     let upload_policy = build_upload_form_policy(board);
+    let file_row = if upload_policy.uploads_enabled {
+        format!(
+            r#"    <tr><td>file</td>
+        <td><input type="file" name="file" data-onchange-check-size="1" accept="{file_accept}">
+            <span style="font-size:0.72rem;color:var(--text-dim)">{file_hint}</span></td></tr>"#,
+            file_accept = upload_policy.file_accept,
+            file_hint = upload_policy.file_hint,
+        )
+    } else {
+        r#"    <tr><td>file</td>
+        <td><span style="font-size:0.8rem;color:var(--text-dim)">uploads are disabled on this board</span></td></tr>"#
+            .to_string()
+    };
 
     // Secondary audio-alongside-image row.
     let audio_combo_row = if board.allow_images && board.allow_audio {
@@ -237,9 +263,7 @@ pub(super) fn reply_form(
     <tr><td>body</td>
         <td><textarea id="reply-body" name="body" rows="4" maxlength="4096"></textarea>
             <button type="submit">post reply</button></td></tr>
-    <tr><td>file</td>
-        <td><input type="file" name="file" data-onchange-check-size="1" accept="{file_accept}">
-            <span style="font-size:0.72rem;color:var(--text-dim)">{file_hint}</span></td></tr>
+    {file_row}
 {audio_combo_row}    <tr><td>options</td>
         <td><label class="sage-label"><input type="checkbox" name="sage" value="1"> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
     {edit_token_row}
@@ -250,10 +274,59 @@ pub(super) fn reply_form(
         board = escape_html(board_short),
         tid = thread_id,
         csrf = escape_html(csrf_token),
-        file_accept = upload_policy.file_accept,
-        file_hint = upload_policy.file_hint,
+        file_row = file_row,
         audio_combo_row = audio_combo_row,
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_upload_form_policy, new_thread_form, reply_form};
+
+    fn uploads_disabled_board() -> crate::models::Board {
+        crate::models::Board {
+            id: 1,
+            short_name: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            nsfw: false,
+            max_threads: 100,
+            bump_limit: 500,
+            allow_images: false,
+            allow_video: false,
+            allow_audio: false,
+            allow_any_files: false,
+            allow_tripcodes: true,
+            edit_window_secs: 0,
+            allow_editing: false,
+            allow_archive: true,
+            allow_video_embeds: false,
+            allow_captcha: false,
+            post_cooldown_secs: 0,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn upload_policy_marks_disabled_board_as_non_uploadable() {
+        let policy = build_upload_form_policy(&uploads_disabled_board());
+        assert!(!policy.uploads_enabled);
+        assert!(policy.file_accept.is_empty());
+    }
+
+    #[test]
+    fn new_thread_form_hides_file_input_when_uploads_disabled() {
+        let html = new_thread_form("test", "csrf", &uploads_disabled_board());
+        assert!(!html.contains("type=\"file\" name=\"file\""));
+        assert!(html.contains("uploads are disabled on this board"));
+    }
+
+    #[test]
+    fn reply_form_hides_file_input_when_uploads_disabled() {
+        let html = reply_form("test", 42, "csrf", &uploads_disabled_board());
+        assert!(!html.contains("type=\"file\" name=\"file\""));
+        assert!(html.contains("uploads are disabled on this board"));
+    }
 }

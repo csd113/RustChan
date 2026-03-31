@@ -162,12 +162,16 @@ impl IntoResponse for AppError {
                 );
                 (
                     StatusCode::BAD_GATEWAY,
-                    format!("API error {status}: {detail}"),
+                    "An upstream service returned an unexpected response. Please try again later."
+                        .to_string(),
                 )
             }
             Self::Tls(msg) => {
                 error!("TLS error: {msg}");
-                (StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "A TLS configuration error occurred.".to_string(),
+                )
             }
         };
 
@@ -177,3 +181,37 @@ impl IntoResponse for AppError {
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::AppError;
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse as _;
+
+    #[test]
+    fn api_errors_hide_upstream_details_from_users() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let response = AppError::Api {
+            status: 502,
+            detail: "upstream exploded".to_string(),
+            endpoint: Some("test".to_string()),
+        }
+        .into_response();
+        let body = runtime
+            .block_on(to_bytes(response.into_body(), usize::MAX))
+            .expect("body bytes");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(!body.contains("upstream exploded"));
+    }
+
+    #[test]
+    fn tls_errors_hide_internal_messages_from_users() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let response = AppError::Tls("secret cert path".to_string()).into_response();
+        let body = runtime
+            .block_on(to_bytes(response.into_body(), usize::MAX))
+            .expect("body bytes");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(!body.contains("secret cert path"));
+    }
+}

@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod board;
 pub mod posting;
+pub mod render;
 pub mod thread;
 
 // ─── Shared multipart form parsing ───────────────────────────────────────────

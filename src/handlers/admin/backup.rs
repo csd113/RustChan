@@ -31,13 +31,15 @@ use tokio_util::io::ReaderStream;
 use tracing::warn;
 
 mod common;
+mod create;
 mod types;
 
 use common::{
     copy_limited, create_staging_dir, db_dir, extract_uploads_to_dir, read_limited_bytes,
     remap_body_quotelinks, remove_path_if_exists, render_restored_body_html,
-    BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
+    validate_board_short_name, BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
 };
+pub use create::*;
 use types::board_backup_types;
 
 // ─── URL query-string encoder ─────────────────────────────────────────────────
@@ -89,6 +91,28 @@ fn encode_q(s: &str) -> String {
 // Module-level constant so it can be referenced inside closures and
 // loops without triggering the "item after statements" clippy lint.
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
+fn restore_db_from_snapshot(
+    live_conn: &mut rusqlite::Connection,
+    snapshot_path: &Path,
+    context: &str,
+) -> Result<()> {
+    let src = rusqlite::Connection::open(snapshot_path).map_err(|restore_err| {
+        AppError::Internal(anyhow::anyhow!(
+            "{context}: open DB rollback snapshot {}: {restore_err}",
+            snapshot_path.display()
+        ))
+    })?;
+    let backup = Backup::new(&src, live_conn).map_err(|restore_err| {
+        AppError::Internal(anyhow::anyhow!("{context}: rollback init: {restore_err}"))
+    })?;
+    backup
+        .run_to_completion(100, std::time::Duration::from_millis(0), None)
+        .map_err(|restore_err| {
+            AppError::Internal(anyhow::anyhow!("{context}: rollback copy: {restore_err}"))
+        })?;
+    Ok(())
+}
 
 #[allow(clippy::too_many_lines)]
 pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
@@ -601,23 +625,8 @@ pub async fn admin_restore(
             })();
 
             if let Err(e) = backup_result {
-                let restore_db_result = (|| -> Result<()> {
-                    let src = rusqlite::Connection::open(&db_snapshot).map_err(|restore_err| {
-                        AppError::Internal(anyhow::anyhow!(
-                            "Open DB rollback snapshot {}: {restore_err}",
-                            db_snapshot.display()
-                        ))
-                    })?;
-                    let backup = Backup::new(&src, &mut live_conn).map_err(|restore_err| {
-                        AppError::Internal(anyhow::anyhow!("Rollback init: {restore_err}"))
-                    })?;
-                    backup
-                        .run_to_completion(100, std::time::Duration::from_millis(0), None)
-                        .map_err(|restore_err| {
-                            AppError::Internal(anyhow::anyhow!("Rollback copy: {restore_err}"))
-                        })?;
-                    Ok(())
-                })();
+                let restore_db_result =
+                    restore_db_from_snapshot(&mut live_conn, &db_snapshot, "Restore");
                 let _ = std::fs::remove_file(&temp_db);
                 let _ = std::fs::remove_file(&db_snapshot);
                 let _ = remove_path_if_exists(&staged_upload_root);
@@ -628,8 +637,22 @@ pub async fn admin_restore(
                 }
                 return Err(e);
             }
-            crate::pending_fs::finalize_full_restore_payload(&pending_restore_payload)
-                .map_err(AppError::Internal)?;
+            if let Err(error) =
+                crate::pending_fs::finalize_full_restore_payload(&pending_restore_payload)
+            {
+                let restore_db_result =
+                    restore_db_from_snapshot(&mut live_conn, &db_snapshot, "Restore");
+                let _ = std::fs::remove_file(&temp_db);
+                let _ = std::fs::remove_file(&db_snapshot);
+                if let Err(restore_err) = restore_db_result {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Restore filesystem swap failed: {error}; DB rollback error: {restore_err}"
+                    )));
+                }
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "Restore filesystem swap failed: {error}"
+                )));
+            }
             db::delete_pending_fs_op(&live_conn, &pending_restore_id)?;
 
             let _ = std::fs::remove_file(&temp_db);
@@ -776,445 +799,7 @@ pub fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
 
 // ─── POST /admin/backup/create ────────────────────────────────────────────────
 
-/// Create a full backup and save it to rustchan-data/full-backups/.
-///
-/// MEM-FIX: The zip is written directly to the final destination file via a
-/// `BufWriter`, so peak RAM usage is O(compression-buffer) not O(zip-size).
-/// A `.tmp` suffix is used during writing; the file is renamed on success so
-/// the backup list never shows a partial/corrupt zip.
-#[allow(clippy::arithmetic_side_effects)]
-pub async fn create_full_backup(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<super::CsrfOnly>,
-) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    let upload_dir = CONFIG.upload_dir.clone();
-    let progress = state.backup_progress.clone();
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
-
-            progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
-
-            // VACUUM INTO for a consistent snapshot.
-            let temp_dir = std::env::temp_dir();
-            let tmp_id = uuid::Uuid::new_v4().simple().to_string();
-            let temp_db = temp_dir.join(format!("chan_backup_{tmp_id}.db"));
-            let temp_db_str = temp_db
-                .to_str()
-                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path non-UTF-8")))?
-                .replace('\'', "''");
-
-            conn.execute_batch(&format!("VACUUM INTO '{temp_db_str}'"))
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {e}")))?;
-            drop(conn);
-
-            // Count files for progress bar before compressing.
-            progress.reset(crate::middleware::backup_phase::COUNT_FILES);
-            let uploads_base = std::path::Path::new(&upload_dir);
-            let file_count = count_files_in_dir(uploads_base);
-            progress
-                .files_total
-                .store(file_count.saturating_add(1), Ordering::Relaxed);
-
-            // MEM-FIX: write zip directly to a .tmp file on disk, not a Vec<u8>.
-            let backup_dir = full_backup_dir();
-            std::fs::create_dir_all(&backup_dir)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create full-backups dir: {e}")))?;
-            let ts = Utc::now().format("%Y%m%d_%H%M%S");
-            let fname = format!("rustchan-backup-{ts}.zip");
-            let final_path = backup_dir.join(&fname);
-            let tmp_path = backup_dir.join(format!("{fname}.tmp"));
-
-            {
-                let out_file = std::io::BufWriter::new(
-                    std::fs::File::create(&tmp_path)
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Create zip tmp: {e}")))?,
-                );
-                let mut zip = zip::ZipWriter::new(out_file);
-                let opts = zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Deflated);
-
-                progress.reset(crate::middleware::backup_phase::COMPRESS);
-                progress
-                    .files_total
-                    .store(file_count.saturating_add(1), Ordering::Relaxed);
-
-                // ── Database snapshot (streamed, not read into RAM) ────────
-                zip.start_file("chan.db", opts)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip DB: {e}")))?;
-                let mut db_src = std::fs::File::open(&temp_db)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Open DB snapshot: {e}")))?;
-                let copied = std::io::copy(&mut db_src, &mut zip)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Stream DB to zip: {e}")))?;
-                drop(db_src);
-                let _ = std::fs::remove_file(&temp_db);
-                progress.files_done.fetch_add(1, Ordering::Relaxed);
-                progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
-
-                // ── Upload files (streamed via io::copy) ───────────────────
-                if uploads_base.exists() {
-                    add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
-                }
-
-                let writer = zip
-                    .finish()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {e}")))?;
-                // Flush the BufWriter so the OS buffer is committed to disk.
-                writer
-                    .into_inner()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush zip writer: {e}")))?
-                    .sync_all()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {e}")))?;
-            }
-
-            // Atomic rename: only becomes visible in the list when complete.
-            std::fs::rename(&tmp_path, &final_path).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp_path);
-                AppError::Internal(anyhow::anyhow!("Rename backup: {e}"))
-            })?;
-
-            let size = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
-            tracing::info!(target: "admin", filename = %fname, bytes = size, "Full backup created");
-            progress
-                .phase
-                .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel?backup_created=1").into_response())
-}
-
-// ─── POST /admin/board/backup/create ─────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct BoardBackupCreateForm {
-    board_short: String,
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
-/// Create a board backup and save it to rustchan-data/board-backups/.
-#[allow(clippy::too_many_lines)]
-pub async fn create_board_backup(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Form(form): Form<BoardBackupCreateForm>,
-) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    let board_short = form
-        .board_short
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(8)
-        .collect::<String>();
-    if board_short.is_empty() {
-        return Err(AppError::BadRequest("Invalid board name.".into()));
-    }
-
-    let upload_dir = CONFIG.upload_dir.clone();
-    let progress = state.backup_progress.clone();
-
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-    use board_backup_types::{BoardRow, ThreadRow, PostRow, PollRow, PollOptionRow, PollVoteRow, FileHashRow, BoardBackupManifest};
-
-            let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
-            let board: BoardRow = conn
-                .query_row(
-                    "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
-                             allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
-                             edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                             allow_captcha, post_cooldown_secs, created_at
-                      FROM boards WHERE short_name = ?1",
-                    params![board_short],
-                    |r| {
-                        Ok(BoardRow {
-                            id: r.get(0)?,
-                            short_name: r.get(1)?,
-                            name: r.get(2)?,
-                            description: r.get(3)?,
-                            nsfw: r.get::<_, i64>(4)? != 0,
-                            max_threads: r.get(5)?,
-                            bump_limit: r.get(6)?,
-                            allow_images: r.get::<_, i64>(7)? != 0,
-                            allow_video: r.get::<_, i64>(8)? != 0,
-                            allow_audio: r.get::<_, i64>(9)? != 0,
-                            allow_any_files: r.get::<_, i64>(10)? != 0,
-                            allow_tripcodes: r.get::<_, i64>(11)? != 0,
-                            edit_window_secs: r.get(12)?,
-                            allow_editing: r.get::<_, i64>(13)? != 0,
-                            allow_archive: r.get::<_, i64>(14)? != 0,
-                            allow_video_embeds: r.get::<_, i64>(15)? != 0,
-                            allow_captcha: r.get::<_, i64>(16)? != 0,
-                            post_cooldown_secs: r.get(17)?,
-                            created_at: r.get(18)?,
-                        })
-                    },
-                )
-                .map_err(|_| AppError::NotFound(format!("Board '{board_short}' not found")))?;
-
-            let board_id = board.id;
-
-            let threads: Vec<ThreadRow> = {
-                let mut s = conn
-                    .prepare(
-                        "SELECT id, board_id, subject, created_at, bumped_at, locked, sticky, reply_count
-                         FROM threads WHERE board_id = ?1 ORDER BY id ASC",
-                    )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                let rows = s
-                    .query_map(params![board_id], |r| {
-                        Ok(ThreadRow {
-                            id: r.get(0)?,
-                            board_id: r.get(1)?,
-                            subject: r.get(2)?,
-                            created_at: r.get(3)?,
-                            bumped_at: r.get(4)?,
-                            locked: r.get::<_, i64>(5)? != 0,
-                            sticky: r.get::<_, i64>(6)? != 0,
-                            reply_count: r.get(7)?,
-                        })
-                    })
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                rows
-            };
-
-            let posts: Vec<PostRow> = {
-                let mut s = conn
-                    .prepare(
-                        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                                media_type, created_at, deletion_token, is_op
-                         FROM posts WHERE board_id = ?1 ORDER BY id ASC",
-                    )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                let rows = s
-                    .query_map(params![board_id], |r| {
-                        Ok(PostRow {
-                            id: r.get(0)?,
-                            thread_id: r.get(1)?,
-                            board_id: r.get(2)?,
-                            name: r.get(3)?,
-                            tripcode: r.get(4)?,
-                            subject: r.get(5)?,
-                            body: r.get(6)?,
-                            body_html: r.get(7)?,
-                            ip_hash: r.get(8)?,
-                            file_path: r.get(9)?,
-                            file_name: r.get(10)?,
-                            file_size: r.get(11)?,
-                            thumb_path: r.get(12)?,
-                            mime_type: r.get(13)?,
-                            media_type: r.get(14)?,
-                            created_at: r.get(15)?,
-                            deletion_token: r.get(16)?,
-                            is_op: r.get::<_, i64>(17)? != 0,
-                        })
-                    })
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                rows
-            };
-
-            let polls: Vec<PollRow> = {
-                let mut s = conn
-                    .prepare(
-                        "SELECT p.id, p.thread_id, p.question, p.expires_at, p.created_at
-                         FROM polls p JOIN threads t ON t.id = p.thread_id
-                         WHERE t.board_id = ?1 ORDER BY p.id ASC",
-                    )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                let rows = s
-                    .query_map(params![board_id], |r| {
-                        Ok(PollRow {
-                            id: r.get(0)?,
-                            thread_id: r.get(1)?,
-                            question: r.get(2)?,
-                            expires_at: r.get(3)?,
-                            created_at: r.get(4)?,
-                        })
-                    })
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                rows
-            };
-
-            let poll_options: Vec<PollOptionRow> = {
-                let mut s = conn
-                    .prepare(
-                        "SELECT po.id, po.poll_id, po.text, po.position
-                         FROM poll_options po
-                         JOIN polls p ON p.id = po.poll_id
-                         JOIN threads t ON t.id = p.thread_id
-                         WHERE t.board_id = ?1 ORDER BY po.id ASC",
-                    )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                let rows = s
-                    .query_map(params![board_id], |r| {
-                        Ok(PollOptionRow {
-                            id: r.get(0)?,
-                            poll_id: r.get(1)?,
-                            text: r.get(2)?,
-                            position: r.get(3)?,
-                        })
-                    })
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                rows
-            };
-
-            let poll_votes: Vec<PollVoteRow> = {
-                let mut s = conn
-                    .prepare(
-                        "SELECT pv.id, pv.poll_id, pv.option_id, pv.ip_hash
-                         FROM poll_votes pv
-                         JOIN polls p ON p.id = pv.poll_id
-                         JOIN threads t ON t.id = p.thread_id
-                         WHERE t.board_id = ?1 ORDER BY pv.id ASC",
-                    )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                let rows = s
-                    .query_map(params![board_id], |r| {
-                        Ok(PollVoteRow {
-                            id: r.get(0)?,
-                            poll_id: r.get(1)?,
-                            option_id: r.get(2)?,
-                            ip_hash: r.get(3)?,
-                        })
-                    })
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                rows
-            };
-
-            let file_hashes: Vec<FileHashRow> = {
-                let mut s = conn
-                    .prepare(
-                        "SELECT DISTINCT fh.sha256, fh.file_path, fh.thumb_path, fh.mime_type, fh.created_at
-                         FROM file_hashes fh
-                         JOIN posts po ON po.file_path = fh.file_path
-                         WHERE po.board_id = ?1 ORDER BY fh.created_at ASC",
-                    )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                let rows = s
-                    .query_map(params![board_id], |r| {
-                        Ok(FileHashRow {
-                            sha256: r.get(0)?,
-                            file_path: r.get(1)?,
-                            thumb_path: r.get(2)?,
-                            mime_type: r.get(3)?,
-                            created_at: r.get(4)?,
-                        })
-                    })
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                rows
-            };
-
-            let manifest = BoardBackupManifest {
-                version: 1,
-                board,
-                threads,
-                posts,
-                polls,
-                poll_options,
-                poll_votes,
-                file_hashes,
-            };
-            let manifest_json = serde_json::to_vec_pretty(&manifest)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON: {e}")))?;
-
-            // MEM-FIX: write zip directly to a .tmp file on disk, not a Vec<u8>.
-            let backup_dir = board_backup_dir();
-            std::fs::create_dir_all(&backup_dir).map_err(|e| {
-                AppError::Internal(anyhow::anyhow!("Create board-backups dir: {e}"))
-            })?;
-            let ts = Utc::now().format("%Y%m%d_%H%M%S");
-            let fname = format!("rustchan-board-{board_short}-{ts}.zip");
-            let final_path = backup_dir.join(&fname);
-            let tmp_path = backup_dir.join(format!("{fname}.tmp"));
-
-            let uploads_base = std::path::Path::new(&upload_dir);
-            let board_upload_path = uploads_base.join(&board_short);
-            let file_count = count_files_in_dir(&board_upload_path);
-            progress.reset(crate::middleware::backup_phase::COMPRESS);
-            // +1 for board.json manifest
-            progress.files_total.store(file_count.saturating_add(1), Ordering::Relaxed);
-
-            {
-                let out_file = std::io::BufWriter::new(
-                    std::fs::File::create(&tmp_path).map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("Create zip tmp: {e}"))
-                    })?,
-                );
-                let mut zip = zip::ZipWriter::new(out_file);
-                let opts = zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Deflated);
-
-                zip.start_file("board.json", opts)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip manifest: {e}")))?;
-                zip.write_all(&manifest_json)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Write manifest: {e}")))?;
-                progress.files_done.fetch_add(1, Ordering::Relaxed);
-                progress.bytes_done.fetch_add(manifest_json.len() as u64, Ordering::Relaxed);
-
-                if board_upload_path.exists() {
-                    add_dir_to_zip(&mut zip, uploads_base, &board_upload_path, opts, &progress)?;
-                }
-
-                let writer = zip
-                    .finish()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {e}")))?;
-                writer
-                    .into_inner()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush zip writer: {e}")))?
-                    .sync_all()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {e}")))?;
-            }
-
-            std::fs::rename(&tmp_path, &final_path).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp_path);
-                AppError::Internal(anyhow::anyhow!("Rename board backup: {e}"))
-            })?;
-
-            let size = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
-            tracing::info!(target: "admin", filename = %fname, bytes = size, "Board backup created");
-            progress.phase.store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    Ok(Redirect::to("/admin/panel?backup_created=1").into_response())
-}
-
+// Create/save handlers live in `backup/create.rs`.
 // ─── GET /admin/backup/download/{kind}/{filename} ────────────────────────────
 
 /// Download a saved backup file.  `kind` must be "full" or "board".
@@ -1227,6 +812,7 @@ pub async fn create_board_backup(
 /// The fix: open a `tokio::fs::File` and wrap it in a `ReaderStream` so Axum
 /// sends the data in 64 KiB chunks pulled directly from the OS page cache.
 /// Peak heap = one 64 KiB chunk; the rest stays on disk.
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn download_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1613,23 +1199,8 @@ pub async fn restore_saved_full_backup(
                 Ok(())
             })();
             if let Err(e) = backup_result {
-                let restore_db_result = (|| -> Result<()> {
-                    let src = rusqlite::Connection::open(&db_snapshot).map_err(|restore_err| {
-                        AppError::Internal(anyhow::anyhow!(
-                            "Open DB rollback snapshot {}: {restore_err}",
-                            db_snapshot.display()
-                        ))
-                    })?;
-                    let backup = Backup::new(&src, &mut live_conn).map_err(|restore_err| {
-                        AppError::Internal(anyhow::anyhow!("Rollback init: {restore_err}"))
-                    })?;
-                    backup
-                        .run_to_completion(100, std::time::Duration::from_millis(0), None)
-                        .map_err(|restore_err| {
-                            AppError::Internal(anyhow::anyhow!("Rollback copy: {restore_err}"))
-                        })?;
-                    Ok(())
-                })();
+                let restore_db_result =
+                    restore_db_from_snapshot(&mut live_conn, &db_snapshot, "Restore-saved");
                 let _ = std::fs::remove_file(&temp_db);
                 let _ = std::fs::remove_file(&db_snapshot);
                 let _ = remove_path_if_exists(&staged_upload_root);
@@ -1640,8 +1211,22 @@ pub async fn restore_saved_full_backup(
                 }
                 return Err(e);
             }
-            crate::pending_fs::finalize_full_restore_payload(&pending_restore_payload)
-                .map_err(AppError::Internal)?;
+            if let Err(error) =
+                crate::pending_fs::finalize_full_restore_payload(&pending_restore_payload)
+            {
+                let restore_db_result =
+                    restore_db_from_snapshot(&mut live_conn, &db_snapshot, "Restore-saved");
+                let _ = std::fs::remove_file(&temp_db);
+                let _ = std::fs::remove_file(&db_snapshot);
+                if let Err(restore_err) = restore_db_result {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Restore-saved filesystem swap failed: {error}; DB rollback error: {restore_err}"
+                    )));
+                }
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "Restore-saved filesystem swap failed: {error}"
+                )));
+            }
             db::delete_pending_fs_op(&live_conn, &pending_restore_id)?;
             let _ = std::fs::remove_file(&temp_db);
             let _ = std::fs::remove_file(&db_snapshot);
@@ -1718,7 +1303,7 @@ pub async fn restore_saved_board_backup(
             use board_backup_types::BoardBackupManifest;
             use std::collections::HashMap;
 
-            let conn = pool.get()?;
+            let mut conn = pool.get()?;
             // Auth check first — only read the file if the session is valid.
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
@@ -1749,6 +1334,7 @@ pub async fn restore_saved_board_backup(
             };
 
             let board_short = manifest.board.short_name.clone();
+            validate_board_short_name(&board_short)?;
             let upload_root = PathBuf::from(&upload_dir);
             let staged_upload_root = create_staging_dir(&upload_root, "board-restore-stage")?;
             extract_uploads_to_dir(&mut archive, &staged_upload_root)?;
@@ -1785,6 +1371,17 @@ pub async fn restore_saved_board_backup(
                     |r| r.get(0),
                 )
                 .ok();
+            let temp_dir = std::env::temp_dir();
+            let db_snapshot = temp_dir.join(format!(
+                "board_restore_live_before_{}.db",
+                uuid::Uuid::new_v4().simple()
+            ));
+            let db_snapshot_str = db_snapshot
+                .to_str()
+                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Snapshot path is non-UTF-8")))?
+                .replace('\'', "''");
+            conn.execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Snapshot board DB: {e}")))?;
 
             // BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
             // board row as well as the thread/post/poll inserts.  Previously those
@@ -1976,18 +1573,32 @@ pub async fn restore_saved_board_backup(
                 Ok(()) => {
                     conn.execute("COMMIT", [])
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit: {e}")))?;
-                    crate::pending_fs::finalize_board_restore_payload(
-                        &pending_board_restore_payload,
-                    )
-                    .map_err(AppError::Internal)?;
+                    if let Err(error) =
+                        crate::pending_fs::finalize_board_restore_payload(&pending_board_restore_payload)
+                    {
+                        if let Err(restore_err) =
+                            restore_db_from_snapshot(&mut conn, &db_snapshot, "Board restore-saved")
+                        {
+                            let _ = std::fs::remove_file(&db_snapshot);
+                            return Err(AppError::Internal(anyhow::anyhow!(
+                                "Board restore-saved filesystem swap failed: {error}; DB rollback error: {restore_err}"
+                            )));
+                        }
+                        let _ = std::fs::remove_file(&db_snapshot);
+                        return Err(AppError::Internal(anyhow::anyhow!(
+                            "Board restore-saved filesystem swap failed: {error}"
+                        )));
+                    }
                     db::delete_pending_fs_op(&conn, &pending_board_restore_id)?;
                 }
                 Err(e) => {
                     let _ = conn.execute("ROLLBACK", []);
                     let _ = remove_path_if_exists(&staged_upload_root);
+                    let _ = std::fs::remove_file(&db_snapshot);
                     return Err(e);
                 }
             }
+            let _ = std::fs::remove_file(&db_snapshot);
             let _ = remove_path_if_exists(&staged_upload_root);
 
             tracing::info!(target: "admin", board = %board_short, "Board restore-saved completed");
@@ -2383,7 +1994,7 @@ pub async fn board_restore(
                 use std::collections::HashMap;
                 use std::io::Read;
 
-                let conn = pool.get()?;
+                let mut conn = pool.get()?;
                 super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
                 // Detect format from the first four bytes (ZIP magic or JSON '{').
@@ -2466,6 +2077,7 @@ pub async fn board_restore(
                 };
 
                 let board_short = manifest.board.short_name.clone();
+                validate_board_short_name(&board_short)?;
                 let upload_root = PathBuf::from(&upload_dir);
                 let staged_upload_root = create_staging_dir(&upload_root, "board-restore-stage")?;
                 if let Some(ref mut archive) = archive_opt {
@@ -2503,6 +2115,17 @@ pub async fn board_restore(
                         |r| r.get(0),
                     )
                     .ok();
+                let temp_dir = std::env::temp_dir();
+                let db_snapshot = temp_dir.join(format!(
+                    "board_restore_live_before_{}.db",
+                    uuid::Uuid::new_v4().simple()
+                ));
+                let db_snapshot_str = db_snapshot
+                    .to_str()
+                    .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Snapshot path is non-UTF-8")))?
+                    .replace('\'', "''");
+                conn.execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Snapshot board DB: {e}")))?;
 
                 // BEGIN IMMEDIATE must cover the DELETE + UPDATE/INSERT of the
                 // board row.  Previously those statements ran outside any transaction.
@@ -2788,16 +2411,32 @@ pub async fn board_restore(
                     Ok(()) => {
                         conn.execute("COMMIT", [])
                             .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit tx: {e}")))?;
-                        crate::pending_fs::finalize_board_restore_payload(&pending_board_restore_payload)
-                            .map_err(AppError::Internal)?;
+                        if let Err(error) =
+                            crate::pending_fs::finalize_board_restore_payload(&pending_board_restore_payload)
+                        {
+                            if let Err(restore_err) =
+                                restore_db_from_snapshot(&mut conn, &db_snapshot, "Board restore")
+                            {
+                                let _ = std::fs::remove_file(&db_snapshot);
+                                return Err(AppError::Internal(anyhow::anyhow!(
+                                    "Board restore filesystem swap failed: {error}; DB rollback error: {restore_err}"
+                                )));
+                            }
+                            let _ = std::fs::remove_file(&db_snapshot);
+                            return Err(AppError::Internal(anyhow::anyhow!(
+                                "Board restore filesystem swap failed: {error}"
+                            )));
+                        }
                         db::delete_pending_fs_op(&conn, &pending_board_restore_id)?;
                     }
                     Err(e) => {
                         let _ = conn.execute("ROLLBACK", []);
                         let _ = remove_path_if_exists(&staged_upload_root);
+                        let _ = std::fs::remove_file(&db_snapshot);
                         return Err(e);
                     }
                 }
+                let _ = std::fs::remove_file(&db_snapshot);
                 let _ = remove_path_if_exists(&staged_upload_root);
 
                 tracing::info!(target: "admin", board = %board_short, "Board restore completed");

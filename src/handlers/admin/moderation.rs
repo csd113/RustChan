@@ -71,7 +71,7 @@ pub async fn add_ban(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to("/admin/panel").into_response())
+    Ok(super::admin_panel_redirect("Ban added.").into_response())
 }
 
 // ─── POST /admin/ban/remove ───────────────────────────────────────────────────
@@ -105,7 +105,7 @@ pub async fn remove_ban(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to("/admin/panel").into_response())
+    Ok(super::admin_panel_redirect("Ban lifted.").into_response())
 }
 
 // ─── POST /admin/post/ban-delete ──────────────────────────────────────────────
@@ -271,7 +271,7 @@ pub async fn dismiss_appeal(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to("/admin/panel#appeals").into_response())
+    Ok(super::admin_panel_redirect_anchor("Appeal dismissed.", "appeals").into_response())
 }
 
 // ─── POST /admin/appeal/accept ────────────────────────────────────────────────
@@ -310,7 +310,10 @@ pub async fn accept_appeal(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to("/admin/panel#appeals").into_response())
+    Ok(
+        super::admin_panel_redirect_anchor("Appeal accepted and ban lifted.", "appeals")
+            .into_response(),
+    )
 }
 
 // ─── POST /admin/filter/add ───────────────────────────────────────────────────
@@ -357,7 +360,7 @@ pub async fn add_filter(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to("/admin/panel").into_response())
+    Ok(super::admin_panel_redirect("Word filter added.").into_response())
 }
 
 // ─── POST /admin/filter/remove ────────────────────────────────────────────────
@@ -391,7 +394,7 @@ pub async fn remove_filter(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to("/admin/panel").into_response())
+    Ok(super::admin_panel_redirect("Word filter removed.").into_response())
 }
 
 // ─── GET /admin/ip/{ip_hash} ──────────────────────────────────────────────────
@@ -531,7 +534,7 @@ pub async fn resolve_report(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to("/admin/panel#reports").into_response())
+    Ok(super::admin_panel_redirect_anchor("Report resolved.", "reports").into_response())
 }
 
 // ─── GET /admin/mod-log ───────────────────────────────────────────────────────

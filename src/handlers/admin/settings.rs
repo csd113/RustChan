@@ -121,7 +121,7 @@ pub async fn update_board_settings(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to("/admin/panel").into_response())
+    Ok(super::admin_panel_redirect("Board settings saved.").into_response())
 }
 
 // ─── POST /admin/site/settings ────────────────────────────────────────────────
@@ -174,6 +174,7 @@ pub async fn update_site_settings(
                 "0"
             };
             db::set_site_setting(&conn, "collapse_greentext", val)?;
+            crate::templates::set_live_collapse_greentext(val == "1");
             tracing::info!(target: "admin", value = val, "Site setting collapse_greentext updated");
 
             // Save the custom site name (trimmed, max 64 chars).

@@ -14,6 +14,13 @@ use crate::models::{AdminSession, AdminUser, Ban, WordFilter};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BanAppealSubmission {
+    Filed,
+    AlreadyFiled,
+    NotBanned,
+}
+
 // ─── Admin user queries ───────────────────────────────────────────────────────
 
 /// # Errors
@@ -509,27 +516,50 @@ pub fn count_mod_log(conn: &rusqlite::Connection) -> Result<i64> {
 
 // ─── Ban appeals ──────────────────────────────────────────────────────────────
 
-/// Insert a new ban appeal. Returns the new appeal id.
+/// File a ban appeal atomically while enforcing the 24-hour duplicate guard.
 ///
-/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
-///
-/// Note (TOCTOU): `has_recent_appeal` and `file_ban_appeal` have a race — two
-/// concurrent requests from the same IP can both pass the check and both
-/// insert appeals. A full fix requires a schema-level UNIQUE(`ip_hash`) or a
-/// time-windowed partial unique index. The guard is retained as a best-effort
-/// spam deterrent for the common (non-concurrent) case.
+/// Uses `BEGIN IMMEDIATE` so the "is this IP banned / has it appealed recently"
+/// checks and the eventual INSERT all see a consistent write-locked view.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-pub fn file_ban_appeal(conn: &rusqlite::Connection, ip_hash: &str, reason: &str) -> Result<i64> {
-    let id: i64 = conn
-        .query_row(
-            "INSERT INTO ban_appeals (ip_hash, reason) VALUES (?1, ?2) RETURNING id",
-            params![ip_hash, reason],
-            |r| r.get(0),
-        )
-        .context("Failed to insert ban appeal")?;
-    Ok(id)
+pub fn file_ban_appeal(
+    conn: &rusqlite::Connection,
+    ip_hash: &str,
+    reason: &str,
+) -> Result<BanAppealSubmission> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin ban-appeal transaction")?;
+
+    let result: Result<BanAppealSubmission> = (|| {
+        if is_banned(conn, ip_hash)?.is_none() {
+            return Ok(BanAppealSubmission::NotBanned);
+        }
+        if has_recent_appeal(conn, ip_hash)? {
+            return Ok(BanAppealSubmission::AlreadyFiled);
+        }
+
+        let _: i64 = conn
+            .query_row(
+                "INSERT INTO ban_appeals (ip_hash, reason) VALUES (?1, ?2) RETURNING id",
+                params![ip_hash, reason],
+                |row| row.get(0),
+            )
+            .context("Failed to insert ban appeal")?;
+        Ok(BanAppealSubmission::Filed)
+    })();
+
+    match result {
+        Ok(outcome) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit ban-appeal transaction")?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 /// Return all open ban appeals, newest first.
@@ -628,8 +658,6 @@ pub fn open_appeal_count(conn: &rusqlite::Connection) -> Result<i64> {
 
 /// Check if an appeal has already been filed from this `ip_hash` (any status)
 /// within the last 24 hours, to prevent spam.
-///
-/// Note (TOCTOU): see `file_ban_appeal` for the concurrency caveat.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -762,4 +790,31 @@ pub fn get_db_size_bytes(conn: &rusqlite::Connection) -> Result<i64> {
 pub fn run_vacuum(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch("VACUUM")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_ban_appeal, BanAppealSubmission};
+
+    #[test]
+    fn ban_appeal_submission_is_deduplicated_within_window() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+        crate::db::add_ban(&conn, "hash1", "reason", None).expect("add ban");
+
+        let first = file_ban_appeal(&conn, "hash1", "please unban").expect("first appeal");
+        let second = file_ban_appeal(&conn, "hash1", "second try").expect("second appeal");
+
+        assert_eq!(first, BanAppealSubmission::Filed);
+        assert_eq!(second, BanAppealSubmission::AlreadyFiled);
+    }
+
+    #[test]
+    fn ban_appeal_submission_requires_active_ban() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+
+        let result = file_ban_appeal(&conn, "hash2", "please unban").expect("appeal result");
+        assert_eq!(result, BanAppealSubmission::NotBanned);
+    }
 }

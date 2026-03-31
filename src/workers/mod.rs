@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZero;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::Notify;
@@ -114,15 +115,23 @@ pub struct JobQueue {
     /// and skip if the same path is already in flight, preventing redundant
     /// `FFmpeg` invocations on client retries or server-restart re-queues.
     pub in_progress: Arc<DashMap<String, bool>>,
+    pending_jobs: Arc<AtomicU64>,
 }
 
 impl JobQueue {
     pub fn new(pool: DbPool) -> Self {
+        let pending_jobs = pool
+            .get()
+            .ok()
+            .and_then(|conn| crate::db::pending_job_count(&conn).ok())
+            .and_then(|count| u64::try_from(count).ok())
+            .unwrap_or(0);
         Self {
             pool,
             notify: Arc::new(Notify::new()),
             cancel: CancellationToken::new(),
             in_progress: Arc::new(DashMap::new()),
+            pending_jobs: Arc::new(AtomicU64::new(pending_jobs)),
         }
     }
 
@@ -135,38 +144,74 @@ impl JobQueue {
     /// bound under a post flood.
     pub fn enqueue(&self, job: &Job) -> Result<i64> {
         let payload = serde_json::to_string(job)?;
-        let conn = self.pool.get()?;
 
         // Back-pressure: check pending count before inserting.
-        if CONFIG.job_queue_capacity > 0 {
-            let pending = crate::db::pending_job_count(&conn).unwrap_or(0);
-            if pending.cast_unsigned() >= CONFIG.job_queue_capacity {
-                warn!(
-                    "Job queue at capacity ({}/{}) — dropping {} job",
-                    pending,
-                    CONFIG.job_queue_capacity,
-                    job.type_str(),
-                );
-                // Return a sentinel -1 rather than an error so callers that
-                // fire-and-forget don't bubble up a spurious error.
-                return Ok(-1);
+        if self.reserve_pending_slot(job.type_str()) {
+            let conn = match self.pool.get() {
+                Ok(conn) => conn,
+                Err(error) => {
+                    self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+                    return Err(error.into());
+                }
+            };
+            match crate::db::enqueue_job(&conn, job.type_str(), &payload) {
+                Ok(id) => {
+                    self.notify.notify_one();
+                    Ok(id)
+                }
+                Err(error) => {
+                    self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+                    Err(error)
+                }
             }
+        } else {
+            Ok(-1)
         }
-
-        let id = crate::db::enqueue_job(&conn, job.type_str(), &payload)?;
-        self.notify.notify_one();
-        Ok(id)
     }
 
     /// Number of jobs currently in "pending" state (not yet started).
     /// Used by the terminal stats display.
     #[allow(dead_code)]
     pub fn pending_count(&self) -> i64 {
-        self.pool
-            .get()
-            .ok()
-            .and_then(|c| crate::db::pending_job_count(&c).ok())
-            .unwrap_or(0)
+        i64::try_from(self.pending_jobs.load(Ordering::Relaxed)).unwrap_or(i64::MAX)
+    }
+
+    fn reserve_pending_slot(&self, job_type: &str) -> bool {
+        if CONFIG.job_queue_capacity == 0 {
+            self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+
+        loop {
+            let pending = self.pending_jobs.load(Ordering::Relaxed);
+            if pending >= CONFIG.job_queue_capacity {
+                warn!(
+                    "Job queue at capacity ({}/{}) — dropping {} job",
+                    pending, CONFIG.job_queue_capacity, job_type,
+                );
+                return false;
+            }
+            if self
+                .pending_jobs
+                .compare_exchange(
+                    pending,
+                    pending.saturating_add(1),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    fn mark_job_claimed(&self) {
+        self.pending_jobs
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
+                Some(pending.saturating_sub(1))
+            })
+            .ok();
     }
 }
 
@@ -239,6 +284,7 @@ async fn worker_loop(
 
         match claim {
             Ok(Ok(Some((job_id, payload)))) => {
+                queue.mark_job_claimed();
                 consecutive_errors = 0; // reset back-off on any successful claim
                 debug!("Worker {id}: picked up job #{job_id}");
                 let pool_done = queue.pool.clone();

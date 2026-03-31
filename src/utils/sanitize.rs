@@ -16,9 +16,13 @@
 //
 // Word filters: applied on raw text BEFORE HTML escaping.
 
-use rand_core::{OsRng, RngCore};
 use regex::Regex;
 use std::sync::LazyLock;
+
+mod formatting;
+
+pub use formatting::extract_video_embed;
+use formatting::{apply_dice, apply_emoji};
 
 #[allow(clippy::expect_used)]
 static RE_REPLY: LazyLock<Regex> =
@@ -43,218 +47,6 @@ static RE_SPOILER: LazyLock<Regex> = LazyLock::new(|| {
 #[allow(clippy::expect_used)]
 static RE_DICE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[dice (\d{1,2})d(\d{1,3})\]").expect("RE_DICE is valid"));
-
-// ─── Video embed URL detection ────────────────────────────────────────────────
-// These extract a canonical video ID from supported platforms so the client-side
-// embed script can build the appropriate iframe/thumbnail without a server round-trip.
-
-/// Try to extract a (`embed_type`, `video_id`) pair from a URL.
-///
-/// Supports `YouTube` (youtube.com and youtu.be), any Invidious instance
-/// (detected by the `/watch?v=` path), and Streamable.
-/// Returns None for all other URLs.
-#[must_use]
-pub fn extract_video_embed(url: &str) -> Option<(&'static str, String)> {
-    // YouTube — youtube.com/watch?v=ID or youtu.be/ID or youtube.com/shorts/ID
-    if url.contains("youtube.com") || url.contains("youtu.be") {
-        if let Some(id) = extract_yt_id(url) {
-            return Some(("youtube", id));
-        }
-    }
-    // Streamable — streamable.com/CODE
-    if url.contains("streamable.com/") {
-        if let Some(code) = extract_streamable_id(url) {
-            return Some(("streamable", code));
-        }
-    }
-    // Invidious — any domain serving /watch?v=ID (11-char YouTube-style ID).
-    // The previous code matched ANY URL containing ?v= or &v=,
-    // meaning a completely ordinary link like https://example.com/article?v=dQw4w9WgXcQ
-    // would be silently replaced with a YouTube embed widget.  We now require
-    // the URL path to contain "/watch" (case-sensitive, matching real Invidious
-    // instances) before treating the ?v= parameter as a video ID.
-    if !url.contains("youtube.com") && !url.contains("youtu.be") && url.contains("/watch") {
-        if let Some(id) = extract_yt_id_from_watch_param(url) {
-            return Some(("youtube", id));
-        }
-    }
-    None
-}
-
-#[allow(clippy::arithmetic_side_effects)]
-fn extract_yt_id(url: &str) -> Option<String> {
-    // youtu.be/ID
-    if let Some(pos) = url.find("youtu.be/") {
-        let rest = &url[pos + 9..];
-        let id: String = rest.chars().take(11).collect();
-        if id.len() == 11
-            && id
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        {
-            return Some(id);
-        }
-    }
-    // youtube.com/shorts/ID
-    if let Some(pos) = url.find("/shorts/") {
-        let rest = &url[pos + 8..];
-        let id: String = rest.chars().take(11).collect();
-        if id.len() == 11
-            && id
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        {
-            return Some(id);
-        }
-    }
-    // ?v=ID or &v=ID
-    extract_yt_id_from_watch_param(url)
-}
-
-#[allow(clippy::arithmetic_side_effects)]
-fn extract_yt_id_from_watch_param(url: &str) -> Option<String> {
-    for prefix in &["?v=", "&v="] {
-        if let Some(pos) = url.find(prefix) {
-            let rest = &url[pos + prefix.len()..];
-            let id: String = rest.chars().take(11).collect();
-            if id.len() == 11
-                && id
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-            {
-                return Some(id);
-            }
-        }
-    }
-    None
-}
-
-#[allow(clippy::arithmetic_side_effects)]
-fn extract_streamable_id(url: &str) -> Option<String> {
-    // streamable.com/CODE — code is alphanumeric, typically 6 chars
-    if let Some(pos) = url.find("streamable.com/") {
-        let rest = &url[pos + 15..];
-        // Strip any query/fragment
-        let code: String = rest
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-            .collect();
-        if !code.is_empty() && code.len() <= 16 {
-            return Some(code);
-        }
-    }
-    None
-}
-
-/// Unicode die-face characters for d6 results (⚀–⚅, value 1–6).
-const fn d6_face(n: u32) -> char {
-    match n {
-        1 => '⚀',
-        2 => '⚁',
-        3 => '⚂',
-        4 => '⚃',
-        5 => '⚄',
-        6 => '⚅',
-        _ => '🎲',
-    }
-}
-
-/// Roll `count` dice each with `sides` faces, return (rolls, sum).
-#[allow(clippy::arithmetic_side_effects)]
-fn roll_dice(count: u32, sides: u32) -> (Vec<u32>, u32) {
-    let mut rolls = Vec::with_capacity(count as usize);
-    let mut sum = 0u32;
-    for _ in 0..count {
-        // next_u32 % sides gives a value 0..sides-1; add 1 for 1..=sides.
-        // Modulo bias is negligible for dice-sized ranges.
-        let roll = (OsRng.next_u32() % sides) + 1;
-        rolls.push(roll);
-        sum = sum.saturating_add(roll);
-    }
-    (rolls, sum)
-}
-
-/// Replace [dice `NdM`] tags in HTML-escaped post text with their rolled results.
-/// Called once per post at creation time — the result is stored in `body_html` so
-/// the same rolls are shown to every reader forever.
-fn apply_dice(text: &str) -> String {
-    RE_DICE
-        .replace_all(text, |caps: &regex::Captures| {
-            let count: u32 = caps[1].parse().unwrap_or(1).clamp(1, 20);
-            let sides: u32 = caps[2].parse().unwrap_or(6).clamp(2, 999);
-            let (rolls, sum) = roll_dice(count, sides);
-
-            // Build the individual roll display
-            let roll_str: Vec<String> = rolls
-                .iter()
-                .map(|&r| {
-                    if sides == 6 {
-                        d6_face(r).to_string()
-                    } else {
-                        format!("【{r}】")
-                    }
-                })
-                .collect();
-
-            format!(
-                r#"<span class="dice-roll" title="{}d{} roll">🎲 {}d{} ▸ {} = {}</span>"#,
-                count,
-                sides,
-                count,
-                sides,
-                roll_str.join(" "),
-                sum,
-            )
-        })
-        .into_owned()
-}
-
-/// Emoji shortcode table — :name: → Unicode glyph
-fn apply_emoji(text: &str) -> String {
-    // Common shortcodes. Extend as desired.
-    const CODES: &[(&str, &str)] = &[
-        (":smile:", "😊"),
-        (":lol:", "😂"),
-        (":kek:", "🤣"),
-        (":rage:", "😡"),
-        (":cry:", "😢"),
-        (":think:", "🤔"),
-        (":eyes:", "👀"),
-        (":fire:", "🔥"),
-        (":check:", "✅"),
-        (":x:", "❌"),
-        (":heart:", "❤️"),
-        (":ok:", "👌"),
-        (":cool:", "😎"),
-        (":skull:", "💀"),
-        (":shrug:", "🤷"),
-        (":pray:", "🙏"),
-        (":nerd:", "🤓"),
-        (":clown:", "🤡"),
-        (":100:", "💯"),
-        (":gg:", "🎮"),
-        (":rip:", "⚰️"),
-        (":based:", "🗿"),
-        (":ngmi:", "😬"),
-        (":gm:", "🌅"),
-        (":uwu:", "🥺"),
-        (":owo:", "👁️👄👁️"),
-    ];
-    // Early-exit if no colon is present — avoids all string allocations for posts
-    // that contain no emoji shortcodes (the common case).
-    if !text.contains(':') {
-        return text.to_string();
-    }
-    let mut out = text.to_string();
-    for (code, emoji) in CODES {
-        // Skip the replace call entirely when the shortcode is absent, avoiding
-        // an allocation for each of the 26 patterns on every post render.
-        if out.contains(code) {
-            out = out.replace(code, emoji);
-        }
-    }
-    out
-}
 
 /// Escape HTML special characters to prevent XSS.
 ///
@@ -321,7 +113,7 @@ pub fn render_post_body(escaped: &str) -> String {
     }
     // Dice tags are resolved first — rolls are seeded from OsRng at post creation
     // time and stored in body_html, making them immutable for all future readers.
-    let escaped = apply_dice(escaped);
+    let escaped = apply_dice(escaped, &RE_DICE);
     let lines: Vec<&str> = escaped.lines().collect();
     let mut html = String::with_capacity(escaped.len() * 2);
     let mut i = 0;

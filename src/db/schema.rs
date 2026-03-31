@@ -234,6 +234,7 @@ pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 
     let _ = CURRENT_MAX_MIGRATION;
     apply_migrations(conn)?;
+    ensure_posts_search_index(conn)?;
     relax_posts_ip_hash(conn)?;
     backfill_media_type(conn)?;
     Ok(())
@@ -247,6 +248,41 @@ fn create_base_schema(conn: &rusqlite::Connection) -> Result<()> {
 fn create_indexes(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(INDEX_SCHEMA_SQL)
         .context("Schema index creation failed")
+}
+
+fn ensure_posts_search_index(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(
+        r"
+        CREATE VIRTUAL TABLE IF NOT EXISTS posts_fts
+        USING fts5(body, content='posts', content_rowid='id', tokenize='unicode61');
+
+        CREATE TRIGGER IF NOT EXISTS posts_ai AFTER INSERT ON posts BEGIN
+            INSERT INTO posts_fts(rowid, body) VALUES (new.id, new.body);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS posts_ad AFTER DELETE ON posts BEGIN
+            INSERT INTO posts_fts(posts_fts, rowid, body) VALUES('delete', old.id, old.body);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS posts_au AFTER UPDATE OF body ON posts BEGIN
+            INSERT INTO posts_fts(posts_fts, rowid, body) VALUES('delete', old.id, old.body);
+            INSERT INTO posts_fts(rowid, body) VALUES (new.id, new.body);
+        END;
+        ",
+    )
+    .context("Search index creation failed")?;
+
+    let post_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
+        .context("Failed to count posts for FTS validation")?;
+    let fts_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM posts_fts", [], |row| row.get(0))
+        .context("Failed to count posts_fts rows")?;
+    if post_count != fts_count {
+        conn.execute_batch("INSERT INTO posts_fts(posts_fts) VALUES('rebuild');")
+            .context("Failed to rebuild posts_fts index")?;
+    }
+    Ok(())
 }
 
 fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {
