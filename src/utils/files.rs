@@ -7,8 +7,8 @@ mod storage;
 
 pub use mime::{detect_mime_type, fallback_download_mime_type};
 pub use storage::{
-    delete_file, format_file_size, mime_to_ext_pub, save_audio_with_image_thumb_from_path,
-    save_upload_from_path, UploadedFile,
+    delete_file, delete_file_checked, format_file_size, mime_to_ext_pub,
+    save_audio_with_image_thumb_from_path, save_upload_from_path, SaveUploadOptions, UploadedFile,
 };
 
 #[cfg(test)]

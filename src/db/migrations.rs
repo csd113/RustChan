@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 27;
+pub(super) const CURRENT_MAX_MIGRATION: i64 = 28;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
@@ -82,6 +82,17 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         27,
         "ALTER TABLE boards ADD COLUMN allow_any_files INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        28,
+        r"CREATE TABLE IF NOT EXISTS pending_fs_ops (
+            id           TEXT PRIMARY KEY,
+            kind         TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at   INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_fs_ops_created
+            ON pending_fs_ops(created_at ASC)",
     ),
 ];
 

@@ -394,7 +394,7 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>>
         // paths_safe_to_delete runs inside the transaction so it sees the
         // post-delete state: any file exclusively used by this board's posts now
         // has zero remaining references and is safe to remove.
-        let safe = super::paths_safe_to_delete(conn, candidates);
+        let safe = super::paths_safe_to_delete(conn, candidates)?;
         Ok(safe)
     })();
 

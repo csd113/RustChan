@@ -106,6 +106,7 @@ pub async fn do_import(state: &AppState, bytes: bytes::Bytes) -> Result<usize, A
                 crate::db::chan_net::insert_post_if_absent(&conn, post, board_id)?;
             }
         }
+        crate::db::chan_net::record_import_tx_id(&conn, &tx_id)?;
         Ok(())
     })
     .await

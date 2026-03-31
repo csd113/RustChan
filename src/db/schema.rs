@@ -4,223 +4,249 @@ use anyhow::{Context, Result};
 
 use super::migrations::{apply_migrations, CURRENT_MAX_MIGRATION};
 
+const BASE_SCHEMA_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS boards (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        short_name      TEXT NOT NULL UNIQUE,
+        name            TEXT NOT NULL,
+        description     TEXT NOT NULL DEFAULT '',
+        nsfw            INTEGER NOT NULL DEFAULT 0,
+        max_threads     INTEGER NOT NULL DEFAULT 150,
+        bump_limit      INTEGER NOT NULL DEFAULT 500,
+        allow_video     INTEGER NOT NULL DEFAULT 1,
+        allow_tripcodes INTEGER NOT NULL DEFAULT 1,
+        allow_images    INTEGER NOT NULL DEFAULT 1,
+        allow_audio     INTEGER NOT NULL DEFAULT 0,
+        allow_any_files INTEGER NOT NULL DEFAULT 0,
+        edit_window_secs    INTEGER NOT NULL DEFAULT 0,
+        allow_editing       INTEGER NOT NULL DEFAULT 0,
+        allow_archive       INTEGER NOT NULL DEFAULT 1,
+        allow_video_embeds  INTEGER NOT NULL DEFAULT 0,
+        allow_captcha       INTEGER NOT NULL DEFAULT 0,
+        post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
+        created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS threads (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        board_id    INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        subject     TEXT,
+        created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+        bumped_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+        locked      INTEGER NOT NULL DEFAULT 0,
+        sticky      INTEGER NOT NULL DEFAULT 0,
+        archived    INTEGER NOT NULL DEFAULT 0,
+        reply_count INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS posts (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id        INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        board_id         INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        name             TEXT NOT NULL DEFAULT 'Anonymous',
+        tripcode         TEXT,
+        subject          TEXT,
+        body             TEXT NOT NULL,
+        body_html        TEXT NOT NULL,
+        ip_hash          TEXT,
+        file_path        TEXT,
+        file_name        TEXT,
+        file_size        INTEGER,
+        thumb_path       TEXT,
+        mime_type        TEXT,
+        created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+        deletion_token   TEXT NOT NULL,
+        is_op            INTEGER NOT NULL DEFAULT 0,
+        media_type       TEXT,
+        audio_file_path  TEXT,
+        audio_file_name  TEXT,
+        audio_file_size  INTEGER,
+        audio_mime_type  TEXT,
+        edited_at        INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS file_hashes (
+        sha256     TEXT PRIMARY KEY,
+        file_path  TEXT NOT NULL,
+        thumb_path TEXT NOT NULL,
+        mime_type  TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS pending_fs_ops (
+        id           TEXT PRIMARY KEY,
+        kind         TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at   INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS admin_users (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        username      TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        created_at    INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS admin_sessions (
+        id         TEXT PRIMARY KEY,
+        admin_id   INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        expires_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS bans (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip_hash    TEXT NOT NULL,
+        reason     TEXT,
+        expires_at INTEGER,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS ban_appeals (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip_hash     TEXT NOT NULL,
+        reason      TEXT NOT NULL DEFAULT '',
+        status      TEXT NOT NULL DEFAULT 'open',
+        created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS word_filters (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        pattern     TEXT NOT NULL,
+        replacement TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS polls (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id  INTEGER NOT NULL UNIQUE REFERENCES threads(id) ON DELETE CASCADE,
+        question   TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS poll_options (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        poll_id  INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+        text     TEXT NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS poll_votes (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        poll_id   INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+        option_id INTEGER NOT NULL REFERENCES poll_options(id) ON DELETE CASCADE,
+        ip_hash   TEXT NOT NULL,
+        UNIQUE(poll_id, ip_hash)
+    );
+
+    CREATE TABLE IF NOT EXISTS site_settings (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS reports (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_id        INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+        thread_id      INTEGER NOT NULL,
+        board_id       INTEGER NOT NULL,
+        reason         TEXT NOT NULL DEFAULT '',
+        reporter_hash  TEXT NOT NULL,
+        status         TEXT NOT NULL DEFAULT 'open',
+        created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+        resolved_at    INTEGER,
+        resolved_by    INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS mod_log (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        admin_id     INTEGER NOT NULL,
+        admin_name   TEXT NOT NULL,
+        action       TEXT NOT NULL,
+        target_type  TEXT NOT NULL DEFAULT '',
+        target_id    INTEGER,
+        board_short  TEXT NOT NULL DEFAULT '',
+        detail       TEXT NOT NULL DEFAULT '',
+        created_at   INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS background_jobs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_type    TEXT NOT NULL,
+        payload     TEXT NOT NULL,
+        status      TEXT NOT NULL DEFAULT 'pending',
+        priority    INTEGER NOT NULL DEFAULT 0,
+        attempts    INTEGER NOT NULL DEFAULT 0,
+        last_error  TEXT,
+        created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS chan_net_posts (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        remote_post_id  INTEGER NOT NULL,
+        board_id        INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        author          TEXT    NOT NULL DEFAULT 'anon',
+        content         TEXT    NOT NULL DEFAULT '',
+        remote_ts       INTEGER NOT NULL,
+        imported_at     INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS chan_net_import_ledger (
+        tx_id        TEXT PRIMARY KEY,
+        imported_at  INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+";
+
+const INDEX_SCHEMA_SQL: &str = "
+    CREATE INDEX IF NOT EXISTS idx_threads_board_sticky_bumped
+        ON threads(board_id, sticky DESC, bumped_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_posts_thread
+        ON posts(thread_id, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_posts_board
+        ON posts(board_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_bans_ip
+        ON bans(ip_hash);
+    CREATE INDEX IF NOT EXISTS idx_sessions_expires
+        ON admin_sessions(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_file_hashes
+        ON file_hashes(sha256);
+    CREATE INDEX IF NOT EXISTS idx_pending_fs_ops_created
+        ON pending_fs_ops(created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_jobs_pending
+        ON background_jobs(status, priority DESC, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_reports_status
+        ON reports(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_mod_log_created
+        ON mod_log(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_posts_thread_id
+        ON posts(thread_id);
+    CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
+        ON posts(ip_hash);
+    CREATE INDEX IF NOT EXISTS idx_threads_archived
+        ON threads(board_id, archived, bumped_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_chan_net_posts_remote
+        ON chan_net_posts(remote_post_id, board_id);
+";
+
 pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS boards (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            short_name      TEXT NOT NULL UNIQUE,
-            name            TEXT NOT NULL,
-            description     TEXT NOT NULL DEFAULT '',
-            nsfw            INTEGER NOT NULL DEFAULT 0,
-            max_threads     INTEGER NOT NULL DEFAULT 150,
-            bump_limit      INTEGER NOT NULL DEFAULT 500,
-            allow_video     INTEGER NOT NULL DEFAULT 1,
-            allow_tripcodes INTEGER NOT NULL DEFAULT 1,
-            allow_images    INTEGER NOT NULL DEFAULT 1,
-            allow_audio     INTEGER NOT NULL DEFAULT 0,
-            allow_any_files INTEGER NOT NULL DEFAULT 0,
-            edit_window_secs    INTEGER NOT NULL DEFAULT 0,
-            allow_editing       INTEGER NOT NULL DEFAULT 0,
-            allow_archive       INTEGER NOT NULL DEFAULT 1,
-            allow_video_embeds  INTEGER NOT NULL DEFAULT 0,
-            allow_captcha       INTEGER NOT NULL DEFAULT 0,
-            post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
-            created_at      INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-
-        CREATE TABLE IF NOT EXISTS threads (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            board_id    INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-            subject     TEXT,
-            created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-            bumped_at   INTEGER NOT NULL DEFAULT (unixepoch()),
-            locked      INTEGER NOT NULL DEFAULT 0,
-            sticky      INTEGER NOT NULL DEFAULT 0,
-            archived    INTEGER NOT NULL DEFAULT 0,
-            reply_count INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS posts (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            thread_id      INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-            board_id       INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-            name           TEXT NOT NULL DEFAULT 'Anonymous',
-            tripcode       TEXT,
-            subject        TEXT,
-            body           TEXT NOT NULL,
-            body_html      TEXT NOT NULL,
-            ip_hash        TEXT,
-            file_path        TEXT,
-            file_name        TEXT,
-            file_size        INTEGER,
-            thumb_path       TEXT,
-            mime_type        TEXT,
-            created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
-            deletion_token   TEXT NOT NULL,
-            is_op            INTEGER NOT NULL DEFAULT 0,
-            media_type       TEXT,
-            audio_file_path  TEXT,
-            audio_file_name  TEXT,
-            audio_file_size  INTEGER,
-            audio_mime_type  TEXT,
-            edited_at        INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS file_hashes (
-            sha256     TEXT PRIMARY KEY,
-            file_path  TEXT NOT NULL,
-            thumb_path TEXT NOT NULL,
-            mime_type  TEXT NOT NULL,
-            created_at INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-
-        CREATE TABLE IF NOT EXISTS admin_users (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            username      TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            created_at    INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-
-        CREATE TABLE IF NOT EXISTS admin_sessions (
-            id         TEXT PRIMARY KEY,
-            admin_id   INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
-            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-            expires_at INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS bans (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip_hash    TEXT NOT NULL,
-            reason     TEXT,
-            expires_at INTEGER,
-            created_at INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-
-        CREATE TABLE IF NOT EXISTS ban_appeals (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip_hash     TEXT NOT NULL,
-            reason      TEXT NOT NULL DEFAULT '',
-            status      TEXT NOT NULL DEFAULT 'open',
-            created_at  INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-
-        CREATE TABLE IF NOT EXISTS word_filters (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            pattern     TEXT NOT NULL,
-            replacement TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS polls (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            thread_id  INTEGER NOT NULL UNIQUE REFERENCES threads(id) ON DELETE CASCADE,
-            question   TEXT NOT NULL,
-            expires_at INTEGER NOT NULL,
-            created_at INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-
-        CREATE TABLE IF NOT EXISTS poll_options (
-            id       INTEGER PRIMARY KEY AUTOINCREMENT,
-            poll_id  INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
-            text     TEXT NOT NULL,
-            position INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS poll_votes (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            poll_id   INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
-            option_id INTEGER NOT NULL REFERENCES poll_options(id) ON DELETE CASCADE,
-            ip_hash   TEXT NOT NULL,
-            UNIQUE(poll_id, ip_hash)
-        );
-
-        CREATE TABLE IF NOT EXISTS site_settings (
-            key        TEXT PRIMARY KEY,
-            value      TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS reports (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id        INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-            thread_id      INTEGER NOT NULL,
-            board_id       INTEGER NOT NULL,
-            reason         TEXT NOT NULL DEFAULT '',
-            reporter_hash  TEXT NOT NULL,
-            status         TEXT NOT NULL DEFAULT 'open',
-            created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
-            resolved_at    INTEGER,
-            resolved_by    INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS mod_log (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            admin_id     INTEGER NOT NULL,
-            admin_name   TEXT NOT NULL,
-            action       TEXT NOT NULL,
-            target_type  TEXT NOT NULL DEFAULT '',
-            target_id    INTEGER,
-            board_short  TEXT NOT NULL DEFAULT '',
-            detail       TEXT NOT NULL DEFAULT '',
-            created_at   INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-
-        CREATE TABLE IF NOT EXISTS background_jobs (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_type    TEXT NOT NULL,
-            payload     TEXT NOT NULL,
-            status      TEXT NOT NULL DEFAULT 'pending',
-            priority    INTEGER NOT NULL DEFAULT 0,
-            attempts    INTEGER NOT NULL DEFAULT 0,
-            last_error  TEXT,
-            created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-            updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_threads_board_sticky_bumped
-            ON threads(board_id, sticky DESC, bumped_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_posts_thread
-            ON posts(thread_id, created_at ASC);
-        CREATE INDEX IF NOT EXISTS idx_posts_board
-            ON posts(board_id, created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_bans_ip
-            ON bans(ip_hash);
-        CREATE INDEX IF NOT EXISTS idx_sessions_expires
-            ON admin_sessions(expires_at);
-        CREATE INDEX IF NOT EXISTS idx_file_hashes
-            ON file_hashes(sha256);
-        CREATE INDEX IF NOT EXISTS idx_jobs_pending
-            ON background_jobs(status, priority DESC, created_at ASC);
-        CREATE INDEX IF NOT EXISTS idx_reports_status
-            ON reports(status, created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_mod_log_created
-            ON mod_log(created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_posts_thread_id
-            ON posts(thread_id);
-        CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
-            ON posts(ip_hash);
-        CREATE INDEX IF NOT EXISTS idx_threads_archived
-            ON threads(board_id, archived, bumped_at DESC);
-
-        CREATE TABLE IF NOT EXISTS chan_net_posts (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            remote_post_id  INTEGER NOT NULL,
-            board_id        INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-            author          TEXT    NOT NULL DEFAULT 'anon',
-            content         TEXT    NOT NULL DEFAULT '',
-            remote_ts       INTEGER NOT NULL,
-            imported_at     INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_chan_net_posts_remote
-            ON chan_net_posts(remote_post_id, board_id);
-        ",
-    )
-    .context("Schema creation failed")?;
+    create_base_schema(conn)?;
+    create_indexes(conn)?;
 
     let _ = CURRENT_MAX_MIGRATION;
     apply_migrations(conn)?;
     relax_posts_ip_hash(conn)?;
     backfill_media_type(conn)?;
     Ok(())
+}
+
+fn create_base_schema(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(BASE_SCHEMA_SQL)
+        .context("Schema table creation failed")
+}
+
+fn create_indexes(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(INDEX_SCHEMA_SQL)
+        .context("Schema index creation failed")
 }
 
 fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {

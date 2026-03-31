@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 pub(super) const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+pub(super) const BOARD_MANIFEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 #[allow(clippy::arithmetic_side_effects)]
 pub(super) fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> String {
@@ -100,6 +101,18 @@ pub(super) fn create_staging_dir(base_path: &Path, label: &str) -> Result<PathBu
     Ok(staging)
 }
 
+pub(super) fn read_limited_bytes<R: std::io::Read>(
+    reader: &mut R,
+    max_bytes: u64,
+    label: &str,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    copy_limited(reader, &mut bytes, max_bytes).map_err(|error| {
+        AppError::BadRequest(format!("{label} exceeds safe size limit: {error}"))
+    })?;
+    Ok(bytes)
+}
+
 pub(super) fn remove_path_if_exists(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -111,47 +124,6 @@ pub(super) fn remove_path_if_exists(path: &Path) -> Result<()> {
         std::fs::remove_file(path)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Remove file {}: {e}", path.display())))
     }
-}
-
-pub(super) fn swap_staged_path_into_place(
-    staged: &Path,
-    live: &Path,
-    backup: &Path,
-) -> Result<bool> {
-    let had_live = live.exists();
-    if had_live {
-        std::fs::rename(live, backup).map_err(|e| {
-            AppError::Internal(anyhow::anyhow!(
-                "Move live path {} aside: {e}",
-                live.display()
-            ))
-        })?;
-    }
-
-    if let Err(e) = std::fs::rename(staged, live) {
-        if had_live {
-            let _ = std::fs::rename(backup, live);
-        }
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "Move staged path {} into place: {e}",
-            live.display()
-        )));
-    }
-
-    Ok(had_live)
-}
-
-pub(super) fn rollback_swapped_path(live: &Path, backup: &Path, had_live: bool) -> Result<()> {
-    remove_path_if_exists(live)?;
-    if had_live {
-        std::fs::rename(backup, live).map_err(|e| {
-            AppError::Internal(anyhow::anyhow!(
-                "Restore backup path {}: {e}",
-                live.display()
-            ))
-        })?;
-    }
-    Ok(())
 }
 
 pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(

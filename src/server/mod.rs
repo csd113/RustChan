@@ -17,13 +17,6 @@ pub mod console;
 #[allow(clippy::module_inception)]
 pub mod server;
 
-#[allow(unused_imports)]
-pub use server::run_http_redirect;
-#[cfg(feature = "tls-acme")]
-#[allow(unused_imports)]
-pub use server::run_https_acme;
-#[allow(unused_imports)]
-pub use server::run_https_static;
 pub use server::run_server;
 
 // Re-export the global atomics so console/ (and any future module) can

@@ -9,6 +9,11 @@ use std::path::Path;
 use super::schema::create_schema;
 use super::types::DbPool;
 
+/// Initialise the `SQLite` connection pool and ensure the schema exists.
+///
+/// # Errors
+/// Returns an error if the database directory cannot be created, the pool
+/// cannot be built, or schema creation fails.
 pub fn init_pool() -> Result<DbPool> {
     let db_path = &CONFIG.database_path;
 
@@ -42,6 +47,10 @@ pub fn init_pool() -> Result<DbPool> {
     Ok(pool)
 }
 
+/// Emit first-run operator guidance when the site has not been configured yet.
+///
+/// # Errors
+/// Returns an error if the database cannot be queried for board or admin counts.
 pub fn first_run_check(pool: &DbPool) -> anyhow::Result<()> {
     let conn = pool.get()?;
     let board_count: i64 = conn

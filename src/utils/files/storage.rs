@@ -16,161 +16,60 @@ pub struct UploadedFile {
     pub file_size: i64,
     pub media_type: crate::models::MediaType,
     pub processing_pending: bool,
+    pub dedup_reused: bool,
 }
 
+pub struct SaveUploadOptions<'a> {
+    pub original_filename: &'a str,
+    pub boards_dir: &'a str,
+    pub board_short: &'a str,
+    pub thumb_size: u32,
+    pub max_image_size: usize,
+    pub max_video_size: usize,
+    pub max_audio_size: usize,
+    pub ffmpeg_available: bool,
+    pub ffmpeg_webp_available: bool,
+    pub allow_any_files: bool,
+}
+
+struct UploadPlan {
+    mime_type: String,
+    media_type: crate::models::MediaType,
+    jpeg_orientation: u32,
+    processing_pending: bool,
+    dest_dir: PathBuf,
+    thumbs_dir: PathBuf,
+}
+
+/// Save and process a primary upload from an already-streamed temporary file.
+///
+/// # Errors
+/// Returns an error if MIME detection, policy validation, media processing,
+/// disk-space checks, or the final filesystem write fails.
 pub fn save_upload_from_path(
     input_path: &Path,
     sniff_bytes: &[u8],
     original_size: usize,
-    original_filename: &str,
-    boards_dir: &str,
-    board_short: &str,
-    thumb_size: u32,
-    max_image_size: usize,
-    max_video_size: usize,
-    max_audio_size: usize,
-    ffmpeg_available: bool,
-    ffmpeg_webp_available: bool,
-    allow_any_files: bool,
+    options: &SaveUploadOptions<'_>,
 ) -> Result<UploadedFile> {
     if original_size == 0 {
         return Err(anyhow::anyhow!("File is empty."));
     }
-
-    let mime_type = match detect_mime_type(sniff_bytes) {
-        Ok(mime) => mime.to_string(),
-        Err(_) if allow_any_files => super::fallback_download_mime_type().to_string(),
-        Err(error) => return Err(error),
-    };
-    if mime_type == "image/svg+xml" {
-        return Err(anyhow::anyhow!(
-            "File type not allowed. SVG files are not accepted because they can contain executable JavaScript."
-        ));
-    }
-
-    let media_type = crate::models::MediaType::from_mime(&mime_type)
-        .ok_or_else(|| anyhow::anyhow!("Could not classify detected MIME type: {mime_type}"))?;
-    let max_size = match media_type {
-        crate::models::MediaType::Video => max_video_size,
-        crate::models::MediaType::Audio => max_audio_size,
-        crate::models::MediaType::Image => max_image_size,
-        crate::models::MediaType::Other => max_image_size.max(max_video_size).max(max_audio_size),
-    };
-    if original_size > max_size {
-        return Err(anyhow::anyhow!(
-            "File too large. Maximum {} size is {} MiB.",
-            match media_type {
-                crate::models::MediaType::Video => "video",
-                crate::models::MediaType::Audio => "audio",
-                crate::models::MediaType::Image => "image",
-                crate::models::MediaType::Other => "file",
-            },
-            max_size / 1024 / 1024
-        ));
-    }
-
-    let jpeg_orientation = if mime_type == "image/jpeg" {
-        read_exif_orientation_from_file(input_path)?
-    } else {
-        1
-    };
-
+    let plan = build_upload_plan(input_path, sniff_bytes, original_size, options)?;
     let file_id = Uuid::new_v4().simple().to_string();
-    let processing_pending = ffmpeg_available
-        && matches!(
-            media_type,
-            crate::models::MediaType::Video | crate::models::MediaType::Audio
-        )
-        && (media_type != crate::models::MediaType::Video
-            || mime_type == "video/mp4"
-            || mime_type == "video/webm");
 
-    let dest_dir = PathBuf::from(boards_dir).join(board_short);
-    let thumbs_dir = dest_dir.join("thumbs");
-    std::fs::create_dir_all(&dest_dir).context("Failed to create board directory")?;
-    if media_type != crate::models::MediaType::Other {
-        std::fs::create_dir_all(&thumbs_dir).context("Failed to create board thumbs directory")?;
-    }
-    check_disk_space(&dest_dir, original_size)?;
-
-    if media_type == crate::models::MediaType::Other {
-        let ext = arbitrary_file_ext(original_filename);
-        let filename = format!("{file_id}.{ext}");
-        let file_path_abs = dest_dir.join(&filename);
-        let tmp = tempfile::NamedTempFile::new_in(&dest_dir)
-            .context("Failed to create temp file for generic upload")?;
-        std::fs::copy(input_path, tmp.path())
-            .context("Failed to copy generic upload to temp file")?;
-        tmp.persist(&file_path_abs)
-            .context("Failed to atomically rename generic upload temp file")?;
-
-        return Ok(UploadedFile {
-            file_path: format!("{board_short}/{filename}"),
-            thumb_path: String::new(),
-            original_name: crate::utils::sanitize::sanitize_filename(original_filename),
-            mime_type,
-            file_size: i64::try_from(original_size).context("File size overflows i64")?,
-            media_type,
-            processing_pending: false,
-        });
+    if plan.media_type == crate::models::MediaType::Other {
+        return save_generic_upload(input_path, original_size, options, &plan, &file_id);
     }
 
-    let processor_input = prepare_processor_input(input_path, &dest_dir, &mime_type)?;
-    let processor =
-        crate::media::MediaProcessor::new_with_ffmpeg_caps(ffmpeg_available, ffmpeg_webp_available);
-    let processed = processor
-        .process_upload(
-            processor_input.path(),
-            &mime_type,
-            &dest_dir,
-            &file_id,
-            &thumbs_dir,
-            thumb_size,
-        )
-        .context("Media processing pipeline failed")?;
-
-    if jpeg_orientation > 1
-        && !ffmpeg_available
-        && processed.thumbnail_path.exists()
-        && processed
-            .thumbnail_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            == Some("webp")
-    {
-        apply_thumb_exif_orientation(&processed.thumbnail_path, jpeg_orientation);
-    }
-
-    let final_mime = processed.mime_type.clone();
-    let final_media_type = crate::models::MediaType::from_mime(&final_mime).unwrap_or(media_type);
-    let file_size = i64::try_from(processed.final_size).context("File size overflows i64")?;
-
-    let filename = processed
-        .file_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("Converted file has non-UTF-8 name")?;
-    let thumb_filename = processed
-        .thumbnail_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("Thumbnail file has non-UTF-8 name")?;
-
-    Ok(UploadedFile {
-        file_path: format!("{board_short}/{filename}"),
-        thumb_path: format!("{board_short}/thumbs/{thumb_filename}"),
-        original_name: crate::utils::sanitize::sanitize_filename(original_filename),
-        mime_type: final_mime,
-        file_size,
-        media_type: final_media_type,
-        processing_pending: if processed.was_converted {
-            false
-        } else {
-            processing_pending
-        },
-    })
+    save_processed_upload(input_path, options, &plan, &file_id)
 }
 
+/// Save a secondary audio upload for an image+audio combo post.
+///
+/// # Errors
+/// Returns an error if the audio MIME check fails, the file exceeds the board
+/// limit, disk-space checks fail, or the file cannot be persisted.
 pub fn save_audio_with_image_thumb_from_path(
     input_path: &Path,
     sniff_bytes: &[u8],
@@ -185,8 +84,7 @@ pub fn save_audio_with_image_thumb_from_path(
     }
 
     let mime_type = detect_mime_type(sniff_bytes)?;
-    let media_type = crate::models::MediaType::from_mime(mime_type)
-        .ok_or_else(|| anyhow::anyhow!("Not an audio file: {mime_type}"))?;
+    let media_type = crate::models::MediaType::from_mime(mime_type);
     if !matches!(media_type, crate::models::MediaType::Audio) {
         return Err(anyhow::anyhow!(
             "Expected an audio file for the audio slot; got {mime_type}"
@@ -221,6 +119,7 @@ pub fn save_audio_with_image_thumb_from_path(
         file_size: i64::try_from(original_size).context("File size overflows i64")?,
         media_type,
         processing_pending: false,
+        dedup_reused: false,
     })
 }
 
@@ -230,20 +129,34 @@ pub fn mime_to_ext_pub(mime: &str) -> &'static str {
 }
 
 pub fn delete_file(boards_dir: &str, relative_path: &str) {
+    if let Err(error) = delete_file_checked(boards_dir, relative_path) {
+        tracing::warn!("delete_file failed for {relative_path}: {error}");
+    }
+}
+
+/// Remove a stored upload path while rejecting traversal attempts.
+///
+/// # Errors
+/// Returns an error if the path is suspicious or the underlying filesystem
+/// removal fails for a reason other than the file already being absent.
+pub fn delete_file_checked(boards_dir: &str, relative_path: &str) -> Result<()> {
     let rel = std::path::Path::new(relative_path);
     if rel.is_absolute()
         || rel
             .components()
             .any(|component| component == std::path::Component::ParentDir)
     {
-        tracing::warn!(
-            "delete_file: rejected suspicious path (potential traversal): {:?}",
-            relative_path
+        anyhow::bail!(
+            "delete_file: rejected suspicious path (potential traversal): {relative_path:?}"
         );
-        return;
     }
 
-    let _ = std::fs::remove_file(PathBuf::from(boards_dir).join(rel));
+    let path = PathBuf::from(boards_dir).join(rel);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("Failed to remove {}", path.display())),
+    }
 }
 
 #[must_use]
@@ -286,19 +199,190 @@ fn prepare_processor_input(
     Ok(tmp)
 }
 
+fn build_upload_plan(
+    input_path: &Path,
+    sniff_bytes: &[u8],
+    original_size: usize,
+    options: &SaveUploadOptions<'_>,
+) -> Result<UploadPlan> {
+    let mime_type = match detect_mime_type(sniff_bytes) {
+        Ok(mime) => mime.to_string(),
+        Err(_) if options.allow_any_files => super::fallback_download_mime_type().to_string(),
+        Err(error) => return Err(error),
+    };
+    if mime_type == "image/svg+xml" {
+        anyhow::bail!(
+            "File type not allowed. SVG files are not accepted because they can contain executable JavaScript."
+        );
+    }
+
+    let media_type = crate::models::MediaType::from_mime(&mime_type);
+    let max_size = max_size_for_media(media_type, options);
+    if original_size > max_size {
+        anyhow::bail!(
+            "File too large. Maximum {} size is {} MiB.",
+            media_label(media_type),
+            max_size / 1024 / 1024
+        );
+    }
+
+    let jpeg_orientation = if mime_type == "image/jpeg" {
+        read_exif_orientation_from_file(input_path)?
+    } else {
+        1
+    };
+
+    let dest_dir = PathBuf::from(options.boards_dir).join(options.board_short);
+    let thumbs_dir = dest_dir.join("thumbs");
+    std::fs::create_dir_all(&dest_dir).context("Failed to create board directory")?;
+    if media_type != crate::models::MediaType::Other {
+        std::fs::create_dir_all(&thumbs_dir).context("Failed to create board thumbs directory")?;
+    }
+    check_disk_space(&dest_dir, original_size)?;
+    let processing_pending = options.ffmpeg_available
+        && matches!(
+            media_type,
+            crate::models::MediaType::Video | crate::models::MediaType::Audio
+        )
+        && (media_type != crate::models::MediaType::Video
+            || mime_type == "video/mp4"
+            || mime_type == "video/webm");
+
+    Ok(UploadPlan {
+        mime_type,
+        media_type,
+        jpeg_orientation,
+        processing_pending,
+        dest_dir,
+        thumbs_dir,
+    })
+}
+
+fn save_generic_upload(
+    input_path: &Path,
+    original_size: usize,
+    options: &SaveUploadOptions<'_>,
+    plan: &UploadPlan,
+    file_id: &str,
+) -> Result<UploadedFile> {
+    let ext = arbitrary_file_ext(options.original_filename);
+    let filename = format!("{file_id}.{ext}");
+    let file_path_abs = plan.dest_dir.join(&filename);
+    let tmp = tempfile::NamedTempFile::new_in(&plan.dest_dir)
+        .context("Failed to create temp file for generic upload")?;
+    std::fs::copy(input_path, tmp.path()).context("Failed to copy generic upload to temp file")?;
+    tmp.persist(&file_path_abs)
+        .context("Failed to atomically rename generic upload temp file")?;
+
+    Ok(UploadedFile {
+        file_path: format!("{}/{filename}", options.board_short),
+        thumb_path: String::new(),
+        original_name: crate::utils::sanitize::sanitize_filename(options.original_filename),
+        mime_type: plan.mime_type.clone(),
+        file_size: i64::try_from(original_size).context("File size overflows i64")?,
+        media_type: plan.media_type,
+        processing_pending: false,
+        dedup_reused: false,
+    })
+}
+
+fn save_processed_upload(
+    input_path: &Path,
+    options: &SaveUploadOptions<'_>,
+    plan: &UploadPlan,
+    file_id: &str,
+) -> Result<UploadedFile> {
+    let processor_input = prepare_processor_input(input_path, &plan.dest_dir, &plan.mime_type)?;
+    let processor = crate::media::MediaProcessor::new_with_ffmpeg_caps(
+        options.ffmpeg_available,
+        options.ffmpeg_webp_available,
+    );
+    let processed = processor
+        .process_upload(
+            processor_input.path(),
+            &plan.mime_type,
+            &plan.dest_dir,
+            file_id,
+            &plan.thumbs_dir,
+            options.thumb_size,
+        )
+        .context("Media processing pipeline failed")?;
+
+    if plan.jpeg_orientation > 1
+        && !options.ffmpeg_available
+        && processed.thumbnail_path.exists()
+        && processed
+            .thumbnail_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            == Some("webp")
+    {
+        apply_thumb_exif_orientation(&processed.thumbnail_path, plan.jpeg_orientation);
+    }
+
+    let filename = processed
+        .file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Converted file has non-UTF-8 name")?;
+    let thumb_filename = processed
+        .thumbnail_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Thumbnail file has non-UTF-8 name")?;
+
+    Ok(UploadedFile {
+        file_path: format!("{}/{filename}", options.board_short),
+        thumb_path: format!("{}/thumbs/{thumb_filename}", options.board_short),
+        original_name: crate::utils::sanitize::sanitize_filename(options.original_filename),
+        mime_type: processed.mime_type.clone(),
+        file_size: i64::try_from(processed.final_size).context("File size overflows i64")?,
+        media_type: crate::models::MediaType::from_mime(&processed.mime_type),
+        processing_pending: if processed.was_converted {
+            false
+        } else {
+            plan.processing_pending
+        },
+        dedup_reused: false,
+    })
+}
+
+fn max_size_for_media(
+    media_type: crate::models::MediaType,
+    options: &SaveUploadOptions<'_>,
+) -> usize {
+    match media_type {
+        crate::models::MediaType::Video => options.max_video_size,
+        crate::models::MediaType::Audio => options.max_audio_size,
+        crate::models::MediaType::Image => options.max_image_size,
+        crate::models::MediaType::Other => options
+            .max_image_size
+            .max(options.max_video_size)
+            .max(options.max_audio_size),
+    }
+}
+
+const fn media_label(media_type: crate::models::MediaType) -> &'static str {
+    match media_type {
+        crate::models::MediaType::Video => "video",
+        crate::models::MediaType::Audio => "audio",
+        crate::models::MediaType::Image => "image",
+        crate::models::MediaType::Other => "file",
+    }
+}
+
 fn arbitrary_file_ext(original_filename: &str) -> String {
     std::path::Path::new(original_filename)
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| {
             ext.chars()
-                .filter(|ch| ch.is_ascii_alphanumeric())
+                .filter(char::is_ascii_alphanumeric)
                 .take(16)
                 .collect::<String>()
         })
         .filter(|ext| !ext.is_empty())
-        .map(|ext| ext.to_ascii_lowercase())
-        .unwrap_or_else(|| "bin".to_string())
+        .map_or_else(|| "bin".to_string(), |ext| ext.to_ascii_lowercase())
 }
 
 fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {

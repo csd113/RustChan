@@ -12,13 +12,15 @@ yanked = "deny"
 # No fixed version available. rsa is a transitive dep pulled in by arti-client;
 # we do not use RSA decryption directly, and Arti uses it only for TLS relay
 # connections where an adaptive chosen-ciphertext oracle is not exposed.
+# This exception is temporary and must be re-reviewed on every Arti upgrade.
 [[advisories.ignore]]
 id = "RUSTSEC-2023-0071"
 
 # RUSTSEC-2024-0436: paste crate marked unmaintained by its author.
 # paste is a transitive dep of arti-client / tor-hsservice. No direct usage
 # in RustChan code; no functional impact. Will be resolved when Arti updates
-# its dependency tree.
+# its dependency tree. This exception is temporary and must be re-reviewed on
+# every Arti upgrade.
 [[advisories.ignore]]
 id = "RUSTSEC-2024-0436"
 

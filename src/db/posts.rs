@@ -202,10 +202,39 @@ pub(super) fn create_post_inner(conn: &rusqlite::Connection, p: &super::NewPost)
     Ok(post_id)
 }
 
+/// Insert a poll row and its options using the caller's existing transaction.
+///
 /// # Errors
-/// Returns an error if the database operation fails.
-pub fn create_post(conn: &rusqlite::Connection, p: &super::NewPost) -> Result<i64> {
-    create_post_inner(conn, p)
+/// Returns an error if the poll row or any option row cannot be inserted.
+pub(super) fn create_poll_inner(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+    question: &str,
+    options: &[String],
+    expires_at: i64,
+) -> Result<i64> {
+    let poll_id: i64 = conn
+        .query_row(
+            "INSERT INTO polls (thread_id, question, expires_at) VALUES (?1, ?2, ?3)
+             RETURNING id",
+            params![thread_id, question, expires_at],
+            |r| r.get(0),
+        )
+        .context("Failed to insert poll")?;
+
+    let mut opt_stmt = conn
+        .prepare_cached("INSERT INTO poll_options (poll_id, text, position) VALUES (?1, ?2, ?3)")?;
+    for (i, text) in options.iter().enumerate() {
+        opt_stmt
+            .execute(params![
+                poll_id,
+                text,
+                i64::try_from(i).context("poll option index overflow")?
+            ])
+            .context("Failed to insert poll option")?;
+    }
+
+    Ok(poll_id)
 }
 
 /// # Errors
@@ -297,7 +326,7 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
 
         // Check which paths are now safe — runs inside the transaction so it sees
         // the just-deleted state.
-        let safe = super::paths_safe_to_delete(conn, candidates);
+        let safe = super::paths_safe_to_delete(conn, candidates)?;
         Ok(safe)
     })();
 
@@ -548,65 +577,6 @@ pub fn record_file_hash(
 }
 
 // ─── Poll queries ─────────────────────────────────────────────────────────────
-
-/// Create a poll with its options atomically.
-///
-/// Replaced `last_insert_rowid()` with INSERT … RETURNING id so the
-/// poll id is retrieved atomically in the same statement rather than relying on
-/// connection-local state.
-///
-/// # Errors
-/// Returns an error if the database operation fails.
-pub fn create_poll(
-    conn: &rusqlite::Connection,
-    thread_id: i64,
-    question: &str,
-    options: &[String],
-    expires_at: i64,
-) -> Result<i64> {
-    // Wrap poll row + all option rows in one IMMEDIATE transaction so a crash
-    // mid-loop cannot leave a poll with zero options (divide-by-zero in display),
-    // and so the write lock is held from the start (no DEFERRED upgrade race).
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .context("Failed to begin poll transaction")?;
-
-    let result: anyhow::Result<i64> = (|| {
-        let poll_id: i64 = conn
-            .query_row(
-                "INSERT INTO polls (thread_id, question, expires_at) VALUES (?1, ?2, ?3)
-                 RETURNING id",
-                params![thread_id, question, expires_at],
-                |r| r.get(0),
-            )
-            .context("Failed to insert poll")?;
-
-        let mut opt_stmt = conn.prepare_cached(
-            "INSERT INTO poll_options (poll_id, text, position) VALUES (?1, ?2, ?3)",
-        )?;
-        for (i, text) in options.iter().enumerate() {
-            opt_stmt
-                .execute(params![
-                    poll_id,
-                    text,
-                    i64::try_from(i).context("poll option index overflow")?
-                ])
-                .context("Failed to insert poll option")?;
-        }
-        Ok(poll_id)
-    })();
-
-    match result {
-        Ok(poll_id) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit poll transaction")?;
-            Ok(poll_id)
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
-    }
-}
 
 /// Fetch the full poll for a thread including vote counts and the user's choice.
 ///
@@ -886,56 +856,6 @@ pub fn pending_job_count(conn: &rusqlite::Connection) -> Result<i64> {
 
 // ─── Post update helpers (used by background workers) ────────────────────────
 
-/// Update a post's `file_path` and `mime_type` after background transcoding.
-///
-/// # Errors
-/// Returns an error if the database operation fails.
-pub fn update_post_file_info(
-    conn: &rusqlite::Connection,
-    post_id: i64,
-    file_path: &str,
-    mime_type: &str,
-) -> Result<()> {
-    conn.execute(
-        "UPDATE posts SET file_path = ?1, mime_type = ?2 WHERE id = ?3",
-        params![file_path, mime_type, post_id],
-    )?;
-    Ok(())
-}
-
-/// Update every post that currently stores `old_path` as its `file_path`.
-///
-/// Required after video transcoding: the deduplication system shares one
-/// physical file across N posts. The `VideoTranscode` worker knows only the
-/// `post_id` that triggered the job, but ALL posts that reference the same MP4
-/// must be migrated to the new `WebM` path before the MP4 is removed from disk.
-/// Without this, `paths_safe_to_delete` counts zero references to the old MP4
-/// and marks it safe to delete — but the `WebM` it was replaced with would also
-/// be considered orphaned the next time any of those stale posts is deleted.
-///
-/// Note (): This function does NOT update the corresponding `file_hashes`
-/// row. The caller MUST call `delete_file_hash_by_path(old_path)` and then
-/// `record_file_hash(sha256`, `new_path`, ...) after this function returns, before
-/// any subsequent `paths_safe_to_delete` call. Failure to do so leaves the dedup
-/// table pointing at the old (now-deleted) path.
-///
-/// Returns the number of posts updated.
-///
-/// # Errors
-/// Returns an error if the database operation fails.
-pub fn update_all_posts_file_path(
-    conn: &rusqlite::Connection,
-    old_path: &str,
-    new_path: &str,
-    new_mime: &str,
-) -> Result<usize> {
-    let n = conn.execute(
-        "UPDATE posts SET file_path = ?1, mime_type = ?2 WHERE file_path = ?3",
-        params![new_path, new_mime, old_path],
-    )?;
-    Ok(n)
-}
-
 /// Update a post's `thumb_path` after background waveform / thumbnail generation.
 ///
 /// # Errors
@@ -969,11 +889,59 @@ pub fn get_post_thumb_path(conn: &rusqlite::Connection, post_id: i64) -> Result<
     Ok(result)
 }
 
-/// Delete a file-hash record by its stored `file_path` (used when the worker
-/// replaces an MP4 with the transcoded `WebM` and needs to refresh the index).
+/// Atomically replace a transcoded media path everywhere it is referenced.
 ///
 /// # Errors
-/// Returns an error if the database operation fails.
+/// Returns an error if any post update or file-hash rewrite fails.
+pub fn replace_transcoded_media(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    old_path: &str,
+    new_path: &str,
+    new_mime: &str,
+    new_sha256: &str,
+) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin transcode media replacement transaction")?;
+
+    let result: anyhow::Result<()> = (|| {
+        let updated = conn.execute(
+            "UPDATE posts SET file_path = ?1, mime_type = ?2 WHERE file_path = ?3",
+            params![new_path, new_mime, old_path],
+        )?;
+        if updated == 0 {
+            conn.execute(
+                "UPDATE posts SET file_path = ?1, mime_type = ?2 WHERE id = ?3",
+                params![new_path, new_mime, post_id],
+            )?;
+        }
+
+        let thumb_path = get_post_thumb_path(conn, post_id)?.unwrap_or_default();
+        conn.execute(
+            "DELETE FROM file_hashes WHERE file_path = ?1",
+            params![old_path],
+        )?;
+        record_file_hash(conn, new_sha256, new_path, &thumb_path, new_mime)?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit transcode media replacement transaction")?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+/// Remove a file-hash record for a path that is being rolled back.
+///
+/// # Errors
+/// Returns an error if the deduplication row cannot be deleted.
 pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM file_hashes WHERE file_path = ?1",

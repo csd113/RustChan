@@ -14,7 +14,7 @@ pub struct NewPost {
     pub subject: Option<String>,
     pub body: String,
     pub body_html: String,
-    pub ip_hash: String,
+    pub ip_hash: Option<String>,
     pub file_path: Option<String>,
     pub file_name: Option<String>,
     pub file_size: Option<i64>,

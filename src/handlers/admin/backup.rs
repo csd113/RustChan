@@ -14,7 +14,7 @@ use crate::{
 };
 use axum::{
     extract::{Form, Multipart, State},
-    http::header,
+    http::{header, HeaderMap},
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -34,9 +34,9 @@ mod common;
 mod types;
 
 use common::{
-    copy_limited, create_staging_dir, db_dir, extract_uploads_to_dir, remap_body_quotelinks,
-    remove_path_if_exists, render_restored_body_html, rollback_swapped_path,
-    swap_staged_path_into_place, ZIP_ENTRY_MAX_BYTES,
+    copy_limited, create_staging_dir, db_dir, extract_uploads_to_dir, read_limited_bytes,
+    remap_body_quotelinks, remove_path_if_exists, render_restored_body_html,
+    BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
 };
 use types::board_backup_types;
 
@@ -324,11 +324,26 @@ fn add_dir_to_zip<W: Write + Seek>(
 pub async fn admin_restore(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
+    super::require_same_origin_request(&headers)?;
+    {
+        let pool = state.db.clone();
+        let session_id = session_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Admin auth preflight task failed: {error}"))
+        })??;
+    }
 
     // Stream the uploaded zip to a NamedTempFile on disk instead of
     // buffering the entire upload into a Vec<u8>.  Full-site backups can be
@@ -556,15 +571,27 @@ pub async fn admin_restore(
                 .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {e}")))?;
 
-            let had_live_uploads = swap_staged_path_into_place(
-                &staged_upload_root,
-                &upload_root,
-                &previous_upload_root,
-            )?;
+            let pending_restore_id = uuid::Uuid::new_v4().to_string();
+            let pending_restore_payload = crate::pending_fs::FullRestoreSwapPayload {
+                staged: staged_upload_root.display().to_string(),
+                live: upload_root.display().to_string(),
+                previous: previous_upload_root.display().to_string(),
+            };
+            let pending_restore_op = crate::pending_fs::PendingFsOpInsert {
+                id: pending_restore_id.clone(),
+                kind: crate::pending_fs::FULL_RESTORE_SWAP_KIND,
+                payload_json: serde_json::to_string(&pending_restore_payload).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!(
+                        "Serialize full restore pending_fs_op payload: {error}"
+                    ))
+                })?,
+            };
 
             let backup_result = (|| -> Result<()> {
                 let src = rusqlite::Connection::open(&temp_db)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Open backup source: {e}")))?;
+                db::ensure_pending_fs_ops_table(&src)?;
+                db::insert_pending_fs_op(&src, &pending_restore_op)?;
                 let backup = Backup::new(&src, &mut live_conn)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup init: {e}")))?;
                 backup
@@ -574,7 +601,6 @@ pub async fn admin_restore(
             })();
 
             if let Err(e) = backup_result {
-                let _ = rollback_swapped_path(&upload_root, &previous_upload_root, had_live_uploads);
                 let restore_db_result = (|| -> Result<()> {
                     let src = rusqlite::Connection::open(&db_snapshot).map_err(|restore_err| {
                         AppError::Internal(anyhow::anyhow!(
@@ -602,10 +628,12 @@ pub async fn admin_restore(
                 }
                 return Err(e);
             }
+            crate::pending_fs::finalize_full_restore_payload(&pending_restore_payload)
+                .map_err(AppError::Internal)?;
+            db::delete_pending_fs_op(&live_conn, &pending_restore_id)?;
 
             let _ = std::fs::remove_file(&temp_db);
             let _ = std::fs::remove_file(&db_snapshot);
-            let _ = remove_path_if_exists(&previous_upload_root);
 
             // ── Re-issue session cookie ───────────────────────────────────
             //
@@ -1556,15 +1584,27 @@ pub async fn restore_saved_full_backup(
                 .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {e}")))?;
 
-            let had_live_uploads = swap_staged_path_into_place(
-                &staged_upload_root,
-                &upload_root,
-                &previous_upload_root,
-            )?;
+            let pending_restore_id = uuid::Uuid::new_v4().to_string();
+            let pending_restore_payload = crate::pending_fs::FullRestoreSwapPayload {
+                staged: staged_upload_root.display().to_string(),
+                live: upload_root.display().to_string(),
+                previous: previous_upload_root.display().to_string(),
+            };
+            let pending_restore_op = crate::pending_fs::PendingFsOpInsert {
+                id: pending_restore_id.clone(),
+                kind: crate::pending_fs::FULL_RESTORE_SWAP_KIND,
+                payload_json: serde_json::to_string(&pending_restore_payload).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!(
+                        "Serialize full restore pending_fs_op payload: {error}"
+                    ))
+                })?,
+            };
 
             let backup_result = (|| -> Result<()> {
                 let src = rusqlite::Connection::open(&temp_db)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Open source: {e}")))?;
+                db::ensure_pending_fs_ops_table(&src)?;
+                db::insert_pending_fs_op(&src, &pending_restore_op)?;
                 let backup = Backup::new(&src, &mut live_conn)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Backup init: {e}")))?;
                 backup
@@ -1573,8 +1613,6 @@ pub async fn restore_saved_full_backup(
                 Ok(())
             })();
             if let Err(e) = backup_result {
-                let _ =
-                    rollback_swapped_path(&upload_root, &previous_upload_root, had_live_uploads);
                 let restore_db_result = (|| -> Result<()> {
                     let src = rusqlite::Connection::open(&db_snapshot).map_err(|restore_err| {
                         AppError::Internal(anyhow::anyhow!(
@@ -1602,9 +1640,11 @@ pub async fn restore_saved_full_backup(
                 }
                 return Err(e);
             }
+            crate::pending_fs::finalize_full_restore_payload(&pending_restore_payload)
+                .map_err(AppError::Internal)?;
+            db::delete_pending_fs_op(&live_conn, &pending_restore_id)?;
             let _ = std::fs::remove_file(&temp_db);
             let _ = std::fs::remove_file(&db_snapshot);
-            let _ = remove_path_if_exists(&previous_upload_root);
 
             let fresh_sid = new_session_id();
             let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
@@ -1699,9 +1739,11 @@ pub async fn restore_saved_board_backup(
                 let mut entry = archive
                     .by_name("board.json")
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Read board.json: {e}")))?;
-                let mut buf = Vec::new();
-                std::io::Read::read_to_end(&mut entry, &mut buf)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Read bytes: {e}")))?;
+                let buf = read_limited_bytes(
+                    &mut entry,
+                    BOARD_MANIFEST_MAX_BYTES,
+                    "board.json manifest",
+                )?;
                 serde_json::from_slice(&buf)
                     .map_err(|e| AppError::BadRequest(format!("Invalid board.json: {e}")))?
             };
@@ -1718,6 +1760,23 @@ pub async fn restore_saved_board_backup(
                 ".{board_short}.restore-old.{}",
                 uuid::Uuid::new_v4().simple()
             ));
+            let pending_board_restore_id = uuid::Uuid::new_v4().to_string();
+            let pending_board_restore_payload = crate::pending_fs::BoardRestoreSwapPayload {
+                staged: staged_board_dir.display().to_string(),
+                live: live_board_dir.display().to_string(),
+                previous: previous_board_dir.display().to_string(),
+            };
+            let pending_board_restore_op = crate::pending_fs::PendingFsOpInsert {
+                id: pending_board_restore_id.clone(),
+                kind: crate::pending_fs::BOARD_RESTORE_SWAP_KIND,
+                payload_json: serde_json::to_string(&pending_board_restore_payload).map_err(
+                    |error| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Serialize board restore pending_fs_op payload: {error}"
+                        ))
+                    },
+                )?,
+            };
 
             let existing_id: Option<i64> = conn
                 .query_row(
@@ -1909,25 +1968,19 @@ pub async fn restore_saved_board_backup(
                     )
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Insert file_hash: {e}")))?;
                 }
+                db::insert_pending_fs_op(&conn, &pending_board_restore_op)?;
                 Ok(())
             })();
 
             match restore_result {
                 Ok(()) => {
-                    let had_live_board = swap_staged_path_into_place(
-                        &staged_board_dir,
-                        &live_board_dir,
-                        &previous_board_dir,
-                    )?;
-                    if let Err(e) = conn.execute("COMMIT", []) {
-                        let _ = rollback_swapped_path(
-                            &live_board_dir,
-                            &previous_board_dir,
-                            had_live_board,
-                        );
-                        return Err(AppError::Internal(anyhow::anyhow!("Commit: {e}")));
-                    }
-                    let _ = remove_path_if_exists(&previous_board_dir);
+                    conn.execute("COMMIT", [])
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit: {e}")))?;
+                    crate::pending_fs::finalize_board_restore_payload(
+                        &pending_board_restore_payload,
+                    )
+                    .map_err(AppError::Internal)?;
+                    db::delete_pending_fs_op(&conn, &pending_board_restore_id)?;
                 }
                 Err(e) => {
                     let _ = conn.execute("ROLLBACK", []);
@@ -2227,6 +2280,7 @@ pub async fn board_backup(
 pub async fn board_restore(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
     // Run the whole operation as a fallible async block so any early return
@@ -2235,6 +2289,18 @@ pub async fn board_restore(
         let session_id = jar
             .get(super::SESSION_COOKIE)
             .map(|c| c.value().to_string());
+        super::require_same_origin_request(&headers)?;
+        {
+            let pool = state.db.clone();
+            let session_id = session_id.clone();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let conn = pool.get()?;
+                super::require_admin_session_sid(&conn, session_id.as_deref())?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Admin auth preflight task failed: {error}")))??;
+        }
         let upload_dir = CONFIG.upload_dir.clone();
 
         // MEM-FIX: stream the uploaded file to a NamedTempFile on disk instead
@@ -2372,10 +2438,11 @@ pub async fn board_restore(
                         let mut entry = archive.by_name("board.json").map_err(|e| {
                             AppError::Internal(anyhow::anyhow!("Read board.json: {e}"))
                         })?;
-                        let mut buf = Vec::new();
-                        entry
-                            .read_to_end(&mut buf)
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Read bytes: {e}")))?;
+                        let buf = read_limited_bytes(
+                            &mut entry,
+                            BOARD_MANIFEST_MAX_BYTES,
+                            "board.json manifest",
+                        )?;
                         serde_json::from_slice(&buf)
                             .map_err(|e| AppError::BadRequest(format!("Invalid board.json: {e}")))?
                     };
@@ -2391,9 +2458,8 @@ pub async fn board_restore(
                     let mut f = zip_tmp
                         .reopen()
                         .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen json: {e}")))?;
-                    let mut buf = Vec::new();
-                    f.read_to_end(&mut buf)
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Read json: {e}")))?;
+                    let buf =
+                        read_limited_bytes(&mut f, BOARD_MANIFEST_MAX_BYTES, "board.json manifest")?;
                     let manifest: BoardBackupManifest = serde_json::from_slice(&buf)
                         .map_err(|e| AppError::BadRequest(format!("Invalid board.json: {e}")))?;
                     (manifest, None)
@@ -2414,6 +2480,21 @@ pub async fn board_restore(
                     ".{board_short}.restore-old.{}",
                     uuid::Uuid::new_v4().simple()
                 ));
+                let pending_board_restore_id = uuid::Uuid::new_v4().to_string();
+                let pending_board_restore_payload = crate::pending_fs::BoardRestoreSwapPayload {
+                    staged: staged_board_dir.display().to_string(),
+                    live: live_board_dir.display().to_string(),
+                    previous: previous_board_dir.display().to_string(),
+                };
+                let pending_board_restore_op = crate::pending_fs::PendingFsOpInsert {
+                    id: pending_board_restore_id.clone(),
+                    kind: crate::pending_fs::BOARD_RESTORE_SWAP_KIND,
+                    payload_json: serde_json::to_string(&pending_board_restore_payload).map_err(|error| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Serialize board restore pending_fs_op payload: {error}"
+                        ))
+                    })?,
+                };
 
                 let existing_id: Option<i64> = conn
                     .query_row(
@@ -2699,25 +2780,17 @@ pub async fn board_restore(
                             AppError::Internal(anyhow::anyhow!("Insert file_hash: {e}"))
                         })?;
                     }
+                    db::insert_pending_fs_op(&conn, &pending_board_restore_op)?;
                     Ok(())
                 })();
 
                 match restore_result {
                     Ok(()) => {
-                        let had_live_board = swap_staged_path_into_place(
-                            &staged_board_dir,
-                            &live_board_dir,
-                            &previous_board_dir,
-                        )?;
-                        if let Err(e) = conn.execute("COMMIT", []) {
-                            let _ = rollback_swapped_path(
-                                &live_board_dir,
-                                &previous_board_dir,
-                                had_live_board,
-                            );
-                            return Err(AppError::Internal(anyhow::anyhow!("Commit tx: {e}")));
-                        }
-                        let _ = remove_path_if_exists(&previous_board_dir);
+                        conn.execute("COMMIT", [])
+                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Commit tx: {e}")))?;
+                        crate::pending_fs::finalize_board_restore_payload(&pending_board_restore_payload)
+                            .map_err(AppError::Internal)?;
+                        db::delete_pending_fs_op(&conn, &pending_board_restore_id)?;
                     }
                     Err(e) => {
                         let _ = conn.execute("ROLLBACK", []);

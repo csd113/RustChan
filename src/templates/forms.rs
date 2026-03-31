@@ -8,28 +8,67 @@ use crate::config::CONFIG;
 use crate::models::Board;
 use crate::utils::sanitize::escape_html;
 
-/// New-thread submission form. Embedded on board index and catalog pages.
-#[allow(clippy::too_many_lines)]
-pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String {
+struct UploadFormPolicy {
+    file_accept: String,
+    file_hint: String,
+}
+
+fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
     let image_mb = CONFIG.max_image_size / 1024 / 1024;
     let video_mb = CONFIG.max_video_size / 1024 / 1024;
     let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
+
+    let mut accept_parts: Vec<&str> = Vec::new();
+    let mut hint_parts: Vec<String> = Vec::new();
+    if board.allow_images {
+        accept_parts.push("image/jpeg,image/png,image/gif,image/webp");
+        hint_parts.push(format!("jpg/png/gif/webp · max {image_mb} MiB"));
+    }
+    if board.allow_video {
+        accept_parts.push("video/mp4,video/webm");
+        hint_parts.push(format!("mp4/webm · max {video_mb} MiB"));
+    }
+    if board.allow_audio {
+        accept_parts.push(
+            "audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac",
+        );
+        hint_parts.push(format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB"));
+    }
+
     let file_accept = if allow_any_files {
         String::new()
     } else {
-        "image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac".to_string()
+        accept_parts.join(",")
     };
     let file_hint = if allow_any_files {
-        format!(
-            "media uploads stay inline where supported; other files download safely as attachments · max {} MiB",
-            audio_mb.max(video_mb).max(image_mb)
-        )
+        let media_hint = if hint_parts.is_empty() {
+            format!(
+                "other files download safely as attachments · max {} MiB",
+                audio_mb.max(video_mb).max(image_mb)
+            )
+        } else {
+            format!(
+                "{} &nbsp;|&nbsp; other files download safely as attachments",
+                hint_parts.join(" &nbsp;|&nbsp; ")
+            )
+        };
+        media_hint
     } else {
-        format!(
-            "jpg/png/gif/webp · max {image_mb} MiB &nbsp;|&nbsp; mp4/webm · max {video_mb} MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a · max {audio_mb} MiB"
-        )
+        hint_parts.join(" &nbsp;|&nbsp; ")
     };
+
+    UploadFormPolicy {
+        file_accept,
+        file_hint,
+    }
+}
+
+/// New-thread submission form. Embedded on board index and catalog pages.
+#[allow(clippy::too_many_lines)]
+pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String {
+    let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
+    let upload_policy = build_upload_form_policy(board);
 
     // PoW CAPTCHA block — only rendered when the board has it enabled.
     // PoW config is passed via data-pow-board / data-pow-difficulty
@@ -134,8 +173,8 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         // poll scripts moved to /static/main.js
         board = escape_html(board_short),
         csrf = escape_html(csrf_token),
-        file_accept = file_accept,
-        file_hint = file_hint,
+        file_accept = upload_policy.file_accept,
+        file_hint = upload_policy.file_hint,
         audio_combo_row = audio_combo_row,
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
@@ -149,39 +188,8 @@ pub(super) fn reply_form(
     csrf_token: &str,
     board: &Board,
 ) -> String {
-    let image_mb = CONFIG.max_image_size / 1024 / 1024;
-    let video_mb = CONFIG.max_video_size / 1024 / 1024;
     let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
-    let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
-
-    // Build the accept attribute and hint based on which media types are enabled.
-    let mut accept_parts: Vec<&str> = Vec::new();
-    let mut hint_parts: Vec<String> = Vec::new();
-    if board.allow_images {
-        accept_parts.push("image/jpeg,image/png,image/gif,image/webp");
-        hint_parts.push(format!("jpg/png/gif/webp · max {image_mb} MiB"));
-    }
-    if board.allow_video {
-        accept_parts.push("video/mp4,video/webm");
-        hint_parts.push(format!("mp4/webm · max {video_mb} MiB"));
-    }
-    if board.allow_audio {
-        accept_parts.push("audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac");
-        hint_parts.push(format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB"));
-    }
-    let file_accept = if allow_any_files {
-        String::new()
-    } else {
-        accept_parts.join(",")
-    };
-    let file_hint = if allow_any_files {
-        format!(
-            "{} &nbsp;|&nbsp; other file types download as attachments",
-            hint_parts.join(" &nbsp;|&nbsp; ")
-        )
-    } else {
-        hint_parts.join(" &nbsp;|&nbsp; ")
-    };
+    let upload_policy = build_upload_form_policy(board);
 
     // Secondary audio-alongside-image row.
     let audio_combo_row = if board.allow_images && board.allow_audio {
@@ -242,8 +250,8 @@ pub(super) fn reply_form(
         board = escape_html(board_short),
         tid = thread_id,
         csrf = escape_html(csrf_token),
-        file_accept = file_accept,
-        file_hint = file_hint,
+        file_accept = upload_policy.file_accept,
+        file_hint = upload_policy.file_hint,
         audio_combo_row = audio_combo_row,
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,

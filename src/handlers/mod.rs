@@ -302,15 +302,16 @@ pub fn process_primary_upload(
     board: &Board,
     conn: &rusqlite::Connection,
     upload_dir: &str,
+    save_root: &str,
     thumb_size: u32,
     max_image_size: usize,
     max_video_size: usize,
     max_audio_size: usize,
     ffmpeg_available: bool,
     ffmpeg_webp_available: bool,
-) -> Result<Option<crate::utils::files::UploadedFile>> {
+) -> Result<(Option<crate::utils::files::UploadedFile>, Option<String>)> {
     let Some((upload, fname)) = file_data else {
-        return Ok(None);
+        return Ok((None, None));
     };
     let allow_any_files =
         crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
@@ -319,8 +320,7 @@ pub fn process_primary_upload(
         Err(_) if allow_any_files => crate::utils::files::fallback_download_mime_type().to_string(),
         Err(error) => return Err(AppError::BadRequest(error.to_string())),
     };
-    let detected_media = crate::models::MediaType::from_mime(&detected_mime)
-        .ok_or_else(|| AppError::BadRequest("Unsupported file type.".into()))?;
+    let detected_media = crate::models::MediaType::from_mime(&detected_mime);
 
     match detected_media {
         crate::models::MediaType::Image if !board.allow_images => {
@@ -372,17 +372,20 @@ pub fn process_primary_upload(
                 .exists();
 
         if file_ok && thumb_ok {
-            let cached_media = crate::models::MediaType::from_mime(&cached.mime_type)
-                .unwrap_or(crate::models::MediaType::Other);
-            return Ok(Some(crate::utils::files::UploadedFile {
-                file_path: cached.file_path,
-                thumb_path: cached.thumb_path,
-                original_name: crate::utils::sanitize::sanitize_filename(&fname),
-                mime_type: cached.mime_type,
-                file_size: i64::try_from(upload.size_bytes).unwrap_or(0),
-                media_type: cached_media,
-                processing_pending: false,
-            }));
+            let cached_media = crate::models::MediaType::from_mime(&cached.mime_type);
+            return Ok((
+                Some(crate::utils::files::UploadedFile {
+                    file_path: cached.file_path,
+                    thumb_path: cached.thumb_path,
+                    original_name: crate::utils::sanitize::sanitize_filename(&fname),
+                    mime_type: cached.mime_type,
+                    file_size: i64::try_from(upload.size_bytes).unwrap_or(0),
+                    media_type: cached_media,
+                    processing_pending: false,
+                    dedup_reused: true,
+                }),
+                None,
+            ));
         }
 
         // One or both paths are gone — the entry is stale.  Log and fall
@@ -397,20 +400,21 @@ pub fn process_primary_upload(
         upload.temp_file.path(),
         &upload.sniff_bytes,
         upload.size_bytes,
-        &fname,
-        upload_dir,
-        &board.short_name,
-        thumb_size,
-        max_image_size,
-        max_video_size,
-        max_audio_size,
-        ffmpeg_available,
-        ffmpeg_webp_available,
-        allow_any_files,
+        &crate::utils::files::SaveUploadOptions {
+            original_filename: &fname,
+            boards_dir: save_root,
+            board_short: &board.short_name,
+            thumb_size,
+            max_image_size,
+            max_video_size,
+            max_audio_size,
+            ffmpeg_available,
+            ffmpeg_webp_available,
+            allow_any_files,
+        },
     )
     .map_err(|e| classify_upload_error(&e))?;
-    crate::db::record_file_hash(conn, &hash, &f.file_path, &f.thumb_path, &f.mime_type)?;
-    Ok(Some(f))
+    Ok((Some(f), Some(hash)))
 }
 
 /// Process the secondary audio file for an image+audio combo upload.
@@ -447,8 +451,7 @@ pub fn process_audio_combo(
     // Confirm the secondary file is actually audio.
     let aud_mime = crate::utils::files::detect_mime_type(&audio_upload.sniff_bytes)
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let aud_media = crate::models::MediaType::from_mime(aud_mime)
-        .ok_or_else(|| AppError::BadRequest("Unsupported audio type.".into()))?;
+    let aud_media = crate::models::MediaType::from_mime(aud_mime);
     if !matches!(aud_media, crate::models::MediaType::Audio) {
         return Err(AppError::BadRequest(
             "The audio slot only accepts audio files.".into(),

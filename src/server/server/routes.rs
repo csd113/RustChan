@@ -75,6 +75,14 @@ pub(super) fn public_routes() -> Router<AppState> {
 
 pub(super) fn admin_routes() -> Router<AppState> {
     Router::new()
+        .merge(admin_auth_routes())
+        .merge(admin_board_routes())
+        .merge(admin_backup_routes())
+        .merge(admin_moderation_routes())
+}
+
+fn admin_auth_routes() -> Router<AppState> {
+    Router::new()
         .route("/admin", get(crate::handlers::admin::admin_index))
         .route(
             "/admin/login",
@@ -82,6 +90,10 @@ pub(super) fn admin_routes() -> Router<AppState> {
         )
         .route("/admin/logout", post(crate::handlers::admin::admin_logout))
         .route("/admin/panel", get(crate::handlers::admin::admin_panel))
+}
+
+fn admin_board_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/admin/board/create",
             post(crate::handlers::admin::create_board),
@@ -94,6 +106,10 @@ pub(super) fn admin_routes() -> Router<AppState> {
             "/admin/board/settings",
             post(crate::handlers::admin::update_board_settings),
         )
+}
+
+fn admin_moderation_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/admin/thread/action",
             post(crate::handlers::admin::thread_action),
@@ -187,5 +203,52 @@ pub(super) fn admin_routes() -> Router<AppState> {
         .route(
             "/admin/appeal/accept",
             post(crate::handlers::admin::accept_appeal),
+        )
+}
+
+fn admin_backup_routes() -> Router<AppState> {
+    Router::new()
+        .route("/admin/backup", get(crate::handlers::admin::admin_backup))
+        .route(
+            "/admin/restore",
+            post(crate::handlers::admin::admin_restore)
+                .layer(DefaultBodyLimit::max(20 * 1024 * 1024 * 1024)),
+        )
+        .route(
+            "/admin/board/backup/{board}",
+            get(crate::handlers::admin::board_backup),
+        )
+        .route(
+            "/admin/board/restore",
+            post(crate::handlers::admin::board_restore)
+                .layer(DefaultBodyLimit::max(20 * 1024 * 1024 * 1024)),
+        )
+        .route(
+            "/admin/backup/create",
+            post(crate::handlers::admin::create_full_backup),
+        )
+        .route(
+            "/admin/board/backup/create",
+            post(crate::handlers::admin::create_board_backup),
+        )
+        .route(
+            "/admin/backup/download/{kind}/{filename}",
+            get(crate::handlers::admin::download_backup),
+        )
+        .route(
+            "/admin/backup/progress",
+            get(crate::handlers::admin::backup_progress_json),
+        )
+        .route(
+            "/admin/backup/delete",
+            post(crate::handlers::admin::delete_backup),
+        )
+        .route(
+            "/admin/backup/restore-saved",
+            post(crate::handlers::admin::restore_saved_full_backup),
+        )
+        .route(
+            "/admin/board/backup/restore-saved",
+            post(crate::handlers::admin::restore_saved_board_backup),
         )
 }

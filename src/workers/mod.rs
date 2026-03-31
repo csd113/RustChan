@@ -692,18 +692,17 @@ fn transcode_video_finalise(
     let conn = pool.get()?;
 
     // clean up on DB failure.
-    let db_result = (|| -> Result<()> {
-        let updated =
-            crate::db::update_all_posts_file_path(&conn, file_path, webm_rel, "video/webm")?;
-        if updated == 0 {
-            crate::db::update_post_file_info(&conn, post_id, webm_rel, "video/webm")?;
-        }
-        let thumb_path = crate::db::get_post_thumb_path(&conn, post_id)?.unwrap_or_default();
+    let db_result = {
         let webm_sha256 = crate::utils::crypto::sha256_hex(&webm_bytes);
-        crate::db::delete_file_hash_by_path(&conn, file_path)?;
-        crate::db::record_file_hash(&conn, &webm_sha256, webm_rel, &thumb_path, "video/webm")?;
-        Ok(())
-    })();
+        crate::db::replace_transcoded_media(
+            &conn,
+            post_id,
+            file_path,
+            webm_rel,
+            "video/webm",
+            &webm_sha256,
+        )
+    };
 
     if let Err(e) = db_result {
         let _ = std::fs::remove_file(webm_abs);
