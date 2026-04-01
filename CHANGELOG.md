@@ -4,6 +4,35 @@ All notable changes to RustChan will be documented in this file.
 
 ---
 
+## [1.1.1]
+
+### Added
+
+- Mobile-only board picker in the header, homepage NSFW consent overlay flow, and a no-JS theme fallback for slower or restricted browsers.
+- Server-backed theme switching with explicit `return_to` routing and better backup/restore diagnostics across admin upload paths.
+- Restore route request logging, board backup manifest inspection logs, and larger multipart restore coverage in the route test harness.
+
+### Improved
+
+- Mobile interaction quality for reply, media expansion, archive rows, catalog controls, board descriptions, and header layout without changing the desktop interface.
+- Tor and mobile resilience through safer identity bucketing, less brittle theme persistence, JS-degraded fallbacks, and better cache revalidation for board, catalog, and thread pages.
+- Generated `settings.toml` readability by regrouping settings into clearer related sections, and log organization by moving runtime logs into `rustchan-data/logs/`.
+- Backup and restore internals by deduplicating board restore into one shared core and full-site restore into one shared execution path with rollback-aware filesystem swaps.
+
+### Fixed
+
+- Mobile photo uploads now preserve correct orientation for both stored images and generated thumbnails.
+- Admin archive, pin, thread deletion, board restore, and full restore flows now refresh more reliably without requiring manual cookie or cache clearing.
+- Firefox and localhost admin restore uploads no longer fail on `Origin: null` or loopback host alias mismatches when valid session and CSRF state are present.
+- Theme picker, board menu, catalog sort controls, and top-bar alignment no longer overflow or misplace themselves on mobile and Tor Browser.
+- Backup/restore logging now respects the app’s actual tracing targets instead of being silently filtered out.
+
+### Validation
+
+- `cargo fmt --all`
+- `cargo clippy --all-targets --all-features -- -D warnings -W clippy::all -W clippy::pedantic -W clippy::nursery`
+- `env -u RUSTC_WRAPPER cargo test --quiet`
+
 ## [1.1.0]
 
 ### Added

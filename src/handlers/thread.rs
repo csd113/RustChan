@@ -33,22 +33,7 @@ pub async fn view_thread(
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
-
-    {
-        let conn = state.db.get()?;
-        let board = db::get_board_by_short(&conn, &board_short)?
-            .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-        if board.nsfw && !crate::handlers::board::has_nsfw_consent(&jar) {
-            return Ok(crate::handlers::board::render_nsfw_disclaimer(
-                &board,
-                &format!("/{}/thread/{thread_id}", board.short_name),
-                &csrf,
-                current_theme.as_deref(),
-            )
-            .into_response());
-        }
-    }
-
+    let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
@@ -58,7 +43,7 @@ pub async fn view_thread(
                 &conn,
                 &board_short,
                 thread_id,
-                &client_ip,
+                &identity_key,
                 jar_session.as_deref(),
                 &crate::config::CONFIG.cookie_secret,
             )?;
@@ -100,6 +85,10 @@ pub async fn view_thread(
             axum::http::HeaderValue::from_str(&etag)
                 .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
         );
+        resp.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("private, no-cache, must-revalidate"),
+        );
         return Ok((jar, resp).into_response());
     }
 
@@ -107,6 +96,10 @@ pub async fn view_thread(
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
     }
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("private, no-cache, must-revalidate"),
+    );
     Ok((jar, resp).into_response())
 }
 
@@ -152,10 +145,10 @@ pub async fn post_reply(
     // Clones kept outside the closure so we can re-render the thread page inline on error.
     let board_short_err = board_short.clone();
     let admin_session_err = admin_session_id.clone();
-    let client_ip_err = client_ip.clone();
     let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
 
-    let _board_short_err = board_short.clone();
+    let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
+    let identity_key_err = identity_key.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = state.job_queue.clone();
@@ -175,7 +168,7 @@ pub async fn post_reply(
                 return Err(AppError::Forbidden("This thread is locked.".into()));
             }
 
-            let ip_hash = hash_ip(&client_ip, &cookie_secret);
+            let ip_hash = hash_ip(&identity_key, &cookie_secret);
             if let Some(reason) = db::is_banned(&conn, &ip_hash)? {
                 return Err(AppError::BannedUser {
                     reason: if reason.is_empty() {
@@ -300,7 +293,7 @@ pub async fn post_reply(
                     &conn,
                     &board_short_err,
                     thread_id,
-                    &client_ip_err,
+                    &identity_key_err,
                     admin_session_err.as_deref(),
                     &CONFIG.cookie_secret,
                 )?;
@@ -547,11 +540,12 @@ pub async fn vote_handler(
         return Err(AppError::BadRequest("Invalid poll option.".into()));
     }
 
+    let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let redirect_url = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            let ip_hash = hash_ip(&client_ip, &cookie_secret);
+            let ip_hash = hash_ip(&identity_key, &cookie_secret);
 
             let (poll_id, thread_id, board_short) = db::get_poll_context(&conn, option_id)?
                 .ok_or_else(|| AppError::NotFound("Poll option not found.".into()))?;

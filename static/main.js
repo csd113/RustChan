@@ -115,6 +115,38 @@ function appendReply(id) {
 
 document.addEventListener('DOMContentLoaded', syncPostFormState);
 
+// ─── NSFW disclaimer overlay ────────────────────────────────────────────────
+
+function openNsfwDisclaimer(returnTo, boardLabel) {
+  var overlay = document.getElementById('nsfw-disclaimer-overlay');
+  if (!overlay) return;
+  var returnField = document.getElementById('nsfw-return-to');
+  var boardEl = document.getElementById('nsfw-board-label');
+  if (returnField && returnTo) returnField.value = returnTo;
+  if (boardEl) boardEl.textContent = boardLabel || '';
+  overlay.hidden = false;
+  overlay.classList.add('is-open');
+  document.body.classList.add('mobile-overlay-open');
+}
+
+function closeNsfwDisclaimer() {
+  var overlay = document.getElementById('nsfw-disclaimer-overlay');
+  if (!overlay) return;
+  overlay.hidden = true;
+  overlay.classList.remove('is-open');
+  document.body.classList.remove('mobile-overlay-open');
+  if (window.location.pathname === '/' && window.location.search.indexOf('nsfw=') !== -1 && window.history && window.history.replaceState) {
+    window.history.replaceState({}, document.title, '/');
+  }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  var overlay = document.getElementById('nsfw-disclaimer-overlay');
+  if (overlay && !overlay.hidden) {
+    document.body.classList.add('mobile-overlay-open');
+  }
+});
+
 // ─── Media expand / collapse ─────────────────────────────────────────────────
 
 var mobileMediaViewer = (function () {
@@ -1154,10 +1186,10 @@ function sortCatalog(mode) {
   if (!grid) return;
   var items = Array.from(grid.querySelectorAll('.catalog-item'));
   items.sort(function (a, b) {
+    var as_ = parseInt(a.dataset.sticky) || 0;
+    var bs_ = parseInt(b.dataset.sticky) || 0;
+    if (as_ !== bs_) return bs_ - as_;
     if (mode === 'bump') {
-      var as_ = parseInt(a.dataset.sticky) || 0;
-      var bs_ = parseInt(b.dataset.sticky) || 0;
-      if (as_ !== bs_) return bs_ - as_;
       return parseInt(b.dataset.bumped) - parseInt(a.dataset.bumped);
     }
     if (mode === 'replies') return parseInt(b.dataset.replies) - parseInt(a.dataset.replies);
@@ -1321,6 +1353,14 @@ document.addEventListener('click', function (e) {
       case 'fetch-updates':       window.fetchUpdates && window.fetchUpdates(); break;
       case 'open-report':
         openReportModal(t.dataset.pid, t.dataset.tid, t.dataset.board, t.dataset.csrf);
+        break;
+      case 'open-nsfw-disclaimer':
+        e.preventDefault();
+        openNsfwDisclaimer(t.dataset.returnTo, t.dataset.boardLabel);
+        break;
+      case 'close-nsfw-disclaimer':
+        e.preventDefault();
+        closeNsfwDisclaimer();
         break;
     }
   }

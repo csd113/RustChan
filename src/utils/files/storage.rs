@@ -308,8 +308,11 @@ fn save_processed_upload(
         )
         .context("Media processing pipeline failed")?;
 
+    if plan.jpeg_orientation > 1 && processed.file_path.exists() {
+        apply_image_exif_orientation(&processed.file_path, plan.jpeg_orientation);
+    }
+
     if plan.jpeg_orientation > 1
-        && !options.ffmpeg_available
         && processed.thumbnail_path.exists()
         && processed
             .thumbnail_path
@@ -399,6 +402,26 @@ fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {
     let rotated = crate::media::exif::apply_exif_orientation(img, orientation);
     if let Err(error) = rotated.save_with_format(thumb_path, image::ImageFormat::WebP) {
         tracing::warn!("failed to re-orient thumbnail: {error}");
+    }
+}
+
+fn apply_image_exif_orientation(image_path: &Path, orientation: u32) {
+    if orientation <= 1 {
+        return;
+    }
+
+    let Ok(data) = std::fs::read(image_path) else {
+        return;
+    };
+    let Ok(format) = image::guess_format(&data) else {
+        return;
+    };
+    let Ok(img) = image::load_from_memory_with_format(&data, format) else {
+        return;
+    };
+    let rotated = crate::media::exif::apply_exif_orientation(img, orientation);
+    if let Err(error) = rotated.save_with_format(image_path, format) {
+        tracing::warn!("failed to re-orient stored image: {error}");
     }
 }
 

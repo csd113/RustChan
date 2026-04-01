@@ -2,6 +2,7 @@
 
 use axum::{
     extract::DefaultBodyLimit,
+    middleware as axum_middleware,
     routing::{get, post},
     Router,
 };
@@ -214,4 +215,49 @@ fn admin_backup_routes() -> Router<AppState> {
             "/admin/board/backup/restore-saved",
             post(crate::handlers::admin::restore_saved_board_backup),
         )
+        .layer(axum_middleware::from_fn(
+            crate::handlers::admin::backup_request_logging_middleware,
+        ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admin_routes;
+    use axum::{
+        body::{to_bytes, Body},
+        http::{header, Request, StatusCode},
+    };
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn board_restore_route_accepts_large_multipart_body_without_global_media_limit() {
+        let app = admin_routes().with_state(crate::test_support::app_state());
+        let file_bytes = vec![b'a'; 60 * 1024 * 1024];
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123")],
+            Some(("backup_file", "board.zip", &file_bytes, "application/zip")),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/board/restore")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(body.contains("Board restore"));
+    }
 }

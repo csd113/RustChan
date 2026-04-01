@@ -360,6 +360,7 @@ pub fn urlencoding_simple(s: &str) -> String {
 
 // ─── Base layout ─────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn base_layout(
     title: &str,
     board_short: Option<&str>,
@@ -388,16 +389,16 @@ pub fn base_layout(
     let board_menu = if boards.is_empty() {
         String::new()
     } else {
-        let items = boards
-            .iter()
-            .map(|b| {
-                format!(
-                    r#"<a class="mobile-board-link" href="/{s}/catalog">/{s}/</a>"#,
-                    s = escape_html(&b.short_name)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        let mut items = String::new();
+        for board in boards {
+            let short = escape_html(&board.short_name);
+            let _ = std::fmt::Write::write_fmt(
+                &mut items,
+                format_args!(
+                    r#"<a class="mobile-board-link" href="/{short}/catalog">/{short}/</a>"#
+                ),
+            );
+        }
         format!(
             r#"<details class="mobile-board-menu">
   <summary class="mobile-board-menu-btn">Boards</summary>
@@ -456,8 +457,8 @@ pub fn base_layout(
 <body{collapse_attr}>
 <header class="site-header">
   <span class="site-name">{forum_name}</span>
-  {board_menu}
   <a class="home-btn" href="/">&#8962; Home</a>
+  {board_menu}
   <nav class="board-list">
     {board_links}
   </nav>
@@ -605,5 +606,14 @@ pub fn error_page(code: u16, message: &str) -> String {
         code = code,
         message = escape_html(message),
     );
-    base_layout(&format!("Error {code}"), None, &body, "", &boards, None, false, "/")
+    base_layout(
+        &format!("Error {code}"),
+        None,
+        &body,
+        "",
+        &boards,
+        None,
+        false,
+        "/",
+    )
 }

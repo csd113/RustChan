@@ -23,7 +23,7 @@ use crate::{
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
-    http::{header, HeaderMap},
+    http::{header, HeaderMap, HeaderValue},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -34,6 +34,8 @@ const PREVIEW_REPLIES: i64 = 3;
 const THREADS_PER_PAGE: i64 = 10;
 pub const USER_THEME_COOKIE: &str = "rustchan_theme";
 pub const NSFW_CONSENT_COOKIE: &str = "rustchan_nsfw_ok";
+pub const VISITOR_ID_COOKIE: &str = "rustchan_visitor_id";
+const HTML_CACHE_CONTROL: &str = "private, no-cache, must-revalidate";
 
 pub fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
     jar.get(USER_THEME_COOKIE)
@@ -41,7 +43,7 @@ pub fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn has_nsfw_consent(jar: &CookieJar) -> bool {
+pub fn has_nsfw_consent(jar: &CookieJar) -> bool {
     jar.get(NSFW_CONSENT_COOKIE)
         .is_some_and(|cookie| cookie.value() == "1")
 }
@@ -54,30 +56,32 @@ fn safe_return_to(path: &str) -> &str {
     }
 }
 
-pub(crate) fn render_nsfw_disclaimer(
-    board: &crate::models::Board,
-    return_to: &str,
-    csrf_token: &str,
-    current_theme: Option<&str>,
-) -> Html<String> {
-    let boards = crate::templates::live_boards();
-    Html(crate::templates::nsfw_disclaimer_page(
-        board,
-        safe_return_to(return_to),
-        csrf_token,
-        boards.as_slice(),
-        current_theme,
-    ))
+pub fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
+    if client_ip.starts_with("tor:") {
+        return client_ip.to_string();
+    }
+
+    if client_ip == "127.0.0.1" || client_ip == "::1" || client_ip == "unknown" {
+        if let Some(visitor_id) = jar.get(VISITOR_ID_COOKIE).map(Cookie::value) {
+            if !visitor_id.is_empty() {
+                return format!("visitor:{visitor_id}");
+            }
+        }
+    }
+
+    client_ip.to_string()
 }
 
 // ─── GET / — board list ───────────────────────────────────────────────────────
 
 pub async fn index(
     State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
-) -> Result<(CookieJar, Html<String>)> {
+) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
+    let nsfw_consent = has_nsfw_consent(&jar);
 
     let (board_stats, site_data) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -98,6 +102,19 @@ pub async fn index(
         None
     };
 
+    let nsfw_prompt_board = params
+        .get("nsfw")
+        .and_then(|short| board_stats.iter().find(|s| s.board.short_name == *short))
+        .map(|s| &s.board);
+
+    if nsfw_consent {
+        if let Some(board) = nsfw_prompt_board {
+            return Ok(
+                (jar, Redirect::to(&format!("/{}/catalog", board.short_name))).into_response(),
+            );
+        }
+    }
+
     Ok((
         jar,
         Html(templates::index_page(
@@ -106,8 +123,11 @@ pub async fn index(
             &csrf,
             onion_address.as_deref(),
             current_theme.as_deref(),
+            nsfw_prompt_board,
+            nsfw_consent,
         )),
-    ))
+    )
+        .into_response())
 }
 
 // ─── GET /:board/ — board index ───────────────────────────────────────────────
@@ -129,21 +149,6 @@ pub async fn board_index(
         .unwrap_or(1)
         .max(1);
 
-    {
-        let conn = state.db.get()?;
-        let board = db::get_board_by_short(&conn, &board_short)?
-            .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-        if board.nsfw && !has_nsfw_consent(&jar) {
-            return Ok(render_nsfw_disclaimer(
-                &board,
-                &format!("/{}", board.short_name),
-                &csrf,
-                current_theme.as_deref(),
-            )
-            .into_response());
-        }
-    }
-
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
@@ -161,17 +166,28 @@ pub async fn board_index(
             // 3.2: Derive ETag from the most-recently-bumped thread on this page
             // combined with the page number.  This is a cheap proxy for "has
             // anything on this page changed?".
-            let max_bump = page_data
+            let page_sig = page_data
                 .summaries
                 .iter()
-                .map(|summary| summary.thread.bumped_at)
-                .max()
-                .unwrap_or(0);
+                .map(|summary| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        summary.thread.id,
+                        summary.thread.bumped_at,
+                        i32::from(summary.thread.sticky),
+                        i32::from(summary.thread.archived)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("|");
             // Include is_admin in the ETag so admin and non-admin responses
             // have distinct cache keys and the browser doesn't serve a cached
             // non-admin page (missing delete controls) to a logged-in admin.
             let admin_tag = if page_data.is_admin { "-a" } else { "" };
-            let etag = format!("\"{max_bump}-{page}{admin_tag}\"");
+            let etag = format!(
+                "\"{}-{}-{page}{admin_tag}\"",
+                page_data.pagination.total, page_sig
+            );
             let html = render::render_board_page(&page_data, &csrf, None, current_theme.as_deref());
             Ok((etag, html))
         }
@@ -198,6 +214,10 @@ pub async fn board_index(
             axum::http::HeaderValue::from_str(&etag)
                 .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
         );
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(HTML_CACHE_CONTROL),
+        );
         return Ok((jar, resp).into_response());
     }
 
@@ -205,6 +225,10 @@ pub async fn board_index(
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
     }
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(HTML_CACHE_CONTROL),
+    );
     Ok((jar, resp).into_response())
 }
 
@@ -256,6 +280,7 @@ pub async fn create_thread(
     let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
 
     let board_short_err = board_short.clone();
+    let identity_key = identity_key(&client_ip, &jar);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = state.job_queue.clone();
@@ -263,7 +288,7 @@ pub async fn create_thread(
             let conn = pool.get()?;
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-            let ip_hash = hash_ip(&client_ip, &cookie_secret);
+            let ip_hash = hash_ip(&identity_key, &cookie_secret);
             if let Some(reason) = db::is_banned(&conn, &ip_hash)? {
                 return Err(AppError::BannedUser {
                     reason: if reason.is_empty() {
@@ -457,21 +482,6 @@ pub async fn catalog(
     let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
 
-    {
-        let conn = state.db.get()?;
-        let board = db::get_board_by_short(&conn, &board_short)?
-            .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-        if board.nsfw && !has_nsfw_consent(&jar) {
-            return Ok(render_nsfw_disclaimer(
-                &board,
-                &format!("/{}/catalog", board.short_name),
-                &csrf,
-                current_theme.as_deref(),
-            )
-            .into_response());
-        }
-    }
-
     // Add ETag caching to the catalog. Previously every request
     // fetched up to 200 full thread rows and re-rendered the entire page
     // regardless of whether anything changed. The ETag is derived from the
@@ -488,9 +498,21 @@ pub async fn catalog(
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
             let threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
-            let max_bump = threads.iter().map(|t| t.bumped_at).max().unwrap_or(0);
+            let catalog_sig = threads
+                .iter()
+                .map(|thread| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        thread.id,
+                        thread.bumped_at,
+                        i32::from(thread.sticky),
+                        i32::from(thread.archived)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("|");
             let admin_tag = if is_admin { "-a" } else { "" };
-            let etag = format!("\"{max_bump}-catalog{admin_tag}\"");
+            let etag = format!("\"{catalog_sig}-catalog{admin_tag}\"");
             let all_boards = crate::templates::live_boards();
             let collapse_greentext = crate::templates::live_collapse_greentext();
             let html = templates::catalog_page(
@@ -524,6 +546,10 @@ pub async fn catalog(
             axum::http::HeaderValue::from_str(&etag)
                 .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
         );
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(HTML_CACHE_CONTROL),
+        );
         return Ok((jar, resp).into_response());
     }
 
@@ -531,6 +557,10 @@ pub async fn catalog(
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
     }
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(HTML_CACHE_CONTROL),
+    );
     Ok((jar, resp).into_response())
 }
 
@@ -551,23 +581,6 @@ pub async fn board_archive(
         .and_then(|p| p.parse().ok())
         .unwrap_or(1)
         .max(1);
-
-    {
-        let conn = state.db.get()?;
-        let board = db::get_board_by_short(&conn, &board_short)?
-            .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-        if board.nsfw && !has_nsfw_consent(&jar) {
-            return Ok((
-                jar,
-                render_nsfw_disclaimer(
-                    &board,
-                    &format!("/{}/archive?page={page}", board.short_name),
-                    &csrf,
-                    current_theme.as_deref(),
-                ),
-            ));
-        }
-    }
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -627,24 +640,6 @@ pub async fn search(
     let query_str: String = q.q.trim().chars().take(256).collect();
     let page = q.page.max(1);
 
-    {
-        let conn = state.db.get()?;
-        let board = db::get_board_by_short(&conn, &board_short)?
-            .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-        if board.nsfw && !has_nsfw_consent(&jar) {
-            let return_to = format!(
-                "/{}/search?q={}&page={}",
-                board.short_name,
-                crate::templates::urlencoding_simple(&query_str),
-                page
-            );
-            return Ok((
-                jar,
-                render_nsfw_disclaimer(&board, &return_to, &csrf, current_theme.as_deref()),
-            ));
-        }
-    }
-
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
@@ -687,6 +682,17 @@ pub async fn search(
 
 /// Ensure the CSRF token cookie is set. Returns (`updated_jar`, `token_string`).
 pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
+    let mut jar = jar;
+    if jar.get(VISITOR_ID_COOKIE).is_none() {
+        let mut visitor_cookie = Cookie::new(VISITOR_ID_COOKIE, new_csrf_token());
+        visitor_cookie.set_http_only(false);
+        visitor_cookie.set_same_site(SameSite::Lax);
+        visitor_cookie.set_path("/");
+        visitor_cookie.set_secure(CONFIG.https_cookies);
+        visitor_cookie.set_max_age(Duration::days(365));
+        jar = jar.add(visitor_cookie);
+    }
+
     if let Some(cookie) = jar.get("csrf_token") {
         let token = cookie.value().to_string();
         if !token.is_empty() {
@@ -758,10 +764,7 @@ pub struct NsfwConsentForm {
     pub return_to: Option<String>,
 }
 
-pub async fn accept_nsfw(
-    jar: CookieJar,
-    Form(form): Form<NsfwConsentForm>,
-) -> Result<Response> {
+pub async fn accept_nsfw(jar: CookieJar, Form(form): Form<NsfwConsentForm>) -> Result<Response> {
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
     if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
@@ -774,11 +777,7 @@ pub async fn accept_nsfw(
     cookie.set_secure(CONFIG.https_cookies);
     cookie.set_max_age(Duration::days(365));
 
-    let redirect_to = form
-        .return_to
-        .as_deref()
-        .map(safe_return_to)
-        .unwrap_or("/");
+    let redirect_to = form.return_to.as_deref().map_or("/", safe_return_to);
     Ok((jar.add(cookie), Redirect::to(redirect_to)).into_response())
 }
 
@@ -806,7 +805,7 @@ pub async fn file_report(
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let ip_hash = hash_ip(&client_ip, &CONFIG.cookie_secret);
+    let ip_hash = hash_ip(&identity_key(&client_ip, &jar), &CONFIG.cookie_secret);
     let reason = form
         .reason
         .as_deref()
@@ -1125,7 +1124,7 @@ pub async fn submit_appeal(
         return Html(crate::templates::error_page(403, "CSRF token mismatch.")).into_response();
     }
 
-    let ip_hash = hash_ip(&client_ip, &CONFIG.cookie_secret);
+    let ip_hash = hash_ip(&identity_key(&client_ip, &jar), &CONFIG.cookie_secret);
     let reason = form.reason.trim().chars().take(512).collect::<String>();
     if reason.is_empty() {
         return Html(crate::templates::error_page(

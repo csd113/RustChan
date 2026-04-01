@@ -337,6 +337,18 @@ pub fn init_logging(log_dir: &Path) {
             // guard selection, consensus downloads) — hundreds of lines/minute.
             // Operators who need Arti internals can set RUST_LOG=tor_proto=debug.
             "rustchan=info,\
+             admin=info,\
+             board=info,\
+             workers=info,\
+             server=info,\
+             db=info,\
+             startup=info,\
+             sessions=info,\
+             polls=info,\
+             chan_net=info,\
+             console=info,\
+             tls=info,\
+             config=info,\
              tower_http=warn,\
              arti_client=warn,\
              tor_proto=warn,\

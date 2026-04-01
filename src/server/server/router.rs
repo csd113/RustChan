@@ -1,10 +1,7 @@
 // src/server/server/router.rs
 
-use axum::{
-    extract::DefaultBodyLimit, http::header, middleware as axum_middleware, routing::get, Router,
-};
+use axum::{http::header, middleware as axum_middleware, routing::get, Router};
 
-use crate::config::CONFIG;
 use crate::middleware::AppState;
 
 #[path = "routes.rs"]
@@ -25,7 +22,6 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
         .route("/static/theme-init.js", get(serve_theme_init_js))
         .merge(public_routes())
         .merge(admin_routes())
-        .layer(DefaultBodyLimit::max(CONFIG.max_video_size))
         .layer(axum_middleware::from_fn(
             crate::middleware::rate_limit_middleware,
         ))

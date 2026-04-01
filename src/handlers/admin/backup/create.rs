@@ -320,6 +320,19 @@ pub async fn create_board_backup(
             };
             let manifest_json = serde_json::to_vec_pretty(&manifest)
                 .map_err(|error| AppError::Internal(anyhow::anyhow!("JSON: {error}")))?;
+            tracing::info!(
+                target: "admin",
+                board = %manifest.board.short_name,
+                version = manifest.version,
+                threads = manifest.threads.len(),
+                posts = manifest.posts.len(),
+                polls = manifest.polls.len(),
+                poll_options = manifest.poll_options.len(),
+                poll_votes = manifest.poll_votes.len(),
+                file_hashes = manifest.file_hashes.len(),
+                manifest_bytes = manifest_json.len(),
+                "Board backup manifest assembled"
+            );
 
             let backup_dir = super::board_backup_dir();
             std::fs::create_dir_all(&backup_dir).map_err(|error| {
@@ -333,6 +346,13 @@ pub async fn create_board_backup(
             let uploads_base = std::path::Path::new(&upload_dir);
             let board_upload_path = uploads_base.join(&board_short);
             let file_count = super::count_files_in_dir(&board_upload_path);
+            tracing::info!(
+                target: "admin",
+                board = %board_short,
+                uploads_dir = %board_upload_path.display(),
+                upload_file_count = file_count,
+                "Board backup starting zip build"
+            );
             progress.reset(crate::middleware::backup_phase::COMPRESS);
             progress
                 .files_total
@@ -390,7 +410,14 @@ pub async fn create_board_backup(
             })?;
 
             let size = std::fs::metadata(&final_path).map(|metadata| metadata.len()).unwrap_or(0);
-            tracing::info!(target: "admin", filename = %filename, bytes = size, "Board backup created");
+            tracing::info!(
+                target: "admin",
+                board = %board_short,
+                filename = %filename,
+                path = %final_path.display(),
+                bytes = size,
+                "Board backup created"
+            );
             progress
                 .phase
                 .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);

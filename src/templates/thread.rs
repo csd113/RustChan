@@ -642,6 +642,7 @@ pub fn render_post(
 // ─── Edit post page ───────────────────────────────────────────────────────────
 
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn edit_post_page(
     board: &Board,
     post: &Post,
@@ -704,6 +705,9 @@ pub fn edit_post_page(
         boards,
         current_theme,
         collapse_greentext,
-        &format!("/{}/thread/{}#p{}", board.short_name, post.thread_id, post.id),
+        &format!(
+            "/{}/thread/{}#p{}",
+            board.short_name, post.thread_id, post.id
+        ),
     )
 }
