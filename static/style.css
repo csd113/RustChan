@@ -1982,40 +1982,6 @@ details.greentext-block[open] > summary { color: var(--green-pale); }
   border: 1px solid var(--border);
 }
 
-.embed-provider-card {
-  width: min(280px, 100%);
-  min-height: 150px;
-  padding: 12px;
-  box-sizing: border-box;
-  border: 1px solid var(--border);
-  background:
-    linear-gradient(160deg, rgba(20,24,28,0.96), rgba(9,11,13,0.96));
-  color: var(--text);
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.embed-provider-name {
-  font-size: 0.72rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--green-bright);
-}
-
-.embed-provider-label {
-  font-size: 0.95rem;
-  color: var(--green-pale);
-}
-
-.embed-provider-meta {
-  font-size: 0.72rem;
-  line-height: 1.4;
-  color: var(--text-dim);
-  word-break: break-word;
-}
-
 .embed-iframe {
   display: block;
   width: 480px;
@@ -2023,14 +1989,6 @@ details.greentext-block[open] > summary { color: var(--green-pale); }
   height: 270px;
   border: 1px solid var(--border-glow);
   background: #000;
-}
-
-.twitter-embed-host {
-  width: min(550px, 100%);
-  min-height: 220px;
-  padding: 0;
-  background: transparent;
-  border: none;
 }
 
 .embed-index-thumb {
@@ -2331,9 +2289,7 @@ details.greentext-block[open] > summary { color: var(--green-pale); }
   }
 
   .media-preview,
-  .embed-iframe,
-  .twitter-embed-host,
-  .embed-provider-card {
+  .embed-iframe {
     width: 100%;
     max-width: 100%;
   }

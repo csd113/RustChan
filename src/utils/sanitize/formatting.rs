@@ -1,10 +1,9 @@
 use rand_core::{OsRng, RngCore};
 
-/// Try to extract a (`embed_type`, `embed_id`) pair from a URL.
+/// Try to extract a (`embed_type`, `video_id`) pair from a URL.
 ///
 /// Supports `YouTube` (youtube.com and youtu.be), any Invidious instance
-/// (detected by the `/watch?v=` path), Streamable, X/Twitter status URLs,
-/// and Instagram post/reel URLs.
+/// (detected by the `/watch?v=` path), and Streamable.
 /// Returns None for all other URLs.
 #[must_use]
 pub fn extract_video_embed(url: &str) -> Option<(&'static str, String)> {
@@ -16,16 +15,6 @@ pub fn extract_video_embed(url: &str) -> Option<(&'static str, String)> {
     if url.contains("streamable.com/") {
         if let Some(code) = extract_streamable_id(url) {
             return Some(("streamable", code));
-        }
-    }
-    if url.contains("twitter.com/") || url.contains("x.com/") {
-        if let Some(id) = extract_status_id(url) {
-            return Some(("twitter", id));
-        }
-    }
-    if url.contains("instagram.com/") {
-        if let Some(id) = extract_instagram_shortcode(url) {
-            return Some(("instagram", id));
         }
     }
     if !url.contains("youtube.com") && !url.contains("youtu.be") && url.contains("/watch") {
@@ -91,47 +80,6 @@ fn extract_streamable_id(url: &str) -> Option<String> {
             .collect();
         if !code.is_empty() && code.len() <= 16 {
             return Some(code);
-        }
-    }
-    None
-}
-
-fn extract_path_segment_after<'a>(url: &'a str, marker: &str) -> Option<&'a str> {
-    let pos = url.find(marker)?;
-    let rest = &url[pos + marker.len()..];
-    let segment = rest
-        .split(['/', '?', '#', '&'])
-        .next()
-        .unwrap_or_default();
-    (!segment.is_empty()).then_some(segment)
-}
-
-fn is_safe_embed_id(id: &str, min_len: usize, max_len: usize) -> bool {
-    let len = id.len();
-    len >= min_len
-        && len <= max_len
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-fn extract_status_id(url: &str) -> Option<String> {
-    for marker in ["/status/", "/statuses/"] {
-        if let Some(id) = extract_path_segment_after(url, marker) {
-            if !id.is_empty() && id.len() <= 32 && id.chars().all(|c| c.is_ascii_digit()) {
-                return Some(id.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn extract_instagram_shortcode(url: &str) -> Option<String> {
-    for marker in ["/p/", "/reel/", "/tv/"] {
-        if let Some(id) = extract_path_segment_after(url, marker) {
-            if is_safe_embed_id(id, 5, 32) {
-                return Some(id.to_string());
-            }
         }
     }
     None
@@ -242,22 +190,6 @@ mod tests {
         assert_eq!(
             extract_video_embed("https://youtu.be/dQw4w9WgXcQ?t=43"),
             Some(("youtube", "dQw4w9WgXcQ".to_string()))
-        );
-    }
-
-    #[test]
-    fn extracts_twitter_status_embed() {
-        assert_eq!(
-            extract_video_embed("https://x.com/OpenAI/status/1890000000000000000"),
-            Some(("twitter", "1890000000000000000".to_string()))
-        );
-    }
-
-    #[test]
-    fn extracts_instagram_post_embed() {
-        assert_eq!(
-            extract_video_embed("https://www.instagram.com/p/C7DcdExample/?img_index=1"),
-            Some(("instagram", "C7DcdExample".to_string()))
         );
     }
 }

@@ -140,9 +140,6 @@ function expandVideoEmbed(preview, type, id, container) {
   } else if (type === 'streamable') {
     iframe.src = 'https://streamable.com/e/' + id + '?autoplay=1';
     iframe.setAttribute('title', 'Streamable player');
-  } else if (type === 'instagram') {
-    iframe.src = 'https://www.instagram.com/p/' + id + '/embed/captioned/';
-    iframe.setAttribute('title', 'Instagram post');
   }
   iframe.className = 'embed-iframe';
   iframe.setAttribute('frameborder', '0');
@@ -1218,46 +1215,6 @@ document.addEventListener('submit', function (e) {
   if (!cfg) return;                          // not a thread page
   if (cfg.dataset.embedEnabled !== '1') return; // embeds disabled for this board
 
-  function ensureTwitterWidgetsScript() {
-    if (window.twttr && window.twttr.widgets) return;
-    if (document.querySelector('script[data-twitter-widgets="1"]')) return;
-    var script = document.createElement('script');
-    script.src = 'https://platform.twitter.com/widgets.js';
-    script.async = true;
-    script.charset = 'utf-8';
-    script.setAttribute('data-twitter-widgets', '1');
-    document.head.appendChild(script);
-  }
-
-  function renderTwitterEmbed(host) {
-    if (!(window.twttr && window.twttr.widgets && window.twttr.widgets.createTweet)) return;
-    if (host.dataset.twitterRendered === '1' || host.dataset.twitterRendering === '1') return;
-    if (host.childElementCount > 0) {
-      host.dataset.twitterRendered = '1';
-      return;
-    }
-    var tweetId = host.getAttribute('data-tweet-id');
-    if (!tweetId) return;
-    host.dataset.twitterRendering = '1';
-    var created = window.twttr.widgets.createTweet(tweetId, host, {
-      align: 'left',
-      dnt: true,
-      conversation: 'none',
-      theme: document.documentElement.getAttribute('data-theme') === 'chanclassic' ? 'light' : 'dark'
-    });
-    if (created && typeof created.then === 'function') {
-      created.then(function () {
-        host.dataset.twitterRendered = '1';
-        delete host.dataset.twitterRendering;
-      }).catch(function () {
-        delete host.dataset.twitterRendering;
-      });
-    } else {
-      host.dataset.twitterRendered = '1';
-      delete host.dataset.twitterRendering;
-    }
-  }
-
   function buildEmbed(span) {
     var type = span.getAttribute('data-embed-type');
     var id   = span.getAttribute('data-embed-id');
@@ -1265,17 +1222,15 @@ document.addEventListener('submit', function (e) {
     if (!type || !id) return;
 
     // Validate: only allow known embed types to prevent arbitrary iframe injection
-    if (type !== 'youtube' && type !== 'streamable' && type !== 'twitter' && type !== 'instagram') return;
+    if (type !== 'youtube' && type !== 'streamable') return;
 
     // Validate YouTube ID format: 11 alphanumeric / dash / underscore chars
     if (type === 'youtube' && !/^[A-Za-z0-9_-]{11}$/.test(id)) return;
     if (type === 'streamable' && !/^[A-Za-z0-9_-]{1,16}$/.test(id)) return;
-    if (type === 'twitter' && !/^[0-9]{1,32}$/.test(id)) return;
-    if (type === 'instagram' && !/^[A-Za-z0-9_-]{5,32}$/.test(id)) return;
 
     // ── outer container: matches .file-container webm layout ─────────────
     var container = document.createElement('div');
-    container.className = 'file-container video-embed-container provider-' + type;
+    container.className = 'file-container video-embed-container';
 
     // ── file-info row (link + close button) ───────────────────────────────
     var info = document.createElement('div');
@@ -1298,7 +1253,7 @@ document.addEventListener('submit', function (e) {
     // ── thumbnail preview (styled like webm .media-preview) ───────────────
     var preview = document.createElement('div');
     preview.className = 'media-preview';
-    preview.title = type === 'twitter' ? 'click to open embedded post' : 'click to open embed';
+    preview.title = 'click to open embed';
 
     if (type === 'youtube') {
       var img = document.createElement('img');
@@ -1314,42 +1269,14 @@ document.addEventListener('submit', function (e) {
       ph.className = 'thumb embed-placeholder-thumb';
       ph.innerHTML = '&#9654; streamable';
       preview.appendChild(ph);
-    } else {
-      var card = document.createElement('div');
-      card.className = 'thumb embed-provider-card';
-      var provider = document.createElement('div');
-      provider.className = 'embed-provider-name';
-      provider.textContent = type === 'twitter' ? 'X / Twitter' : 'Instagram';
-      var label = document.createElement('div');
-      label.className = 'embed-provider-label';
-      label.textContent = type === 'twitter' ? 'Open inline post' : 'Open inline post';
-      var meta = document.createElement('div');
-      meta.className = 'embed-provider-meta';
-      meta.textContent = url;
-      card.appendChild(provider);
-      card.appendChild(label);
-      card.appendChild(meta);
-      preview.appendChild(card);
     }
 
     var overlay = document.createElement('div');
     overlay.className = 'media-expand-overlay';
-    overlay.innerHTML = type === 'twitter' ? '&#8599;' : '&#9654;';
+    overlay.innerHTML = '&#9654;';
     preview.appendChild(overlay);
 
     preview.addEventListener('click', function () {
-      if (type === 'twitter') {
-        preview.style.display = 'none';
-        var closeBtn = container.querySelector('.media-close-btn');
-        if (closeBtn) closeBtn.style.display = 'inline-flex';
-        var embedHost = document.createElement('div');
-        embedHost.className = 'twitter-embed-host embed-iframe';
-        embedHost.setAttribute('data-tweet-id', id);
-        container.appendChild(embedHost);
-        ensureTwitterWidgetsScript();
-        renderTwitterEmbed(embedHost);
-        return;
-      }
       expandVideoEmbed(preview, type, id, container);
     });
     container.appendChild(preview);
@@ -1366,7 +1293,6 @@ document.addEventListener('submit', function (e) {
 
   function applyEmbeds(root) {
     root.querySelectorAll('span.video-unfurl[data-embed-type]').forEach(buildEmbed);
-    root.querySelectorAll('.twitter-embed-host[data-tweet-id]').forEach(renderTwitterEmbed);
   }
 
   applyEmbeds(document);
