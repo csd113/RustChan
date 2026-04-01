@@ -77,6 +77,13 @@ hr { border: none; border-top: 1px solid var(--border); margin: 0.6rem 0; }
   animation: blink 1.2s step-end infinite;
 }
 
+html:not([data-theme]) .site-header::before,
+html[data-theme="dorfic"] .site-header::before {
+  content: none;
+  animation: none;
+  margin-right: 0;
+}
+
 @keyframes blink { 50% { opacity: 0; } }
 
 .board-list {
@@ -1731,7 +1738,6 @@ html.no-js .post-form-wrap {
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }
-[data-theme="dorfic"] .site-header::before { color: #ffcc66; }
 [data-theme="dorfic"] a { color: #d4a040; }
 [data-theme="dorfic"] a:hover { color: #ffcc66; text-shadow: 0 0 8px rgba(255,200,80,0.5); }
 [data-theme="dorfic"] button,
