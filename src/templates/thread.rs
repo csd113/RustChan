@@ -521,7 +521,7 @@ pub fn render_post(
                 html,
                 r#"<div class="file-container file-download">
 <div class="file-info">
-  <a href="/boards/{f}" rel="noreferrer">{orig}</a> ({sz})
+  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
 </div>"#,
                 f = escape_html(file),

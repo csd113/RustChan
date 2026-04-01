@@ -405,13 +405,13 @@ function closeReportModal() {
 
   // Priority: personal localStorage preference > server-configured default.
   // The server injects data-default-theme on <html> when the admin picks a
-  // non-terminal default.  New visitors (no localStorage) should see that
-  // theme instead of always falling back to terminal.
+  // non-default theme. New visitors (no localStorage) should see that theme
+  // instead of falling back to terminal.
   (function () {
     var active = null;
     try { active = localStorage.getItem('rustchan_theme'); } catch (e) {}
     if (!active || THEMES.indexOf(active) === -1) {
-      active = document.documentElement.getAttribute('data-default-theme') || 'terminal';
+      active = document.documentElement.getAttribute('data-default-theme') || 'fluorogrid';
     }
     if (active && THEMES.indexOf(active) !== -1) { applyTheme(active); }
   }());
@@ -800,6 +800,7 @@ function closeReportModal() {
 (function () {
   var _cbCache = {};
   var _cbInFlight = {};
+  var _cbHideTimer = null;
 
   function getCbPopup() { return document.getElementById('ql-popup'); }
 
@@ -861,22 +862,25 @@ function closeReportModal() {
   }
 
   function wireCrossLinks(root) {
+    var popup = getCbPopup();
+    if (popup && popup.dataset.crosslinkPopupWired !== '1') {
+      popup.dataset.crosslinkPopupWired = '1';
+      popup.addEventListener('mouseenter', function () { clearTimeout(_cbHideTimer); });
+      popup.addEventListener('mouseleave', function () {
+        _cbHideTimer = setTimeout(function () { popup.style.display = 'none'; }, 120);
+      });
+    }
+
     root.querySelectorAll('a.crosslink[data-crossboard][data-pid]').forEach(function (link) {
+      if (link.dataset.crosslinkWired === '1') return;
+      link.dataset.crosslinkWired = '1';
       var board = link.getAttribute('data-crossboard');
       var pid = link.getAttribute('data-pid');
       if (!board || !pid) return;
-      var _hideTimer = null;
-      var popup = getCbPopup();
-      link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); fetchAndShow(link, board, pid); });
+      link.addEventListener('mouseenter', function () { clearTimeout(_cbHideTimer); fetchAndShow(link, board, pid); });
       link.addEventListener('mouseleave', function () {
-        _hideTimer = setTimeout(function () { if (popup) popup.style.display = 'none'; }, 120);
+        _cbHideTimer = setTimeout(function () { if (popup) popup.style.display = 'none'; }, 120);
       });
-      if (popup) {
-        popup.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); });
-        popup.addEventListener('mouseleave', function () {
-          _hideTimer = setTimeout(function () { popup.style.display = 'none'; }, 120);
-        });
-      }
       link.addEventListener('click', function (e) {
         e.preventDefault();
         var key = board + ':' + pid;
@@ -1227,14 +1231,31 @@ document.addEventListener('submit', function (e) {
 
   function renderTwitterEmbed(host) {
     if (!(window.twttr && window.twttr.widgets && window.twttr.widgets.createTweet)) return;
+    if (host.dataset.twitterRendered === '1' || host.dataset.twitterRendering === '1') return;
+    if (host.childElementCount > 0) {
+      host.dataset.twitterRendered = '1';
+      return;
+    }
     var tweetId = host.getAttribute('data-tweet-id');
     if (!tweetId) return;
-    window.twttr.widgets.createTweet(tweetId, host, {
+    host.dataset.twitterRendering = '1';
+    var created = window.twttr.widgets.createTweet(tweetId, host, {
       align: 'left',
       dnt: true,
       conversation: 'none',
       theme: document.documentElement.getAttribute('data-theme') === 'chanclassic' ? 'light' : 'dark'
     });
+    if (created && typeof created.then === 'function') {
+      created.then(function () {
+        host.dataset.twitterRendered = '1';
+        delete host.dataset.twitterRendering;
+      }).catch(function () {
+        delete host.dataset.twitterRendering;
+      });
+    } else {
+      host.dataset.twitterRendered = '1';
+      delete host.dataset.twitterRendering;
+    }
   }
 
   function buildEmbed(span) {
