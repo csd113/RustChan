@@ -10,9 +10,9 @@ forum_name = "RustChan"
 site_subtitle = "select board to proceed"
 # Default theme for first-time visitors (before they choose their own).
 # Valid values: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
-# Leave as "terminal" (or empty) for the default dark terminal look.
+# Leave as "fluorogrid" (or empty) for the default system theme.
 # Can also be changed at any time from the admin panel → Site Settings.
-default_theme = "terminal"
+default_theme = "fluorogrid"
 # Port the server listens on (binds to 0.0.0.0:<port>).
 port = 8080
 # Maximum size for image uploads in megabytes (jpg, png, gif, webp).

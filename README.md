@@ -350,7 +350,7 @@ site_subtitle = "A self-hosted imageboard"
 
 # Default theme served to new visitors. Options: terminal, frutiger-aero,
 # dorific-aero, fluorogrid, neoncubicle, chan-classic
-default_theme = "terminal"
+default_theme = "fluorogrid"
 
 # TCP port (binds to 0.0.0.0:<port>).
 port = 8080
@@ -413,7 +413,7 @@ All settings can be overridden via environment variables, which take precedence 
 |---|---|---|
 | `CHAN_FORUM_NAME` | `RustChan` | Site display name |
 | `CHAN_SITE_SUBTITLE` | *(from settings.toml)* | Home page subtitle |
-| `CHAN_DEFAULT_THEME` | `terminal` | Default theme for new visitors |
+| `CHAN_DEFAULT_THEME` | `fluorogrid` | Default theme for new visitors |
 | `CHAN_PORT` | `8080` | TCP port |
 | `CHAN_BIND` | `0.0.0.0:8080` | Full bind address (overrides `CHAN_PORT`) |
 | `CHAN_DB` | `rustchan-data/chan.db` | SQLite database path |

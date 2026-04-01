@@ -379,9 +379,9 @@ pub fn base_layout(
 
     let default_theme = live_default_theme();
     // Only inject the attribute when a non-default theme is configured — no
-    // attribute means "terminal" (the built-in default), matching the
+    // attribute means "fluorogrid" (the built-in default), matching the
     // client-side behaviour in theme-init.js.
-    let default_theme_attr = if !default_theme.is_empty() && &*default_theme != "terminal" {
+    let default_theme_attr = if !default_theme.is_empty() && &*default_theme != "fluorogrid" {
         format!(r#" data-default-theme="{}""#, escape_html(&default_theme))
     } else {
         String::new()
@@ -466,7 +466,7 @@ pub fn base_layout(
 #[must_use]
 pub fn ban_page(reason: &str, csrf_token: &str) -> String {
     let default_theme = live_default_theme();
-    let default_theme_attr = if !default_theme.is_empty() && &*default_theme != "terminal" {
+    let default_theme_attr = if !default_theme.is_empty() && &*default_theme != "fluorogrid" {
         format!(r#" data-default-theme="{}""#, escape_html(&default_theme))
     } else {
         String::new()

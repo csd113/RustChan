@@ -6,13 +6,13 @@ use axum::{
 };
 
 pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
-     script-src 'self'; \
+     script-src 'self' https://platform.twitter.com; \
      style-src 'self' 'unsafe-inline'; \
-     img-src 'self' data: blob: https://img.youtube.com; \
+     img-src 'self' data: blob: https://img.youtube.com https://platform.twitter.com; \
      media-src 'self' blob:; \
      font-src 'self'; \
-     connect-src 'self'; \
-     frame-src https://www.youtube-nocookie.com https://streamable.com; \
+     connect-src 'self' https://publish.x.com; \
+     frame-src https://www.youtube-nocookie.com https://streamable.com https://www.instagram.com https://platform.twitter.com https://syndication.twitter.com; \
      frame-ancestors 'none'; \
      object-src 'none'; \
      base-uri 'self'";
@@ -67,14 +67,17 @@ mod tests {
 
     #[test]
     fn csp_allows_core_end_user_media_features() {
-        assert!(CONTENT_SECURITY_POLICY.contains("script-src 'self'"));
+        assert!(CONTENT_SECURITY_POLICY.contains("script-src 'self' https://platform.twitter.com"));
         assert!(
-            CONTENT_SECURITY_POLICY.contains("img-src 'self' data: blob: https://img.youtube.com")
+            CONTENT_SECURITY_POLICY.contains(
+                "img-src 'self' data: blob: https://img.youtube.com https://platform.twitter.com"
+            )
         );
         assert!(CONTENT_SECURITY_POLICY.contains("media-src 'self' blob:"));
-        assert!(CONTENT_SECURITY_POLICY.contains("connect-src 'self'"));
-        assert!(CONTENT_SECURITY_POLICY
-            .contains("frame-src https://www.youtube-nocookie.com https://streamable.com"));
+        assert!(CONTENT_SECURITY_POLICY.contains("connect-src 'self' https://publish.x.com"));
+        assert!(CONTENT_SECURITY_POLICY.contains(
+            "frame-src https://www.youtube-nocookie.com https://streamable.com https://www.instagram.com https://platform.twitter.com https://syndication.twitter.com"
+        ));
     }
 
     #[test]

@@ -350,7 +350,7 @@ impl Config {
         );
         let initial_default_theme = env_str(
             "CHAN_DEFAULT_THEME",
-            s.default_theme.as_deref().unwrap_or("terminal"),
+            s.default_theme.as_deref().unwrap_or("fluorogrid"),
         );
         let port: u16 = env_parse("CHAN_PORT", s.port.unwrap_or(8080));
         let max_image_mb: u32 = env_parse("CHAN_MAX_IMAGE_MB", s.max_image_size_mb.unwrap_or(8));
