@@ -260,10 +260,15 @@ pub fn render_log_view() -> String {
     writeln!(
         out,
         " {}",
-        dim("Logs are written to rustchan-data/server.log")
+        dim("Logs are written to rustchan-data/logs/rustchan.YYYY-MM-DD.log")
     )
     .ok();
-    writeln!(out, " {}", dim("tail -f rustchan-data/server.log")).ok();
+    writeln!(
+        out,
+        " {}",
+        dim("tail -f rustchan-data/logs/rustchan.$(date +%F).log")
+    )
+    .ok();
     writeln!(out).ok();
     writeln!(out, "{RULE}").ok();
     writeln!(out, " {} Back", bold("[L]")).ok();

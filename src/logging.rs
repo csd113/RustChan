@@ -13,7 +13,7 @@
 //      All writes go through `CONSOLE_MUTEX` so `console.rs` interactive
 //      output never interleaves with log events.
 //
-//   2. Log file (rustchan.YYYY-MM-DD.log, human-readable text, daily rotation)
+//   2. Log file (logs/rustchan.YYYY-MM-DD.log, human-readable text, daily rotation)
 //      Same fixed-column format as the non-TTY terminal output, with two extras:
 //        • Millisecond precision on every timestamp.
 //        • WARN and ERROR lines append  (src/file.rs:line)  at the end so you

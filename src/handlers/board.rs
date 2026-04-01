@@ -28,9 +28,47 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use std::collections::HashMap;
+use time::Duration;
 
 const PREVIEW_REPLIES: i64 = 3;
 const THREADS_PER_PAGE: i64 = 10;
+pub const USER_THEME_COOKIE: &str = "rustchan_theme";
+pub const NSFW_CONSENT_COOKIE: &str = "rustchan_nsfw_ok";
+
+pub fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
+    jar.get(USER_THEME_COOKIE)
+        .and_then(|cookie| crate::templates::normalize_theme_slug(cookie.value()))
+        .map(str::to_string)
+}
+
+pub(crate) fn has_nsfw_consent(jar: &CookieJar) -> bool {
+    jar.get(NSFW_CONSENT_COOKIE)
+        .is_some_and(|cookie| cookie.value() == "1")
+}
+
+fn safe_return_to(path: &str) -> &str {
+    if path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\") {
+        path
+    } else {
+        "/"
+    }
+}
+
+pub(crate) fn render_nsfw_disclaimer(
+    board: &crate::models::Board,
+    return_to: &str,
+    csrf_token: &str,
+    current_theme: Option<&str>,
+) -> Html<String> {
+    let boards = crate::templates::live_boards();
+    Html(crate::templates::nsfw_disclaimer_page(
+        board,
+        safe_return_to(return_to),
+        csrf_token,
+        boards.as_slice(),
+        current_theme,
+    ))
+}
 
 // ─── GET / — board list ───────────────────────────────────────────────────────
 
@@ -38,6 +76,7 @@ pub async fn index(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
+    let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
 
     let (board_stats, site_data) = tokio::task::spawn_blocking({
@@ -66,6 +105,7 @@ pub async fn index(
             &site_data,
             &csrf,
             onion_address.as_deref(),
+            current_theme.as_deref(),
         )),
     ))
 }
@@ -80,6 +120,7 @@ pub async fn board_index(
     jar: CookieJar,
     req_headers: HeaderMap,
 ) -> Result<Response> {
+    let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
 
     let page: i64 = params
@@ -87,6 +128,21 @@ pub async fn board_index(
         .and_then(|p| p.parse().ok())
         .unwrap_or(1)
         .max(1);
+
+    {
+        let conn = state.db.get()?;
+        let board = db::get_board_by_short(&conn, &board_short)?
+            .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+        if board.nsfw && !has_nsfw_consent(&jar) {
+            return Ok(render_nsfw_disclaimer(
+                &board,
+                &format!("/{}", board.short_name),
+                &csrf,
+                current_theme.as_deref(),
+            )
+            .into_response());
+        }
+    }
 
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -116,7 +172,7 @@ pub async fn board_index(
             // non-admin page (missing delete controls) to a logged-in admin.
             let admin_tag = if page_data.is_admin { "-a" } else { "" };
             let etag = format!("\"{max_bump}-{page}{admin_tag}\"");
-            let html = render::render_board_page(&page_data, &csrf, None);
+            let html = render::render_board_page(&page_data, &csrf, None, current_theme.as_deref());
             Ok((etag, html))
         }
     })
@@ -162,6 +218,7 @@ pub async fn create_thread(
     jar: CookieJar,
     multipart: Multipart,
 ) -> Result<Response> {
+    let current_theme = current_theme_from_jar(&jar);
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
     let form = parse_post_multipart(multipart, csrf_cookie.as_deref()).await?;
 
@@ -358,6 +415,7 @@ pub async fn create_thread(
         Err(AppError::BadRequest(msg)) => {
             let board_short_render = board_short_err.clone();
             let pool = state.db.clone();
+            let current_theme = current_theme.clone();
             let html = tokio::task::spawn_blocking(move || -> Result<String> {
                 let conn = pool.get()?;
                 let page_data = render::load_board_page_data(
@@ -372,6 +430,7 @@ pub async fn create_thread(
                     &page_data,
                     &csrf_for_error,
                     Some(&msg),
+                    current_theme.as_deref(),
                 ))
             })
             .await
@@ -395,7 +454,23 @@ pub async fn catalog(
     jar: CookieJar,
     req_headers: HeaderMap,
 ) -> Result<Response> {
+    let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
+
+    {
+        let conn = state.db.get()?;
+        let board = db::get_board_by_short(&conn, &board_short)?
+            .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+        if board.nsfw && !has_nsfw_consent(&jar) {
+            return Ok(render_nsfw_disclaimer(
+                &board,
+                &format!("/{}/catalog", board.short_name),
+                &csrf,
+                current_theme.as_deref(),
+            )
+            .into_response());
+        }
+    }
 
     // Add ETag caching to the catalog. Previously every request
     // fetched up to 200 full thread rows and re-rendered the entire page
@@ -424,6 +499,7 @@ pub async fn catalog(
                 &csrf_clone,
                 all_boards.as_slice(),
                 is_admin,
+                current_theme.as_deref(),
                 collapse_greentext,
             );
             Ok((etag, html))
@@ -467,6 +543,7 @@ pub async fn board_archive(
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
     const ARCHIVE_PER_PAGE: i64 = 20;
+    let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
 
     let page: i64 = params
@@ -474,6 +551,23 @@ pub async fn board_archive(
         .and_then(|p| p.parse().ok())
         .unwrap_or(1)
         .max(1);
+
+    {
+        let conn = state.db.get()?;
+        let board = db::get_board_by_short(&conn, &board_short)?
+            .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+        if board.nsfw && !has_nsfw_consent(&jar) {
+            return Ok((
+                jar,
+                render_nsfw_disclaimer(
+                    &board,
+                    &format!("/{}/archive?page={page}", board.short_name),
+                    &csrf,
+                    current_theme.as_deref(),
+                ),
+            ));
+        }
+    }
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -506,6 +600,7 @@ pub async fn board_archive(
                 &pagination,
                 &csrf_clone,
                 all_boards.as_slice(),
+                current_theme.as_deref(),
                 collapse_greentext,
             ))
         }
@@ -525,11 +620,30 @@ pub async fn search(
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
     const SEARCH_PER_PAGE: i64 = 20;
+    let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
 
     // Cap query length to prevent excessively large LIKE pattern scans.
     let query_str: String = q.q.trim().chars().take(256).collect();
     let page = q.page.max(1);
+
+    {
+        let conn = state.db.get()?;
+        let board = db::get_board_by_short(&conn, &board_short)?
+            .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+        if board.nsfw && !has_nsfw_consent(&jar) {
+            let return_to = format!(
+                "/{}/search?q={}&page={}",
+                board.short_name,
+                crate::templates::urlencoding_simple(&query_str),
+                page
+            );
+            return Ok((
+                jar,
+                render_nsfw_disclaimer(&board, &return_to, &csrf, current_theme.as_deref()),
+            ));
+        }
+    }
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -558,6 +672,7 @@ pub async fn search(
                 &pagination,
                 &csrf_clone,
                 all_boards.as_slice(),
+                current_theme.as_deref(),
                 collapse_greentext,
             ))
         }
@@ -575,7 +690,10 @@ pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
     if let Some(cookie) = jar.get("csrf_token") {
         let token = cookie.value().to_string();
         if !token.is_empty() {
-            return (jar, token);
+            return (
+                jar,
+                crate::utils::crypto::make_csrf_form_token(&token, &CONFIG.cookie_secret),
+            );
         }
     }
     let token = new_csrf_token();
@@ -588,7 +706,80 @@ pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
     cookie.set_path("/");
     // set Secure flag based on config (true when behind proxy / HTTPS)
     cookie.set_secure(CONFIG.https_cookies);
-    (jar.add(cookie), token)
+    (
+        jar.add(cookie),
+        crate::utils::crypto::make_csrf_form_token(&token, &CONFIG.cookie_secret),
+    )
+}
+
+pub async fn set_theme(
+    Path(theme): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    jar: CookieJar,
+    headers: HeaderMap,
+) -> Result<Response> {
+    let theme = crate::templates::normalize_theme_slug(&theme)
+        .ok_or_else(|| AppError::BadRequest("Unknown theme.".into()))?;
+
+    let mut cookie = Cookie::new(USER_THEME_COOKIE, theme.to_string());
+    cookie.set_http_only(false);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_max_age(Duration::days(365));
+    let jar = jar.add(cookie);
+
+    if headers
+        .get("x-rustchan-background")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "1")
+    {
+        return Ok((jar, axum::http::StatusCode::NO_CONTENT).into_response());
+    }
+
+    let redirect_to = params
+        .get("return_to")
+        .map(String::as_str)
+        .map(safe_return_to)
+        .or_else(|| {
+            headers
+                .get(header::REFERER)
+                .and_then(|v| v.to_str().ok())
+                .filter(|v| !v.trim().is_empty())
+        })
+        .unwrap_or("/");
+    Ok((jar, Redirect::to(redirect_to)).into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub struct NsfwConsentForm {
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+    pub return_to: Option<String>,
+}
+
+pub async fn accept_nsfw(
+    jar: CookieJar,
+    Form(form): Form<NsfwConsentForm>,
+) -> Result<Response> {
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    let mut cookie = Cookie::new(NSFW_CONSENT_COOKIE, "1");
+    cookie.set_http_only(false);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_max_age(Duration::days(365));
+
+    let redirect_to = form
+        .return_to
+        .as_deref()
+        .map(safe_return_to)
+        .unwrap_or("/");
+    Ok((jar.add(cookie), Redirect::to(redirect_to)).into_response())
 }
 
 // ─── POST /report ─────────────────────────────────────────────────────────────

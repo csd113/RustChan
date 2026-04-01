@@ -37,7 +37,7 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
         err = err_html,
         csrf = escape_html(csrf_token),
     );
-    base_layout("admin login", None, &body, csrf_token, boards, false)
+    base_layout("admin login", None, &body, csrf_token, boards, None, false, "/admin")
 }
 
 // ─── Admin panel ──────────────────────────────────────────────────────────────
@@ -667,7 +667,7 @@ old boards to prevent query performance degradation.
         )),
     );
 
-    base_layout("admin panel", None, &body, csrf_token, boards, false)
+    base_layout("admin panel", None, &body, csrf_token, boards, None, false, "/admin")
 }
 
 // ─── Moderation log ───────────────────────────────────────────────────────────
@@ -735,7 +735,7 @@ pub fn mod_log_page(
         pagination = pagination_html,
     );
 
-    base_layout("mod log — admin", None, &body, csrf_token, boards, false)
+    base_layout("mod log — admin", None, &body, csrf_token, boards, None, false, "/admin/log")
 }
 
 // ─── VACUUM result ────────────────────────────────────────────────────────────
@@ -777,7 +777,7 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
         pct = pct,
     );
 
-    base_layout("VACUUM result", None, &body, csrf_token, &[], false)
+    base_layout("VACUUM result", None, &body, csrf_token, &[], None, false, "/admin")
 }
 
 // ─── IP history ───────────────────────────────────────────────────────────────
@@ -896,6 +896,8 @@ pub fn admin_ip_history_page(
         &body,
         csrf_token,
         all_boards,
+        None,
         false,
+        &format!("/admin/ip/{}", ip_hash),
     )
 }

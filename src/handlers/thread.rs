@@ -31,7 +31,23 @@ pub async fn view_thread(
     jar: CookieJar,
     req_headers: HeaderMap,
 ) -> Result<Response> {
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
+
+    {
+        let conn = state.db.get()?;
+        let board = db::get_board_by_short(&conn, &board_short)?
+            .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+        if board.nsfw && !crate::handlers::board::has_nsfw_consent(&jar) {
+            return Ok(crate::handlers::board::render_nsfw_disclaimer(
+                &board,
+                &format!("/{}/thread/{thread_id}", board.short_name),
+                &csrf,
+                current_theme.as_deref(),
+            )
+            .into_response());
+        }
+    }
 
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -57,7 +73,8 @@ pub async fn view_thread(
                 "\"{}-b{boards_ver}{admin_tag}\"",
                 page_data.thread.bumped_at
             );
-            let html = render::render_thread_page(&page_data, &csrf, None);
+            let html =
+                render::render_thread_page(&page_data, &csrf, None, current_theme.as_deref());
             Ok((etag, html, page_data.is_admin))
         }
     })
@@ -276,6 +293,7 @@ pub async fn post_reply(
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
             let db_pool = state.db.clone();
+            let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
             let html = tokio::task::spawn_blocking(move || -> Result<String> {
                 let conn = db_pool.get()?;
                 let page_data = render::load_thread_page_data(
@@ -290,6 +308,7 @@ pub async fn post_reply(
                     &page_data,
                     &csrf_for_error,
                     Some(&msg),
+                    current_theme.as_deref(),
                 ))
             })
             .await
@@ -319,6 +338,7 @@ pub async fn edit_post_get(
     Query(query): Query<EditQuery>,
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
 
     let html = tokio::task::spawn_blocking({
@@ -364,6 +384,7 @@ pub async fn edit_post_get(
                 all_boards.as_slice(),
                 &prefill_token,
                 None,
+                current_theme.as_deref(),
                 collapse_greentext,
             ))
         }
@@ -409,7 +430,8 @@ pub async fn edit_post_post(
 
     let outcome = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let csrf_clone = csrf_cookie.clone().unwrap_or_default();
+            let csrf_clone = csrf_cookie.clone().unwrap_or_default();
+        let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
         move || -> Result<EditOutcome> {
             let conn = pool.get()?;
 
@@ -475,6 +497,7 @@ pub async fn edit_post_post(
                     all_boards.as_slice(),
                     &token,
                     Some(err_msg),
+                    current_theme.as_deref(),
                     collapse_greentext,
                 );
                 return Ok(EditOutcome::ErrorPage(html));

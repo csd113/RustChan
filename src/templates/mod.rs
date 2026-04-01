@@ -29,6 +29,15 @@ pub mod board;
 pub mod forms;
 pub mod thread;
 
+pub const VALID_THEMES: &[&str] = &[
+    "terminal",
+    "aero",
+    "dorfic",
+    "fluorogrid",
+    "neoncubicle",
+    "chanclassic",
+];
+
 // Re-export every public symbol so all existing call-sites (templates::foo)
 // continue to compile without any changes.
 pub use admin::*;
@@ -151,6 +160,14 @@ pub fn live_site_name() -> Arc<str> {
 
 pub fn live_site_subtitle() -> Arc<str> {
     Arc::clone(&*LIVE_SITE_SUBTITLE.read())
+}
+
+#[must_use]
+pub fn normalize_theme_slug(theme: &str) -> Option<&'static str> {
+    VALID_THEMES
+        .iter()
+        .copied()
+        .find(|candidate| candidate.eq_ignore_ascii_case(theme.trim()))
 }
 
 fn rebuild_live_board_nav() {
@@ -349,7 +366,9 @@ pub fn base_layout(
     body: &str,
     csrf_token: &str,
     boards: &[Board],
+    current_theme: Option<&str>,
     collapse_greentext: bool,
+    current_path: &str,
 ) -> String {
     let inner_links: String = boards
         .iter()
@@ -366,6 +385,26 @@ pub fn base_layout(
     } else {
         format!("[ {inner_links} ]")
     };
+    let board_menu = if boards.is_empty() {
+        String::new()
+    } else {
+        let items = boards
+            .iter()
+            .map(|b| {
+                format!(
+                    r#"<a class="mobile-board-link" href="/{s}/catalog">/{s}/</a>"#,
+                    s = escape_html(&b.short_name)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!(
+            r#"<details class="mobile-board-menu">
+  <summary class="mobile-board-menu-btn">Boards</summary>
+  <nav class="mobile-board-menu-panel">{items}</nav>
+</details>"#
+        )
+    };
 
     let search_bar = board_short.map_or_else(String::new, |b| {
         format!(
@@ -378,18 +417,34 @@ pub fn base_layout(
     });
 
     let default_theme = live_default_theme();
-    // Only inject the attribute when a non-default theme is configured — no
-    // attribute means "fluorogrid" (the built-in default), matching the
-    // client-side behaviour in theme-init.js.
-    let default_theme_attr = if !default_theme.is_empty() && &*default_theme != "fluorogrid" {
-        format!(r#" data-default-theme="{}""#, escape_html(&default_theme))
+    let configured_default = if default_theme.is_empty() {
+        "fluorogrid"
     } else {
+        &default_theme
+    };
+    let active_theme = current_theme
+        .and_then(normalize_theme_slug)
+        .unwrap_or_else(|| normalize_theme_slug(configured_default).unwrap_or("fluorogrid"));
+    let default_theme_attr = format!(
+        r#" data-default-theme="{}""#,
+        escape_html(configured_default)
+    );
+    let active_theme_attr = if active_theme == "terminal" {
         String::new()
+    } else {
+        format!(r#" data-theme="{}""#, escape_html(active_theme))
+    };
+    let theme_href = |theme: &str| {
+        format!(
+            "/theme/{}?return_to={}",
+            escape_html(theme),
+            urlencoding_simple(current_path)
+        )
     };
 
     format!(
         r#"<!DOCTYPE html>
-<html lang="en"{default_theme_attr}>
+<html lang="en" class="no-js"{default_theme_attr}{active_theme_attr}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -401,6 +456,7 @@ pub fn base_layout(
 <body{collapse_attr}>
 <header class="site-header">
   <span class="site-name">{forum_name}</span>
+  {board_menu}
   <a class="home-btn" href="/">&#8962; Home</a>
   <nav class="board-list">
     {board_links}
@@ -413,30 +469,39 @@ pub fn base_layout(
 </main>
 <footer class="site-footer">
   <p>{forum_name} &mdash; <a href="/">home</a></p>
+  <nav class="theme-picker-fallback" aria-label="Theme selector">
+    <span class="theme-picker-fallback-title">Theme:</span>
+    <a href="{terminal_theme_href}">Terminal</a>
+    <a href="{aero_theme_href}">Frutiger Aero</a>
+    <a href="{dorfic_theme_href}">DORFic</a>
+    <a href="{fluorogrid_theme_href}">FluoroGrid</a>
+    <a href="{neoncubicle_theme_href}">NeonCubicle</a>
+    <a href="{chanclassic_theme_href}">ChanClassic</a>
+  </nav>
 </footer>
 
 <!-- Theme Picker — onclick= replaced with data-action= attributes -->
 <button id="theme-picker-btn" data-action="toggle-theme-picker" title="Select Theme">&#127912; Theme</button>
 <div id="theme-picker-panel">
   <div class="tp-title">// SELECT THEME</div>
-  <button class="tp-option" data-action="set-theme" data-theme="terminal">
+  <a class="tp-option" data-action="set-theme" data-theme="terminal" href="{terminal_theme_href}">
     <span class="tp-swatch" style="background:#00ff41;"></span>Terminal
-  </button>
-  <button class="tp-option" data-action="set-theme" data-theme="aero">
+  </a>
+  <a class="tp-option" data-action="set-theme" data-theme="aero" href="{aero_theme_href}">
     <span class="tp-swatch" style="background:#6aaed6;"></span>Frutiger Aero
-  </button>
-  <button class="tp-option" data-action="set-theme" data-theme="dorfic">
+  </a>
+  <a class="tp-option" data-action="set-theme" data-theme="dorfic" href="{dorfic_theme_href}">
     <span class="tp-swatch" style="background:#ffcc66;"></span>DORFic
-  </button>
-  <button class="tp-option" data-action="set-theme" data-theme="fluorogrid">
+  </a>
+  <a class="tp-option" data-action="set-theme" data-theme="fluorogrid" href="{fluorogrid_theme_href}">
     <span class="tp-swatch" style="background:#8833aa;"></span>FluoroGrid
-  </button>
-  <button class="tp-option" data-action="set-theme" data-theme="neoncubicle">
+  </a>
+  <a class="tp-option" data-action="set-theme" data-theme="neoncubicle" href="{neoncubicle_theme_href}">
     <span class="tp-swatch" style="background:#b03888;"></span>NeonCubicle
-  </button>
-  <button class="tp-option" data-action="set-theme" data-theme="chanclassic">
+  </a>
+  <a class="tp-option" data-action="set-theme" data-theme="chanclassic" href="{chanclassic_theme_href}">
     <span class="tp-swatch" style="background:#800000;"></span>ChanClassic
-  </button>
+  </a>
 </div>
 
 <input type="hidden" id="csrf_global" value="{csrf_token}">
@@ -446,10 +511,18 @@ pub fn base_layout(
         title = escape_html(title),
         board_links = board_links,
         search_bar = search_bar,
+        board_menu = board_menu,
         forum_name = escape_html(&live_site_name()),
         body = body,
         csrf_token = escape_html(csrf_token),
         default_theme_attr = default_theme_attr,
+        active_theme_attr = active_theme_attr,
+        terminal_theme_href = theme_href("terminal"),
+        aero_theme_href = theme_href("aero"),
+        dorfic_theme_href = theme_href("dorfic"),
+        fluorogrid_theme_href = theme_href("fluorogrid"),
+        neoncubicle_theme_href = theme_href("neoncubicle"),
+        chanclassic_theme_href = theme_href("chanclassic"),
         collapse_attr = if collapse_greentext {
             " data-collapse-greentext=\"1\""
         } else {
@@ -466,14 +539,23 @@ pub fn base_layout(
 #[must_use]
 pub fn ban_page(reason: &str, csrf_token: &str) -> String {
     let default_theme = live_default_theme();
-    let default_theme_attr = if !default_theme.is_empty() && &*default_theme != "fluorogrid" {
-        format!(r#" data-default-theme="{}""#, escape_html(&default_theme))
+    let configured_default = if default_theme.is_empty() {
+        "fluorogrid"
     } else {
+        &default_theme
+    };
+    let default_theme_attr = format!(
+        r#" data-default-theme="{}""#,
+        escape_html(configured_default)
+    );
+    let active_theme_attr = if configured_default == "terminal" {
         String::new()
+    } else {
+        format!(r#" data-theme="{}""#, escape_html(configured_default))
     };
     format!(
         r#"<!DOCTYPE html>
-<html lang="en"{default_theme_attr}>
+<html lang="en" class="no-js"{default_theme_attr}{active_theme_attr}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -502,6 +584,7 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
 </body>
 </html>"#,
         default_theme_attr = default_theme_attr,
+        active_theme_attr = active_theme_attr,
         reason = escape_html(reason),
         csrf = escape_html(csrf_token),
     )
@@ -522,12 +605,5 @@ pub fn error_page(code: u16, message: &str) -> String {
         code = code,
         message = escape_html(message),
     );
-    base_layout(
-        &format!("Error {code}"),
-        None,
-        &body,
-        "", // no CSRF — error page has no forms that need it
-        &boards,
-        false,
-    )
+    base_layout(&format!("Error {code}"), None, &body, "", &boards, None, false, "/")
 }

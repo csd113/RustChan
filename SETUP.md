@@ -317,7 +317,7 @@ These wizards perform the same operations as the `rustchan-cli admin` subcommand
 
 ### Running as a systemd service
 
-When RustChan runs under systemd it has no attached TTY, so the TUI is not displayed. All output goes to the journal (`journalctl -u rustchan-cli -f`) and to the rotating log file in `rustchan-data/`. This is the recommended production configuration — the console is intended for development and single-operator setups where you are watching the process directly.
+When RustChan runs under systemd it has no attached TTY, so the TUI is not displayed. All output goes to the journal (`journalctl -u rustchan-cli -f`) and to the rotating log file in `rustchan-data/logs/`. This is the recommended production configuration — the console is intended for development and single-operator setups where you are watching the process directly.
 
 If you want to interact with the console on a production server, attach with:
 
@@ -467,7 +467,7 @@ Nothing extra is required. When you start RustChan normally, the ChanNet API is 
 sudo systemctl start rustchan-cli
 ```
 
-Both the web UI (port 8080) and the ChanNet API (port 7070) start in the same process. Logs for both appear in `rustchan-data/rustchan.YYYY-MM-DD.log`.
+Both the web UI (port 8080) and the ChanNet API (port 7070) start in the same process. Logs for both appear in `rustchan-data/logs/rustchan.YYYY-MM-DD.log`.
 
 ### Firewall
 
@@ -757,7 +757,7 @@ Before exposing your instance to the internet:
 - [ ] Tor hidden service directory owned by `tor` user with mode `700` (if applicable)
 - [ ] `db_warn_threshold_mb` set to a value appropriate for your disk (default: 2048 MiB)
 - [ ] `auto_vacuum_interval_hours` enabled (default: 24) to prevent unbounded DB growth
-- [ ] Log monitoring in place (`journalctl -u rustchan-cli -f` or `tail -f rustchan-data/rustchan.$(date +%F).log`)
+- [ ] Log monitoring in place (`journalctl -u rustchan-cli -f` or `tail -f rustchan-data/logs/rustchan.$(date +%F).log`)
 
 ---
 
@@ -792,12 +792,12 @@ Database migrations run automatically on startup — no manual SQL is ever neede
 ```bash
 sudo journalctl -u rustchan-cli -n 50 --no-pager
 # Or read the rotating log file directly:
-sudo -u chan tail -n 50 /var/lib/chan/rustchan-data/rustchan.$(date +%F).log
+sudo -u chan tail -n 50 /var/lib/chan/rustchan-data/logs/rustchan.$(date +%F).log
 ```
 Common causes: path doesn't exist or wrong ownership, port already in use, wrong architecture.
 
 **Log files not appearing:**
-Logs are written to `rustchan-data/` (e.g. `rustchan-data/rustchan.2026-03-19.log`), not the directory of the binary. Ensure the `chan` user has write permission to `rustchan-data/`. The directory is created automatically on first run, but will fail silently if permissions are wrong — check `journalctl` output in that case.
+Logs are written to `rustchan-data/logs/` (e.g. `rustchan-data/logs/rustchan.2026-03-19.log`), not the directory of the binary. Ensure the `chan` user has write permission to `rustchan-data/logs/`. The directory is created automatically on first run, but will fail silently if permissions are wrong — check `journalctl` output in that case.
 
 **ffmpeg not detected:**
 ```bash
@@ -855,6 +855,6 @@ Verify `auto_vacuum_interval_hours` is non-zero and check the admin panel Databa
 The backup system now correctly maps database pool exhaustion to 503 (Service Unavailable) instead of 500. This is a retryable condition — wait a moment and try again, or check if the instance is under heavy load.
 
 **ChanNet API not reachable:**
-Verify port 7070 is not firewalled. RustChan logs a startup message confirming the ChanNet server is listening. Check `rustchan-data/rustchan.$(date +%F).log` for any bind errors. If you are behind nginx, ensure you have a separate proxy block for port 7070.
+Verify port 7070 is not firewalled. RustChan logs a startup message confirming the ChanNet server is listening. Check `rustchan-data/logs/rustchan.$(date +%F).log` for any bind errors. If you are behind nginx, ensure you have a separate proxy block for port 7070.
 
 **Memory usage:** Typical idle footprint is 30–60 MiB. Connection pool under load uses ~32 MiB. Image processing may spike to ~64 MiB temporarily. Backup I/O peaks at ~64 KiB regardless of backup size. Well within Raspberry Pi 4 limits when `blocking_threads` is tuned appropriately.

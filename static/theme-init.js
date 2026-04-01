@@ -1,6 +1,8 @@
-// theme-init.js — loaded in <head> to apply saved theme before first paint,
-// preventing a flash of the default system theme on page load.
+// theme-init.js — loaded in <head> to switch the page into JS mode and apply
+// any saved theme preference before first paint.
 try {
+  document.documentElement.classList.remove('no-js');
+  document.documentElement.classList.add('js');
   var _t = localStorage.getItem('rustchan_theme');
   if (_t) {
     document.documentElement.setAttribute('data-theme', _t);

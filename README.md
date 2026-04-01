@@ -542,7 +542,7 @@ RustChan is intentionally minimal — no template engine, no ORM, no JavaScript 
 | Timing-safe comparison | `subtle` crate |
 | Response compression | `tower-http` CompressionLayer (gzip, Brotli, zstd) |
 | Request timeout | `tower-http` TimeoutLayer |
-| Logging | `tracing` + `tracing-subscriber` + daily-rotating file appender; logs in `rustchan-data/` |
+| Logging | `tracing` + `tracing-subscriber` + daily-rotating file appender; logs in `rustchan-data/logs/` |
 | HTML rendering | Plain Rust `format!` strings |
 | Configuration | `settings.toml` (atomic writes) + env var overrides via `once_cell::Lazy` |
 | Federation | ChanNet API on port 7070 (ZIP-based, text-only) |

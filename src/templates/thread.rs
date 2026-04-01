@@ -28,6 +28,7 @@ pub fn thread_page(
     is_admin: bool,
     poll: Option<&crate::models::PollData>,
     error: Option<&str>,
+    current_theme: Option<&str>,
     collapse_greentext: bool,
 ) -> String {
     let mut body = String::new();
@@ -175,12 +176,12 @@ pub fn thread_page(
         let form_html = super::forms::reply_form(&board.short_name, thread.id, csrf_token, board);
         let _ = write!(
             body,
-            r#"<div class="post-toggle-bar reply">
-  <button class="post-toggle-btn" data-action="toggle-post-form">[ Reply ]</button>
+            r##"<div class="post-toggle-bar reply">
+  <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Reply ]</a>
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {form_html}
-</div>"#
+</div>"##
         );
     }
 
@@ -233,7 +234,9 @@ pub fn thread_page(
         &body,
         csrf_token,
         boards,
+        current_theme,
         collapse_greentext,
+        &format!("/{}/thread/{}", board.short_name, thread.id),
     )
 }
 
@@ -405,6 +408,7 @@ pub fn render_post(
 <strong class="name">{name}</strong>{tripcode}
 <span class="post-time" data-utc="{ts}">{time}</span>{edited}
 <a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>
+<a class="mobile-reply-btn" href="#post-form-wrap" data-action="append-reply" data-id="{id}" aria-label="Reply to post {id}">reply</a>
 <span class="backrefs" id="backrefs-{id}"></span>
 </div>"##,
         op_class = op_class,
@@ -474,10 +478,10 @@ pub fn render_post(
   <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<div class="media-preview" data-action="expand-media" title="click to play">
+<a class="media-preview" data-action="expand-media" href="/boards/{f}" target="_blank" rel="noreferrer" title="click to play">
   <img class="thumb" src="/boards/{th}" loading="lazy" alt="video thumbnail">
   <div class="media-expand-overlay">&#9654;</div>
-</div>
+</a>
 <video class="media-expanded" controls preload="none" style="display:none">
   <source src="/boards/{f}" type="{mime}">
 </video>
@@ -497,10 +501,10 @@ pub fn render_post(
   <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<div class="media-preview" data-action="expand-media" title="click to expand">
+<a class="media-preview" data-action="expand-media" href="/boards/{f}" target="_blank" rel="noreferrer" title="click to expand">
   <img class="thumb" src="/boards/{th}" loading="lazy" alt="image">
   <div class="media-expand-overlay">&#x2922;</div>
-</div>
+</a>
 <img class="media-expanded" src="" data-src="/boards/{f}" style="display:none"
      alt="image" draggable="false">
 </div>"#,
@@ -645,6 +649,7 @@ pub fn edit_post_page(
     boards: &[Board],
     prefill_token: &str,
     error: Option<&str>,
+    current_theme: Option<&str>,
     collapse_greentext: bool,
 ) -> String {
     let error_html = error
@@ -697,6 +702,8 @@ pub fn edit_post_page(
         &body,
         csrf_token,
         boards,
+        current_theme,
         collapse_greentext,
+        &format!("/{}/thread/{}#p{}", board.short_name, post.thread_id, post.id),
     )
 }

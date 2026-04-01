@@ -15,6 +15,8 @@ pub(super) fn public_routes() -> Router<AppState> {
         .route("/healthz", get(observability::healthz))
         .route("/readyz", get(observability::readyz))
         .route("/metrics", get(observability::metrics))
+        .route("/nsfw/accept", post(crate::handlers::board::accept_nsfw))
+        .route("/theme/{theme}", get(crate::handlers::board::set_theme))
         .route("/", get(crate::handlers::board::index))
         .route("/{board}", get(crate::handlers::board::board_index))
         .route(

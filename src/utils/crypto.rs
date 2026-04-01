@@ -103,6 +103,20 @@ pub fn new_csrf_token() -> String {
     random_hex(32)
 }
 
+#[must_use]
+pub fn sign_csrf_token(raw_token: &str, secret: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(secret.as_bytes());
+    hasher.update(b":csrf:");
+    hasher.update(raw_token.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+#[must_use]
+pub fn make_csrf_form_token(raw_token: &str, secret: &str) -> String {
+    format!("{raw_token}.{}", sign_csrf_token(raw_token, secret))
+}
+
 /// Hash an IP address with a secret salt. Output is a 64-char hex string.
 ///
 /// The salt prevents rainbow-table attacks if the DB is leaked.

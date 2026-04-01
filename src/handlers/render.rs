@@ -59,7 +59,12 @@ pub fn load_board_page_data(
     })
 }
 
-pub fn render_board_page(data: &BoardPageData, csrf_token: &str, error: Option<&str>) -> String {
+pub fn render_board_page(
+    data: &BoardPageData,
+    csrf_token: &str,
+    error: Option<&str>,
+    current_theme: Option<&str>,
+) -> String {
     let boards = templates::live_boards();
     let collapse_greentext = templates::live_collapse_greentext();
     templates::board_page(
@@ -70,6 +75,7 @@ pub fn render_board_page(data: &BoardPageData, csrf_token: &str, error: Option<&
         boards.as_slice(),
         data.is_admin,
         error,
+        current_theme,
         collapse_greentext,
     )
 }
@@ -102,7 +108,12 @@ pub fn load_thread_page_data(
     })
 }
 
-pub fn render_thread_page(data: &ThreadPageData, csrf_token: &str, error: Option<&str>) -> String {
+pub fn render_thread_page(
+    data: &ThreadPageData,
+    csrf_token: &str,
+    error: Option<&str>,
+    current_theme: Option<&str>,
+) -> String {
     let boards = templates::live_boards();
     let collapse_greentext = templates::live_collapse_greentext();
     templates::thread_page(
@@ -114,6 +125,7 @@ pub fn render_thread_page(data: &ThreadPageData, csrf_token: &str, error: Option
         data.is_admin,
         data.poll.as_ref(),
         error,
+        current_theme,
         collapse_greentext,
     )
 }
