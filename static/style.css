@@ -800,17 +800,6 @@ html:not([data-theme]) .poster-id-btn {
 
 .post-num:hover { color: var(--green-bright); }
 
-.mobile-reply-btn {
-  display: none;
-  border: 1px solid var(--border);
-  color: var(--green-pale);
-  background: rgba(0,0,0,0.12);
-  padding: 1px 7px;
-  font-size: 0.72rem;
-  line-height: 1.4;
-  text-transform: lowercase;
-}
-
 /* ── Tags (sticky / locked) ───────────────────────────────────────────────── */
 
 .tag {
@@ -1804,12 +1793,6 @@ html:not([data-theme]) .poster-id-btn {
   .post-num {
     font-size: 0.9rem;
     padding: 4px 0;
-  }
-  .mobile-reply-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 32px;
   }
   html.no-js .post-form-wrap {
     margin-top: 10px;

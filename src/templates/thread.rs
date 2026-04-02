@@ -510,7 +510,6 @@ pub fn render_post(
 <strong class="name">{name}</strong>{tripcode}{poster_id_html}
 <span class="post-time" data-utc="{ts}">{time}</span>{edited}
 <a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>
-<a class="mobile-reply-btn" href="#post-form-wrap" data-action="append-reply" data-id="{id}" aria-label="Reply to post {id}">reply</a>
 <span class="backrefs" id="backrefs-{id}"></span>
 </div>"##,
         op_class = op_class,
