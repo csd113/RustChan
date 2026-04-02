@@ -445,3 +445,41 @@ fn mime_to_ext(mime: &str) -> &'static str {
         _ => "bin",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::save_audio_with_image_thumb_from_path;
+
+    #[test]
+    fn combo_flac_audio_is_saved_losslessly_without_pending_processing() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let board_dir = tempdir.path().join("test");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+
+        let input = tempfile::Builder::new()
+            .suffix(".flac")
+            .tempfile_in(tempdir.path())
+            .expect("temp file");
+        let flac_bytes = b"fLaC\x00\x00\x00\x22test flac bytes";
+        std::fs::write(input.path(), flac_bytes).expect("write flac");
+
+        let uploaded = save_audio_with_image_thumb_from_path(
+            input.path(),
+            flac_bytes,
+            flac_bytes.len(),
+            "track.flac",
+            tempdir.path().to_str().expect("utf8 path"),
+            "test",
+            1024 * 1024,
+        )
+        .expect("save flac");
+
+        assert_eq!(uploaded.mime_type, "audio/flac");
+        assert_eq!(uploaded.file_path.split('.').next_back(), Some("flac"));
+        assert!(!uploaded.processing_pending);
+
+        let stored_bytes =
+            std::fs::read(tempdir.path().join(&uploaded.file_path)).expect("read stored flac");
+        assert_eq!(stored_bytes, flac_bytes);
+    }
+}

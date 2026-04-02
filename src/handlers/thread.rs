@@ -132,6 +132,7 @@ pub async fn post_reply(
     let cookie_secret = CONFIG.cookie_secret.clone();
     let file_data = form.file;
     let audio_file_data = form.audio_file;
+    let image_file_data = form.image_file;
     let name_val = form.name;
     let del_token_val = form.deletion_token;
     let form_sage = form.sage;
@@ -210,11 +211,12 @@ pub async fn post_reply(
                 || board.allow_video
                 || board.allow_audio
                 || (crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files);
-            let has_file = file_data.is_some();
+            let has_file = file_data.is_some() || audio_file_data.is_some() || image_file_data.is_some();
             let (body_text, body_html) =
                 posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;
 
             let uploads = posting::process_uploads(
+                image_file_data,
                 file_data,
                 audio_file_data,
                 &board,

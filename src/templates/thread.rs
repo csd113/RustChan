@@ -553,6 +553,22 @@ pub fn render_post(
                         .as_deref()
                         .is_some_and(|m| m.starts_with("video/")));
 
+            let combo_audio = if !is_audio && !is_video {
+                match (&post.audio_file_path, &post.audio_mime_type) {
+                    (Some(aud_file), Some(aud_mime)) => Some((
+                        aud_file.as_str(),
+                        aud_mime.as_str(),
+                        post.audio_file_name.as_deref().unwrap_or("audio"),
+                        post.audio_file_size
+                            .map(format_file_size)
+                            .unwrap_or_default(),
+                    )),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
             if is_audio {
                 let _ = write!(
                     html,
@@ -600,7 +616,7 @@ pub fn render_post(
                 // Image
                 let _ = write!(
                     html,
-                    r#"<div class="file-container">
+                    r#"<div class="file-container{combo_class}">
 <div class="file-info">
   File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
@@ -611,11 +627,34 @@ pub fn render_post(
 </a>
 <img class="media-expanded" src="" data-src="/boards/{f}" style="display:none"
      alt="image" draggable="false">
+{audio_combo_html}
 </div>"#,
+                    combo_class = if combo_audio.is_some() {
+                        " image-audio-combo"
+                    } else {
+                        ""
+                    },
                     f = escape_html(file),
                     th = escape_html(thumb),
                     orig = escape_html(name_str),
-                    sz = escape_html(&size_str)
+                    sz = escape_html(&size_str),
+                    audio_combo_html = combo_audio.map_or_else(String::new, |(aud_file, aud_mime, aud_name, aud_size)| {
+                        format!(
+                            r#"<div class="audio-combo audio-combo-inline">
+<div class="file-info">
+  Audio: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+</div>
+<audio controls preload="none" class="audio-player audio-player-combo">
+  <source src="/boards/{f}" type="{mime}">
+  Your browser does not support the audio element.
+</audio>
+</div>"#,
+                            f = escape_html(aud_file),
+                            orig = escape_html(aud_name),
+                            sz = escape_html(&aud_size),
+                            mime = escape_html(aud_mime)
+                        )
+                    })
                 );
             }
         }
@@ -640,7 +679,7 @@ pub fn render_post(
     }
 
     // Secondary audio for image+audio combo posts
-    if show_media {
+    if show_media && !matches!(&post.media_type, Some(crate::models::MediaType::Image)) {
         if let (Some(aud_file), Some(aud_mime)) = (&post.audio_file_path, &post.audio_mime_type) {
             let aud_name = post.audio_file_name.as_deref().unwrap_or("audio");
             let aud_size = post
@@ -815,4 +854,66 @@ pub fn edit_post_page(
             board.short_name, post.thread_id, post.id
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_post, RenderPostOpts};
+    use crate::models::{MediaType, Post};
+
+    fn sample_post() -> Post {
+        Post {
+            id: 1,
+            thread_id: 1,
+            board_id: 1,
+            name: "anon".into(),
+            tripcode: None,
+            subject: None,
+            body: "body".into(),
+            body_html: "body".into(),
+            ip_hash: Some("hash".into()),
+            file_path: Some("test/image.webp".into()),
+            file_name: Some("image.webp".into()),
+            file_size: Some(1024),
+            thumb_path: Some("test/thumbs/image.webp".into()),
+            mime_type: Some("image/webp".into()),
+            media_type: Some(MediaType::Image),
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            created_at: 1_700_000_000,
+            deletion_token: "token".into(),
+            is_op: false,
+            edited_at: None,
+        }
+    }
+
+    #[test]
+    fn image_audio_combo_renders_single_media_box_with_inline_audio() {
+        let mut post = sample_post();
+        post.audio_file_path = Some("test/song.flac".into());
+        post.audio_file_name = Some("song.flac".into());
+        post.audio_file_size = Some(2048);
+        post.audio_mime_type = Some("audio/flac".into());
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: true,
+                allow_editing: false,
+                show_poster_ids: false,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html.contains("file-container image-audio-combo"));
+        assert!(html.contains(r#"Audio: <a href="/boards/test/song.flac""#));
+        assert!(!html.contains("file-container audio-container audio-combo"));
+    }
 }

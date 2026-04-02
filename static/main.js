@@ -153,6 +153,7 @@ var mobileMediaViewer = (function () {
   var overlay = null;
   var stage = null;
   var closeBtn = null;
+  var activeContainer = null;
 
   function ensure() {
     if (overlay) return;
@@ -195,20 +196,24 @@ var mobileMediaViewer = (function () {
 
   function close() {
     if (!overlay) return;
+    syncComboAudio(activeContainer, false);
+    activeContainer = null;
     stage.innerHTML = '';
     overlay.hidden = true;
     document.body.classList.remove('mobile-overlay-open');
   }
 
   return {
-    openImage: function (src, alt) {
+    openImage: function (src, alt, container) {
+      activeContainer = container || null;
       var img = document.createElement('img');
       img.className = 'mobile-media-viewer__media mobile-media-viewer__image';
       img.src = src;
       img.alt = alt || 'image';
       open(img);
     },
-    openVideo: function (src, type) {
+    openVideo: function (src, type, container) {
+      activeContainer = container || null;
       var video = document.createElement('video');
       video.className = 'mobile-media-viewer__media mobile-media-viewer__video';
       video.controls = true;
@@ -246,12 +251,17 @@ function expandMedia(preview) {
   var closeBtn = container.querySelector('.media-close-btn');
   if (isMobileViewport()) {
     if (expanded.tagName === 'IMG') {
-      mobileMediaViewer.openImage(expanded.dataset.src || expanded.src, expanded.alt);
+      syncComboAudio(container, true);
+      mobileMediaViewer.openImage(expanded.dataset.src || expanded.src, expanded.alt, container);
       return;
     }
     if (expanded.tagName === 'VIDEO') {
       var source = expanded.querySelector('source');
-      mobileMediaViewer.openVideo(source ? source.src : expanded.currentSrc || expanded.src, source ? source.type : '');
+      mobileMediaViewer.openVideo(
+        source ? source.src : expanded.currentSrc || expanded.src,
+        source ? source.type : '',
+        container
+      );
       return;
     }
   }
@@ -268,6 +278,7 @@ function expandMedia(preview) {
   if (expanded.tagName === 'VIDEO') {
     expanded.play().catch(function () {});
   }
+  syncComboAudio(container, true);
   // Wire click-on-expanded to collapse back to thumbnail (once per element).
   if (!expanded.dataset.collapseWired) {
     expanded.dataset.collapseWired = '1';
@@ -310,6 +321,15 @@ function collapseMedia(btn) {
   // preview to its natural inline-block hit area.
   preview.style.display = '';
   btn.style.display = 'none';
+}
+
+function syncComboAudio(container, shouldPlay) {
+  if (!container || !container.classList.contains('image-audio-combo')) return;
+  var audio = container.querySelector('.audio-player-combo');
+  if (!audio) return;
+  if (shouldPlay) {
+    audio.play().catch(function () {});
+  }
 }
 
 function expandVideoEmbed(preview, type, id, container) {

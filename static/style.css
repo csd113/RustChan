@@ -2808,6 +2808,41 @@ details.greentext-block[open] > summary { color: var(--green-pale); }
   padding-top: 4px;
 }
 
+.image-audio-combo {
+  width: fit-content;
+  max-width: 100%;
+}
+
+.image-audio-combo .media-preview {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.image-audio-combo .audio-combo-inline {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  max-width: none;
+}
+
+.reply .image-audio-combo .audio-combo-inline {
+  max-width: none;
+}
+
+.audio-player {
+  display: block;
+  width: min(100%, 280px);
+}
+
+.image-audio-combo .audio-player {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  margin-top: 4px;
+}
+
 @media (max-width: 900px), (hover: none) and (pointer: coarse) {
   html,
   body {

@@ -104,10 +104,12 @@ pub struct PostFormData {
     pub subject: String,
     pub body: String,
     pub deletion_token: String,
-    /// Temp file + original filename if a file was attached.
+    /// Legacy/general upload slot (used for video or arbitrary files).
     pub file: Option<(TempUpload, String)>,
-    /// Secondary audio file for image+audio combo uploads.
+    /// Primary audio slot shown first in the posting UI.
     pub audio_file: Option<(TempUpload, String)>,
+    /// Optional cover-image slot shown second in the posting UI.
+    pub image_file: Option<(TempUpload, String)>,
     // ── Poll fields (only used when creating a new thread) ────────────────
     pub poll_question: String,
     pub poll_options: Vec<String>,
@@ -133,6 +135,7 @@ pub async fn parse_post_multipart(
     let mut deletion_token = String::new();
     let mut file: Option<(TempUpload, String)> = None;
     let mut audio_file: Option<(TempUpload, String)> = None;
+    let mut image_file: Option<(TempUpload, String)> = None;
     let mut poll_question = String::new();
     let mut poll_options: Vec<String> = Vec::new();
     let mut poll_duration_value: Option<i64> = None;
@@ -209,6 +212,13 @@ pub async fn parse_post_multipart(
                     audio_file = Some((upload, fname));
                 }
             }
+            Some("image_file") => {
+                let fname = field.file_name().unwrap_or("image").to_string();
+                let upload = stream_field_to_temp_file(field, CONFIG.max_image_size).await?;
+                if upload.size_bytes > 0 {
+                    image_file = Some((upload, fname));
+                }
+            }
             _ => {
                 let _ = field.bytes().await;
             }
@@ -246,6 +256,7 @@ pub async fn parse_post_multipart(
         deletion_token,
         file,
         audio_file,
+        image_file,
         poll_question,
         poll_options,
         poll_duration_secs,
@@ -418,6 +429,14 @@ pub fn process_primary_upload(
     Ok((Some(f), Some(hash)))
 }
 
+fn temp_upload_mime(upload: &TempUpload, allow_any_files: bool) -> Result<String> {
+    match crate::utils::files::detect_mime_type(&upload.sniff_bytes) {
+        Ok(mime) => Ok(mime.to_string()),
+        Err(_) if allow_any_files => Ok(crate::utils::files::fallback_download_mime_type().to_string()),
+        Err(error) => Err(AppError::BadRequest(error.to_string())),
+    }
+}
+
 /// Process the secondary audio file for an image+audio combo upload.
 /// `primary_upload` must already be the processed primary image.
 ///
@@ -475,6 +494,93 @@ pub fn process_audio_combo(
         aud_file.thumb_path.clone_from(&img.thumb_path);
     }
     Ok(Some(aud_file))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn process_audio_first_uploads(
+    audio_file_data: Option<(TempUpload, String)>,
+    image_file_data: Option<(TempUpload, String)>,
+    fallback_file_data: Option<(TempUpload, String)>,
+    board: &Board,
+    conn: &rusqlite::Connection,
+    upload_dir: &str,
+    save_root_str: &str,
+    thumb_size: u32,
+    max_image_size: usize,
+    max_video_size: usize,
+    max_audio_size: usize,
+    ffmpeg_available: bool,
+    ffmpeg_webp_available: bool,
+) -> Result<(Option<crate::utils::files::UploadedFile>, Option<crate::utils::files::UploadedFile>, Option<String>)> {
+    let allow_any_files =
+        crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
+
+    if let Some((image_upload, image_name)) = image_file_data {
+        let (primary, primary_hash) = process_primary_upload(
+            Some((image_upload, image_name)),
+            board,
+            conn,
+            upload_dir,
+            save_root_str,
+            thumb_size,
+            max_image_size,
+            max_video_size,
+            max_audio_size,
+            ffmpeg_available,
+            ffmpeg_webp_available,
+        )?;
+
+        let audio = process_audio_combo(
+            audio_file_data,
+            primary.as_ref(),
+            board,
+            save_root_str,
+            max_audio_size,
+        )?;
+
+        return Ok((primary, audio, primary_hash));
+    }
+
+    if let Some((audio_upload, audio_name)) = audio_file_data {
+        let audio_mime = temp_upload_mime(&audio_upload, allow_any_files)?;
+        if crate::models::MediaType::from_mime(&audio_mime) != crate::models::MediaType::Audio {
+            return Err(AppError::BadRequest(
+                "The audio slot only accepts audio files.".into(),
+            ));
+        }
+
+        let (primary, primary_hash) = process_primary_upload(
+            Some((audio_upload, audio_name)),
+            board,
+            conn,
+            upload_dir,
+            save_root_str,
+            thumb_size,
+            max_image_size,
+            max_video_size,
+            max_audio_size,
+            ffmpeg_available,
+            ffmpeg_webp_available,
+        )?;
+
+        return Ok((primary, None, primary_hash));
+    }
+
+    let (primary, primary_hash) = process_primary_upload(
+        fallback_file_data,
+        board,
+        conn,
+        upload_dir,
+        save_root_str,
+        thumb_size,
+        max_image_size,
+        max_video_size,
+        max_audio_size,
+        ffmpeg_available,
+        ffmpeg_webp_available,
+    )?;
+
+    Ok((primary, None, primary_hash))
 }
 
 fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
