@@ -306,7 +306,9 @@ function collapseMedia(btn) {
   expanded.style.maxHeight = '';
   // Restore float so thumbnail sits beside post text again.
   container.classList.remove('media-is-expanded');
-  preview.style.display = 'block';
+  // Clear the inline display override so CSS can restore the thumbnail
+  // preview to its natural inline-block hit area.
+  preview.style.display = '';
   btn.style.display = 'none';
 }
 

@@ -416,7 +416,7 @@ fn poster_id_chip_style(poster_id: &str) -> String {
     let hue_index = digest
         .first()
         .map_or(0, |byte| usize::from(*byte) % POSTER_CHIP_HUES.len());
-    let hue = POSTER_CHIP_HUES[hue_index];
+    let hue = POSTER_CHIP_HUES.get(hue_index).copied().unwrap_or(200);
     let accent_lightness = 60 + digest.get(1).map_or(0, |byte| u16::from(*byte) % 8);
     let background_lightness = 19 + digest.get(2).map_or(0, |byte| u16::from(*byte) % 8);
     let shadow_strength = 34 + digest.get(3).map_or(0, |byte| u16::from(*byte) % 18);
@@ -439,7 +439,7 @@ fn annotate_op_quotelinks(body_html: &str, thread_op_id: Option<i64>) -> String 
         r##"<a href="#p{op_id}" class="quotelink" data-pid="{op_id}">&gt;&gt;{op_id}</a>"##
     );
     let replacement = format!(
-        r##"<a href="#p{op_id}" class="quotelink" data-pid="{op_id}">&gt;&gt;{op_id} (OP)</a>"##
+        r##"<a href="#p{op_id}" class="quotelink" data-pid="{op_id}">&gt;&gt;{op_id}<span class="quotelink-op-label">(OP)</span></a>"##
     );
     body_html.replace(&target, &replacement)
 }
