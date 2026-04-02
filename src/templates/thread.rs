@@ -229,7 +229,7 @@ pub fn thread_page(
 
     base_layout(
         &format!(
-            "/{}/  {}",
+            "/{}/ - {}",
             board.short_name,
             thread.subject.as_deref().unwrap_or("thread")
         ),
@@ -638,9 +638,11 @@ pub fn render_post(
                     th = escape_html(thumb),
                     orig = escape_html(name_str),
                     sz = escape_html(&size_str),
-                    audio_combo_html = combo_audio.map_or_else(String::new, |(aud_file, aud_mime, aud_name, aud_size)| {
-                        format!(
-                            r#"<div class="audio-combo audio-combo-inline">
+                    audio_combo_html = combo_audio.map_or_else(
+                        String::new,
+                        |(aud_file, aud_mime, aud_name, aud_size)| {
+                            format!(
+                                r#"<div class="audio-combo audio-combo-inline">
 <div class="file-info">
   Audio: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
@@ -649,12 +651,13 @@ pub fn render_post(
   Your browser does not support the audio element.
 </audio>
 </div>"#,
-                            f = escape_html(aud_file),
-                            orig = escape_html(aud_name),
-                            sz = escape_html(&aud_size),
-                            mime = escape_html(aud_mime)
-                        )
-                    })
+                                f = escape_html(aud_file),
+                                orig = escape_html(aud_name),
+                                sz = escape_html(&aud_size),
+                                mime = escape_html(aud_mime)
+                            )
+                        }
+                    )
                 );
             }
         }

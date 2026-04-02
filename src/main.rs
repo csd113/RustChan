@@ -28,6 +28,7 @@ mod config;
 mod db;
 mod detect;
 mod error;
+mod favicon;
 mod handlers;
 mod logging;
 mod media;

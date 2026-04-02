@@ -227,10 +227,11 @@ pub fn process_uploads(
     conn: &rusqlite::Connection,
     config: &UploadConfig<'_>,
 ) -> Result<ProcessedUploads> {
-    let stage_root = (file_data.is_some() || audio_file_data.is_some() || image_file_data.is_some())
-        .then(|| crate::pending_fs::create_stage_root(config.upload_dir, "upload"))
-        .transpose()
-        .map_err(AppError::Internal)?;
+    let stage_root =
+        (file_data.is_some() || audio_file_data.is_some() || image_file_data.is_some())
+            .then(|| crate::pending_fs::create_stage_root(config.upload_dir, "upload"))
+            .transpose()
+            .map_err(AppError::Internal)?;
     let save_root = stage_root
         .as_deref()
         .unwrap_or_else(|| std::path::Path::new(config.upload_dir));

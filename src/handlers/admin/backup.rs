@@ -586,6 +586,9 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     let temp_db = temp_dir.join(format!("chan_restore_{tmp_id}.db"));
     let upload_root = PathBuf::from(upload_dir);
     let staged_upload_root = create_staging_dir(&upload_root, "restore-stage")?;
+    let live_global_favicon_dir = crate::favicon::global_backup_source_dir();
+    let staged_global_favicon_dir = create_staging_dir(&live_global_favicon_dir, "restore-stage")?;
+    let mut favicon_extracted = false;
     let previous_upload_root = upload_root.parent().map_or_else(
         || PathBuf::from(format!("{}.restore-old", upload_root.display())),
         |parent| {
@@ -668,6 +671,37 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
                     AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
                 })?;
             }
+        } else if let Some(rel) = name.strip_prefix("favicon/") {
+            if rel.is_empty() {
+                continue;
+            }
+            let rel_path = Path::new(rel);
+            if rel_path
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+            {
+                warn!("{suspicious_entry_log}: skipping suspicious entry '{name}'");
+                continue;
+            }
+            favicon_extracted = true;
+            let target = staged_global_favicon_dir.join(rel_path);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&target).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("mkdir {}: {error}", target.display()))
+                })?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).map_err(|error| {
+                        AppError::Internal(anyhow::anyhow!("mkdir parent: {error}"))
+                    })?;
+                }
+                let mut out = std::fs::File::create(&target).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("Create {}: {error}", target.display()))
+                })?;
+                copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
+                })?;
+            }
         }
     }
 
@@ -719,6 +753,7 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         let _ = std::fs::remove_file(&temp_db);
         let _ = std::fs::remove_file(&db_snapshot);
         let _ = remove_path_if_exists(&staged_upload_root);
+        let _ = remove_path_if_exists(&staged_global_favicon_dir);
         if let Err(restore_err) = restore_db_result {
             return Err(AppError::Internal(anyhow::anyhow!(
                 "{restore_label} failed and rollback failed: {error}; rollback error: {restore_err}"
@@ -731,6 +766,7 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         let restore_db_result = restore_db_from_snapshot(live_conn, &db_snapshot, restore_label);
         let _ = std::fs::remove_file(&temp_db);
         let _ = std::fs::remove_file(&db_snapshot);
+        let _ = remove_path_if_exists(&staged_global_favicon_dir);
         if let Err(restore_err) = restore_db_result {
             return Err(AppError::Internal(anyhow::anyhow!(
                 "{restore_label} filesystem swap failed: {error}; DB rollback error: {restore_err}"
@@ -741,6 +777,17 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         )));
     }
     db::delete_pending_fs_op(live_conn, &pending_restore_id)?;
+
+    if favicon_extracted {
+        remove_path_if_exists(&live_global_favicon_dir)?;
+        std::fs::rename(&staged_global_favicon_dir, &live_global_favicon_dir).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "{restore_label} global favicon swap failed: {error}"
+            ))
+        })?;
+    } else {
+        let _ = remove_path_if_exists(&staged_global_favicon_dir);
+    }
 
     let _ = std::fs::remove_file(&temp_db);
     let _ = std::fs::remove_file(&db_snapshot);
@@ -768,6 +815,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
     let upload_dir = CONFIG.upload_dir.clone();
+    let global_favicon_dir = crate::favicon::global_backup_source_dir();
     let progress = state.backup_progress.clone();
 
     let (tmp_path, filename, file_size) = tokio::task::spawn_blocking({
@@ -793,7 +841,8 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             // Count files for progress bar before compressing.
             progress.reset(crate::middleware::backup_phase::COUNT_FILES);
             let uploads_base = std::path::Path::new(&upload_dir);
-            let file_count = count_files_in_dir(uploads_base);
+            let favicon_file_count = count_files_in_dir(&global_favicon_dir);
+            let file_count = count_files_in_dir(uploads_base).saturating_add(favicon_file_count);
             // +1 for chan.db
             progress
                 .files_total
@@ -831,6 +880,16 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                 // ── Upload files (streamed file-by-file via io::copy) ──────
                 if uploads_base.exists() {
                     add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
+                }
+                if global_favicon_dir.exists() {
+                    add_dir_to_zip_with_prefix(
+                        &mut zip,
+                        &global_favicon_dir,
+                        &global_favicon_dir,
+                        "favicon",
+                        opts,
+                        &progress,
+                    )?;
                 }
 
                 // Flush the BufWriter explicitly so I/O errors are not
@@ -929,6 +988,17 @@ fn add_dir_to_zip<W: Write + Seek>(
     opts: zip::write::SimpleFileOptions,
     progress: &crate::middleware::BackupProgress,
 ) -> Result<()> {
+    add_dir_to_zip_with_prefix(zip, base, dir, "uploads", opts, progress)
+}
+
+pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
+    zip: &mut zip::ZipWriter<W>,
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    prefix: &str,
+    opts: zip::write::SimpleFileOptions,
+    progress: &crate::middleware::BackupProgress,
+) -> Result<()> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("read_dir {}: {}", dir.display(), e)))?;
 
@@ -940,12 +1010,12 @@ fn add_dir_to_zip<W: Write + Seek>(
             .strip_prefix(base)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("strip_prefix: {e}")))?;
         let rel_str = relative.to_string_lossy().replace('\\', "/");
-        let zip_path = format!("uploads/{rel_str}");
+        let zip_path = format!("{prefix}/{rel_str}");
 
         if path.is_dir() {
             zip.add_directory(&zip_path, opts)
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("zip dir: {e}")))?;
-            add_dir_to_zip(zip, base, &path, opts, progress)?;
+            add_dir_to_zip_with_prefix(zip, base, &path, prefix, opts, progress)?;
         } else if path.is_file() {
             // MEM-FIX: open file, stream through io::copy — no Vec<u8> allocation.
             let mut src = std::fs::File::open(&path).map_err(|e| {

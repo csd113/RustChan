@@ -451,6 +451,7 @@ pub fn base_layout(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>{title}</title>
+{favicon_head}
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/theme-init.js"></script>
 </head>
@@ -510,6 +511,7 @@ pub fn base_layout(
 </body>
 </html>"#,
         title = escape_html(title),
+        favicon_head = crate::favicon::favicon_head_html(board_short),
         board_links = board_links,
         search_bar = search_bar,
         board_menu = board_menu,

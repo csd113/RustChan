@@ -16,6 +16,30 @@ pub(super) fn public_routes() -> Router<AppState> {
         .route("/healthz", get(observability::healthz))
         .route("/readyz", get(observability::readyz))
         .route("/metrics", get(observability::metrics))
+        .route(
+            "/favicon.ico",
+            get(crate::handlers::favicon::serve_favicon_ico),
+        )
+        .route(
+            "/favicon-16x16.png",
+            get(crate::handlers::favicon::serve_favicon_16),
+        )
+        .route(
+            "/favicon-32x32.png",
+            get(crate::handlers::favicon::serve_favicon_32),
+        )
+        .route(
+            "/apple-touch-icon.png",
+            get(crate::handlers::favicon::serve_apple_touch_icon),
+        )
+        .route(
+            "/android-chrome-192x192.png",
+            get(crate::handlers::favicon::serve_android_chrome_192),
+        )
+        .route(
+            "/android-chrome-512x512.png",
+            get(crate::handlers::favicon::serve_android_chrome_512),
+        )
         .route("/nsfw/accept", post(crate::handlers::board::accept_nsfw))
         .route("/theme/{theme}", get(crate::handlers::board::set_theme))
         .route("/", get(crate::handlers::board::index))
@@ -121,6 +145,20 @@ fn admin_board_routes() -> Router<AppState> {
         .route(
             "/admin/board/settings",
             post(crate::handlers::admin::update_board_settings),
+        )
+        .route(
+            "/admin/site/favicon",
+            post(crate::handlers::admin::update_site_favicon)
+                .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
+        )
+        .route(
+            "/admin/board/favicon",
+            post(crate::handlers::admin::update_board_favicon)
+                .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
+        )
+        .route(
+            "/admin/board/favicon/clear",
+            post(crate::handlers::admin::clear_board_favicon_override),
         )
 }
 

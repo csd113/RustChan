@@ -72,12 +72,14 @@ pub fn admin_panel_page(
     // (is_error, message) — is_error=true → red, false → green.
     flash: Option<(bool, &str)>,
 ) -> String {
+    let global_favicon_exists = crate::favicon::global_has_custom_favicon();
     let mut board_cards = String::new();
     for b in boards {
         let checked = |v: bool| if v { " checked" } else { "" };
+        let board_favicon_exists = crate::favicon::board_has_custom_favicon(&b.short_name);
         let _ = write!(
             board_cards,
-            r#"<details class="board-settings-card">
+            r#"<details class="board-settings-card" id="board-{short}">
 <summary>/{short}/ — {name} {nsfw_tag}</summary>
 <form method="POST" action="/admin/board/settings" class="board-settings-form">
 <input type="hidden" name="_csrf"     value="{csrf}">
@@ -117,6 +119,22 @@ pub fn admin_panel_page(
   <button type="submit">save settings</button>
 </div>
 </form>
+<div class="favicon-inline-row">
+{board_favicon_preview}
+<form method="POST" action="/admin/board/favicon" enctype="multipart/form-data" class="favicon-inline-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <label class="favicon-inline-label">
+    {board_favicon_label}
+    <input type="file" name="favicon" accept="image/png,image/jpeg,image/webp" required class="favicon-inline-input">
+  </label>
+  <button type="submit">{board_favicon_button}</button>
+</form>
+{board_favicon_clear}
+</div>
+<p style="color:var(--text-dim);font-size:0.78rem;margin:0.35rem 0 0">
+  {board_favicon_status}
+</p>
 <!-- Delete form is now OUTSIDE the settings form. -->
 <form method="POST" action="/admin/board/delete" style="display:inline;margin-top:4px">
   <input type="hidden" name="_csrf"     value="{csrf}">
@@ -167,7 +185,43 @@ pub fn admin_panel_page(
             edit_ck = checked(b.allow_editing),
             embeds_ck = checked(b.allow_video_embeds),
             captcha_ck = checked(b.allow_captcha),
-            poster_ids_ck = checked(b.show_poster_ids)
+            poster_ids_ck = checked(b.show_poster_ids),
+            board_favicon_preview = if board_favicon_exists {
+                format!(
+                    r#"<img class="favicon-inline-preview" src="/boards/{short}/_favicon/favicon-32x32.png" alt="/{short}/ favicon">"#,
+                    short = escape_html(&b.short_name)
+                )
+            } else {
+                String::new()
+            },
+            board_favicon_label = if board_favicon_exists {
+                "replace favicon"
+            } else {
+                "board favicon"
+            },
+            board_favicon_button = if board_favicon_exists {
+                "replace"
+            } else {
+                "upload"
+            },
+            board_favicon_status = if board_favicon_exists {
+                "Custom board favicon is active here and overrides the global favicon."
+            } else {
+                "No board-specific favicon set. This board uses the global favicon."
+            },
+            board_favicon_clear = if board_favicon_exists {
+                format!(
+                    r#"<form method="POST" action="/admin/board/favicon/clear" class="favicon-inline-clear">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <button type="submit">clear</button>
+</form>"#,
+                    csrf = escape_html(csrf_token),
+                    id = b.id
+                )
+            } else {
+                String::new()
+            }
         );
     }
 
@@ -432,7 +486,7 @@ old boards to prevent query performance degradation.
 <!-- ═══════════════════════════════════════════════════════════════════════════
      // site settings
      ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section">
+<section class="admin-section" id="site-settings">
 <h2>// site settings</h2>
 <form method="POST" action="/admin/site/settings">
 <input type="hidden" name="_csrf" value="{csrf}">
@@ -464,6 +518,20 @@ old boards to prevent query performance degradation.
 </div>
 <button type="submit">save settings</button>
 </form>
+<div class="favicon-inline-row favicon-inline-row-global">
+{global_favicon_preview}
+<form method="POST" action="/admin/site/favicon" enctype="multipart/form-data" class="favicon-inline-form">
+<input type="hidden" name="_csrf" value="{csrf}">
+<label class="favicon-inline-label">
+  {global_favicon_label}
+  <input type="file" name="favicon" accept="image/png,image/jpeg,image/webp" required class="favicon-inline-input">
+</label>
+<button type="submit">{global_favicon_button}</button>
+</form>
+</div>
+<p style="color:var(--text-dim);font-size:0.78rem;margin:0.45rem 0 0">
+  {global_favicon_status}
+</p>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -637,8 +705,29 @@ old boards to prevent query performance degradation.
         report_badge = report_badge,
         appeal_rows = appeal_rows,
         appeal_badge = appeal_badge,
+        global_favicon_preview = if global_favicon_exists {
+            r#"<img class="favicon-inline-preview" src="/favicon-32x32.png" alt="global favicon">"#
+                .to_string()
+        } else {
+            String::new()
+        },
+        global_favicon_label = if global_favicon_exists {
+            "replace favicon"
+        } else {
+            "global favicon"
+        },
+        global_favicon_button = if global_favicon_exists {
+            "replace"
+        } else {
+            "upload"
+        },
         site_name_val = escape_html(site_name),
         site_subtitle_val = escape_html(site_subtitle),
+        global_favicon_status = if global_favicon_exists {
+            "Custom global favicon is active and stored alongside the main database."
+        } else {
+            "No custom global favicon uploaded yet."
+        },
         sel_terminal = if default_theme == "terminal" || default_theme.is_empty() {
             " selected"
         } else {

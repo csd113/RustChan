@@ -11,6 +11,7 @@ pub async fn create_full_backup(
     super::super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let upload_dir = CONFIG.upload_dir.clone();
+    let global_favicon_dir = crate::favicon::global_backup_source_dir();
     let progress = state.backup_progress.clone();
 
     tokio::task::spawn_blocking({
@@ -35,7 +36,9 @@ pub async fn create_full_backup(
 
             progress.reset(crate::middleware::backup_phase::COUNT_FILES);
             let uploads_base = std::path::Path::new(&upload_dir);
-            let file_count = super::count_files_in_dir(uploads_base);
+            let favicon_file_count = super::count_files_in_dir(&global_favicon_dir);
+            let file_count =
+                super::count_files_in_dir(uploads_base).saturating_add(favicon_file_count);
             progress
                 .files_total
                 .store(file_count.saturating_add(1), Ordering::Relaxed);
@@ -79,6 +82,16 @@ pub async fn create_full_backup(
 
                 if uploads_base.exists() {
                     super::add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
+                }
+                if global_favicon_dir.exists() {
+                    super::add_dir_to_zip_with_prefix(
+                        &mut zip,
+                        &global_favicon_dir,
+                        &global_favicon_dir,
+                        "favicon",
+                        opts,
+                        &progress,
+                    )?;
                 }
 
                 let writer = zip.finish().map_err(|error| {

@@ -12,6 +12,7 @@ All notable changes to RustChan will be documented in this file.
 - Server-backed theme switching with explicit `return_to` routing and better backup/restore diagnostics across admin upload paths.
 - Restore route request logging, board backup manifest inspection logs, and larger multipart restore coverage in the route test harness.
 - Per-board archived-thread retention limit in the admin panel, with a default cap of `150` archived threads per board.
+- Automatic favicon generation from a single `512x512` upload, with global site icons plus optional per-board favicon overrides.
 
 ### Improved
 
@@ -23,6 +24,7 @@ All notable changes to RustChan will be documented in this file.
 - Generated `settings.toml` readability by regrouping settings into clearer related sections, and log organization by moving runtime logs into `rustchan-data/logs/`.
 - Backup and restore internals by deduplicating board restore into one shared core and full-site restore into one shared execution path with rollback-aware filesystem swaps.
 - Automatic archive trimming now deletes media only after the last remaining post reference is gone, so deduplicated uploads shared across multiple threads are preserved safely until truly unused.
+- Admin favicon controls now use a compact inline layout with live previews and clearer replace/clear actions for both global and board-specific icons.
 
 ### Fixed
 
@@ -35,6 +37,7 @@ All notable changes to RustChan will be documented in this file.
 - Thumbnail hover and click hitboxes no longer stretch left of the visible image after closing expanded media.
 - OP quotelinks now render the `(OP)` marker with tighter spacing so they display as `>>123 (OP)` instead of looking over-separated.
 - Backup/restore logging now respects the app’s actual tracing targets instead of being silently filtered out.
+- Board index, catalog, and thread tab titles now use clearer board-aware formatting, and full-site restore no longer wipes the current global favicon when restoring an older backup that did not include favicon data.
 
 ### Validation
 

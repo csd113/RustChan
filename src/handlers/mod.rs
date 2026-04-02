@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod board;
+pub mod favicon;
 pub mod posting;
 pub mod render;
 pub mod thread;
@@ -432,7 +433,9 @@ pub fn process_primary_upload(
 fn temp_upload_mime(upload: &TempUpload, allow_any_files: bool) -> Result<String> {
     match crate::utils::files::detect_mime_type(&upload.sniff_bytes) {
         Ok(mime) => Ok(mime.to_string()),
-        Err(_) if allow_any_files => Ok(crate::utils::files::fallback_download_mime_type().to_string()),
+        Err(_) if allow_any_files => {
+            Ok(crate::utils::files::fallback_download_mime_type().to_string())
+        }
         Err(error) => Err(AppError::BadRequest(error.to_string())),
     }
 }
@@ -511,7 +514,11 @@ pub fn process_audio_first_uploads(
     max_audio_size: usize,
     ffmpeg_available: bool,
     ffmpeg_webp_available: bool,
-) -> Result<(Option<crate::utils::files::UploadedFile>, Option<crate::utils::files::UploadedFile>, Option<String>)> {
+) -> Result<(
+    Option<crate::utils::files::UploadedFile>,
+    Option<crate::utils::files::UploadedFile>,
+    Option<String>,
+)> {
     let allow_any_files =
         crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
     let has_audio_first_upload = audio_file_data.is_some() || image_file_data.is_some();
@@ -723,11 +730,9 @@ mod tests {
 
         match result {
             Ok(_) => panic!("mixed upload modes should be rejected"),
-            Err(error) => assert!(
-                error
-                    .to_string()
-                    .contains("Use either the audio/image upload flow or the other-file slot")
-            ),
+            Err(error) => assert!(error
+                .to_string()
+                .contains("Use either the audio/image upload flow or the other-file slot")),
         }
     }
 }

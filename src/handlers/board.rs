@@ -1061,6 +1061,7 @@ pub async fn file_report(
 /// rather than display or play it inline.
 fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
     match path.extension().and_then(|e| e.to_str()) {
+        Some("ico") => Some("image/x-icon"),
         Some("webp") => Some("image/webp"),
         Some("jpg" | "jpeg") => Some("image/jpeg"),
         Some("png") => Some("image/png"),

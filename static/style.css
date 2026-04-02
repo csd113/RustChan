@@ -1725,6 +1725,49 @@ html:not([data-theme]) .poster-id-btn {
   align-items: center;
 }
 
+.favicon-inline-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 0.45rem;
+}
+
+.favicon-inline-row-global {
+  margin-top: 0.75rem;
+}
+
+.favicon-inline-preview {
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border);
+  display: block;
+  flex: 0 0 auto;
+}
+
+.favicon-inline-form,
+.favicon-inline-clear {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.favicon-inline-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.76rem;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.favicon-inline-input {
+  color: var(--text);
+  max-width: 260px;
+}
+
 .nsfw-tag {
   font-size: 0.7rem;
   border: 1px solid var(--red);

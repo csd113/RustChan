@@ -26,7 +26,8 @@ fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
         hint_parts.push(format!("mp4/webm · max {video_mb} MiB"));
     }
 
-    let uploads_enabled = board.allow_images || board.allow_audio || allow_any_files || !accept_parts.is_empty();
+    let uploads_enabled =
+        board.allow_images || board.allow_audio || allow_any_files || !accept_parts.is_empty();
     let extra_accept = if allow_any_files {
         String::new()
     } else {
@@ -72,7 +73,9 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
 
     let image_row = if board.allow_images {
         let image_hint = if board.allow_audio {
-            format!("optional cover image for the audio post · jpg/png/gif/webp · max {image_mb} MiB")
+            format!(
+                "optional cover image for the audio post · jpg/png/gif/webp · max {image_mb} MiB"
+            )
         } else {
             format!("jpg/png/gif/webp · max {image_mb} MiB")
         };
@@ -228,7 +231,9 @@ pub(super) fn reply_form(
 
     let image_row = if board.allow_images {
         let image_hint = if board.allow_audio {
-            format!("optional cover image for the audio reply · jpg/png/gif/webp · max {image_mb} MiB")
+            format!(
+                "optional cover image for the audio reply · jpg/png/gif/webp · max {image_mb} MiB"
+            )
         } else {
             format!("jpg/png/gif/webp · max {image_mb} MiB")
         };

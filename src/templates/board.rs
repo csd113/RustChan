@@ -316,7 +316,7 @@ pub fn board_page(
     ));
 
     base_layout(
-        &format!("/{}", board.short_name),
+        &format!("/{}/ — {} - Index", board.short_name, board.name),
         Some(&board.short_name),
         &body,
         csrf_token,
@@ -770,12 +770,13 @@ pub fn catalog_page(
     ));
     base_layout(
         &format!(
-            "/{}/{}",
+            "/{}/ — {} - {}",
             board.short_name,
+            board.name,
             if hidden_view {
-                "hidden threads"
+                "Hidden Threads"
             } else {
-                "catalog"
+                "Catalog"
             }
         ),
         Some(&board.short_name),
