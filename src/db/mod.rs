@@ -15,6 +15,7 @@ pub mod posts;
 mod schema;
 pub mod threads;
 mod types;
+mod user_thread_prefs;
 
 pub use pool::{first_run_check, has_no_admin, init_pool};
 pub use types::{CachedFile, DbPool, NewPost};
@@ -27,6 +28,7 @@ pub use boards::*;
 pub use fs_ops::*;
 pub use posts::*;
 pub use threads::*;
+pub use user_thread_prefs::*;
 
 /// Given a list of candidate file paths collected from posts about to be deleted,
 /// return only those paths that are no longer referenced by any remaining post.

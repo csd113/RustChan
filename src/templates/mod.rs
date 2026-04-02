@@ -237,7 +237,7 @@ pub const fn report_modal_script() -> &'static str {
     r#"
 <div id="report-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true">
   <div class="compress-modal-box">
-    <div class="compress-modal-title">&#9873; Report Post</div>
+    <div class="compress-modal-title">&#9873; Report Thread/Post</div>
     <form method="POST" action="/report" id="report-form">
       <input type="hidden" name="_csrf"     id="report-csrf">
       <input type="hidden" name="post_id"   id="report-post-id">

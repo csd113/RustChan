@@ -9,11 +9,13 @@
 
 use crate::models::{Board, Pagination, Post, Thread, ThreadSummary};
 use crate::utils::sanitize::escape_html;
+use std::collections::HashSet;
 use std::fmt::Write;
 
 use super::{
     base_layout, compress_modal_script, embed_thumb_from_body, fmt_ts, fmt_ts_short,
-    live_site_name, live_site_subtitle, render_pagination, urlencoding_simple, TOGGLE_SCRIPT,
+    live_site_name, live_site_subtitle, render_pagination, report_modal_script, urlencoding_simple,
+    TOGGLE_SCRIPT,
 };
 
 // ─── Site index (board list) ──────────────────────────────────────────────────
@@ -523,6 +525,9 @@ fn render_thread_summary(
 pub fn catalog_page(
     board: &Board,
     threads: &[Thread],
+    pinned_ids: &HashSet<i64>,
+    hidden_count: usize,
+    hidden_view: bool,
     csrf_token: &str,
     boards: &[Board],
     is_admin: bool,
@@ -555,12 +560,26 @@ pub fn catalog_page(
     } else {
         String::new()
     };
+    let hidden_nav = if hidden_count > 0 {
+        let active_class = if hidden_view { " active" } else { "" };
+        format!(
+            r#"<span class="board-nav-hidden">Hidden Threads: {hidden_count} <a class="board-nav-link{active_class}" href="/{bs}/hidden">[Show]</a></span>"#,
+        )
+    } else {
+        String::new()
+    };
+    let title_suffix = if hidden_view { " hidden threads" } else { "" };
+    let empty_message = if hidden_view {
+        "No hidden threads right now."
+    } else {
+        "No threads yet."
+    };
 
     let _ = write!(
         body,
         r##"<div class="board-header catalog-header-row">
   <div class="catalog-header-left board-catalog-header">
-    <h1>/{bs}/  — {bn}</h1>
+    <h1>/{bs}/  — {bn}{title_suffix}</h1>
     <p class="board-desc">{desc}</p>
   </div>
   <div class="catalog-controls">
@@ -589,7 +608,7 @@ pub fn catalog_page(
     </div>
   </div>
 </div>
-<div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link active" href="/{bs}/catalog">[Catalog]</a>{nav_archive}</div>
+<div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link{catalog_active}" href="/{bs}/catalog">[Catalog]</a>{nav_archive}{hidden_nav}</div>
 <div class="post-toggle-bar centered catalog-toggle-bar">
   <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Start a New Thread ]</a>
 </div>
@@ -599,8 +618,11 @@ pub fn catalog_page(
 <div class="catalog-grid" id="catalog-grid">"##,
         bs = bs,
         bn = bn,
+        title_suffix = title_suffix,
         desc = escape_html(&board.description),
+        catalog_active = if hidden_view { "" } else { " active" },
         nav_archive = nav_archive,
+        hidden_nav = hidden_nav,
         form = super::forms::new_thread_form(&board.short_name, csrf_token, board)
     );
 
@@ -648,34 +670,96 @@ pub fn catalog_page(
                 escape_html(&comment_preview)
             )
         };
+        let is_pinned = pinned_ids.contains(&t.id);
+        let menu_hide_action = if hidden_view { "unhide" } else { "hide" };
+        let menu_hide_label = if hidden_view {
+            "Unhide thread"
+        } else {
+            "Hide thread"
+        };
+        let pin_action = if is_pinned { "unpin" } else { "pin" };
+        let pin_label = if is_pinned {
+            "Unpin thread"
+        } else {
+            "Pin thread"
+        };
+        let return_to = if hidden_view && menu_hide_action == "unhide" {
+            format!("/{}/catalog", board.short_name)
+        } else if hidden_view {
+            format!("/{}/hidden", board.short_name)
+        } else {
+            format!("/{}/catalog", board.short_name)
+        };
 
         let _ = write!(
             body,
-            r#"<div class="catalog-item{sticky}" data-replies="{replies}" data-created="{created}" data-bumped="{bumped}" data-sticky="{is_sticky}">
-<a href="/{board}/thread/{tid}">
+            r#"<div class="catalog-item{sticky}{pinned_class}" data-replies="{replies}" data-created="{created}" data-bumped="{bumped}" data-sticky="{is_sticky}" data-pinned="{is_pinned}">
+<a class="catalog-card-link" href="/{board}/thread/{tid}">
 {thumb}
 <div class="catalog-info">
+<div class="catalog-meta-row">
 <span class="catalog-replies">R: {replies} / F: {images}</span>
+<div class="catalog-card-actions">
+  <button type="button" class="catalog-thread-menu-toggle" data-action="toggle-thread-menu" aria-haspopup="true" aria-expanded="false" aria-label="Thread actions">&#9654;</button>
+  <div class="catalog-thread-menu" hidden>
+    <button type="button" class="catalog-thread-menu-item" data-action="open-report" data-pid="{post_id}" data-tid="{tid}" data-board="{board}" data-csrf="{csrf}" data-report-label="Reporting thread No.{tid}">Report thread</button>
+    <form method="POST" action="/{board}/thread-preference">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <input type="hidden" name="thread_id" value="{tid}">
+      <input type="hidden" name="board" value="{board}">
+      <input type="hidden" name="action" value="{pin_action}">
+      <input type="hidden" name="return_to" value="{return_to}">
+      <button type="submit" class="catalog-thread-menu-item">{pin_label}</button>
+    </form>
+    <form method="POST" action="/{board}/thread-preference">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <input type="hidden" name="thread_id" value="{tid}">
+      <input type="hidden" name="board" value="{board}">
+      <input type="hidden" name="action" value="{menu_hide_action}">
+      <input type="hidden" name="return_to" value="{return_to}">
+      <button type="submit" class="catalog-thread-menu-item">{menu_hide_label}</button>
+    </form>
+  </div>
+</div>
+</div>
 {subject}
 {comment}
 </div>
 </a>
 </div>"#,
             sticky = if t.sticky { " sticky" } else { "" },
+            pinned_class = if is_pinned { " is-pinned" } else { "" },
+            is_pinned = if is_pinned { "1" } else { "0" },
             is_sticky = if t.sticky { "1" } else { "0" },
             board = escape_html(&board.short_name),
             tid = t.id,
+            post_id = t.op_id.unwrap_or(t.id),
             thumb = thumb_html,
             replies = t.reply_count,
             images = t.image_count,
             subject = subject_html,
             comment = comment_html,
             created = t.created_at,
-            bumped = t.bumped_at
+            bumped = t.bumped_at,
+            csrf = escape_html(csrf_token),
+            pin_action = pin_action,
+            pin_label = pin_label,
+            menu_hide_action = menu_hide_action,
+            menu_hide_label = menu_hide_label,
+            return_to = escape_html(&return_to)
+        );
+    }
+
+    if threads.is_empty() {
+        let _ = write!(
+            body,
+            r#"<p class="catalog-empty-state">{}</p>"#,
+            escape_html(empty_message)
         );
     }
 
     body.push_str("</div>");
+    body.push_str(report_modal_script());
     // sortCatalog moved to /static/main.js
     body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
@@ -683,14 +767,26 @@ pub fn catalog_page(
         crate::config::CONFIG.max_video_size,
     ));
     base_layout(
-        &format!("/{}/  catalog", board.short_name),
+        &format!(
+            "/{}/{}",
+            board.short_name,
+            if hidden_view {
+                "hidden threads"
+            } else {
+                "catalog"
+            }
+        ),
         Some(&board.short_name),
         &body,
         csrf_token,
         boards,
         current_theme,
         collapse_greentext,
-        &format!("/{}/catalog", board.short_name),
+        &if hidden_view {
+            format!("/{}/hidden", board.short_name)
+        } else {
+            format!("/{}/catalog", board.short_name)
+        },
     )
 }
 

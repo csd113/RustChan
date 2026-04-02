@@ -413,7 +413,9 @@ fn poster_id_chip_style(poster_id: &str) -> String {
     hasher.update(b":poster-id-chip:");
     hasher.update(poster_id.as_bytes());
     let digest = hasher.finalize();
-    let hue_index = digest.first().map_or(0, |byte| usize::from(*byte) % POSTER_CHIP_HUES.len());
+    let hue_index = digest
+        .first()
+        .map_or(0, |byte| usize::from(*byte) % POSTER_CHIP_HUES.len());
     let hue = POSTER_CHIP_HUES[hue_index];
     let accent_lightness = 60 + digest.get(1).map_or(0, |byte| u16::from(*byte) % 8);
     let background_lightness = 19 + digest.get(2).map_or(0, |byte| u16::from(*byte) % 8);
@@ -425,12 +427,7 @@ fn poster_id_chip_style(poster_id: &str) -> String {
             "--poster-chip-fg:hsl({} 100% 97% / 0.99);",
             "--poster-chip-shadow:color-mix(in srgb, var(--poster-chip-accent) {}%, transparent);"
         ),
-        hue,
-        accent_lightness,
-        hue,
-        background_lightness,
-        hue,
-        shadow_strength
+        hue, accent_lightness, hue, background_lightness, hue, shadow_strength
     )
 }
 

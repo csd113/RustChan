@@ -27,7 +27,7 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use time::Duration;
 
 const PREVIEW_REPLIES: i64 = 3;
@@ -70,6 +70,51 @@ pub fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
     }
 
     client_ip.to_string()
+}
+
+fn viewer_preference_key(client_ip: &str, jar: &CookieJar) -> String {
+    hash_ip(&identity_key(client_ip, jar), &CONFIG.cookie_secret)
+}
+
+fn split_catalog_threads(
+    threads: Vec<crate::models::Thread>,
+    prefs: &HashMap<i64, db::UserThreadPreference>,
+) -> (
+    Vec<crate::models::Thread>,
+    Vec<crate::models::Thread>,
+    HashSet<i64>,
+) {
+    let mut visible = Vec::new();
+    let mut hidden = Vec::new();
+    let mut pinned_ids = HashSet::new();
+
+    for thread in threads {
+        if let Some(pref) = prefs.get(&thread.id) {
+            if pref.pinned {
+                pinned_ids.insert(thread.id);
+            }
+            if pref.hidden {
+                hidden.push(thread);
+                continue;
+            }
+        }
+        visible.push(thread);
+    }
+
+    let sort_threads = |items: &mut Vec<crate::models::Thread>| {
+        items.sort_by(|a, b| {
+            let a_pinned = pinned_ids.contains(&a.id);
+            let b_pinned = pinned_ids.contains(&b.id);
+            b_pinned
+                .cmp(&a_pinned)
+                .then_with(|| b.sticky.cmp(&a.sticky))
+                .then_with(|| b.bumped_at.cmp(&a.bumped_at))
+        });
+    };
+
+    sort_threads(&mut visible);
+    sort_threads(&mut hidden);
+    (visible, hidden, pinned_ids)
 }
 
 // ─── GET / — board list ───────────────────────────────────────────────────────
@@ -476,11 +521,13 @@ pub async fn create_thread(
 pub async fn catalog(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
+    let viewer_key = viewer_preference_key(&client_ip, &jar);
 
     // Add ETag caching to the catalog. Previously every request
     // fetched up to 200 full thread rows and re-rendered the entire page
@@ -490,6 +537,7 @@ pub async fn catalog(
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
+        let viewer_key = viewer_key.clone();
         move || -> Result<(String, String)> {
             let conn = pool.get()?;
             let is_admin = jar_session
@@ -497,7 +545,9 @@ pub async fn catalog(
                 .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-            let threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
+            let all_threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
+            let prefs = db::get_preferences_for_board(&conn, &viewer_key, board.id)?;
+            let (threads, hidden_threads, pinned_ids) = split_catalog_threads(all_threads, &prefs);
             let catalog_sig = threads
                 .iter()
                 .map(|thread| {
@@ -511,13 +561,28 @@ pub async fn catalog(
                 })
                 .collect::<Vec<_>>()
                 .join("|");
+            let mut pref_sig_parts = prefs
+                .iter()
+                .map(|(thread_id, pref)| {
+                    format!(
+                        "{thread_id}:{}:{}",
+                        i32::from(pref.pinned),
+                        i32::from(pref.hidden)
+                    )
+                })
+                .collect::<Vec<_>>();
+            pref_sig_parts.sort();
+            let pref_sig = pref_sig_parts.join("|");
             let admin_tag = if is_admin { "-a" } else { "" };
-            let etag = format!("\"{catalog_sig}-catalog{admin_tag}\"");
+            let etag = format!("\"{catalog_sig}-{pref_sig}-catalog{admin_tag}\"");
             let all_boards = crate::templates::live_boards();
             let collapse_greentext = crate::templates::live_collapse_greentext();
             let html = templates::catalog_page(
                 &board,
                 &threads,
+                &pinned_ids,
+                hidden_threads.len(),
+                false,
                 &csrf_clone,
                 all_boards.as_slice(),
                 is_admin,
@@ -562,6 +627,54 @@ pub async fn catalog(
         HeaderValue::from_static(HTML_CACHE_CONTROL),
     );
     Ok((jar, resp).into_response())
+}
+
+pub async fn hidden_threads(
+    State(state): State<AppState>,
+    Path(board_short): Path<String>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
+    jar: CookieJar,
+) -> Result<(CookieJar, Html<String>)> {
+    let current_theme = current_theme_from_jar(&jar);
+    let (jar, csrf) = ensure_csrf(jar);
+    let viewer_key = viewer_preference_key(&client_ip, &jar);
+    let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
+
+    let html = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let csrf_clone = csrf.clone();
+        let jar_session = jar_session.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            let is_admin = jar_session
+                .as_deref()
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+            let all_threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
+            let prefs = db::get_preferences_for_board(&conn, &viewer_key, board.id)?;
+            let (_visible, hidden_threads, pinned_ids) = split_catalog_threads(all_threads, &prefs);
+
+            let all_boards = crate::templates::live_boards();
+            let collapse_greentext = crate::templates::live_collapse_greentext();
+            Ok(templates::catalog_page(
+                &board,
+                &hidden_threads,
+                &pinned_ids,
+                hidden_threads.len(),
+                true,
+                &csrf_clone,
+                all_boards.as_slice(),
+                is_admin,
+                current_theme.as_deref(),
+                collapse_greentext,
+            ))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok((jar, Html(html)))
 }
 
 // ─── GET /:board/archive ──────────────────────────────────────────────────────
@@ -779,6 +892,75 @@ pub async fn accept_nsfw(jar: CookieJar, Form(form): Form<NsfwConsentForm>) -> R
 
     let redirect_to = form.return_to.as_deref().map_or("/", safe_return_to);
     Ok((jar.add(cookie), Redirect::to(redirect_to)).into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub struct ThreadPreferenceForm {
+    pub thread_id: i64,
+    pub board: String,
+    pub action: String,
+    pub return_to: Option<String>,
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+}
+
+pub async fn update_thread_preference(
+    State(state): State<AppState>,
+    Path(board_short): Path<String>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
+    jar: CookieJar,
+    Form(form): Form<ThreadPreferenceForm>,
+) -> Result<Response> {
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    let board_from_form = form
+        .board
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect::<String>();
+    if board_from_form != board_short {
+        return Err(AppError::BadRequest("Board mismatch.".into()));
+    }
+
+    let viewer_key = viewer_preference_key(&client_ip, &jar);
+    let action = form.action.trim().to_ascii_lowercase();
+    let thread_id = form.thread_id;
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| AppError::NotFound("Board not found.".into()))?;
+            let thread = db::get_thread(&conn, thread_id)?
+                .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
+            if thread.board_id != board.id || thread.archived {
+                return Err(AppError::NotFound("Thread not found.".into()));
+            }
+
+            match action.as_str() {
+                "pin" => db::set_thread_pinned(&conn, &viewer_key, thread.id, true)?,
+                "unpin" => db::set_thread_pinned(&conn, &viewer_key, thread.id, false)?,
+                "hide" => db::set_thread_hidden(&conn, &viewer_key, thread.id, true)?,
+                "unhide" => db::set_thread_hidden(&conn, &viewer_key, thread.id, false)?,
+                _ => return Err(AppError::BadRequest("Unknown thread action.".into())),
+            }
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let redirect_to = form.return_to.as_deref().map_or_else(
+        || format!("/{board_short}/catalog"),
+        |path| safe_return_to(path).to_string(),
+    );
+    Ok(Redirect::to(&redirect_to).into_response())
 }
 
 // ─── POST /report ─────────────────────────────────────────────────────────────

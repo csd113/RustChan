@@ -531,13 +531,13 @@ function collapseVideoEmbed(btn) {
 
 // ─── Report modal ─────────────────────────────────────────────────────────────
 
-function openReportModal(postId, threadId, board, csrf) {
+function openReportModal(postId, threadId, board, csrf, label) {
   document.getElementById('report-post-id').value = postId;
   document.getElementById('report-thread-id').value = threadId;
   document.getElementById('report-board').value = board;
   document.getElementById('report-csrf').value = csrf;
   var info = document.getElementById('report-info');
-  if (info) info.textContent = 'Reporting post No.' + postId;
+  if (info) info.textContent = label || ('Reporting post No.' + postId);
   var reason = document.getElementById('report-reason');
   if (reason) reason.value = '';
   var modal = document.getElementById('report-modal');
@@ -548,6 +548,26 @@ function openReportModal(postId, threadId, board, csrf) {
 function closeReportModal() {
   var modal = document.getElementById('report-modal');
   if (modal) modal.style.display = 'none';
+}
+
+function closeThreadMenus() {
+  document.querySelectorAll('.catalog-thread-menu-toggle[aria-expanded="true"]').forEach(function (btn) {
+    btn.setAttribute('aria-expanded', 'false');
+  });
+  document.querySelectorAll('.catalog-thread-menu').forEach(function (menu) {
+    menu.hidden = true;
+  });
+}
+
+function toggleThreadMenu(toggle) {
+  if (!toggle) return;
+  var actions = toggle.closest('.catalog-card-actions');
+  var menu = actions && actions.querySelector('.catalog-thread-menu');
+  if (!menu) return;
+  var opening = menu.hidden;
+  closeThreadMenus();
+  menu.hidden = !opening;
+  toggle.setAttribute('aria-expanded', opening ? 'true' : 'false');
 }
 
 // ─── Theme picker ─────────────────────────────────────────────────────────────
@@ -1186,6 +1206,9 @@ function sortCatalog(mode) {
   if (!grid) return;
   var items = Array.from(grid.querySelectorAll('.catalog-item'));
   items.sort(function (a, b) {
+    var ap = parseInt(a.dataset.pinned) || 0;
+    var bp = parseInt(b.dataset.pinned) || 0;
+    if (ap !== bp) return bp - ap;
     var as_ = parseInt(a.dataset.sticky) || 0;
     var bs_ = parseInt(b.dataset.sticky) || 0;
     if (as_ !== bs_) return bs_ - as_;
@@ -1379,6 +1402,11 @@ document.addEventListener('click', function (e) {
       case 'dismiss-compress':    dismissCompressModal(); break;
       case 'start-compress':      startCompress(); break;
       case 'close-report':        closeReportModal(); break;
+      case 'toggle-thread-menu':
+        e.preventDefault();
+        e.stopPropagation();
+        toggleThreadMenu(t);
+        break;
       case 'toggle-theme-picker':
         e.preventDefault();
         window.toggleThemePicker && window.toggleThemePicker();
@@ -1403,7 +1431,8 @@ document.addEventListener('click', function (e) {
       case 'collapse-media':      collapseMedia(t); break;
       case 'fetch-updates':       window.fetchUpdates && window.fetchUpdates(); break;
       case 'open-report':
-        openReportModal(t.dataset.pid, t.dataset.tid, t.dataset.board, t.dataset.csrf);
+        closeThreadMenus();
+        openReportModal(t.dataset.pid, t.dataset.tid, t.dataset.board, t.dataset.csrf, t.dataset.reportLabel);
         break;
       case 'open-nsfw-disclaimer':
         e.preventDefault();
@@ -1418,6 +1447,10 @@ document.addEventListener('click', function (e) {
         togglePosterHighlights(t.dataset.threadId, t.dataset.posterId);
         break;
     }
+  }
+
+  if (!e.target.closest('.catalog-card-actions')) {
+    closeThreadMenus();
   }
 
   // data-confirm: prompt before allowing click/submit
@@ -1458,6 +1491,7 @@ document.addEventListener('change', function (e) {
 });
 
 document.addEventListener('submit', function (e) {
+  closeThreadMenus();
   var form = e.target;
   // data-confirm-submit: prompt before form submission
   if (form.dataset.confirmSubmit) {
@@ -1472,6 +1506,12 @@ document.addEventListener('submit', function (e) {
     if (!adminBanDelete(form, pid)) {
       e.preventDefault();
     }
+  }
+});
+
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') {
+    closeThreadMenus();
   }
 });
 

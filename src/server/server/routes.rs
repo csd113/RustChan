@@ -28,6 +28,15 @@ pub(super) fn public_routes() -> Router<AppState> {
         )
         .route("/{board}/catalog", get(crate::handlers::board::catalog))
         .route(
+            "/{board}/hidden",
+            get(crate::handlers::board::hidden_threads),
+        )
+        .route(
+            "/{board}/thread-preference",
+            post(crate::handlers::board::update_thread_preference)
+                .layer(DefaultBodyLimit::max(65_536)),
+        )
+        .route(
             "/{board}/archive",
             get(crate::handlers::board::board_archive),
         )
