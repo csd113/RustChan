@@ -701,7 +701,7 @@ pub fn catalog_page(
 <div class="catalog-meta-center">
 <span class="catalog-replies">R: {replies} / F: {images}</span>
 <div class="catalog-card-actions">
-  <button type="button" class="catalog-thread-menu-toggle" data-action="toggle-thread-menu" aria-haspopup="true" aria-expanded="false" aria-label="Thread actions">&#9654;</button>
+  <button type="button" class="catalog-thread-menu-toggle" data-action="toggle-thread-menu" aria-haspopup="true" aria-expanded="false" aria-label="Thread actions"></button>
   <div class="catalog-thread-menu" hidden>
     <button type="button" class="catalog-thread-menu-item" data-action="open-report" data-pid="{post_id}" data-tid="{tid}" data-board="{board}" data-csrf="{csrf}" data-report-label="Reporting thread No.{tid}">Report thread</button>
     <form method="POST" action="/{board}/thread-preference">

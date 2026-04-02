@@ -118,6 +118,10 @@ html[data-theme="dorfic"] .site-header::before {
   display: none;
 }
 
+.mobile-board-menu-btn::marker {
+  display: none;
+}
+
 .mobile-board-menu-panel {
   position: absolute;
   top: calc(100% + 6px);
@@ -1178,17 +1182,21 @@ html:not([data-theme]) .poster-id-btn {
 }
 
 .catalog-thread-menu-toggle {
-  border: none;
-  background: transparent;
+  border: 1px solid transparent;
+  background: rgba(89, 168, 255, 0.06);
   color: #59a8ff;
   cursor: pointer;
-  font-size: 0.82rem;
-  line-height: 1;
-  padding: 2px 3px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
   opacity: 0;
-  transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease;
+  transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
   transform: translateX(-2px);
   flex: 0 0 auto;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .catalog-item:hover .catalog-thread-menu-toggle,
@@ -1197,9 +1205,20 @@ html:not([data-theme]) .poster-id-btn {
   transform: translateX(0);
 }
 
+.catalog-thread-menu-toggle::before {
+  content: "";
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 -5px 0 currentColor, 0 5px 0 currentColor;
+}
+
 .catalog-thread-menu-toggle:hover,
 .catalog-thread-menu-toggle:focus-visible {
   color: #8cc4ff;
+  border-color: rgba(89, 168, 255, 0.32);
+  background: rgba(89, 168, 255, 0.12);
 }
 
 .catalog-thread-menu {
@@ -2451,6 +2470,11 @@ details.greentext-block > summary {
   user-select: none;
 }
 
+details.greentext-block > summary::marker,
+details.greentext-block > summary::-webkit-details-marker {
+  display: none;
+}
+
 details.greentext-block > summary:hover { color: var(--green-bright); border-color: var(--green-dim); }
 details.greentext-block[open] > summary { color: var(--green-pale); }
 
@@ -2658,6 +2682,11 @@ details.greentext-block[open] > summary { color: var(--green-pale); }
   padding: 4px 8px;
   border: 1px solid var(--border);
   display: inline-block;
+}
+
+.poll-creator > summary::marker,
+.poll-creator > summary::-webkit-details-marker {
+  display: none;
 }
 
 .poll-creator > summary:hover { border-color: var(--green-dim); color: var(--green-bright); }
