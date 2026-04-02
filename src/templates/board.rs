@@ -297,6 +297,7 @@ pub fn board_page(
             &board.short_name,
             csrf_token,
             is_admin,
+            board.show_poster_ids,
         ));
     }
 
@@ -332,6 +333,7 @@ fn render_thread_summary(
     board_short: &str,
     csrf_token: &str,
     is_admin: bool,
+    show_poster_ids: bool,
 ) -> String {
     let t = &summary.thread;
     let mut html = String::new();
@@ -503,6 +505,8 @@ fn render_thread_summary(
                 is_admin,
                 show_media: true,
                 allow_editing: false, // no edit link on board index previews
+                show_poster_ids,
+                thread_op_id: summary.thread.op_id,
             },
             0,
         ));
@@ -735,6 +739,8 @@ pub fn search_page(
                     is_admin: false,
                     show_media: true,
                     allow_editing: false, // no edit link on search results
+                    show_poster_ids: board.show_poster_ids,
+                    thread_op_id: None,
                 },
                 0,
             ));

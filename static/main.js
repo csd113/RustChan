@@ -1216,6 +1216,28 @@ function setCatalogCommentVisibility(mode) {
   grid.classList.toggle('catalog-comments-off', mode === 'off');
 }
 
+function togglePosterHighlights(threadId, posterId) {
+  var posts = Array.from(document.querySelectorAll('.post[data-thread-id]'));
+  var matching = posts.filter(function (post) {
+    return post.dataset.threadId === String(threadId) && post.dataset.posterId === posterId;
+  });
+  if (!matching.length) return;
+
+  var alreadyActive = matching.every(function (post) {
+    return post.classList.contains('post-same-poster-highlighted');
+  });
+
+  posts.forEach(function (post) {
+    post.classList.remove('post-same-poster-highlighted');
+  });
+
+  if (!alreadyActive) {
+    matching.forEach(function (post) {
+      post.classList.add('post-same-poster-highlighted');
+    });
+  }
+}
+
 // Restore saved catalog controls on page load
 (function () {
   try {
@@ -1390,6 +1412,10 @@ document.addEventListener('click', function (e) {
       case 'close-nsfw-disclaimer':
         e.preventDefault();
         closeNsfwDisclaimer();
+        break;
+      case 'toggle-poster-highlight':
+        e.preventDefault();
+        togglePosterHighlights(t.dataset.threadId, t.dataset.posterId);
         break;
     }
   }

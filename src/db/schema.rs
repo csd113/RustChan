@@ -23,6 +23,7 @@ const BASE_SCHEMA_SQL: &str = "
         allow_archive       INTEGER NOT NULL DEFAULT 1,
         allow_video_embeds  INTEGER NOT NULL DEFAULT 0,
         allow_captcha       INTEGER NOT NULL DEFAULT 0,
+        show_poster_ids     INTEGER NOT NULL DEFAULT 0,
         post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
         created_at      INTEGER NOT NULL DEFAULT (unixepoch())
     );

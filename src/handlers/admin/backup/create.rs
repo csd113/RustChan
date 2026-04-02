@@ -162,7 +162,7 @@ pub async fn create_board_backup(
                     "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                              allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                              edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                             allow_captcha, post_cooldown_secs, created_at
+                             allow_captcha, show_poster_ids, post_cooldown_secs, created_at
                       FROM boards WHERE short_name = ?1",
                     params![board_short],
                     |row| {
@@ -184,8 +184,9 @@ pub async fn create_board_backup(
                             allow_archive: row.get::<_, i64>(14)? != 0,
                             allow_video_embeds: row.get::<_, i64>(15)? != 0,
                             allow_captcha: row.get::<_, i64>(16)? != 0,
-                            post_cooldown_secs: row.get(17)?,
-                            created_at: row.get(18)?,
+                            show_poster_ids: row.get::<_, i64>(17)? != 0,
+                            post_cooldown_secs: row.get(18)?,
+                            created_at: row.get(19)?,
                         })
                     },
                 )

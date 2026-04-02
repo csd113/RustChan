@@ -37,6 +37,7 @@ pub struct BoardSettingsForm {
     allow_archive: Option<String>,
     allow_video_embeds: Option<String>,
     allow_captcha: Option<String>,
+    show_poster_ids: Option<String>,
     post_cooldown_secs: Option<String>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
@@ -111,6 +112,7 @@ pub async fn update_board_settings(
                 form.allow_archive.as_deref() == Some("1"),
                 form.allow_video_embeds.as_deref() == Some("1"),
                 form.allow_captcha.as_deref() == Some("1"),
+                form.show_poster_ids.as_deref() == Some("1"),
                 post_cooldown_secs,
             )?;
             tracing::info!(target: "admin", board_id = board_id, "Board settings updated");

@@ -7,6 +7,7 @@
 
 use crate::models::{Board, Post, Thread};
 use crate::utils::{files::format_file_size, sanitize::escape_html};
+use sha2::{Digest, Sha256};
 use std::fmt::Write;
 
 use super::{
@@ -164,6 +165,8 @@ pub fn thread_page(
                 is_admin,
                 show_media: true,
                 allow_editing: board.allow_editing,
+                show_poster_ids: board.show_poster_ids,
+                thread_op_id: thread.op_id,
             },
             board.edit_window_secs,
         ));
@@ -355,6 +358,93 @@ pub struct RenderPostOpts {
     pub is_admin: bool,
     pub show_media: bool,
     pub allow_editing: bool,
+    pub show_poster_ids: bool,
+    pub thread_op_id: Option<i64>,
+}
+
+const POSTER_ID_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn poster_id_char(index: u8) -> char {
+    POSTER_ID_ALPHABET
+        .get(usize::from(index))
+        .copied()
+        .map_or('A', char::from)
+}
+
+fn encode_poster_id(bytes: [u8; 6]) -> String {
+    let mut out = String::with_capacity(8);
+    let [b0, b1, b2, b3, b4, b5] = bytes;
+    out.push(poster_id_char(b0 >> 2));
+    out.push(poster_id_char(((b0 & 0x03) << 4) | (b1 >> 4)));
+    out.push(poster_id_char(((b1 & 0x0f) << 2) | (b2 >> 6)));
+    out.push(poster_id_char(b2 & 0x3f));
+    out.push(poster_id_char(b3 >> 2));
+    out.push(poster_id_char(((b3 & 0x03) << 4) | (b4 >> 4)));
+    out.push(poster_id_char(((b4 & 0x0f) << 2) | (b5 >> 6)));
+    out.push(poster_id_char(b5 & 0x3f));
+    out
+}
+
+fn render_poster_id(post: &Post, show_poster_ids: bool) -> Option<String> {
+    if !show_poster_ids {
+        return None;
+    }
+    let ip_hash = post.ip_hash.as_deref()?;
+    let mut hasher = Sha256::new();
+    hasher.update(crate::config::CONFIG.cookie_secret.as_bytes());
+    hasher.update(b":poster-id:");
+    hasher.update(post.thread_id.to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(ip_hash.as_bytes());
+    let digest = hasher.finalize();
+    let mut short = [0u8; 6];
+    let head = digest.get(..6)?;
+    short.copy_from_slice(head);
+    Some(encode_poster_id(short))
+}
+
+fn poster_id_chip_style(poster_id: &str) -> String {
+    const POSTER_CHIP_HUES: [u16; 18] = [
+        0, 210, 122, 32, 282, 168, 338, 52, 196, 96, 16, 248, 146, 308, 72, 184, 228, 356,
+    ];
+
+    let mut hasher = Sha256::new();
+    hasher.update(b":poster-id-chip:");
+    hasher.update(poster_id.as_bytes());
+    let digest = hasher.finalize();
+    let hue_index = digest.first().map_or(0, |byte| usize::from(*byte) % POSTER_CHIP_HUES.len());
+    let hue = POSTER_CHIP_HUES[hue_index];
+    let accent_lightness = 60 + digest.get(1).map_or(0, |byte| u16::from(*byte) % 8);
+    let background_lightness = 19 + digest.get(2).map_or(0, |byte| u16::from(*byte) % 8);
+    let shadow_strength = 34 + digest.get(3).map_or(0, |byte| u16::from(*byte) % 18);
+    format!(
+        concat!(
+            "--poster-chip-accent:hsl({} 88% {}% / 0.98);",
+            "--poster-chip-bg:hsl({} 64% {}% / 0.97);",
+            "--poster-chip-fg:hsl({} 100% 97% / 0.99);",
+            "--poster-chip-shadow:color-mix(in srgb, var(--poster-chip-accent) {}%, transparent);"
+        ),
+        hue,
+        accent_lightness,
+        hue,
+        background_lightness,
+        hue,
+        shadow_strength
+    )
+}
+
+fn annotate_op_quotelinks(body_html: &str, thread_op_id: Option<i64>) -> String {
+    let Some(op_id) = thread_op_id else {
+        return body_html.to_string();
+    };
+    let target = format!(
+        r##"<a href="#p{op_id}" class="quotelink" data-pid="{op_id}">&gt;&gt;{op_id}</a>"##
+    );
+    let replacement = format!(
+        r##"<a href="#p{op_id}" class="quotelink" data-pid="{op_id}">&gt;&gt;{op_id} (OP)</a>"##
+    );
+    body_html.replace(&target, &replacement)
 }
 
 /// Render a single post as HTML.
@@ -380,7 +470,19 @@ pub fn render_post(
         is_admin,
         show_media,
         allow_editing,
+        show_poster_ids,
+        thread_op_id,
     } = opts;
+    let poster_id = render_poster_id(post, show_poster_ids);
+    let poster_id_html = poster_id.as_ref().map_or_else(String::new, |poster_id| {
+        let chip_style = poster_id_chip_style(poster_id);
+        format!(
+            r#" <button type="button" class="poster-id-btn" style="{chip_style}" data-action="toggle-poster-highlight" data-thread-id="{thread_id}" data-poster-id="{poster_id}">ID: {poster_id}</button>"#,
+            chip_style = chip_style,
+            thread_id = post.thread_id,
+            poster_id = escape_html(poster_id),
+        )
+    });
     let tripcode_html = post
         .tripcode
         .as_ref()
@@ -401,11 +503,14 @@ pub fn render_post(
         .unwrap_or_default();
 
     let op_class = if post.is_op { " op" } else { " reply" };
+    let poster_attr = poster_id.as_ref().map_or_else(String::new, |poster_id| {
+        format!(r#" data-poster-id="{}""#, escape_html(poster_id))
+    });
 
     let mut html = format!(
-        r##"<div class="post{op_class}" id="p{id}">
+        r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}>
 <div class="post-meta">
-<strong class="name">{name}</strong>{tripcode}
+<strong class="name">{name}</strong>{tripcode}{poster_id_html}
 <span class="post-time" data-utc="{ts}">{time}</span>{edited}
 <a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>
 <a class="mobile-reply-btn" href="#post-form-wrap" data-action="append-reply" data-id="{id}" aria-label="Reply to post {id}">reply</a>
@@ -413,8 +518,11 @@ pub fn render_post(
 </div>"##,
         op_class = op_class,
         id = post.id,
+        thread_id = post.thread_id,
+        poster_attr = poster_attr,
         name = escape_html(&post.name),
         tripcode = tripcode_html,
+        poster_id_html = poster_id_html,
         ts = post.created_at,
         time = fmt_ts_short(post.created_at),
         edited = edited_html,
@@ -454,7 +562,7 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container audio-container">
 <div class="file-info">
-  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
 <div class="audio-thumb">
   <img class="thumb" src="/boards/{th}" loading="lazy" alt="audio">
@@ -475,7 +583,7 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container">
 <div class="file-info">
-  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
 <a class="media-preview" data-action="expand-media" href="/boards/{f}" target="_blank" rel="noreferrer" title="click to play">
@@ -498,7 +606,7 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container">
 <div class="file-info">
-  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
 <a class="media-preview" data-action="expand-media" href="/boards/{f}" target="_blank" rel="noreferrer" title="click to expand">
@@ -525,7 +633,7 @@ pub fn render_post(
                 html,
                 r#"<div class="file-container file-download">
 <div class="file-info">
-  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
 </div>"#,
                 f = escape_html(file),
@@ -547,7 +655,7 @@ pub fn render_post(
                 html,
                 r#"<div class="file-container audio-container audio-combo">
 <div class="file-info">
-  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
 <audio controls preload="none" class="audio-player">
   <source src="/boards/{f}" type="{mime}">
@@ -563,7 +671,8 @@ pub fn render_post(
     }
 
     // Post body (pre-rendered, sanitised HTML)
-    let _ = write!(html, r#"<div class="post-body">{}</div>"#, post.body_html);
+    let body_html = annotate_op_quotelinks(&post.body_html, thread_op_id);
+    let _ = write!(html, r#"<div class="post-body">{body_html}</div>"#);
 
     // Edit link + report button (only on thread pages where show_delete=true)
     if show_delete {

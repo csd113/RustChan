@@ -103,6 +103,7 @@ pub struct Board {
     pub allow_archive: bool,   // when true, overflow threads are archived instead of deleted
     pub allow_video_embeds: bool, // per-board inline video embed unfurling (YouTube/Invidious/Streamable)
     pub allow_captcha: bool,      // per-board PoW CAPTCHA on threads and replies (hashcash-style)
+    pub show_poster_ids: bool,    // per-board thread-local poster IDs in post headers
     pub post_cooldown_secs: i64,  // seconds a user must wait between posts (0 = disabled)
     pub created_at: i64,          // Unix timestamp
 }

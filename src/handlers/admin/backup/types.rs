@@ -34,6 +34,8 @@ pub(super) mod board_backup_types {
         #[serde(default)]
         pub allow_captcha: bool,
         #[serde(default)]
+        pub show_poster_ids: bool,
+        #[serde(default)]
         pub post_cooldown_secs: i64,
         pub created_at: i64,
     }

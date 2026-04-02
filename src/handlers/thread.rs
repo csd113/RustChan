@@ -636,7 +636,7 @@ pub async fn thread_updates(
                 let conn = pool.get()?;
 
                 // Validate board + thread exist (returns 404 for bad URLs).
-                let _board = db::get_board_by_short(&conn, &board_short)?
+                let board = db::get_board_by_short(&conn, &board_short)?
                     .ok_or_else(|| crate::error::AppError::NotFound("Board not found.".into()))?;
                 let thread = db::get_thread(&conn, thread_id)?
                     .ok_or_else(|| crate::error::AppError::NotFound("Thread not found.".into()))?;
@@ -660,6 +660,8 @@ pub async fn thread_updates(
                             is_admin: false,
                             show_media: true,
                             allow_editing: false, // no edit link in auto-appended HTML; reload restores it
+                            show_poster_ids: thread.board_id == board.id && board.show_poster_ids,
+                            thread_op_id: thread.op_id,
                         },
                         0,
                     ));

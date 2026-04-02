@@ -252,8 +252,8 @@ where
                  allow_images=?6, allow_video=?7, allow_audio=?8, allow_any_files=?9,
                  allow_tripcodes=?10, edit_window_secs=?11, allow_editing=?12,
                  allow_archive=?13, allow_video_embeds=?14, allow_captcha=?15,
-                 post_cooldown_secs=?16
-                 WHERE id=?17",
+                 show_poster_ids=?16, post_cooldown_secs=?17
+                 WHERE id=?18",
                 params![
                     manifest.board.name,
                     manifest.board.description,
@@ -270,6 +270,7 @@ where
                     i64::from(manifest.board.allow_archive),
                     i64::from(manifest.board.allow_video_embeds),
                     i64::from(manifest.board.allow_captcha),
+                    i64::from(manifest.board.show_poster_ids),
                     manifest.board.post_cooldown_secs,
                     existing_id,
                 ],
@@ -281,8 +282,8 @@ where
                 "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
                  bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
                  allow_tripcodes, edit_window_secs, allow_editing, allow_archive,
-                 allow_video_embeds, allow_captcha, post_cooldown_secs, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                 allow_video_embeds, allow_captcha, show_poster_ids, post_cooldown_secs, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 params![
                     manifest.board.short_name,
                     manifest.board.name,
@@ -300,6 +301,7 @@ where
                     i64::from(manifest.board.allow_archive),
                     i64::from(manifest.board.allow_video_embeds),
                     i64::from(manifest.board.allow_captcha),
+                    i64::from(manifest.board.show_poster_ids),
                     manifest.board.post_cooldown_secs,
                     manifest.board.created_at,
                 ],
@@ -1625,7 +1627,7 @@ pub async fn board_backup(
                 "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                         allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                         edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                        allow_captcha, post_cooldown_secs, created_at
+                        allow_captcha, show_poster_ids, post_cooldown_secs, created_at
                  FROM boards WHERE short_name = ?1",
                 params![board_short],
                 |r| Ok(BoardRow {
@@ -1646,8 +1648,9 @@ pub async fn board_backup(
                     allow_archive: r.get::<_, i64>(14)? != 0,
                     allow_video_embeds: r.get::<_, i64>(15)? != 0,
                     allow_captcha: r.get::<_, i64>(16)? != 0,
-                    post_cooldown_secs: r.get(17)?,
-                    created_at: r.get(18)?,
+                    show_poster_ids: r.get::<_, i64>(17)? != 0,
+                    post_cooldown_secs: r.get(18)?,
+                    created_at: r.get(19)?,
                 }),
             ).map_err(|_| AppError::NotFound(format!("Board '{board_short}' not found")))?;
 

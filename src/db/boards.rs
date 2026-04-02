@@ -33,8 +33,9 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         allow_archive: row.get::<_, i32>(14)? != 0,
         allow_video_embeds: row.get::<_, i32>(15)? != 0,
         allow_captcha: row.get::<_, i32>(16)? != 0,
-        post_cooldown_secs: row.get(17)?,
-        created_at: row.get(18)?,
+        show_poster_ids: row.get::<_, i32>(17)? != 0,
+        post_cooldown_secs: row.get(18)?,
+        created_at: row.get(19)?,
     })
 }
 
@@ -111,7 +112,7 @@ pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                 edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                allow_captcha, post_cooldown_secs, created_at
+                allow_captcha, show_poster_ids, post_cooldown_secs, created_at
          FROM boards ORDER BY id ASC",
     )?;
     let boards = stmt
@@ -134,8 +135,8 @@ pub fn get_all_boards_with_stats(
         "SELECT b.id, b.short_name, b.name, b.description, b.nsfw, b.max_threads,
                 b.bump_limit, b.allow_images, b.allow_video, b.allow_audio,
                 b.allow_any_files, b.allow_tripcodes, b.edit_window_secs, b.allow_editing,
-                b.allow_archive, b.allow_video_embeds, b.allow_captcha, b.post_cooldown_secs,
-                b.created_at,
+                b.allow_archive, b.allow_video_embeds, b.allow_captcha, b.show_poster_ids,
+                b.post_cooldown_secs, b.created_at,
                 COUNT(t.id) AS thread_count
          FROM boards b
          LEFT JOIN threads t ON t.board_id = b.id AND t.archived = 0
@@ -145,7 +146,7 @@ pub fn get_all_boards_with_stats(
     let out = stmt
         .query_map([], |row| {
             let board = map_board(row)?;
-            let thread_count: i64 = row.get(19)?;
+            let thread_count: i64 = row.get(20)?;
             Ok(crate::models::BoardStats {
                 board,
                 thread_count,
@@ -162,7 +163,7 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
         "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                 edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                allow_captcha, post_cooldown_secs, created_at
+                allow_captcha, show_poster_ids, post_cooldown_secs, created_at
          FROM boards WHERE short_name = ?1",
     )?;
     Ok(stmt.query_row(params![short], map_board).optional()?)
@@ -273,6 +274,7 @@ pub fn update_board_settings(
     allow_archive: bool,
     allow_video_embeds: bool,
     allow_captcha: bool,
+    show_poster_ids: bool,
     post_cooldown_secs: i64,
 ) -> Result<()> {
     let n = conn
@@ -282,8 +284,8 @@ pub fn update_board_settings(
              allow_images=?6, allow_video=?7, allow_audio=?8, allow_any_files=?9,
              allow_tripcodes=?10, edit_window_secs=?11, allow_editing=?12,
              allow_archive=?13, allow_video_embeds=?14, allow_captcha=?15,
-             post_cooldown_secs=?16
-             WHERE id=?17",
+             show_poster_ids=?16, post_cooldown_secs=?17
+             WHERE id=?18",
             params![
                 name,
                 description,
@@ -300,6 +302,7 @@ pub fn update_board_settings(
                 i32::from(allow_archive),
                 i32::from(allow_video_embeds),
                 i32::from(allow_captcha),
+                i32::from(show_poster_ids),
                 post_cooldown_secs,
                 id,
             ],

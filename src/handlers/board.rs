@@ -1022,6 +1022,8 @@ pub async fn api_post_preview(
                             is_admin: false,
                             show_media: true,
                             allow_editing: false, // no edit link in read-only preview
+                            show_poster_ids: false,
+                            thread_op_id: None,
                         },
                         0, // no edit window
                     );
@@ -1229,7 +1231,7 @@ mod tests {
             crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
             crate::db::update_board_settings(
                 &conn, 1, "Test", "", false, 500, 100, false, false, false, false, true, 0, false,
-                true, false, false, 0,
+                true, false, false, false, 0,
             )
             .expect("update board settings");
         }

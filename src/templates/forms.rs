@@ -304,6 +304,7 @@ mod tests {
             allow_archive: true,
             allow_video_embeds: false,
             allow_captcha: false,
+            show_poster_ids: false,
             post_cooldown_secs: 0,
             created_at: 0,
         }

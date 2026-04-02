@@ -98,6 +98,7 @@ pub fn admin_panel_page(
   <label><input type="checkbox" name="allow_archive"   value="1"{archive_ck}> Enable archive</label>
   <label><input type="checkbox" name="allow_video_embeds" value="1"{embeds_ck}> Embed video links (YouTube / Invidious / Streamable)</label>
   <label><input type="checkbox" name="allow_captcha"      value="1"{captcha_ck}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)</label>
+  <label><input type="checkbox" name="show_poster_ids"    value="1"{poster_ids_ck}> Show thread-local poster IDs</label>
   <label><input type="checkbox" name="allow_editing"   value="1"{edit_ck}>
     Allow post editing</label>
 </div>
@@ -163,7 +164,8 @@ pub fn admin_panel_page(
             archive_ck = checked(b.allow_archive),
             edit_ck = checked(b.allow_editing),
             embeds_ck = checked(b.allow_video_embeds),
-            captcha_ck = checked(b.allow_captcha)
+            captcha_ck = checked(b.allow_captcha),
+            poster_ids_ck = checked(b.show_poster_ids)
         );
     }
 
