@@ -735,6 +735,10 @@ html.no-js .post-form-wrap {
   overflow: hidden;
 }
 
+.file-container + .post-body {
+  margin-top: 1.35rem;
+}
+
 /* .quote is emitted by render_post_body for greentext lines */
 .post-body .quote { color: #789922; }
 
