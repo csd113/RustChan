@@ -16,6 +16,7 @@ All notable changes to RustChan will be documented in this file.
 
 - Mobile interaction quality for reply, media expansion, archive rows, catalog controls, board descriptions, and header layout without changing the desktop interface.
 - Poster ID chips on boards with IDs enabled now use stronger per-ID color separation so different posters are easier to tell apart without breaking theme compatibility.
+- NSFW disclaimer copy and action-button styling now read more clearly across themes, including light-theme contrast improvements for the consent button.
 - Tor and mobile resilience through safer identity bucketing, less brittle theme persistence, JS-degraded fallbacks, and better cache revalidation for board, catalog, and thread pages.
 - Generated `settings.toml` readability by regrouping settings into clearer related sections, and log organization by moving runtime logs into `rustchan-data/logs/`.
 - Backup and restore internals by deduplicating board restore into one shared core and full-site restore into one shared execution path with rollback-aware filesystem swaps.
@@ -26,6 +27,8 @@ All notable changes to RustChan will be documented in this file.
 - Admin archive, pin, thread deletion, board restore, and full restore flows now refresh more reliably without requiring manual cookie or cache clearing.
 - Firefox and localhost admin restore uploads no longer fail on `Origin: null` or loopback host alias mismatches when valid session and CSRF state are present.
 - Theme picker, board menu, catalog sort controls, and top-bar alignment no longer overflow or misplace themselves on mobile and Tor Browser.
+- Thumbnail hover and click hitboxes no longer stretch left of the visible image after closing expanded media.
+- OP quotelinks now render the `(OP)` marker with tighter spacing so they display as `>>123 (OP)` instead of looking over-separated.
 - Backup/restore logging now respects the app’s actual tracing targets instead of being silently filtered out.
 
 ### Validation
