@@ -474,7 +474,12 @@ pub async fn create_thread(
                 allow_archive: board.allow_archive,
             });
 
-            tracing::info!(target: "board", thread_id = thread_id, board = %board.short_name, "New thread created");
+            tracing::info!(
+                target: "board",
+                board = %board.short_name,
+                thread_id = thread_id,
+                "Created new thread"
+            );
             Ok(format!("/{}/thread/{thread_id}", board.short_name))
         }
     })

@@ -288,7 +288,11 @@ pub fn detect_tor(
 
         let mut attempt = 0u32;
         loop {
-            tracing::info!(target: "rustchan::detect", attempt, "Tor: starting Arti");
+            tracing::info!(
+                target: "rustchan::detect",
+                attempt = attempt + 1,
+                "Starting Tor"
+            );
             let run_start = std::time::Instant::now();
             let result = tokio::select! {
                 r = run_arti(data_dir.clone(), bind_port, onion_address.clone()) => r,

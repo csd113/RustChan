@@ -73,7 +73,7 @@ pub async fn create_board(
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             db::create_board(&conn, &short, &name, &description, nsfw)?;
-            tracing::info!(target: "admin", board = %short, "Board created");
+            tracing::info!(target: "admin", board = %short, "Created board");
             // Refresh live board list so the top bar on any subsequent error
             // page includes the newly created board.
             crate::templates::set_live_boards(db::get_all_boards(&conn)?);

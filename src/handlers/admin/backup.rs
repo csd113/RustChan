@@ -49,21 +49,21 @@ pub async fn backup_request_logging_middleware(req: Request, next: Next) -> Resp
     let headers = req.headers().clone();
     let response = next.run(req).await;
     let status = response.status();
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let content_length = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok());
 
     tracing::info!(
         target: "admin",
         method = %method,
         uri = %uri,
         status = status.as_u16(),
-        content_type = headers
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("<missing>"),
-        content_length = headers
-            .get(header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("<missing>"),
-        "Admin backup route handled request"
+        content_type = content_type.unwrap_or(""),
+        content_length = content_length.unwrap_or(""),
+        "Admin backup request completed"
     );
 
     response
@@ -1935,17 +1935,18 @@ pub async fn board_restore(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let content_length = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok());
+
     tracing::info!(
         target: "admin",
         route = "/admin/board/restore",
-        content_type = headers
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("<missing>"),
-        content_length = headers
-            .get(header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("<missing>"),
+        content_type = content_type.unwrap_or(""),
+        content_length = content_length.unwrap_or(""),
         has_session_cookie = jar.get(super::SESSION_COOKIE).is_some(),
         has_csrf_cookie = jar.get("csrf_token").is_some(),
         "Board restore upload started"

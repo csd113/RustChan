@@ -136,10 +136,20 @@ fn convert_to_webp(input: &Path, output_dir: &Path, file_stem: &str) -> Result<C
         Ok(()) => {
             atomic_rename(&tmp_out, &output)?;
             let final_size = file_size(&output)?;
+            let source_name = input
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("input image");
+            let output_name = output
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("converted.webp");
             tracing::info!(
-                "image→webp: converted {} → {} ({final_size} bytes)",
-                input.display(),
-                output.display()
+                target: "convert",
+                source = source_name,
+                saved_as = output_name,
+                bytes = final_size,
+                "Converted image to WebP"
             );
             Ok(ConversionResult {
                 final_path: output,

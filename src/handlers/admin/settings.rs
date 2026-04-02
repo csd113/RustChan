@@ -131,6 +131,11 @@ pub async fn update_board_settings(
         move || -> Result<()> {
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            let board_short: String = conn.query_row(
+                "SELECT short_name FROM boards WHERE id = ?1",
+                rusqlite::params![board_id],
+                |row| row.get(0),
+            )?;
             db::update_board_settings(
                 &conn,
                 board_id,
@@ -154,7 +159,12 @@ pub async fn update_board_settings(
                 form.show_poster_ids.as_deref() == Some("1"),
                 post_cooldown_secs,
             )?;
-            tracing::info!(target: "admin", board_id = board_id, "Board settings updated");
+            tracing::info!(
+                target: "admin",
+                board = %board_short,
+                board_id = board_id,
+                "Saved board settings"
+            );
             crate::templates::set_live_boards(db::get_all_boards(&conn)?);
             Ok(())
         }

@@ -45,6 +45,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, OnceLock};
 
+use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::{FmtContext, MakeWriter};
@@ -159,6 +160,133 @@ fn write_component_tag(writer: &mut Writer<'_>, target: &str, ansi: bool) -> fmt
     write!(writer, "{open}[{display:<8}]{close} ")
 }
 
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
+            while let Some(next) = chars.next() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        out.push(ch);
+    }
+
+    out
+}
+
+fn humanize_field_name(name: &str) -> String {
+    match name {
+        "uri" => "URI".to_string(),
+        "id" => "ID".to_string(),
+        "mime" => "MIME type".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
+fn should_hide_field(name: &str, value: &str) -> bool {
+    matches!(value, "" | "<missing>")
+        && matches!(name, "content_type" | "content_length" | "mime" | "path")
+}
+
+#[derive(Default)]
+struct LogEventFields {
+    message: Option<String>,
+    fields: Vec<(String, String)>,
+}
+
+impl LogEventFields {
+    fn push_field(&mut self, field: &Field, value: String) {
+        let clean = strip_ansi(value.trim());
+        if field.name() == "message" {
+            if !clean.is_empty() {
+                self.message = Some(clean);
+            }
+            return;
+        }
+        if should_hide_field(field.name(), &clean) {
+            return;
+        }
+        self.fields.push((field.name().to_string(), clean));
+    }
+}
+
+impl Visit for LogEventFields {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.push_field(field, value.to_string());
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.push_field(
+            field,
+            if value {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        );
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.push_field(field, value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.push_field(field, value.to_string());
+    }
+
+    fn record_i128(&mut self, field: &Field, value: i128) {
+        self.push_field(field, value.to_string());
+    }
+
+    fn record_u128(&mut self, field: &Field, value: u128) {
+        self.push_field(field, value.to_string());
+    }
+
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        self.push_field(field, value.to_string());
+    }
+
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+        self.push_field(field, value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        self.push_field(field, format!("{value:?}"));
+    }
+}
+
+fn write_event_fields(writer: &mut Writer<'_>, event: &Event<'_>) -> fmt::Result {
+    let mut fields = LogEventFields::default();
+    event.record(&mut fields);
+
+    let has_message = fields.message.is_some();
+
+    if let Some(message) = fields.message.as_deref() {
+        write!(writer, "{message}")?;
+    }
+
+    if !fields.fields.is_empty() {
+        if has_message {
+            write!(writer, " - ")?;
+        }
+
+        for (index, (name, value)) in fields.fields.iter().enumerate() {
+            if index > 0 {
+                write!(writer, ", ")?;
+            }
+            write!(writer, "{}: {}", humanize_field_name(name), value)?;
+        }
+    }
+
+    Ok(())
+}
+
 // ─── Terminal formatter ───────────────────────────────────────────────────────
 
 /// Writes one compact line per log event to the terminal.
@@ -204,7 +332,8 @@ where
         // tracing_subscriber writes the `message` field first, then all other
         // key=value fields separated by spaces — e.g.:
         //   "Request received  method=GET path=/b/ latency_ms=4"
-        ctx.format_fields(writer.by_ref(), event)?;
+        let _ = ctx;
+        write_event_fields(&mut writer, event)?;
         writeln!(writer)
     }
 }
@@ -246,7 +375,8 @@ where
         write_component_tag(&mut writer, meta.target(), false)?;
 
         // ── Message and structured key=value fields ───────────────────────────
-        ctx.format_fields(writer.by_ref(), event)?;
+        let _ = ctx;
+        write_event_fields(&mut writer, event)?;
 
         // ── Source location suffix for WARN and ERROR ─────────────────────────
         // Only attached at these levels because:

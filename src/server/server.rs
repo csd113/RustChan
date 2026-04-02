@@ -774,7 +774,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 tracing::info!(
                     target: "server",
                     url = %format!("https://{https_addr}/admin"),
-                    "Admin panel (HTTPS)"
+                    "Admin panel available over HTTPS"
                 );
 
                 tokio::spawn(async move {
@@ -794,7 +794,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 tracing::info!(
                     target: "server",
                     url = %format!("https://{https_addr}/admin"),
-                    "Admin panel (HTTPS/ACME)"
+                    "Admin panel available over HTTPS (ACME)"
                 );
 
                 tokio::spawn(async move {
