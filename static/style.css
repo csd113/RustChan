@@ -201,6 +201,11 @@ html[data-theme="dorfic"] .site-header::before {
   color: var(--green-pale);
   user-select: all;
   font-size: 0.82rem;
+  display: inline-block;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* ── Home button ──────────────────────────────────────────────────────────── */
