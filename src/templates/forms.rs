@@ -30,6 +30,8 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
     let video_mb = CONFIG.max_video_size / 1024 / 1024;
     let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
+    let audio_image_dual_mode =
+        board.allow_audio && board.allow_images && !board.allow_video && !allow_any_files;
 
     let mut accept_parts: Vec<&str> = Vec::new();
     let mut hint_parts: Vec<String> = Vec::new();
@@ -65,7 +67,7 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
         hint_parts.join(" &nbsp;|&nbsp; ")
     };
 
-    let optional_image_row = if board.allow_audio && board.allow_images && !board.allow_video && !allow_any_files {
+    let optional_image_row = if audio_image_dual_mode {
         format!(
             r#"<details class="upload-secondary-toggle">
               <summary aria-label="Show optional image upload">▾ Optional Image</summary>
@@ -81,17 +83,27 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
         String::new()
     };
 
-    let primary_name = if board.allow_audio && board.allow_images && !board.allow_video && !allow_any_files {
+    let primary_name = if audio_image_dual_mode {
         "audio_file"
     } else {
         "file"
     };
     let primary_label = if primary_name == "audio_file" { "audio" } else { "upload" };
+    let primary_accept = if audio_image_dual_mode {
+        AUDIO_ACCEPT.to_string()
+    } else {
+        file_accept
+    };
+    let primary_hint = if audio_image_dual_mode {
+        format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB")
+    } else {
+        file_hint
+    };
 
     format!(
         r#"    <tr><td>{primary_label}</td>
-        <td><input type="file" name="{primary_name}" data-onchange-check-size="1" accept="{file_accept}">
-            <span style="font-size:0.72rem;color:var(--text-dim)">{file_hint}</span>
+        <td><input type="file" name="{primary_name}" data-onchange-check-size="1" accept="{primary_accept}">
+            <span style="font-size:0.72rem;color:var(--text-dim)">{primary_hint}</span>
             {optional_image_row}</td></tr>"#,
     )
 }
@@ -358,6 +370,10 @@ mod tests {
         assert!(html.contains("<td>audio</td>"));
         assert!(html.contains("Optional Image"));
         assert!(html.contains("optional cover image for the audio post"));
+        assert!(html.contains("accept=\"audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac\""));
+        assert!(html.contains("mp3/ogg/flac/wav/m4a · max"));
+        assert!(!html.contains("jpg/png/gif/webp · max 8 MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a"));
+        assert!(!html.contains("video/mp4,video/webm"));
         assert!(!html.contains("name=\"file\""));
     }
 

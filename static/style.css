@@ -3376,6 +3376,7 @@ html:not([data-theme]) .compress-do-btn {
 }
 
 .thread-nav-bottom {
+  margin-top: 8px;
   padding-top: 10px;
 }
 

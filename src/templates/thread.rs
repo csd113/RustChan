@@ -193,12 +193,6 @@ pub fn thread_page(
     }
 
     body.push_str("</div><!-- #thread-posts -->\n");
-    body.push_str(&render_thread_nav(
-        &board.short_name,
-        thread.reply_count,
-        true,
-    ));
-    body.push_str("<div id=\"bottom\"></div>\n");
 
     if !thread.locked {
         let form_html = super::forms::reply_form(&board.short_name, thread.id, csrf_token, board);
@@ -212,6 +206,12 @@ pub fn thread_page(
 </div>"##
         );
     }
+    body.push_str("<div id=\"bottom\"></div>\n");
+    body.push_str(&render_thread_nav(
+        &board.short_name,
+        thread.reply_count,
+        true,
+    ));
 
     body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
