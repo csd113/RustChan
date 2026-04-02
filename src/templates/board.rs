@@ -559,14 +559,30 @@ pub fn catalog_page(
     <h1>/{bs}/  — {bn}</h1>
     <p class="board-desc">{desc}</p>
   </div>
-  <div class="catalog-sort-wrap">
-    <label class="catalog-sort-label" for="catalog-sort">sort:</label>
-    <select id="catalog-sort" class="catalog-sort-select" data-action="sort-catalog">
+  <div class="catalog-controls">
+    <div class="catalog-control-group">
+      <label class="catalog-sort-label" for="catalog-sort">Sort By:</label>
+      <select id="catalog-sort" class="catalog-sort-select" data-action="sort-catalog">
       <option value="bump" selected>bump order</option>
       <option value="replies">reply count</option>
       <option value="created">creation date</option>
       <option value="last_reply">last reply</option>
-    </select>
+      </select>
+    </div>
+    <div class="catalog-control-group">
+      <label class="catalog-sort-label" for="catalog-image-size">Image Size:</label>
+      <select id="catalog-image-size" class="catalog-sort-select" data-action="catalog-image-size">
+        <option value="small" selected>Small</option>
+        <option value="large">Large</option>
+      </select>
+    </div>
+    <div class="catalog-control-group">
+      <label class="catalog-sort-label" for="catalog-show-comment">Show OP Comment:</label>
+      <select id="catalog-show-comment" class="catalog-sort-select" data-action="catalog-show-comment">
+        <option value="on">On</option>
+        <option value="off" selected>Off</option>
+      </select>
+    </div>
   </div>
 </div>
 <div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link active" href="/{bs}/catalog">[Catalog]</a>{nav_archive}</div>
@@ -598,11 +614,36 @@ pub fn catalog_page(
             escape_html(th)
         ));
 
-        let subject = t
+        let subject_preview: String = t
             .subject
             .as_deref()
-            .unwrap_or_else(|| t.op_body.as_deref().unwrap_or(""));
-        let preview: String = subject.chars().take(80).collect();
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect();
+        let comment_preview: String = t
+            .op_body
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(140)
+            .collect();
+        let subject_html = if subject_preview.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"<p class="catalog-subject">{}</p>"#,
+                escape_html(&subject_preview)
+            )
+        };
+        let comment_html = if comment_preview.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"<p class="catalog-comment">{}</p>"#,
+                escape_html(&comment_preview)
+            )
+        };
 
         let _ = write!(
             body,
@@ -611,7 +652,8 @@ pub fn catalog_page(
 {thumb}
 <div class="catalog-info">
 <span class="catalog-replies">R: {replies} / F: {images}</span>
-<p class="catalog-subject">{subj}</p>
+{subject}
+{comment}
 </div>
 </a>
 </div>"#,
@@ -622,7 +664,8 @@ pub fn catalog_page(
             thumb = thumb_html,
             replies = t.reply_count,
             images = t.image_count,
-            subj = escape_html(&preview),
+            subject = subject_html,
+            comment = comment_html,
             created = t.created_at,
             bumped = t.bumped_at
         );

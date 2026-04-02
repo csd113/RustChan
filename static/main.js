@@ -1202,13 +1202,42 @@ function sortCatalog(mode) {
   grid.appendChild(frag);
 }
 
-// Restore saved catalog sort on page load
+function setCatalogImageSize(size) {
+  try { sessionStorage.setItem('catalog_image_size', size); } catch (e) {}
+  var grid = document.getElementById('catalog-grid');
+  if (!grid) return;
+  grid.classList.toggle('catalog-large', size === 'large');
+}
+
+function setCatalogCommentVisibility(mode) {
+  try { sessionStorage.setItem('catalog_show_comment', mode); } catch (e) {}
+  var grid = document.getElementById('catalog-grid');
+  if (!grid) return;
+  grid.classList.toggle('catalog-comments-off', mode === 'off');
+}
+
+// Restore saved catalog controls on page load
 (function () {
   try {
-    var saved = sessionStorage.getItem('catalog_sort');
-    if (saved) {
-      var sel = document.getElementById('catalog-sort');
-      if (sel) { sel.value = saved; sortCatalog(saved); }
+    var sortValue = sessionStorage.getItem('catalog_sort') || 'bump';
+    var sortSelect = document.getElementById('catalog-sort');
+    if (sortSelect) {
+      sortSelect.value = sortValue;
+      sortCatalog(sortValue);
+    }
+
+    var imageSize = sessionStorage.getItem('catalog_image_size') || 'small';
+    var imageSizeSelect = document.getElementById('catalog-image-size');
+    if (imageSizeSelect) {
+      imageSizeSelect.value = imageSize;
+      setCatalogImageSize(imageSize);
+    }
+
+    var showComment = sessionStorage.getItem('catalog_show_comment') || 'off';
+    var commentSelect = document.getElementById('catalog-show-comment');
+    if (commentSelect) {
+      commentSelect.value = showComment;
+      setCatalogCommentVisibility(showComment);
     }
   } catch (e) {}
 })();
@@ -1388,6 +1417,12 @@ document.addEventListener('change', function (e) {
   // Catalog sort
   if (target.id === 'catalog-sort') {
     sortCatalog(target.value);
+  }
+  if (target.id === 'catalog-image-size') {
+    setCatalogImageSize(target.value);
+  }
+  if (target.id === 'catalog-show-comment') {
+    setCatalogCommentVisibility(target.value);
   }
   // Allow-editing checkbox: show/hide edit-window row
   if (target.name === 'allow_editing') {

@@ -376,25 +376,34 @@ main {
   text-align: center;
 }
 
-/* ── Catalog header row with sort dropdown ────────────────────────────────── */
+/* ── Catalog header row with controls ─────────────────────────────────────── */
 
 .catalog-header-row {
-  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   text-align: center;
 }
 
 .catalog-header-left { display: block; }
 
-.catalog-sort-wrap {
-  position: absolute;
-  top: 50%;
-  right: 0;
-  transform: translateY(-50%);
+.catalog-controls {
+  position: static;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  column-gap: 12px;
+  width: 100%;
+  max-width: none;
+  padding-top: 0;
+}
+
+.catalog-control-group {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
-  flex-shrink: 0;
-  padding-top: 2px;
 }
 
 .archive-thread-link {
@@ -1063,6 +1072,29 @@ html.no-js .post-form-wrap {
 .catalog-info { font-size: 0.72rem; }
 .catalog-replies { color: var(--green-dim); font-weight: bold; letter-spacing: 0.03em; }
 .catalog-subject { color: var(--text-dim); margin-top: 2px; }
+.catalog-comment {
+  color: var(--text);
+  margin-top: 4px;
+  line-height: 1.35;
+  text-align: left;
+  word-break: break-word;
+}
+
+.catalog-grid.catalog-large {
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+}
+
+.catalog-grid.catalog-large .catalog-thumb {
+  max-height: 148px;
+}
+
+.catalog-grid.catalog-large .catalog-no-image {
+  height: 128px;
+}
+
+.catalog-grid.catalog-comments-off .catalog-comment {
+  display: none;
+}
 
 /* ── Index / home ─────────────────────────────────────────────────────────── */
 
@@ -1580,9 +1612,9 @@ html.no-js .post-form-wrap {
     padding: 6px 12px;
   }
 
-  /* Catalog header row: stack sort below title */
+  /* Catalog header row: stack controls below title */
   .catalog-header-row { flex-direction: column; gap: 6px; }
-  .catalog-sort-wrap { align-self: flex-start; }
+  .catalog-controls { align-self: flex-start; }
 
   #theme-picker-btn {
     right: max(12px, env(safe-area-inset-right));
@@ -2616,12 +2648,18 @@ details.greentext-block[open] > summary { color: var(--green-pale); }
     text-align: center;
   }
 
-  .catalog-sort-wrap {
+  .catalog-controls {
     position: static;
     transform: none;
     width: 100%;
+    max-width: none;
     justify-content: flex-end;
     padding-top: 0;
+  }
+
+  .catalog-control-group {
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   .board-header h1,
