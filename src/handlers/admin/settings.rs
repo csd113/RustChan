@@ -26,6 +26,7 @@ pub struct BoardSettingsForm {
     description: String,
     bump_limit: Option<String>,
     max_threads: Option<String>,
+    max_archived_threads: Option<String>,
     nsfw: Option<String>,
     allow_images: Option<String>,
     allow_video: Option<String>,
@@ -65,6 +66,12 @@ pub async fn update_board_settings(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(150)
         .clamp(1, 1_000);
+    let max_archived_threads = form
+        .max_archived_threads
+        .as_deref()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(150)
+        .clamp(1, 10_000);
     let edit_window_secs = form
         .edit_window_secs
         .as_deref()
@@ -101,6 +108,7 @@ pub async fn update_board_settings(
                 form.nsfw.as_deref() == Some("1"),
                 bump_limit,
                 max_threads,
+                max_archived_threads,
                 form.allow_images.as_deref() == Some("1"),
                 form.allow_video.as_deref() == Some("1"),
                 form.allow_audio.as_deref() == Some("1"),

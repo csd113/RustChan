@@ -78,6 +78,7 @@ pub enum Job {
         board_id: i64,
         board_short: String,
         max_threads: i64,
+        max_archived_threads: i64,
         allow_archive: bool,
     },
     /// Spam / abuse analysis hook — currently logs; extend for auto-banning.
@@ -461,8 +462,19 @@ async fn handle_job(
             board_id,
             board_short,
             max_threads,
+            max_archived_threads,
             allow_archive,
-        } => prune_threads(board_id, board_short, max_threads, allow_archive, pool).await,
+        } => {
+            prune_threads(
+                board_id,
+                board_short,
+                max_threads,
+                max_archived_threads,
+                allow_archive,
+                pool,
+            )
+            .await
+        }
 
         Job::SpamCheck {
             post_id,
@@ -937,6 +949,7 @@ async fn prune_threads(
     board_id: i64,
     board_short: String,
     max_threads: i64,
+    max_archived_threads: i64,
     allow_archive: bool,
     pool: DbPool,
 ) -> Result<()> {
@@ -950,8 +963,16 @@ async fn prune_threads(
         let do_archive = allow_archive || CONFIG.archive_before_prune;
         if do_archive {
             let count = crate::db::archive_old_threads(&conn, board_id, max_threads)?;
+            let paths =
+                crate::db::prune_old_archived_threads(&conn, board_id, max_archived_threads)?;
+            for p in &paths {
+                crate::utils::files::delete_file(&CONFIG.upload_dir, p);
+            }
             if count > 0 {
                 tracing::info!(target: "workers", count = count, board = %board_short, board_id = board_id, "ThreadArchive: threads archived");
+            }
+            if !paths.is_empty() {
+                tracing::info!(target: "workers", archived_cap = max_archived_threads, board = %board_short, board_id = board_id, files_removed = paths.len(), "ThreadArchivePrune: archived threads deleted");
             }
         } else {
             let paths = crate::db::prune_old_threads(&conn, board_id, max_threads)?;

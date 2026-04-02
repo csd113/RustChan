@@ -12,6 +12,7 @@ const BASE_SCHEMA_SQL: &str = "
         description     TEXT NOT NULL DEFAULT '',
         nsfw            INTEGER NOT NULL DEFAULT 0,
         max_threads     INTEGER NOT NULL DEFAULT 150,
+        max_archived_threads INTEGER NOT NULL DEFAULT 150,
         bump_limit      INTEGER NOT NULL DEFAULT 500,
         allow_video     INTEGER NOT NULL DEFAULT 1,
         allow_tripcodes INTEGER NOT NULL DEFAULT 1,

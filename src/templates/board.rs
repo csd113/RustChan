@@ -893,7 +893,7 @@ pub fn archive_page(
   <a class="board-nav-link active" href="/{bs}/archive">[Archive]</a>
 </div>
 <div class="page-box">
-<p class="archive-subtext">Threads cycled off the board index — read-only, preserved permanently.</p>
+<p class="archive-subtext">Threads cycled off the board index — read-only, retained up to this board's archive limit.</p>
 </div>"#,
         bs = bs,
         bn = bn,

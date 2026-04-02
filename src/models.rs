@@ -92,6 +92,7 @@ pub struct Board {
     pub description: String,
     pub nsfw: bool,
     pub max_threads: i64,
+    pub max_archived_threads: i64,
     pub bump_limit: i64,
     pub allow_images: bool,    // per-board image upload toggle (default: true)
     pub allow_video: bool,     // per-board video upload toggle (default: true)

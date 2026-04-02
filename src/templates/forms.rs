@@ -293,6 +293,7 @@ mod tests {
             description: String::new(),
             nsfw: false,
             max_threads: 100,
+            max_archived_threads: 150,
             bump_limit: 500,
             allow_images: false,
             allow_video: false,

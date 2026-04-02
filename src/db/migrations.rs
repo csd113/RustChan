@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 30;
+pub(super) const CURRENT_MAX_MIGRATION: i64 = 31;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
@@ -113,6 +113,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
             ON user_thread_preferences(user_hash, hidden);
         CREATE INDEX IF NOT EXISTS idx_user_thread_preferences_thread
             ON user_thread_preferences(thread_id)",
+    ),
+    (
+        31,
+        "ALTER TABLE boards ADD COLUMN max_archived_threads INTEGER NOT NULL DEFAULT 150",
     ),
 ];
 

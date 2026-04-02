@@ -11,6 +11,7 @@ All notable changes to RustChan will be documented in this file.
 - Mobile-only board picker in the header, homepage NSFW consent overlay flow, and a no-JS theme fallback for slower or restricted browsers.
 - Server-backed theme switching with explicit `return_to` routing and better backup/restore diagnostics across admin upload paths.
 - Restore route request logging, board backup manifest inspection logs, and larger multipart restore coverage in the route test harness.
+- Per-board archived-thread retention limit in the admin panel, with a default cap of `150` archived threads per board.
 
 ### Improved
 
@@ -20,6 +21,7 @@ All notable changes to RustChan will be documented in this file.
 - Tor and mobile resilience through safer identity bucketing, less brittle theme persistence, JS-degraded fallbacks, and better cache revalidation for board, catalog, and thread pages.
 - Generated `settings.toml` readability by regrouping settings into clearer related sections, and log organization by moving runtime logs into `rustchan-data/logs/`.
 - Backup and restore internals by deduplicating board restore into one shared core and full-site restore into one shared execution path with rollback-aware filesystem swaps.
+- Automatic archive trimming now deletes media only after the last remaining post reference is gone, so deduplicated uploads shared across multiple threads are preserved safely until truly unused.
 
 ### Fixed
 

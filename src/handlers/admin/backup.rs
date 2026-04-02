@@ -248,17 +248,18 @@ where
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Clear threads: {error}")))?;
             conn.execute(
                 "UPDATE boards SET name=?1, description=?2, nsfw=?3,
-                 max_threads=?4, bump_limit=?5,
-                 allow_images=?6, allow_video=?7, allow_audio=?8, allow_any_files=?9,
-                 allow_tripcodes=?10, edit_window_secs=?11, allow_editing=?12,
-                 allow_archive=?13, allow_video_embeds=?14, allow_captcha=?15,
-                 show_poster_ids=?16, post_cooldown_secs=?17
-                 WHERE id=?18",
+                 max_threads=?4, max_archived_threads=?5, bump_limit=?6,
+                 allow_images=?7, allow_video=?8, allow_audio=?9, allow_any_files=?10,
+                 allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13,
+                 allow_archive=?14, allow_video_embeds=?15, allow_captcha=?16,
+                 show_poster_ids=?17, post_cooldown_secs=?18
+                 WHERE id=?19",
                 params![
                     manifest.board.name,
                     manifest.board.description,
                     i64::from(manifest.board.nsfw),
                     manifest.board.max_threads,
+                    manifest.board.max_archived_threads,
                     manifest.board.bump_limit,
                     i64::from(manifest.board.allow_images),
                     i64::from(manifest.board.allow_video),
@@ -280,16 +281,17 @@ where
         } else {
             conn.execute(
                 "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
-                 bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
+                 max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
                  allow_tripcodes, edit_window_secs, allow_editing, allow_archive,
                  allow_video_embeds, allow_captcha, show_poster_ids, post_cooldown_secs, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
                 params![
                     manifest.board.short_name,
                     manifest.board.name,
                     manifest.board.description,
                     i64::from(manifest.board.nsfw),
                     manifest.board.max_threads,
+                    manifest.board.max_archived_threads,
                     manifest.board.bump_limit,
                     i64::from(manifest.board.allow_images),
                     i64::from(manifest.board.allow_video),
@@ -1624,7 +1626,7 @@ pub async fn board_backup(
 
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
             let board: BoardRow = conn.query_row(
-                "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
+                "SELECT id, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
                         allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                         edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
                         allow_captcha, show_poster_ids, post_cooldown_secs, created_at
@@ -1637,20 +1639,21 @@ pub async fn board_backup(
                     description: r.get(3)?,
                     nsfw: r.get::<_, i64>(4)? != 0,
                     max_threads: r.get(5)?,
-                    bump_limit: r.get(6)?,
-                    allow_images: r.get::<_, i64>(7)? != 0,
-                    allow_video: r.get::<_, i64>(8)? != 0,
-                    allow_audio: r.get::<_, i64>(9)? != 0,
-                    allow_any_files: r.get::<_, i64>(10)? != 0,
-                    allow_tripcodes: r.get::<_, i64>(11)? != 0,
-                    edit_window_secs: r.get(12)?,
-                    allow_editing: r.get::<_, i64>(13)? != 0,
-                    allow_archive: r.get::<_, i64>(14)? != 0,
-                    allow_video_embeds: r.get::<_, i64>(15)? != 0,
-                    allow_captcha: r.get::<_, i64>(16)? != 0,
-                    show_poster_ids: r.get::<_, i64>(17)? != 0,
-                    post_cooldown_secs: r.get(18)?,
-                    created_at: r.get(19)?,
+                    max_archived_threads: r.get(6)?,
+                    bump_limit: r.get(7)?,
+                    allow_images: r.get::<_, i64>(8)? != 0,
+                    allow_video: r.get::<_, i64>(9)? != 0,
+                    allow_audio: r.get::<_, i64>(10)? != 0,
+                    allow_any_files: r.get::<_, i64>(11)? != 0,
+                    allow_tripcodes: r.get::<_, i64>(12)? != 0,
+                    edit_window_secs: r.get(13)?,
+                    allow_editing: r.get::<_, i64>(14)? != 0,
+                    allow_archive: r.get::<_, i64>(15)? != 0,
+                    allow_video_embeds: r.get::<_, i64>(16)? != 0,
+                    allow_captcha: r.get::<_, i64>(17)? != 0,
+                    show_poster_ids: r.get::<_, i64>(18)? != 0,
+                    post_cooldown_secs: r.get(19)?,
+                    created_at: r.get(20)?,
                 }),
             ).map_err(|_| AppError::NotFound(format!("Board '{board_short}' not found")))?;
 

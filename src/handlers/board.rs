@@ -468,6 +468,7 @@ pub async fn create_thread(
                 board_id: board.id,
                 board_short: board.short_name.clone(),
                 max_threads,
+                max_archived_threads: board.max_archived_threads,
                 allow_archive: board.allow_archive,
             });
 
@@ -1412,8 +1413,8 @@ mod tests {
             let conn = state.db.get().expect("db connection");
             crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
             crate::db::update_board_settings(
-                &conn, 1, "Test", "", false, 500, 100, false, false, false, false, true, 0, false,
-                true, false, false, false, 0,
+                &conn, 1, "Test", "", false, 500, 100, 150, false, false, false, false, true, 0,
+                false, true, false, false, false, 0,
             )
             .expect("update board settings");
         }

@@ -565,6 +565,71 @@ pub fn prune_old_threads(
     }
 }
 
+/// Hard-delete oldest archived threads that exceed the archive retention cap.
+///
+/// Returns the on-disk paths that are now safe to remove. As with live-thread
+/// pruning, the caller is responsible for deleting those files from disk.
+///
+/// The ordering uses `bumped_at DESC`, matching the archive page and ensuring
+/// we keep the most recently-active archived threads.
+pub fn prune_old_archived_threads(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    max: i64,
+) -> Result<Vec<String>> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin prune_old_archived_threads transaction")?;
+
+    let result: anyhow::Result<Vec<String>> = (|| {
+        let ids: Vec<i64> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT id FROM threads
+                 WHERE board_id = ?1 AND archived = 1
+                 ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
+            )?;
+            let collected = stmt
+                .query_map(params![board_id, max], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let candidates = collect_thread_file_paths(conn, &ids)?;
+
+        let placeholders: String = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i.saturating_add(1)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("DELETE FROM threads WHERE id IN ({placeholders})");
+        conn.execute(&sql, rusqlite::params_from_iter(&ids))
+            .context("Failed to bulk delete archived threads")?;
+
+        let safe = super::paths_safe_to_delete(conn, candidates)?;
+        Ok(safe)
+    })();
+
+    match result {
+        Ok(ref paths) if paths.is_empty() => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Ok(Vec::new())
+        }
+        Ok(safe) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit prune_old_archived_threads transaction")?;
+            Ok(safe)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 // ─── Archive listing ──────────────────────────────────────────────────────────
 
 /// Get paginated archived threads for a board.

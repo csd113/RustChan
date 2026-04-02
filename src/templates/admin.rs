@@ -87,6 +87,7 @@ pub fn admin_panel_page(
   <label>Description<input type="text" name="description" value="{desc_raw}" maxlength="256"></label>
   <label>Bump limit<input type="number" name="bump_limit" value="{bump}" min="1" max="10000"></label>
   <label>Max threads<input type="number" name="max_threads" value="{maxt}" min="1" max="1000"></label>
+  <label>Max archived threads<input type="number" name="max_archived_threads" value="{max_archived}" min="1" max="10000"></label>
 </div>
 <div class="board-settings-checks">
   <label><input type="checkbox" name="nsfw"            value="1"{nsfw_ck}> NSFW</label>
@@ -145,6 +146,7 @@ pub fn admin_panel_page(
             desc_raw = escape_html(&b.description),
             bump = b.bump_limit,
             maxt = b.max_threads,
+            max_archived = b.max_archived_threads,
             edit_win = b.edit_window_secs,
             edit_win_display = if b.allow_editing { "" } else { "display:none" },
             cooldown = b.post_cooldown_secs,
