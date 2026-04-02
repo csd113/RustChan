@@ -7,12 +7,44 @@
 
 use crate::models::{Board, Post, Thread};
 use crate::utils::{files::format_file_size, sanitize::escape_html};
+use sha2::{Digest, Sha256};
 use std::fmt::Write;
 
 use super::{
     base_layout, compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script,
     thread_autoupdate_script, TOGGLE_SCRIPT,
 };
+
+fn render_thread_nav(board_short: &str, reply_count: i64, is_bottom: bool) -> String {
+    let jump_link = if is_bottom { "#top" } else { "#bottom" };
+    let jump_label = if is_bottom { "Top" } else { "Bottom" };
+    let nav_class = if is_bottom {
+        "board-header thread-nav thread-nav-bottom"
+    } else {
+        "board-header thread-nav"
+    };
+
+    format!(
+        r#"<div class="{nav_class}">
+  <a href="/{s}">[ Return ]</a>
+  <a href="/{s}/catalog">[ Catalog ]</a>
+  <a href="{jump_link}">[ {jump_label} ]</a>
+  <button class="thread-nav-btn" data-action="fetch-updates">[ Update ]</button>
+  <label class="autoupdate-label">
+    <input type="checkbox" data-role="autoupdate-toggle" data-action="autoupdate-toggle">
+    Auto
+  </label>
+  <span class="autoupdate-status" data-role="autoupdate-status"></span>
+  <span class="thread-reply-stat">R: <span data-role="thread-reply-count">{reply_count}</span></span>
+</div>
+"#,
+        nav_class = nav_class,
+        s = escape_html(board_short),
+        jump_link = jump_link,
+        jump_label = jump_label,
+        reply_count = reply_count,
+    )
+}
 
 // ─── Thread page ──────────────────────────────────────────────────────────────
 
@@ -28,6 +60,7 @@ pub fn thread_page(
     is_admin: bool,
     poll: Option<&crate::models::PollData>,
     error: Option<&str>,
+    current_theme: Option<&str>,
     collapse_greentext: bool,
 ) -> String {
     let mut body = String::new();
@@ -121,23 +154,12 @@ pub fn thread_page(
 
     let _ = write!(
         body,
-        r##"<div class="thread-board-banner board-thread-header">/{s}/ — {bn}</div>
-<div class="board-header thread-nav">
-  <a href="/{s}">[ Return ]</a>
-  <a href="/{s}/catalog">[ Catalog ]</a>
-  <a href="#bottom">[ Bottom ]</a>
-  <button class="thread-nav-btn" data-action="fetch-updates">[ Update ]</button>
-  <label class="autoupdate-label">
-    <input type="checkbox" id="autoupdate-toggle-cb" data-action="autoupdate-toggle">
-    Auto
-  </label>
-  <span class="autoupdate-status" id="autoupdate-status"></span>
-  <span class="thread-reply-stat">R: <span id="thread-reply-count">{rc}</span></span>
-</div>
-"##,
+        r##"<div id="top"></div>
+<div class="thread-board-banner board-thread-header">/{s}/ — {bn}</div>
+{top_nav}"##,
         s = escape_html(&board.short_name),
         bn = escape_html(&board.name),
-        rc = thread.reply_count
+        top_nav = render_thread_nav(&board.short_name, thread.reply_count, false)
     );
     body.push_str(locked_notice);
 
@@ -163,26 +185,33 @@ pub fn thread_page(
                 is_admin,
                 show_media: true,
                 allow_editing: board.allow_editing,
+                show_poster_ids: board.show_poster_ids,
+                thread_op_id: thread.op_id,
             },
             board.edit_window_secs,
         ));
     }
 
     body.push_str("</div><!-- #thread-posts -->\n");
-    body.push_str("<div id=\"bottom\"></div>\n");
 
     if !thread.locked {
         let form_html = super::forms::reply_form(&board.short_name, thread.id, csrf_token, board);
         let _ = write!(
             body,
-            r#"<div class="post-toggle-bar reply">
-  <button class="post-toggle-btn" data-action="toggle-post-form">[ Reply ]</button>
+            r##"<div class="post-toggle-bar reply">
+  <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Reply ]</a>
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {form_html}
-</div>"#
+</div>"##
         );
     }
+    body.push_str("<div id=\"bottom\"></div>\n");
+    body.push_str(&render_thread_nav(
+        &board.short_name,
+        thread.reply_count,
+        true,
+    ));
 
     body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
@@ -225,7 +254,7 @@ pub fn thread_page(
 
     base_layout(
         &format!(
-            "/{}/  {}",
+            "/{}/ - {}",
             board.short_name,
             thread.subject.as_deref().unwrap_or("thread")
         ),
@@ -233,7 +262,9 @@ pub fn thread_page(
         &body,
         csrf_token,
         boards,
+        current_theme,
         collapse_greentext,
+        &format!("/{}/thread/{}", board.short_name, thread.id),
     )
 }
 
@@ -352,6 +383,90 @@ pub struct RenderPostOpts {
     pub is_admin: bool,
     pub show_media: bool,
     pub allow_editing: bool,
+    pub show_poster_ids: bool,
+    pub thread_op_id: Option<i64>,
+}
+
+const POSTER_ID_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn poster_id_char(index: u8) -> char {
+    POSTER_ID_ALPHABET
+        .get(usize::from(index))
+        .copied()
+        .map_or('A', char::from)
+}
+
+fn encode_poster_id(bytes: [u8; 6]) -> String {
+    let mut out = String::with_capacity(8);
+    let [b0, b1, b2, b3, b4, b5] = bytes;
+    out.push(poster_id_char(b0 >> 2));
+    out.push(poster_id_char(((b0 & 0x03) << 4) | (b1 >> 4)));
+    out.push(poster_id_char(((b1 & 0x0f) << 2) | (b2 >> 6)));
+    out.push(poster_id_char(b2 & 0x3f));
+    out.push(poster_id_char(b3 >> 2));
+    out.push(poster_id_char(((b3 & 0x03) << 4) | (b4 >> 4)));
+    out.push(poster_id_char(((b4 & 0x0f) << 2) | (b5 >> 6)));
+    out.push(poster_id_char(b5 & 0x3f));
+    out
+}
+
+fn render_poster_id(post: &Post, show_poster_ids: bool) -> Option<String> {
+    if !show_poster_ids {
+        return None;
+    }
+    let ip_hash = post.ip_hash.as_deref()?;
+    let mut hasher = Sha256::new();
+    hasher.update(crate::config::CONFIG.cookie_secret.as_bytes());
+    hasher.update(b":poster-id:");
+    hasher.update(post.thread_id.to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(ip_hash.as_bytes());
+    let digest = hasher.finalize();
+    let mut short = [0u8; 6];
+    let head = digest.get(..6)?;
+    short.copy_from_slice(head);
+    Some(encode_poster_id(short))
+}
+
+fn poster_id_chip_style(poster_id: &str) -> String {
+    const POSTER_CHIP_HUES: [u16; 18] = [
+        0, 210, 122, 32, 282, 168, 338, 52, 196, 96, 16, 248, 146, 308, 72, 184, 228, 356,
+    ];
+
+    let mut hasher = Sha256::new();
+    hasher.update(b":poster-id-chip:");
+    hasher.update(poster_id.as_bytes());
+    let digest = hasher.finalize();
+    let hue_index = digest
+        .first()
+        .map_or(0, |byte| usize::from(*byte) % POSTER_CHIP_HUES.len());
+    let hue = POSTER_CHIP_HUES.get(hue_index).copied().unwrap_or(200);
+    let accent_lightness = 60 + digest.get(1).map_or(0, |byte| u16::from(*byte) % 8);
+    let background_lightness = 19 + digest.get(2).map_or(0, |byte| u16::from(*byte) % 8);
+    let shadow_strength = 34 + digest.get(3).map_or(0, |byte| u16::from(*byte) % 18);
+    format!(
+        concat!(
+            "--poster-chip-accent:hsl({} 88% {}% / 0.98);",
+            "--poster-chip-bg:hsl({} 64% {}% / 0.97);",
+            "--poster-chip-fg:hsl({} 100% 97% / 0.99);",
+            "--poster-chip-shadow:color-mix(in srgb, var(--poster-chip-accent) {}%, transparent);"
+        ),
+        hue, accent_lightness, hue, background_lightness, hue, shadow_strength
+    )
+}
+
+fn annotate_op_quotelinks(body_html: &str, thread_op_id: Option<i64>) -> String {
+    let Some(op_id) = thread_op_id else {
+        return body_html.to_string();
+    };
+    let target = format!(
+        r##"<a href="#p{op_id}" class="quotelink" data-pid="{op_id}">&gt;&gt;{op_id}</a>"##
+    );
+    let replacement = format!(
+        r##"<a href="#p{op_id}" class="quotelink" data-pid="{op_id}">&gt;&gt;{op_id}<span class="quotelink-op-label">(OP)</span></a>"##
+    );
+    body_html.replace(&target, &replacement)
 }
 
 /// Render a single post as HTML.
@@ -377,7 +492,19 @@ pub fn render_post(
         is_admin,
         show_media,
         allow_editing,
+        show_poster_ids,
+        thread_op_id,
     } = opts;
+    let poster_id = render_poster_id(post, show_poster_ids);
+    let poster_id_html = poster_id.as_ref().map_or_else(String::new, |poster_id| {
+        let chip_style = poster_id_chip_style(poster_id);
+        format!(
+            r#" <button type="button" class="poster-id-btn" style="{chip_style}" data-action="toggle-poster-highlight" data-thread-id="{thread_id}" data-poster-id="{poster_id}">ID: {poster_id}</button>"#,
+            chip_style = chip_style,
+            thread_id = post.thread_id,
+            poster_id = escape_html(poster_id),
+        )
+    });
     let tripcode_html = post
         .tripcode
         .as_ref()
@@ -398,19 +525,25 @@ pub fn render_post(
         .unwrap_or_default();
 
     let op_class = if post.is_op { " op" } else { " reply" };
+    let poster_attr = poster_id.as_ref().map_or_else(String::new, |poster_id| {
+        format!(r#" data-poster-id="{}""#, escape_html(poster_id))
+    });
 
     let mut html = format!(
-        r##"<div class="post{op_class}" id="p{id}">
+        r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}>
 <div class="post-meta">
-<strong class="name">{name}</strong>{tripcode}
+<strong class="name">{name}</strong>{tripcode}{poster_id_html}
 <span class="post-time" data-utc="{ts}">{time}</span>{edited}
 <a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>
 <span class="backrefs" id="backrefs-{id}"></span>
 </div>"##,
         op_class = op_class,
         id = post.id,
+        thread_id = post.thread_id,
+        poster_attr = poster_attr,
         name = escape_html(&post.name),
         tripcode = tripcode_html,
+        poster_id_html = poster_id_html,
         ts = post.created_at,
         time = fmt_ts_short(post.created_at),
         edited = edited_html,
@@ -445,12 +578,28 @@ pub fn render_post(
                         .as_deref()
                         .is_some_and(|m| m.starts_with("video/")));
 
+            let combo_audio = if !is_audio && !is_video {
+                match (&post.audio_file_path, &post.audio_mime_type) {
+                    (Some(aud_file), Some(aud_mime)) => Some((
+                        aud_file.as_str(),
+                        aud_mime.as_str(),
+                        post.audio_file_name.as_deref().unwrap_or("audio"),
+                        post.audio_file_size
+                            .map(format_file_size)
+                            .unwrap_or_default(),
+                    )),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
             if is_audio {
                 let _ = write!(
                     html,
                     r#"<div class="file-container audio-container">
 <div class="file-info">
-  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
 <div class="audio-thumb">
   <img class="thumb" src="/boards/{th}" loading="lazy" alt="audio">
@@ -471,13 +620,13 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container">
 <div class="file-info">
-  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<div class="media-preview" data-action="expand-media" title="click to play">
+<a class="media-preview" data-action="expand-media" href="/boards/{f}" target="_blank" rel="noreferrer" title="click to play">
   <img class="thumb" src="/boards/{th}" loading="lazy" alt="video thumbnail">
   <div class="media-expand-overlay">&#9654;</div>
-</div>
+</a>
 <video class="media-expanded" controls preload="none" style="display:none">
   <source src="/boards/{f}" type="{mime}">
 </video>
@@ -492,22 +641,48 @@ pub fn render_post(
                 // Image
                 let _ = write!(
                     html,
-                    r#"<div class="file-container">
+                    r#"<div class="file-container{combo_class}">
 <div class="file-info">
-  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<div class="media-preview" data-action="expand-media" title="click to expand">
+<a class="media-preview" data-action="expand-media" href="/boards/{f}" target="_blank" rel="noreferrer" title="click to expand">
   <img class="thumb" src="/boards/{th}" loading="lazy" alt="image">
   <div class="media-expand-overlay">&#x2922;</div>
-</div>
+</a>
 <img class="media-expanded" src="" data-src="/boards/{f}" style="display:none"
      alt="image" draggable="false">
+{audio_combo_html}
 </div>"#,
+                    combo_class = if combo_audio.is_some() {
+                        " image-audio-combo"
+                    } else {
+                        ""
+                    },
                     f = escape_html(file),
                     th = escape_html(thumb),
                     orig = escape_html(name_str),
-                    sz = escape_html(&size_str)
+                    sz = escape_html(&size_str),
+                    audio_combo_html = combo_audio.map_or_else(
+                        String::new,
+                        |(aud_file, aud_mime, aud_name, aud_size)| {
+                            format!(
+                                r#"<div class="audio-combo audio-combo-inline">
+<div class="file-info">
+  Audio: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+</div>
+<audio controls preload="none" class="audio-player audio-player-combo">
+  <source src="/boards/{f}" type="{mime}">
+  Your browser does not support the audio element.
+</audio>
+</div>"#,
+                                f = escape_html(aud_file),
+                                orig = escape_html(aud_name),
+                                sz = escape_html(&aud_size),
+                                mime = escape_html(aud_mime)
+                            )
+                        }
+                    )
                 );
             }
         }
@@ -521,7 +696,7 @@ pub fn render_post(
                 html,
                 r#"<div class="file-container file-download">
 <div class="file-info">
-  <a href="/boards/{f}" rel="noreferrer">{orig}</a> ({sz})
+  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
 </div>"#,
                 f = escape_html(file),
@@ -532,7 +707,7 @@ pub fn render_post(
     }
 
     // Secondary audio for image+audio combo posts
-    if show_media {
+    if show_media && !matches!(&post.media_type, Some(crate::models::MediaType::Image)) {
         if let (Some(aud_file), Some(aud_mime)) = (&post.audio_file_path, &post.audio_mime_type) {
             let aud_name = post.audio_file_name.as_deref().unwrap_or("audio");
             let aud_size = post
@@ -543,7 +718,7 @@ pub fn render_post(
                 html,
                 r#"<div class="file-container audio-container audio-combo">
 <div class="file-info">
-  <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
 <audio controls preload="none" class="audio-player">
   <source src="/boards/{f}" type="{mime}">
@@ -559,7 +734,8 @@ pub fn render_post(
     }
 
     // Post body (pre-rendered, sanitised HTML)
-    let _ = write!(html, r#"<div class="post-body">{}</div>"#, post.body_html);
+    let body_html = annotate_op_quotelinks(&post.body_html, thread_op_id);
+    let _ = write!(html, r#"<div class="post-body">{body_html}</div>"#);
 
     // Edit link + report button (only on thread pages where show_delete=true)
     if show_delete {
@@ -638,6 +814,7 @@ pub fn render_post(
 // ─── Edit post page ───────────────────────────────────────────────────────────
 
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn edit_post_page(
     board: &Board,
     post: &Post,
@@ -645,6 +822,7 @@ pub fn edit_post_page(
     boards: &[Board],
     prefill_token: &str,
     error: Option<&str>,
+    current_theme: Option<&str>,
     collapse_greentext: bool,
 ) -> String {
     let error_html = error
@@ -697,6 +875,73 @@ pub fn edit_post_page(
         &body,
         csrf_token,
         boards,
+        current_theme,
         collapse_greentext,
+        &format!(
+            "/{}/thread/{}#p{}",
+            board.short_name, post.thread_id, post.id
+        ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_post, RenderPostOpts};
+    use crate::models::{MediaType, Post};
+
+    fn sample_post() -> Post {
+        Post {
+            id: 1,
+            thread_id: 1,
+            board_id: 1,
+            name: "anon".into(),
+            tripcode: None,
+            subject: None,
+            body: "body".into(),
+            body_html: "body".into(),
+            ip_hash: Some("hash".into()),
+            file_path: Some("test/image.webp".into()),
+            file_name: Some("image.webp".into()),
+            file_size: Some(1024),
+            thumb_path: Some("test/thumbs/image.webp".into()),
+            mime_type: Some("image/webp".into()),
+            media_type: Some(MediaType::Image),
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            created_at: 1_700_000_000,
+            deletion_token: "token".into(),
+            is_op: false,
+            edited_at: None,
+        }
+    }
+
+    #[test]
+    fn image_audio_combo_renders_single_media_box_with_inline_audio() {
+        let mut post = sample_post();
+        post.audio_file_path = Some("test/song.flac".into());
+        post.audio_file_name = Some("song.flac".into());
+        post.audio_file_size = Some(2048);
+        post.audio_mime_type = Some("audio/flac".into());
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: true,
+                allow_editing: false,
+                show_poster_ids: false,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html.contains("file-container image-audio-combo"));
+        assert!(html.contains(r#"Audio: <a href="/boards/test/song.flac""#));
+        assert!(!html.contains("file-container audio-container audio-combo"));
+    }
 }

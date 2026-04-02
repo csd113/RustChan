@@ -12,6 +12,8 @@ pub(super) mod board_backup_types {
         pub description: String,
         pub nsfw: bool,
         pub max_threads: i64,
+        #[serde(default = "default_max_archived_threads")]
+        pub max_archived_threads: i64,
         pub bump_limit: i64,
         #[serde(default = "default_true")]
         pub allow_images: bool,
@@ -34,6 +36,8 @@ pub(super) mod board_backup_types {
         #[serde(default)]
         pub allow_captcha: bool,
         #[serde(default)]
+        pub show_poster_ids: bool,
+        #[serde(default)]
         pub post_cooldown_secs: i64,
         pub created_at: i64,
     }
@@ -44,6 +48,10 @@ pub(super) mod board_backup_types {
 
     const fn default_edit_window_secs() -> i64 {
         300
+    }
+
+    const fn default_max_archived_threads() -> i64 {
+        150
     }
 
     #[derive(Serialize, Deserialize)]

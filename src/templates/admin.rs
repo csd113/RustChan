@@ -37,7 +37,16 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
         err = err_html,
         csrf = escape_html(csrf_token),
     );
-    base_layout("admin login", None, &body, csrf_token, boards, false)
+    base_layout(
+        "admin login",
+        None,
+        &body,
+        csrf_token,
+        boards,
+        None,
+        false,
+        "/admin",
+    )
 }
 
 // ─── Admin panel ──────────────────────────────────────────────────────────────
@@ -63,12 +72,18 @@ pub fn admin_panel_page(
     // (is_error, message) — is_error=true → red, false → green.
     flash: Option<(bool, &str)>,
 ) -> String {
+    let global_favicon_exists = crate::favicon::global_has_custom_favicon();
+    let global_favicon_version =
+        crate::favicon::favicon_version_for_board(None).unwrap_or_default();
     let mut board_cards = String::new();
     for b in boards {
         let checked = |v: bool| if v { " checked" } else { "" };
+        let board_favicon_exists = crate::favicon::board_has_custom_favicon(&b.short_name);
+        let board_favicon_version =
+            crate::favicon::favicon_version_for_board(Some(&b.short_name)).unwrap_or_default();
         let _ = write!(
             board_cards,
-            r#"<details class="board-settings-card">
+            r#"<details class="board-settings-card" id="board-{short}">
 <summary>/{short}/ — {name} {nsfw_tag}</summary>
 <form method="POST" action="/admin/board/settings" class="board-settings-form">
 <input type="hidden" name="_csrf"     value="{csrf}">
@@ -78,6 +93,7 @@ pub fn admin_panel_page(
   <label>Description<input type="text" name="description" value="{desc_raw}" maxlength="256"></label>
   <label>Bump limit<input type="number" name="bump_limit" value="{bump}" min="1" max="10000"></label>
   <label>Max threads<input type="number" name="max_threads" value="{maxt}" min="1" max="1000"></label>
+  <label>Max archived threads<input type="number" name="max_archived_threads" value="{max_archived}" min="1" max="10000"></label>
 </div>
 <div class="board-settings-checks">
   <label><input type="checkbox" name="nsfw"            value="1"{nsfw_ck}> NSFW</label>
@@ -89,6 +105,7 @@ pub fn admin_panel_page(
   <label><input type="checkbox" name="allow_archive"   value="1"{archive_ck}> Enable archive</label>
   <label><input type="checkbox" name="allow_video_embeds" value="1"{embeds_ck}> Embed video links (YouTube / Invidious / Streamable)</label>
   <label><input type="checkbox" name="allow_captcha"      value="1"{captcha_ck}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)</label>
+  <label><input type="checkbox" name="show_poster_ids"    value="1"{poster_ids_ck}> Show thread-local poster IDs</label>
   <label><input type="checkbox" name="allow_editing"   value="1"{edit_ck}>
     Allow post editing</label>
 </div>
@@ -106,6 +123,22 @@ pub fn admin_panel_page(
   <button type="submit">save settings</button>
 </div>
 </form>
+<div class="favicon-inline-row">
+{board_favicon_preview}
+<form method="POST" action="/admin/board/favicon" enctype="multipart/form-data" class="favicon-inline-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <label class="favicon-inline-label">
+    {board_favicon_label}
+    <input type="file" name="favicon" accept="image/png,image/jpeg,image/webp" required class="favicon-inline-input">
+  </label>
+  <button type="submit">{board_favicon_button}</button>
+</form>
+{board_favicon_clear}
+</div>
+<p style="color:var(--text-dim);font-size:0.78rem;margin:0.35rem 0 0">
+  {board_favicon_status}
+</p>
 <!-- Delete form is now OUTSIDE the settings form. -->
 <form method="POST" action="/admin/board/delete" style="display:inline;margin-top:4px">
   <input type="hidden" name="_csrf"     value="{csrf}">
@@ -135,6 +168,7 @@ pub fn admin_panel_page(
             desc_raw = escape_html(&b.description),
             bump = b.bump_limit,
             maxt = b.max_threads,
+            max_archived = b.max_archived_threads,
             edit_win = b.edit_window_secs,
             edit_win_display = if b.allow_editing { "" } else { "display:none" },
             cooldown = b.post_cooldown_secs,
@@ -154,7 +188,45 @@ pub fn admin_panel_page(
             archive_ck = checked(b.allow_archive),
             edit_ck = checked(b.allow_editing),
             embeds_ck = checked(b.allow_video_embeds),
-            captcha_ck = checked(b.allow_captcha)
+            captcha_ck = checked(b.allow_captcha),
+            poster_ids_ck = checked(b.show_poster_ids),
+            board_favicon_preview = if board_favicon_exists {
+                format!(
+                    r#"<img class="favicon-inline-preview" src="/boards/{short}/_favicon/favicon-32x32.png?v={version}" alt="/{short}/ favicon">"#,
+                    short = escape_html(&b.short_name),
+                    version = escape_html(&board_favicon_version)
+                )
+            } else {
+                String::new()
+            },
+            board_favicon_label = if board_favicon_exists {
+                "replace favicon"
+            } else {
+                "board favicon"
+            },
+            board_favicon_button = if board_favicon_exists {
+                "replace"
+            } else {
+                "upload"
+            },
+            board_favicon_status = if board_favicon_exists {
+                "Custom board favicon is active here and overrides the global favicon."
+            } else {
+                "No board-specific favicon set. This board uses the global favicon."
+            },
+            board_favicon_clear = if board_favicon_exists {
+                format!(
+                    r#"<form method="POST" action="/admin/board/favicon/clear" class="favicon-inline-clear">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <button type="submit">clear</button>
+</form>"#,
+                    csrf = escape_html(csrf_token),
+                    id = b.id
+                )
+            } else {
+                String::new()
+            }
         );
     }
 
@@ -419,7 +491,7 @@ old boards to prevent query performance degradation.
 <!-- ═══════════════════════════════════════════════════════════════════════════
      // site settings
      ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section">
+<section class="admin-section" id="site-settings">
 <h2>// site settings</h2>
 <form method="POST" action="/admin/site/settings">
 <input type="hidden" name="_csrf" value="{csrf}">
@@ -451,6 +523,20 @@ old boards to prevent query performance degradation.
 </div>
 <button type="submit">save settings</button>
 </form>
+<div class="favicon-inline-row favicon-inline-row-global">
+{global_favicon_preview}
+<form method="POST" action="/admin/site/favicon" enctype="multipart/form-data" class="favicon-inline-form">
+<input type="hidden" name="_csrf" value="{csrf}">
+<label class="favicon-inline-label">
+  {global_favicon_label}
+  <input type="file" name="favicon" accept="image/png,image/jpeg,image/webp" required class="favicon-inline-input">
+</label>
+<button type="submit">{global_favicon_button}</button>
+</form>
+</div>
+<p style="color:var(--text-dim);font-size:0.78rem;margin:0.45rem 0 0">
+  {global_favicon_status}
+</p>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -624,8 +710,31 @@ old boards to prevent query performance degradation.
         report_badge = report_badge,
         appeal_rows = appeal_rows,
         appeal_badge = appeal_badge,
+        global_favicon_preview = if global_favicon_exists {
+            format!(
+                r#"<img class="favicon-inline-preview" src="/favicon-32x32.png?v={version}" alt="global favicon">"#,
+                version = escape_html(&global_favicon_version)
+            )
+        } else {
+            String::new()
+        },
+        global_favicon_label = if global_favicon_exists {
+            "replace favicon"
+        } else {
+            "global favicon"
+        },
+        global_favicon_button = if global_favicon_exists {
+            "replace"
+        } else {
+            "upload"
+        },
         site_name_val = escape_html(site_name),
         site_subtitle_val = escape_html(site_subtitle),
+        global_favicon_status = if global_favicon_exists {
+            "Custom global favicon is active and stored alongside the main database."
+        } else {
+            "No custom global favicon uploaded yet."
+        },
         sel_terminal = if default_theme == "terminal" || default_theme.is_empty() {
             " selected"
         } else {
@@ -667,7 +776,16 @@ old boards to prevent query performance degradation.
         )),
     );
 
-    base_layout("admin panel", None, &body, csrf_token, boards, false)
+    base_layout(
+        "admin panel",
+        None,
+        &body,
+        csrf_token,
+        boards,
+        None,
+        false,
+        "/admin",
+    )
 }
 
 // ─── Moderation log ───────────────────────────────────────────────────────────
@@ -735,7 +853,16 @@ pub fn mod_log_page(
         pagination = pagination_html,
     );
 
-    base_layout("mod log — admin", None, &body, csrf_token, boards, false)
+    base_layout(
+        "mod log — admin",
+        None,
+        &body,
+        csrf_token,
+        boards,
+        None,
+        false,
+        "/admin/log",
+    )
 }
 
 // ─── VACUUM result ────────────────────────────────────────────────────────────
@@ -777,7 +904,16 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
         pct = pct,
     );
 
-    base_layout("VACUUM result", None, &body, csrf_token, &[], false)
+    base_layout(
+        "VACUUM result",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        None,
+        false,
+        "/admin",
+    )
 }
 
 // ─── IP history ───────────────────────────────────────────────────────────────
@@ -896,6 +1032,8 @@ pub fn admin_ip_history_page(
         &body,
         csrf_token,
         all_boards,
+        None,
         false,
+        &format!("/admin/ip/{ip_hash}"),
     )
 }

@@ -11,6 +11,7 @@ pub async fn create_full_backup(
     super::super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let upload_dir = CONFIG.upload_dir.clone();
+    let global_favicon_dir = crate::favicon::global_backup_source_dir();
     let progress = state.backup_progress.clone();
 
     tokio::task::spawn_blocking({
@@ -35,7 +36,9 @@ pub async fn create_full_backup(
 
             progress.reset(crate::middleware::backup_phase::COUNT_FILES);
             let uploads_base = std::path::Path::new(&upload_dir);
-            let file_count = super::count_files_in_dir(uploads_base);
+            let favicon_file_count = super::count_files_in_dir(&global_favicon_dir);
+            let file_count =
+                super::count_files_in_dir(uploads_base).saturating_add(favicon_file_count);
             progress
                 .files_total
                 .store(file_count.saturating_add(1), Ordering::Relaxed);
@@ -79,6 +82,16 @@ pub async fn create_full_backup(
 
                 if uploads_base.exists() {
                     super::add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
+                }
+                if global_favicon_dir.exists() {
+                    super::add_dir_to_zip_with_prefix(
+                        &mut zip,
+                        &global_favicon_dir,
+                        &global_favicon_dir,
+                        "favicon",
+                        opts,
+                        &progress,
+                    )?;
                 }
 
                 let writer = zip.finish().map_err(|error| {
@@ -159,10 +172,10 @@ pub async fn create_board_backup(
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
             let board: BoardRow = conn
                 .query_row(
-                    "SELECT id, short_name, name, description, nsfw, max_threads, bump_limit,
+                    "SELECT id, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
                              allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                              edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                             allow_captcha, post_cooldown_secs, created_at
+                             allow_captcha, show_poster_ids, post_cooldown_secs, created_at
                       FROM boards WHERE short_name = ?1",
                     params![board_short],
                     |row| {
@@ -173,19 +186,21 @@ pub async fn create_board_backup(
                             description: row.get(3)?,
                             nsfw: row.get::<_, i64>(4)? != 0,
                             max_threads: row.get(5)?,
-                            bump_limit: row.get(6)?,
-                            allow_images: row.get::<_, i64>(7)? != 0,
-                            allow_video: row.get::<_, i64>(8)? != 0,
-                            allow_audio: row.get::<_, i64>(9)? != 0,
-                            allow_any_files: row.get::<_, i64>(10)? != 0,
-                            allow_tripcodes: row.get::<_, i64>(11)? != 0,
-                            edit_window_secs: row.get(12)?,
-                            allow_editing: row.get::<_, i64>(13)? != 0,
-                            allow_archive: row.get::<_, i64>(14)? != 0,
-                            allow_video_embeds: row.get::<_, i64>(15)? != 0,
-                            allow_captcha: row.get::<_, i64>(16)? != 0,
-                            post_cooldown_secs: row.get(17)?,
-                            created_at: row.get(18)?,
+                            max_archived_threads: row.get(6)?,
+                            bump_limit: row.get(7)?,
+                            allow_images: row.get::<_, i64>(8)? != 0,
+                            allow_video: row.get::<_, i64>(9)? != 0,
+                            allow_audio: row.get::<_, i64>(10)? != 0,
+                            allow_any_files: row.get::<_, i64>(11)? != 0,
+                            allow_tripcodes: row.get::<_, i64>(12)? != 0,
+                            edit_window_secs: row.get(13)?,
+                            allow_editing: row.get::<_, i64>(14)? != 0,
+                            allow_archive: row.get::<_, i64>(15)? != 0,
+                            allow_video_embeds: row.get::<_, i64>(16)? != 0,
+                            allow_captcha: row.get::<_, i64>(17)? != 0,
+                            show_poster_ids: row.get::<_, i64>(18)? != 0,
+                            post_cooldown_secs: row.get(19)?,
+                            created_at: row.get(20)?,
                         })
                     },
                 )
@@ -320,6 +335,19 @@ pub async fn create_board_backup(
             };
             let manifest_json = serde_json::to_vec_pretty(&manifest)
                 .map_err(|error| AppError::Internal(anyhow::anyhow!("JSON: {error}")))?;
+            tracing::info!(
+                target: "admin",
+                board = %manifest.board.short_name,
+                version = manifest.version,
+                threads = manifest.threads.len(),
+                posts = manifest.posts.len(),
+                polls = manifest.polls.len(),
+                poll_options = manifest.poll_options.len(),
+                poll_votes = manifest.poll_votes.len(),
+                file_hashes = manifest.file_hashes.len(),
+                manifest_bytes = manifest_json.len(),
+                "Board backup manifest assembled"
+            );
 
             let backup_dir = super::board_backup_dir();
             std::fs::create_dir_all(&backup_dir).map_err(|error| {
@@ -333,6 +361,13 @@ pub async fn create_board_backup(
             let uploads_base = std::path::Path::new(&upload_dir);
             let board_upload_path = uploads_base.join(&board_short);
             let file_count = super::count_files_in_dir(&board_upload_path);
+            tracing::info!(
+                target: "admin",
+                board = %board_short,
+                uploads_dir = %board_upload_path.display(),
+                upload_file_count = file_count,
+                "Board backup starting zip build"
+            );
             progress.reset(crate::middleware::backup_phase::COMPRESS);
             progress
                 .files_total
@@ -390,7 +425,14 @@ pub async fn create_board_backup(
             })?;
 
             let size = std::fs::metadata(&final_path).map(|metadata| metadata.len()).unwrap_or(0);
-            tracing::info!(target: "admin", filename = %filename, bytes = size, "Board backup created");
+            tracing::info!(
+                target: "admin",
+                board = %board_short,
+                filename = %filename,
+                path = %final_path.display(),
+                bytes = size,
+                "Board backup created"
+            );
             progress
                 .phase
                 .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);

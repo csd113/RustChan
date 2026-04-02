@@ -12,6 +12,7 @@ const BASE_SCHEMA_SQL: &str = "
         description     TEXT NOT NULL DEFAULT '',
         nsfw            INTEGER NOT NULL DEFAULT 0,
         max_threads     INTEGER NOT NULL DEFAULT 150,
+        max_archived_threads INTEGER NOT NULL DEFAULT 150,
         bump_limit      INTEGER NOT NULL DEFAULT 500,
         allow_video     INTEGER NOT NULL DEFAULT 1,
         allow_tripcodes INTEGER NOT NULL DEFAULT 1,
@@ -23,6 +24,7 @@ const BASE_SCHEMA_SQL: &str = "
         allow_archive       INTEGER NOT NULL DEFAULT 1,
         allow_video_embeds  INTEGER NOT NULL DEFAULT 0,
         allow_captcha       INTEGER NOT NULL DEFAULT 0,
+        show_poster_ids     INTEGER NOT NULL DEFAULT 0,
         post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
         created_at      INTEGER NOT NULL DEFAULT (unixepoch())
     );
@@ -195,6 +197,16 @@ const BASE_SCHEMA_SQL: &str = "
         tx_id        TEXT PRIMARY KEY,
         imported_at  INTEGER NOT NULL DEFAULT (unixepoch())
     );
+
+    CREATE TABLE IF NOT EXISTS user_thread_preferences (
+        user_hash   TEXT NOT NULL,
+        thread_id    INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        pinned      INTEGER NOT NULL DEFAULT 0,
+        hidden      INTEGER NOT NULL DEFAULT 0,
+        created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+        PRIMARY KEY(user_hash, thread_id)
+    );
 ";
 
 const INDEX_SCHEMA_SQL: &str = "
@@ -226,6 +238,10 @@ const INDEX_SCHEMA_SQL: &str = "
         ON threads(board_id, archived, bumped_at DESC);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_chan_net_posts_remote
         ON chan_net_posts(remote_post_id, board_id);
+    CREATE INDEX IF NOT EXISTS idx_user_thread_preferences_user_hidden
+        ON user_thread_preferences(user_hash, hidden);
+    CREATE INDEX IF NOT EXISTS idx_user_thread_preferences_thread
+        ON user_thread_preferences(thread_id);
 ";
 
 pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {

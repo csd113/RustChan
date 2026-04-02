@@ -43,6 +43,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
+use std::net::IpAddr;
 
 // ─── Shared constant ──────────────────────────────────────────────────────────
 
@@ -97,11 +98,23 @@ fn require_same_origin_request(headers: &HeaderMap) -> Result<()> {
         .map(|authority| authority.host().to_string())
         .ok_or_else(|| AppError::Forbidden("Missing Host header.".into()))?;
 
-    let source = headers
+    let Some(source) = headers
         .get(header::ORIGIN)
         .or_else(|| headers.get(header::REFERER))
         .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| AppError::Forbidden("Missing Origin/Referer header.".into()))?;
+    else {
+        // Some browsers omit Origin/Referer on same-origin multipart uploads,
+        // especially on localhost. The admin endpoints already require a valid
+        // CSRF token, so treat missing headers as an allowed fallback.
+        return Ok(());
+    };
+    if source.eq_ignore_ascii_case("null") {
+        // Firefox and some privacy-restricted/local contexts can send
+        // `Origin: null` on multipart form submissions from localhost. The
+        // admin endpoints still require a valid session + CSRF token, so
+        // treat this the same as a missing Origin/Referer fallback.
+        return Ok(());
+    }
     let source_uri = source
         .parse::<Uri>()
         .map_err(|_| AppError::Forbidden("Invalid Origin/Referer header.".into()))?;
@@ -110,11 +123,34 @@ fn require_same_origin_request(headers: &HeaderMap) -> Result<()> {
         .map(axum::http::uri::Authority::host)
         .ok_or_else(|| AppError::Forbidden("Origin/Referer header has no authority.".into()))?;
 
-    if source_host.eq_ignore_ascii_case(&request_host) {
+    if hosts_match_for_same_origin(source_host, &request_host) {
         Ok(())
     } else {
+        tracing::warn!(
+            target: "admin",
+            request_host = %request_host,
+            source_host = %source_host,
+            source = %source,
+            "Admin same-origin validation rejected request"
+        );
         Err(AppError::Forbidden("Origin/Referer host mismatch.".into()))
     }
+}
+
+fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
+    if source_host.eq_ignore_ascii_case(request_host) {
+        return true;
+    }
+
+    is_loopback_alias(source_host) && is_loopback_alias(request_host)
+}
+
+fn is_loopback_alias(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 fn encode_query_component(input: &str) -> String {
@@ -281,4 +317,33 @@ pub async fn admin_panel(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok((jar, Html(html)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hosts_match_for_same_origin;
+
+    #[test]
+    fn same_origin_accepts_exact_host_match() {
+        assert!(hosts_match_for_same_origin("example.com", "example.com"));
+    }
+
+    #[test]
+    fn same_origin_accepts_loopback_aliases() {
+        assert!(hosts_match_for_same_origin("localhost", "127.0.0.1"));
+        assert!(hosts_match_for_same_origin("127.0.0.1", "localhost"));
+        assert!(hosts_match_for_same_origin("::1", "localhost"));
+        assert!(hosts_match_for_same_origin("127.0.0.1", "::1"));
+    }
+
+    #[test]
+    fn same_origin_rejects_different_non_loopback_hosts() {
+        assert!(!hosts_match_for_same_origin("example.com", "127.0.0.1"));
+        assert!(!hosts_match_for_same_origin("evil.test", "localhost"));
+    }
+
+    #[test]
+    fn null_origin_is_handled_by_caller_fallback() {
+        assert!(!hosts_match_for_same_origin("null", "localhost"));
+    }
 }

@@ -11,11 +11,42 @@ use crate::{
     middleware::AppState,
 };
 use axum::{
-    extract::{Form, Query, State},
+    extract::{Form, Multipart, Query, State},
+    http::HeaderMap,
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
+
+const MAX_FAVICON_UPLOAD_BYTES: usize = 5 * 1024 * 1024;
+
+async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String> {
+    field
+        .text()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))
+}
+
+async fn read_limited_upload_bytes(
+    mut field: axum::extract::multipart::Field<'_>,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
+        if out.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(AppError::UploadTooLarge(format!(
+                "File too large. Maximum upload size is {} MiB.",
+                max_bytes / 1024 / 1024
+            )));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
 
 // ─── POST /admin/board/settings ──────────────────────────────────────────────
 
@@ -26,6 +57,7 @@ pub struct BoardSettingsForm {
     description: String,
     bump_limit: Option<String>,
     max_threads: Option<String>,
+    max_archived_threads: Option<String>,
     nsfw: Option<String>,
     allow_images: Option<String>,
     allow_video: Option<String>,
@@ -37,6 +69,7 @@ pub struct BoardSettingsForm {
     allow_archive: Option<String>,
     allow_video_embeds: Option<String>,
     allow_captcha: Option<String>,
+    show_poster_ids: Option<String>,
     post_cooldown_secs: Option<String>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
@@ -64,6 +97,12 @@ pub async fn update_board_settings(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(150)
         .clamp(1, 1_000);
+    let max_archived_threads = form
+        .max_archived_threads
+        .as_deref()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(150)
+        .clamp(1, 10_000);
     let edit_window_secs = form
         .edit_window_secs
         .as_deref()
@@ -100,6 +139,7 @@ pub async fn update_board_settings(
                 form.nsfw.as_deref() == Some("1"),
                 bump_limit,
                 max_threads,
+                max_archived_threads,
                 form.allow_images.as_deref() == Some("1"),
                 form.allow_video.as_deref() == Some("1"),
                 form.allow_audio.as_deref() == Some("1"),
@@ -111,6 +151,7 @@ pub async fn update_board_settings(
                 form.allow_archive.as_deref() == Some("1"),
                 form.allow_video_embeds.as_deref() == Some("1"),
                 form.allow_captcha.as_deref() == Some("1"),
+                form.show_poster_ids.as_deref() == Some("1"),
                 post_cooldown_secs,
             )?;
             tracing::info!(target: "admin", board_id = board_id, "Board settings updated");
@@ -122,6 +163,170 @@ pub async fn update_board_settings(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(super::admin_panel_redirect("Board settings saved.").into_response())
+}
+
+#[derive(Deserialize)]
+pub struct ClearBoardFaviconForm {
+    board_id: i64,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+}
+
+pub async fn clear_board_favicon_override(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<ClearBoardFaviconForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+
+    let board_short = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            let board_short: String = conn.query_row(
+                "SELECT short_name FROM boards WHERE id = ?1",
+                rusqlite::params![form.board_id],
+                |row| row.get(0),
+            )?;
+            crate::favicon::clear_board_favicon(&board_short)?;
+            Ok(board_short)
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok(super::admin_panel_redirect_anchor(
+        &format!("Board /{board_short}/ favicon override cleared."),
+        &format!("board-{board_short}"),
+    )
+    .into_response())
+}
+
+pub async fn update_site_favicon(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::require_same_origin_request(&headers)?;
+
+    let mut csrf = None;
+    let mut favicon_bytes: Option<Vec<u8>> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
+        match field.name() {
+            Some("_csrf") => csrf = Some(read_text_field(field).await?),
+            Some("favicon") => {
+                let bytes = read_limited_upload_bytes(field, MAX_FAVICON_UPLOAD_BYTES).await?;
+                if !bytes.is_empty() {
+                    favicon_bytes = Some(bytes);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    super::check_csrf_jar(&jar, csrf.as_deref())?;
+    let favicon_bytes =
+        favicon_bytes.ok_or_else(|| AppError::BadRequest("No favicon file uploaded.".into()))?;
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            crate::favicon::write_favicon_set(
+                crate::favicon::FaviconScope::Global,
+                &favicon_bytes,
+            )?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok(
+        super::admin_panel_redirect_anchor("Global favicon updated.", "site-settings")
+            .into_response(),
+    )
+}
+
+pub async fn update_board_favicon(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::require_same_origin_request(&headers)?;
+
+    let mut csrf = None;
+    let mut board_id = None;
+    let mut favicon_bytes: Option<Vec<u8>> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
+        match field.name() {
+            Some("_csrf") => csrf = Some(read_text_field(field).await?),
+            Some("board_id") => {
+                board_id = read_text_field(field).await?.trim().parse::<i64>().ok();
+            }
+            Some("favicon") => {
+                let bytes = read_limited_upload_bytes(field, MAX_FAVICON_UPLOAD_BYTES).await?;
+                if !bytes.is_empty() {
+                    favicon_bytes = Some(bytes);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    super::check_csrf_jar(&jar, csrf.as_deref())?;
+    let board_id = board_id.ok_or_else(|| AppError::BadRequest("Missing board id.".into()))?;
+    let favicon_bytes =
+        favicon_bytes.ok_or_else(|| AppError::BadRequest("No favicon file uploaded.".into()))?;
+
+    let board_short = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            let board_short: String = conn.query_row(
+                "SELECT short_name FROM boards WHERE id = ?1",
+                rusqlite::params![board_id],
+                |row| row.get(0),
+            )?;
+            crate::favicon::write_favicon_set(
+                crate::favicon::FaviconScope::Board(&board_short),
+                &favicon_bytes,
+            )?;
+            Ok(board_short)
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok(super::admin_panel_redirect_anchor(
+        &format!("Board /{board_short}/ favicon updated."),
+        &format!("board-{board_short}"),
+    )
+    .into_response())
 }
 
 // ─── POST /admin/site/settings ────────────────────────────────────────────────

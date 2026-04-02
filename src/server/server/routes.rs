@@ -2,6 +2,7 @@
 
 use axum::{
     extract::DefaultBodyLimit,
+    middleware as axum_middleware,
     routing::{get, post},
     Router,
 };
@@ -15,6 +16,32 @@ pub(super) fn public_routes() -> Router<AppState> {
         .route("/healthz", get(observability::healthz))
         .route("/readyz", get(observability::readyz))
         .route("/metrics", get(observability::metrics))
+        .route(
+            "/favicon.ico",
+            get(crate::handlers::favicon::serve_favicon_ico),
+        )
+        .route(
+            "/favicon-16x16.png",
+            get(crate::handlers::favicon::serve_favicon_16),
+        )
+        .route(
+            "/favicon-32x32.png",
+            get(crate::handlers::favicon::serve_favicon_32),
+        )
+        .route(
+            "/apple-touch-icon.png",
+            get(crate::handlers::favicon::serve_apple_touch_icon),
+        )
+        .route(
+            "/android-chrome-192x192.png",
+            get(crate::handlers::favicon::serve_android_chrome_192),
+        )
+        .route(
+            "/android-chrome-512x512.png",
+            get(crate::handlers::favicon::serve_android_chrome_512),
+        )
+        .route("/nsfw/accept", post(crate::handlers::board::accept_nsfw))
+        .route("/theme/{theme}", get(crate::handlers::board::set_theme))
         .route("/", get(crate::handlers::board::index))
         .route("/{board}", get(crate::handlers::board::board_index))
         .route(
@@ -24,6 +51,15 @@ pub(super) fn public_routes() -> Router<AppState> {
             )),
         )
         .route("/{board}/catalog", get(crate::handlers::board::catalog))
+        .route(
+            "/{board}/hidden",
+            get(crate::handlers::board::hidden_threads),
+        )
+        .route(
+            "/{board}/thread-preference",
+            post(crate::handlers::board::update_thread_preference)
+                .layer(DefaultBodyLimit::max(65_536)),
+        )
         .route(
             "/{board}/archive",
             get(crate::handlers::board::board_archive),
@@ -109,6 +145,20 @@ fn admin_board_routes() -> Router<AppState> {
         .route(
             "/admin/board/settings",
             post(crate::handlers::admin::update_board_settings),
+        )
+        .route(
+            "/admin/site/favicon",
+            post(crate::handlers::admin::update_site_favicon)
+                .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
+        )
+        .route(
+            "/admin/board/favicon",
+            post(crate::handlers::admin::update_board_favicon)
+                .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
+        )
+        .route(
+            "/admin/board/favicon/clear",
+            post(crate::handlers::admin::clear_board_favicon_override),
         )
 }
 
@@ -212,4 +262,49 @@ fn admin_backup_routes() -> Router<AppState> {
             "/admin/board/backup/restore-saved",
             post(crate::handlers::admin::restore_saved_board_backup),
         )
+        .layer(axum_middleware::from_fn(
+            crate::handlers::admin::backup_request_logging_middleware,
+        ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admin_routes;
+    use axum::{
+        body::{to_bytes, Body},
+        http::{header, Request, StatusCode},
+    };
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn board_restore_route_accepts_large_multipart_body_without_global_media_limit() {
+        let app = admin_routes().with_state(crate::test_support::app_state());
+        let file_bytes = vec![b'a'; 60 * 1024 * 1024];
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123")],
+            Some(("backup_file", "board.zip", &file_bytes, "application/zip")),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/board/restore")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(body.contains("Board restore"));
+    }
 }

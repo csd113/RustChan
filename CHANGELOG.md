@@ -4,6 +4,47 @@ All notable changes to RustChan will be documented in this file.
 
 ---
 
+## [1.1.1]
+
+### Added
+
+- Mobile-only board picker in the header, homepage NSFW consent overlay flow, and a no-JS theme fallback for slower or restricted browsers.
+- Server-backed theme switching with explicit `return_to` routing and better backup/restore diagnostics across admin upload paths.
+- Restore route request logging, board backup manifest inspection logs, and larger multipart restore coverage in the route test harness.
+- Per-board archived-thread retention limit in the admin panel, with a default cap of `150` archived threads per board.
+- Automatic favicon generation from a single `512x512` upload, with global site icons plus optional per-board favicon overrides.
+
+### Improved
+
+- Mobile interaction quality for reply, media expansion, archive rows, catalog controls, board descriptions, and header layout without changing the desktop interface.
+- Poster ID chips on boards with IDs enabled now use stronger per-ID color separation so different posters are easier to tell apart without breaking theme compatibility.
+- NSFW disclaimer copy and action-button styling now read more clearly across themes, including light-theme contrast improvements for the consent button.
+- Audio posting UX now leads with an audio-first upload flow, clearer field labels, and an explicit optional cover-image slot instead of the previous mixed primary/secondary upload wording.
+- Tor and mobile resilience through safer identity bucketing, less brittle theme persistence, JS-degraded fallbacks, and better cache revalidation for board, catalog, and thread pages.
+- Generated `settings.toml` readability by regrouping settings into clearer related sections, and log organization by moving runtime logs into `rustchan-data/logs/`.
+- Backup and restore internals by deduplicating board restore into one shared core and full-site restore into one shared execution path with rollback-aware filesystem swaps.
+- Automatic archive trimming now deletes media only after the last remaining post reference is gone, so deduplicated uploads shared across multiple threads are preserved safely until truly unused.
+- Admin favicon controls now use a compact inline layout with live previews and clearer replace/clear actions for both global and board-specific icons.
+
+### Fixed
+
+- Mobile photo uploads now preserve correct orientation for both stored images and generated thumbnails.
+- Admin archive, pin, thread deletion, board restore, and full restore flows now refresh more reliably without requiring manual cookie or cache clearing.
+- Firefox and localhost admin restore uploads no longer fail on `Origin: null` or loopback host alias mismatches when valid session and CSRF state are present.
+- Linked image+audio posts now render as one combined media block, use the uploaded image as the audio thumbnail, autoplay the attached song when the image is expanded, keep playing when the image is collapsed, and size the audio seek bar to the same width as the linked image.
+- Secondary combo-audio uploads now preserve FLAC bytes as-is without FFmpeg re-encoding, while still reusing the linked image thumbnail for the post presentation.
+- Theme picker, board menu, catalog sort controls, and top-bar alignment no longer overflow or misplace themselves on mobile and Tor Browser.
+- Thumbnail hover and click hitboxes no longer stretch left of the visible image after closing expanded media.
+- OP quotelinks now render the `(OP)` marker with tighter spacing so they display as `>>123 (OP)` instead of looking over-separated.
+- Backup/restore logging now respects the app’s actual tracing targets instead of being silently filtered out.
+- Board index, catalog, and thread tab titles now use clearer board-aware formatting, and full-site restore no longer wipes the current global favicon when restoring an older backup that did not include favicon data.
+
+### Validation
+
+- `cargo fmt --all`
+- `cargo clippy --all-targets --all-features -- -D warnings -W clippy::all -W clippy::pedantic -W clippy::nursery`
+- `env -u RUSTC_WRAPPER cargo test --quiet`
+
 ## [1.1.0]
 
 ### Added

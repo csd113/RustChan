@@ -10,20 +10,34 @@ use crate::utils::sanitize::escape_html;
 
 struct UploadFormPolicy {
     uploads_enabled: bool,
-    file_accept: String,
-    file_hint: String,
 }
 
+const AUDIO_ACCEPT: &str =
+    "audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac";
+const IMAGE_ACCEPT: &str = "image/jpeg,image/png,image/gif,image/webp";
+
 fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
+    let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
+
+    let uploads_enabled =
+        board.allow_images || board.allow_audio || board.allow_video || allow_any_files;
+
+    UploadFormPolicy { uploads_enabled }
+}
+
+fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
     let image_mb = CONFIG.max_image_size / 1024 / 1024;
     let video_mb = CONFIG.max_video_size / 1024 / 1024;
     let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
+    let audio_image_dual_mode =
+        board.allow_audio && board.allow_images && !board.allow_video && !allow_any_files;
 
     let mut accept_parts: Vec<&str> = Vec::new();
     let mut hint_parts: Vec<String> = Vec::new();
+
     if board.allow_images {
-        accept_parts.push("image/jpeg,image/png,image/gif,image/webp");
+        accept_parts.push(IMAGE_ACCEPT);
         hint_parts.push(format!("jpg/png/gif/webp · max {image_mb} MiB"));
     }
     if board.allow_video {
@@ -31,59 +45,89 @@ fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
         hint_parts.push(format!("mp4/webm · max {video_mb} MiB"));
     }
     if board.allow_audio {
-        accept_parts.push(
-            "audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac",
-        );
+        accept_parts.push(AUDIO_ACCEPT);
         hint_parts.push(format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB"));
     }
 
-    let uploads_enabled = allow_any_files || !accept_parts.is_empty();
     let file_accept = if allow_any_files {
         String::new()
     } else {
         accept_parts.join(",")
     };
     let file_hint = if allow_any_files {
-        let media_hint = if hint_parts.is_empty() {
-            format!(
-                "other files download safely as attachments · max {} MiB",
-                audio_mb.max(video_mb).max(image_mb)
-            )
+        if hint_parts.is_empty() {
+            format!("other files download safely as attachments · max {video_mb} MiB")
         } else {
             format!(
                 "{} &nbsp;|&nbsp; other files download safely as attachments",
                 hint_parts.join(" &nbsp;|&nbsp; ")
             )
-        };
-        media_hint
+        }
     } else {
         hint_parts.join(" &nbsp;|&nbsp; ")
     };
 
-    UploadFormPolicy {
-        uploads_enabled,
-        file_accept,
-        file_hint,
-    }
+    let optional_image_row = if audio_image_dual_mode {
+        format!(
+            r#"<details class="upload-secondary-toggle">
+              <summary aria-label="Show optional image upload">▾ Optional Image</summary>
+              <div class="upload-secondary-panel">
+                <input type="file" name="image_file" data-onchange-check-size="1" accept="{image_accept}">
+                <span style="font-size:0.72rem;color:var(--text-dim)">{audio_image_hint} · jpg/png/gif/webp · max {image_mb} MiB</span>
+              </div>
+            </details>"#,
+            image_accept = IMAGE_ACCEPT,
+            audio_image_hint = audio_image_hint,
+        )
+    } else {
+        String::new()
+    };
+
+    let primary_name = if audio_image_dual_mode {
+        "audio_file"
+    } else {
+        "file"
+    };
+    let primary_label = if primary_name == "audio_file" {
+        "audio"
+    } else {
+        "upload"
+    };
+    let primary_accept = if audio_image_dual_mode {
+        AUDIO_ACCEPT.to_string()
+    } else {
+        file_accept
+    };
+    let primary_hint = if audio_image_dual_mode {
+        format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB")
+    } else {
+        file_hint
+    };
+
+    format!(
+        r#"    <tr><td>{primary_label}</td>
+        <td><input type="file" name="{primary_name}" data-onchange-check-size="1" accept="{primary_accept}">
+            <span style="font-size:0.72rem;color:var(--text-dim)">{primary_hint}</span>
+            {optional_image_row}</td></tr>"#,
+    )
 }
 
 /// New-thread submission form. Embedded on board index and catalog pages.
 #[allow(clippy::too_many_lines)]
 pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String {
-    let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
     let upload_policy = build_upload_form_policy(board);
-    let file_row = if upload_policy.uploads_enabled {
-        format!(
-            r#"    <tr><td>file</td>
-        <td><input type="file" name="file" data-onchange-check-size="1" accept="{file_accept}">
-            <span style="font-size:0.72rem;color:var(--text-dim)">{file_hint}</span></td></tr>"#,
-            file_accept = upload_policy.file_accept,
-            file_hint = upload_policy.file_hint,
-        )
+    let upload_row = if upload_policy.uploads_enabled {
+        render_single_upload_row(board, "optional cover image for the audio post")
     } else {
-        r#"    <tr><td>file</td>
+        String::new()
+    };
+
+    let uploads_disabled_row = if !upload_policy.uploads_enabled {
+        r#"    <tr><td>uploads</td>
         <td><span style="font-size:0.8rem;color:var(--text-dim)">uploads are disabled on this board</span></td></tr>"#
             .to_string()
+    } else {
+        String::new()
     };
 
     // PoW CAPTCHA block — only rendered when the board has it enabled.
@@ -106,17 +150,6 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
     };
 
     // captcha JS block removed — logic lives in /static/main.js.
-
-    // Secondary audio input — shown only when the board allows both images and audio.
-    let audio_combo_row = if board.allow_images && board.allow_audio {
-        format!(
-            r#"    <tr><td>audio<br><span style="font-size:0.65rem;color:var(--text-dim)">(+ image)</span></td>
-        <td><input type="file" name="audio_file" accept="audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
-            <span style="font-size:0.72rem;color:var(--text-dim)">optional audio alongside image · max {audio_mb} MiB</span></td></tr>"#,
-        )
-    } else {
-        String::new()
-    };
 
     let edit_token_row = if board.allow_editing {
         r#"    <tr><td>edit token</td>
@@ -148,8 +181,8 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
               <span title="Emoji">:fire:</span>
             </div>
         </td></tr>
-    {file_row}
-    {audio_combo_row}
+    {uploads_disabled_row}
+    {upload_row}
     {edit_token_row}
     {captcha_row}
         <td colspan="2">
@@ -187,8 +220,8 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         // poll scripts moved to /static/main.js
         board = escape_html(board_short),
         csrf = escape_html(csrf_token),
-        file_row = file_row,
-        audio_combo_row = audio_combo_row,
+        uploads_disabled_row = uploads_disabled_row,
+        upload_row = upload_row,
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
     )
@@ -201,29 +234,17 @@ pub(super) fn reply_form(
     csrf_token: &str,
     board: &Board,
 ) -> String {
-    let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
     let upload_policy = build_upload_form_policy(board);
-    let file_row = if upload_policy.uploads_enabled {
-        format!(
-            r#"    <tr><td>file</td>
-        <td><input type="file" name="file" data-onchange-check-size="1" accept="{file_accept}">
-            <span style="font-size:0.72rem;color:var(--text-dim)">{file_hint}</span></td></tr>"#,
-            file_accept = upload_policy.file_accept,
-            file_hint = upload_policy.file_hint,
-        )
+    let upload_row = if upload_policy.uploads_enabled {
+        render_single_upload_row(board, "optional cover image for the audio reply")
     } else {
-        r#"    <tr><td>file</td>
-        <td><span style="font-size:0.8rem;color:var(--text-dim)">uploads are disabled on this board</span></td></tr>"#
-            .to_string()
+        String::new()
     };
 
-    // Secondary audio-alongside-image row.
-    let audio_combo_row = if board.allow_images && board.allow_audio {
-        format!(
-            r#"    <tr><td>audio<br><span style="font-size:0.65rem;color:var(--text-dim)">(+ image)</span></td>
-        <td><input type="file" name="audio_file" accept="audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac">
-            <span style="font-size:0.72rem;color:var(--text-dim)">optional audio alongside image · max {audio_mb} MiB</span></td></tr>"#,
-        )
+    let uploads_disabled_row = if !upload_policy.uploads_enabled {
+        r#"    <tr><td>uploads</td>
+        <td><span style="font-size:0.8rem;color:var(--text-dim)">uploads are disabled on this board</span></td></tr>"#
+            .to_string()
     } else {
         String::new()
     };
@@ -263,8 +284,9 @@ pub(super) fn reply_form(
     <tr><td>body</td>
         <td><textarea id="reply-body" name="body" rows="4" maxlength="4096"></textarea>
             <button type="submit">post reply</button></td></tr>
-    {file_row}
-{audio_combo_row}    <tr><td>options</td>
+    {uploads_disabled_row}
+    {upload_row}
+    <tr><td>options</td>
         <td><label class="sage-label"><input type="checkbox" name="sage" value="1"> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
     {edit_token_row}
     {captcha_row}
@@ -274,8 +296,8 @@ pub(super) fn reply_form(
         board = escape_html(board_short),
         tid = thread_id,
         csrf = escape_html(csrf_token),
-        file_row = file_row,
-        audio_combo_row = audio_combo_row,
+        uploads_disabled_row = uploads_disabled_row,
+        upload_row = upload_row,
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
     )
@@ -293,6 +315,7 @@ mod tests {
             description: String::new(),
             nsfw: false,
             max_threads: 100,
+            max_archived_threads: 150,
             bump_limit: 500,
             allow_images: false,
             allow_video: false,
@@ -304,8 +327,17 @@ mod tests {
             allow_archive: true,
             allow_video_embeds: false,
             allow_captcha: false,
+            show_poster_ids: false,
             post_cooldown_secs: 0,
             created_at: 0,
+        }
+    }
+
+    fn audio_image_board() -> crate::models::Board {
+        crate::models::Board {
+            allow_images: true,
+            allow_audio: true,
+            ..uploads_disabled_board()
         }
     }
 
@@ -313,13 +345,14 @@ mod tests {
     fn upload_policy_marks_disabled_board_as_non_uploadable() {
         let policy = build_upload_form_policy(&uploads_disabled_board());
         assert!(!policy.uploads_enabled);
-        assert!(policy.file_accept.is_empty());
     }
 
     #[test]
     fn new_thread_form_hides_file_input_when_uploads_disabled() {
         let html = new_thread_form("test", "csrf", &uploads_disabled_board());
         assert!(!html.contains("type=\"file\" name=\"file\""));
+        assert!(!html.contains("name=\"image_file\""));
+        assert!(!html.contains("name=\"audio_file\""));
         assert!(html.contains("uploads are disabled on this board"));
     }
 
@@ -327,6 +360,42 @@ mod tests {
     fn reply_form_hides_file_input_when_uploads_disabled() {
         let html = reply_form("test", 42, "csrf", &uploads_disabled_board());
         assert!(!html.contains("type=\"file\" name=\"file\""));
+        assert!(!html.contains("name=\"image_file\""));
+        assert!(!html.contains("name=\"audio_file\""));
         assert!(html.contains("uploads are disabled on this board"));
+    }
+
+    #[test]
+    fn audio_image_form_is_audio_first_and_cover_image_second() {
+        let html = new_thread_form("test", "csrf", &audio_image_board());
+        let audio_pos = html.find("name=\"audio_file\"").expect("audio row");
+        let image_pos = html.find("name=\"image_file\"").expect("image row");
+        assert!(audio_pos < image_pos);
+        assert!(html.contains("<td>audio</td>"));
+        assert!(html.contains("Optional Image"));
+        assert!(html.contains("optional cover image for the audio post"));
+        assert!(html.contains("accept=\"audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac\""));
+        assert!(html.contains("mp3/ogg/flac/wav/m4a · max"));
+        assert!(!html.contains("jpg/png/gif/webp · max 8 MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a"));
+        assert!(!html.contains("video/mp4,video/webm"));
+        assert!(!html.contains("name=\"file\""));
+    }
+
+    #[test]
+    fn mixed_media_form_uses_single_upload_input() {
+        let html = new_thread_form(
+            "test",
+            "csrf",
+            &crate::models::Board {
+                allow_images: true,
+                allow_video: true,
+                allow_audio: true,
+                ..uploads_disabled_board()
+            },
+        );
+        assert!(html.contains("<td>upload</td>"));
+        assert!(html.contains("name=\"file\""));
+        assert!(!html.contains("name=\"audio_file\""));
+        assert!(!html.contains("name=\"image_file\""));
     }
 }

@@ -180,3 +180,16 @@ pub(super) fn apply_emoji(text: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::extract_video_embed;
+
+    #[test]
+    fn extracts_youtube_embed() {
+        assert_eq!(
+            extract_video_embed("https://youtu.be/dQw4w9WgXcQ?t=43"),
+            Some(("youtube", "dQw4w9WgXcQ".to_string()))
+        );
+    }
+}

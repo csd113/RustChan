@@ -220,16 +220,18 @@ pub fn resolve_deletion_token(raw_token: &str) -> String {
 }
 
 pub fn process_uploads(
+    image_file_data: Option<(crate::handlers::TempUpload, String)>,
     file_data: Option<(crate::handlers::TempUpload, String)>,
     audio_file_data: Option<(crate::handlers::TempUpload, String)>,
     board: &Board,
     conn: &rusqlite::Connection,
     config: &UploadConfig<'_>,
 ) -> Result<ProcessedUploads> {
-    let stage_root = (file_data.is_some() || audio_file_data.is_some())
-        .then(|| crate::pending_fs::create_stage_root(config.upload_dir, "upload"))
-        .transpose()
-        .map_err(AppError::Internal)?;
+    let stage_root =
+        (file_data.is_some() || audio_file_data.is_some() || image_file_data.is_some())
+            .then(|| crate::pending_fs::create_stage_root(config.upload_dir, "upload"))
+            .transpose()
+            .map_err(AppError::Internal)?;
     let save_root = stage_root
         .as_deref()
         .unwrap_or_else(|| std::path::Path::new(config.upload_dir));
@@ -237,7 +239,9 @@ pub fn process_uploads(
         .to_str()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Upload stage root is non-UTF-8")))?;
 
-    let (primary, primary_hash) = crate::handlers::process_primary_upload(
+    let (primary, audio, primary_hash) = crate::handlers::process_audio_first_uploads(
+        audio_file_data,
+        image_file_data,
         file_data,
         board,
         conn,
@@ -249,14 +253,6 @@ pub fn process_uploads(
         config.max_audio_size,
         config.ffmpeg_available,
         config.ffmpeg_webp_available,
-    )?;
-
-    let audio = crate::handlers::process_audio_combo(
-        audio_file_data,
-        primary.as_ref(),
-        board,
-        save_root_str,
-        config.max_audio_size,
     )?;
 
     let pending_finalize = stage_root.as_ref().and_then(|stage_dir| {

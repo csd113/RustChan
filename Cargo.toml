@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 # axum 0.8 requires Rust 1.75; arti-client 0.40 bumps the effective floor to
 # 1.90 — keep both fields in sync.
@@ -59,7 +59,7 @@ hex    = "0.4"
 # shares the exact same crate instance as argon2's transitive dep.
 rand_core = { version = "0.6", features = ["getrandom"] }
 
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"] }
 
 # EXIF orientation correction: read Orientation tag from JPEG uploads and
 # apply the corresponding rotation before thumbnailing so that photos taken

@@ -152,8 +152,9 @@ fn rate_limited_toast_page() -> String {
   <p>You are navigating too fast.<br>Taking you back in a moment…</p>
   <div class="bar"></div>
 </div>
-<script src="/static/main.js" defer></script>
+<script src="{main_js_src}" defer></script>
 </body>
-</html>"#
+</html>"#,
+        main_js_src = crate::templates::static_asset_url("/static/main.js")
     )
 }

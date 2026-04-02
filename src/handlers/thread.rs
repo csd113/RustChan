@@ -31,8 +31,9 @@ pub async fn view_thread(
     jar: CookieJar,
     req_headers: HeaderMap,
 ) -> Result<Response> {
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
-
+    let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
@@ -42,7 +43,7 @@ pub async fn view_thread(
                 &conn,
                 &board_short,
                 thread_id,
-                &client_ip,
+                &identity_key,
                 jar_session.as_deref(),
                 &crate::config::CONFIG.cookie_secret,
             )?;
@@ -57,7 +58,8 @@ pub async fn view_thread(
                 "\"{}-b{boards_ver}{admin_tag}\"",
                 page_data.thread.bumped_at
             );
-            let html = render::render_thread_page(&page_data, &csrf, None);
+            let html =
+                render::render_thread_page(&page_data, &csrf, None, current_theme.as_deref());
             Ok((etag, html, page_data.is_admin))
         }
     })
@@ -83,6 +85,10 @@ pub async fn view_thread(
             axum::http::HeaderValue::from_str(&etag)
                 .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
         );
+        resp.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("private, no-cache, must-revalidate"),
+        );
         return Ok((jar, resp).into_response());
     }
 
@@ -90,6 +96,10 @@ pub async fn view_thread(
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
     }
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("private, no-cache, must-revalidate"),
+    );
     Ok((jar, resp).into_response())
 }
 
@@ -122,6 +132,7 @@ pub async fn post_reply(
     let cookie_secret = CONFIG.cookie_secret.clone();
     let file_data = form.file;
     let audio_file_data = form.audio_file;
+    let image_file_data = form.image_file;
     let name_val = form.name;
     let del_token_val = form.deletion_token;
     let form_sage = form.sage;
@@ -135,10 +146,10 @@ pub async fn post_reply(
     // Clones kept outside the closure so we can re-render the thread page inline on error.
     let board_short_err = board_short.clone();
     let admin_session_err = admin_session_id.clone();
-    let client_ip_err = client_ip.clone();
     let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
 
-    let _board_short_err = board_short.clone();
+    let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
+    let identity_key_err = identity_key.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = state.job_queue.clone();
@@ -158,7 +169,7 @@ pub async fn post_reply(
                 return Err(AppError::Forbidden("This thread is locked.".into()));
             }
 
-            let ip_hash = hash_ip(&client_ip, &cookie_secret);
+            let ip_hash = hash_ip(&identity_key, &cookie_secret);
             if let Some(reason) = db::is_banned(&conn, &ip_hash)? {
                 return Err(AppError::BannedUser {
                     reason: if reason.is_empty() {
@@ -200,11 +211,12 @@ pub async fn post_reply(
                 || board.allow_video
                 || board.allow_audio
                 || (crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files);
-            let has_file = file_data.is_some();
+            let has_file = file_data.is_some() || audio_file_data.is_some() || image_file_data.is_some();
             let (body_text, body_html) =
                 posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;
 
             let uploads = posting::process_uploads(
+                image_file_data,
                 file_data,
                 audio_file_data,
                 &board,
@@ -276,13 +288,14 @@ pub async fn post_reply(
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
             let db_pool = state.db.clone();
+            let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
             let html = tokio::task::spawn_blocking(move || -> Result<String> {
                 let conn = db_pool.get()?;
                 let page_data = render::load_thread_page_data(
                     &conn,
                     &board_short_err,
                     thread_id,
-                    &client_ip_err,
+                    &identity_key_err,
                     admin_session_err.as_deref(),
                     &CONFIG.cookie_secret,
                 )?;
@@ -290,6 +303,7 @@ pub async fn post_reply(
                     &page_data,
                     &csrf_for_error,
                     Some(&msg),
+                    current_theme.as_deref(),
                 ))
             })
             .await
@@ -319,6 +333,7 @@ pub async fn edit_post_get(
     Query(query): Query<EditQuery>,
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
 
     let html = tokio::task::spawn_blocking({
@@ -364,6 +379,7 @@ pub async fn edit_post_get(
                 all_boards.as_slice(),
                 &prefill_token,
                 None,
+                current_theme.as_deref(),
                 collapse_greentext,
             ))
         }
@@ -409,7 +425,8 @@ pub async fn edit_post_post(
 
     let outcome = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let csrf_clone = csrf_cookie.clone().unwrap_or_default();
+            let csrf_clone = csrf_cookie.clone().unwrap_or_default();
+        let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
         move || -> Result<EditOutcome> {
             let conn = pool.get()?;
 
@@ -475,6 +492,7 @@ pub async fn edit_post_post(
                     all_boards.as_slice(),
                     &token,
                     Some(err_msg),
+                    current_theme.as_deref(),
                     collapse_greentext,
                 );
                 return Ok(EditOutcome::ErrorPage(html));
@@ -524,11 +542,12 @@ pub async fn vote_handler(
         return Err(AppError::BadRequest("Invalid poll option.".into()));
     }
 
+    let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let redirect_url = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            let ip_hash = hash_ip(&client_ip, &cookie_secret);
+            let ip_hash = hash_ip(&identity_key, &cookie_secret);
 
             let (poll_id, thread_id, board_short) = db::get_poll_context(&conn, option_id)?
                 .ok_or_else(|| AppError::NotFound("Poll option not found.".into()))?;
@@ -619,7 +638,7 @@ pub async fn thread_updates(
                 let conn = pool.get()?;
 
                 // Validate board + thread exist (returns 404 for bad URLs).
-                let _board = db::get_board_by_short(&conn, &board_short)?
+                let board = db::get_board_by_short(&conn, &board_short)?
                     .ok_or_else(|| crate::error::AppError::NotFound("Board not found.".into()))?;
                 let thread = db::get_thread(&conn, thread_id)?
                     .ok_or_else(|| crate::error::AppError::NotFound("Thread not found.".into()))?;
@@ -643,6 +662,8 @@ pub async fn thread_updates(
                             is_admin: false,
                             show_media: true,
                             allow_editing: false, // no edit link in auto-appended HTML; reload restores it
+                            show_poster_ids: thread.board_id == board.id && board.show_poster_ids,
+                            thread_op_id: thread.op_id,
                         },
                         0,
                     ));

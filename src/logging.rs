@@ -13,7 +13,7 @@
 //      All writes go through `CONSOLE_MUTEX` so `console.rs` interactive
 //      output never interleaves with log events.
 //
-//   2. Log file (rustchan.YYYY-MM-DD.log, human-readable text, daily rotation)
+//   2. Log file (logs/rustchan.YYYY-MM-DD.log, human-readable text, daily rotation)
 //      Same fixed-column format as the non-TTY terminal output, with two extras:
 //        • Millisecond precision on every timestamp.
 //        • WARN and ERROR lines append  (src/file.rs:line)  at the end so you
@@ -337,6 +337,18 @@ pub fn init_logging(log_dir: &Path) {
             // guard selection, consensus downloads) — hundreds of lines/minute.
             // Operators who need Arti internals can set RUST_LOG=tor_proto=debug.
             "rustchan=info,\
+             admin=info,\
+             board=info,\
+             workers=info,\
+             server=info,\
+             db=info,\
+             startup=info,\
+             sessions=info,\
+             polls=info,\
+             chan_net=info,\
+             console=info,\
+             tls=info,\
+             config=info,\
              tower_http=warn,\
              arti_client=warn,\
              tor_proto=warn,\

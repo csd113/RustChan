@@ -78,6 +78,7 @@ pub enum Job {
         board_id: i64,
         board_short: String,
         max_threads: i64,
+        max_archived_threads: i64,
         allow_archive: bool,
     },
     /// Spam / abuse analysis hook — currently logs; extend for auto-banning.
@@ -461,8 +462,19 @@ async fn handle_job(
             board_id,
             board_short,
             max_threads,
+            max_archived_threads,
             allow_archive,
-        } => prune_threads(board_id, board_short, max_threads, allow_archive, pool).await,
+        } => {
+            prune_threads(
+                board_id,
+                board_short,
+                max_threads,
+                max_archived_threads,
+                allow_archive,
+                pool,
+            )
+            .await
+        }
 
         Job::SpamCheck {
             post_id,
@@ -776,7 +788,7 @@ type WaveformPrepareParts = (
     Vec<String>,
     PathBuf,
     String,
-    Vec<u8>,
+    PathBuf,
     tempfile::NamedTempFile,
 );
 
@@ -795,7 +807,7 @@ async fn generate_waveform(
     let ffmpeg_timeout = Duration::from_secs(timeout_secs);
 
     // Phase 1: prepare (file I/O, temp file creation) — blocking.
-    let (args, png_abs, png_rel, data, tmp_png) = {
+    let (args, png_abs, png_rel, src_path, tmp_png) = {
         let file_path2 = file_path.clone();
         let board_short2 = board_short.clone();
         tokio::task::spawn_blocking(move || waveform_prepare(&file_path2, &board_short2))
@@ -838,14 +850,14 @@ async fn generate_waveform(
 
     // Phase 3: persist + DB update — blocking.
     tokio::task::spawn_blocking(move || {
-        waveform_finalise(post_id, &png_abs, &png_rel, &data, tmp_png, &pool)
+        waveform_finalise(post_id, &png_abs, &png_rel, &src_path, tmp_png, &pool)
     })
     .await
     .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform finalise: {e}"))?
 }
 
 /// Blocking prepare phase for [`generate_waveform`]: validate the source,
-/// read its bytes, create a temp output file, and build the ffmpeg arg list.
+/// create a temp output file, and build the ffmpeg arg list.
 fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepareParts> {
     use anyhow::Context as _;
     let upload_dir = &CONFIG.upload_dir;
@@ -861,7 +873,6 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("Malformed audio filename: {}", src.display()))?
         .to_string();
-    let data = std::fs::read(&src)?;
     let thumb_size = CONFIG.thumb_size;
     let thumbs_dir = PathBuf::from(upload_dir).join(board_short).join("thumbs");
     std::fs::create_dir_all(&thumbs_dir)?;
@@ -901,7 +912,7 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
     .iter()
     .map(|s| (*s).to_string())
     .collect();
-    Ok((args, png_abs, png_rel, data, tmp_png))
+    Ok((args, png_abs, png_rel, src, tmp_png))
 }
 
 /// Blocking finalise phase for [`generate_waveform`]: atomically persist the
@@ -910,7 +921,7 @@ fn waveform_finalise(
     post_id: i64,
     png_abs: &std::path::Path,
     png_rel: &str,
-    data: &[u8],
+    src_path: &std::path::Path,
     tmp_png: tempfile::NamedTempFile,
     pool: &DbPool,
 ) -> Result<()> {
@@ -921,7 +932,7 @@ fn waveform_finalise(
     let conn = pool.get()?;
     crate::db::update_post_thumb_path(&conn, post_id, png_rel)?;
     // update dedup record with final thumb path.
-    let audio_sha256 = crate::utils::crypto::sha256_hex(data);
+    let audio_sha256 = sha256_file_hex(src_path)?;
     let _ = conn.execute(
         "UPDATE file_hashes SET thumb_path = ?1 WHERE sha256 = ?2",
         rusqlite::params![png_rel, audio_sha256],
@@ -931,12 +942,33 @@ fn waveform_finalise(
     Ok(())
 }
 
+fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
+    use anyhow::Context as _;
+    use sha2::Digest as _;
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open {} for hashing", path.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buf)
+            .with_context(|| format!("failed to read {} for hashing", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        if let Some(bytes) = buf.get(..read) {
+            hasher.update(bytes);
+        }
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 // ─── ThreadPrune ─────────────────────────────────────────────────────────────
 
 async fn prune_threads(
     board_id: i64,
     board_short: String,
     max_threads: i64,
+    max_archived_threads: i64,
     allow_archive: bool,
     pool: DbPool,
 ) -> Result<()> {
@@ -950,8 +982,16 @@ async fn prune_threads(
         let do_archive = allow_archive || CONFIG.archive_before_prune;
         if do_archive {
             let count = crate::db::archive_old_threads(&conn, board_id, max_threads)?;
+            let paths =
+                crate::db::prune_old_archived_threads(&conn, board_id, max_archived_threads)?;
+            for p in &paths {
+                crate::utils::files::delete_file(&CONFIG.upload_dir, p);
+            }
             if count > 0 {
                 tracing::info!(target: "workers", count = count, board = %board_short, board_id = board_id, "ThreadArchive: threads archived");
+            }
+            if !paths.is_empty() {
+                tracing::info!(target: "workers", archived_cap = max_archived_threads, board = %board_short, board_id = board_id, files_removed = paths.len(), "ThreadArchivePrune: archived threads deleted");
             }
         } else {
             let paths = crate::db::prune_old_threads(&conn, board_id, max_threads)?;

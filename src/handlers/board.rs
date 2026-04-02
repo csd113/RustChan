@@ -23,22 +23,110 @@ use crate::{
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
-    http::{header, HeaderMap},
+    http::{header, HeaderMap, HeaderValue},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use time::Duration;
 
 const PREVIEW_REPLIES: i64 = 3;
 const THREADS_PER_PAGE: i64 = 10;
+pub const USER_THEME_COOKIE: &str = "rustchan_theme";
+pub const NSFW_CONSENT_COOKIE: &str = "rustchan_nsfw_ok";
+pub const VISITOR_ID_COOKIE: &str = "rustchan_visitor_id";
+const HTML_CACHE_CONTROL: &str = "private, no-cache, must-revalidate";
+
+pub fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
+    jar.get(USER_THEME_COOKIE)
+        .and_then(|cookie| crate::templates::normalize_theme_slug(cookie.value()))
+        .map(str::to_string)
+}
+
+pub fn has_nsfw_consent(jar: &CookieJar) -> bool {
+    jar.get(NSFW_CONSENT_COOKIE)
+        .is_some_and(|cookie| cookie.value() == "1")
+}
+
+fn safe_return_to(path: &str) -> &str {
+    if path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\") {
+        path
+    } else {
+        "/"
+    }
+}
+
+pub fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
+    if client_ip.starts_with("tor:") {
+        return client_ip.to_string();
+    }
+
+    if client_ip == "127.0.0.1" || client_ip == "::1" || client_ip == "unknown" {
+        if let Some(visitor_id) = jar.get(VISITOR_ID_COOKIE).map(Cookie::value) {
+            if !visitor_id.is_empty() {
+                return format!("visitor:{visitor_id}");
+            }
+        }
+    }
+
+    client_ip.to_string()
+}
+
+fn viewer_preference_key(client_ip: &str, jar: &CookieJar) -> String {
+    hash_ip(&identity_key(client_ip, jar), &CONFIG.cookie_secret)
+}
+
+fn split_catalog_threads(
+    threads: Vec<crate::models::Thread>,
+    prefs: &HashMap<i64, db::UserThreadPreference>,
+) -> (
+    Vec<crate::models::Thread>,
+    Vec<crate::models::Thread>,
+    HashSet<i64>,
+) {
+    let mut visible = Vec::new();
+    let mut hidden = Vec::new();
+    let mut pinned_ids = HashSet::new();
+
+    for thread in threads {
+        if let Some(pref) = prefs.get(&thread.id) {
+            if pref.pinned {
+                pinned_ids.insert(thread.id);
+            }
+            if pref.hidden {
+                hidden.push(thread);
+                continue;
+            }
+        }
+        visible.push(thread);
+    }
+
+    let sort_threads = |items: &mut Vec<crate::models::Thread>| {
+        items.sort_by(|a, b| {
+            let a_pinned = pinned_ids.contains(&a.id);
+            let b_pinned = pinned_ids.contains(&b.id);
+            b_pinned
+                .cmp(&a_pinned)
+                .then_with(|| b.sticky.cmp(&a.sticky))
+                .then_with(|| b.bumped_at.cmp(&a.bumped_at))
+        });
+    };
+
+    sort_threads(&mut visible);
+    sort_threads(&mut hidden);
+    (visible, hidden, pinned_ids)
+}
 
 // ─── GET / — board list ───────────────────────────────────────────────────────
 
 pub async fn index(
     State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
-) -> Result<(CookieJar, Html<String>)> {
+) -> Result<Response> {
+    let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
+    let nsfw_consent = has_nsfw_consent(&jar);
 
     let (board_stats, site_data) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -59,6 +147,19 @@ pub async fn index(
         None
     };
 
+    let nsfw_prompt_board = params
+        .get("nsfw")
+        .and_then(|short| board_stats.iter().find(|s| s.board.short_name == *short))
+        .map(|s| &s.board);
+
+    if nsfw_consent {
+        if let Some(board) = nsfw_prompt_board {
+            return Ok(
+                (jar, Redirect::to(&format!("/{}/catalog", board.short_name))).into_response(),
+            );
+        }
+    }
+
     Ok((
         jar,
         Html(templates::index_page(
@@ -66,8 +167,12 @@ pub async fn index(
             &site_data,
             &csrf,
             onion_address.as_deref(),
+            current_theme.as_deref(),
+            nsfw_prompt_board,
+            nsfw_consent,
         )),
-    ))
+    )
+        .into_response())
 }
 
 // ─── GET /:board/ — board index ───────────────────────────────────────────────
@@ -80,6 +185,7 @@ pub async fn board_index(
     jar: CookieJar,
     req_headers: HeaderMap,
 ) -> Result<Response> {
+    let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
 
     let page: i64 = params
@@ -105,18 +211,29 @@ pub async fn board_index(
             // 3.2: Derive ETag from the most-recently-bumped thread on this page
             // combined with the page number.  This is a cheap proxy for "has
             // anything on this page changed?".
-            let max_bump = page_data
+            let page_sig = page_data
                 .summaries
                 .iter()
-                .map(|summary| summary.thread.bumped_at)
-                .max()
-                .unwrap_or(0);
+                .map(|summary| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        summary.thread.id,
+                        summary.thread.bumped_at,
+                        i32::from(summary.thread.sticky),
+                        i32::from(summary.thread.archived)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("|");
             // Include is_admin in the ETag so admin and non-admin responses
             // have distinct cache keys and the browser doesn't serve a cached
             // non-admin page (missing delete controls) to a logged-in admin.
             let admin_tag = if page_data.is_admin { "-a" } else { "" };
-            let etag = format!("\"{max_bump}-{page}{admin_tag}\"");
-            let html = render::render_board_page(&page_data, &csrf, None);
+            let etag = format!(
+                "\"{}-{}-{page}{admin_tag}\"",
+                page_data.pagination.total, page_sig
+            );
+            let html = render::render_board_page(&page_data, &csrf, None, current_theme.as_deref());
             Ok((etag, html))
         }
     })
@@ -142,6 +259,10 @@ pub async fn board_index(
             axum::http::HeaderValue::from_str(&etag)
                 .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
         );
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(HTML_CACHE_CONTROL),
+        );
         return Ok((jar, resp).into_response());
     }
 
@@ -149,6 +270,10 @@ pub async fn board_index(
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
     }
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(HTML_CACHE_CONTROL),
+    );
     Ok((jar, resp).into_response())
 }
 
@@ -162,6 +287,7 @@ pub async fn create_thread(
     jar: CookieJar,
     multipart: Multipart,
 ) -> Result<Response> {
+    let current_theme = current_theme_from_jar(&jar);
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
     let form = parse_post_multipart(multipart, csrf_cookie.as_deref()).await?;
 
@@ -181,6 +307,7 @@ pub async fn create_thread(
     let cookie_secret = CONFIG.cookie_secret.clone();
     let file_data = form.file;
     let audio_file_data = form.audio_file;
+    let image_file_data = form.image_file;
     let name_val = form.name;
     let subject_val = form.subject;
     let del_token_val = form.deletion_token;
@@ -199,6 +326,7 @@ pub async fn create_thread(
     let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
 
     let board_short_err = board_short.clone();
+    let identity_key = identity_key(&client_ip, &jar);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = state.job_queue.clone();
@@ -206,7 +334,7 @@ pub async fn create_thread(
             let conn = pool.get()?;
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-            let ip_hash = hash_ip(&client_ip, &cookie_secret);
+            let ip_hash = hash_ip(&identity_key, &cookie_secret);
             if let Some(reason) = db::is_banned(&conn, &ip_hash)? {
                 return Err(AppError::BannedUser {
                     reason: if reason.is_empty() {
@@ -248,11 +376,12 @@ pub async fn create_thread(
                 || board.allow_video
                 || board.allow_audio
                 || (crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files);
-            let has_file = file_data.is_some();
+            let has_file = file_data.is_some() || audio_file_data.is_some() || image_file_data.is_some();
             let (body_text, body_html) =
                 posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;
 
             let uploads = posting::process_uploads(
+                image_file_data,
                 file_data,
                 audio_file_data,
                 &board,
@@ -341,6 +470,7 @@ pub async fn create_thread(
                 board_id: board.id,
                 board_short: board.short_name.clone(),
                 max_threads,
+                max_archived_threads: board.max_archived_threads,
                 allow_archive: board.allow_archive,
             });
 
@@ -358,6 +488,7 @@ pub async fn create_thread(
         Err(AppError::BadRequest(msg)) => {
             let board_short_render = board_short_err.clone();
             let pool = state.db.clone();
+            let current_theme = current_theme.clone();
             let html = tokio::task::spawn_blocking(move || -> Result<String> {
                 let conn = pool.get()?;
                 let page_data = render::load_board_page_data(
@@ -372,6 +503,7 @@ pub async fn create_thread(
                     &page_data,
                     &csrf_for_error,
                     Some(&msg),
+                    current_theme.as_deref(),
                 ))
             })
             .await
@@ -392,10 +524,13 @@ pub async fn create_thread(
 pub async fn catalog(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
 ) -> Result<Response> {
+    let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
+    let viewer_key = viewer_preference_key(&client_ip, &jar);
 
     // Add ETag caching to the catalog. Previously every request
     // fetched up to 200 full thread rows and re-rendered the entire page
@@ -405,6 +540,7 @@ pub async fn catalog(
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
         let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
+        let viewer_key = viewer_key.clone();
         move || -> Result<(String, String)> {
             let conn = pool.get()?;
             let is_admin = jar_session
@@ -412,18 +548,48 @@ pub async fn catalog(
                 .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-            let threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
-            let max_bump = threads.iter().map(|t| t.bumped_at).max().unwrap_or(0);
+            let all_threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
+            let prefs = db::get_preferences_for_board(&conn, &viewer_key, board.id)?;
+            let (threads, hidden_threads, pinned_ids) = split_catalog_threads(all_threads, &prefs);
+            let catalog_sig = threads
+                .iter()
+                .map(|thread| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        thread.id,
+                        thread.bumped_at,
+                        i32::from(thread.sticky),
+                        i32::from(thread.archived)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("|");
+            let mut pref_sig_parts = prefs
+                .iter()
+                .map(|(thread_id, pref)| {
+                    format!(
+                        "{thread_id}:{}:{}",
+                        i32::from(pref.pinned),
+                        i32::from(pref.hidden)
+                    )
+                })
+                .collect::<Vec<_>>();
+            pref_sig_parts.sort();
+            let pref_sig = pref_sig_parts.join("|");
             let admin_tag = if is_admin { "-a" } else { "" };
-            let etag = format!("\"{max_bump}-catalog{admin_tag}\"");
+            let etag = format!("\"{catalog_sig}-{pref_sig}-catalog{admin_tag}\"");
             let all_boards = crate::templates::live_boards();
             let collapse_greentext = crate::templates::live_collapse_greentext();
             let html = templates::catalog_page(
                 &board,
                 &threads,
+                &pinned_ids,
+                hidden_threads.len(),
+                false,
                 &csrf_clone,
                 all_boards.as_slice(),
                 is_admin,
+                current_theme.as_deref(),
                 collapse_greentext,
             );
             Ok((etag, html))
@@ -448,6 +614,10 @@ pub async fn catalog(
             axum::http::HeaderValue::from_str(&etag)
                 .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
         );
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(HTML_CACHE_CONTROL),
+        );
         return Ok((jar, resp).into_response());
     }
 
@@ -455,7 +625,59 @@ pub async fn catalog(
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
     }
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(HTML_CACHE_CONTROL),
+    );
     Ok((jar, resp).into_response())
+}
+
+pub async fn hidden_threads(
+    State(state): State<AppState>,
+    Path(board_short): Path<String>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
+    jar: CookieJar,
+) -> Result<(CookieJar, Html<String>)> {
+    let current_theme = current_theme_from_jar(&jar);
+    let (jar, csrf) = ensure_csrf(jar);
+    let viewer_key = viewer_preference_key(&client_ip, &jar);
+    let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
+
+    let html = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let csrf_clone = csrf.clone();
+        let jar_session = jar_session.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            let is_admin = jar_session
+                .as_deref()
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+            let all_threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
+            let prefs = db::get_preferences_for_board(&conn, &viewer_key, board.id)?;
+            let (_visible, hidden_threads, pinned_ids) = split_catalog_threads(all_threads, &prefs);
+
+            let all_boards = crate::templates::live_boards();
+            let collapse_greentext = crate::templates::live_collapse_greentext();
+            Ok(templates::catalog_page(
+                &board,
+                &hidden_threads,
+                &pinned_ids,
+                hidden_threads.len(),
+                true,
+                &csrf_clone,
+                all_boards.as_slice(),
+                is_admin,
+                current_theme.as_deref(),
+                collapse_greentext,
+            ))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok((jar, Html(html)))
 }
 
 // ─── GET /:board/archive ──────────────────────────────────────────────────────
@@ -467,6 +689,7 @@ pub async fn board_archive(
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
     const ARCHIVE_PER_PAGE: i64 = 20;
+    let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
 
     let page: i64 = params
@@ -506,6 +729,7 @@ pub async fn board_archive(
                 &pagination,
                 &csrf_clone,
                 all_boards.as_slice(),
+                current_theme.as_deref(),
                 collapse_greentext,
             ))
         }
@@ -525,6 +749,7 @@ pub async fn search(
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
     const SEARCH_PER_PAGE: i64 = 20;
+    let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
 
     // Cap query length to prevent excessively large LIKE pattern scans.
@@ -558,6 +783,7 @@ pub async fn search(
                 &pagination,
                 &csrf_clone,
                 all_boards.as_slice(),
+                current_theme.as_deref(),
                 collapse_greentext,
             ))
         }
@@ -572,10 +798,24 @@ pub async fn search(
 
 /// Ensure the CSRF token cookie is set. Returns (`updated_jar`, `token_string`).
 pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
+    let mut jar = jar;
+    if jar.get(VISITOR_ID_COOKIE).is_none() {
+        let mut visitor_cookie = Cookie::new(VISITOR_ID_COOKIE, new_csrf_token());
+        visitor_cookie.set_http_only(false);
+        visitor_cookie.set_same_site(SameSite::Lax);
+        visitor_cookie.set_path("/");
+        visitor_cookie.set_secure(CONFIG.https_cookies);
+        visitor_cookie.set_max_age(Duration::days(365));
+        jar = jar.add(visitor_cookie);
+    }
+
     if let Some(cookie) = jar.get("csrf_token") {
         let token = cookie.value().to_string();
         if !token.is_empty() {
-            return (jar, token);
+            return (
+                jar,
+                crate::utils::crypto::make_csrf_form_token(&token, &CONFIG.cookie_secret),
+            );
         }
     }
     let token = new_csrf_token();
@@ -588,7 +828,142 @@ pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
     cookie.set_path("/");
     // set Secure flag based on config (true when behind proxy / HTTPS)
     cookie.set_secure(CONFIG.https_cookies);
-    (jar.add(cookie), token)
+    (
+        jar.add(cookie),
+        crate::utils::crypto::make_csrf_form_token(&token, &CONFIG.cookie_secret),
+    )
+}
+
+pub async fn set_theme(
+    Path(theme): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    jar: CookieJar,
+    headers: HeaderMap,
+) -> Result<Response> {
+    let theme = crate::templates::normalize_theme_slug(&theme)
+        .ok_or_else(|| AppError::BadRequest("Unknown theme.".into()))?;
+
+    let mut cookie = Cookie::new(USER_THEME_COOKIE, theme.to_string());
+    cookie.set_http_only(false);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_max_age(Duration::days(365));
+    let jar = jar.add(cookie);
+
+    if headers
+        .get("x-rustchan-background")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "1")
+    {
+        return Ok((jar, axum::http::StatusCode::NO_CONTENT).into_response());
+    }
+
+    let redirect_to = params
+        .get("return_to")
+        .map(String::as_str)
+        .map(safe_return_to)
+        .or_else(|| {
+            headers
+                .get(header::REFERER)
+                .and_then(|v| v.to_str().ok())
+                .filter(|v| !v.trim().is_empty())
+        })
+        .unwrap_or("/");
+    Ok((jar, Redirect::to(redirect_to)).into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub struct NsfwConsentForm {
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+    pub return_to: Option<String>,
+}
+
+pub async fn accept_nsfw(jar: CookieJar, Form(form): Form<NsfwConsentForm>) -> Result<Response> {
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    let mut cookie = Cookie::new(NSFW_CONSENT_COOKIE, "1");
+    cookie.set_http_only(false);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_max_age(Duration::days(365));
+
+    let redirect_to = form.return_to.as_deref().map_or("/", safe_return_to);
+    Ok((jar.add(cookie), Redirect::to(redirect_to)).into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub struct ThreadPreferenceForm {
+    pub thread_id: i64,
+    pub board: String,
+    pub action: String,
+    pub return_to: Option<String>,
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+}
+
+pub async fn update_thread_preference(
+    State(state): State<AppState>,
+    Path(board_short): Path<String>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
+    jar: CookieJar,
+    Form(form): Form<ThreadPreferenceForm>,
+) -> Result<Response> {
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    let board_from_form = form
+        .board
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect::<String>();
+    if board_from_form != board_short {
+        return Err(AppError::BadRequest("Board mismatch.".into()));
+    }
+
+    let viewer_key = viewer_preference_key(&client_ip, &jar);
+    let action = form.action.trim().to_ascii_lowercase();
+    let thread_id = form.thread_id;
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| AppError::NotFound("Board not found.".into()))?;
+            let thread = db::get_thread(&conn, thread_id)?
+                .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
+            if thread.board_id != board.id || thread.archived {
+                return Err(AppError::NotFound("Thread not found.".into()));
+            }
+
+            match action.as_str() {
+                "pin" => db::set_thread_pinned(&conn, &viewer_key, thread.id, true)?,
+                "unpin" => db::set_thread_pinned(&conn, &viewer_key, thread.id, false)?,
+                "hide" => db::set_thread_hidden(&conn, &viewer_key, thread.id, true)?,
+                "unhide" => db::set_thread_hidden(&conn, &viewer_key, thread.id, false)?,
+                _ => return Err(AppError::BadRequest("Unknown thread action.".into())),
+            }
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let redirect_to = form.return_to.as_deref().map_or_else(
+        || format!("/{board_short}/catalog"),
+        |path| safe_return_to(path).to_string(),
+    );
+    Ok(Redirect::to(&redirect_to).into_response())
 }
 
 // ─── POST /report ─────────────────────────────────────────────────────────────
@@ -615,7 +990,7 @@ pub async fn file_report(
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let ip_hash = hash_ip(&client_ip, &CONFIG.cookie_secret);
+    let ip_hash = hash_ip(&identity_key(&client_ip, &jar), &CONFIG.cookie_secret);
     let reason = form
         .reason
         .as_deref()
@@ -686,6 +1061,7 @@ pub async fn file_report(
 /// rather than display or play it inline.
 fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
     match path.extension().and_then(|e| e.to_str()) {
+        Some("ico") => Some("image/x-icon"),
         Some("webp") => Some("image/webp"),
         Some("jpg" | "jpeg") => Some("image/jpeg"),
         Some("png") => Some("image/png"),
@@ -717,6 +1093,7 @@ pub async fn serve_board_media(
     Path(media_path): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
+    use axum::http::header::CACHE_CONTROL;
     use axum::http::StatusCode;
     use std::path::PathBuf;
     use tower::ServiceExt;
@@ -729,6 +1106,14 @@ pub async fn serve_board_media(
 
     let base = PathBuf::from(&CONFIG.upload_dir);
     let target = base.join(&media_path);
+    let has_version = req
+        .uri()
+        .query()
+        .is_some_and(|query| query.split('&').any(|part| part.starts_with("v=")));
+    let is_board_favicon = std::path::Path::new(&media_path)
+        .components()
+        .nth(1)
+        .is_some_and(|part| part.as_os_str() == "_favicon");
 
     // Verify the resolved path is still inside the upload directory.
     // This catches any edge cases that slip past the string checks above
@@ -751,6 +1136,12 @@ pub async fn serve_board_media(
                     HeaderValue, CONTENT_DISPOSITION, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS,
                 };
                 let mut resp = resp.map(axum::body::Body::new);
+                if is_board_favicon {
+                    resp.headers_mut().insert(
+                        CACHE_CONTROL,
+                        HeaderValue::from_static(board_media_cache_control(has_version)),
+                    );
+                }
                 if let Some(ct) = media_content_type(&target) {
                     resp.headers_mut()
                         .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
@@ -789,6 +1180,14 @@ pub async fn serve_board_media(
         }
     } else {
         StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+fn board_media_cache_control(has_version: bool) -> &'static str {
+    if has_version {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache, must-revalidate"
     }
 }
 
@@ -832,6 +1231,8 @@ pub async fn api_post_preview(
                             is_admin: false,
                             show_media: true,
                             allow_editing: false, // no edit link in read-only preview
+                            show_poster_ids: false,
+                            thread_op_id: None,
                         },
                         0, // no edit window
                     );
@@ -934,7 +1335,7 @@ pub async fn submit_appeal(
         return Html(crate::templates::error_page(403, "CSRF token mismatch.")).into_response();
     }
 
-    let ip_hash = hash_ip(&client_ip, &CONFIG.cookie_secret);
+    let ip_hash = hash_ip(&identity_key(&client_ip, &jar), &CONFIG.cookie_secret);
     let reason = form.reason.trim().chars().take(512).collect::<String>();
     if reason.is_empty() {
         return Html(crate::templates::error_page(
@@ -968,12 +1369,13 @@ pub async fn submit_appeal(
         r#"<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Appeal Submitted</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="{stylesheet_href}">
 </head><body><div class="page-box error-page">
 <h1>appeal submitted</h1>
 <p>{msg}</p>
 <p><a href="/">return home</a></p>
 </div></body></html>"#,
+        stylesheet_href = crate::templates::static_asset_url("/static/style.css"),
         msg = crate::utils::sanitize::escape_html(msg)
     );
     Html(html).into_response()
@@ -1038,8 +1440,8 @@ mod tests {
             let conn = state.db.get().expect("db connection");
             crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
             crate::db::update_board_settings(
-                &conn, 1, "Test", "", false, 500, 100, false, false, false, false, true, 0, false,
-                true, false, false, 0,
+                &conn, 1, "Test", "", false, 500, 100, 150, false, false, false, false, true, 0,
+                false, true, false, false, false, 0,
             )
             .expect("update board settings");
         }

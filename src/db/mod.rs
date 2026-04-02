@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use rusqlite::params;
+use rusqlite::OptionalExtension;
 use std::collections::HashSet;
 
 pub mod admin;
@@ -14,6 +15,7 @@ pub mod posts;
 mod schema;
 pub mod threads;
 mod types;
+mod user_thread_prefs;
 
 pub use pool::{first_run_check, has_no_admin, init_pool};
 pub use types::{CachedFile, DbPool, NewPost};
@@ -26,6 +28,7 @@ pub use boards::*;
 pub use fs_ops::*;
 pub use posts::*;
 pub use threads::*;
+pub use user_thread_prefs::*;
 
 /// Given a list of candidate file paths collected from posts about to be deleted,
 /// return only those paths that are no longer referenced by any remaining post.
@@ -54,29 +57,25 @@ pub fn paths_safe_to_delete(
         return Ok(Vec::new());
     }
 
-    let placeholders: String = unique
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("(?{})", i.saturating_add(1)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT v.p FROM (VALUES {placeholders}) AS v(p)
-         WHERE NOT EXISTS (
-             SELECT 1 FROM posts
-             WHERE file_path = v.p OR thumb_path = v.p OR audio_file_path = v.p
-         )"
-    );
+    let mut ref_stmt = conn
+        .prepare(
+            "SELECT 1 FROM posts
+             WHERE file_path = ?1 OR thumb_path = ?1 OR audio_file_path = ?1
+             LIMIT 1",
+        )
+        .context("Prepare safe-delete reference query failed")?;
 
-    let mut stmt = conn
-        .prepare(&sql)
-        .context("Prepare safe-delete candidate query failed")?;
-
-    let safe: Vec<String> = stmt
-        .query_map(rusqlite::params_from_iter(&unique), |r| r.get(0))
-        .context("Query safe-delete candidates failed")?
-        .collect::<rusqlite::Result<_>>()
-        .context("Read safe-delete candidates failed")?;
+    let mut safe = Vec::new();
+    for path in &unique {
+        let still_referenced = ref_stmt
+            .query_row(params![path], |_r| Ok(()))
+            .optional()
+            .context("Query safe-delete candidate failed")?
+            .is_some();
+        if !still_referenced {
+            safe.push(path.clone());
+        }
+    }
 
     let safe_set: HashSet<&str> = safe.iter().map(String::as_str).collect();
     for path in &safe {

@@ -16,6 +16,9 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::LazyLock;
+use std::thread;
+use std::time::{Duration, Instant};
 
 fn ffmpeg_command() -> Command {
     Command::new(&crate::config::CONFIG.ffmpeg_path)
@@ -24,6 +27,22 @@ fn ffmpeg_command() -> Command {
 fn ffprobe_command() -> Command {
     Command::new(&crate::config::CONFIG.ffprobe_path)
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamKind {
+    AudioOnly,
+    Video,
+}
+
+static ENCODER_LIST: LazyLock<Option<String>> = LazyLock::new(|| {
+    ffmpeg_command()
+        .args(["-encoders"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+});
 
 /// Probe whether the `ffmpeg` binary is reachable on the current PATH.
 ///
@@ -57,12 +76,11 @@ pub fn detect_ffmpeg() -> bool {
 /// Returns an error if ffmpeg cannot be spawned (binary missing, permission
 /// denied) or if the process exits with a non-zero status code.
 pub fn run_ffmpeg(args: &[&str]) -> Result<()> {
-    let output = ffmpeg_command().args(args).output().with_context(|| {
-        format!(
-            "failed to spawn ffmpeg binary '{}' — is it installed and executable?",
-            crate::config::CONFIG.ffmpeg_path
-        )
-    })?;
+    let output = run_command_with_timeout(
+        ffmpeg_command().args(args),
+        &crate::config::CONFIG.ffmpeg_path,
+        "ffmpeg",
+    )?;
 
     if output.status.success() {
         Ok(())
@@ -109,39 +127,6 @@ pub fn ffmpeg_image_to_webp(input: &Path, output: &Path) -> Result<()> {
     .with_context(|| format!("image→webp conversion failed for {in_str}"))
 }
 
-/// Convert a GIF animation to `WebM` (VP9 codec) using ffmpeg.
-///
-/// Retained for potential future use but no longer called by the conversion
-/// pipeline — GIFs are now converted to animated WebP via
-/// [`ffmpeg_image_to_webp`] so they remain in the Image media category and
-/// render as `<img>` tags rather than `<video>` tags.
-///
-/// # Errors
-/// Returns an error if ffmpeg exits non-zero or cannot be spawned.
-#[allow(dead_code)]
-pub fn ffmpeg_gif_to_webm(input: &Path, output: &Path) -> Result<()> {
-    let in_str = path_to_str(input)?;
-    let out_str = path_to_str(output)?;
-
-    run_ffmpeg(&[
-        "-loglevel",
-        "error",
-        "-i",
-        in_str,
-        "-c:v",
-        "libvpx-vp9",
-        "-crf",
-        "30",
-        "-b:v",
-        "0",
-        "-map_metadata",
-        "-1",
-        "-y",
-        out_str,
-    ])
-    .with_context(|| format!("gif→webm conversion failed for {in_str}"))
-}
-
 /// Generate a WebP thumbnail from an image or video by extracting the first
 /// frame and scaling to fit within `max_dim × max_dim`.
 ///
@@ -177,6 +162,53 @@ pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()>
     .with_context(|| format!("thumbnail generation failed for {in_str}"))
 }
 
+/// Probe whether a WebM container is audio-only or contains video streams.
+///
+/// # Errors
+/// Returns an error if `ffprobe` cannot be spawned, times out, exits non-zero,
+/// or reports no audio/video streams.
+pub fn probe_stream_kind(path: &Path) -> Result<StreamKind> {
+    let path_str = path_to_str(path)?;
+    let output = run_command_with_timeout(
+        ffprobe_command().args([
+            "-v",
+            "quiet",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path_str,
+        ]),
+        &crate::config::CONFIG.ffprobe_path,
+        "ffprobe",
+    )?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "ffprobe exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let mut saw_audio = false;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        match line.trim() {
+            "video" => return Ok(StreamKind::Video),
+            "audio" => saw_audio = true,
+            _ => {}
+        }
+    }
+
+    if saw_audio {
+        Ok(StreamKind::AudioOnly)
+    } else {
+        Err(anyhow::anyhow!(
+            "ffprobe returned no audio or video streams for: {path_str}"
+        ))
+    }
+}
+
 /// Probe the primary video codec of a media file using `ffprobe`.
 ///
 /// Returns the lowercase codec name (e.g. `"vp9"`, `"av1"`, `"h264"`) on
@@ -186,8 +218,8 @@ pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()>
 /// Returns an error if `ffprobe` cannot be spawned, exits non-zero, or its
 /// output contains no recognisable codec name.
 pub fn probe_video_codec(path: &str) -> Result<String> {
-    let output = ffprobe_command()
-        .args([
+    let output = run_command_with_timeout(
+        ffprobe_command().args([
             "-v",
             "quiet",
             "-select_streams",
@@ -197,14 +229,10 @@ pub fn probe_video_codec(path: &str) -> Result<String> {
             "-of",
             "default=noprint_wrappers=1:nokey=1",
             path,
-        ])
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to spawn ffprobe binary '{}' — is it installed and executable?",
-                crate::config::CONFIG.ffprobe_path
-            )
-        })?;
+        ]),
+        &crate::config::CONFIG.ffprobe_path,
+        "ffprobe",
+    )?;
 
     if !output.status.success() {
         return Err(anyhow::anyhow!(
@@ -226,72 +254,6 @@ pub fn probe_video_codec(path: &str) -> Result<String> {
 
     Ok(codec)
 }
-
-/// Transcode a video file to `WebM` (VP9 video + Opus audio) using ffmpeg.
-///
-/// Uses constant-quality VP9 encoding (`-crf 30 -b:v 0`) and Opus audio at
-/// 128 kbps.  All metadata is stripped.  Accepts MP4 or AV1 `WebM` inputs.
-///
-/// # Errors
-/// Returns an error if ffmpeg exits non-zero or cannot be spawned.
-#[allow(dead_code)]
-pub fn ffmpeg_transcode_to_webm(input: &Path, output: &Path) -> Result<()> {
-    let in_str = path_to_str(input)?;
-    let out_str = path_to_str(output)?;
-
-    run_ffmpeg(&[
-        "-loglevel",
-        "error",
-        "-i",
-        in_str,
-        "-c:v",
-        "libvpx-vp9",
-        "-crf",
-        "30",
-        "-b:v",
-        "0",
-        "-c:a",
-        "libopus",
-        "-b:a",
-        "128k",
-        "-map_metadata",
-        "-1",
-        "-y",
-        out_str,
-    ])
-    .with_context(|| format!("video→webm transcode failed for {in_str}"))
-}
-
-/// Generate a waveform PNG image for an audio file using ffmpeg's
-/// `showwavespic` filter.
-///
-/// The output image will be `width × height` pixels.  The waveform is
-/// rendered in a neutral grey (`0x888888`) suitable for both light and dark
-/// page themes.
-///
-/// # Errors
-/// Returns an error if ffmpeg exits non-zero or cannot be spawned.
-#[allow(dead_code)]
-pub fn ffmpeg_audio_waveform(input: &Path, output: &Path, width: u32, height: u32) -> Result<()> {
-    let in_str = path_to_str(input)?;
-    let out_str = path_to_str(output)?;
-    let filter = format!("showwavespic=s={width}x{height}:colors=0x888888");
-
-    run_ffmpeg(&[
-        "-loglevel",
-        "error",
-        "-i",
-        in_str,
-        "-filter_complex",
-        &filter,
-        "-frames:v",
-        "1",
-        "-y",
-        out_str,
-    ])
-    .with_context(|| format!("audio waveform generation failed for {in_str}"))
-}
-
 // ─── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Convert a `Path` to a UTF-8 `&str`, returning a descriptive error if the
@@ -299,6 +261,39 @@ pub fn ffmpeg_audio_waveform(input: &Path, output: &Path, width: u32, height: u3
 fn path_to_str(p: &Path) -> Result<&str> {
     p.to_str()
         .ok_or_else(|| anyhow::anyhow!("path contains non-UTF-8 characters: {}", p.display()))
+}
+
+fn run_command_with_timeout(
+    command: &mut Command,
+    program: &str,
+    label: &str,
+) -> Result<std::process::Output> {
+    let timeout = Duration::from_secs(crate::config::CONFIG.ffmpeg_timeout_secs);
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!("failed to spawn {label} binary '{program}' — is it installed and executable?")
+        })?;
+    let started = Instant::now();
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return child
+                .wait_with_output()
+                .with_context(|| format!("{label} I/O error"));
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow::anyhow!(
+                "{label} timed out after {}s",
+                timeout.as_secs()
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Probe whether the current ffmpeg binary has the `libwebp` encoder compiled in.
@@ -311,19 +306,9 @@ fn path_to_str(p: &Path) -> Result<&str> {
 /// where blocking is acceptable.
 #[must_use]
 pub fn check_webp_encoder() -> bool {
-    let output = ffmpeg_command()
-        .args(["-encoders"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
-
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.lines().any(|line| line.contains("libwebp"))
-        }
-        Err(_) => false,
-    }
+    ENCODER_LIST
+        .as_deref()
+        .is_some_and(|stdout| stdout.lines().any(|line| line.contains("libwebp")))
 }
 
 /// Probe whether the current ffmpeg binary has the `libvpx-vp9` encoder compiled in.
@@ -335,19 +320,9 @@ pub fn check_webp_encoder() -> bool {
 /// This is a synchronous, blocking call intended for use at server startup.
 #[must_use]
 pub fn check_vp9_encoder() -> bool {
-    let output = ffmpeg_command()
-        .args(["-encoders"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
-
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.lines().any(|line| line.contains("libvpx-vp9"))
-        }
-        Err(_) => false,
-    }
+    ENCODER_LIST
+        .as_deref()
+        .is_some_and(|stdout| stdout.lines().any(|line| line.contains("libvpx-vp9")))
 }
 
 /// Probe whether the current ffmpeg binary has the `libopus` encoder compiled in.
@@ -359,17 +334,7 @@ pub fn check_vp9_encoder() -> bool {
 /// This is a synchronous, blocking call intended for use at server startup.
 #[must_use]
 pub fn check_opus_encoder() -> bool {
-    let output = ffmpeg_command()
-        .args(["-encoders"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
-
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.lines().any(|line| line.contains("libopus"))
-        }
-        Err(_) => false,
-    }
+    ENCODER_LIST
+        .as_deref()
+        .is_some_and(|stdout| stdout.lines().any(|line| line.contains("libopus")))
 }

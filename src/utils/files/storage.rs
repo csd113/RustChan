@@ -41,6 +41,34 @@ struct UploadPlan {
     thumbs_dir: PathBuf,
 }
 
+pub fn classify_upload_mime(
+    input_path: &Path,
+    sniff_bytes: &[u8],
+    allow_any_files: bool,
+) -> Result<String> {
+    let detected = match detect_mime_type(sniff_bytes) {
+        Ok(mime) => mime.to_string(),
+        Err(_) if allow_any_files => super::fallback_download_mime_type().to_string(),
+        Err(error) => return Err(error),
+    };
+
+    if detected == "video/webm" {
+        match crate::media::ffmpeg::probe_stream_kind(input_path) {
+            Ok(crate::media::ffmpeg::StreamKind::AudioOnly) => return Ok("audio/webm".to_string()),
+            Ok(crate::media::ffmpeg::StreamKind::Video) => {}
+            Err(error) => {
+                tracing::debug!(
+                    path = %input_path.display(),
+                    error = %error,
+                    "ffprobe could not refine WebM media type; treating upload as video/webm"
+                );
+            }
+        }
+    }
+
+    Ok(detected)
+}
+
 /// Save and process a primary upload from an already-streamed temporary file.
 ///
 /// # Errors
@@ -83,8 +111,8 @@ pub fn save_audio_with_image_thumb_from_path(
         return Err(anyhow::anyhow!("Audio file is empty."));
     }
 
-    let mime_type = detect_mime_type(sniff_bytes)?;
-    let media_type = crate::models::MediaType::from_mime(mime_type);
+    let mime_type = classify_upload_mime(input_path, sniff_bytes, false)?;
+    let media_type = crate::models::MediaType::from_mime(&mime_type);
     if !matches!(media_type, crate::models::MediaType::Audio) {
         return Err(anyhow::anyhow!(
             "Expected an audio file for the audio slot; got {mime_type}"
@@ -98,7 +126,7 @@ pub fn save_audio_with_image_thumb_from_path(
     }
 
     let file_id = Uuid::new_v4().simple().to_string();
-    let ext = mime_to_ext(mime_type);
+    let ext = mime_to_ext(&mime_type);
     let filename = format!("{file_id}.{ext}");
     let dest_dir = PathBuf::from(boards_dir).join(board_short);
     std::fs::create_dir_all(&dest_dir).context("Failed to create board directory")?;
@@ -205,11 +233,7 @@ fn build_upload_plan(
     original_size: usize,
     options: &SaveUploadOptions<'_>,
 ) -> Result<UploadPlan> {
-    let mime_type = match detect_mime_type(sniff_bytes) {
-        Ok(mime) => mime.to_string(),
-        Err(_) if options.allow_any_files => super::fallback_download_mime_type().to_string(),
-        Err(error) => return Err(error),
-    };
+    let mime_type = classify_upload_mime(input_path, sniff_bytes, options.allow_any_files)?;
     if mime_type == "image/svg+xml" {
         anyhow::bail!(
             "File type not allowed. SVG files are not accepted because they can contain executable JavaScript."
@@ -308,8 +332,11 @@ fn save_processed_upload(
         )
         .context("Media processing pipeline failed")?;
 
+    if plan.jpeg_orientation > 1 && processed.file_path.exists() {
+        apply_image_exif_orientation(&processed.file_path, plan.jpeg_orientation);
+    }
+
     if plan.jpeg_orientation > 1
-        && !options.ffmpeg_available
         && processed.thumbnail_path.exists()
         && processed
             .thumbnail_path
@@ -397,9 +424,56 @@ fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {
         return;
     };
     let rotated = crate::media::exif::apply_exif_orientation(img, orientation);
-    if let Err(error) = rotated.save_with_format(thumb_path, image::ImageFormat::WebP) {
+    if let Err(error) = write_image_atomic(thumb_path, &rotated, image::ImageFormat::WebP) {
         tracing::warn!("failed to re-orient thumbnail: {error}");
     }
+}
+
+fn apply_image_exif_orientation(image_path: &Path, orientation: u32) {
+    if orientation <= 1 {
+        return;
+    }
+
+    let Ok(data) = std::fs::read(image_path) else {
+        return;
+    };
+    let Ok(format) = image::guess_format(&data) else {
+        return;
+    };
+    let Ok(img) = image::load_from_memory_with_format(&data, format) else {
+        return;
+    };
+    let rotated = crate::media::exif::apply_exif_orientation(img, orientation);
+    if let Err(error) = write_image_atomic(image_path, &rotated, format) {
+        tracing::warn!("failed to re-orient stored image: {error}");
+    }
+}
+
+fn write_image_atomic(
+    output_path: &Path,
+    image: &image::DynamicImage,
+    format: image::ImageFormat,
+) -> Result<()> {
+    let parent = output_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("output path has no parent: {}", output_path.display()))?;
+    let tmp = tempfile::Builder::new()
+        .prefix("rustchan-orient-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .with_context(|| format!("failed to create temp file for {}", output_path.display()))?;
+    image
+        .save_with_format(tmp.path(), format)
+        .with_context(|| {
+            format!(
+                "failed to write re-oriented image to {}",
+                tmp.path().display()
+            )
+        })?;
+    tmp.persist(output_path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to atomically replace {}", output_path.display()))?;
+    Ok(())
 }
 
 fn mime_to_ext(mime: &str) -> &'static str {
@@ -420,5 +494,43 @@ fn mime_to_ext(mime: &str) -> &'static str {
         "audio/mp4" => "m4a",
         "audio/aac" => "aac",
         _ => "bin",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::save_audio_with_image_thumb_from_path;
+
+    #[test]
+    fn combo_flac_audio_is_saved_losslessly_without_pending_processing() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let board_dir = tempdir.path().join("test");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+
+        let input = tempfile::Builder::new()
+            .suffix(".flac")
+            .tempfile_in(tempdir.path())
+            .expect("temp file");
+        let flac_bytes = b"fLaC\x00\x00\x00\x22test flac bytes";
+        std::fs::write(input.path(), flac_bytes).expect("write flac");
+
+        let uploaded = save_audio_with_image_thumb_from_path(
+            input.path(),
+            flac_bytes,
+            flac_bytes.len(),
+            "track.flac",
+            tempdir.path().to_str().expect("utf8 path"),
+            "test",
+            1024 * 1024,
+        )
+        .expect("save flac");
+
+        assert_eq!(uploaded.mime_type, "audio/flac");
+        assert_eq!(uploaded.file_path.split('.').next_back(), Some("flac"));
+        assert!(!uploaded.processing_pending);
+
+        let stored_bytes =
+            std::fs::read(tempdir.path().join(&uploaded.file_path)).expect("read stored flac");
+        assert_eq!(stored_bytes, flac_bytes);
     }
 }

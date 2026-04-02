@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 28;
+pub(super) const CURRENT_MAX_MIGRATION: i64 = 31;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
@@ -93,6 +93,30 @@ const MIGRATIONS: &[(i64, &str)] = &[
         );
         CREATE INDEX IF NOT EXISTS idx_pending_fs_ops_created
             ON pending_fs_ops(created_at ASC)",
+    ),
+    (
+        29,
+        "ALTER TABLE boards ADD COLUMN show_poster_ids INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        30,
+        r"CREATE TABLE IF NOT EXISTS user_thread_preferences (
+            user_hash   TEXT NOT NULL,
+            thread_id    INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+            pinned      INTEGER NOT NULL DEFAULT 0,
+            hidden      INTEGER NOT NULL DEFAULT 0,
+            created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY(user_hash, thread_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_thread_preferences_user_hidden
+            ON user_thread_preferences(user_hash, hidden);
+        CREATE INDEX IF NOT EXISTS idx_user_thread_preferences_thread
+            ON user_thread_preferences(thread_id)",
+    ),
+    (
+        31,
+        "ALTER TABLE boards ADD COLUMN max_archived_threads INTEGER NOT NULL DEFAULT 150",
     ),
 ];
 
