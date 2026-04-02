@@ -15,6 +15,37 @@ use super::{
     thread_autoupdate_script, TOGGLE_SCRIPT,
 };
 
+fn render_thread_nav(board_short: &str, reply_count: i64, is_bottom: bool) -> String {
+    let jump_link = if is_bottom { "#top" } else { "#bottom" };
+    let jump_label = if is_bottom { "Top" } else { "Bottom" };
+    let nav_class = if is_bottom {
+        "board-header thread-nav thread-nav-bottom"
+    } else {
+        "board-header thread-nav"
+    };
+
+    format!(
+        r#"<div class="{nav_class}">
+  <a href="/{s}">[ Return ]</a>
+  <a href="/{s}/catalog">[ Catalog ]</a>
+  <a href="{jump_link}">[ {jump_label} ]</a>
+  <button class="thread-nav-btn" data-action="fetch-updates">[ Update ]</button>
+  <label class="autoupdate-label">
+    <input type="checkbox" data-role="autoupdate-toggle" data-action="autoupdate-toggle">
+    Auto
+  </label>
+  <span class="autoupdate-status" data-role="autoupdate-status"></span>
+  <span class="thread-reply-stat">R: <span data-role="thread-reply-count">{reply_count}</span></span>
+</div>
+"#,
+        nav_class = nav_class,
+        s = escape_html(board_short),
+        jump_link = jump_link,
+        jump_label = jump_label,
+        reply_count = reply_count,
+    )
+}
+
 // ─── Thread page ──────────────────────────────────────────────────────────────
 
 #[must_use]
@@ -123,23 +154,12 @@ pub fn thread_page(
 
     let _ = write!(
         body,
-        r##"<div class="thread-board-banner board-thread-header">/{s}/ — {bn}</div>
-<div class="board-header thread-nav">
-  <a href="/{s}">[ Return ]</a>
-  <a href="/{s}/catalog">[ Catalog ]</a>
-  <a href="#bottom">[ Bottom ]</a>
-  <button class="thread-nav-btn" data-action="fetch-updates">[ Update ]</button>
-  <label class="autoupdate-label">
-    <input type="checkbox" id="autoupdate-toggle-cb" data-action="autoupdate-toggle">
-    Auto
-  </label>
-  <span class="autoupdate-status" id="autoupdate-status"></span>
-  <span class="thread-reply-stat">R: <span id="thread-reply-count">{rc}</span></span>
-</div>
-"##,
+        r##"<div id="top"></div>
+<div class="thread-board-banner board-thread-header">/{s}/ — {bn}</div>
+{top_nav}"##,
         s = escape_html(&board.short_name),
         bn = escape_html(&board.name),
-        rc = thread.reply_count
+        top_nav = render_thread_nav(&board.short_name, thread.reply_count, false)
     );
     body.push_str(locked_notice);
 
@@ -173,6 +193,11 @@ pub fn thread_page(
     }
 
     body.push_str("</div><!-- #thread-posts -->\n");
+    body.push_str(&render_thread_nav(
+        &board.short_name,
+        thread.reply_count,
+        true,
+    ));
     body.push_str("<div id=\"bottom\"></div>\n");
 
     if !thread.locked {

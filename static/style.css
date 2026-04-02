@@ -639,6 +639,27 @@ html.no-js .post-form-wrap {
 
 .post-form input[type="file"] { padding: 3px; cursor: pointer; }
 
+.upload-secondary-toggle {
+  margin-top: 6px;
+}
+
+.upload-secondary-toggle > summary {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  cursor: pointer;
+  list-style: none;
+  display: inline-block;
+  padding: 2px 0;
+}
+
+.upload-secondary-toggle > summary:hover {
+  color: var(--green-bright);
+}
+
+.upload-secondary-panel {
+  margin-top: 6px;
+}
+
 .post-form textarea { min-height: 90px; }
 
 .post-form button[type="submit"] {
@@ -3352,6 +3373,10 @@ html:not([data-theme]) .compress-do-btn {
   align-items: center;
   gap: 2px 0;
   padding: 4px 0 8px;
+}
+
+.thread-nav-bottom {
+  padding-top: 10px;
 }
 
 .thread-nav a,

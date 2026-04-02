@@ -677,7 +677,12 @@ function toggleThreadMenu(toggle) {
 
 (function () {
   var container = document.getElementById('thread-posts');
-  var statusEl = document.getElementById('autoupdate-status');
+  var statusEls = Array.prototype.slice.call(
+    document.querySelectorAll('[data-role="autoupdate-status"]')
+  );
+  var toggleEls = Array.prototype.slice.call(
+    document.querySelectorAll('[data-role="autoupdate-toggle"]')
+  );
   var timer = null;
   var updating = false;
   var autoOn = false;
@@ -727,12 +732,23 @@ function toggleThreadMenu(toggle) {
   }, { passive: true });
 
   function setStatus(msg) {
-    if (statusEl) statusEl.textContent = msg;
+    statusEls.forEach(function (el) {
+      el.textContent = msg;
+    });
+  }
+
+  function syncAutoUpdateToggles(checked) {
+    toggleEls.forEach(function (el) {
+      if (el.checked !== checked) el.checked = checked;
+    });
   }
 
   function applyDeltaState(data) {
-    var rcEl = document.getElementById('thread-reply-count');
-    if (rcEl && data.reply_count !== undefined) rcEl.textContent = data.reply_count;
+    if (data.reply_count !== undefined) {
+      document.querySelectorAll('[data-role="thread-reply-count"]').forEach(function (el) {
+        el.textContent = data.reply_count;
+      });
+    }
     var lockedEl = document.getElementById('thread-locked-indicator');
     if (lockedEl && data.locked !== undefined) lockedEl.style.display = data.locked ? '' : 'none';
     var stickyEl = document.getElementById('thread-sticky-indicator');
@@ -777,6 +793,7 @@ function toggleThreadMenu(toggle) {
 
   function toggleAutoUpdate(cb) {
     autoOn = cb.checked;
+    syncAutoUpdateToggles(autoOn);
     if (autoOn) {
       if (timer) clearInterval(timer);
       timer = setInterval(window.fetchUpdates, 15000);
@@ -1492,7 +1509,7 @@ document.addEventListener('change', function (e) {
     window.checkFileSize && window.checkFileSize(target);
   }
   // Autoupdate toggle
-  if (target.id === 'autoupdate-toggle-cb') {
+  if (target.matches && target.matches('[data-role="autoupdate-toggle"]')) {
     window._toggleAutoUpdate && window._toggleAutoUpdate(target);
   }
   // Catalog sort
