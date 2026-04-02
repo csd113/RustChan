@@ -2202,6 +2202,7 @@ html:not([data-theme]) .poster-id-btn {
 }
 [data-theme="chanclassic"] body {
   background: #ead6b8;
+  color: #111111;
 }
 [data-theme="chanclassic"] .site-header {
   background: #800000;
@@ -2219,13 +2220,47 @@ html:not([data-theme]) .poster-id-btn {
 }
 [data-theme="chanclassic"] .site-header a,
 [data-theme="chanclassic"] .site-header button {
-  color: #ffcccc;
+  color: #fff0f0;
 }
 [data-theme="chanclassic"] .site-subtitle {
-  color: #ffcccc;
+  color: #f5dede;
 }
-[data-theme="chanclassic"] a { color: #0000ee; text-decoration: underline; }
+[data-theme="chanclassic"] a { color: #0000ee; text-decoration: none; }
 [data-theme="chanclassic"] a:hover { color: #cc0000; text-shadow: none; }
+[data-theme="chanclassic"] .post-body a,
+[data-theme="chanclassic"] .file-info a,
+[data-theme="chanclassic"] .post-num a,
+[data-theme="chanclassic"] .post-ref,
+[data-theme="chanclassic"] .backrefs .backref {
+  text-decoration: underline;
+}
+[data-theme="chanclassic"] .site-header a,
+[data-theme="chanclassic"] .site-header button,
+[data-theme="chanclassic"] .board-list a,
+[data-theme="chanclassic"] .board-nav-link,
+[data-theme="chanclassic"] .home-btn,
+[data-theme="chanclassic"] .admin-header-link,
+[data-theme="chanclassic"] .thread-nav a,
+[data-theme="chanclassic"] .thread-nav-btn,
+[data-theme="chanclassic"] .post-toggle-btn,
+[data-theme="chanclassic"] .post-num a,
+[data-theme="chanclassic"] .poster-id-btn,
+[data-theme="chanclassic"] .catalog-thread-link,
+[data-theme="chanclassic"] .archive-thread-link {
+  text-decoration: none;
+  text-shadow: none;
+}
+[data-theme="chanclassic"] .thread-nav a:hover,
+[data-theme="chanclassic"] .thread-nav-btn:hover,
+[data-theme="chanclassic"] .board-list a:hover,
+[data-theme="chanclassic"] .board-nav-link:hover,
+[data-theme="chanclassic"] .home-btn:hover,
+[data-theme="chanclassic"] .admin-header-link:hover,
+[data-theme="chanclassic"] .post-toggle-btn:hover {
+  text-decoration: underline;
+  background: transparent;
+  box-shadow: none;
+}
 [data-theme="chanclassic"] .op,
 [data-theme="chanclassic"] .reply {
   background: #f0e0d6;
@@ -2245,6 +2280,12 @@ html:not([data-theme]) .poster-id-btn {
 /* Post number / quote link */
 [data-theme="chanclassic"] .post-num a,
 [data-theme="chanclassic"] .post-ref { color: #0000ee; }
+[data-theme="chanclassic"] .post-time,
+[data-theme="chanclassic"] .file-info,
+[data-theme="chanclassic"] .thread-reply-stat,
+[data-theme="chanclassic"] .autoupdate-status {
+  color: #5f5f5f;
+}
 /* Greentext */
 [data-theme="chanclassic"] .greentext { color: #789922; }
 /* Poster name */
@@ -2262,15 +2303,46 @@ html:not([data-theme]) .poster-id-btn {
   color: #000000;
   border-radius: 2px;
 }
+[data-theme="chanclassic"] .thread-nav-btn,
+[data-theme="chanclassic"] .post-toggle-btn,
+[data-theme="chanclassic"] .site-header button,
+[data-theme="chanclassic"] .board-list a,
+[data-theme="chanclassic"] .board-nav-link,
+[data-theme="chanclassic"] .home-btn,
+[data-theme="chanclassic"] .admin-header-link {
+  background: transparent;
+  border: none;
+  color: #0000ee;
+  border-radius: 0;
+  box-shadow: none;
+}
+[data-theme="chanclassic"] .site-header button {
+  color: #fff0f0;
+}
+[data-theme="chanclassic"] .home-btn,
+[data-theme="chanclassic"] .admin-header-link {
+  padding-left: 0;
+  padding-right: 0;
+}
 [data-theme="chanclassic"] button:hover {
   background: #d8c8b0;
   border-color: #800000;
   color: #800000;
   box-shadow: none;
 }
+[data-theme="chanclassic"] .thread-nav-btn:hover,
+[data-theme="chanclassic"] .post-toggle-btn:hover,
+[data-theme="chanclassic"] .board-list a:hover,
+[data-theme="chanclassic"] .board-nav-link:hover,
+[data-theme="chanclassic"] .home-btn:hover,
+[data-theme="chanclassic"] .admin-header-link:hover {
+  color: #cc0000;
+  border: none;
+}
 /* Board header bar */
 [data-theme="chanclassic"] .board-header {
   border-bottom: 1px solid #d9bfb7;
+  color: #3b3b3b;
 }
 /* Thread divider */
 [data-theme="chanclassic"] .thread + .thread { border-top: 1px solid #d9bfb7; }
@@ -2286,11 +2358,28 @@ html:not([data-theme]) .poster-id-btn {
   border-radius: 0;
   background: #f0e0d6;
 }
+[data-theme="chanclassic"] .catalog-thread-link,
+[data-theme="chanclassic"] .archive-thread-link,
+[data-theme="chanclassic"] .board-card-link {
+  color: #1b3fa8;
+}
 /* File info */
 [data-theme="chanclassic"] .file-info { color: #707070; font-size: 0.8rem; }
 /* Spoiler text */
 [data-theme="chanclassic"] .spoiler { background: #000; color: #000; }
 [data-theme="chanclassic"] .spoiler:hover { color: #fff; }
+[data-theme="chanclassic"] .post-form-container input[type="text"],
+[data-theme="chanclassic"] .post-form-container textarea,
+[data-theme="chanclassic"] .post-form-container input[type="file"] {
+  background: #ffffee;
+  border-color: #b7a58f;
+  color: #111111;
+}
+[data-theme="chanclassic"] .post-form-container input[type="text"]:focus,
+[data-theme="chanclassic"] .post-form-container textarea:focus {
+  border-color: #800000;
+  box-shadow: none;
+}
 
 /* ── Theme Picker Widget ──────────────────────────────────────────────────── */
 
