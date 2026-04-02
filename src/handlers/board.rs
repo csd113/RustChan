@@ -1093,6 +1093,7 @@ pub async fn serve_board_media(
     Path(media_path): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
+    use axum::http::header::CACHE_CONTROL;
     use axum::http::StatusCode;
     use std::path::PathBuf;
     use tower::ServiceExt;
@@ -1105,6 +1106,14 @@ pub async fn serve_board_media(
 
     let base = PathBuf::from(&CONFIG.upload_dir);
     let target = base.join(&media_path);
+    let has_version = req
+        .uri()
+        .query()
+        .is_some_and(|query| query.split('&').any(|part| part.starts_with("v=")));
+    let is_board_favicon = std::path::Path::new(&media_path)
+        .components()
+        .nth(1)
+        .is_some_and(|part| part.as_os_str() == "_favicon");
 
     // Verify the resolved path is still inside the upload directory.
     // This catches any edge cases that slip past the string checks above
@@ -1127,6 +1136,12 @@ pub async fn serve_board_media(
                     HeaderValue, CONTENT_DISPOSITION, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS,
                 };
                 let mut resp = resp.map(axum::body::Body::new);
+                if is_board_favicon {
+                    resp.headers_mut().insert(
+                        CACHE_CONTROL,
+                        HeaderValue::from_static(board_media_cache_control(has_version)),
+                    );
+                }
                 if let Some(ct) = media_content_type(&target) {
                     resp.headers_mut()
                         .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
@@ -1165,6 +1180,14 @@ pub async fn serve_board_media(
         }
     } else {
         StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+fn board_media_cache_control(has_version: bool) -> &'static str {
+    if has_version {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache, must-revalidate"
     }
 }
 
@@ -1346,12 +1369,13 @@ pub async fn submit_appeal(
         r#"<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Appeal Submitted</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="{stylesheet_href}">
 </head><body><div class="page-box error-page">
 <h1>appeal submitted</h1>
 <p>{msg}</p>
 <p><a href="/">return home</a></p>
 </div></body></html>"#,
+        stylesheet_href = crate::templates::static_asset_url("/static/style.css"),
         msg = crate::utils::sanitize::escape_html(msg)
     );
     Html(html).into_response()

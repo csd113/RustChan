@@ -73,10 +73,14 @@ pub fn admin_panel_page(
     flash: Option<(bool, &str)>,
 ) -> String {
     let global_favicon_exists = crate::favicon::global_has_custom_favicon();
+    let global_favicon_version =
+        crate::favicon::favicon_version_for_board(None).unwrap_or_default();
     let mut board_cards = String::new();
     for b in boards {
         let checked = |v: bool| if v { " checked" } else { "" };
         let board_favicon_exists = crate::favicon::board_has_custom_favicon(&b.short_name);
+        let board_favicon_version =
+            crate::favicon::favicon_version_for_board(Some(&b.short_name)).unwrap_or_default();
         let _ = write!(
             board_cards,
             r#"<details class="board-settings-card" id="board-{short}">
@@ -188,8 +192,9 @@ pub fn admin_panel_page(
             poster_ids_ck = checked(b.show_poster_ids),
             board_favicon_preview = if board_favicon_exists {
                 format!(
-                    r#"<img class="favicon-inline-preview" src="/boards/{short}/_favicon/favicon-32x32.png" alt="/{short}/ favicon">"#,
-                    short = escape_html(&b.short_name)
+                    r#"<img class="favicon-inline-preview" src="/boards/{short}/_favicon/favicon-32x32.png?v={version}" alt="/{short}/ favicon">"#,
+                    short = escape_html(&b.short_name),
+                    version = escape_html(&board_favicon_version)
                 )
             } else {
                 String::new()
@@ -706,8 +711,10 @@ old boards to prevent query performance degradation.
         appeal_rows = appeal_rows,
         appeal_badge = appeal_badge,
         global_favicon_preview = if global_favicon_exists {
-            r#"<img class="favicon-inline-preview" src="/favicon-32x32.png" alt="global favicon">"#
-                .to_string()
+            format!(
+                r#"<img class="favicon-inline-preview" src="/favicon-32x32.png?v={version}" alt="global favicon">"#,
+                version = escape_html(&global_favicon_version)
+            )
         } else {
             String::new()
         },

@@ -19,6 +19,10 @@ async fn serve_named_global_favicon(
     let Some(path) = crate::favicon::global_favicon_file(file_name) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let has_version = req
+        .uri()
+        .query()
+        .is_some_and(|query| query.split('&').any(|part| part.starts_with("v=")));
     let req = req.map(|_| axum::body::Body::empty());
     ServeFile::new(path).oneshot(req).await.map_or_else(
         |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -30,11 +34,19 @@ async fn serve_named_global_favicon(
             );
             resp.headers_mut().insert(
                 header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=86400"),
+                HeaderValue::from_static(cache_control_for_favicon(has_version)),
             );
             resp.into_response()
         },
     )
+}
+
+fn cache_control_for_favicon(has_version: bool) -> &'static str {
+    if has_version {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache, must-revalidate"
+    }
 }
 
 pub async fn serve_favicon_ico(req: axum::extract::Request) -> Response {
@@ -59,4 +71,25 @@ pub async fn serve_android_chrome_192(req: axum::extract::Request) -> Response {
 
 pub async fn serve_android_chrome_512(req: axum::extract::Request) -> Response {
     serve_named_global_favicon("android-chrome-512x512.png", req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cache_control_for_favicon;
+
+    #[test]
+    fn versioned_favicons_are_safe_to_cache_long_term() {
+        assert_eq!(
+            cache_control_for_favicon(true),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    #[test]
+    fn unversioned_favicons_must_revalidate() {
+        assert_eq!(
+            cache_control_for_favicon(false),
+            "no-cache, must-revalidate"
+        );
+    }
 }

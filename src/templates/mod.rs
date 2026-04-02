@@ -23,6 +23,7 @@ use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::time::UNIX_EPOCH;
 
 pub mod admin;
 pub mod board;
@@ -78,6 +79,7 @@ static LIVE_BOARDS: LazyLock<RwLock<Arc<Vec<crate::models::Board>>>> =
 static LIVE_BOARDS_VERSION: AtomicU64 = AtomicU64::new(0);
 static LIVE_BOARD_NAV: LazyLock<RwLock<(u64, Arc<str>)>> =
     LazyLock::new(|| RwLock::new((0, Arc::from(""))));
+static STATIC_ASSET_VERSION: LazyLock<String> = LazyLock::new(compute_static_asset_version);
 
 /// Replace the in-memory board list.  Call after any board create / delete /
 /// restore operation so that `error_page()` renders the correct top-bar links.
@@ -108,6 +110,20 @@ pub fn live_boards_snapshot() -> Arc<Vec<crate::models::Board>> {
 /// mutations invalidate cached thread HTML (and thus stale nav bars).
 pub fn live_boards_version() -> u64 {
     LIVE_BOARDS_VERSION.load(Ordering::Relaxed)
+}
+
+fn compute_static_asset_version() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
+pub(crate) fn static_asset_url(path: &str) -> String {
+    format!("{path}?v={}", *STATIC_ASSET_VERSION)
 }
 
 pub fn set_live_collapse_greentext(enabled: bool) {
@@ -442,6 +458,9 @@ pub fn base_layout(
             urlencoding_simple(current_path)
         )
     };
+    let stylesheet_href = static_asset_url("/static/style.css");
+    let theme_init_src = static_asset_url("/static/theme-init.js");
+    let main_js_src = static_asset_url("/static/main.js");
 
     format!(
         r#"<!DOCTYPE html>
@@ -452,8 +471,8 @@ pub fn base_layout(
 <meta name="referrer" content="no-referrer">
 <title>{title}</title>
 {favicon_head}
-<link rel="stylesheet" href="/static/style.css">
-<script src="/static/theme-init.js"></script>
+<link rel="stylesheet" href="{stylesheet_href}">
+<script src="{theme_init_src}"></script>
 </head>
 <body{collapse_attr}>
 <header class="site-header">
@@ -507,17 +526,20 @@ pub fn base_layout(
 </div>
 
 <input type="hidden" id="csrf_global" value="{csrf_token}">
-<script src="/static/main.js" defer></script>
+<script src="{main_js_src}" defer></script>
 </body>
 </html>"#,
         title = escape_html(title),
         favicon_head = crate::favicon::favicon_head_html(board_short),
+        stylesheet_href = stylesheet_href,
+        theme_init_src = theme_init_src,
         board_links = board_links,
         search_bar = search_bar,
         board_menu = board_menu,
         forum_name = escape_html(&live_site_name()),
         body = body,
         csrf_token = escape_html(csrf_token),
+        main_js_src = main_js_src,
         default_theme_attr = default_theme_attr,
         active_theme_attr = active_theme_attr,
         terminal_theme_href = theme_href("terminal"),
@@ -556,6 +578,9 @@ pub fn ban_page(reason: &str, csrf_token: &str) -> String {
     } else {
         format!(r#" data-theme="{}""#, escape_html(configured_default))
     };
+    let stylesheet_href = static_asset_url("/static/style.css");
+    let theme_init_src = static_asset_url("/static/theme-init.js");
+    let main_js_src = static_asset_url("/static/main.js");
     format!(
         r#"<!DOCTYPE html>
 <html lang="en" class="no-js"{default_theme_attr}{active_theme_attr}>
@@ -563,8 +588,8 @@ pub fn ban_page(reason: &str, csrf_token: &str) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>You Are Banned</title>
-<link rel="stylesheet" href="/static/style.css">
-<script src="/static/theme-init.js"></script>
+<link rel="stylesheet" href="{stylesheet_href}">
+<script src="{theme_init_src}"></script>
 </head>
 <body>
 <div class="page-box error-page">
@@ -583,13 +608,16 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
 </div>
 <!-- Global CSRF token consumed by main.js for fetch-based requests -->
 <input type="hidden" id="csrf_global" value="{csrf}">
-<script src="/static/main.js" defer></script>
+<script src="{main_js_src}" defer></script>
 </body>
 </html>"#,
         default_theme_attr = default_theme_attr,
         active_theme_attr = active_theme_attr,
+        stylesheet_href = stylesheet_href,
+        theme_init_src = theme_init_src,
         reason = escape_html(reason),
         csrf = escape_html(csrf_token),
+        main_js_src = main_js_src,
     )
 }
 

@@ -42,10 +42,14 @@ pub fn global_has_custom_favicon() -> bool {
     version_for_scope(FaviconScope::Global).is_some()
 }
 
+pub fn favicon_version_for_board(board_short: Option<&str>) -> Option<String> {
+    board_short
+        .and_then(|short| version_for_scope(FaviconScope::Board(short)))
+        .or_else(|| version_for_scope(FaviconScope::Global))
+}
+
 pub fn favicon_head_html(board_short: Option<&str>) -> String {
-    let resolved = board_short
-        .and_then(|short| resolve_scope(FaviconScope::Board(short)))
-        .or_else(|| resolve_scope(FaviconScope::Global));
+    let resolved = resolve_favicon_for_board(board_short);
     let Some(resolved) = resolved else {
         return String::new();
     };
@@ -62,6 +66,12 @@ pub fn favicon_head_html(board_short: Option<&str>) -> String {
         base = resolved.base_url,
         v = v,
     )
+}
+
+pub fn resolve_favicon_for_board(board_short: Option<&str>) -> Option<ResolvedFavicon> {
+    board_short
+        .and_then(|short| resolve_scope(FaviconScope::Board(short)))
+        .or_else(|| resolve_scope(FaviconScope::Global))
 }
 
 pub fn write_favicon_set(scope: FaviconScope<'_>, bytes: &[u8]) -> Result<()> {
