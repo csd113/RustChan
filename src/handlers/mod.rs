@@ -328,11 +328,12 @@ pub fn process_primary_upload(
     };
     let allow_any_files =
         crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
-    let detected_mime = match crate::utils::files::detect_mime_type(&upload.sniff_bytes) {
-        Ok(mime) => mime.to_string(),
-        Err(_) if allow_any_files => crate::utils::files::fallback_download_mime_type().to_string(),
-        Err(error) => return Err(AppError::BadRequest(error.to_string())),
-    };
+    let detected_mime = crate::utils::files::classify_upload_mime(
+        upload.temp_file.path(),
+        &upload.sniff_bytes,
+        allow_any_files,
+    )
+    .map_err(|error| AppError::BadRequest(error.to_string()))?;
     let detected_media = crate::models::MediaType::from_mime(&detected_mime);
 
     match detected_media {
@@ -431,13 +432,12 @@ pub fn process_primary_upload(
 }
 
 fn temp_upload_mime(upload: &TempUpload, allow_any_files: bool) -> Result<String> {
-    match crate::utils::files::detect_mime_type(&upload.sniff_bytes) {
-        Ok(mime) => Ok(mime.to_string()),
-        Err(_) if allow_any_files => {
-            Ok(crate::utils::files::fallback_download_mime_type().to_string())
-        }
-        Err(error) => Err(AppError::BadRequest(error.to_string())),
-    }
+    crate::utils::files::classify_upload_mime(
+        upload.temp_file.path(),
+        &upload.sniff_bytes,
+        allow_any_files,
+    )
+    .map_err(|error| AppError::BadRequest(error.to_string()))
 }
 
 /// Process the secondary audio file for an image+audio combo upload.
@@ -468,16 +468,6 @@ pub fn process_audio_combo(
     if !primary_is_image {
         return Err(AppError::BadRequest(
             "Audio can only be combined with an image upload.".into(),
-        ));
-    }
-
-    // Confirm the secondary file is actually audio.
-    let aud_mime = crate::utils::files::detect_mime_type(&audio_upload.sniff_bytes)
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let aud_media = crate::models::MediaType::from_mime(aud_mime);
-    if !matches!(aud_media, crate::models::MediaType::Audio) {
-        return Err(AppError::BadRequest(
-            "The audio slot only accepts audio files.".into(),
         ));
     }
 

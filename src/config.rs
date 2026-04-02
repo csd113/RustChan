@@ -545,6 +545,15 @@ impl Config {
     /// Returns an error if any configuration value is out of an acceptable range,
     /// or if the upload directory is not writable.
     pub fn validate(&self) -> anyhow::Result<()> {
+        fn url_host_is_loopback(url: &str) -> bool {
+            reqwest::Url::parse(url).ok().is_some_and(|parsed| {
+                parsed.host_str().is_some_and(|host| {
+                    host.eq_ignore_ascii_case("localhost")
+                        || host.parse::<std::net::IpAddr>().ok().is_some_and(|ip| ip.is_loopback())
+                })
+            })
+        }
+
         const MIB: usize = 1024 * 1024;
         const MAX_IMAGE_MIB: usize = 100;
         const MAX_VIDEO_MIB: usize = 2048;
@@ -655,6 +664,25 @@ impl Config {
                 "CONFIG ERROR: rustwave_url must begin with http:// or https://, got: {}",
                 self.rustwave_url
             ));
+        }
+        if self.enable_tor_support && !self.tor_only {
+            tracing::warn!(
+                target: "config",
+                "Tor support is enabled, but tor_only=false. RustChan will accept both clearnet and Tor traffic."
+            );
+        }
+        if self.tor_only && self.tls.acme.enabled {
+            anyhow::bail!(
+                "CONFIG ERROR: tor_only=true cannot be combined with [tls.acme]. \
+                 ACME validation requires public HTTPS reachability, but tor_only binds RustChan to loopback."
+            );
+        }
+        if self.tor_only && !url_host_is_loopback(&self.rustwave_url) {
+            anyhow::bail!(
+                "CONFIG ERROR: tor_only=true requires rustwave_url to point at localhost/loopback. \
+                 Current rustwave_url '{}' would send federation traffic directly off-host.",
+                self.rustwave_url
+            );
         }
         Ok(())
     }

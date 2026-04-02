@@ -509,12 +509,7 @@ async fn publish_onion_address(
     data_dir: &std::path::Path,
     onion_address: &RwLock<Option<String>>,
 ) {
-    tracing::debug!(
-        target: "rustchan::detect",
-        onion_address = %onion_name,
-        keys_dir = %data_dir.join("arti_state").join("keys").display(),
-        "Tor: hidden service active"
-    );
+    tracing::debug!(target: "rustchan::detect", "Tor: hidden service active");
     tracing::info!(target: "rustchan::detect", "Tor: hidden service active");
 
     *onion_address.write().await = Some(onion_name.to_string());
@@ -570,8 +565,7 @@ async fn proxy_tor_stream(
         TOR_STREAM_TOKENS.insert(local_port, Arc::clone(&token));
         Some(TokenGuard(local_port))
     } else {
-        tracing::debug!(target: "rustchan::detect", "Tor: could not determine local port — stream uses shared bucket");
-        None
+        return Err("could not determine local port for Tor identity isolation".into());
     };
 
     tokio::io::copy_bidirectional(&mut tor_stream, &mut local).await?;

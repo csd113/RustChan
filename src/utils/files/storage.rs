@@ -41,6 +41,34 @@ struct UploadPlan {
     thumbs_dir: PathBuf,
 }
 
+pub fn classify_upload_mime(
+    input_path: &Path,
+    sniff_bytes: &[u8],
+    allow_any_files: bool,
+) -> Result<String> {
+    let detected = match detect_mime_type(sniff_bytes) {
+        Ok(mime) => mime.to_string(),
+        Err(_) if allow_any_files => super::fallback_download_mime_type().to_string(),
+        Err(error) => return Err(error),
+    };
+
+    if detected == "video/webm" {
+        match crate::media::ffmpeg::probe_stream_kind(input_path) {
+            Ok(crate::media::ffmpeg::StreamKind::AudioOnly) => return Ok("audio/webm".to_string()),
+            Ok(crate::media::ffmpeg::StreamKind::Video) => {}
+            Err(error) => {
+                tracing::debug!(
+                    path = %input_path.display(),
+                    error = %error,
+                    "ffprobe could not refine WebM media type; treating upload as video/webm"
+                );
+            }
+        }
+    }
+
+    Ok(detected)
+}
+
 /// Save and process a primary upload from an already-streamed temporary file.
 ///
 /// # Errors
@@ -83,8 +111,8 @@ pub fn save_audio_with_image_thumb_from_path(
         return Err(anyhow::anyhow!("Audio file is empty."));
     }
 
-    let mime_type = detect_mime_type(sniff_bytes)?;
-    let media_type = crate::models::MediaType::from_mime(mime_type);
+    let mime_type = classify_upload_mime(input_path, sniff_bytes, false)?;
+    let media_type = crate::models::MediaType::from_mime(&mime_type);
     if !matches!(media_type, crate::models::MediaType::Audio) {
         return Err(anyhow::anyhow!(
             "Expected an audio file for the audio slot; got {mime_type}"
@@ -98,7 +126,7 @@ pub fn save_audio_with_image_thumb_from_path(
     }
 
     let file_id = Uuid::new_v4().simple().to_string();
-    let ext = mime_to_ext(mime_type);
+    let ext = mime_to_ext(&mime_type);
     let filename = format!("{file_id}.{ext}");
     let dest_dir = PathBuf::from(boards_dir).join(board_short);
     std::fs::create_dir_all(&dest_dir).context("Failed to create board directory")?;
@@ -205,11 +233,7 @@ fn build_upload_plan(
     original_size: usize,
     options: &SaveUploadOptions<'_>,
 ) -> Result<UploadPlan> {
-    let mime_type = match detect_mime_type(sniff_bytes) {
-        Ok(mime) => mime.to_string(),
-        Err(_) if options.allow_any_files => super::fallback_download_mime_type().to_string(),
-        Err(error) => return Err(error),
-    };
+    let mime_type = classify_upload_mime(input_path, sniff_bytes, options.allow_any_files)?;
     if mime_type == "image/svg+xml" {
         anyhow::bail!(
             "File type not allowed. SVG files are not accepted because they can contain executable JavaScript."
@@ -400,7 +424,9 @@ fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {
         return;
     };
     let rotated = crate::media::exif::apply_exif_orientation(img, orientation);
-    if let Err(error) = rotated.save_with_format(thumb_path, image::ImageFormat::WebP) {
+    if let Err(error) =
+        write_image_atomic(thumb_path, &rotated, image::ImageFormat::WebP)
+    {
         tracing::warn!("failed to re-orient thumbnail: {error}");
     }
 }
@@ -420,9 +446,31 @@ fn apply_image_exif_orientation(image_path: &Path, orientation: u32) {
         return;
     };
     let rotated = crate::media::exif::apply_exif_orientation(img, orientation);
-    if let Err(error) = rotated.save_with_format(image_path, format) {
+    if let Err(error) = write_image_atomic(image_path, &rotated, format) {
         tracing::warn!("failed to re-orient stored image: {error}");
     }
+}
+
+fn write_image_atomic(
+    output_path: &Path,
+    image: &image::DynamicImage,
+    format: image::ImageFormat,
+) -> Result<()> {
+    let parent = output_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("output path has no parent: {}", output_path.display()))?;
+    let tmp = tempfile::Builder::new()
+        .prefix("rustchan-orient-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .with_context(|| format!("failed to create temp file for {}", output_path.display()))?;
+    image
+        .save_with_format(tmp.path(), format)
+        .with_context(|| format!("failed to write re-oriented image to {}", tmp.path().display()))?;
+    tmp.persist(output_path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to atomically replace {}", output_path.display()))?;
+    Ok(())
 }
 
 fn mime_to_ext(mime: &str) -> &'static str {

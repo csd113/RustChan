@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 
 use super::ffmpeg;
 
+const MAX_IMAGE_THUMBNAIL_PIXELS: u64 = 100_000_000;
+
 // ─── Static placeholder SVGs ──────────────────────────────────────────────────
 
 // Note: these SVG strings contain `"#` sequences (e.g. fill="#0a0f0a") which
@@ -214,6 +216,15 @@ fn image_crate_thumbnail(
 ) -> Result<()> {
     let format = mime_to_image_format(mime)
         .ok_or_else(|| anyhow::anyhow!("unsupported image MIME for thumbnail: {mime}"))?;
+    let (width, height) = image::image_dimensions(input_path)
+        .with_context(|| format!("failed to inspect {} before thumbnailing", input_path.display()))?;
+    if u64::from(width).saturating_mul(u64::from(height)) > MAX_IMAGE_THUMBNAIL_PIXELS {
+        anyhow::bail!(
+            "image dimensions {}x{} exceed thumbnail safety limit",
+            width,
+            height
+        );
+    }
 
     let data = std::fs::read(input_path)
         .with_context(|| format!("failed to read {} for thumbnailing", input_path.display()))?;
