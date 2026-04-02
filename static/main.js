@@ -1488,7 +1488,7 @@ document.addEventListener('click', function (e) {
 document.addEventListener('change', function (e) {
   var target = e.target;
   // File inputs: check size
-  if (target.name === 'file' || target.name === 'audio_file') {
+  if (target.matches && target.matches('input[type="file"][data-onchange-check-size]')) {
     window.checkFileSize && window.checkFileSize(target);
   }
   // Autoupdate toggle
@@ -1714,15 +1714,6 @@ document.addEventListener('click', function (e) {
     }
   }, 3000);
 })();
-
-// ─── File input size check (data-onchange-check-size) ────────────────────────
-// Previously wired via onchange="checkFileSize(this)".  Now applied to all
-// file inputs that carry the data-onchange-check-size attribute.
-document.querySelectorAll('input[type="file"][data-onchange-check-size]').forEach(function (inp) {
-  inp.addEventListener('change', function () {
-    window.checkFileSize && window.checkFileSize(inp);
-  });
-});
 
 // ─── Admin backup progress bar ────────────────────────────────────────────────
 //

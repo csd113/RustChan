@@ -514,6 +514,14 @@ pub fn process_audio_first_uploads(
 ) -> Result<(Option<crate::utils::files::UploadedFile>, Option<crate::utils::files::UploadedFile>, Option<String>)> {
     let allow_any_files =
         crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
+    let has_audio_first_upload = audio_file_data.is_some() || image_file_data.is_some();
+
+    if has_audio_first_upload && fallback_file_data.is_some() {
+        return Err(AppError::BadRequest(
+            "Use either the audio/image upload flow or the other-file slot, not both in the same post."
+                .into(),
+        ));
+    }
 
     if let Some((image_upload, image_name)) = image_file_data {
         let (primary, primary_hash) = process_primary_upload(
@@ -642,4 +650,84 @@ pub fn enqueue_post_jobs(
         ip_hash: ip_hash.to_string(),
         body_len,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{process_audio_first_uploads, TempUpload};
+
+    fn sample_board() -> crate::models::Board {
+        crate::models::Board {
+            id: 1,
+            short_name: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            nsfw: false,
+            max_threads: 100,
+            max_archived_threads: 150,
+            bump_limit: 500,
+            allow_images: true,
+            allow_video: true,
+            allow_audio: true,
+            allow_any_files: true,
+            allow_tripcodes: true,
+            allow_editing: false,
+            edit_window_secs: 0,
+            allow_archive: true,
+            allow_video_embeds: false,
+            allow_captcha: false,
+            show_poster_ids: false,
+            post_cooldown_secs: 0,
+            created_at: 0,
+        }
+    }
+
+    fn temp_upload(name: &str, bytes: &[u8]) -> (TempUpload, String) {
+        let temp_file = tempfile::Builder::new()
+            .prefix("rustchan-test-upload-")
+            .tempfile()
+            .expect("temp upload");
+        std::fs::write(temp_file.path(), bytes).expect("write temp upload");
+        (
+            TempUpload {
+                temp_file,
+                sniff_bytes: bytes.to_vec(),
+                size_bytes: bytes.len(),
+            },
+            name.to_string(),
+        )
+    }
+
+    #[test]
+    fn audio_first_flow_rejects_mixing_other_slot_with_audio_or_image_slots() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        let board = sample_board();
+        let audio = temp_upload("track.flac", b"fLaC\x00\x00\x00\x22test");
+        let other = temp_upload("clip.webm", b"\x1a\x45\xdf\xa3webm");
+
+        let result = process_audio_first_uploads(
+            Some(audio),
+            None,
+            Some(other),
+            &board,
+            &conn,
+            "/tmp",
+            "/tmp",
+            150,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            false,
+            false,
+        );
+
+        match result {
+            Ok(_) => panic!("mixed upload modes should be rejected"),
+            Err(error) => assert!(
+                error
+                    .to_string()
+                    .contains("Use either the audio/image upload flow or the other-file slot")
+            ),
+        }
+    }
 }
