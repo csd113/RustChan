@@ -88,7 +88,11 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
     } else {
         "file"
     };
-    let primary_label = if primary_name == "audio_file" { "audio" } else { "upload" };
+    let primary_label = if primary_name == "audio_file" {
+        "audio"
+    } else {
+        "upload"
+    };
     let primary_accept = if audio_image_dual_mode {
         AUDIO_ACCEPT.to_string()
     } else {

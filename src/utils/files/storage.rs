@@ -424,9 +424,7 @@ fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {
         return;
     };
     let rotated = crate::media::exif::apply_exif_orientation(img, orientation);
-    if let Err(error) =
-        write_image_atomic(thumb_path, &rotated, image::ImageFormat::WebP)
-    {
+    if let Err(error) = write_image_atomic(thumb_path, &rotated, image::ImageFormat::WebP) {
         tracing::warn!("failed to re-orient thumbnail: {error}");
     }
 }
@@ -466,7 +464,12 @@ fn write_image_atomic(
         .with_context(|| format!("failed to create temp file for {}", output_path.display()))?;
     image
         .save_with_format(tmp.path(), format)
-        .with_context(|| format!("failed to write re-oriented image to {}", tmp.path().display()))?;
+        .with_context(|| {
+            format!(
+                "failed to write re-oriented image to {}",
+                tmp.path().display()
+            )
+        })?;
     tmp.persist(output_path)
         .map_err(|error| error.error)
         .with_context(|| format!("failed to atomically replace {}", output_path.display()))?;

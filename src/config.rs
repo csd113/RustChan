@@ -549,7 +549,10 @@ impl Config {
             reqwest::Url::parse(url).ok().is_some_and(|parsed| {
                 parsed.host_str().is_some_and(|host| {
                     host.eq_ignore_ascii_case("localhost")
-                        || host.parse::<std::net::IpAddr>().ok().is_some_and(|ip| ip.is_loopback())
+                        || host
+                            .parse::<std::net::IpAddr>()
+                            .ok()
+                            .is_some_and(|ip| ip.is_loopback())
                 })
             })
         }

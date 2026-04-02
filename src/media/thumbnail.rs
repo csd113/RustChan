@@ -216,8 +216,12 @@ fn image_crate_thumbnail(
 ) -> Result<()> {
     let format = mime_to_image_format(mime)
         .ok_or_else(|| anyhow::anyhow!("unsupported image MIME for thumbnail: {mime}"))?;
-    let (width, height) = image::image_dimensions(input_path)
-        .with_context(|| format!("failed to inspect {} before thumbnailing", input_path.display()))?;
+    let (width, height) = image::image_dimensions(input_path).with_context(|| {
+        format!(
+            "failed to inspect {} before thumbnailing",
+            input_path.display()
+        )
+    })?;
     if u64::from(width).saturating_mul(u64::from(height)) > MAX_IMAGE_THUMBNAIL_PIXELS {
         anyhow::bail!(
             "image dimensions {}x{} exceed thumbnail safety limit",

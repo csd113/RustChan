@@ -15,10 +15,10 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, Instant};
-use std::process::{Command, Stdio};
 
 fn ffmpeg_command() -> Command {
     Command::new(&crate::config::CONFIG.ffmpeg_path)
