@@ -62,7 +62,6 @@ static LIVE_SITE_SUBTITLE: LazyLock<RwLock<Arc<str>>> =
 /// change without requiring a server restart or extra DB round-trip per request.
 static LIVE_DEFAULT_THEME: LazyLock<RwLock<Arc<str>>> =
     LazyLock::new(|| RwLock::new(Arc::from("")));
-static LIVE_COLLAPSE_GREENTEXT: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(false));
 
 /// In-memory cache of the current board list, used by standalone pages (error
 /// pages, ban pages) that don't have DB access at render time.  Updated by
@@ -129,14 +128,6 @@ pub fn static_asset_url(path: &str) -> String {
     format!("{path}?v={}", *STATIC_ASSET_VERSION)
 }
 
-pub fn set_live_collapse_greentext(enabled: bool) {
-    *LIVE_COLLAPSE_GREENTEXT.write() = enabled;
-}
-
-pub fn live_collapse_greentext() -> bool {
-    *LIVE_COLLAPSE_GREENTEXT.read()
-}
-
 pub fn live_board_nav() -> (u64, Arc<str>) {
     let guard = LIVE_BOARD_NAV.read();
     (guard.0, Arc::clone(&guard.1))
@@ -189,9 +180,20 @@ pub fn normalize_theme_slug(theme: &str) -> Option<&'static str> {
         .find(|candidate| candidate.eq_ignore_ascii_case(theme.trim()))
 }
 
-fn rebuild_live_board_nav() {
-    let boards = live_boards_snapshot();
-    let nav_inner = boards
+fn board_nav_groups(boards: &[Board]) -> (Vec<&Board>, Vec<&Board>) {
+    let sfw = boards
+        .iter()
+        .filter(|board| !board.nsfw)
+        .collect::<Vec<_>>();
+    let nsfw = boards.iter().filter(|board| board.nsfw).collect::<Vec<_>>();
+    (sfw, nsfw)
+}
+
+fn board_nav_group_html(boards: &[&Board]) -> Option<String> {
+    if boards.is_empty() {
+        return None;
+    }
+    let inner = boards
         .iter()
         .map(|board| {
             format!(
@@ -201,10 +203,40 @@ fn rebuild_live_board_nav() {
         })
         .collect::<Vec<_>>()
         .join(" / ");
-    let nav_html: Arc<str> = if nav_inner.is_empty() {
+    Some(format!(
+        r#"<span class="board-list-group">[ {inner} ]</span>"#
+    ))
+}
+
+fn mobile_board_group_html(title: &str, boards: &[&Board]) -> String {
+    if boards.is_empty() {
+        return String::new();
+    }
+    let items = boards
+        .iter()
+        .map(|board| {
+            let short = escape_html(&board.short_name);
+            format!(r#"<a class="mobile-board-link" href="/{short}/catalog">/{short}/</a>"#)
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    format!(
+        r#"<div class="mobile-board-group"><div class="mobile-board-group-title">{title}</div>{items}</div>"#
+    )
+}
+
+fn rebuild_live_board_nav() {
+    let boards = live_boards_snapshot();
+    let (sfw, nsfw) = board_nav_groups(boards.as_slice());
+    let nav_html = [board_nav_group_html(&sfw), board_nav_group_html(&nsfw)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let nav_html: Arc<str> = if nav_html.is_empty() {
         Arc::from("")
     } else {
-        Arc::from(format!("[ {nav_inner} ]"))
+        Arc::from(nav_html)
     };
     let version = live_boards_version();
     *LIVE_BOARD_NAV.write() = (version, nav_html);
@@ -390,34 +422,23 @@ pub fn base_layout(
     collapse_greentext: bool,
     current_path: &str,
 ) -> String {
-    let inner_links: String = boards
-        .iter()
-        .map(|b| {
-            format!(
-                r#"<a href="/{s}/catalog">{s}</a>"#,
-                s = escape_html(&b.short_name)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" / ");
-    let board_links = if inner_links.is_empty() {
-        String::new()
-    } else {
-        format!("[ {inner_links} ]")
-    };
+    let (sfw_boards, nsfw_boards) = board_nav_groups(boards);
+    let board_links = [
+        board_nav_group_html(&sfw_boards),
+        board_nav_group_html(&nsfw_boards),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ");
     let board_menu = if boards.is_empty() {
         String::new()
     } else {
-        let mut items = String::new();
-        for board in boards {
-            let short = escape_html(&board.short_name);
-            let _ = std::fmt::Write::write_fmt(
-                &mut items,
-                format_args!(
-                    r#"<a class="mobile-board-link" href="/{short}/catalog">/{short}/</a>"#
-                ),
-            );
-        }
+        let items = format!(
+            "{}{}",
+            mobile_board_group_html("Boards", &sfw_boards),
+            mobile_board_group_html("NSFW", &nsfw_boards)
+        );
         format!(
             r#"<details class="mobile-board-menu">
   <summary class="mobile-board-menu-btn">Boards</summary>

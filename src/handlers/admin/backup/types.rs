@@ -38,6 +38,8 @@ pub(super) mod board_backup_types {
         #[serde(default)]
         pub show_poster_ids: bool,
         #[serde(default)]
+        pub collapse_greentext: bool,
+        #[serde(default)]
         pub post_cooldown_secs: i64,
         pub created_at: i64,
     }

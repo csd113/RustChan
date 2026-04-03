@@ -95,8 +95,8 @@ const MAX_BODY_BYTES: usize = 32 * 1024; // 32 KiB
 /// via extremely large inputs through the regex pipeline.
 ///
 /// When 3 or more consecutive greentext lines appear they are wrapped in a
-/// `<details open>` block — expanded by default.  The admin site-settings
-/// panel can enable "collapse greentext walls", which is handled purely on
+/// `<details open>` block — expanded by default. A board's admin settings
+/// can enable "collapse greentext walls", which is handled purely on
 /// the client side (JS removes the `open` attribute when the page-level
 /// `data-collapse-greentext` attribute is present on `<body>`).
 #[must_use]

@@ -675,6 +675,7 @@ mod tests {
             allow_video_embeds: false,
             allow_captcha: false,
             show_poster_ids: false,
+            collapse_greentext: false,
             post_cooldown_secs: 0,
             created_at: 0,
         }

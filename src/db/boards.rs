@@ -12,6 +12,9 @@ use crate::models::Board;
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 
+const BOARD_ORDER_SQL: &str = "nsfw ASC, display_order ASC, id ASC";
+const BOARD_GROUP_ORDER_SQL: &str = "display_order ASC, id ASC";
+
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
 pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
@@ -36,9 +39,72 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         allow_video_embeds: row.get::<_, i32>(17)? != 0,
         allow_captcha: row.get::<_, i32>(18)? != 0,
         show_poster_ids: row.get::<_, i32>(19)? != 0,
-        post_cooldown_secs: row.get(20)?,
-        created_at: row.get(21)?,
+        collapse_greentext: row.get::<_, i32>(20)? != 0,
+        post_cooldown_secs: row.get(21)?,
+        created_at: row.get(22)?,
     })
+}
+
+fn next_board_display_order(
+    conn: &rusqlite::Connection,
+    nsfw: bool,
+    exclude_id: Option<i64>,
+) -> Result<i64> {
+    let nsfw = i32::from(nsfw);
+    let next = if let Some(exclude_id) = exclude_id {
+        conn.query_row(
+            "SELECT COALESCE(MAX(display_order) + 1, 1)
+             FROM boards
+             WHERE nsfw = ?1 AND id != ?2",
+            params![nsfw, exclude_id],
+            |row| row.get(0),
+        )?
+    } else {
+        conn.query_row(
+            "SELECT COALESCE(MAX(display_order) + 1, 1)
+             FROM boards
+             WHERE nsfw = ?1",
+            params![nsfw],
+            |row| row.get(0),
+        )?
+    };
+    Ok(next)
+}
+
+fn normalize_board_group_order(
+    conn: &rusqlite::Connection,
+    nsfw: bool,
+    exclude_id: Option<i64>,
+) -> Result<()> {
+    let mut stmt = if exclude_id.is_some() {
+        conn.prepare_cached(&format!(
+            "SELECT id FROM boards
+             WHERE nsfw = ?1 AND id != ?2
+             ORDER BY {BOARD_GROUP_ORDER_SQL}"
+        ))?
+    } else {
+        conn.prepare_cached(&format!(
+            "SELECT id FROM boards
+             WHERE nsfw = ?1
+             ORDER BY {BOARD_GROUP_ORDER_SQL}"
+        ))?
+    };
+    let ordered_ids = if let Some(exclude_id) = exclude_id {
+        stmt.query_map(params![i32::from(nsfw), exclude_id], |row| {
+            row.get::<_, i64>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        stmt.query_map(params![i32::from(nsfw)], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    drop(stmt);
+
+    let mut update = conn.prepare_cached("UPDATE boards SET display_order = ?1 WHERE id = ?2")?;
+    for (position, board_id) in ordered_ids.iter().enumerate() {
+        update.execute(params![position as i64 + 1, board_id])?;
+    }
+    Ok(())
 }
 
 // ─── Site settings ────────────────────────────────────────────────────────────
@@ -97,25 +163,19 @@ pub fn get_default_user_theme(conn: &rusqlite::Connection) -> String {
         .unwrap_or_default()
 }
 
-/// Convenience: read the collapsible-greentext toggle (default: false).
-pub fn get_collapse_greentext(conn: &rusqlite::Connection) -> bool {
-    get_site_setting(conn, "collapse_greentext")
-        .ok()
-        .flatten()
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-}
-
 // ─── Board queries ────────────────────────────────────────────────────────────
 
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, display_order, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
+        &format!(
+            "SELECT id, display_order, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                 edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                allow_captcha, show_poster_ids, post_cooldown_secs, created_at
-         FROM boards ORDER BY display_order ASC, id ASC",
+                allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs, created_at
+         FROM boards ORDER BY {BOARD_ORDER_SQL}"
+        ),
     )?;
     let boards = stmt
         .query_map([], map_board)?
@@ -138,17 +198,17 @@ pub fn get_all_boards_with_stats(
                 b.max_archived_threads, b.bump_limit, b.allow_images, b.allow_video, b.allow_audio,
                 b.allow_any_files, b.allow_tripcodes, b.edit_window_secs, b.allow_editing,
                 b.allow_archive, b.allow_video_embeds, b.allow_captcha, b.show_poster_ids,
-                b.post_cooldown_secs, b.created_at,
+                b.collapse_greentext, b.post_cooldown_secs, b.created_at,
                 COUNT(t.id) AS thread_count
          FROM boards b
          LEFT JOIN threads t ON t.board_id = b.id AND t.archived = 0
          GROUP BY b.id
-         ORDER BY b.display_order ASC, b.id ASC",
+         ORDER BY b.nsfw ASC, b.display_order ASC, b.id ASC",
     )?;
     let out = stmt
         .query_map([], |row| {
             let board = map_board(row)?;
-            let thread_count: i64 = row.get(22)?;
+            let thread_count: i64 = row.get(23)?;
             Ok(crate::models::BoardStats {
                 board,
                 thread_count,
@@ -165,7 +225,7 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
         "SELECT id, display_order, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                 edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                allow_captcha, show_poster_ids, post_cooldown_secs, created_at
+                allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs, created_at
          FROM boards WHERE short_name = ?1",
     )?;
     Ok(stmt.query_row(params![short], map_board).optional()?)
@@ -183,12 +243,13 @@ pub fn create_board(
     nsfw: bool,
 ) -> Result<i64> {
     // New boards default to images and video enabled; audio off by default.
+    let display_order = next_board_display_order(conn, nsfw, None)?;
     let id: i64 = conn
         .query_row(
             "INSERT INTO boards (display_order, short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
-             VALUES (COALESCE((SELECT MAX(display_order) + 1 FROM boards), 1), ?1, ?2, ?3, ?4, 1, 1, 0)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 0)
              RETURNING id",
-            params![short, name, description, i32::from(nsfw)],
+            params![display_order, short, name, description, i32::from(nsfw)],
             |r| r.get(0),
         )
         .context("Failed to create board")?;
@@ -213,13 +274,14 @@ pub fn create_board_with_media_flags(
     allow_video: bool,
     allow_audio: bool,
 ) -> Result<i64> {
+    let display_order = next_board_display_order(conn, nsfw, None)?;
     let id: i64 = conn
         .query_row(
             "INSERT INTO boards (display_order, short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
-             VALUES (COALESCE((SELECT MAX(display_order) + 1 FROM boards), 1), ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              RETURNING id",
             params![
-                short, name, description, i32::from(nsfw),
+                display_order, short, name, description, i32::from(nsfw),
                 i32::from(allow_images), i32::from(allow_video), i32::from(allow_audio),
             ],
             |r| r.get(0),
@@ -228,16 +290,22 @@ pub fn create_board_with_media_flags(
     Ok(id)
 }
 
-/// Move a board one slot up or down in the shared display order used by the
-/// homepage, header nav, and admin panel.
+/// Move a board one slot up or down inside its current SFW/NSFW group.
 ///
 /// # Errors
 /// Returns an error if the database operation fails or the board id is not found.
 pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Result<()> {
     let tx = conn.transaction()?;
-    let mut stmt = tx.prepare_cached("SELECT id FROM boards ORDER BY display_order ASC, id ASC")?;
+    let board_nsfw: bool = tx.query_row(
+        "SELECT nsfw FROM boards WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, i32>(0).map(|value| value != 0),
+    )?;
+    let mut stmt = tx.prepare_cached(&format!(
+        "SELECT id FROM boards WHERE nsfw = ?1 ORDER BY {BOARD_GROUP_ORDER_SQL}"
+    ))?;
     let mut ordered_ids = stmt
-        .query_map([], |row| row.get::<_, i64>(0))?
+        .query_map(params![i32::from(board_nsfw)], |row| row.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
@@ -261,11 +329,12 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
 
     ordered_ids.swap(index, target_index);
 
-    let mut update = tx.prepare_cached("UPDATE boards SET display_order = ?1 WHERE id = ?2")?;
-    for (position, board_id) in ordered_ids.iter().enumerate() {
-        update.execute(params![position as i64 + 1, board_id])?;
+    {
+        let mut update = tx.prepare_cached("UPDATE boards SET display_order = ?1 WHERE id = ?2")?;
+        for (position, board_id) in ordered_ids.iter().enumerate() {
+            update.execute(params![position as i64 + 1, board_id])?;
+        }
     }
-    drop(update);
     tx.commit()?;
     Ok(())
 }
@@ -303,7 +372,7 @@ pub fn update_board(
 /// Returns an error if the database operation fails or the board id is not found.
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub fn update_board_settings(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     id: i64,
     name: &str,
     description: &str,
@@ -322,17 +391,25 @@ pub fn update_board_settings(
     allow_video_embeds: bool,
     allow_captcha: bool,
     show_poster_ids: bool,
+    collapse_greentext: bool,
     post_cooldown_secs: i64,
 ) -> Result<()> {
-    let n = conn
-        .execute(
+    let tx = conn.transaction()?;
+    let current_nsfw: bool = tx.query_row(
+        "SELECT nsfw FROM boards WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, i32>(0).map(|value| value != 0),
+    )?;
+
+    let affected = if current_nsfw == nsfw {
+        tx.execute(
             "UPDATE boards SET name=?1, description=?2, nsfw=?3,
              bump_limit=?4, max_threads=?5, max_archived_threads=?6,
              allow_images=?7, allow_video=?8, allow_audio=?9, allow_any_files=?10,
              allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13,
              allow_archive=?14, allow_video_embeds=?15, allow_captcha=?16,
-             show_poster_ids=?17, post_cooldown_secs=?18
-             WHERE id=?19",
+             show_poster_ids=?17, collapse_greentext=?18, post_cooldown_secs=?19
+             WHERE id=?20",
             params![
                 name,
                 description,
@@ -351,14 +428,55 @@ pub fn update_board_settings(
                 i32::from(allow_video_embeds),
                 i32::from(allow_captcha),
                 i32::from(show_poster_ids),
+                i32::from(collapse_greentext),
                 post_cooldown_secs,
                 id,
             ],
         )
-        .context("Failed to update board settings")?;
-    if n == 0 {
+    } else {
+        let next_display_order = next_board_display_order(&tx, nsfw, Some(id))?;
+        tx.execute(
+            "UPDATE boards SET name=?1, description=?2, nsfw=?3, display_order=?4,
+             bump_limit=?5, max_threads=?6, max_archived_threads=?7,
+             allow_images=?8, allow_video=?9, allow_audio=?10, allow_any_files=?11,
+             allow_tripcodes=?12, edit_window_secs=?13, allow_editing=?14,
+             allow_archive=?15, allow_video_embeds=?16, allow_captcha=?17,
+             show_poster_ids=?18, collapse_greentext=?19, post_cooldown_secs=?20
+             WHERE id=?21",
+            params![
+                name,
+                description,
+                i32::from(nsfw),
+                next_display_order,
+                bump_limit,
+                max_threads,
+                max_archived_threads,
+                i32::from(allow_images),
+                i32::from(allow_video),
+                i32::from(allow_audio),
+                i32::from(allow_any_files),
+                i32::from(allow_tripcodes),
+                edit_window_secs,
+                i32::from(allow_editing),
+                i32::from(allow_archive),
+                i32::from(allow_video_embeds),
+                i32::from(allow_captcha),
+                i32::from(show_poster_ids),
+                i32::from(collapse_greentext),
+                post_cooldown_secs,
+                id,
+            ],
+        )
+    }
+    .context("Failed to update board settings")?;
+    if affected == 0 {
         anyhow::bail!("Board id {id} not found");
     }
+    if current_nsfw != nsfw {
+        normalize_board_group_order(&tx, current_nsfw, None)?;
+        normalize_board_group_order(&tx, nsfw, None)?;
+    }
+    tx.commit()?;
     Ok(())
 }
 

@@ -54,8 +54,13 @@ pub async fn view_thread(
             // page (without delete controls) to a user who has since logged in.
             let boards_ver = crate::templates::live_boards_version();
             let admin_tag = if page_data.is_admin { "-a" } else { "" };
+            let greentext_tag = if page_data.board.collapse_greentext {
+                "-cg1"
+            } else {
+                "-cg0"
+            };
             let etag = format!(
-                "\"{}-b{boards_ver}{admin_tag}\"",
+                "\"{}-b{boards_ver}{admin_tag}{greentext_tag}\"",
                 page_data.thread.bumped_at
             );
             let html =
@@ -370,7 +375,6 @@ pub async fn edit_post_get(
             }
 
             let all_boards = crate::templates::live_boards();
-            let collapse_greentext = crate::templates::live_collapse_greentext();
 
             Ok(crate::templates::edit_post_page(
                 &board,
@@ -380,7 +384,7 @@ pub async fn edit_post_get(
                 &prefill_token,
                 None,
                 current_theme.as_deref(),
-                collapse_greentext,
+                board.collapse_greentext,
             ))
         }
     })
@@ -474,7 +478,6 @@ pub async fn edit_post_post(
             // window is actually configured.
             if !success {
                 let all_boards = crate::templates::live_boards();
-                let collapse_greentext = crate::templates::live_collapse_greentext();
                 let err_msg = if board.edit_window_secs > 0 {
                     let now = chrono::Utc::now().timestamp();
                     if now - post.created_at > board.edit_window_secs {
@@ -493,7 +496,7 @@ pub async fn edit_post_post(
                     &token,
                     Some(err_msg),
                     current_theme.as_deref(),
-                    collapse_greentext,
+                    board.collapse_greentext,
                 );
                 return Ok(EditOutcome::ErrorPage(html));
             }

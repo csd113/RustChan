@@ -123,6 +123,125 @@ function appendReply(id) {
 
 document.addEventListener('DOMContentLoaded', syncPostFormState);
 
+function formatBytes(bytes) {
+  if (typeof bytes !== 'number' || !isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return bytes + ' B';
+  var units = ['KiB', 'MiB', 'GiB'];
+  var value = bytes / 1024;
+  var unitIndex = 0;
+  while (value >= 1024 && unitIndex + 1 < units.length) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return value.toFixed(value >= 10 ? 0 : 1) + ' ' + units[unitIndex];
+}
+
+function fileInputsHaveSelection(form) {
+  var fileInputs = form.querySelectorAll('input[type="file"]');
+  for (var i = 0; i < fileInputs.length; i += 1) {
+    if (fileInputs[i].files && fileInputs[i].files.length > 0) return true;
+  }
+  return false;
+}
+
+function setUploadProgress(form, percent, message) {
+  var row = form.querySelector('.upload-progress-row');
+  if (!row) return;
+  row.hidden = false;
+  var bar = row.querySelector('.upload-progress-bar');
+  var text = row.querySelector('.upload-progress-text');
+  if (bar && typeof percent === 'number' && isFinite(percent)) {
+    var clamped = Math.max(0, Math.min(100, percent));
+    bar.style.width = clamped + '%';
+  }
+  if (text && message) text.textContent = message;
+}
+
+function resetUploadProgress(form) {
+  var row = form.querySelector('.upload-progress-row');
+  if (!row) return;
+  row.hidden = true;
+  var bar = row.querySelector('.upload-progress-bar');
+  var text = row.querySelector('.upload-progress-text');
+  if (bar) bar.style.width = '0%';
+  if (text) text.textContent = 'Preparing upload…';
+}
+
+function setSubmittingState(form, submitting) {
+  form.dataset.uploadSubmitting = submitting ? '1' : '';
+  form.querySelectorAll('button[type="submit"]').forEach(function (button) {
+    button.disabled = submitting;
+  });
+}
+
+function submitPostFormWithProgress(form) {
+  if (!window.XMLHttpRequest || form.dataset.uploadSubmitting === '1') return false;
+  if (!fileInputsHaveSelection(form)) return false;
+
+  var xhr = new XMLHttpRequest();
+  xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
+  xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+  setSubmittingState(form, true);
+  setUploadProgress(form, 0, 'Starting upload…');
+
+  xhr.upload.addEventListener('progress', function (event) {
+    if (event.lengthComputable && event.total > 0) {
+      var percent = (event.loaded / event.total) * 100;
+      setUploadProgress(
+        form,
+        percent,
+        'Uploading ' + formatBytes(event.loaded) + ' / ' + formatBytes(event.total) + ' (' + Math.round(percent) + '%)'
+      );
+    } else {
+      setUploadProgress(form, 100, 'Uploading…');
+    }
+  });
+
+  xhr.addEventListener('load', function () {
+    setSubmittingState(form, false);
+    setUploadProgress(form, 100, 'Finishing…');
+
+    var finalUrl = xhr.responseURL || form.action;
+    var contentType = xhr.getResponseHeader('Content-Type') || '';
+    var isHtml = contentType.indexOf('text/html') !== -1;
+
+    if (xhr.status >= 200 && xhr.status < 400 && finalUrl && finalUrl !== window.location.href) {
+      window.location.assign(finalUrl);
+      return;
+    }
+
+    if (isHtml && xhr.responseText) {
+      document.open();
+      document.write(xhr.responseText);
+      document.close();
+      return;
+    }
+
+    if (xhr.status >= 200 && xhr.status < 400) {
+      window.location.reload();
+      return;
+    }
+
+    resetUploadProgress(form);
+    alert('Upload failed. Please try again.');
+  });
+
+  xhr.addEventListener('error', function () {
+    setSubmittingState(form, false);
+    resetUploadProgress(form);
+    alert('Upload failed. Please check your connection and try again.');
+  });
+
+  xhr.addEventListener('abort', function () {
+    setSubmittingState(form, false);
+    resetUploadProgress(form);
+  });
+
+  xhr.send(new FormData(form));
+  return true;
+}
+
 // ─── NSFW disclaimer overlay ────────────────────────────────────────────────
 
 function openNsfwDisclaimer(returnTo, boardLabel) {
@@ -391,6 +510,7 @@ function collapseVideoEmbed(btn) {
 
 (function () {
   var _input = null, _file = null, _max = 0, _compressing = false;
+  var VIDEO_COMPRESS_TIMEOUT_MS = 120000;
 
   function getMax(type) {
     var modal = document.getElementById('compress-modal');
@@ -398,6 +518,111 @@ function collapseVideoEmbed(btn) {
     if (type === 'image') return parseInt(modal.dataset.maxImage, 10) || 0;
     if (type === 'video') return parseInt(modal.dataset.maxVideo, 10) || 0;
     return 0;
+  }
+
+  function imageOutputType(file) {
+    if (file.type === 'image/jpeg' || file.type === 'image/jpg') return 'image/jpeg';
+    if (file.type === 'image/png' || file.type === 'image/webp') {
+      return canvasSupportsType('image/webp') ? 'image/webp' : 'image/jpeg';
+    }
+    return 'image/jpeg';
+  }
+
+  function imageOutputExt(type) {
+    return type === 'image/webp' ? 'webp' : 'jpg';
+  }
+
+  function canvasSupportsType(type) {
+    var canvas = document.createElement('canvas');
+    return canvas.toDataURL(type).indexOf('data:' + type) === 0;
+  }
+
+  function hasAnimatedWebP(bytes) {
+    var marker = [0x41, 0x4e, 0x49, 0x4d]; // ANIM
+    for (var i = 0; i <= bytes.length - marker.length; i += 1) {
+      var matched = true;
+      for (var j = 0; j < marker.length; j += 1) {
+        if (bytes[i + j] !== marker[j]) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) return true;
+    }
+    return false;
+  }
+
+  function hasAnimatedGif(bytes) {
+    var frameMarkers = 0;
+    for (var i = 0; i <= bytes.length - 2; i += 1) {
+      if (bytes[i] === 0x21 && bytes[i + 1] === 0xf9) {
+        frameMarkers += 1;
+        if (frameMarkers > 1) return true;
+      }
+    }
+    return false;
+  }
+
+  function isAnimatedImage(file) {
+    if (!file || !file.arrayBuffer) return Promise.resolve(false);
+    if (file.type !== 'image/gif' && file.type !== 'image/webp') return Promise.resolve(false);
+    return file.arrayBuffer().then(function (buffer) {
+      var bytes = new Uint8Array(buffer);
+      if (file.type === 'image/gif') return hasAnimatedGif(bytes);
+      if (file.type === 'image/webp') return hasAnimatedWebP(bytes);
+      return false;
+    }).catch(function () {
+      return false;
+    });
+  }
+
+  function imageHasTransparency(img) {
+    var sample = document.createElement('canvas');
+    var sampleCtx = sample.getContext('2d');
+    if (!sampleCtx) return false;
+    sample.width = Math.min(img.naturalWidth || img.width || 1, 64);
+    sample.height = Math.min(img.naturalHeight || img.height || 1, 64);
+    sampleCtx.drawImage(img, 0, 0, sample.width, sample.height);
+    var data = sampleCtx.getImageData(0, 0, sample.width, sample.height).data;
+    for (var i = 3; i < data.length; i += 4) {
+      if (data[i] !== 255) return true;
+    }
+    return false;
+  }
+
+  function stripFileExtension(name) {
+    return /\.[^.]+$/.test(name) ? name.replace(/\.[^.]+$/, '') : name;
+  }
+
+  function stopMediaStream(stream) {
+    if (!stream || !stream.getTracks) return;
+    stream.getTracks().forEach(function (track) {
+      try { track.stop(); } catch (e) {}
+    });
+  }
+
+  function cleanupVideoElement(videoEl) {
+    if (!videoEl) return;
+    try { videoEl.pause(); } catch (e) {}
+    try {
+      videoEl.removeAttribute('src');
+      videoEl.load();
+    } catch (e) {}
+  }
+
+  function videoRecorderMimeType() {
+    if (!window.MediaRecorder) return '';
+    var types = [
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp9',
+      'video/webm;codecs=vp8,opus',
+      'video/webm;codecs=vp8',
+      'video/webm'
+    ];
+    for (var i = 0; i < types.length; i += 1) {
+      if (MediaRecorder.isTypeSupported(types[i])) return types[i];
+    }
+    return '';
   }
 
   window.checkFileSize = function (input) {
@@ -446,8 +671,8 @@ function collapseVideoEmbed(btn) {
         _setView('done');
         return;
       }
-      var ext = isImg ? 'jpg' : 'webm';
-      var newName = _file.name.replace(/\.[^.]+$/, '') + '_compressed.' + ext;
+      var ext = isImg ? imageOutputExt(blob.type) : 'webm';
+      var newName = stripFileExtension(_file.name) + '_compressed.' + ext;
       var dt = new DataTransfer();
       dt.items.add(new File([blob], newName, { type: blob.type }));
       _input.files = dt.files;
@@ -484,76 +709,137 @@ function collapseVideoEmbed(btn) {
 
   function _compressImage(file, maxBytes) {
     return new Promise(function (resolve, reject) {
-      var img = new Image();
-      var url = URL.createObjectURL(file);
-      img.onload = function () {
-        URL.revokeObjectURL(url);
-        var w = img.naturalWidth, h = img.naturalHeight;
-        var scale = 1.0, quality = 0.85;
-        var canvas = document.createElement('canvas');
-        var ctx = canvas.getContext('2d');
-        var attempt = 0;
-        function tryEncode() {
-          attempt++;
-          canvas.width = Math.round(w * scale);
-          canvas.height = Math.round(h * scale);
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          canvas.toBlob(function (blob) {
-            _setProgress(Math.min(attempt * 15, 90), 'Compressing\u2026 attempt ' + attempt);
-            if (!blob) { reject(new Error('Canvas toBlob failed')); return; }
-            if (blob.size <= maxBytes) { resolve(blob); return; }
-            if (attempt >= 8) { resolve(blob); return; }
-            quality -= 0.1;
-            if (quality < 0.3) { quality = 0.5; scale *= 0.75; }
-            tryEncode();
-          }, 'image/jpeg', quality);
+      isAnimatedImage(file).then(function (animated) {
+        if (animated) {
+          reject(new Error('Animated images are not auto-compressed to avoid losing animation'));
+          return;
         }
-        tryEncode();
-      };
-      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('Image load failed')); };
-      img.src = url;
+        var img = new Image();
+        var url = URL.createObjectURL(file);
+        img.onload = function () {
+          URL.revokeObjectURL(url);
+          var w = img.naturalWidth, h = img.naturalHeight;
+          var scale = 1.0, quality = 0.85;
+          var outputType = imageOutputType(file);
+          if (outputType === 'image/jpeg' && imageHasTransparency(img)) {
+            reject(new Error('This image uses transparency and this browser cannot safely auto-compress it'));
+            return;
+          }
+          var canvas = document.createElement('canvas');
+          var ctx = canvas.getContext('2d');
+          if (!ctx) {
+            reject(new Error('Canvas 2D context unavailable'));
+            return;
+          }
+          var attempt = 0;
+          function tryEncode() {
+            attempt++;
+            canvas.width = Math.round(w * scale);
+            canvas.height = Math.round(h * scale);
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            canvas.toBlob(function (blob) {
+              _setProgress(Math.min(attempt * 15, 90), 'Compressing\u2026 attempt ' + attempt);
+              if (!blob) { reject(new Error('Canvas toBlob failed')); return; }
+              if (blob.size <= maxBytes) { resolve(blob); return; }
+              if (attempt >= 8) { resolve(blob); return; }
+              quality -= 0.1;
+              if (quality < 0.3) { quality = 0.5; scale *= 0.75; }
+              tryEncode();
+            }, outputType, quality);
+          }
+          tryEncode();
+        };
+        img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('Image load failed')); };
+        img.src = url;
+      });
     });
   }
 
   function _compressVideo(file, maxBytes) {
     return new Promise(function (resolve, reject) {
       if (!window.MediaRecorder) { reject(new Error('MediaRecorder not supported')); return; }
+      var mimeType = videoRecorderMimeType();
+      if (!mimeType) { reject(new Error('No supported WebM encoder available in this browser')); return; }
       var url = URL.createObjectURL(file);
       var videoEl = document.createElement('video');
+      videoEl.preload = 'auto';
       videoEl.muted = true;
+      videoEl.playsInline = true;
       videoEl.src = url;
       var duration = 0;
+      var stream = null;
+      var recorder = null;
+      var progressTimer = null;
+      var safetyTimer = null;
+      var settled = false;
+
+      function finish(err, blob) {
+        if (settled) return;
+        settled = true;
+        if (progressTimer) clearInterval(progressTimer);
+        if (safetyTimer) clearTimeout(safetyTimer);
+        stopMediaStream(stream);
+        cleanupVideoElement(videoEl);
+        URL.revokeObjectURL(url);
+        if (err) {
+          reject(err);
+        } else {
+          resolve(blob);
+        }
+      }
+
       videoEl.onloadedmetadata = function () {
         duration = videoEl.duration;
-        if (!duration || !isFinite(duration)) { URL.revokeObjectURL(url); reject(new Error('Cannot determine video duration')); return; }
+        if (!duration || !isFinite(duration)) { finish(new Error('Cannot determine video duration')); return; }
         _setProgress(10, 'Analysing video\u2026');
         var targetBitsPerSec = Math.floor((maxBytes * 8) / duration * 0.9);
-        var mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
-        var stream = null;
-        try { stream = videoEl.captureStream ? videoEl.captureStream() : videoEl.mozCaptureStream(); } catch (e) { URL.revokeObjectURL(url); reject(e); return; }
-        var recorder = new MediaRecorder(stream, { mimeType: mimeType, videoBitsPerSecond: targetBitsPerSec });
+        try {
+          stream = videoEl.captureStream ? videoEl.captureStream() : videoEl.mozCaptureStream();
+        } catch (e) {
+          finish(e);
+          return;
+        }
+        if (!stream) {
+          finish(new Error('Video capture stream is not available'));
+          return;
+        }
+        try {
+          recorder = new MediaRecorder(stream, {
+            mimeType: mimeType,
+            videoBitsPerSecond: Math.max(targetBitsPerSec, 120000)
+          });
+        } catch (e) {
+          finish(e);
+          return;
+        }
         var chunks = [];
         recorder.ondataavailable = function (e) { if (e.data && e.data.size > 0) chunks.push(e.data); };
         recorder.onstop = function () {
-          URL.revokeObjectURL(url);
-          resolve(new Blob(chunks, { type: 'video/webm' }));
+          finish(null, new Blob(chunks, { type: 'video/webm' }));
         };
-        recorder.onerror = function (e) { URL.revokeObjectURL(url); reject(e.error || new Error('MediaRecorder error')); };
+        recorder.onerror = function (e) { finish(e.error || new Error('MediaRecorder error')); };
         videoEl.currentTime = 0;
-        videoEl.play().catch(function () {});
-        recorder.start();
-        var progressTimer = setInterval(function () {
+        recorder.start(1000);
+        progressTimer = setInterval(function () {
           _setProgress(Math.min(10 + Math.round((videoEl.currentTime / duration) * 80), 90), 'Re-encoding\u2026 ' + Math.round((videoEl.currentTime / duration) * 100) + '%');
         }, 500);
-        videoEl.addEventListener('timeupdate', function captureFrame() {
-          if (videoEl.currentTime >= duration - 0.1) {
-            clearInterval(progressTimer);
-            recorder.stop();
-            videoEl.removeEventListener('timeupdate', captureFrame);
+        safetyTimer = setTimeout(function () {
+          if (recorder && recorder.state !== 'inactive') {
+            try { recorder.stop(); } catch (e) {}
+          }
+          finish(new Error('Video compression timed out'));
+        }, VIDEO_COMPRESS_TIMEOUT_MS);
+        videoEl.addEventListener('ended', function handleEnded() {
+          videoEl.removeEventListener('ended', handleEnded);
+          if (recorder && recorder.state !== 'inactive') {
+            try { recorder.stop(); } catch (e) { finish(e); }
           }
         });
+        videoEl.play().catch(function (err) {
+          finish(err || new Error('Video playback failed during compression'));
+        });
       };
-      videoEl.onerror = function () { URL.revokeObjectURL(url); reject(new Error('Video load error')); };
+      videoEl.onerror = function () { finish(new Error('Video load error')); };
       videoEl.load();
     });
   }
@@ -1619,6 +1905,12 @@ document.addEventListener('change', function (e) {
 document.addEventListener('submit', function (e) {
   closeThreadMenus();
   var form = e.target;
+  if (form.matches && form.matches('form.post-form')) {
+    if (submitPostFormWithProgress(form)) {
+      e.preventDefault();
+      return;
+    }
+  }
   // data-confirm-submit: prompt before form submission
   if (form.dataset.confirmSubmit) {
     if (!confirm(form.dataset.confirmSubmit)) {
@@ -1914,6 +2206,79 @@ document.addEventListener('click', function (e) {
     if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
   }
 
+  function _submitRestoreUploadForm(form, title) {
+    var xhr = null;
+    _downloadMode = false;
+    _stopPolling();
+    showBackupModal(title);
+    _setBkProgress(0, 'Starting upload…');
+
+    form.querySelectorAll('button[type="submit"]').forEach(function (button) {
+      button.disabled = true;
+    });
+
+    xhr = new XMLHttpRequest();
+    xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+    xhr.upload.addEventListener('progress', function (event) {
+      if (event.lengthComputable && event.total > 0) {
+        var pct = Math.round((event.loaded / event.total) * 100);
+        _setBkProgress(
+          pct,
+          'Uploading restore file… ' +
+          formatBytes(event.loaded) + ' / ' + formatBytes(event.total) +
+          ' (' + pct + '%)'
+        );
+      } else {
+        _setBkProgress(15, 'Uploading restore file…');
+      }
+    });
+
+    function _restoreFormDone() {
+      form.querySelectorAll('button[type="submit"]').forEach(function (button) {
+        button.disabled = false;
+      });
+    }
+
+    xhr.addEventListener('load', function () {
+      _restoreFormDone();
+      if (xhr.status >= 200 && xhr.status < 400) {
+        _setBkProgress(100, 'Upload complete. Restoring backup…');
+        if (xhr.responseURL && xhr.responseURL !== window.location.href) {
+          window.location.assign(xhr.responseURL);
+          return;
+        }
+        var contentType = xhr.getResponseHeader('content-type') || '';
+        if (contentType.indexOf('text/html') !== -1 && xhr.responseText) {
+          document.open();
+          document.write(xhr.responseText);
+          document.close();
+          return;
+        }
+        window.location.reload();
+        return;
+      }
+      _setBkProgress(0, 'Restore upload failed (' + xhr.status + ')');
+      showDoneButton();
+    });
+
+    xhr.addEventListener('error', function () {
+      _restoreFormDone();
+      _setBkProgress(0, 'Restore upload failed. Please try again.');
+      showDoneButton();
+    });
+
+    xhr.addEventListener('abort', function () {
+      _restoreFormDone();
+      _setBkProgress(0, 'Restore upload cancelled.');
+      showDoneButton();
+    });
+
+    xhr.send(new FormData(form));
+  }
+
   // ── Flow A: "Save to server" forms ──────────────────────────────────────────
 
   function _submitBackupForm(form, title, options) {
@@ -2043,6 +2408,14 @@ document.addEventListener('click', function (e) {
         e.preventDefault();
         var label = link.dataset.backupLabel || 'backup';
         _triggerDownload(link.href, label);
+      });
+    });
+
+    document.querySelectorAll('form.backup-restore-upload-form').forEach(function (form) {
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var label = form.dataset.restoreLabel || 'backup';
+        _submitRestoreUploadForm(form, '\u21bb Uploading ' + label + '…');
       });
     });
   });

@@ -56,7 +56,6 @@ pub fn admin_panel_page(
     boards: &[Board],
     bans: &[Ban],
     filters: &[WordFilter],
-    collapse_greentext: bool,
     csrf_token: &str,
     full_backups: &[BackupInfo],
     board_backups: &[BackupInfo],
@@ -77,17 +76,24 @@ pub fn admin_panel_page(
     let global_favicon_version =
         crate::favicon::favicon_version_for_board(None).unwrap_or_default();
     let mut board_cards = String::new();
-    for b in boards {
+    for (index, b) in boards.iter().enumerate() {
         let checked = |v: bool| if v { " checked" } else { "" };
+        let prev_same_group = index
+            .checked_sub(1)
+            .and_then(|prev| boards.get(prev))
+            .is_some_and(|prev| prev.nsfw == b.nsfw);
+        let next_same_group = boards
+            .get(index + 1)
+            .is_some_and(|next| next.nsfw == b.nsfw);
         let board_favicon_exists = crate::favicon::board_has_custom_favicon(&b.short_name);
         let board_favicon_version =
             crate::favicon::favicon_version_for_board(Some(&b.short_name)).unwrap_or_default();
         let _ = write!(
             board_cards,
-            r#"<details class="board-settings-card" id="board-{short}">
+            r#"{group_gap}<details class="board-settings-card" id="board-{short}">
 <summary>/{short}/ — {name} {nsfw_tag}</summary>
 <div class="board-order-toolbar">
-<span>shared order: {display_order}</span>
+<span>{group_label} order: {display_order}</span>
 <form method="POST" action="/admin/board/reorder">
   <input type="hidden" name="_csrf" value="{csrf}">
   <input type="hidden" name="board_id" value="{id}">
@@ -124,6 +130,9 @@ pub fn admin_panel_page(
   <label><input type="checkbox" name="allow_video_embeds" value="1"{embeds_ck}> Embed video links (YouTube / Invidious / Streamable)</label>
   <label><input type="checkbox" name="allow_captcha"      value="1"{captcha_ck}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)</label>
   <label><input type="checkbox" name="show_poster_ids"    value="1"{poster_ids_ck}> Show thread-local poster IDs</label>
+  <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block for this board. Existing posts are not affected.">
+    <input type="checkbox" name="collapse_greentext" value="1"{collapse_ck}> Collapse long greentext walls (3+ lines) into expandable blocks
+  </label>
   <label><input type="checkbox" name="allow_editing"   value="1"{edit_ck}>
     Allow post editing</label>
 </div>
@@ -185,6 +194,12 @@ pub fn admin_panel_page(
             },
             csrf = escape_html(csrf_token),
             id = b.id,
+            group_gap = if index > 0 && b.nsfw && !prev_same_group {
+                "<div class=\"admin-board-group-gap\" aria-hidden=\"true\"></div>"
+            } else {
+                ""
+            },
+            group_label = if b.nsfw { "NSFW" } else { "SFW" },
             display_order = b.display_order,
             name_raw = escape_html(&b.name),
             desc_raw = escape_html(&b.description),
@@ -212,16 +227,9 @@ pub fn admin_panel_page(
             embeds_ck = checked(b.allow_video_embeds),
             captcha_ck = checked(b.allow_captcha),
             poster_ids_ck = checked(b.show_poster_ids),
-            move_up_disabled = if b.display_order <= 1 {
-                " disabled"
-            } else {
-                ""
-            },
-            move_down_disabled = if b.display_order >= boards.len() as i64 {
-                " disabled"
-            } else {
-                ""
-            },
+            collapse_ck = checked(b.collapse_greentext),
+            move_up_disabled = if !prev_same_group { " disabled" } else { "" },
+            move_down_disabled = if !next_same_group { " disabled" } else { "" },
             board_favicon_preview = if board_favicon_exists {
                 format!(
                     r#"<img class="favicon-inline-preview" src="/boards/{short}/_favicon/favicon-32x32.png?v={version}" alt="/{short}/ favicon">"#,
@@ -575,12 +583,6 @@ old boards to prevent query performance degradation.
     </select>
   </label>
 </div>
-<div class="board-settings-checks" style="margin-bottom:0.75rem">
-  <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block. Existing posts are not affected — only new posts use the current setting.">
-    <input type="checkbox" name="collapse_greentext" value="1"{collapse_ck}>
-    Collapse long greentext walls (3+ lines) into expandable blocks
-  </label>
-</div>
 <button type="submit">save settings</button>
 </form>
 <div class="favicon-inline-row favicon-inline-row-global">
@@ -604,7 +606,7 @@ old boards to prevent query performance degradation.
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// boards</h2>
-<p class="admin-order-note">Board order is shared across the homepage, top bar, and this panel.</p>
+<p class="admin-order-note">Board order is shared across the homepage, top bar, and this panel, with SFW and NSFW boards each keeping their own separate order.</p>
 <div class="admin-board-cards">{board_cards}</div>
 <h3>create board</h3>
 <form method="POST" action="/admin/board/create">
@@ -686,7 +688,7 @@ old boards to prevent query performance degradation.
 <input type="hidden" name="_csrf" value="{csrf}">
 <button type="submit" id="full-backup-btn">&#128190; save to server</button>
 </form>
-<form method="POST" action="/admin/restore" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+<form method="POST" action="/admin/restore" enctype="multipart/form-data" class="backup-restore-upload-form" data-restore-label="full backup" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="file" name="backup_file" accept=".zip" required style="color:var(--text)">
 <button type="submit" class="btn-danger"
@@ -706,7 +708,7 @@ old boards to prevent query performance degradation.
 <h2>// board backup &amp; restore</h2>
 <p style="color:var(--text-dim);font-size:0.85rem">Board backups cover a single board. Use <em>save to server</em> on a board card above to store the backup in <code>rustchan-data/backups/boards/</code>, or use the table below to download, restore, or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
 <div style="margin-top:0.5rem;margin-bottom:0.75rem">
-<form method="POST" action="/admin/board/restore" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+<form method="POST" action="/admin/board/restore" enctype="multipart/form-data" class="backup-restore-upload-form" data-restore-label="board backup" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="file" name="backup_file" accept=".zip,.json" required style="color:var(--text)">
 <button type="submit" class="btn-danger"
@@ -761,7 +763,6 @@ old boards to prevent query performance degradation.
         board_cards = board_cards,
         ban_rows = ban_rows,
         filter_rows = filter_rows,
-        collapse_ck = if collapse_greentext { " checked" } else { "" },
         full_backup_rows = full_backup_rows,
         board_backup_rows = board_backup_rows,
         db_size_str = format_file_size(db_size_bytes),

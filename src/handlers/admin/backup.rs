@@ -259,8 +259,8 @@ where
                  allow_images=?7, allow_video=?8, allow_audio=?9, allow_any_files=?10,
                  allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13,
                  allow_archive=?14, allow_video_embeds=?15, allow_captcha=?16,
-                 show_poster_ids=?17, post_cooldown_secs=?18
-                 WHERE id=?19",
+                 show_poster_ids=?17, collapse_greentext=?18, post_cooldown_secs=?19
+                 WHERE id=?20",
                 params![
                     manifest.board.name,
                     manifest.board.description,
@@ -279,6 +279,7 @@ where
                     i64::from(manifest.board.allow_video_embeds),
                     i64::from(manifest.board.allow_captcha),
                     i64::from(manifest.board.show_poster_ids),
+                    i64::from(manifest.board.collapse_greentext),
                     manifest.board.post_cooldown_secs,
                     existing_id,
                 ],
@@ -290,8 +291,8 @@ where
                 "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
                  max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
                  allow_tripcodes, edit_window_secs, allow_editing, allow_archive,
-                 allow_video_embeds, allow_captcha, show_poster_ids, post_cooldown_secs, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+                 allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
                 params![
                     manifest.board.short_name,
                     manifest.board.name,
@@ -311,6 +312,7 @@ where
                     i64::from(manifest.board.allow_video_embeds),
                     i64::from(manifest.board.allow_captcha),
                     i64::from(manifest.board.show_poster_ids),
+                    i64::from(manifest.board.collapse_greentext),
                     manifest.board.post_cooldown_secs,
                     manifest.board.created_at,
                 ],

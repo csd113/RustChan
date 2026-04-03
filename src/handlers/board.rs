@@ -240,8 +240,13 @@ pub async fn board_index(
             // have distinct cache keys and the browser doesn't serve a cached
             // non-admin page (missing delete controls) to a logged-in admin.
             let admin_tag = if page_data.is_admin { "-a" } else { "" };
+            let greentext_tag = if page_data.board.collapse_greentext {
+                "-cg1"
+            } else {
+                "-cg0"
+            };
             let etag = format!(
-                "\"{}-{}-{page}{admin_tag}\"",
+                "\"{}-{}-{page}{admin_tag}{greentext_tag}\"",
                 page_data.pagination.total, page_sig
             );
             let html = render::render_board_page(&page_data, &csrf, None, current_theme.as_deref());
@@ -593,9 +598,13 @@ pub async fn catalog(
             pref_sig_parts.sort();
             let pref_sig = pref_sig_parts.join("|");
             let admin_tag = if is_admin { "-a" } else { "" };
-            let etag = format!("\"{catalog_sig}-{pref_sig}-catalog{admin_tag}\"");
+            let greentext_tag = if board.collapse_greentext {
+                "-cg1"
+            } else {
+                "-cg0"
+            };
+            let etag = format!("\"{catalog_sig}-{pref_sig}-catalog{admin_tag}{greentext_tag}\"");
             let all_boards = crate::templates::live_boards();
-            let collapse_greentext = crate::templates::live_collapse_greentext();
             let html = templates::catalog_page(
                 &board,
                 &threads,
@@ -606,7 +615,7 @@ pub async fn catalog(
                 all_boards.as_slice(),
                 is_admin,
                 current_theme.as_deref(),
-                collapse_greentext,
+                board.collapse_greentext,
             );
             Ok((etag, html))
         }
@@ -675,7 +684,6 @@ pub async fn hidden_threads(
             let (_visible, hidden_threads, pinned_ids) = split_catalog_threads(all_threads, &prefs);
 
             let all_boards = crate::templates::live_boards();
-            let collapse_greentext = crate::templates::live_collapse_greentext();
             Ok(templates::catalog_page(
                 &board,
                 &hidden_threads,
@@ -686,7 +694,7 @@ pub async fn hidden_threads(
                 all_boards.as_slice(),
                 is_admin,
                 current_theme.as_deref(),
-                collapse_greentext,
+                board.collapse_greentext,
             ))
         }
     })
@@ -738,7 +746,6 @@ pub async fn board_archive(
             )?;
 
             let all_boards = crate::templates::live_boards();
-            let collapse_greentext = crate::templates::live_collapse_greentext();
             Ok(templates::archive_page(
                 &board,
                 &threads,
@@ -746,7 +753,7 @@ pub async fn board_archive(
                 &csrf_clone,
                 all_boards.as_slice(),
                 current_theme.as_deref(),
-                collapse_greentext,
+                board.collapse_greentext,
             ))
         }
     })
@@ -791,7 +798,6 @@ pub async fn search(
             )?;
 
             let all_boards = crate::templates::live_boards();
-            let collapse_greentext = crate::templates::live_collapse_greentext();
             Ok(templates::search_page(
                 &board,
                 &query_str,
@@ -800,7 +806,7 @@ pub async fn search(
                 &csrf_clone,
                 all_boards.as_slice(),
                 current_theme.as_deref(),
-                collapse_greentext,
+                board.collapse_greentext,
             ))
         }
     })
@@ -1453,11 +1459,11 @@ mod tests {
     async fn create_thread_rejects_uploads_on_upload_disabled_board() {
         let state = crate::test_support::app_state();
         {
-            let conn = state.db.get().expect("db connection");
+            let mut conn = state.db.get().expect("db connection");
             crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
             crate::db::update_board_settings(
-                &conn, 1, "Test", "", false, 500, 100, 150, false, false, false, false, true, 0,
-                false, true, false, false, false, 0,
+                &mut conn, 1, "Test", "", false, 500, 100, 150, false, false, false, false, true,
+                0, false, true, false, false, false, false, 0,
             )
             .expect("update board settings");
         }

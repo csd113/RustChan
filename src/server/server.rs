@@ -178,8 +178,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             });
             crate::templates::set_live_site_subtitle(&subtitle);
 
-            crate::templates::set_live_collapse_greentext(crate::db::get_collapse_greentext(&conn));
-
             // Seed default_theme from settings.toml if not yet configured in DB.
             let default_theme = crate::db::get_default_user_theme(&conn);
             let default_theme = if default_theme.is_empty()

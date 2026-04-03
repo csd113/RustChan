@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 32;
+pub(super) const CURRENT_MAX_MIGRATION: i64 = 33;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
@@ -124,6 +124,20 @@ const MIGRATIONS: &[(i64, &str)] = &[
         UPDATE boards
         SET display_order = id
         WHERE display_order = 0",
+    ),
+    (
+        33,
+        r"ALTER TABLE boards ADD COLUMN collapse_greentext INTEGER NOT NULL DEFAULT 0;
+        UPDATE boards
+        SET collapse_greentext = CASE
+            WHEN EXISTS (
+                SELECT 1
+                FROM site_settings
+                WHERE key = 'collapse_greentext'
+                  AND (value = '1' OR lower(value) = 'true')
+            ) THEN 1
+            ELSE 0
+        END",
     ),
 ];
 

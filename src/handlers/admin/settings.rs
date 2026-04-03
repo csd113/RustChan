@@ -79,6 +79,7 @@ pub struct BoardSettingsForm {
     allow_video_embeds: Option<String>,
     allow_captcha: Option<String>,
     show_poster_ids: Option<String>,
+    collapse_greentext: Option<String>,
     post_cooldown_secs: Option<String>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
@@ -138,7 +139,7 @@ pub async fn update_board_settings(
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
-            let conn = pool.get()?;
+            let mut conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             let board_short: String = conn.query_row(
                 "SELECT short_name FROM boards WHERE id = ?1",
@@ -146,7 +147,7 @@ pub async fn update_board_settings(
                 |row| row.get(0),
             )?;
             db::update_board_settings(
-                &conn,
+                &mut conn,
                 board_id,
                 &name,
                 &description,
@@ -166,6 +167,7 @@ pub async fn update_board_settings(
                 form.allow_video_embeds.as_deref() == Some("1"),
                 form.allow_captcha.as_deref() == Some("1"),
                 form.show_poster_ids.as_deref() == Some("1"),
+                form.collapse_greentext.as_deref() == Some("1"),
                 post_cooldown_secs,
             )?;
             tracing::info!(
@@ -371,8 +373,6 @@ pub async fn update_board_favicon(
 pub struct SiteSettingsForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
-    /// Checkbox: present = "1", absent = not submitted (treat as false)
-    pub collapse_greentext: Option<String>,
     /// Custom site name (replaces [ `RustChan` ] on home page and footer).
     pub site_name: Option<String>,
     /// Custom home page subtitle line below the site name.
@@ -409,14 +409,6 @@ pub async fn update_site_settings(
             ];
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            let val = if form.collapse_greentext.as_deref() == Some("1") {
-                "1"
-            } else {
-                "0"
-            };
-            db::set_site_setting(&conn, "collapse_greentext", val)?;
-            crate::templates::set_live_collapse_greentext(val == "1");
-            tracing::info!(target: "admin", value = val, "Site setting collapse_greentext updated");
 
             // Save the custom site name (trimmed, max 64 chars).
             let new_name = form
@@ -603,7 +595,6 @@ pub async fn admin_panel(
             let boards = db::get_all_boards(&conn)?;
             let bans = db::list_bans(&conn)?;
             let filters = db::get_word_filters(&conn)?;
-            let collapse_greentext = db::get_collapse_greentext(&conn);
             let reports = db::get_open_reports(&conn)?;
             let appeals = db::get_open_ban_appeals(&conn)?;
             let site_name = db::get_site_name(&conn);
@@ -638,7 +629,6 @@ pub async fn admin_panel(
                 &boards,
                 &bans,
                 &filters,
-                collapse_greentext,
                 &csrf_clone,
                 &full_backups,
                 &board_backups_list,

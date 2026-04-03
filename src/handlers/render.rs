@@ -66,7 +66,6 @@ pub fn render_board_page(
     current_theme: Option<&str>,
 ) -> String {
     let boards = templates::live_boards();
-    let collapse_greentext = templates::live_collapse_greentext();
     templates::board_page(
         &data.board,
         &data.summaries,
@@ -76,7 +75,7 @@ pub fn render_board_page(
         data.is_admin,
         error,
         current_theme,
-        collapse_greentext,
+        data.board.collapse_greentext,
     )
 }
 
@@ -115,7 +114,6 @@ pub fn render_thread_page(
     current_theme: Option<&str>,
 ) -> String {
     let boards = templates::live_boards();
-    let collapse_greentext = templates::live_collapse_greentext();
     templates::thread_page(
         &data.board,
         &data.thread,
@@ -126,6 +124,6 @@ pub fn render_thread_page(
         data.poll.as_ref(),
         error,
         current_theme,
-        collapse_greentext,
+        data.board.collapse_greentext,
     )
 }

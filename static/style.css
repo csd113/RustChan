@@ -95,6 +95,10 @@ html[data-theme="dorfic"] .site-header::before {
   letter-spacing: 0.02em;
 }
 
+.board-list-group + .board-list-group {
+  margin-left: 0.65rem;
+}
+
 .mobile-board-menu {
   display: none !important;
 }
@@ -137,6 +141,20 @@ html[data-theme="dorfic"] .site-header::before {
   background: var(--bg-panel);
   border: 1px solid var(--border-glow);
   box-shadow: 0 4px 20px rgba(0,0,0,0.45);
+}
+
+.mobile-board-group + .mobile-board-group {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.mobile-board-group-title {
+  margin: 0 0 4px;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .mobile-board-link {
@@ -1782,6 +1800,10 @@ html:not([data-theme]) .poster-id-btn {
   flex-direction: column;
   gap: 6px;
   margin-bottom: 16px;
+}
+
+.admin-board-group-gap {
+  height: 10px;
 }
 
 .board-settings-card {
@@ -3764,6 +3786,14 @@ html:not([data-theme]) .compress-do-btn {
   color: var(--text-dim);
   font-size: 0.78rem;
   min-height: 1.2em;
+}
+
+.upload-progress-row[hidden] {
+  display: none;
+}
+
+.upload-progress-wrap {
+  max-width: 420px;
 }
 
 /* ── Report button ────────────────────────────────────────────────────────── */

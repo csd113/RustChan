@@ -12,6 +12,17 @@ struct UploadFormPolicy {
     uploads_enabled: bool,
 }
 
+fn upload_progress_row() -> &'static str {
+    r#"    <tr class="upload-progress-row" hidden>
+        <td>upload</td>
+        <td>
+          <div class="compress-progress upload-progress-wrap" style="display:block;margin:0">
+            <div class="compress-progress-track"><div class="compress-progress-bar upload-progress-bar" style="width:0%"></div></div>
+            <div class="compress-progress-text upload-progress-text">Preparing upload…</div>
+          </div>
+        </td></tr>"#
+}
+
 const AUDIO_ACCEPT: &str =
     "audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac";
 const IMAGE_ACCEPT: &str = "image/jpeg,image/png,image/gif,image/webp";
@@ -181,6 +192,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         </td></tr>
     {uploads_disabled_row}
     {upload_row}
+    {upload_progress_row}
     {edit_token_row}
     {captcha_row}
         <td colspan="2">
@@ -220,6 +232,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         csrf = escape_html(csrf_token),
         uploads_disabled_row = uploads_disabled_row,
         upload_row = upload_row,
+        upload_progress_row = upload_progress_row(),
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
     )
@@ -284,6 +297,7 @@ pub(super) fn reply_form(
             <button type="submit">post reply</button></td></tr>
     {uploads_disabled_row}
     {upload_row}
+    {upload_progress_row}
     <tr><td>options</td>
         <td><label class="sage-label"><input type="checkbox" name="sage" value="1"> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
     {edit_token_row}
@@ -296,6 +310,7 @@ pub(super) fn reply_form(
         csrf = escape_html(csrf_token),
         uploads_disabled_row = uploads_disabled_row,
         upload_row = upload_row,
+        upload_progress_row = upload_progress_row(),
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
     )
@@ -327,6 +342,7 @@ mod tests {
             allow_video_embeds: false,
             allow_captcha: false,
             show_poster_ids: false,
+            collapse_greentext: false,
             post_cooldown_secs: 0,
             created_at: 0,
         }

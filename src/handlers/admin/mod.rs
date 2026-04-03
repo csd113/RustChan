@@ -298,7 +298,6 @@ pub async fn admin_panel(
             let boards = db::get_all_boards(&conn)?;
             let bans = db::list_bans(&conn)?;
             let filters = db::get_word_filters(&conn)?;
-            let collapse_greentext = db::get_collapse_greentext(&conn);
             let reports = db::get_open_reports(&conn)?;
             let appeals = db::get_open_ban_appeals(&conn)?;
             let site_name = db::get_site_name(&conn);
@@ -333,7 +332,6 @@ pub async fn admin_panel(
                 &boards,
                 &bans,
                 &filters,
-                collapse_greentext,
                 &csrf_clone,
                 &full_backups,
                 &board_backups_list,
