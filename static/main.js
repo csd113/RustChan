@@ -6,11 +6,16 @@
 
 'use strict';
 
+var MOBILE_FORM_BREAKPOINT_PX = 700;
+
 document.documentElement.classList.remove('no-js');
 document.documentElement.classList.add('js');
 
 function isMobileViewport() {
-  return window.matchMedia && window.matchMedia('(max-width: 700px)').matches;
+  return (
+    window.matchMedia &&
+    window.matchMedia('(max-width: ' + MOBILE_FORM_BREAKPOINT_PX + 'px)').matches
+  );
 }
 
 function isTouchLikeDevice() {
@@ -43,7 +48,7 @@ function setPostFormOpen(open, opts) {
   syncPostFormState();
   if (open) {
     var first = wrap.querySelector('input[type="text"], textarea');
-    if (first) first.focus();
+    if (first && !isMobileViewport()) first.focus();
     if (isMobileViewport() || (opts && opts.scrollIntoView)) {
       setTimeout(function () {
         wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -109,7 +114,10 @@ function appendReply(id) {
     setPostFormOpen(true, { scrollIntoView: true });
   }
   var ta = document.getElementById('reply-body');
-  if (ta) { ta.value += '>>' + id + '\n'; ta.focus(); }
+  if (ta) {
+    ta.value += '>>' + id + '\n';
+    if (!isMobileViewport()) ta.focus();
+  }
   return false;
 }
 

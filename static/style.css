@@ -1930,7 +1930,7 @@ html:not([data-theme]) .poster-id-btn {
 
 /* ── Responsive ───────────────────────────────────────────────────────────── */
 
-@media (max-width: 600px) {
+@media (max-width: 700px) {
   main { padding: 8px 4px; }
   .reply { margin-left: 6px; }
   .catalog-grid { grid-template-columns: repeat(2, 1fr); }
@@ -1961,6 +1961,13 @@ html:not([data-theme]) .poster-id-btn {
   }
   .post-form-container {
     padding: 10px 8px;
+  }
+  .post-form input[type="text"],
+  .post-form textarea,
+  .post-form input[type="file"],
+  .post-form input[type="number"],
+  .post-form select {
+    font-size: 16px;
   }
   .post-form button[type="submit"] {
     min-height: 40px;
