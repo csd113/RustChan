@@ -9,21 +9,22 @@ Complete setup instructions for Linux, macOS, and Windows.
 1. [Prerequisites](#prerequisites)
 2. [Installing ffmpeg (Optional)](#installing-ffmpeg)
 3. [Installing Tor (Optional)](#installing-tor)
-4. [Building](#building)
-5. [System Setup (Linux)](#system-setup-linux)
-6. [Running as a Service](#running-as-a-service)
-7. [First-Run Configuration](#first-run-configuration)
-8. [Console Interface](#console-interface)
-9. [nginx + TLS](#nginx--tls)
-10. [Tor Hidden Service](#tor-hidden-service)
-11. [ChanNet API](#channet-api)
-12. [Configuration Reference](#configuration-reference)
-13. [Admin Panel](#admin-panel)
-14. [Backups](#backups)
-15. [Raspberry Pi Tips](#raspberry-pi-tips)
-16. [Security Checklist](#security-checklist)
-17. [Updating](#updating)
-18. [Troubleshooting](#troubleshooting)
+4. [Installing ngrok (Optional)](#installing-ngrok)
+5. [Building](#building)
+6. [System Setup (Linux)](#system-setup-linux)
+7. [Running as a Service](#running-as-a-service)
+8. [First-Run Configuration](#first-run-configuration)
+9. [Console Interface](#console-interface)
+10. [nginx + TLS](#nginx--tls)
+11. [Tor Hidden Service](#tor-hidden-service)
+12. [ChanNet API](#channet-api)
+13. [Configuration Reference](#configuration-reference)
+14. [Admin Panel](#admin-panel)
+15. [Backups](#backups)
+16. [Raspberry Pi Tips](#raspberry-pi-tips)
+17. [Security Checklist](#security-checklist)
+18. [Updating](#updating)
+19. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -115,6 +116,43 @@ brew services start tor
 2. Extract to `C:\tor` and add it to PATH
 
 Verify: `tor --version`
+
+---
+
+## Installing ngrok
+
+**Optional.** ngrok gives RustChan a temporary public HTTPS URL for quick sharing, testing, or private operator access without setting up a reverse proxy or opening router ports.
+
+RustChan uses the official `ngrok` CLI that you install and configure yourself. It does not manage your ngrok account, dashboard, or authtoken directly.
+
+When ngrok integration is enabled, the RustChan console can:
+
+- toggle the tunnel on or off with `T`
+- show the active public ngrok URL in the dashboard
+- write ngrok startup and error details to `rustchan-data/logs/`
+
+Install and configure ngrok using ngrok's official setup flow:
+
+- [ngrok agent CLI docs](https://ngrok.com/docs/agent/cli)
+- [ngrok setup page](https://dashboard.ngrok.com/get-started/setup)
+
+Typical setup is:
+
+1. Install the `ngrok` CLI for your platform.
+2. Run the authtoken command from your ngrok dashboard.
+3. Verify the CLI with `ngrok version`.
+4. Restart RustChan.
+
+RustChan's generated `settings.toml` includes:
+
+```toml
+[ngrok]
+enabled = true
+```
+
+Set `enabled = false` to hide ngrok completely from the RustChan dashboard and console shortcuts.
+
+If ngrok is installed but not configured, pressing `T` shows a setup reminder in the console and asks you to restart RustChan after completing ngrok setup.
 
 ---
 
@@ -241,6 +279,9 @@ enable_tor_support = false
 require_ffmpeg = false
 ffmpeg_timeout_secs = 120
 
+[ngrok]
+enabled = true
+
 # Database maintenance
 wal_checkpoint_interval_secs = 3600
 auto_vacuum_interval_hours = 24
@@ -301,6 +342,8 @@ Stats refresh automatically every 3 seconds. Press `R` for an immediate update.
 |-----|--------|
 | `H` | Help — full key reference screen |
 | `R` | Force immediate stats refresh |
+| `T` | Open or close the ngrok control screen (only when `[ngrok].enabled = true`) |
+| `S` | Start or stop ngrok from the ngrok control screen |
 | `L` | Toggle log view (40 most recent lines, optional timestamps) |
 | `B` | Board list table (slug / name / NSFW / thread count / post count) |
 | `C` | Create board wizard |
@@ -311,7 +354,7 @@ Stats refresh automatically every 3 seconds. Press `R` for an immediate update.
 
 ### Wizard flows
 
-`[C]`, `[A]`, and `[D]` launch interactive admin wizards. While a wizard is active the dashboard pauses and the terminal reverts to normal line-input mode so you can type freely. When the wizard completes (or is cancelled), the dashboard resumes automatically with a clean frame.
+`[C]`, `[A]`, and `[D]` launch interactive admin wizards. ngrok setup guidance uses this same temporary line-input mode when RustChan needs to tell you to install and configure ngrok. While a wizard is active the dashboard pauses and the terminal reverts to normal line-input mode so you can type freely. When the wizard completes (or is cancelled), the dashboard resumes automatically with a clean frame.
 
 These wizards perform the same operations as the `rustchan-cli admin` subcommands — use whichever is more convenient.
 

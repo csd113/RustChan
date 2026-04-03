@@ -37,6 +37,7 @@ static RAW_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConsoleMode {
     Dashboard,
+    NgrokControl,
     LogView,
     Help,
     BoardList,
@@ -138,6 +139,7 @@ async fn render(mode: &SharedConsoleMode, stats: &SharedStats, last_rendered: &m
         match current_mode {
             ConsoleMode::Wizard(_) => return,
             ConsoleMode::Dashboard => dashboard::render_dashboard(&snap),
+            ConsoleMode::NgrokControl => dashboard::render_ngrok_control(&snap),
             ConsoleMode::LogView => dashboard::render_log_view(),
             ConsoleMode::Help => dashboard::render_help(),
             ConsoleMode::BoardList => dashboard::render_board_list(&snap),

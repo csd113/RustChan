@@ -74,21 +74,30 @@ impl NgrokController {
         self.stop_active_process(true).await;
     }
 
-    pub async fn toggle(&self, port: u16) -> ToggleOutcome {
+    pub async fn start(&self, port: u16) -> ToggleOutcome {
         self.reap_finished_process().await;
 
         if self.has_active_process().await {
-            self.stop_active_process(true).await;
-            return ToggleOutcome::Disabled;
+            return ToggleOutcome::Enabled;
         }
 
         if !is_ngrok_installed() {
+            tracing::warn!(
+                target: "ngrok",
+                "ngrok start requested but ngrok CLI is not installed"
+            );
             self.set_state_unconditionally(NgrokState::NotInstalled)
                 .await;
             return ToggleOutcome::NeedsSetupPrompt;
         }
 
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        tracing::info!(
+            target: "ngrok",
+            generation,
+            port,
+            "starting ngrok tunnel"
+        );
         self.set_state_if_current(generation, NgrokState::Starting)
             .await;
 
@@ -115,6 +124,15 @@ impl NgrokController {
             Ok(Ok(StartupSignal::NeedsSetup)) => ToggleOutcome::NeedsSetupPrompt,
             Ok(Ok(StartupSignal::Started)) | Ok(Err(_)) | Err(_) => ToggleOutcome::Enabled,
         }
+    }
+
+    pub async fn stop(&self) {
+        self.stop_active_process(true).await;
+    }
+
+    pub async fn is_running(&self) -> bool {
+        self.reap_finished_process().await;
+        self.has_active_process().await
     }
 
     async fn has_active_process(&self) -> bool {
@@ -151,6 +169,11 @@ impl NgrokController {
         };
 
         if let Some(stop) = managed.stop {
+            tracing::info!(
+                target: "ngrok",
+                generation = managed.generation,
+                "stopping ngrok tunnel"
+            );
             stop.cancel();
         }
         if let Some(task) = managed.task {
@@ -217,6 +240,11 @@ async fn supervise_ngrok(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(
+                target: "ngrok",
+                generation,
+                "ngrok CLI not found while starting tunnel"
+            );
             set_state_if_current(
                 &state,
                 &generation_clock,
@@ -231,6 +259,12 @@ async fn supervise_ngrok(
             return;
         }
         Err(error) => {
+            tracing::error!(
+                target: "ngrok",
+                generation,
+                error = %error,
+                "failed to start ngrok process"
+            );
             set_state_if_current(
                 &state,
                 &generation_clock,
@@ -245,6 +279,12 @@ async fn supervise_ngrok(
             return;
         }
     };
+    tracing::info!(
+        target: "ngrok",
+        generation,
+        port,
+        "ngrok process started"
+    );
 
     let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
     if let Some(stdout) = child.stdout.take() {
@@ -263,21 +303,59 @@ async fn supervise_ngrok(
             _ = stop.cancelled() => {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                tracing::info!(
+                    target: "ngrok",
+                    generation,
+                    "ngrok tunnel stopped"
+                );
                 set_state_if_current(&state, &generation_clock, generation, NgrokState::Disabled).await;
                 cleanup_process_slot(&process, generation).await;
                 return;
             }
             status = child.wait() => {
                 let next = match status {
-                    Ok(exit) if exit.success() => NgrokState::Disabled,
-                    Ok(_exit) if setup_issue => NgrokState::NotConfigured,
+                    Ok(exit) if exit.success() => {
+                        tracing::info!(
+                            target: "ngrok",
+                            generation,
+                            status = %exit,
+                            "ngrok process exited cleanly"
+                        );
+                        NgrokState::Disabled
+                    }
+                    Ok(exit) if setup_issue => {
+                        tracing::warn!(
+                            target: "ngrok",
+                            generation,
+                            status = %exit,
+                            error = %last_error.as_deref().unwrap_or("ngrok setup required"),
+                            "ngrok exited because setup is incomplete"
+                        );
+                        NgrokState::NotConfigured
+                    }
                     Ok(exit) => NgrokState::Error {
                         message: last_error.unwrap_or_else(|| format!("ngrok exited with status {exit}")),
                     },
-                    Err(error) => NgrokState::Error {
-                        message: format!("failed to wait for ngrok: {error}"),
-                    },
+                    Err(error) => {
+                        tracing::error!(
+                            target: "ngrok",
+                            generation,
+                            error = %error,
+                            "failed while waiting for ngrok process"
+                        );
+                        NgrokState::Error {
+                            message: format!("failed to wait for ngrok: {error}"),
+                        }
+                    }
                 };
+                if let NgrokState::Error { message } = &next {
+                    tracing::error!(
+                        target: "ngrok",
+                        generation,
+                        error = %message,
+                        "ngrok tunnel failed"
+                    );
+                }
                 set_state_if_current(&state, &generation_clock, generation, next).await;
                 cleanup_process_slot(&process, generation).await;
                 let signal = if setup_issue {
@@ -289,8 +367,16 @@ async fn supervise_ngrok(
                 return;
             }
             Some(line) = line_rx.recv() => {
+                log_ngrok_output_line(generation, &line);
+
                 if let Some(url) = extract_public_url(&line) {
                     saw_ready = true;
+                    tracing::info!(
+                        target: "ngrok",
+                        generation,
+                        url = %url,
+                        "ngrok public URL ready"
+                    );
                     set_state_if_current(
                         &state,
                         &generation_clock,
@@ -305,6 +391,12 @@ async fn supervise_ngrok(
                 if looks_like_setup_issue(&line) {
                     setup_issue = true;
                     last_error = Some(clean_line(&line));
+                    tracing::warn!(
+                        target: "ngrok",
+                        generation,
+                        error = %last_error.as_deref().unwrap_or("ngrok setup required"),
+                        "ngrok reported a setup/configuration error"
+                    );
                     let _ = startup_tx.take().map(|tx| tx.send(StartupSignal::NeedsSetup));
                     let _ = child.start_kill();
                     continue;
@@ -327,12 +419,24 @@ async fn supervise_ngrok(
                 let next = if setup_issue {
                     NgrokState::NotConfigured
                 } else if saw_ready {
+                    tracing::info!(
+                        target: "ngrok",
+                        generation,
+                        "ngrok log streams closed after tunnel session ended"
+                    );
                     NgrokState::Disabled
                 } else {
+                    let message = last_error.unwrap_or_else(|| {
+                        "ngrok ended before publishing a public URL".to_string()
+                    });
+                    tracing::error!(
+                        target: "ngrok",
+                        generation,
+                        error = %message,
+                        "ngrok ended before a public URL was available"
+                    );
                     NgrokState::Error {
-                        message: last_error.unwrap_or_else(|| {
-                            "ngrok ended before publishing a public URL".to_string()
-                        }),
+                        message,
                     }
                 };
                 set_state_if_current(&state, &generation_clock, generation, next).await;
@@ -414,10 +518,71 @@ fn looks_like_setup_issue(line: &str) -> bool {
     cleaned.contains("authtoken")
         || cleaned.contains("authentication failed")
         || cleaned.contains("failed to authenticate")
-        || cleaned.contains("err_ngrok_")
+        || cleaned.contains("invalid authtoken")
+        || cleaned.contains("no authtoken")
         || cleaned.contains("config check failed")
         || cleaned.contains("account is required")
         || cleaned.contains("sign up")
+}
+
+fn log_ngrok_output_line(generation: u64, line: &str) {
+    let message = clean_line(line);
+    if message.is_empty() {
+        return;
+    }
+
+    let level = extract_ngrok_level(line);
+    let error_code = extract_ngrok_error_code(&message);
+
+    match (level.as_deref(), error_code.as_deref()) {
+        (Some("error"), Some(code)) => tracing::error!(
+            target: "ngrok",
+            generation,
+            error_code = %code,
+            output = %message,
+            "ngrok CLI output"
+        ),
+        (Some("error"), None) => tracing::error!(
+            target: "ngrok",
+            generation,
+            output = %message,
+            "ngrok CLI output"
+        ),
+        (Some("warn"), Some(code)) | (Some("warning"), Some(code)) => tracing::warn!(
+            target: "ngrok",
+            generation,
+            error_code = %code,
+            output = %message,
+            "ngrok CLI output"
+        ),
+        (Some("warn"), None) | (Some("warning"), None) => tracing::warn!(
+            target: "ngrok",
+            generation,
+            output = %message,
+            "ngrok CLI output"
+        ),
+        _ => {}
+    }
+}
+
+fn extract_ngrok_level(line: &str) -> Option<String> {
+    let json = serde_json::from_str::<Value>(line).ok()?;
+    for key in ["lvl", "level", "severity"] {
+        if let Some(value) = json.get(key).and_then(Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_ascii_lowercase());
+            }
+        }
+    }
+    None
+}
+
+fn extract_ngrok_error_code(message: &str) -> Option<String> {
+    message
+        .split(|c: char| c.is_whitespace() || c == ':' || c == ',' || c == ';')
+        .find(|token| token.starts_with("ERR_NGROK_"))
+        .map(ToString::to_string)
 }
 
 fn extract_error_message(line: &str) -> Option<String> {

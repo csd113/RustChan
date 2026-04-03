@@ -13,7 +13,8 @@ use tokio::sync::mpsc;
 pub enum KeyEvent {
     Help,
     Reload,       // [R] — force immediate stats refresh
-    ToggleNgrok,  // [T]
+    NgrokScreen,  // [T]
+    NgrokAction,  // [S]
     ToggleLogs,   // [L]
     BoardList,    // [B]
     CreateBoard,  // [C] — enters wizard
@@ -35,7 +36,8 @@ fn map_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
     match code {
         KeyCode::Char('h' | 'H') => KeyEvent::Help,
         KeyCode::Char('r' | 'R') => KeyEvent::Reload,
-        KeyCode::Char('t' | 'T') => KeyEvent::ToggleNgrok,
+        KeyCode::Char('t' | 'T') => KeyEvent::NgrokScreen,
+        KeyCode::Char('s' | 'S') => KeyEvent::NgrokAction,
         KeyCode::Char('l' | 'L') => KeyEvent::ToggleLogs,
         KeyCode::Char('b' | 'B') => KeyEvent::BoardList,
         KeyCode::Char('c' | 'C') => KeyEvent::CreateBoard,

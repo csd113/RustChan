@@ -43,6 +43,14 @@ cookie_secret = "{secret}"
 # ── Media processing / feature flags ──────────────────────────────────────────
 {server_section}
 
+# ── Public tunnel integration ─────────────────────────────────────────────────
+[ngrok]
+
+# Terminal ngrok integration. When true, the operator dashboard shows the
+# [T] toggle and can launch a public tunnel through the official ngrok CLI.
+# Set to false to hide all ngrok controls from the dashboard. Default: true.
+enabled = true
+
 
 # ── Federation / ChanNet gateway ──────────────────────────────────────────────
 # Uncomment these only if you are using the ChanNet / RustWave integration.

@@ -592,6 +592,20 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // box — the dashboard shows the address on its next render tick instead.
     let (mut key_rx, _force_reload_render) = super::console::start(&shared_stats, &shared_mode);
 
+    if CONFIG.ngrok_enabled {
+        let result = ngrok_controller.start(bind_port).await;
+        force_reload_notify.notify_one();
+        if matches!(
+            result,
+            crate::server::ngrok::ToggleOutcome::NeedsSetupPrompt
+        ) {
+            tracing::warn!(
+                target: "ngrok",
+                "ngrok is enabled in settings, but setup is incomplete"
+            );
+        }
+    }
+
     // Tor: spawned after the TUI is up. F-04: handle awaited on shutdown.
     let tor_handle = crate::detect::detect_tor(
         CONFIG.enable_tor_support,
@@ -620,8 +634,31 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     KeyEvent::Reload => {
                         force_reload.notify_one();
                     }
-                    KeyEvent::ToggleNgrok => {
-                        let result = ngrok.toggle(bind_port).await;
+                    KeyEvent::NgrokScreen => {
+                        if !CONFIG.ngrok_enabled {
+                            tracing::debug!(
+                                target: "ngrok",
+                                "ignoring ngrok controls because ngrok.enabled=false"
+                            );
+                            continue;
+                        }
+                        let next = if current == ConsoleMode::NgrokControl {
+                            ConsoleMode::Dashboard
+                        } else {
+                            ConsoleMode::NgrokControl
+                        };
+                        *mode_d.write().await = next;
+                    }
+                    KeyEvent::NgrokAction => {
+                        if current != ConsoleMode::NgrokControl {
+                            continue;
+                        }
+                        let result = if ngrok.is_running().await {
+                            ngrok.stop().await;
+                            crate::server::ngrok::ToggleOutcome::Disabled
+                        } else {
+                            ngrok.start(bind_port).await
+                        };
                         force_reload.notify_one();
                         if matches!(
                             result,
