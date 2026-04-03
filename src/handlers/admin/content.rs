@@ -190,7 +190,11 @@ pub async fn reorder_board(
     let move_up = match form.direction.as_str() {
         "up" => true,
         "down" => false,
-        _ => return Err(AppError::BadRequest("Unknown board reorder direction.".into())),
+        _ => {
+            return Err(AppError::BadRequest(
+                "Unknown board reorder direction.".into(),
+            ))
+        }
     };
     let return_to = safe_return_to(form.return_to.as_deref()).to_string();
     let board_id = form.board_id;

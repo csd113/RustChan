@@ -233,14 +233,9 @@ pub fn create_board_with_media_flags(
 ///
 /// # Errors
 /// Returns an error if the database operation fails or the board id is not found.
-pub fn move_board(
-    conn: &mut rusqlite::Connection,
-    id: i64,
-    move_up: bool,
-) -> Result<()> {
+pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Result<()> {
     let tx = conn.transaction()?;
-    let mut stmt =
-        tx.prepare_cached("SELECT id FROM boards ORDER BY display_order ASC, id ASC")?;
+    let mut stmt = tx.prepare_cached("SELECT id FROM boards ORDER BY display_order ASC, id ASC")?;
     let mut ordered_ids = stmt
         .query_map([], |row| row.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;

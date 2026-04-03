@@ -212,7 +212,11 @@ pub fn admin_panel_page(
             embeds_ck = checked(b.allow_video_embeds),
             captcha_ck = checked(b.allow_captcha),
             poster_ids_ck = checked(b.show_poster_ids),
-            move_up_disabled = if b.display_order <= 1 { " disabled" } else { "" },
+            move_up_disabled = if b.display_order <= 1 {
+                " disabled"
+            } else {
+                ""
+            },
             move_down_disabled = if b.display_order >= boards.len() as i64 {
                 " disabled"
             } else {
@@ -830,8 +834,8 @@ old boards to prevent query performance degradation.
             if let Some(addr) = tor_address {
                 let _ = write!(
                     addresses,
-                    r#"<p style="color:var(--text-dim);font-size:0.82rem;margin:0">
-  <code style="user-select:all;color:var(--text)">{}</code>
+                    r#"<p class="admin-access-address">
+  <code class="onion-addr">{}</code>
 </p>"#,
                     escape_html(addr)
                 );
@@ -839,14 +843,14 @@ old boards to prevent query performance degradation.
             if let Some(url) = ngrok_url {
                 let _ = write!(
                     addresses,
-                    r#"<p style="color:var(--text-dim);font-size:0.82rem;margin:0.35rem 0 0">
-  <code style="user-select:all;color:var(--text)">{}</code>
+                    r#"<p class="admin-access-address">
+  <code class="onion-addr">{}</code>
 </p>"#,
                     escape_html(url)
                 );
             }
             format!(
-                r#"<section class="admin-section" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
+                r#"<section class="admin-section admin-access-addresses" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
 <h2>// active access addresses</h2>
 {}
 </section>"#,

@@ -28,22 +28,25 @@ fn board_reorder_controls(
     is_last: bool,
 ) -> String {
     format!(
-        r#"<div class="board-reorder-controls">
-  <form method="POST" action="/admin/board/reorder">
-    <input type="hidden" name="_csrf" value="{csrf}">
-    <input type="hidden" name="board_id" value="{board_id}">
-    <input type="hidden" name="direction" value="up">
-    <input type="hidden" name="return_to" value="{return_to}">
-    <button type="submit"{up_disabled} aria-label="Move /{short}/ earlier">&#8593;</button>
-  </form>
-  <form method="POST" action="/admin/board/reorder">
-    <input type="hidden" name="_csrf" value="{csrf}">
-    <input type="hidden" name="board_id" value="{board_id}">
-    <input type="hidden" name="direction" value="down">
-    <input type="hidden" name="return_to" value="{return_to}">
-    <button type="submit"{down_disabled} aria-label="Move /{short}/ later">&#8595;</button>
-  </form>
-</div>"#,
+        r#"<details class="board-reorder-menu">
+  <summary class="board-reorder-toggle" aria-label="Reorder /{short}/">&#8645;</summary>
+  <div class="board-reorder-controls">
+    <form method="POST" action="/admin/board/reorder">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <input type="hidden" name="board_id" value="{board_id}">
+      <input type="hidden" name="direction" value="up">
+      <input type="hidden" name="return_to" value="{return_to}">
+      <button type="submit"{up_disabled} aria-label="Move /{short}/ earlier">&#8593;</button>
+    </form>
+    <form method="POST" action="/admin/board/reorder">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <input type="hidden" name="board_id" value="{board_id}">
+      <input type="hidden" name="direction" value="down">
+      <input type="hidden" name="return_to" value="{return_to}">
+      <button type="submit"{down_disabled} aria-label="Move /{short}/ later">&#8595;</button>
+    </form>
+  </div>
+</details>"#,
         csrf = escape_html(csrf_token),
         board_id = board.id,
         return_to = escape_html(return_to),

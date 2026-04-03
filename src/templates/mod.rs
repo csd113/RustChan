@@ -496,11 +496,11 @@ pub fn base_layout(
   <nav class="theme-picker-fallback" aria-label="Theme selector">
     <span class="theme-picker-fallback-title">Theme:</span>
     <a href="{terminal_theme_href}">Terminal</a>
-    <a href="{aero_theme_href}">Frutiger Aero</a>
     <a href="{dorfic_theme_href}">DORFic</a>
-    <a href="{fluorogrid_theme_href}">FluoroGrid</a>
-    <a href="{neoncubicle_theme_href}">NeonCubicle</a>
     <a href="{chanclassic_theme_href}">ChanClassic</a>
+    <a href="{aero_theme_href}">Frutiger Aero</a>
+    <a href="{neoncubicle_theme_href}">NeonCubicle</a>
+    <a href="{fluorogrid_theme_href}">FluoroGrid</a>
   </nav>
 </footer>
 
@@ -511,20 +511,20 @@ pub fn base_layout(
   <a class="tp-option" data-action="set-theme" data-theme="terminal" href="{terminal_theme_href}">
     <span class="tp-swatch" style="background:#00ff41;"></span>Terminal
   </a>
-  <a class="tp-option" data-action="set-theme" data-theme="aero" href="{aero_theme_href}">
-    <span class="tp-swatch" style="background:#6aaed6;"></span>Frutiger Aero
-  </a>
   <a class="tp-option" data-action="set-theme" data-theme="dorfic" href="{dorfic_theme_href}">
     <span class="tp-swatch" style="background:#ffcc66;"></span>DORFic
   </a>
-  <a class="tp-option" data-action="set-theme" data-theme="fluorogrid" href="{fluorogrid_theme_href}">
-    <span class="tp-swatch" style="background:#8833aa;"></span>FluoroGrid
+  <a class="tp-option" data-action="set-theme" data-theme="chanclassic" href="{chanclassic_theme_href}">
+    <span class="tp-swatch" style="background:#800000;"></span>ChanClassic
+  </a>
+  <a class="tp-option" data-action="set-theme" data-theme="aero" href="{aero_theme_href}">
+    <span class="tp-swatch" style="background:#6aaed6;"></span>Frutiger Aero
   </a>
   <a class="tp-option" data-action="set-theme" data-theme="neoncubicle" href="{neoncubicle_theme_href}">
     <span class="tp-swatch" style="background:#b03888;"></span>NeonCubicle
   </a>
-  <a class="tp-option" data-action="set-theme" data-theme="chanclassic" href="{chanclassic_theme_href}">
-    <span class="tp-swatch" style="background:#800000;"></span>ChanClassic
+  <a class="tp-option" data-action="set-theme" data-theme="fluorogrid" href="{fluorogrid_theme_href}">
+    <span class="tp-swatch" style="background:#8833aa;"></span>FluoroGrid
   </a>
 </div>
 

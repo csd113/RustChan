@@ -339,8 +339,10 @@ pub fn render_log_view() -> String {
                             writeln!(out, " {}", dim("Showing newest log lines...")).ok();
                             writeln!(out).ok();
                         }
-                        for line in &lines[start..] {
-                            writeln!(out, " {line}").ok();
+                        if let Some(visible_lines) = lines.get(start..) {
+                            for line in visible_lines {
+                                writeln!(out, " {line}").ok();
+                            }
                         }
                     }
                 }
