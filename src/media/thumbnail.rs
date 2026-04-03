@@ -223,11 +223,7 @@ fn image_crate_thumbnail(
         )
     })?;
     if u64::from(width).saturating_mul(u64::from(height)) > MAX_IMAGE_THUMBNAIL_PIXELS {
-        anyhow::bail!(
-            "image dimensions {}x{} exceed thumbnail safety limit",
-            width,
-            height
-        );
+        anyhow::bail!("image dimensions {width}x{height} exceed thumbnail safety limit");
     }
 
     let data = std::fs::read(input_path)

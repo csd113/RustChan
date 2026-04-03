@@ -23,7 +23,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use crate::config::{check_cookie_secret_rotation, generate_settings_file_if_missing, CONFIG};
+use crate::config::{
+    check_cookie_secret_rotation, data_dir, generate_settings_file_if_missing,
+    migrate_runtime_layout_if_needed, CONFIG,
+};
 use crate::middleware::AppState;
 
 mod assets;
@@ -89,14 +92,9 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // Err but never panics, so the let _ discard is intentional.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let early_data_dir = {
-        let exe = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p: &std::path::Path| p.to_path_buf()))
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        exe.join("rustchan-data")
-    };
+    let early_data_dir = data_dir();
     std::fs::create_dir_all(&early_data_dir)?;
+    migrate_runtime_layout_if_needed()?;
 
     generate_settings_file_if_missing();
 
@@ -804,7 +802,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // build_acceptor failure is now a hard error (return Err) instead
     // of a silent log-and-continue.  If TLS is enabled in config but the acceptor
     // cannot be constructed (missing cert files, bad PEM, permission denied on
-    // tls/dev/, etc.), the process exits with a clear message rather than running
+    // runtime/tls/dev/, etc.), the process exits with a clear message rather than running
     // silently as HTTP-only with no indication that HTTPS is absent.
     if CONFIG.tls.enabled {
         let data_dir_tls = data_dir.clone();

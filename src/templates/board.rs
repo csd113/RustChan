@@ -521,7 +521,11 @@ fn render_thread_summary(
 // ─── Catalog page ─────────────────────────────────────────────────────────────
 
 #[must_use]
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::implicit_hasher
+)]
 pub fn catalog_page(
     board: &Board,
     threads: &[Thread],

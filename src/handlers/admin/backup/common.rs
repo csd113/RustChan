@@ -1,7 +1,6 @@
 // src/handlers/admin/backup/common.rs
 
 use crate::{
-    config::CONFIG,
     error::{AppError, Result},
     middleware::{backup_phase, BackupProgress},
 };
@@ -227,12 +226,6 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {e}", target.display())))?;
     }
     Ok(())
-}
-
-pub(super) fn db_dir() -> PathBuf {
-    PathBuf::from(&CONFIG.database_path)
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
 #[cfg(test)]

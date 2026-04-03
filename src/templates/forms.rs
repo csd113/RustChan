@@ -72,12 +72,10 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
             r#"<details class="upload-secondary-toggle">
               <summary aria-label="Show optional image upload">▾ Optional Image</summary>
               <div class="upload-secondary-panel">
-                <input type="file" name="image_file" data-onchange-check-size="1" accept="{image_accept}">
+                <input type="file" name="image_file" data-onchange-check-size="1" accept="{IMAGE_ACCEPT}">
                 <span style="font-size:0.72rem;color:var(--text-dim)">{audio_image_hint} · jpg/png/gif/webp · max {image_mb} MiB</span>
               </div>
-            </details>"#,
-            image_accept = IMAGE_ACCEPT,
-            audio_image_hint = audio_image_hint,
+            </details>"#
         )
     } else {
         String::new()
@@ -122,12 +120,12 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         String::new()
     };
 
-    let uploads_disabled_row = if !upload_policy.uploads_enabled {
+    let uploads_disabled_row = if upload_policy.uploads_enabled {
+        String::new()
+    } else {
         r#"    <tr><td>uploads</td>
         <td><span style="font-size:0.8rem;color:var(--text-dim)">uploads are disabled on this board</span></td></tr>"#
             .to_string()
-    } else {
-        String::new()
     };
 
     // PoW CAPTCHA block — only rendered when the board has it enabled.
@@ -241,12 +239,12 @@ pub(super) fn reply_form(
         String::new()
     };
 
-    let uploads_disabled_row = if !upload_policy.uploads_enabled {
+    let uploads_disabled_row = if upload_policy.uploads_enabled {
+        String::new()
+    } else {
         r#"    <tr><td>uploads</td>
         <td><span style="font-size:0.8rem;color:var(--text-dim)">uploads are disabled on this board</span></td></tr>"#
             .to_string()
-    } else {
-        String::new()
     };
 
     let edit_token_row = if board.allow_editing {

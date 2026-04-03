@@ -572,6 +572,11 @@ pub fn prune_old_threads(
 ///
 /// The ordering uses `bumped_at DESC`, matching the archive page and ensuring
 /// we keep the most recently-active archived threads.
+///
+/// # Errors
+/// Returns an error if the transaction cannot be opened or committed, if the
+/// candidate threads cannot be queried, or if the bulk delete/safe-path
+/// calculation fails.
 pub fn prune_old_archived_threads(
     conn: &rusqlite::Connection,
     board_id: i64,

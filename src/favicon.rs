@@ -24,30 +24,36 @@ pub struct ResolvedFavicon {
     pub version: String,
 }
 
+#[must_use]
 pub fn global_favicon_dir() -> PathBuf {
-    data_dir().join("favicon")
+    crate::config::runtime_favicon_dir()
 }
 
+#[must_use]
 pub fn board_favicon_dir(board_short: &str) -> PathBuf {
     PathBuf::from(&CONFIG.upload_dir)
         .join(board_short)
         .join("_favicon")
 }
 
+#[must_use]
 pub fn board_has_custom_favicon(board_short: &str) -> bool {
     version_for_scope(FaviconScope::Board(board_short)).is_some()
 }
 
+#[must_use]
 pub fn global_has_custom_favicon() -> bool {
     version_for_scope(FaviconScope::Global).is_some()
 }
 
+#[must_use]
 pub fn favicon_version_for_board(board_short: Option<&str>) -> Option<String> {
     board_short
         .and_then(|short| version_for_scope(FaviconScope::Board(short)))
         .or_else(|| version_for_scope(FaviconScope::Global))
 }
 
+#[must_use]
 pub fn favicon_head_html(board_short: Option<&str>) -> String {
     let resolved = resolve_favicon_for_board(board_short);
     let Some(resolved) = resolved else {
@@ -68,37 +74,43 @@ pub fn favicon_head_html(board_short: Option<&str>) -> String {
     )
 }
 
+#[must_use]
 pub fn resolve_favicon_for_board(board_short: Option<&str>) -> Option<ResolvedFavicon> {
     board_short
         .and_then(|short| resolve_scope(FaviconScope::Board(short)))
         .or_else(|| resolve_scope(FaviconScope::Global))
 }
 
+/// Generate and atomically publish the full favicon asset set for a scope.
+///
+/// # Errors
+/// Returns an error if the uploaded image cannot be decoded, is not exactly
+/// `512x512`, or any filesystem write or rename operation fails.
 pub fn write_favicon_set(scope: FaviconScope<'_>, bytes: &[u8]) -> Result<()> {
     let img = decode_uploaded_favicon(bytes)?;
     let target_dir = scope_dir(scope);
-    let stage_dir = staging_dir_for(&target_dir)?;
+    let stage_dir = staging_dir_for(&target_dir);
     std::fs::create_dir_all(&stage_dir)
         .with_context(|| format!("create favicon staging directory {}", stage_dir.display()))?;
 
     write_png(
-        img.resize_exact(16, 16, FilterType::Lanczos3),
+        &img.resize_exact(16, 16, FilterType::Lanczos3),
         &stage_dir.join("favicon-16x16.png"),
     )?;
     write_png(
-        img.resize_exact(32, 32, FilterType::Lanczos3),
+        &img.resize_exact(32, 32, FilterType::Lanczos3),
         &stage_dir.join("favicon-32x32.png"),
     )?;
     write_png(
-        img.resize_exact(180, 180, FilterType::Lanczos3),
+        &img.resize_exact(180, 180, FilterType::Lanczos3),
         &stage_dir.join("apple-touch-icon.png"),
     )?;
     write_png(
-        img.resize_exact(192, 192, FilterType::Lanczos3),
+        &img.resize_exact(192, 192, FilterType::Lanczos3),
         &stage_dir.join("android-chrome-192x192.png"),
     )?;
     write_png(
-        img.resize_exact(512, 512, FilterType::Lanczos3),
+        &img.resize_exact(512, 512, FilterType::Lanczos3),
         &stage_dir.join("android-chrome-512x512.png"),
     )?;
     img.resize_exact(32, 32, FilterType::Lanczos3)
@@ -114,6 +126,12 @@ pub fn write_favicon_set(scope: FaviconScope<'_>, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Remove a board-specific favicon override so the board falls back to the
+/// global favicon.
+///
+/// # Errors
+/// Returns an error if the board favicon directory exists but cannot be
+/// removed.
 pub fn clear_board_favicon(board_short: &str) -> Result<()> {
     let dir = board_favicon_dir(board_short);
     if dir.exists() {
@@ -123,6 +141,7 @@ pub fn clear_board_favicon(board_short: &str) -> Result<()> {
     Ok(())
 }
 
+#[must_use]
 pub fn global_favicon_file(file_name: &str) -> Option<PathBuf> {
     if !GLOBAL_FILENAMES.contains(&file_name) || file_name == "version.txt" {
         return None;
@@ -131,14 +150,9 @@ pub fn global_favicon_file(file_name: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+#[must_use]
 pub fn global_backup_source_dir() -> PathBuf {
     global_favicon_dir()
-}
-
-fn data_dir() -> PathBuf {
-    PathBuf::from(&CONFIG.database_path)
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
 fn resolve_scope(scope: FaviconScope<'_>) -> Option<ResolvedFavicon> {
@@ -150,7 +164,7 @@ fn resolve_scope(scope: FaviconScope<'_>) -> Option<ResolvedFavicon> {
     Some(ResolvedFavicon { base_url, version })
 }
 
-fn staging_dir_for(target_dir: &Path) -> Result<PathBuf> {
+fn staging_dir_for(target_dir: &Path) -> PathBuf {
     let parent = target_dir
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
@@ -162,7 +176,7 @@ fn staging_dir_for(target_dir: &Path) -> Result<PathBuf> {
         ".{file_name}.stage.{}",
         uuid::Uuid::new_v4().simple()
     ));
-    Ok(stage_dir)
+    stage_dir
 }
 
 fn swap_stage_into_place(stage_dir: &Path, target_dir: &Path) -> Result<()> {
@@ -236,7 +250,7 @@ fn decode_uploaded_favicon(bytes: &[u8]) -> Result<DynamicImage> {
     Ok(img)
 }
 
-fn write_png(image: DynamicImage, path: &Path) -> Result<()> {
+fn write_png(image: &DynamicImage, path: &Path) -> Result<()> {
     image
         .save_with_format(path, ImageFormat::Png)
         .with_context(|| format!("write {}", path.display()))

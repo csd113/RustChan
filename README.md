@@ -277,13 +277,13 @@ See **[SETUP.md — Installing ffmpeg](SETUP.md#installing-ffmpeg)** for platfor
 RustChan includes **built-in Tor onion service support via [Arti](https://gitlab.torproject.org/tpo/core/arti)** — no system `tor` installation required. Set `enable_tor_support = true` in `settings.toml` and restart. On first launch RustChan will:
 
 1. Download ~2 MB of Tor directory data and bootstrap to the network (~30 seconds)
-2. Generate a persistent Ed25519 keypair in `rustchan-data/arti_state/keys/`
+2. Generate a persistent Ed25519 keypair in `rustchan-data/runtime/tor/state/keys/`
 3. Derive your permanent `.onion` address from that keypair and start the hidden service
 4. Begin accepting and proxying inbound onion connections to the local HTTP port
 
-The `.onion` address appears on the home page and in the admin panel as soon as the service is ready. Subsequent starts are ready in ~5 seconds using the cached consensus in `rustchan-data/arti_cache/`.
+The `.onion` address appears on the home page and in the admin panel as soon as the service is ready. Subsequent starts are ready in ~5 seconds using the cached consensus in `rustchan-data/runtime/tor/cache/`.
 
-**Back up `rustchan-data/arti_state/keys/`** — this directory contains your service keypair. Losing it means a new `.onion` address on the next start. Delete it intentionally to rotate to a new address.
+**Back up `rustchan-data/runtime/tor/state/keys/`** — this directory contains your service keypair. Losing it means a new `.onion` address on the next start. Delete it intentionally to rotate to a new address.
 
 See **[SETUP.md — Tor](SETUP.md#tor--onion-service)** for details on key management and migrating from a previous system `tor` installation.
 
@@ -349,17 +349,23 @@ rustchan-data/
 ├── chan.db-shm                           ← SQLite shared-memory sidecar
 ├── logs/
 │   └── rustchan.YYYY-MM-DD.log           ← daily rotated human-readable logs
-├── full-backups/                         ← full site backups
-│   └── rustchan-backup-20260304_120000.zip
-├── board-backups/                        ← per-board backups
-│   └── rustchan-board-tech-20260304_120000.zip
-├── tls/
-│   ├── dev/
-│   │   ├── self-signed.crt               ← auto-generated localhost dev cert
-│   │   └── self-signed.key
-│   └── acme/                             ← ACME cache when [tls.acme] is enabled
-├── arti_state/                           ← Tor onion-service key material/state
-├── arti_cache/                           ← Tor cache data
+├── backups/
+│   ├── full/                             ← full site backups
+│   │   └── rustchan-backup-20260304_120000.zip
+│   └── boards/                           ← per-board backups
+│       └── rustchan-board-tech-20260304_120000.zip
+├── runtime/
+│   ├── tls/
+│   │   ├── dev/
+│   │   │   ├── self-signed.crt           ← auto-generated localhost dev cert
+│   │   │   └── self-signed.key
+│   │   └── acme/                         ← ACME cache when [tls.acme] is enabled
+│   ├── tor/
+│   │   ├── state/                        ← Tor onion-service key material/state
+│   │   └── cache/                        ← Tor cache data
+│   ├── favicon/                          ← generated global favicon assets
+│   └── tmp/
+│       └── board-downloads/              ← temporary admin backup download files
 └── boards/
     ├── .pending/                         ← crash-safe staging area for uploads/restores
     ├── b/
@@ -445,7 +451,7 @@ port = 8443
 # staging = true
 # domains = ["example.com"]
 # email = "admin@example.com"
-# cache_dir = "tls/acme"
+# cache_dir = "runtime/tls/acme"
 ```
 
 ### Environment Variables
@@ -478,7 +484,7 @@ All settings can be overridden via environment variables, which take precedence 
 | `CHAN_TOR_ONLY` | `false` | Bind loopback-only and serve exclusively over Tor |
 | `CHAN_TOR_BOOTSTRAP_TIMEOUT` | `120` | Tor bootstrap timeout (seconds) |
 | `CHAN_TOR_MAX_STREAMS` | `512` | Max simultaneous inbound Tor streams |
-| `CHAN_TOR_NICKNAME` | `rustchan` | Onion service nickname under `arti_state/` |
+| `CHAN_TOR_NICKNAME` | `rustchan` | Onion service nickname under `runtime/tor/state/` |
 | `CHAN_REQUIRE_FFMPEG` | `false` | Exit at startup if ffmpeg is unavailable |
 | `CHAN_FFMPEG_PATH` | `ffmpeg` | ffmpeg executable path |
 | `CHAN_FFPROBE_PATH` | `ffprobe` | ffprobe executable path |
@@ -512,7 +518,7 @@ A full backup is a `.zip` containing a consistent SQLite snapshot (via `VACUUM I
 
 | Action | Description |
 |---|---|
-| **💾 Save** | Creates a backup and writes it to `rustchan-data/full-backups/` |
+| **💾 Save** | Creates a backup and writes it to `rustchan-data/backups/full/` |
 | **⬇ Download** | Streams a saved backup to your browser |
 | **↺ Restore (server)** | Restores from a file already on the server |
 | **↺ Restore (upload)** | Restores from a `.zip` uploaded from your computer (max 512 MiB) |

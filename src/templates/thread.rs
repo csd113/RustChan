@@ -154,9 +154,9 @@ pub fn thread_page(
 
     let _ = write!(
         body,
-        r##"<div id="top"></div>
+        r#"<div id="top"></div>
 <div class="thread-board-banner board-thread-header">/{s}/ — {bn}</div>
-{top_nav}"##,
+{top_nav}"#,
         s = escape_html(&board.short_name),
         bn = escape_html(&board.name),
         top_nav = render_thread_nav(&board.short_name, thread.reply_count, false)

@@ -105,21 +105,16 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Resolve the binary directory, then derive rustchan-data/ so logs,
-    // uploads, settings, and the database stay under one instance folder.
-    // Falls back to "./rustchan-data" if the exe path cannot be determined.
-    let binary_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(std::path::PathBuf::from))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-
-    // Create rustchan-data/ and rustchan-data/logs/ before init_logging so
-    // the rolling file appender can open the directory immediately on startup.
-    let data_dir = binary_dir.join("rustchan-data");
+    // Create the runtime data directories before init_logging so the rolling
+    // file appender can open the directory immediately on startup.
+    let data_dir = crate::config::data_dir();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         eprintln!("Warning: could not create rustchan-data directory: {e}");
     }
-    let log_dir = data_dir.join("logs");
+    if let Err(e) = crate::config::migrate_runtime_layout_if_needed() {
+        eprintln!("Warning: could not migrate runtime layout: {e}");
+    }
+    let log_dir = crate::config::logs_dir();
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         eprintln!("Warning: could not create rustchan-data/logs directory: {e}");
     }

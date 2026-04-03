@@ -75,7 +75,7 @@ const fn settings_template_server_section() -> &'static str {
 # Tor Onion Service support (powered by Arti — no system tor required).
 # When true, Arti bootstraps at startup and hosts a .onion hidden service.
 # First run downloads ~2 MB of directory data and takes ~30 s.
-# The service keypair lives in rustchan-data/arti_state/keys/ — back it up.
+# The service keypair lives in rustchan-data/runtime/tor/state/keys/ — back it up.
 # Delete that directory to rotate to a new .onion address.
 enable_tor_support = true
 
@@ -96,7 +96,7 @@ enable_tor_support = true
 
 # Nickname for this instance's Tor hidden service key.
 # Only needs changing when multiple rustchan instances share the same
-# rustchan-data/arti_state/ directory — identical nicknames cause key
+# rustchan-data/runtime/tor/state/ directory — identical nicknames cause key
 # collisions and one instance will fail to start its onion service.
 # tor_service_nickname = "rustchan"
 
@@ -166,7 +166,7 @@ const fn settings_template_tls_section() -> &'static str {
     r#"
 # ── TLS / HTTPS ───────────────────────────────────────────────────────────────
 # HTTPS is enabled by default on port 8443. On first run a self-signed
-# localhost certificate is generated automatically in rustchan-data/tls/dev/.
+# localhost certificate is generated automatically in rustchan-data/runtime/tls/dev/.
 # For production, configure [tls.acme] (Let's Encrypt) or [tls.manual_cert].
 [tls]
 enabled = true
@@ -182,6 +182,6 @@ port = 8443
 # staging = true
 # domains = ["example.com"]
 # email = "admin@example.com"
-# cache_dir = "tls/acme"
+# cache_dir = "runtime/tls/acme"
 "#
 }

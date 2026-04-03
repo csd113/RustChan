@@ -15,12 +15,15 @@ All notable changes to RustChan will be documented in this file.
 
 - Cross-platform `ngrok` integration now uses the official `ngrok` CLI workflow on macOS, Linux, and Windows instead of embedding account setup inside RustChan.
 - Tunnel lifecycle handling is more resilient through generation-guarded state updates, proper child-process cleanup, and restart-safe task reaping in the console runtime.
+- Runtime data layout is now tidier under `rustchan-data/`, with backups grouped into `backups/full` and `backups/boards`, and generated operational state grouped under `runtime/` for Tor, TLS, favicon assets, and temporary admin files.
 
 ### Fixed
 
 - Pressing `[T]` with `ngrok` installed but not configured now opens the setup guidance flow instead of silently leaving the dashboard in a setup-required state.
 - Rapid `ngrok` toggles no longer allow a stale background task to overwrite the state of a newer tunnel session.
 - Restarting `ngrok` after an unexpected tunnel exit now works on the next keypress instead of requiring an extra off/on cycle.
+- Existing installs now migrate old runtime folders automatically at startup, so prior `full-backups`, `board-backups`, `arti_state`, `arti_cache`, `tls`, `favicon`, and temp backup-download directories continue working under the new layout without manual moves.
+- Backup, Tor, TLS, favicon, admin UI, and documentation paths now consistently point at the reorganized filesystem structure instead of the older scattered folder names.
 
 ### Validation
 

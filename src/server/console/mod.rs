@@ -243,6 +243,7 @@ pub fn start(
 /// `tokio::task::block_in_place` at the call site when inside an async context.
 #[allow(clippy::cast_precision_loss)]
 #[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::too_many_arguments)]
 pub fn collect_stats(
     pool: &crate::db::DbPool,
     start: Instant,

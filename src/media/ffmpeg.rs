@@ -162,7 +162,7 @@ pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()>
     .with_context(|| format!("thumbnail generation failed for {in_str}"))
 }
 
-/// Probe whether a WebM container is audio-only or contains video streams.
+/// Probe whether a `WebM` container is audio-only or contains video streams.
 ///
 /// # Errors
 /// Returns an error if `ffprobe` cannot be spawned, times out, exits non-zero,

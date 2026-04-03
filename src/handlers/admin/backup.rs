@@ -39,7 +39,7 @@ mod create;
 mod types;
 
 use common::{
-    copy_limited, create_staging_dir, db_dir, extract_uploads_to_dir, log_backup_phase,
+    copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
     log_backup_progress, read_limited_bytes, remap_body_quotelinks, remove_path_if_exists,
     render_restored_body_html, validate_board_short_name, BOARD_MANIFEST_MAX_BYTES,
     ZIP_ENTRY_MAX_BYTES,
@@ -1268,14 +1268,14 @@ pub async fn admin_restore(
 //
 // Rewrite in-board `>>{old_id}` references in the raw post body.
 // `pairs` must be pre-sorted by old-ID string length descending.
-/// rustchan-data/full-backups/
+/// rustchan-data/backups/full/
 pub fn full_backup_dir() -> PathBuf {
-    db_dir().join("full-backups")
+    crate::config::full_backups_dir()
 }
 
-/// rustchan-data/board-backups/
+/// rustchan-data/backups/boards/
 pub fn board_backup_dir() -> PathBuf {
-    db_dir().join("board-backups")
+    crate::config::board_backups_dir()
 }
 
 pub fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
@@ -1302,9 +1302,9 @@ pub fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
     }
 }
 
-/// rustchan-data/tmp-board-downloads/
+/// rustchan-data/runtime/tmp/board-downloads/
 pub fn temp_board_download_dir() -> PathBuf {
-    db_dir().join("tmp-board-downloads")
+    crate::config::runtime_temp_board_downloads_dir()
 }
 
 fn prune_stale_temp_board_downloads() {
@@ -1355,10 +1355,9 @@ impl Stream for TempFileStream {
     type Item = std::result::Result<axum::body::Bytes, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.inner.as_mut() {
-            Some(inner) => Pin::new(inner).poll_next(cx),
-            None => Poll::Ready(None),
-        }
+        self.inner
+            .as_mut()
+            .map_or_else(|| Poll::Ready(None), |inner| Pin::new(inner).poll_next(cx))
     }
 }
 
@@ -1643,7 +1642,7 @@ pub struct RestoreSavedForm {
     csrf: Option<String>,
 }
 
-/// Restore a full backup from a saved file in full-backups/.
+/// Restore a full backup from a saved file in backups/full/.
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::arithmetic_side_effects)]
 pub async fn restore_saved_full_backup(
@@ -1721,7 +1720,7 @@ pub async fn restore_saved_full_backup(
 
 // ─── POST /admin/board/backup/restore-saved ───────────────────────────────────
 
-/// Restore a board backup from a saved file in board-backups/.
+/// Restore a board backup from a saved file in backups/boards/.
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::arithmetic_side_effects)]
 pub async fn restore_saved_board_backup(

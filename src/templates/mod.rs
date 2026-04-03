@@ -118,11 +118,14 @@ fn compute_static_asset_version() -> String {
         .and_then(|path| std::fs::metadata(path).ok())
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs().to_string())
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+        .map_or_else(
+            || env!("CARGO_PKG_VERSION").to_string(),
+            |duration| duration.as_secs().to_string(),
+        )
 }
 
-pub(crate) fn static_asset_url(path: &str) -> String {
+#[must_use]
+pub fn static_asset_url(path: &str) -> String {
     format!("{path}?v={}", *STATIC_ASSET_VERSION)
 }
 

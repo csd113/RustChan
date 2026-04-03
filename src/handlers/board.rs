@@ -1188,7 +1188,7 @@ pub async fn serve_board_media(
     }
 }
 
-fn board_media_cache_control(has_version: bool) -> &'static str {
+const fn board_media_cache_control(has_version: bool) -> &'static str {
     if has_version {
         "public, max-age=31536000, immutable"
     } else {

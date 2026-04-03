@@ -41,6 +41,11 @@ struct UploadPlan {
     thumbs_dir: PathBuf,
 }
 
+/// Classify an uploaded file into the MIME type `RustChan` should persist.
+///
+/// # Errors
+/// Returns an error if MIME sniffing fails and arbitrary file uploads are not
+/// allowed, or if `ffprobe` probing fails in a way that must be surfaced.
 pub fn classify_upload_mime(
     input_path: &Path,
     sniff_bytes: &[u8],
@@ -143,7 +148,7 @@ pub fn save_audio_with_image_thumb_from_path(
         file_path: format!("{board_short}/{filename}"),
         thumb_path: String::new(),
         original_name: crate::utils::sanitize::sanitize_filename(original_filename),
-        mime_type: mime_type.to_string(),
+        mime_type: mime_type.clone(),
         file_size: i64::try_from(original_size).context("File size overflows i64")?,
         media_type,
         processing_pending: false,

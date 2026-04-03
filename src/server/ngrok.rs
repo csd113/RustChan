@@ -122,7 +122,7 @@ impl NgrokController {
 
         match timeout(Duration::from_secs(3), startup_rx).await {
             Ok(Ok(StartupSignal::NeedsSetup)) => ToggleOutcome::NeedsSetupPrompt,
-            Ok(Ok(StartupSignal::Started)) | Ok(Err(_)) | Err(_) => ToggleOutcome::Enabled,
+            Ok(Ok(StartupSignal::Started) | Err(_)) | Err(_) => ToggleOutcome::Enabled,
         }
     }
 
@@ -214,6 +214,7 @@ fn is_ngrok_installed() -> bool {
         .is_ok_and(|status| status.success())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn supervise_ngrok(
     port: u16,
     generation: u64,
@@ -300,7 +301,7 @@ async fn supervise_ngrok(
 
     loop {
         tokio::select! {
-            _ = stop.cancelled() => {
+            () = stop.cancelled() => {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 tracing::info!(
@@ -548,14 +549,14 @@ fn log_ngrok_output_line(generation: u64, line: &str) {
             output = %message,
             "ngrok CLI output"
         ),
-        (Some("warn"), Some(code)) | (Some("warning"), Some(code)) => tracing::warn!(
+        (Some("warn" | "warning"), Some(code)) => tracing::warn!(
             target: "ngrok",
             generation,
             error_code = %code,
             output = %message,
             "ngrok CLI output"
         ),
-        (Some("warn"), None) | (Some("warning"), None) => tracing::warn!(
+        (Some("warn" | "warning"), None) => tracing::warn!(
             target: "ngrok",
             generation,
             output = %message,

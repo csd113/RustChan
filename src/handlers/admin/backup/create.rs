@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(clippy::too_many_lines)]
 pub async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -47,7 +48,7 @@ pub async fn create_full_backup(
 
             let backup_dir = super::full_backup_dir();
             std::fs::create_dir_all(&backup_dir).map_err(|error| {
-                AppError::Internal(anyhow::anyhow!("Create full-backups dir: {error}"))
+                AppError::Internal(anyhow::anyhow!("Create full backup dir: {error}"))
             })?;
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
             let filename =

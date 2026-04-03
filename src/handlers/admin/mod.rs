@@ -363,10 +363,7 @@ pub async fn admin_live_log(
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
 
-            let logs_dir = std::path::Path::new(&CONFIG.database_path)
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
-                .join("logs");
+            let logs_dir = crate::config::logs_dir();
 
             let Some(path) = latest_log_file(&logs_dir) else {
                 return Ok(

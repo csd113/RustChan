@@ -237,7 +237,7 @@ fn parse_formatted_duration(value: &str) -> Option<String> {
     let seconds = inner.parse::<f64>().ok()?;
 
     if seconds >= 60.0 {
-        let total = seconds.round() as u64;
+        let total = std::time::Duration::from_secs_f64(seconds.round()).as_secs();
         let minutes = total / 60;
         let secs = total % 60;
         if secs == 0 {
@@ -246,7 +246,10 @@ fn parse_formatted_duration(value: &str) -> Option<String> {
             Some(format!("{minutes}m {secs}s"))
         }
     } else if seconds >= 10.0 {
-        Some(format!("{}s", seconds.round() as u64))
+        Some(format!(
+            "{}s",
+            std::time::Duration::from_secs_f64(seconds.round()).as_secs()
+        ))
     } else {
         Some(format!("{seconds:.1}s"))
     }
@@ -281,7 +284,7 @@ struct LogEventFields {
 }
 
 impl LogEventFields {
-    fn push_field(&mut self, field: &Field, value: String) {
+    fn push_field(&mut self, field: &Field, value: &str) {
         let clean = normalize_field_value(field.name(), &strip_ansi(value.trim()));
         if field.name() == "message" {
             if !clean.is_empty() {
@@ -298,46 +301,39 @@ impl LogEventFields {
 
 impl Visit for LogEventFields {
     fn record_str(&mut self, field: &Field, value: &str) {
-        self.push_field(field, value.to_string());
+        self.push_field(field, value);
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.push_field(
-            field,
-            if value {
-                "yes".to_string()
-            } else {
-                "no".to_string()
-            },
-        );
+        self.push_field(field, if value { "yes" } else { "no" });
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.push_field(field, value.to_string());
+        self.push_field(field, &value.to_string());
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.push_field(field, value.to_string());
+        self.push_field(field, &value.to_string());
     }
 
     fn record_i128(&mut self, field: &Field, value: i128) {
-        self.push_field(field, value.to_string());
+        self.push_field(field, &value.to_string());
     }
 
     fn record_u128(&mut self, field: &Field, value: u128) {
-        self.push_field(field, value.to_string());
+        self.push_field(field, &value.to_string());
     }
 
     fn record_f64(&mut self, field: &Field, value: f64) {
-        self.push_field(field, value.to_string());
+        self.push_field(field, &value.to_string());
     }
 
     fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
-        self.push_field(field, value.to_string());
+        self.push_field(field, &value.to_string());
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        self.push_field(field, format!("{value:?}"));
+        self.push_field(field, &format!("{value:?}"));
     }
 }
 
@@ -353,8 +349,7 @@ fn extract_percent(message: &str) -> Option<String> {
     let percent_index = message.find('%')?;
     let number = message[..percent_index]
         .rsplit_once(' ')
-        .map(|(_, value)| value)
-        .unwrap_or(&message[..percent_index]);
+        .map_or(&message[..percent_index], |(_, value)| value);
     Some(format!("{number}%"))
 }
 
