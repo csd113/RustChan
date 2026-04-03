@@ -212,14 +212,14 @@ fn mobile_board_group_html(title: &str, boards: &[&Board]) -> String {
     if boards.is_empty() {
         return String::new();
     }
-    let items = boards
-        .iter()
-        .map(|board| {
-            let short = escape_html(&board.short_name);
-            format!(r#"<a class="mobile-board-link" href="/{short}/catalog">/{short}/</a>"#)
-        })
-        .collect::<Vec<_>>()
-        .join("");
+    let mut items = String::new();
+    for board in boards {
+        let short = escape_html(&board.short_name);
+        let _ = write!(
+            items,
+            r#"<a class="mobile-board-link" href="/{short}/catalog">/{short}/</a>"#
+        );
+    }
     format!(
         r#"<div class="mobile-board-group"><div class="mobile-board-group-title">{title}</div>{items}</div>"#
     )

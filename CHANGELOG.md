@@ -10,12 +10,20 @@ All notable changes to RustChan will be documented in this file.
 
 - Integrated `ngrok` terminal toggle on `[T]`, including dashboard status, live public URL display, and help/footer shortcuts in the full-screen operator console.
 - Guided `ngrok` setup prompt that tells operators to install and configure `ngrok` using the official commands from their ngrok dashboard, then reboot RustChan for support to take effect.
+- Shared board ordering controls, backed by a persistent `display_order` field, so admins can reorder boards once and see the same order reflected across the homepage, top header board list, and admin panel.
+- Live upload progress bars for post media uploads and admin restore uploads, covering image/video/audio post forms plus full-site and per-board backup restore uploads from local files.
 
 ### Improved
 
 - Cross-platform `ngrok` integration now uses the official `ngrok` CLI workflow on macOS, Linux, and Windows instead of embedding account setup inside RustChan.
 - Tunnel lifecycle handling is more resilient through generation-guarded state updates, proper child-process cleanup, and restart-safe task reaping in the console runtime.
 - Runtime data layout is now tidier under `rustchan-data/`, with backups grouped into `backups/full` and `backups/boards`, and generated operational state grouped under `runtime/` for Tor, TLS, favicon assets, and temporary admin files.
+- Homepage admin board reordering is now available through a subtler per-card toggle instead of always-visible controls, keeping the feature accessible without cluttering the board list.
+- Board navigation and admin ordering now split SFW and NSFW boards into separate groups, with independent per-group move controls and safer reordering when a board is retagged between normal and NSFW.
+- Post headers now render subjects inline ahead of poster names, with theme-appropriate subject colors and separators so titles remain distinct from usernames across Terminal, DORFic, ChanClassic, Frutiger Aero, FluoroGrid, and NeonCubicle.
+- Theme presentation is more polished through reordered theme-picker menus, softer ChanClassic header link contrast, and rounder shared controls in Frutiger Aero and NeonCubicle so top-level navigation matches those themes' bubbly styling better.
+- Catalog page presentation is cleaner through centered sort/display selectors and larger board-description text on both board headers and homepage board cards.
+- The admin site-settings layout is tidier, with the save button aligned into the form action row instead of floating awkwardly above the global favicon controls.
 
 ### Fixed
 
@@ -24,6 +32,11 @@ All notable changes to RustChan will be documented in this file.
 - Restarting `ngrok` after an unexpected tunnel exit now works on the next keypress instead of requiring an extra off/on cycle.
 - Existing installs now migrate old runtime folders automatically at startup, so prior `full-backups`, `board-backups`, `arti_state`, `arti_cache`, `tls`, `favicon`, and temp backup-download directories continue working under the new layout without manual moves.
 - Backup, Tor, TLS, favicon, admin UI, and documentation paths now consistently point at the reorganized filesystem structure instead of the older scattered folder names.
+- Admin-panel live access addresses now wrap correctly on mobile instead of overflowing offscreen, and the console live-log renderer now avoids panic-prone slicing flagged by strict Clippy.
+- The long-greentext collapse toggle now works as a true per-board setting instead of a global site-wide flag, with migration/backfill support for existing installs and backup/restore compatibility for the new board field.
+- Client-side auto-compress is safer for oversized media: animated images are no longer silently flattened, transparent images avoid destructive JPEG fallback when the browser cannot preserve alpha, and video re-encoding now has stronger cleanup and timeout handling so the modal is less likely to get stuck.
+- Board search no longer crashes on punctuation-heavy input such as `'`, `"`, or `>>1`; the search layer now normalizes free-form input into FTS-safe terms and returns ordinary empty results when nothing usable remains.
+- Spoilers on legacy posts now keep working under the stricter CSP by upgrading older inline-click spoiler markup to the shared delegated `data-action` handler at runtime.
 
 ### Validation
 
@@ -31,6 +44,7 @@ All notable changes to RustChan will be documented in this file.
 - `env -u RUSTC_WRAPPER cargo check`
 - `env -u RUSTC_WRAPPER cargo test --quiet`
 - `env -u RUSTC_WRAPPER cargo clippy --all-targets --all-features -- -D warnings`
+- `env -u RUSTC_WRAPPER cargo clippy -- -D warnings`
 
 ## [1.1.1]
 

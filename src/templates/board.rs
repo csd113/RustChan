@@ -126,6 +126,7 @@ fn board_cards(
 }
 
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 pub fn index_page(
     board_stats: &[crate::models::BoardStats],
@@ -209,9 +210,8 @@ pub fn index_page(
     } else {
         format!(
             r#"<div class="index-section index-onion-section">
-{}
-</div>"#,
-            access_links
+{access_links}
+</div>"#
         )
     };
 

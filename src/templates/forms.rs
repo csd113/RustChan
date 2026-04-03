@@ -12,7 +12,7 @@ struct UploadFormPolicy {
     uploads_enabled: bool,
 }
 
-fn upload_progress_row() -> &'static str {
+const fn upload_progress_row() -> &'static str {
     r#"    <tr class="upload-progress-row" hidden>
         <td>upload</td>
         <td>

@@ -505,18 +505,44 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 // ─── LIKE escape helper ───────────────────────────────────────────────────────
 
-/// Extracted from `search_posts` and `count_search_results` to avoid
-/// duplicating the escape logic. Escapes `%` and `_` metacharacters so that
+/// Extract conservative FTS-safe tokens from free-form user input.
+///
+/// `SQLite` FTS5 treats punctuation-heavy input as query syntax, so raw tokens like
+/// `'`, `"`, or `>>1` can raise syntax errors when passed through directly.
+/// Normalizing to alphanumeric search terms preserves ordinary text search while
+/// degrading punctuation-only input into a harmless "no results" query.
+fn search_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut current = String::new();
+
+    for ch in query.chars() {
+        if ch.is_alphanumeric() {
+            current.push(ch);
+            continue;
+        }
+
+        if !current.is_empty() {
+            terms.push(std::mem::take(&mut current));
+            if terms.len() >= 12 {
+                return terms;
+            }
+        }
+    }
+
+    if !current.is_empty() && terms.len() < 12 {
+        terms.push(current);
+    }
+
+    terms
+}
+
 /// Build a conservative FTS5 query from free-form user input.
 ///
 /// Each token becomes an `AND`-joined prefix term so searches remain fast on the FTS
 /// index without exposing raw FTS syntax to the user.
 fn to_fts_query(query: &str) -> Option<String> {
-    let terms = query
-        .split_whitespace()
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .take(12)
+    let terms = search_terms(query)
+        .into_iter()
         .map(|term| format!(r#""{}"*"#, term.replace('"', "\"\"")))
         .collect::<Vec<_>>();
     (!terms.is_empty()).then(|| terms.join(" AND "))
@@ -998,4 +1024,35 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
         params![file_path],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{search_terms, to_fts_query};
+
+    #[test]
+    fn search_query_ignores_punctuation_only_input() {
+        assert_eq!(to_fts_query("'"), None);
+        assert_eq!(to_fts_query("\""), None);
+        assert_eq!(to_fts_query("... !!!"), None);
+    }
+
+    #[test]
+    fn search_query_strips_chan_punctuation_without_crashing() {
+        assert_eq!(search_terms(">>1"), vec!["1"]);
+        assert_eq!(search_terms("💥💥💥   >>1 ' \" %"), vec!["1"]);
+        assert_eq!(to_fts_query(">>1"), Some("\"1\"*".to_string()));
+    }
+
+    #[test]
+    fn search_query_keeps_text_terms_usable() {
+        assert_eq!(
+            search_terms("rock'n'roll C++ anime"),
+            vec!["rock", "n", "roll", "C", "anime"]
+        );
+        assert_eq!(
+            to_fts_query("hello world"),
+            Some("\"hello\"* AND \"world\"*".to_string())
+        );
+    }
 }

@@ -230,7 +230,8 @@ fn admin_backup_routes() -> Router<AppState> {
         .route("/admin/backup", get(crate::handlers::admin::admin_backup))
         .route(
             "/admin/restore",
-            post(crate::handlers::admin::admin_restore)
+            get(|| async { axum::response::Redirect::to("/admin/panel") })
+                .post(crate::handlers::admin::admin_restore)
                 .layer(DefaultBodyLimit::max(20 * 1024 * 1024 * 1024)),
         )
         .route(
@@ -239,7 +240,8 @@ fn admin_backup_routes() -> Router<AppState> {
         )
         .route(
             "/admin/board/restore",
-            post(crate::handlers::admin::board_restore)
+            get(|| async { axum::response::Redirect::to("/admin/panel") })
+                .post(crate::handlers::admin::board_restore)
                 .layer(DefaultBodyLimit::max(20 * 1024 * 1024 * 1024)),
         )
         .route(
@@ -314,5 +316,27 @@ mod tests {
             .expect("body bytes");
         let body = String::from_utf8(body.to_vec()).expect("utf8 body");
         assert!(body.contains("Board restore"));
+    }
+
+    #[tokio::test]
+    async fn board_restore_get_redirects_back_to_admin_panel() {
+        let app = admin_routes().with_state(crate::test_support::app_state());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/admin/board/restore")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/admin/panel"
+        );
     }
 }

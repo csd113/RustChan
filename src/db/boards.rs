@@ -102,7 +102,9 @@ fn normalize_board_group_order(
 
     let mut update = conn.prepare_cached("UPDATE boards SET display_order = ?1 WHERE id = ?2")?;
     for (position, board_id) in ordered_ids.iter().enumerate() {
-        update.execute(params![position as i64 + 1, board_id])?;
+        let display_order =
+            i64::try_from(position).context("board display_order index must fit in i64")? + 1;
+        update.execute(params![display_order, board_id])?;
     }
     Ok(())
 }
@@ -332,7 +334,9 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
     {
         let mut update = tx.prepare_cached("UPDATE boards SET display_order = ?1 WHERE id = ?2")?;
         for (position, board_id) in ordered_ids.iter().enumerate() {
-            update.execute(params![position as i64 + 1, board_id])?;
+            let display_order =
+                i64::try_from(position).context("board display_order index must fit in i64")? + 1;
+            update.execute(params![display_order, board_id])?;
         }
     }
     tx.commit()?;

@@ -86,8 +86,17 @@ function localizePostTimes(root) {
   });
 }
 
+function upgradeLegacySpoilers(root) {
+  (root || document).querySelectorAll('.spoiler:not([data-action])').forEach(function (el) {
+    // Older posts were rendered with inline onclick handlers that are blocked by CSP.
+    el.dataset.action = 'toggle-spoiler';
+    el.removeAttribute('onclick');
+  });
+}
+
 document.addEventListener('DOMContentLoaded', function () {
   localizePostTimes(document);
+  upgradeLegacySpoilers(document);
 });
 
 // Hook into new-post insertions (thread auto-update, quote popups, etc.)
@@ -95,6 +104,7 @@ document.addEventListener('DOMContentLoaded', function () {
   var _origLocalize = window._onNewPostsInserted;
   window._onNewPostsInserted = function (container) {
     localizePostTimes(container);
+    upgradeLegacySpoilers(container);
     if (_origLocalize) _origLocalize(container);
   };
 }());
@@ -2206,6 +2216,47 @@ document.addEventListener('click', function (e) {
     if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
   }
 
+  function _absoluteUrl(url) {
+    if (!url) return '';
+    try {
+      return new URL(url, window.location.href).toString();
+    } catch (_err) {
+      return '';
+    }
+  }
+
+  function _extractRefreshTarget(refreshValue) {
+    if (!refreshValue) return '';
+    var match = refreshValue.match(/url\s*=\s*(.+)$/i);
+    if (!match) return '';
+    return match[1].trim().replace(/^["']|["']$/g, '');
+  }
+
+  function _extractRedirectTargetFromHtml(html) {
+    if (!html) return '';
+
+    var metaMatch = html.match(/<meta[^>]+http-equiv=["']refresh["'][^>]+content=["'][^"']*url=([^"'>]+)["']/i);
+    if (metaMatch && metaMatch[1]) return metaMatch[1].trim();
+
+    var linkMatch = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*>\s*Continue\s*<\/a>/i);
+    if (linkMatch && linkMatch[1]) return linkMatch[1].trim();
+
+    return '';
+  }
+
+  function _resolveRestoreRedirectTarget(xhr, form) {
+    var refreshTarget = _extractRefreshTarget(xhr.getResponseHeader('refresh') || '');
+    var htmlTarget = _extractRedirectTargetFromHtml(xhr.responseText || '');
+    var responseUrl = _absoluteUrl(xhr.responseURL || '');
+    var formAction = _absoluteUrl(form.action || '');
+    var current = _absoluteUrl(window.location.href);
+    var target = _absoluteUrl(refreshTarget || htmlTarget || '');
+
+    if (target && target !== current) return target;
+    if (responseUrl && responseUrl !== current && responseUrl !== formAction) return responseUrl;
+    return '';
+  }
+
   function _submitRestoreUploadForm(form, title) {
     var xhr = null;
     _downloadMode = false;
@@ -2246,8 +2297,9 @@ document.addEventListener('click', function (e) {
       _restoreFormDone();
       if (xhr.status >= 200 && xhr.status < 400) {
         _setBkProgress(100, 'Upload complete. Restoring backup…');
-        if (xhr.responseURL && xhr.responseURL !== window.location.href) {
-          window.location.assign(xhr.responseURL);
+        var redirectTarget = _resolveRestoreRedirectTarget(xhr, form);
+        if (redirectTarget) {
+          window.location.assign(redirectTarget);
           return;
         }
         var contentType = xhr.getResponseHeader('content-type') || '';

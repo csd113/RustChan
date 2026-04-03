@@ -228,8 +228,8 @@ pub fn admin_panel_page(
             captcha_ck = checked(b.allow_captcha),
             poster_ids_ck = checked(b.show_poster_ids),
             collapse_ck = checked(b.collapse_greentext),
-            move_up_disabled = if !prev_same_group { " disabled" } else { "" },
-            move_down_disabled = if !next_same_group { " disabled" } else { "" },
+            move_up_disabled = if prev_same_group { "" } else { " disabled" },
+            move_down_disabled = if next_same_group { "" } else { " disabled" },
             board_favicon_preview = if board_favicon_exists {
                 format!(
                     r#"<img class="favicon-inline-preview" src="/boards/{short}/_favicon/favicon-32x32.png?v={version}" alt="/{short}/ favicon">"#,
@@ -855,9 +855,8 @@ old boards to prevent query performance degradation.
             format!(
                 r#"<section class="admin-section admin-access-addresses" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
 <h2>// active access addresses</h2>
-{}
-</section>"#,
-                addresses
+{addresses}
+</section>"#
             )
         },
     );

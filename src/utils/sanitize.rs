@@ -424,6 +424,7 @@ mod tests {
         // [spoiler] is our own markup, not HTML — pass the raw tag directly.
         let html = render_post_body("[spoiler]secret[/spoiler]");
         assert!(html.contains("class=\"spoiler\""));
+        assert!(html.contains("data-action=\"toggle-spoiler\""));
         assert!(html.contains("secret"));
     }
 
