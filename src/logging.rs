@@ -568,14 +568,21 @@ where
 /// `CONSOLE_MUTEX`). It is never accessed directly.
 struct LockedWriter {
     _guard: parking_lot::MutexGuard<'static, ()>,
+    suppress: bool,
 }
 
 impl io::Write for LockedWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.suppress {
+            return Ok(buf.len());
+        }
         io::stdout().write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        if self.suppress {
+            return Ok(());
+        }
         io::stdout().flush()
     }
 }
@@ -592,6 +599,7 @@ impl<'a> MakeWriter<'a> for ConsoleLock {
     fn make_writer(&'a self) -> LockedWriter {
         LockedWriter {
             _guard: CONSOLE_MUTEX.lock(),
+            suppress: is_tui_active(),
         }
     }
 }

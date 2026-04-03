@@ -15,6 +15,7 @@
 
 use super::ChanStats;
 use crate::config::CONFIG;
+use std::path::{Path, PathBuf};
 
 // ─── ANSI helpers ─────────────────────────────────────────────────────────────
 
@@ -305,28 +306,106 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
 
 pub fn render_log_view() -> String {
     use std::fmt::Write as _;
-    let mut out = String::with_capacity(512);
+    let mut out = String::with_capacity(8192);
     writeln!(out, "{RULE}").ok();
     writeln!(out, " {} Log View", bold("\u{25c8}")).ok();
     writeln!(out, "{RULE}").ok();
     writeln!(out).ok();
-    writeln!(
-        out,
-        " {}",
-        dim("Logs are written to rustchan-data/logs/rustchan.YYYY-MM-DD.log")
-    )
-    .ok();
-    writeln!(
-        out,
-        " {}",
-        dim("tail -f rustchan-data/logs/rustchan.$(date +%F).log")
-    )
-    .ok();
+
+    let logs_dir = crate::config::logs_dir();
+    match latest_log_file(&logs_dir) {
+        Some(path) => {
+            let filename = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("current log");
+            writeln!(out, " {} {}", dim("File:"), cyan(filename)).ok();
+            writeln!(out).ok();
+
+            match read_log_tail(&path, 24 * 1024) {
+                Ok((content, truncated)) => {
+                    let available_lines = log_body_height();
+                    let lines = content
+                        .lines()
+                        .map(str::trim_end)
+                        .filter(|line| !line.is_empty())
+                        .collect::<Vec<_>>();
+
+                    if lines.is_empty() {
+                        writeln!(out, " {}", dim("Log file is empty.")).ok();
+                    } else {
+                        let start = lines.len().saturating_sub(available_lines);
+                        if truncated || start > 0 {
+                            writeln!(out, " {}", dim("Showing newest log lines...")).ok();
+                            writeln!(out).ok();
+                        }
+                        for line in &lines[start..] {
+                            writeln!(out, " {line}").ok();
+                        }
+                    }
+                }
+                Err(err) => {
+                    writeln!(out, " {}", red("Could not read live log.")).ok();
+                    writeln!(out, " {}", dim(&err)).ok();
+                }
+            }
+        }
+        None => {
+            writeln!(out, " {}", dim("No live log file found yet.")).ok();
+        }
+    }
+
     writeln!(out).ok();
     writeln!(out, "{RULE}").ok();
     writeln!(out, " {} Back", bold("[L]")).ok();
     writeln!(out, "{RULE}").ok();
     out
+}
+
+fn log_body_height() -> usize {
+    crossterm::terminal::size()
+        .map(|(_, rows)| usize::from(rows.saturating_sub(8)).max(6))
+        .unwrap_or(24)
+}
+
+fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
+    let mut files = std::fs::read_dir(logs_dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("log"))
+        .collect::<Vec<_>>();
+    files.sort();
+    files.pop()
+}
+
+fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).map_err(|e| format!("Open log: {e}"))?;
+    let len = file
+        .metadata()
+        .map_err(|e| format!("Log metadata: {e}"))?
+        .len();
+    let start = len.saturating_sub(max_bytes as u64);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| format!("Seek log: {e}"))?;
+
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .map_err(|e| format!("Read log: {e}"))?;
+
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let truncated = start > 0;
+    let content = if truncated {
+        match text.find('\n') {
+            Some(pos) if pos + 1 < text.len() => text[pos + 1..].to_string(),
+            _ => text,
+        }
+    } else {
+        text
+    };
+    Ok((content, truncated))
 }
 
 // ─── render_help() ────────────────────────────────────────────────────────────
