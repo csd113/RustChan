@@ -3458,7 +3458,23 @@ details.greentext-block[open] > summary { color: var(--green-pale); }
     background: linear-gradient(to top, rgba(0,0,0,0.5), rgba(0,0,0,0.15));
   }
 
-  .media-preview .thumb,
+  .media-preview {
+    width: auto;
+  }
+
+  .media-preview .thumb {
+    width: auto;
+    height: auto;
+    max-width: 150px;
+    max-height: 150px;
+    object-fit: contain;
+  }
+
+  .reply .media-preview .thumb {
+    max-width: 80px;
+    max-height: 80px;
+  }
+
   .embed-placeholder-thumb {
     width: 100%;
     max-width: 100%;
