@@ -583,7 +583,9 @@ old boards to prevent query performance degradation.
     </select>
   </label>
 </div>
-<button type="submit">save settings</button>
+<div class="board-settings-actions" style="margin-top:0.2rem">
+  <button type="submit">save settings</button>
+</div>
 </form>
 <div class="favicon-inline-row favicon-inline-row-global">
 {global_favicon_preview}
