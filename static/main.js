@@ -181,6 +181,43 @@ function setSubmittingState(form, submitting) {
   form.dataset.uploadSubmitting = submitting ? '1' : '';
   form.querySelectorAll('button[type="submit"]').forEach(function (button) {
     button.disabled = submitting;
+
+    if (!button.dataset.uploadOriginalLabel) {
+      button.dataset.uploadOriginalLabel = button.textContent;
+    }
+  });
+}
+
+function startSubmitButtonAnimation(form) {
+  stopSubmitButtonAnimation(form);
+
+  var frame = 0;
+  var labels = ['Posting.', 'Posting..', 'Posting...'];
+  var buttons = Array.prototype.slice.call(form.querySelectorAll('button[type="submit"]'));
+  if (!buttons.length) return;
+
+  function render() {
+    var label = labels[frame];
+    buttons.forEach(function (button) {
+      button.textContent = label;
+    });
+    frame = (frame + 1) % labels.length;
+  }
+
+  render();
+  form._submitButtonAnimationTimer = window.setInterval(render, 450);
+}
+
+function stopSubmitButtonAnimation(form) {
+  if (form._submitButtonAnimationTimer) {
+    window.clearInterval(form._submitButtonAnimationTimer);
+    form._submitButtonAnimationTimer = null;
+  }
+
+  form.querySelectorAll('button[type="submit"]').forEach(function (button) {
+    if (button.dataset.uploadOriginalLabel) {
+      button.textContent = button.dataset.uploadOriginalLabel;
+    }
   });
 }
 
@@ -193,6 +230,7 @@ function submitPostFormWithProgress(form) {
   xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
   setSubmittingState(form, true);
+  startSubmitButtonAnimation(form);
   setUploadProgress(form, 0, 'Starting upload…');
 
   xhr.upload.addEventListener('progress', function (event) {
@@ -209,6 +247,7 @@ function submitPostFormWithProgress(form) {
   });
 
   xhr.addEventListener('load', function () {
+    stopSubmitButtonAnimation(form);
     setSubmittingState(form, false);
     setUploadProgress(form, 100, 'Finishing…');
 
@@ -238,12 +277,14 @@ function submitPostFormWithProgress(form) {
   });
 
   xhr.addEventListener('error', function () {
+    stopSubmitButtonAnimation(form);
     setSubmittingState(form, false);
     resetUploadProgress(form);
     alert('Upload failed. Please check your connection and try again.');
   });
 
   xhr.addEventListener('abort', function () {
+    stopSubmitButtonAnimation(form);
     setSubmittingState(form, false);
     resetUploadProgress(form);
   });
