@@ -166,7 +166,7 @@ fn strip_ansi(input: &str) -> String {
 
     while let Some(ch) = chars.next() {
         if ch == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
-            while let Some(next) = chars.next() {
+            for next in chars.by_ref() {
                 if ('@'..='~').contains(&next) {
                     break;
                 }
@@ -182,16 +182,96 @@ fn strip_ansi(input: &str) -> String {
 
 fn humanize_field_name(name: &str) -> String {
     match name {
+        "addr" => "address".to_string(),
+        "admin_id" => "admin ID".to_string(),
+        "archived_cap" => "archive limit".to_string(),
+        "board_id" => "board ID".to_string(),
+        "bytes" => "size".to_string(),
+        "error" => "error".to_string(),
+        "failure_rate" => "failure rate".to_string(),
+        "files_removed" => "files removed".to_string(),
+        "freed_kib" => "freed KiB".to_string(),
+        "has_csrf_cookie" => "CSRF cookie".to_string(),
+        "has_session_cookie" => "session cookie".to_string(),
         "uri" => "URI".to_string(),
         "id" => "ID".to_string(),
+        "latency_ms" => "latency".to_string(),
         "mime" => "MIME type".to_string(),
+        "post_id" => "post ID".to_string(),
+        "remaining_kib" => "remaining KiB".to_string(),
+        "retry_in" => "retry in".to_string(),
+        "saved_as" => "saved as".to_string(),
+        "thread_id" => "thread ID".to_string(),
+        "thumb" => "thumbnail".to_string(),
+        "url" => "URL".to_string(),
         other => other.replace('_', " "),
     }
 }
 
+fn is_external_source(file: &str) -> bool {
+    file.contains("/.cargo/registry/src/") || file.contains("/rustc/")
+}
+
+fn is_tor_component(component: &str) -> bool {
+    matches!(
+        component,
+        "guard" | "hspool" | "reactor" | "circmgr" | "dirmgr" | "guardmgr" | "chanmgr"
+    )
+}
+
+fn title_case_message(message: &str) -> String {
+    let mut chars = message.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() => {
+            format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+        }
+        _ => message.to_string(),
+    }
+}
+
+fn parse_formatted_duration(value: &str) -> Option<String> {
+    let inner = value
+        .strip_prefix("FormattedDuration(")?
+        .strip_suffix(')')?
+        .strip_suffix('s')?;
+    let seconds = inner.parse::<f64>().ok()?;
+
+    if seconds >= 60.0 {
+        let total = seconds.round() as u64;
+        let minutes = total / 60;
+        let secs = total % 60;
+        if secs == 0 {
+            Some(format!("{minutes}m"))
+        } else {
+            Some(format!("{minutes}m {secs}s"))
+        }
+    } else if seconds >= 10.0 {
+        Some(format!("{}s", seconds.round() as u64))
+    } else {
+        Some(format!("{seconds:.1}s"))
+    }
+}
+
+fn normalize_field_value(name: &str, value: &str) -> String {
+    if let Some(duration) = parse_formatted_duration(value) {
+        return duration;
+    }
+
+    if name == "guard" && value.starts_with("GuardId(") {
+        return "[scrubbed]".to_string();
+    }
+
+    if name == "latency_ms" {
+        return format!("{value} ms");
+    }
+
+    value.to_string()
+}
+
 fn should_hide_field(name: &str, value: &str) -> bool {
-    matches!(value, "" | "<missing>")
-        && matches!(name, "content_type" | "content_length" | "mime" | "path")
+    (matches!(value, "" | "<missing>")
+        && matches!(name, "content_type" | "content_length" | "mime" | "path"))
+        || (name == "guard" && value == "[scrubbed]")
 }
 
 #[derive(Default)]
@@ -202,7 +282,7 @@ struct LogEventFields {
 
 impl LogEventFields {
     fn push_field(&mut self, field: &Field, value: String) {
-        let clean = strip_ansi(value.trim());
+        let clean = normalize_field_value(field.name(), &strip_ansi(value.trim()));
         if field.name() == "message" {
             if !clean.is_empty() {
                 self.message = Some(clean);
@@ -261,9 +341,91 @@ impl Visit for LogEventFields {
     }
 }
 
-fn write_event_fields(writer: &mut Writer<'_>, event: &Event<'_>) -> fmt::Result {
+fn upsert_field(fields: &mut Vec<(String, String)>, name: &str, value: String) {
+    if let Some((_, existing)) = fields.iter_mut().find(|(field_name, _)| field_name == name) {
+        *existing = value;
+    } else {
+        fields.push((name.to_string(), value));
+    }
+}
+
+fn extract_percent(message: &str) -> Option<String> {
+    let percent_index = message.find('%')?;
+    let number = message[..percent_index]
+        .rsplit_once(' ')
+        .map(|(_, value)| value)
+        .unwrap_or(&message[..percent_index]);
+    Some(format!("{number}%"))
+}
+
+fn normalize_message_text(message: &str) -> String {
+    let mut cleaned = message.trim().replace('—', "-").replace('…', "...");
+    if cleaned.contains('→') {
+        cleaned = cleaned.replace('→', " to ");
+    }
+    while cleaned.contains("  ") {
+        cleaned = cleaned.replace("  ", " ");
+    }
+    title_case_message(&cleaned)
+}
+
+fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields) {
+    let Some(message) = fields.message.clone() else {
+        return;
+    };
+
+    let component = extract_component(target);
+    fields.message = Some(normalize_message_text(&message));
+
+    match component {
+        "guard" => {
+            if let Some((_, retry)) = message.split_once("Retrying in ") {
+                let retry = retry.trim_end_matches('.');
+                let retry = parse_formatted_duration(retry).unwrap_or_else(|| retry.to_string());
+                fields.message = Some("Tor guard connection failed".to_string());
+                upsert_field(&mut fields.fields, "retry_in", retry);
+            } else if message.starts_with("Questionable guard:") {
+                fields.message = Some("Tor marked a guard as unstable".to_string());
+                if let Some(rate) = extract_percent(&message) {
+                    upsert_field(&mut fields.fields, "failure_rate", rate);
+                }
+            }
+        }
+        "hspool" => {
+            if message == "Too many preemptive onion service circuits failed; waiting a while." {
+                fields.message = Some(
+                    "Tor onion-service circuits are failing; waiting before retrying".to_string(),
+                );
+            }
+        }
+        "reactor" => {
+            if message.eq_ignore_ascii_case("removing circuit leg") {
+                fields.message = Some("Tor circuit closed".to_string());
+            }
+        }
+        _ => {}
+    }
+
+    if let Some(file) = file {
+        if is_external_source(file) && is_tor_component(component) {
+            if let Some(msg) = fields.message.as_mut() {
+                if !msg.starts_with("Tor ") {
+                    *msg = format!("Tor: {msg}");
+                }
+            }
+        }
+    }
+}
+
+fn write_event_fields(
+    writer: &mut Writer<'_>,
+    target: &str,
+    file: Option<&str>,
+    event: &Event<'_>,
+) -> fmt::Result {
     let mut fields = LogEventFields::default();
     event.record(&mut fields);
+    rewrite_message(target, file, &mut fields);
 
     let has_message = fields.message.is_some();
 
@@ -333,7 +495,8 @@ where
         // key=value fields separated by spaces — e.g.:
         //   "Request received  method=GET path=/b/ latency_ms=4"
         let _ = ctx;
-        write_event_fields(&mut writer, event)?;
+        let meta = event.metadata();
+        write_event_fields(&mut writer, meta.target(), meta.file(), event)?;
         writeln!(writer)
     }
 }
@@ -376,7 +539,7 @@ where
 
         // ── Message and structured key=value fields ───────────────────────────
         let _ = ctx;
-        write_event_fields(&mut writer, event)?;
+        write_event_fields(&mut writer, meta.target(), meta.file(), event)?;
 
         // ── Source location suffix for WARN and ERROR ─────────────────────────
         // Only attached at these levels because:
@@ -386,6 +549,10 @@ where
         //     having the exact file:line avoids a grep → blame cycle.
         if matches!(level, Level::ERROR | Level::WARN) {
             if let (Some(file), Some(line)) = (meta.file(), meta.line()) {
+                if is_external_source(file) {
+                    writeln!(writer)?;
+                    return Ok(());
+                }
                 // Trim the leading "src/" that Rust adds to all file paths so
                 // the suffix stays compact: "(db/posts.rs:79)" not
                 // "(src/db/posts.rs:79)".
@@ -563,4 +730,53 @@ pub fn console_prompt(msg: &str) {
     let _ = write!(io::stdout(), "{msg}");
     let _ = io::stdout().flush();
     // _guard dropped here — stdin read happens outside the lock
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        extract_component, humanize_field_name, is_external_source, normalize_field_value,
+        normalize_message_text, parse_formatted_duration,
+    };
+
+    #[test]
+    fn parses_formatted_duration_into_plain_text() {
+        assert_eq!(
+            parse_formatted_duration("FormattedDuration(29.99997625s)").as_deref(),
+            Some("30s")
+        );
+        assert_eq!(
+            parse_formatted_duration("FormattedDuration(125.0s)").as_deref(),
+            Some("2m 5s")
+        );
+    }
+
+    #[test]
+    fn normalizes_common_field_names_and_values() {
+        assert_eq!(humanize_field_name("thread_id"), "thread ID");
+        assert_eq!(humanize_field_name("latency_ms"), "latency");
+        assert_eq!(normalize_field_value("latency_ms", "42"), "42 ms");
+        assert_eq!(normalize_field_value("guard", "GuardId(foo)"), "[scrubbed]");
+    }
+
+    #[test]
+    fn cleans_up_message_text() {
+        assert_eq!(
+            normalize_message_text("removing circuit leg"),
+            "Removing circuit leg"
+        );
+        assert_eq!(
+            normalize_message_text("image→webp: converted"),
+            "Image to webp: converted"
+        );
+    }
+
+    #[test]
+    fn detects_external_source_locations() {
+        assert!(is_external_source(
+            "/Users/example/.cargo/registry/src/index.crates.io-xxx/tor-proto/src/client/reactor.rs"
+        ));
+        assert!(!is_external_source("src/server/server.rs"));
+        assert_eq!(extract_component("rustchan::server::server"), "server");
+    }
 }

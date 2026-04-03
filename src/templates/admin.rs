@@ -146,9 +146,12 @@ pub fn admin_panel_page(
   <button type="submit" class="btn-danger"
           data-confirm="Delete /{short}/ and ALL its content?">delete board</button>
 </form>
-<a href="/admin/board/backup/{short}" class="backup-download-link" data-backup-label="/{short}/ board backup" style="display:inline-block;margin-left:0.5rem;margin-top:4px">
-  <button type="button">&#8659; download to computer /{short}/</button>
-</a>
+<form method="POST" action="/admin/board/backup/create" class="board-backup-download-form" data-board="{short}" style="display:inline-block;margin-left:0.5rem;margin-top:4px">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_short" value="{short}">
+  <input type="hidden" name="download_after_create" value="1">
+  <button type="submit">&#8659; download to computer /{short}/</button>
+</form>
 <form method="POST" action="/admin/board/backup/create" class="board-backup-create-form" data-board="{short}" style="display:inline-block;margin-left:0.25rem;margin-top:4px">
   <input type="hidden" name="_csrf" value="{csrf}">
   <input type="hidden" name="board_short" value="{short}">
@@ -487,6 +490,26 @@ old boards to prevent query performance degradation.
 <input type="hidden" name="_csrf" value="{csrf}">
 <button type="submit">logout</button>
 </form>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     // live log
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<section class="admin-section" id="live-log">
+<details class="board-settings-card">
+<summary>// live log</summary>
+<p style="color:var(--text-dim);font-size:0.85rem">
+  Watching <span id="admin-live-log-file">current log</span>. Updates every 2 seconds.
+</p>
+<div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;margin-bottom:0.6rem">
+  <button type="button" id="admin-live-log-refresh">refresh now</button>
+  <button type="button" id="admin-live-log-clear">clear</button>
+  <label style="color:var(--text-dim);font-size:0.82rem">
+    <input type="checkbox" id="admin-live-log-autoscroll" checked> auto-scroll
+  </label>
+</div>
+<pre id="admin-live-log-output" style="margin:0;max-height:24rem;overflow:auto;padding:0.85rem;border:1px solid var(--border);background:var(--bg-input);color:var(--text);font-size:0.78rem;line-height:1.45;white-space:pre-wrap;word-break:break-word">Loading live log…</pre>
+</details>
+</section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
      // site settings

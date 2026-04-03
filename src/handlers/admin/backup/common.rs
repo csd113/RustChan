@@ -3,6 +3,7 @@
 use crate::{
     config::CONFIG,
     error::{AppError, Result},
+    middleware::{backup_phase, BackupProgress},
 };
 use std::io::Seek;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,48 @@ use tracing::warn;
 
 pub(super) const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub(super) const BOARD_MANIFEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+pub(super) fn log_backup_phase(phase: u64) {
+    let message = match phase {
+        backup_phase::SNAPSHOT_DB => "Backup progress - snapshotting database",
+        backup_phase::COUNT_FILES => "Backup progress - counting files",
+        backup_phase::COMPRESS => "Backup progress - compressing files",
+        backup_phase::DONE => "Backup progress - done",
+        _ => return,
+    };
+    tracing::info!(target: "admin", "{message}");
+}
+
+pub(super) fn log_backup_progress(progress: &BackupProgress) {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let phase = progress.phase.load(Relaxed);
+    if phase != backup_phase::COMPRESS {
+        return;
+    }
+
+    let done = progress.files_done.load(Relaxed);
+    let total = progress.files_total.load(Relaxed);
+    if total == 0 || done == 0 {
+        return;
+    }
+
+    let percent = done.saturating_mul(100) / total.max(1);
+    let prev_done = done.saturating_sub(1);
+    let prev_percent = prev_done.saturating_mul(100) / total.max(1);
+    let should_log = total <= 50
+        || done == 1
+        || done == total
+        || done.is_multiple_of(25)
+        || (percent != prev_percent && percent.is_multiple_of(10));
+
+    if should_log {
+        tracing::info!(
+            target: "admin",
+            "Backup progress - compressing files: {done}/{total} ({percent}%)"
+        );
+    }
+}
 
 pub(super) fn validate_board_short_name(short_name: &str) -> Result<()> {
     let valid = !short_name.is_empty()

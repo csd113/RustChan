@@ -39,10 +39,11 @@ use crate::{
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, Uri},
-    response::{Html, Redirect},
+    response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
+use std::io::{Read, Seek, SeekFrom};
 use std::net::IpAddr;
 
 // ─── Shared constant ──────────────────────────────────────────────────────────
@@ -211,6 +212,11 @@ pub struct AdminPanelQuery {
     pub settings_saved: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct LiveLogQuery {
+    pub bytes: Option<usize>,
+}
+
 pub async fn admin_panel(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -319,9 +325,99 @@ pub async fn admin_panel(
     Ok((jar, Html(html)))
 }
 
+pub async fn admin_live_log(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(params): Query<LiveLogQuery>,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let max_bytes = params.bytes.unwrap_or(65_536).clamp(4_096, 262_144);
+
+    let payload = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
+
+            let logs_dir = std::path::Path::new(&CONFIG.database_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("logs");
+
+            let Some(path) = latest_log_file(&logs_dir) else {
+                return Ok(
+                    serde_json::json!({
+                        "filename": "no log file",
+                        "content": "No live log file found yet.",
+                        "truncated": false
+                    })
+                    .to_string(),
+                );
+            };
+
+            let (content, truncated) = read_log_tail(&path, max_bytes)?;
+            Ok(
+                serde_json::json!({
+                    "filename": path.file_name().and_then(|name| name.to_str()).unwrap_or("current log"),
+                    "content": content,
+                    "truncated": truncated
+                })
+                .to_string(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok((
+        [(header::CONTENT_TYPE, "application/json".to_string())],
+        payload,
+    )
+        .into_response())
+}
+
+fn latest_log_file(logs_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut files = std::fs::read_dir(logs_dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("log"))
+        .collect::<Vec<_>>();
+    files.sort();
+    files.pop()
+}
+
+fn read_log_tail(path: &std::path::Path, max_bytes: usize) -> Result<(String, bool)> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Open log: {e}")))?;
+    let len = file
+        .metadata()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Log metadata: {e}")))?
+        .len();
+    let start = len.saturating_sub(max_bytes as u64);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek log: {e}")))?;
+
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Read log: {e}")))?;
+
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let truncated = start > 0;
+    let content = if truncated {
+        match text.find('\n') {
+            Some(pos) if pos + 1 < text.len() => text[pos + 1..].to_string(),
+            _ => text,
+        }
+    } else {
+        text
+    };
+    Ok((content, truncated))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::hosts_match_for_same_origin;
+    use super::{hosts_match_for_same_origin, latest_log_file, read_log_tail};
 
     #[test]
     fn same_origin_accepts_exact_host_match() {
@@ -345,5 +441,27 @@ mod tests {
     #[test]
     fn null_origin_is_handled_by_caller_fallback() {
         assert!(!hosts_match_for_same_origin("null", "localhost"));
+    }
+
+    #[test]
+    fn picks_latest_log_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("rustchan.2026-04-01.log"), "old").expect("old");
+        std::fs::write(dir.path().join("rustchan.2026-04-02.log"), "new").expect("new");
+        let latest = latest_log_file(dir.path()).expect("latest");
+        assert_eq!(
+            latest.file_name().and_then(|name| name.to_str()),
+            Some("rustchan.2026-04-02.log")
+        );
+    }
+
+    #[test]
+    fn reads_tail_of_log_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rustchan.2026-04-02.log");
+        std::fs::write(&path, "line1\nline2\nline3\n").expect("write");
+        let (content, truncated) = read_log_tail(&path, 8).expect("tail");
+        assert!(truncated);
+        assert!(content.contains("line3"));
     }
 }

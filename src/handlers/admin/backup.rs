@@ -13,19 +13,22 @@ use crate::{
     utils::crypto::new_session_id,
 };
 use axum::{
-    extract::{Form, FromRequest, Multipart, Request, State},
+    extract::{Form, FromRequest, Multipart, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::Utc;
+use futures::stream::Stream;
 use rusqlite::{backup::Backup, params};
 use serde::Deserialize;
 use serde_json;
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::Ordering;
+use std::task::{Context, Poll};
 use time;
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::ReaderStream;
@@ -36,9 +39,10 @@ mod create;
 mod types;
 
 use common::{
-    copy_limited, create_staging_dir, db_dir, extract_uploads_to_dir, read_limited_bytes,
-    remap_body_quotelinks, remove_path_if_exists, render_restored_body_html,
-    validate_board_short_name, BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
+    copy_limited, create_staging_dir, db_dir, extract_uploads_to_dir, log_backup_phase,
+    log_backup_progress, read_limited_bytes, remap_body_quotelinks, remove_path_if_exists,
+    render_restored_body_html, validate_board_short_name, BOARD_MANIFEST_MAX_BYTES,
+    ZIP_ENTRY_MAX_BYTES,
 };
 pub use create::*;
 use types::board_backup_types;
@@ -46,6 +50,9 @@ use types::board_backup_types;
 pub async fn backup_request_logging_middleware(req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
+    if uri.path() == "/admin/backup/progress" {
+        return next.run(req).await;
+    }
     let headers = req.headers().clone();
     let response = next.run(req).await;
     let status = response.status();
@@ -825,6 +832,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
+            log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
 
             let temp_dir = std::env::temp_dir();
             let tmp_id = uuid::Uuid::new_v4().simple().to_string();
@@ -840,6 +848,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 
             // Count files for progress bar before compressing.
             progress.reset(crate::middleware::backup_phase::COUNT_FILES);
+            log_backup_phase(crate::middleware::backup_phase::COUNT_FILES);
             let uploads_base = std::path::Path::new(&upload_dir);
             let favicon_file_count = count_files_in_dir(&global_favicon_dir);
             let file_count = count_files_in_dir(uploads_base).saturating_add(favicon_file_count);
@@ -861,6 +870,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                     .compression_method(zip::CompressionMethod::Deflated);
 
                 progress.reset(crate::middleware::backup_phase::COMPRESS);
+                log_backup_phase(crate::middleware::backup_phase::COMPRESS);
                 progress
                     .files_total
                     .store(file_count.saturating_add(1), Ordering::Relaxed);
@@ -876,6 +886,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                 let _ = std::fs::remove_file(&temp_db);
                 progress.files_done.fetch_add(1, Ordering::Relaxed);
                 progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
+                log_backup_progress(&progress);
 
                 // ── Upload files (streamed file-by-file via io::copy) ──────
                 if uploads_base.exists() {
@@ -919,6 +930,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             progress
                 .phase
                 .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
+            log_backup_phase(crate::middleware::backup_phase::DONE);
             Ok((final_path, fname, file_size))
         }
     })
@@ -1028,6 +1040,7 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
             })?;
             progress.files_done.fetch_add(1, Ordering::Relaxed);
             progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
+            log_backup_progress(progress);
         }
     }
     Ok(())
@@ -1265,6 +1278,107 @@ pub fn board_backup_dir() -> PathBuf {
     db_dir().join("board-backups")
 }
 
+pub fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
+    let candidate = dir.join(base_name);
+    if !candidate.exists() {
+        return base_name.to_string();
+    }
+
+    let stem = Path::new(base_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("backup");
+    let ext = Path::new(base_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("zip");
+
+    loop {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let candidate_name = format!("{stem}-{suffix}.{ext}");
+        if !dir.join(&candidate_name).exists() {
+            return candidate_name;
+        }
+    }
+}
+
+/// rustchan-data/tmp-board-downloads/
+pub fn temp_board_download_dir() -> PathBuf {
+    db_dir().join("tmp-board-downloads")
+}
+
+fn prune_stale_temp_board_downloads() {
+    let dir = temp_board_download_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let cutoff = std::time::Duration::from_secs(60 * 60);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_zip = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+        if !is_zip {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(age) = modified.elapsed() else {
+            continue;
+        };
+        if age >= cutoff {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+struct TempFileStream {
+    inner: Option<ReaderStream<tokio::fs::File>>,
+    cleanup_path: Option<PathBuf>,
+}
+
+impl TempFileStream {
+    fn new(file: tokio::fs::File, cleanup_path: PathBuf) -> Self {
+        Self {
+            inner: Some(ReaderStream::new(file)),
+            cleanup_path: Some(cleanup_path),
+        }
+    }
+}
+
+impl Stream for TempFileStream {
+    type Item = std::result::Result<axum::body::Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.inner.as_mut() {
+            Some(inner) => Pin::new(inner).poll_next(cx),
+            None => Poll::Ready(None),
+        }
+    }
+}
+
+impl Drop for TempFileStream {
+    fn drop(&mut self) {
+        let _ = self.inner.take();
+        if let Some(path) = self.cleanup_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn latest_board_backup_filename(board_short: &str) -> Option<String> {
+    let prefix = format!("rustchan-board-{board_short}-");
+    let mut matches = list_backup_files(&board_backup_dir())
+        .into_iter()
+        .filter(|info| info.filename.starts_with(&prefix));
+    matches.next().map(|info| info.filename)
+}
+
 /// List `.zip` files in `dir`, newest-filename-first.
 pub fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
     let mut files = Vec::new();
@@ -1324,6 +1438,7 @@ pub fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
 pub async fn download_backup(
     State(state): State<AppState>,
     jar: CookieJar,
+    Query(query): Query<DownloadBackupQuery>,
     axum::extract::Path((kind, filename)): axum::extract::Path<(String, String)>,
 ) -> Result<Response> {
     let session_id = jar
@@ -1362,6 +1477,10 @@ pub async fn download_backup(
     let backup_dir = match kind.as_str() {
         "full" => full_backup_dir(),
         "board" => board_backup_dir(),
+        "temp-board" => {
+            prune_stale_temp_board_downloads();
+            temp_board_download_dir()
+        }
         _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
     };
 
@@ -1377,7 +1496,14 @@ pub async fn download_backup(
     let file = tokio::fs::File::open(&path)
         .await
         .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
-    let stream = ReaderStream::new(file);
+    let cleanup_temp = kind == "temp-board" && query.cleanup.as_deref() == Some("1");
+    let stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<axum::body::Bytes, std::io::Error>> + Send>,
+    > = if cleanup_temp {
+        Box::pin(TempFileStream::new(file, path.clone()))
+    } else {
+        Box::pin(ReaderStream::new(file))
+    };
     let body = axum::body::Body::from_stream(stream);
 
     let disposition = format!("attachment; filename=\"{safe_filename}\"");
@@ -1435,6 +1561,11 @@ pub async fn backup_progress_json(
         json,
     )
         .into_response())
+}
+
+#[derive(Default, Deserialize)]
+pub struct DownloadBackupQuery {
+    cleanup: Option<String>,
 }
 
 // ─── POST /admin/backup/delete ────────────────────────────────────────────────
@@ -1683,243 +1814,39 @@ pub async fn board_backup(
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    let upload_dir = CONFIG.upload_dir.clone();
-    let progress = state.backup_progress.clone();
+    let safe_board = board_short
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect::<String>();
+    if safe_board.is_empty() {
+        return Err(AppError::BadRequest("Invalid board name.".into()));
+    }
 
-    let (tmp_path, filename, file_size) = tokio::task::spawn_blocking({
+    let filename = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<(PathBuf, String, u64)> {
-    use board_backup_types::{BoardRow, ThreadRow, PostRow, PollRow, PollOptionRow, PollVoteRow, FileHashRow, BoardBackupManifest};
-
+        let safe_board = safe_board.clone();
+        move || -> Result<String> {
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            conn.query_row(
+                "SELECT 1 FROM boards WHERE short_name = ?1",
+                params![safe_board],
+                |_| Ok(()),
+            )
+            .map_err(|_| AppError::NotFound(format!("Board '{safe_board}' not found")))?;
 
-            progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
-            let board: BoardRow = conn.query_row(
-                "SELECT id, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
-                        allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
-                        edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                        allow_captcha, show_poster_ids, post_cooldown_secs, created_at
-                 FROM boards WHERE short_name = ?1",
-                params![board_short],
-                |r| Ok(BoardRow {
-                    id: r.get(0)?,
-                    short_name: r.get(1)?,
-                    name: r.get(2)?,
-                    description: r.get(3)?,
-                    nsfw: r.get::<_, i64>(4)? != 0,
-                    max_threads: r.get(5)?,
-                    max_archived_threads: r.get(6)?,
-                    bump_limit: r.get(7)?,
-                    allow_images: r.get::<_, i64>(8)? != 0,
-                    allow_video: r.get::<_, i64>(9)? != 0,
-                    allow_audio: r.get::<_, i64>(10)? != 0,
-                    allow_any_files: r.get::<_, i64>(11)? != 0,
-                    allow_tripcodes: r.get::<_, i64>(12)? != 0,
-                    edit_window_secs: r.get(13)?,
-                    allow_editing: r.get::<_, i64>(14)? != 0,
-                    allow_archive: r.get::<_, i64>(15)? != 0,
-                    allow_video_embeds: r.get::<_, i64>(16)? != 0,
-                    allow_captcha: r.get::<_, i64>(17)? != 0,
-                    show_poster_ids: r.get::<_, i64>(18)? != 0,
-                    post_cooldown_secs: r.get(19)?,
-                    created_at: r.get(20)?,
-                }),
-            ).map_err(|_| AppError::NotFound(format!("Board '{board_short}' not found")))?;
-
-            let board_id = board.id;
-
-            // ── Threads ───────────────────────────────────────────────────
-            let threads: Vec<ThreadRow> = {
-                let mut s = conn.prepare(
-                    "SELECT id, board_id, subject, created_at, bumped_at, locked, sticky, reply_count
-                     FROM threads WHERE board_id = ?1 ORDER BY id ASC"
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                let rows = s.query_map(params![board_id], |r| Ok(ThreadRow {
-                    id: r.get(0)?, board_id: r.get(1)?, subject: r.get(2)?,
-                    created_at: r.get(3)?, bumped_at: r.get(4)?,
-                    locked: r.get::<_,i64>(5)? != 0, sticky: r.get::<_,i64>(6)? != 0,
-                    reply_count: r.get(7)?,
-                })).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-                .collect::<std::result::Result<Vec<_>,_>>()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?; rows
-            };
-
-            // ── Posts ─────────────────────────────────────────────────────
-            let posts: Vec<PostRow> = {
-                let mut s = conn.prepare(
-                    "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                            ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                            media_type, created_at, deletion_token, is_op
-                     FROM posts WHERE board_id = ?1 ORDER BY id ASC"
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                let rows = s.query_map(params![board_id], |r| Ok(PostRow {
-                    id: r.get(0)?, thread_id: r.get(1)?, board_id: r.get(2)?,
-                    name: r.get(3)?, tripcode: r.get(4)?, subject: r.get(5)?,
-                    body: r.get(6)?, body_html: r.get(7)?, ip_hash: r.get(8)?,
-                    file_path: r.get(9)?, file_name: r.get(10)?, file_size: r.get(11)?,
-                    thumb_path: r.get(12)?, mime_type: r.get(13)?, media_type: r.get(14)?,
-                    created_at: r.get(15)?, deletion_token: r.get(16)?,
-                    is_op: r.get::<_,i64>(17)? != 0,
-                })).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-                .collect::<std::result::Result<Vec<_>,_>>()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?; rows
-            };
-
-            // ── Polls ─────────────────────────────────────────────────────
-            let polls: Vec<PollRow> = {
-                let mut s = conn.prepare(
-                    "SELECT p.id, p.thread_id, p.question, p.expires_at, p.created_at
-                     FROM polls p JOIN threads t ON t.id = p.thread_id
-                     WHERE t.board_id = ?1 ORDER BY p.id ASC"
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                let rows = s.query_map(params![board_id], |r| Ok(PollRow {
-                    id: r.get(0)?, thread_id: r.get(1)?, question: r.get(2)?,
-                    expires_at: r.get(3)?, created_at: r.get(4)?,
-                })).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-                .collect::<std::result::Result<Vec<_>,_>>()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?; rows
-            };
-
-            // ── Poll options ──────────────────────────────────────────────
-            let poll_options: Vec<PollOptionRow> = {
-                let mut s = conn.prepare(
-                    "SELECT po.id, po.poll_id, po.text, po.position
-                     FROM poll_options po
-                     JOIN polls p ON p.id = po.poll_id
-                     JOIN threads t ON t.id = p.thread_id
-                     WHERE t.board_id = ?1 ORDER BY po.id ASC"
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                let rows = s.query_map(params![board_id], |r| Ok(PollOptionRow {
-                    id: r.get(0)?, poll_id: r.get(1)?, text: r.get(2)?, position: r.get(3)?,
-                })).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-                .collect::<std::result::Result<Vec<_>,_>>()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?; rows
-            };
-
-            // ── Poll votes ────────────────────────────────────────────────
-            let poll_votes: Vec<PollVoteRow> = {
-                let mut s = conn.prepare(
-                    "SELECT pv.id, pv.poll_id, pv.option_id, pv.ip_hash
-                     FROM poll_votes pv
-                     JOIN polls p ON p.id = pv.poll_id
-                     JOIN threads t ON t.id = p.thread_id
-                     WHERE t.board_id = ?1 ORDER BY pv.id ASC"
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                let rows = s.query_map(params![board_id], |r| Ok(PollVoteRow {
-                    id: r.get(0)?, poll_id: r.get(1)?, option_id: r.get(2)?,
-                    ip_hash: r.get(3)?,
-                })).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-                .collect::<std::result::Result<Vec<_>,_>>()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?; rows
-            };
-
-            // ── File hashes referenced by this board ──────────────────────
-            let file_hashes: Vec<FileHashRow> = {
-                let mut s = conn.prepare(
-                    "SELECT DISTINCT fh.sha256, fh.file_path, fh.thumb_path, fh.mime_type, fh.created_at
-                     FROM file_hashes fh
-                     JOIN posts po ON po.file_path = fh.file_path
-                     WHERE po.board_id = ?1 ORDER BY fh.created_at ASC"
-                ).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-                let rows = s.query_map(params![board_id], |r| Ok(FileHashRow {
-                    sha256: r.get(0)?, file_path: r.get(1)?, thumb_path: r.get(2)?,
-                    mime_type: r.get(3)?, created_at: r.get(4)?,
-                })).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-                .collect::<std::result::Result<Vec<_>,_>>()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?; rows
-            };
-
-            // ── Serialise manifest ────────────────────────────────────────
-            let manifest = BoardBackupManifest {
-                version: 1, board, threads, posts, polls,
-                poll_options, poll_votes, file_hashes,
-            };
-
-            // ── Build zip to NamedTempFile (MEM-FIX) ─────────────────────
-            let manifest_json = serde_json::to_vec_pretty(&manifest)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON serialise: {e}")))?;
-
-            let uploads_base = std::path::Path::new(&upload_dir);
-            let board_upload_path = uploads_base.join(&board_short);
-            let file_count = count_files_in_dir(&board_upload_path);
-            progress.reset(crate::middleware::backup_phase::COMPRESS);
-            progress.files_total.store(file_count.saturating_add(1), Ordering::Relaxed);
-
-            let zip_tmp = tempfile::NamedTempFile::new()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp zip: {e}")))?;
-            {
-                let out_file = std::io::BufWriter::new(
-                    zip_tmp.as_file().try_clone().map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("Clone temp file handle: {e}"))
-                    })?,
-                );
-                let mut zip = zip::ZipWriter::new(out_file);
-                let opts = zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Deflated);
-
-                zip.start_file("board.json", opts)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip manifest: {e}")))?;
-                zip.write_all(&manifest_json)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Write manifest: {e}")))?;
-                progress.files_done.fetch_add(1, Ordering::Relaxed);
-                progress.bytes_done.fetch_add(manifest_json.len() as u64, Ordering::Relaxed);
-
-                if board_upload_path.exists() {
-                    add_dir_to_zip(&mut zip, uploads_base, &board_upload_path, opts, &progress)?;
-                }
-
-                // Flush the BufWriter explicitly so I/O errors are not
-                // silently swallowed by the implicit Drop-flush.
-                let writer = zip
-                    .finish()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Finalise zip: {e}")))?;
-                writer
-                    .into_inner()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush zip writer: {e}")))?
-                    .sync_all()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {e}")))?;
-            }
-
-            let file_size = zip_tmp.as_file().metadata().map(|m| m.len()).unwrap_or(0);
-
-            let (_, tmp_path_obj) = zip_tmp.into_parts();
-            let final_path = tmp_path_obj.keep().map_err(|e| {
-                AppError::Internal(anyhow::anyhow!("Persist temp zip: {e}"))
-            })?;
-
-            let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-            let fname = format!("rustchan-board-{board_short}-{ts}.zip");
-            tracing::info!(target: "admin", board = %board_short, bytes = file_size, "Board backup downloaded");
-            progress.phase.store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
-            Ok((final_path, fname, file_size))
+            latest_board_backup_filename(&safe_board).ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "No saved backup found for /{safe_board}/. Create one from the admin panel first."
+                ))
+            })
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let file = tokio::fs::File::open(&tmp_path)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Open board backup for streaming: {e}")))?;
-    let stream = ReaderStream::new(file);
-    let body = axum::body::Body::from_stream(stream);
-
-    let cleanup_path = tmp_path;
-    tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
-        let _ = tokio::fs::remove_file(cleanup_path).await;
-    });
-
-    let disposition = format!("attachment; filename=\"{filename}\"");
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/zip".to_string()),
-            (header::CONTENT_DISPOSITION, disposition),
-            (header::CONTENT_LENGTH, file_size.to_string()),
-        ],
-        body,
-    )
-        .into_response())
+    Ok(Redirect::to(&format!("/admin/backup/download/board/{filename}")).into_response())
 }
 
 /// Restore a single board from a board-level backup zip or raw board.json.

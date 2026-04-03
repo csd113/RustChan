@@ -835,17 +835,38 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     }
 
     let serve_cancel = worker_cancel.clone();
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        tokio::select! {
-            () = shutdown_signal() => {}
-            () = serve_cancel.cancelled() => {}
+    let wait_shutdown = worker_cancel.clone();
+    let mut http_server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            serve_cancel.cancelled().await;
+        })
+        .await
+    });
+
+    tokio::select! {
+        () = shutdown_signal() => {
+            worker_cancel.cancel();
         }
-    })
-    .await?;
+        () = wait_shutdown.cancelled() => {}
+    }
+
+    match tokio::time::timeout(Duration::from_secs(1), &mut http_server).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => return Err(e.into()),
+        Ok(Err(join_err)) => return Err(anyhow::anyhow!("HTTP server task failed: {join_err}")),
+        Err(_) => {
+            tracing::warn!(
+                target: "server",
+                "Forcing disconnect of active HTTP clients during shutdown"
+            );
+            http_server.abort();
+            let _ = http_server.await;
+        }
+    }
     // timeout, replacing the previous blind 10-second sleep. Each worker is
     // given up to (ffmpeg_timeout + 10)s to finish its in-flight job.
     tracing::info!(target: "server", "Signalling background workers to shut down…");
@@ -891,7 +912,7 @@ pub async fn run_https_static(
     // background workers and the HTTP listener.
     tokio::spawn(async move {
         cancel.cancelled().await;
-        handle_clone.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+        handle_clone.graceful_shutdown(Some(std::time::Duration::from_secs(1)));
     });
 
     // Convert tokio TcpListener → std TcpListener for axum_server::from_tcp_rustls.

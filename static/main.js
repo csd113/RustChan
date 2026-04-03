@@ -551,6 +551,85 @@ function collapseVideoEmbed(btn) {
   }
 })();
 
+(function () {
+  function initAdminLiveLog() {
+    var output = document.getElementById('admin-live-log-output');
+    var fileLabel = document.getElementById('admin-live-log-file');
+    var refreshBtn = document.getElementById('admin-live-log-refresh');
+    var clearBtn = document.getElementById('admin-live-log-clear');
+    var autoscroll = document.getElementById('admin-live-log-autoscroll');
+    if (!output) return;
+
+    var timer = null;
+    var lastText = '';
+    var clearedBaseline = '';
+    var clearedFile = '';
+
+    function visibleText(fullText, fileName) {
+      if (!clearedBaseline || clearedFile !== fileName) {
+        return fullText;
+      }
+      if (fullText === clearedBaseline) {
+        return '';
+      }
+      if (fullText.indexOf(clearedBaseline) === 0) {
+        return fullText.slice(clearedBaseline.length).replace(/^\n+/, '');
+      }
+      return fullText;
+    }
+
+    function fetchLog() {
+      fetch('/admin/log/live?bytes=65536', { credentials: 'same-origin' })
+        .then(function (resp) { return resp.json(); })
+        .then(function (data) {
+          var fileName = data.filename || 'current log';
+          var fullText = data.content || '';
+          if (data.truncated) {
+            fullText = '[showing latest log tail]\n' + fullText;
+          }
+          if (fileLabel) fileLabel.textContent = fileName;
+          if (fileName !== clearedFile) {
+            clearedBaseline = '';
+            clearedFile = fileName;
+          }
+          if (fullText === lastText) return;
+          lastText = fullText;
+          var text = visibleText(fullText, fileName);
+          output.textContent = text || 'Waiting for new log lines…';
+          if (!autoscroll || autoscroll.checked) {
+            output.scrollTop = output.scrollHeight;
+          }
+        })
+        .catch(function () {
+          output.textContent = 'Failed to load live log.';
+        });
+    }
+
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', function () {
+        fetchLog();
+      });
+    }
+
+    if (clearBtn) {
+      clearBtn.addEventListener('click', function () {
+        clearedBaseline = lastText;
+        clearedFile = fileLabel ? fileLabel.textContent : '';
+        output.textContent = 'Waiting for new log lines…';
+      });
+    }
+
+    fetchLog();
+    timer = setInterval(fetchLog, 2000);
+
+    window.addEventListener('beforeunload', function () {
+      if (timer) clearInterval(timer);
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', initAdminLiveLog);
+})();
+
 // ─── Report modal ─────────────────────────────────────────────────────────────
 
 function openReportModal(postId, threadId, board, csrf, label) {
@@ -1829,21 +1908,60 @@ document.addEventListener('click', function (e) {
 
   // ── Flow A: "Save to server" forms ──────────────────────────────────────────
 
-  function _submitBackupForm(form, title) {
+  function _submitBackupForm(form, title, options) {
+    options = options || {};
     _downloadMode = false;
     showBackupModal(title);
     _startPolling(null);
 
     // URLSearchParams → application/x-www-form-urlencoded, required by Axum's Form<>.
     var params = new URLSearchParams(new FormData(form));
-    fetch(form.action, { method: 'POST', body: params, credentials: 'same-origin' })
+    var headers = {};
+    if (options.downloadAfterCreate) {
+      headers['X-Requested-With'] = 'XMLHttpRequest';
+      headers['X-Rustchan-Download-After-Create'] = '1';
+    }
+
+    fetch(form.action, {
+      method: 'POST',
+      body: params,
+      credentials: 'same-origin',
+      headers: headers
+    })
       .then(function (resp) {
         _stopPolling();
-        if (resp.ok || resp.redirected) {
-          _setBkProgress(100, '\u2713 Backup saved to server!');
-        } else {
+        if (!resp.ok && !resp.redirected) {
           _setBkProgress(0, 'Server returned an error (' + resp.status + ')');
+          showDoneButton();
+          return null;
         }
+
+        var contentType = resp.headers.get('content-type') || '';
+        if (contentType.indexOf('application/json') !== -1) {
+          return resp.json();
+        }
+
+        _setBkProgress(100, '\u2713 Backup saved to server!');
+        showDoneButton();
+        return null;
+      })
+      .then(function (data) {
+        if (!data) return;
+        if (data.download_url) {
+          _setBkProgress(100, '\u2713 Backup ready! Starting download\u2026');
+          var a = document.createElement('a');
+          a.href = data.download_url;
+          a.download = '';
+          a.style.display = 'none';
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(function () {
+            if (a.parentNode) a.parentNode.removeChild(a);
+            window.location.reload();
+          }, 1500);
+          return;
+        }
+        _setBkProgress(100, '\u2713 Backup saved to server!');
         showDoneButton();
       })
       .catch(function (err) {
@@ -1896,6 +2014,18 @@ document.addEventListener('click', function (e) {
         e.preventDefault();
         var board = form.dataset.board || '';
         _submitBackupForm(form, '\uD83D\uDCBE Backing up /' + board + '/\u2026');
+      });
+    });
+
+    document.querySelectorAll('.board-backup-download-form').forEach(function (form) {
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var board = form.dataset.board || '';
+        _submitBackupForm(
+          form,
+          '\uD83D\uDCBE Preparing /' + board + '/ download\u2026',
+          { downloadAfterCreate: true }
+        );
       });
     });
 
