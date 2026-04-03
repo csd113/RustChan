@@ -68,6 +68,7 @@ pub fn admin_panel_page(
     site_subtitle: &str,
     default_theme: &str,
     tor_address: Option<&str>,
+    ngrok_url: Option<&str>,
     // Optional one-time flash message shown at the top of the panel.
     // (is_error, message) — is_error=true → red, false → green.
     flash: Option<(bool, &str)>,
@@ -797,15 +798,36 @@ old boards to prevent query performance degradation.
         } else {
             ""
         },
-        tor_section = tor_address.map_or_else(String::new, |addr| format!(
-            r#"<section class="admin-section" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
-<h2>// active onion address</h2>
-<p style="color:var(--text-dim);font-size:0.82rem;margin:0">
+        tor_section = if tor_address.is_none() && ngrok_url.is_none() {
+            String::new()
+        } else {
+            let mut addresses = String::new();
+            if let Some(addr) = tor_address {
+                let _ = write!(
+                    addresses,
+                    r#"<p style="color:var(--text-dim);font-size:0.82rem;margin:0">
   <code style="user-select:all;color:var(--text)">{}</code>
-</p>
+</p>"#,
+                    escape_html(addr)
+                );
+            }
+            if let Some(url) = ngrok_url {
+                let _ = write!(
+                    addresses,
+                    r#"<p style="color:var(--text-dim);font-size:0.82rem;margin:0.35rem 0 0">
+  <code style="user-select:all;color:var(--text)">{}</code>
+</p>"#,
+                    escape_html(url)
+                );
+            }
+            format!(
+                r#"<section class="admin-section" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
+<h2>// active access addresses</h2>
+{}
 </section>"#,
-            escape_html(addr)
-        )),
+                addresses
+            )
+        },
     );
 
     base_layout(

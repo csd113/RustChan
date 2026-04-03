@@ -146,6 +146,11 @@ pub async fn index(
     } else {
         None
     };
+    let ngrok_url: Option<String> = if crate::config::CONFIG.ngrok_enabled {
+        state.ngrok.ready_url().await
+    } else {
+        None
+    };
 
     let nsfw_prompt_board = params
         .get("nsfw")
@@ -167,6 +172,7 @@ pub async fn index(
             &site_data,
             &csrf,
             onion_address.as_deref(),
+            ngrok_url.as_deref(),
             current_theme.as_deref(),
             nsfw_prompt_board,
             nsfw_consent,

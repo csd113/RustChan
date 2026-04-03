@@ -82,6 +82,7 @@ pub fn index_page(
     site_stats: &crate::models::SiteStats,
     csrf_token: &str,
     onion_address: Option<&str>,
+    ngrok_url: Option<&str>,
     current_theme: Option<&str>,
     nsfw_prompt_board: Option<&Board>,
     nsfw_consent: bool,
@@ -137,14 +138,31 @@ pub fn index_page(
         gb = active_gb,
     );
 
-    let onion_html = onion_address.map_or_else(String::new, |addr| {
+    let mut access_links = String::new();
+    if let Some(addr) = onion_address {
+        let _ = write!(
+            access_links,
+            r#"<p class="index-onion"><code class="onion-addr">{}</code></p>"#,
+            escape_html(addr)
+        );
+    }
+    if let Some(url) = ngrok_url {
+        let _ = write!(
+            access_links,
+            r#"<p class="index-onion"><code class="onion-addr">{}</code></p>"#,
+            escape_html(url)
+        );
+    }
+    let onion_html = if access_links.is_empty() {
+        String::new()
+    } else {
         format!(
             r#"<div class="index-section index-onion-section">
-<p class="index-onion"><code class="onion-addr">{}</code></p>
+{}
 </div>"#,
-            escape_html(addr)
+            access_links
         )
-    });
+    };
 
     let nsfw_overlay = if nsfw.is_empty() {
         String::new()

@@ -279,6 +279,11 @@ pub async fn admin_panel(
     } else {
         None
     };
+    let ngrok_url_val: Option<String> = if CONFIG.ngrok_enabled {
+        state.ngrok.ready_url().await
+    } else {
+        None
+    };
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -320,6 +325,7 @@ pub async fn admin_panel(
 
             // Onion address resolved before spawn_blocking (see above).
             let tor_address: Option<String> = onion_address_val;
+            let ngrok_url: Option<String> = ngrok_url_val;
 
             let flash_ref = flash.as_ref().map(|(is_err, msg)| (*is_err, msg.as_str()));
 
@@ -339,6 +345,7 @@ pub async fn admin_panel(
                 &site_subtitle,
                 &default_theme,
                 tor_address.as_deref(),
+                ngrok_url.as_deref(),
                 flash_ref,
             ))
         }

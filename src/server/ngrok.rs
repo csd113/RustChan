@@ -70,6 +70,13 @@ impl NgrokController {
         self.state.read().await.clone()
     }
 
+    pub async fn ready_url(&self) -> Option<String> {
+        match self.snapshot().await {
+            NgrokState::Ready { url } => Some(url),
+            _ => None,
+        }
+    }
+
     pub async fn shutdown(&self) {
         self.stop_active_process(true).await;
     }

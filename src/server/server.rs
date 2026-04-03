@@ -249,6 +249,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         None
     };
 
+    let ngrok_controller = crate::server::ngrok::NgrokController::new();
+
     let state = AppState {
         db: pool.clone(),
         ffmpeg_available,
@@ -257,6 +259,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
         chan_ledger,
         onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        ngrok: ngrok_controller.clone(),
     };
 
     // worker_cancel is the shutdown token threaded through all background tasks
@@ -535,8 +538,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     let shared_mode: super::console::SharedConsoleMode = std::sync::Arc::new(
         tokio::sync::RwLock::new(super::console::ConsoleMode::Dashboard),
     );
-    let ngrok_controller = crate::server::ngrok::NgrokController::new();
-
     // Stats refresh task — polls DB every 3 s (or immediately on [R]).
     // block_in_place keeps &mut delta locals on the same stack frame so
     // req/s and other deltas are correctly accumulated across calls.
