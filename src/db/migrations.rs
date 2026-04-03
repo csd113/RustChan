@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 31;
+pub(super) const CURRENT_MAX_MIGRATION: i64 = 32;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
@@ -117,6 +117,13 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         31,
         "ALTER TABLE boards ADD COLUMN max_archived_threads INTEGER NOT NULL DEFAULT 150",
+    ),
+    (
+        32,
+        r"ALTER TABLE boards ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;
+        UPDATE boards
+        SET display_order = id
+        WHERE display_order = 0",
     ),
 ];
 

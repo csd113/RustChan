@@ -7,6 +7,7 @@ use super::migrations::{apply_migrations, CURRENT_MAX_MIGRATION};
 const BASE_SCHEMA_SQL: &str = "
     CREATE TABLE IF NOT EXISTS boards (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        display_order   INTEGER NOT NULL DEFAULT 0,
         short_name      TEXT NOT NULL UNIQUE,
         name            TEXT NOT NULL,
         description     TEXT NOT NULL DEFAULT '',

@@ -87,6 +87,7 @@ impl std::fmt::Display for MediaType {
 #[allow(clippy::struct_excessive_bools)]
 pub struct Board {
     pub id: i64,
+    pub display_order: i64,
     pub short_name: String, // "tech" (no slashes)
     pub name: String,       // "Technology"
     pub description: String,

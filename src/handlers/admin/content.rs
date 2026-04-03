@@ -95,6 +95,26 @@ pub struct BoardIdForm {
     csrf: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct ReorderBoardForm {
+    board_id: i64,
+    direction: String,
+    return_to: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+}
+
+fn safe_return_to(path: Option<&str>) -> &str {
+    let Some(path) = path else {
+        return "/admin/panel";
+    };
+    if path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\") {
+        path
+    } else {
+        "/admin/panel"
+    }
+}
+
 pub async fn delete_board(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -153,6 +173,42 @@ pub async fn delete_board(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(super::admin_panel_redirect("Board deleted.").into_response())
+}
+
+// ─── POST /admin/board/reorder ───────────────────────────────────────────────
+
+pub async fn reorder_board(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<ReorderBoardForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+
+    let move_up = match form.direction.as_str() {
+        "up" => true,
+        "down" => false,
+        _ => return Err(AppError::BadRequest("Unknown board reorder direction.".into())),
+    };
+    let return_to = safe_return_to(form.return_to.as_deref()).to_string();
+    let board_id = form.board_id;
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let mut conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            db::move_board(&mut conn, board_id, move_up)?;
+            crate::templates::set_live_boards(db::get_all_boards(&conn)?);
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok(Redirect::to(&return_to).into_response())
 }
 
 // ─── POST /admin/thread/action ────────────────────────────────────────────────

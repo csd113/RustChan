@@ -128,13 +128,17 @@ pub async fn index(
     let (jar, csrf) = ensure_csrf(jar);
     let nsfw_consent = has_nsfw_consent(&jar);
 
-    let (board_stats, site_data) = tokio::task::spawn_blocking({
+    let admin_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
+    let (board_stats, site_data, is_admin) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<(Vec<crate::models::BoardStats>, crate::models::SiteStats)> {
+        move || -> Result<(Vec<crate::models::BoardStats>, crate::models::SiteStats, bool)> {
             let conn = pool.get()?;
             let boards = db::get_all_boards_with_stats(&conn)?;
             let site_data = db::get_site_stats(&conn).unwrap_or_default();
-            Ok((boards, site_data))
+            let is_admin = admin_session
+                .as_deref()
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
+            Ok((boards, site_data, is_admin))
         }
     })
     .await
@@ -176,6 +180,7 @@ pub async fn index(
             current_theme.as_deref(),
             nsfw_prompt_board,
             nsfw_consent,
+            is_admin,
         )),
     )
         .into_response())

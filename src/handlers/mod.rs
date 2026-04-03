@@ -656,6 +656,7 @@ mod tests {
     fn sample_board() -> crate::models::Board {
         crate::models::Board {
             id: 1,
+            display_order: 1,
             short_name: "test".to_string(),
             name: "Test".to_string(),
             description: String::new(),

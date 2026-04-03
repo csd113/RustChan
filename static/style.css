@@ -847,7 +847,7 @@ html:not([data-theme]) .poster-id-btn {
 
 .subject {
   font-size: 0.88rem;
-  margin-bottom: 4px;
+  margin-bottom: 0;
 }
 
 .subject a { color: var(--green-bright); }
@@ -1386,7 +1386,6 @@ html:not([data-theme]) .poster-id-btn {
 }
 
 .board-card {
-  display: block;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-left: 3px solid var(--green-dim);
@@ -1401,6 +1400,12 @@ html:not([data-theme]) .poster-id-btn {
   background: rgba(0,200,64,0.04);
   color: var(--green-pale);
   box-shadow: 0 0 10px rgba(0,200,64,0.12);
+}
+
+.board-card-link {
+  display: block;
+  color: inherit;
+  text-decoration: none;
 }
 
 .board-card-short {
@@ -1485,6 +1490,30 @@ html:not([data-theme]) .poster-id-btn {
   margin-top: 4px;
   font-weight: bold;
   letter-spacing: 0.03em;
+}
+
+.board-reorder-controls {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.board-reorder-controls form,
+.board-order-toolbar form {
+  margin: 0;
+}
+
+.board-reorder-controls button,
+.board-order-toolbar button {
+  min-width: 2rem;
+  padding: 2px 7px;
+}
+
+.board-reorder-controls button:disabled,
+.board-order-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* ── Site stats section ───────────────────────────────────────────────────── */
@@ -1692,6 +1721,20 @@ html:not([data-theme]) .poster-id-btn {
 }
 .board-settings-card[open] > summary::before { transform: rotate(90deg); }
 .board-settings-card > summary:hover { color: var(--green-bright); }
+
+.board-order-toolbar,
+.admin-order-note {
+  color: var(--text-dim);
+}
+
+.board-order-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 14px 0;
+  font-size: 0.78rem;
+}
 
 .admin-section-collapsible {
   padding: 0;

@@ -86,6 +86,23 @@ pub fn admin_panel_page(
             board_cards,
             r#"<details class="board-settings-card" id="board-{short}">
 <summary>/{short}/ — {name} {nsfw_tag}</summary>
+<div class="board-order-toolbar">
+<span>shared order: {display_order}</span>
+<form method="POST" action="/admin/board/reorder">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <input type="hidden" name="direction" value="up">
+  <input type="hidden" name="return_to" value="/admin/panel#board-{short}">
+  <button type="submit"{move_up_disabled}>move up</button>
+</form>
+<form method="POST" action="/admin/board/reorder">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <input type="hidden" name="direction" value="down">
+  <input type="hidden" name="return_to" value="/admin/panel#board-{short}">
+  <button type="submit"{move_down_disabled}>move down</button>
+</form>
+</div>
 <form method="POST" action="/admin/board/settings" class="board-settings-form">
 <input type="hidden" name="_csrf"     value="{csrf}">
 <input type="hidden" name="board_id"  value="{id}">
@@ -168,6 +185,7 @@ pub fn admin_panel_page(
             },
             csrf = escape_html(csrf_token),
             id = b.id,
+            display_order = b.display_order,
             name_raw = escape_html(&b.name),
             desc_raw = escape_html(&b.description),
             bump = b.bump_limit,
@@ -194,6 +212,12 @@ pub fn admin_panel_page(
             embeds_ck = checked(b.allow_video_embeds),
             captcha_ck = checked(b.allow_captcha),
             poster_ids_ck = checked(b.show_poster_ids),
+            move_up_disabled = if b.display_order <= 1 { " disabled" } else { "" },
+            move_down_disabled = if b.display_order >= boards.len() as i64 {
+                " disabled"
+            } else {
+                ""
+            },
             board_favicon_preview = if board_favicon_exists {
                 format!(
                     r#"<img class="favicon-inline-preview" src="/boards/{short}/_favicon/favicon-32x32.png?v={version}" alt="/{short}/ favicon">"#,
@@ -576,6 +600,7 @@ old boards to prevent query performance degradation.
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// boards</h2>
+<p class="admin-order-note">Board order is shared across the homepage, top bar, and this panel.</p>
 <div class="admin-board-cards">{board_cards}</div>
 <h3>create board</h3>
 <form method="POST" action="/admin/board/create">

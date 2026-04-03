@@ -529,10 +529,17 @@ pub fn render_post(
         format!(r#" data-poster-id="{}""#, escape_html(poster_id))
     });
 
+    let subject_html = post.subject.as_ref().map_or_else(String::new, |subject| {
+        format!(
+            r#"<span class="subject"><strong>{}</strong></span>"#,
+            escape_html(subject)
+        )
+    });
+
     let mut html = format!(
         r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}>
 <div class="post-meta">
-<strong class="name">{name}</strong>{tripcode}{poster_id_html}
+{subject_html}<strong class="name">{name}</strong>{tripcode}{poster_id_html}
 <span class="post-time" data-utc="{ts}">{time}</span>{edited}
 <a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>
 <span class="backrefs" id="backrefs-{id}"></span>
@@ -541,6 +548,7 @@ pub fn render_post(
         id = post.id,
         thread_id = post.thread_id,
         poster_attr = poster_attr,
+        subject_html = subject_html,
         name = escape_html(&post.name),
         tripcode = tripcode_html,
         poster_id_html = poster_id_html,
@@ -548,14 +556,6 @@ pub fn render_post(
         time = fmt_ts_short(post.created_at),
         edited = edited_html,
     );
-
-    if let Some(subject) = &post.subject {
-        let _ = write!(
-            html,
-            r#"<div class="subject"><strong>{}</strong></div>"#,
-            escape_html(subject)
-        );
-    }
 
     // Image / Video / Audio
     if show_media {

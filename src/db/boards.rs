@@ -17,26 +17,27 @@ use rusqlite::{params, OptionalExtension};
 pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
     Ok(Board {
         id: row.get(0)?,
-        short_name: row.get(1)?,
-        name: row.get(2)?,
-        description: row.get(3)?,
-        nsfw: row.get::<_, i32>(4)? != 0,
-        max_threads: row.get(5)?,
-        max_archived_threads: row.get(6)?,
-        bump_limit: row.get(7)?,
-        allow_images: row.get::<_, i32>(8)? != 0,
-        allow_video: row.get::<_, i32>(9)? != 0,
-        allow_audio: row.get::<_, i32>(10)? != 0,
-        allow_any_files: row.get::<_, i32>(11)? != 0,
-        allow_tripcodes: row.get::<_, i32>(12)? != 0,
-        edit_window_secs: row.get(13)?,
-        allow_editing: row.get::<_, i32>(14)? != 0,
-        allow_archive: row.get::<_, i32>(15)? != 0,
-        allow_video_embeds: row.get::<_, i32>(16)? != 0,
-        allow_captcha: row.get::<_, i32>(17)? != 0,
-        show_poster_ids: row.get::<_, i32>(18)? != 0,
-        post_cooldown_secs: row.get(19)?,
-        created_at: row.get(20)?,
+        display_order: row.get(1)?,
+        short_name: row.get(2)?,
+        name: row.get(3)?,
+        description: row.get(4)?,
+        nsfw: row.get::<_, i32>(5)? != 0,
+        max_threads: row.get(6)?,
+        max_archived_threads: row.get(7)?,
+        bump_limit: row.get(8)?,
+        allow_images: row.get::<_, i32>(9)? != 0,
+        allow_video: row.get::<_, i32>(10)? != 0,
+        allow_audio: row.get::<_, i32>(11)? != 0,
+        allow_any_files: row.get::<_, i32>(12)? != 0,
+        allow_tripcodes: row.get::<_, i32>(13)? != 0,
+        edit_window_secs: row.get(14)?,
+        allow_editing: row.get::<_, i32>(15)? != 0,
+        allow_archive: row.get::<_, i32>(16)? != 0,
+        allow_video_embeds: row.get::<_, i32>(17)? != 0,
+        allow_captcha: row.get::<_, i32>(18)? != 0,
+        show_poster_ids: row.get::<_, i32>(19)? != 0,
+        post_cooldown_secs: row.get(20)?,
+        created_at: row.get(21)?,
     })
 }
 
@@ -110,11 +111,11 @@ pub fn get_collapse_greentext(conn: &rusqlite::Connection) -> bool {
 /// Returns an error if the database operation fails.
 pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
+        "SELECT id, display_order, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                 edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
                 allow_captcha, show_poster_ids, post_cooldown_secs, created_at
-         FROM boards ORDER BY id ASC",
+         FROM boards ORDER BY display_order ASC, id ASC",
     )?;
     let boards = stmt
         .query_map([], map_board)?
@@ -133,7 +134,7 @@ pub fn get_all_boards_with_stats(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<crate::models::BoardStats>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT b.id, b.short_name, b.name, b.description, b.nsfw, b.max_threads,
+        "SELECT b.id, b.display_order, b.short_name, b.name, b.description, b.nsfw, b.max_threads,
                 b.max_archived_threads, b.bump_limit, b.allow_images, b.allow_video, b.allow_audio,
                 b.allow_any_files, b.allow_tripcodes, b.edit_window_secs, b.allow_editing,
                 b.allow_archive, b.allow_video_embeds, b.allow_captcha, b.show_poster_ids,
@@ -142,12 +143,12 @@ pub fn get_all_boards_with_stats(
          FROM boards b
          LEFT JOIN threads t ON t.board_id = b.id AND t.archived = 0
          GROUP BY b.id
-         ORDER BY b.id ASC",
+         ORDER BY b.display_order ASC, b.id ASC",
     )?;
     let out = stmt
         .query_map([], |row| {
             let board = map_board(row)?;
-            let thread_count: i64 = row.get(21)?;
+            let thread_count: i64 = row.get(22)?;
             Ok(crate::models::BoardStats {
                 board,
                 thread_count,
@@ -161,7 +162,7 @@ pub fn get_all_boards_with_stats(
 /// Returns an error if the database operation fails.
 pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Option<Board>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
+        "SELECT id, display_order, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                 edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
                 allow_captcha, show_poster_ids, post_cooldown_secs, created_at
@@ -184,8 +185,9 @@ pub fn create_board(
     // New boards default to images and video enabled; audio off by default.
     let id: i64 = conn
         .query_row(
-            "INSERT INTO boards (short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
-             VALUES (?1, ?2, ?3, ?4, 1, 1, 0) RETURNING id",
+            "INSERT INTO boards (display_order, short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
+             VALUES (COALESCE((SELECT MAX(display_order) + 1 FROM boards), 1), ?1, ?2, ?3, ?4, 1, 1, 0)
+             RETURNING id",
             params![short, name, description, i32::from(nsfw)],
             |r| r.get(0),
         )
@@ -213,8 +215,9 @@ pub fn create_board_with_media_flags(
 ) -> Result<i64> {
     let id: i64 = conn
         .query_row(
-            "INSERT INTO boards (short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id",
+            "INSERT INTO boards (display_order, short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
+             VALUES (COALESCE((SELECT MAX(display_order) + 1 FROM boards), 1), ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             RETURNING id",
             params![
                 short, name, description, i32::from(nsfw),
                 i32::from(allow_images), i32::from(allow_video), i32::from(allow_audio),
@@ -223,6 +226,53 @@ pub fn create_board_with_media_flags(
         )
         .context("Failed to create board with media flags")?;
     Ok(id)
+}
+
+/// Move a board one slot up or down in the shared display order used by the
+/// homepage, header nav, and admin panel.
+///
+/// # Errors
+/// Returns an error if the database operation fails or the board id is not found.
+pub fn move_board(
+    conn: &mut rusqlite::Connection,
+    id: i64,
+    move_up: bool,
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    let mut stmt =
+        tx.prepare_cached("SELECT id FROM boards ORDER BY display_order ASC, id ASC")?;
+    let mut ordered_ids = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let index = ordered_ids
+        .iter()
+        .position(|board_id| *board_id == id)
+        .ok_or_else(|| anyhow::anyhow!("Board id {id} not found"))?;
+
+    let swap_with = if move_up {
+        index.checked_sub(1)
+    } else if index + 1 < ordered_ids.len() {
+        Some(index + 1)
+    } else {
+        None
+    };
+
+    let Some(target_index) = swap_with else {
+        tx.commit()?;
+        return Ok(());
+    };
+
+    ordered_ids.swap(index, target_index);
+
+    let mut update = tx.prepare_cached("UPDATE boards SET display_order = ?1 WHERE id = ?2")?;
+    for (position, board_id) in ordered_ids.iter().enumerate() {
+        update.execute(params![position as i64 + 1, board_id])?;
+    }
+    drop(update);
+    tx.commit()?;
+    Ok(())
 }
 
 /// Added rows-affected check — silently succeeding when the board

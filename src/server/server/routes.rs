@@ -151,6 +151,10 @@ fn admin_board_routes() -> Router<AppState> {
             post(crate::handlers::admin::update_board_settings),
         )
         .route(
+            "/admin/board/reorder",
+            post(crate::handlers::admin::reorder_board),
+        )
+        .route(
             "/admin/site/favicon",
             post(crate::handlers::admin::update_site_favicon)
                 .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),

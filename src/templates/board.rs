@@ -20,9 +20,47 @@ use super::{
 
 // ─── Site index (board list) ──────────────────────────────────────────────────
 
-fn board_cards(list: &[&crate::models::BoardStats], nsfw_consent: bool) -> String {
+fn board_reorder_controls(
+    board: &Board,
+    csrf_token: &str,
+    return_to: &str,
+    is_first: bool,
+    is_last: bool,
+) -> String {
+    format!(
+        r#"<div class="board-reorder-controls">
+  <form method="POST" action="/admin/board/reorder">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="board_id" value="{board_id}">
+    <input type="hidden" name="direction" value="up">
+    <input type="hidden" name="return_to" value="{return_to}">
+    <button type="submit"{up_disabled} aria-label="Move /{short}/ earlier">&#8593;</button>
+  </form>
+  <form method="POST" action="/admin/board/reorder">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="board_id" value="{board_id}">
+    <input type="hidden" name="direction" value="down">
+    <input type="hidden" name="return_to" value="{return_to}">
+    <button type="submit"{down_disabled} aria-label="Move /{short}/ later">&#8595;</button>
+  </form>
+</div>"#,
+        csrf = escape_html(csrf_token),
+        board_id = board.id,
+        return_to = escape_html(return_to),
+        short = escape_html(&board.short_name),
+        up_disabled = if is_first { " disabled" } else { "" },
+        down_disabled = if is_last { " disabled" } else { "" },
+    )
+}
+
+fn board_cards(
+    list: &[&crate::models::BoardStats],
+    nsfw_consent: bool,
+    csrf_token: &str,
+    show_reorder_controls: bool,
+) -> String {
     let mut out = String::new();
-    for s in list {
+    for (index, s) in list.iter().enumerate() {
         let b = &s.board;
         let nsfw_badge = if b.nsfw {
             r#"<span class="nsfw-badge">NSFW</span>"#
@@ -53,14 +91,23 @@ fn board_cards(list: &[&crate::models::BoardStats], nsfw_consent: bool) -> Strin
         } else {
             "threads"
         };
+        let reorder_controls = if show_reorder_controls {
+            board_reorder_controls(b, csrf_token, "/", index == 0, index + 1 == list.len())
+        } else {
+            String::new()
+        };
         let _ = write!(
             out,
-            r#"<a class="board-card" href="{href}"{action_attr}{return_to_attr}>
-  <div class="board-card-short">/{sh}/</div>
-  <div class="board-card-name">{n}{nsfw}</div>
-  <div class="board-card-desc">{d}</div>
-  <div class="board-card-stats">{tc} {tw}</div>
-</a>"#,
+            r#"<div class="board-card">
+  {reorder_controls}
+  <a class="board-card-link" href="{href}"{action_attr}{return_to_attr}>
+    <div class="board-card-short">/{sh}/</div>
+    <div class="board-card-name">{n}{nsfw}</div>
+    <div class="board-card-desc">{d}</div>
+    <div class="board-card-stats">{tc} {tw}</div>
+  </a>
+</div>"#,
+            reorder_controls = reorder_controls,
             href = href,
             action_attr = action_attr,
             return_to_attr = return_to_attr,
@@ -86,6 +133,7 @@ pub fn index_page(
     current_theme: Option<&str>,
     nsfw_prompt_board: Option<&Board>,
     nsfw_consent: bool,
+    is_admin: bool,
 ) -> String {
     let all_boards: Vec<Board> = board_stats.iter().map(|s| s.board.clone()).collect();
 
@@ -99,7 +147,7 @@ pub fn index_page(
     } else {
         format!(
             "<div class=\"index-section\"><h2 class=\"index-section-title\">// Boards</h2><div class=\"board-cards\">{}</div></div>",
-            board_cards(&sfw, nsfw_consent)
+            board_cards(&sfw, nsfw_consent, csrf_token, is_admin)
         )
     };
 
@@ -108,7 +156,7 @@ pub fn index_page(
     } else {
         format!(
             "<div class=\"index-section\"><h2 class=\"index-section-title\">// Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2><div class=\"board-cards\">{}</div></div>",
-            board_cards(&nsfw, nsfw_consent)
+            board_cards(&nsfw, nsfw_consent, csrf_token, is_admin)
         )
     };
 

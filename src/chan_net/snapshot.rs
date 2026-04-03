@@ -33,7 +33,7 @@ use zip::{write::SimpleFileOptions, ZipWriter};
 pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
     // ── Boards ────────────────────────────────────────────────────────────
     // Column is `name` (display name), not `title` — verified against db/mod.rs.
-    let mut stmt = conn.prepare("SELECT short_name, name FROM boards ORDER BY id")?;
+    let mut stmt = conn.prepare("SELECT short_name, name FROM boards ORDER BY display_order, id")?;
     let boards: Vec<SnapshotBoard> = stmt
         .query_map([], |row| {
             Ok(SnapshotBoard {
