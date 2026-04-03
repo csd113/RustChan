@@ -4,6 +4,31 @@ All notable changes to RustChan will be documented in this file.
 
 ---
 
+## [1.1.2]
+
+### Added
+
+- Integrated `ngrok` terminal toggle on `[T]`, including dashboard status, live public URL display, and help/footer shortcuts in the full-screen operator console.
+- Guided `ngrok` setup prompt that tells operators to install and configure `ngrok` using the official commands from their ngrok dashboard, then reboot RustChan for support to take effect.
+
+### Improved
+
+- Cross-platform `ngrok` integration now uses the official `ngrok` CLI workflow on macOS, Linux, and Windows instead of embedding account setup inside RustChan.
+- Tunnel lifecycle handling is more resilient through generation-guarded state updates, proper child-process cleanup, and restart-safe task reaping in the console runtime.
+
+### Fixed
+
+- Pressing `[T]` with `ngrok` installed but not configured now opens the setup guidance flow instead of silently leaving the dashboard in a setup-required state.
+- Rapid `ngrok` toggles no longer allow a stale background task to overwrite the state of a newer tunnel session.
+- Restarting `ngrok` after an unexpected tunnel exit now works on the next keypress instead of requiring an extra off/on cycle.
+
+### Validation
+
+- `cargo fmt`
+- `env -u RUSTC_WRAPPER cargo check`
+- `env -u RUSTC_WRAPPER cargo test --quiet`
+- `env -u RUSTC_WRAPPER cargo clippy --all-targets --all-features -- -D warnings`
+
 ## [1.1.1]
 
 ### Added

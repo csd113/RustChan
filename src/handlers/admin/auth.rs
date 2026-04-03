@@ -23,6 +23,7 @@ use crate::{
 };
 use axum::{
     extract::{Form, State},
+    http::HeaderMap,
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -199,6 +200,7 @@ pub struct LoginForm {
 pub async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     Form(form): Form<LoginForm>,
 ) -> Result<Response> {
@@ -310,8 +312,9 @@ pub async fn admin_login(
             cookie.set_http_only(true);
             cookie.set_same_site(SameSite::Strict);
             cookie.set_path("/");
-            // Derive Secure flag from config; true when CHAN_HTTPS_COOKIES=true.
-            cookie.set_secure(CONFIG.https_cookies);
+            // Only mark the session cookie Secure when this request is actually
+            // arriving over HTTPS (direct TLS or proxy-forwarded HTTPS).
+            cookie.set_secure(super::should_set_secure_cookie(&headers));
             // Set Max-Age so browsers expire the cookie after the
             // configured session lifetime instead of persisting it indefinitely.
             cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));

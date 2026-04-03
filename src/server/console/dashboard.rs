@@ -155,6 +155,16 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
         }
     }
 
+    let ngrok_status = match &stats.ngrok {
+        crate::server::ngrok::NgrokState::Disabled => red("DISABLED"),
+        crate::server::ngrok::NgrokState::Starting => yellow("STARTING"),
+        crate::server::ngrok::NgrokState::Ready { .. } => green("READY"),
+        crate::server::ngrok::NgrokState::NotInstalled => red("NOT INSTALLED"),
+        crate::server::ngrok::NgrokState::NotConfigured => yellow("NOT CONFIGURED"),
+        crate::server::ngrok::NgrokState::Error { .. } => red("ERROR"),
+    };
+    row(&mut out, "Ngrok", &ngrok_status);
+
     writeln!(out).ok();
 
     // ── Endpoints ─────────────────────────────────────────────────────────────
@@ -182,6 +192,23 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
             row(&mut out, "Onion", &dim("waiting for Tor\u{2026}"));
         }
         None => {}
+    }
+
+    match &stats.ngrok {
+        crate::server::ngrok::NgrokState::Ready { url } => {
+            row(&mut out, "Public", &cyan(url));
+        }
+        crate::server::ngrok::NgrokState::Starting => {
+            row(&mut out, "Public", &dim("waiting for ngrok\u{2026}"));
+        }
+        crate::server::ngrok::NgrokState::NotInstalled
+        | crate::server::ngrok::NgrokState::NotConfigured => {
+            row(&mut out, "Public", &dim("ngrok setup required"));
+        }
+        crate::server::ngrok::NgrokState::Error { message } => {
+            row(&mut out, "Public", &dim(message));
+        }
+        crate::server::ngrok::NgrokState::Disabled => {}
     }
 
     writeln!(out).ok();
@@ -240,8 +267,8 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
     // ── Footer ────────────────────────────────────────────────────────────────
     writeln!(out, "{RULE}").ok();
     writeln!(out,
-        " {} Help  {} Reload  {} Boards  {} New board  {} New admin  {} Del thread  {} Logs  {} Quit",
-        bold("[H]"), bold("[R]"), bold("[B]"), bold("[C]"), bold("[A]"), bold("[D]"), bold("[L]"), bold("[Q]"),
+        " {} Help  {} Reload  {} Ngrok  {} Boards  {} New board  {} New admin  {} Del thread  {} Logs  {} Quit",
+        bold("[H]"), bold("[R]"), bold("[T]"), bold("[B]"), bold("[C]"), bold("[A]"), bold("[D]"), bold("[L]"), bold("[Q]"),
     ).ok();
     writeln!(out, "{RULE}").ok();
 
@@ -288,6 +315,7 @@ pub fn render_help() -> String {
     let keys: &[(&str, &str)] = &[
         ("[H]", "Help"),
         ("[R]", "Force-reload stats"),
+        ("[T]", "Toggle ngrok public URL"),
         ("[L]", "Log view"),
         ("[B]", "Board list"),
         ("[C]", "Create board wizard"),

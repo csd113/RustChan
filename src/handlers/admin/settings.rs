@@ -20,6 +20,15 @@ use serde::Deserialize;
 
 const MAX_FAVICON_UPLOAD_BYTES: usize = 5 * 1024 * 1024;
 
+fn format_favicon_upload_error(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(std::string::ToString::to_string)
+        .filter(|msg| !msg.trim().is_empty() && !msg.starts_with("write "))
+        .last()
+        .unwrap_or_else(|| "Favicon upload failed.".to_string())
+}
+
 async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String> {
     field
         .text()
@@ -251,7 +260,7 @@ pub async fn update_site_favicon(
     let favicon_bytes =
         favicon_bytes.ok_or_else(|| AppError::BadRequest("No favicon file uploaded.".into()))?;
 
-    tokio::task::spawn_blocking({
+    let favicon_result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -264,12 +273,21 @@ pub async fn update_site_favicon(
         }
     })
     .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    Ok(
-        super::admin_panel_redirect_anchor("Global favicon updated.", "site-settings")
-            .into_response(),
-    )
+    match favicon_result {
+        Ok(()) => Ok(super::admin_panel_redirect_anchor(
+            "Global favicon updated.",
+            "site-settings",
+        )
+        .into_response()),
+        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor(
+            &format_favicon_upload_error(&error),
+            "site-settings",
+        )
+        .into_response()),
+        Err(error) => Err(error),
+    }
 }
 
 pub async fn update_board_favicon(
@@ -312,7 +330,7 @@ pub async fn update_board_favicon(
     let favicon_bytes =
         favicon_bytes.ok_or_else(|| AppError::BadRequest("No favicon file uploaded.".into()))?;
 
-    let board_short = tokio::task::spawn_blocking({
+    let favicon_result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -330,13 +348,21 @@ pub async fn update_board_favicon(
         }
     })
     .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    Ok(super::admin_panel_redirect_anchor(
-        &format!("Board /{board_short}/ favicon updated."),
-        &format!("board-{board_short}"),
-    )
-    .into_response())
+    match favicon_result {
+        Ok(board_short) => Ok(super::admin_panel_redirect_anchor(
+            &format!("Board /{board_short}/ favicon updated."),
+            &format!("board-{board_short}"),
+        )
+        .into_response()),
+        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor(
+            &format_favicon_upload_error(&error),
+            "site-settings",
+        )
+        .into_response()),
+        Err(error) => Err(error),
+    }
 }
 
 // ─── POST /admin/site/settings ────────────────────────────────────────────────

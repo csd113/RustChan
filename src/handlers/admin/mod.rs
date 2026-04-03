@@ -171,6 +171,26 @@ fn encode_query_component(input: &str) -> String {
     encoded
 }
 
+pub(super) fn should_set_secure_cookie(headers: &HeaderMap) -> bool {
+    if !CONFIG.https_cookies {
+        return false;
+    }
+
+    if CONFIG.tls.enabled {
+        return true;
+    }
+
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .next()
+                .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
+        })
+}
+
 fn admin_panel_redirect_with_status(
     message: &str,
     is_error: bool,
@@ -191,6 +211,10 @@ pub(super) fn admin_panel_redirect(message: &str) -> Redirect {
 
 pub(super) fn admin_panel_redirect_anchor(message: &str, anchor: &str) -> Redirect {
     admin_panel_redirect_with_status(message, false, Some(anchor))
+}
+
+pub(super) fn admin_panel_error_redirect_anchor(message: &str, anchor: &str) -> Redirect {
+    admin_panel_redirect_with_status(message, true, Some(anchor))
 }
 
 // ─── GET /admin/panel ─────────────────────────────────────────────────────────

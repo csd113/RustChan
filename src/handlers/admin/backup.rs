@@ -1223,7 +1223,7 @@ pub async fn admin_restore(
     new_cookie.set_http_only(true);
     new_cookie.set_same_site(SameSite::Strict);
     new_cookie.set_path("/");
-    new_cookie.set_secure(CONFIG.https_cookies);
+    new_cookie.set_secure(super::should_set_secure_cookie(&headers));
     // Set Max-Age so the browser expires the cookie after the configured
     // session lifetime — matching the behaviour of the normal login handler.
     new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
@@ -1649,6 +1649,7 @@ pub struct RestoreSavedForm {
 pub async fn restore_saved_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
     let session_id = jar
@@ -1712,7 +1713,7 @@ pub async fn restore_saved_full_backup(
     new_cookie.set_http_only(true);
     new_cookie.set_same_site(SameSite::Strict);
     new_cookie.set_path("/");
-    new_cookie.set_secure(CONFIG.https_cookies);
+    new_cookie.set_secure(super::should_set_secure_cookie(&headers));
     // Set Max-Age to match normal login behaviour.
     new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
     Ok((jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response())

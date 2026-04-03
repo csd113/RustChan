@@ -415,6 +415,12 @@ pub fn admin_panel_page(
     } else {
         format!(r#" <span class="report-badge">{}</span>"#, appeals.len())
     };
+    let moderation_open_attr = if report_count > 0 || !appeals.is_empty() {
+        " open"
+    } else {
+        ""
+    };
+    let moderation_summary_badges = format!("{report_badge}{appeal_badge}");
 
     let mut appeal_rows = String::new();
     if appeals.is_empty() {
@@ -495,8 +501,9 @@ old boards to prevent query performance degradation.
      // live log
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section" id="live-log">
-<details class="board-settings-card">
+<details class="admin-dropdown">
 <summary>// live log</summary>
+<div class="admin-dropdown-content">
 <p style="color:var(--text-dim);font-size:0.85rem">
   Watching <span id="admin-live-log-file">current log</span>. Updates every 2 seconds.
 </p>
@@ -508,6 +515,7 @@ old boards to prevent query performance degradation.
   </label>
 </div>
 <pre id="admin-live-log-output" style="margin:0;max-height:24rem;overflow:auto;padding:0.85rem;border:1px solid var(--border);background:var(--bg-input);color:var(--text);font-size:0.78rem;line-height:1.45;white-space:pre-wrap;word-break:break-word">Loading live log…</pre>
+</div>
 </details>
 </section>
 
@@ -580,37 +588,33 @@ old boards to prevent query performance degradation.
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
-     // moderation log
+     // moderation dropdown (log + reports + moderation tools)
      ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section">
-<h2>// moderation log <a href="/admin/mod-log" style="font-size:0.78rem;margin-left:0.6rem;color:var(--text-dim)">[ view full log ]</a></h2>
+<section class="admin-section admin-section-collapsible" id="reports">
+<details class="admin-dropdown"{moderation_open_attr}>
+<summary><span>// moderation</span><span class="admin-dropdown-badges">{moderation_summary_badges}</span></summary>
+<div class="admin-dropdown-content">
+<div class="admin-subsection">
+<h3>// moderation log <a href="/admin/mod-log" style="font-size:0.78rem;margin-left:0.6rem;color:var(--text-dim)">[ view full log ]</a></h3>
 <p style="color:var(--text-dim);font-size:0.82rem">All admin actions are recorded in the moderation log. Click <em>view full log</em> to browse the history.</p>
-</section>
+</div>
 
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // report inbox
-     ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section" id="reports">
-<h2>// report inbox{report_badge}</h2>
+<div class="admin-subsection">
+<h3>// report inbox{report_badge}</h3>
 <table class="admin-table">
 <thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
 <tbody>{report_rows}</tbody>
 </table>
-</section>
+</div>
 
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // moderation (ban appeals + active bans + word filters)
-     ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section">
-<h2>// moderation</h2>
-
-<h3 id="appeals">Ban appeals{appeal_badge}</h3>
+<div class="admin-subsection">
+<h3 id="appeals">// ban appeals{appeal_badge}</h3>
 <table class="admin-table">
 <thead><tr><th>ip (partial)</th><th>appeal message</th><th>filed</th><th>action</th></tr></thead>
 <tbody>{appeal_rows}</tbody>
 </table>
 
-<h3 style="margin-top:1.5rem">Active bans</h3>
+<h3 style="margin-top:1.5rem">// active bans</h3>
 <table class="admin-table">
 <thead><tr><th>ip hash (partial)</th><th>reason</th><th>expires</th><th>action</th></tr></thead>
 <tbody>{ban_rows}</tbody>
@@ -624,7 +628,7 @@ old boards to prevent query performance degradation.
 <button type="submit">ban</button>
 </form>
 
-<h3 style="margin-top:1.5rem">Word filters</h3>
+<h3 style="margin-top:1.5rem">// word filters</h3>
 <table class="admin-table">
 <thead><tr><th>pattern</th><th>replacement</th><th>action</th></tr></thead>
 <tbody>{filter_rows}</tbody>
@@ -636,6 +640,9 @@ old boards to prevent query performance degradation.
 <input type="text" name="replacement" placeholder="replace with">
 <button type="submit">add</button>
 </form>
+</div>
+</div>
+</details>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -733,6 +740,8 @@ old boards to prevent query performance degradation.
         report_badge = report_badge,
         appeal_rows = appeal_rows,
         appeal_badge = appeal_badge,
+        moderation_open_attr = moderation_open_attr,
+        moderation_summary_badges = moderation_summary_badges,
         global_favicon_preview = if global_favicon_exists {
             format!(
                 r#"<img class="favicon-inline-preview" src="/favicon-32x32.png?v={version}" alt="global favicon">"#,

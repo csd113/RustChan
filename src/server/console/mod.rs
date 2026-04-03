@@ -49,6 +49,7 @@ pub enum WizardKind {
     CreateBoard,
     CreateAdmin,
     DeleteThread,
+    NgrokSetup,
 }
 
 pub type SharedConsoleMode = Arc<RwLock<ConsoleMode>>;
@@ -81,6 +82,8 @@ pub struct ChanStats {
     pub spinner_tick: u8,
     /// Live onion address once Tor has bootstrapped, None while bootstrapping.
     pub onion_address: Option<String>,
+    /// Current ngrok tunnel state, if the operator has toggled it.
+    pub ngrok: crate::server::ngrok::NgrokState,
 }
 
 impl Default for ChanStats {
@@ -101,6 +104,7 @@ impl Default for ChanStats {
             active_uploads: 0,
             spinner_tick: 0,
             onion_address: None,
+            ngrok: crate::server::ngrok::NgrokState::Disabled,
         }
     }
 }
@@ -245,6 +249,7 @@ pub fn collect_stats(
     prev_threads: &mut i64,
     prev_posts: &mut i64,
     onion_address: Option<String>,
+    ngrok: crate::server::ngrok::NgrokState,
 ) -> ChanStats {
     use std::sync::atomic::Ordering;
 
@@ -317,6 +322,7 @@ pub fn collect_stats(
         active_uploads,
         spinner_tick,
         onion_address,
+        ngrok,
     }
 }
 

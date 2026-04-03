@@ -1600,6 +1600,13 @@ html:not([data-theme]) .poster-id-btn {
   margin: 10px 0 6px;
 }
 
+.admin-section h4 {
+  font-size: 0.78rem;
+  color: var(--green-dim);
+  margin: 0.85rem 0 0.4rem;
+  letter-spacing: 0.04em;
+}
+
 .admin-section form {
   display: flex;
   flex-wrap: wrap;
@@ -1685,6 +1692,67 @@ html:not([data-theme]) .poster-id-btn {
 }
 .board-settings-card[open] > summary::before { transform: rotate(90deg); }
 .board-settings-card > summary:hover { color: var(--green-bright); }
+
+.admin-section-collapsible {
+  padding: 0;
+}
+
+.admin-dropdown {
+  background: var(--bg-panel);
+}
+
+.admin-dropdown > summary {
+  padding: 12px 14px;
+  cursor: pointer;
+  color: var(--green);
+  font-size: 0.88rem;
+  letter-spacing: 0.08em;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  user-select: none;
+}
+
+.admin-dropdown > summary::-webkit-details-marker { display: none; }
+.admin-dropdown > summary::marker { display: none; }
+.admin-dropdown > summary::before {
+  content: '▶';
+  font-size: 0.65rem;
+  color: var(--green-dim);
+  margin-right: 4px;
+  transition: transform 0.15s;
+}
+
+.admin-dropdown > summary > span:first-child {
+  display: inline-flex;
+  align-items: center;
+}
+
+.admin-dropdown[open] > summary::before { transform: rotate(90deg); }
+.admin-dropdown > summary:hover { color: var(--green-bright); }
+
+.admin-dropdown-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.admin-dropdown-content {
+  padding: 0 14px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.admin-subsection {
+  padding-top: 12px;
+}
+
+.admin-subsection + .admin-subsection {
+  margin-top: 14px;
+  border-top: 1px solid rgba(26,46,26,0.55);
+}
 
 .board-settings-form {
   padding: 10px 14px 12px;

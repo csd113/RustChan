@@ -14,6 +14,7 @@
 
 pub mod cli;
 pub mod console;
+pub mod ngrok;
 #[allow(clippy::module_inception)]
 pub mod server;
 
