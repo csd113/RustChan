@@ -222,7 +222,7 @@ pub async fn create_board_backup(
             let threads = collect_rows(
                 &conn,
                 board_id,
-                "SELECT id, board_id, subject, created_at, bumped_at, locked, sticky, reply_count
+                "SELECT id, board_id, subject, created_at, bumped_at, locked, sticky, archived, reply_count
                  FROM threads WHERE board_id = ?1 ORDER BY id ASC",
                 |row| {
                     Ok(ThreadRow {
@@ -233,7 +233,8 @@ pub async fn create_board_backup(
                         bumped_at: row.get(4)?,
                         locked: row.get::<_, i64>(5)? != 0,
                         sticky: row.get::<_, i64>(6)? != 0,
-                        reply_count: row.get(7)?,
+                        archived: row.get::<_, i64>(7)? != 0,
+                        reply_count: row.get(8)?,
                     })
                 },
             )?;

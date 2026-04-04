@@ -7,6 +7,7 @@
 //   admin_vacuum_result_page — post-VACUUM feedback
 //   admin_ip_history_page   — posts by IP hash
 
+use crate::db::DbHealthReport;
 use crate::models::{BackupInfo, Ban, Board, WordFilter};
 use crate::utils::{files::format_file_size, sanitize::escape_html};
 use std::fmt::Write;
@@ -734,11 +735,17 @@ old boards to prevent query performance degradation.
   bulk deletions (deleted threads, pruned posts, etc.).  This may take a few seconds on large
   databases and briefly blocks writes.
 </p>
+<div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+<form method="POST" action="/admin/db/check">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <button type="submit">&#x1F50E; check integrity</button>
+</form>
 <form method="POST" action="/admin/vacuum">
   <input type="hidden" name="_csrf" value="{csrf}">
   <button type="submit"
           data-confirm="Run VACUUM? This will briefly block the database while it rebuilds. Continue?">&#x1F9F9; run VACUUM</button>
 </form>
+</div>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -991,6 +998,118 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
 
     base_layout(
         "VACUUM result",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        None,
+        false,
+        "/admin",
+    )
+}
+
+#[must_use]
+pub fn admin_db_health_result_page(
+    report: &DbHealthReport,
+    attempted_repair: bool,
+    csrf_token: &str,
+) -> String {
+    let title = if attempted_repair {
+        "[ database repair ]"
+    } else {
+        "[ database check ]"
+    };
+    let status_line = if attempted_repair {
+        match report.after_ok {
+            Some(true) => {
+                r#"<p style="color:var(--green-bright)">Repair completed. The database integrity check passed afterward.</p>"#
+            }
+            Some(false) => {
+                r#"<p class="error">Repair finished, but the database still reports a problem. Restoring a known-good full backup is recommended.</p>"#
+            }
+            None => {
+                r#"<p class="error">Repair finished, but no final integrity result was produced.</p>"#
+            }
+        }
+    } else if report.before_ok {
+        r#"<p style="color:var(--green-bright)">The database integrity check passed.</p>"#
+    } else {
+        r#"<p class="error">The database integrity check found a problem.</p>"#
+    };
+    let repair_action = if attempted_repair {
+        String::new()
+    } else {
+        format!(
+            r#"<form method="POST" action="/admin/db/repair" style="margin-top:1rem">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <button type="submit"
+          data-confirm="Attempt database repair? This will run integrity checks, REINDEX, and rebuild the search index. It is safe to try, but it may not fix true file corruption. Continue?">&#x1F6E0; attempt repair</button>
+</form>"#,
+            csrf = escape_html(csrf_token),
+        )
+    };
+
+    let mut repair_steps_html = String::new();
+    if report.repair_steps.is_empty() {
+        repair_steps_html
+            .push_str(r#"<li style="color:var(--text-dim)">No repair steps were needed.</li>"#);
+    } else {
+        for step in &report.repair_steps {
+            let _ = write!(
+                repair_steps_html,
+                r#"<li>{step}</li>"#,
+                step = escape_html(step)
+            );
+        }
+    }
+
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>{title}</h1>
+<section class="admin-section">
+<h2>// summary</h2>
+{status_line}
+<div class="page-box" style="margin-top:0.75rem;max-width:760px">
+<p><strong>Before:</strong> {before_status}</p>
+<p><strong>Check output:</strong> <code>{before}</code></p>
+<p><strong>Repair run:</strong> {repair_attempted}</p>
+<p><strong>After:</strong> {after_status}</p>
+<p><strong>Final output:</strong> <code>{after}</code></p>
+</div>
+<h2 style="margin-top:1rem">// what was done</h2>
+<ul style="margin:0.75rem 0 0 1.25rem;max-width:760px">
+{repair_steps}
+</ul>
+{repair_action}
+<p style="margin-top:1rem;color:var(--text-dim)">
+  This tool can repair index and search-index issues, but true SQLite file corruption may still require restoring a known-good full backup.
+</p>
+<p style="margin-top:1rem">
+  <a href="/admin/panel">&#8592; back to admin panel</a>
+</p>
+</section>
+</div>"#,
+        title = title,
+        status_line = status_line,
+        before = escape_html(&report.before_check),
+        before_status = if report.before_ok {
+            r#"<span style="color:var(--green-bright)">Passed</span>"#
+        } else {
+            r#"<span style="color:var(--red-bright)">Problem found</span>"#
+        },
+        repair_attempted = if report.repair_attempted { "Yes" } else { "No" },
+        after = escape_html(report.after_check.as_deref().unwrap_or("not run")),
+        after_status = match report.after_ok {
+            Some(true) => r#"<span style="color:var(--green-bright)">Passed</span>"#,
+            Some(false) => r#"<span style="color:var(--red-bright)">Problem found</span>"#,
+            None => "Not run",
+        },
+        repair_steps = repair_steps_html,
+        repair_action = repair_action,
+    );
+
+    base_layout(
+        "Database health",
         None,
         &body,
         csrf_token,

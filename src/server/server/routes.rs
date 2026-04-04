@@ -206,6 +206,14 @@ fn admin_moderation_routes() -> Router<AppState> {
             "/admin/site/settings",
             post(crate::handlers::admin::update_site_settings),
         )
+        .route(
+            "/admin/db/check",
+            post(crate::handlers::admin::admin_db_check),
+        )
+        .route(
+            "/admin/db/repair",
+            post(crate::handlers::admin::admin_db_repair),
+        )
         .route("/admin/vacuum", post(crate::handlers::admin::admin_vacuum))
         .route(
             "/admin/ip/{ip_hash}",
@@ -284,7 +292,24 @@ mod tests {
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
     };
+    use std::io::{Cursor, Write as _};
     use tower::ServiceExt as _;
+
+    fn board_backup_zip_bytes() -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            let options = zip::write::SimpleFileOptions::default();
+            writer
+                .start_file("board.json", options)
+                .expect("start board.json");
+            writer
+                .write_all(br#"{"version":1,"board":{"short_name":"b","name":"Random","description":"","nsfw":false,"thread_limit":100,"reply_limit":300,"bump_limit":300,"max_threads_per_ip":0,"require_thread_title":false,"enable_flags":false,"text_only":false,"forced_anon":false,"sage_without_cap":false,"max_file_size":0,"max_webm_size":0,"max_comment_chars":2000,"max_replies_per_thread":300,"max_subject_chars":100,"cooldown_seconds":0,"thread_cooldown_seconds":0,"show_thread_stats":false,"archive_threads":false,"public_logs":false,"allow_post_deletion":true,"allow_thread_deletion":true,"allow_media_uploads":true,"allow_polls":true,"default_name":"Anonymous","id":0},"threads":[],"posts":[],"polls":[],"file_hashes":[]}"#)
+                .expect("write board.json");
+            writer.finish().expect("finish zip");
+        }
+        cursor.into_inner()
+    }
 
     #[tokio::test]
     async fn board_restore_route_accepts_large_multipart_body_without_global_media_limit() {
@@ -338,5 +363,68 @@ mod tests {
             response.headers().get(header::LOCATION).unwrap(),
             "/admin/panel"
         );
+    }
+
+    #[tokio::test]
+    async fn full_restore_board_backup_upload_redirects_with_helpful_error() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            let admin_id =
+                crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "b", "Random", "", false).expect("create board");
+            crate::db::create_session(
+                &conn,
+                "session123",
+                admin_id,
+                chrono::Utc::now().timestamp() + 3600,
+            )
+            .expect("create session");
+        }
+
+        let app = admin_routes().with_state(state);
+        let zip_bytes = board_backup_zip_bytes();
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123")],
+            Some(("backup_file", "board.zip", &zip_bytes, "application/zip")),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/restore")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::HOST, "localhost")
+                    .header(
+                        header::COOKIE,
+                        "csrf_token=csrf123; chan_admin_session=session123",
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let refresh = response
+            .headers()
+            .get("refresh")
+            .and_then(|value| value.to_str().ok())
+            .expect("refresh header");
+        assert!(refresh.contains("/admin/panel?restore_error="));
+        assert!(refresh.contains("board+backup"));
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(body.contains("Restore failed."));
+        assert!(body.contains("/admin/panel?restore_error="));
     }
 }

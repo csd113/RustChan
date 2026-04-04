@@ -21,6 +21,16 @@ pub enum BanAppealSubmission {
     NotBanned,
 }
 
+#[derive(Debug, Clone)]
+pub struct DbHealthReport {
+    pub before_check: String,
+    pub before_ok: bool,
+    pub repair_attempted: bool,
+    pub repair_steps: Vec<String>,
+    pub after_check: Option<String>,
+    pub after_ok: Option<bool>,
+}
+
 // ─── Admin user queries ───────────────────────────────────────────────────────
 
 /// # Errors
@@ -792,9 +802,127 @@ pub fn run_vacuum(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+fn integrity_check_status(conn: &rusqlite::Connection) -> (String, bool) {
+    let mut stmt = match conn.prepare("PRAGMA integrity_check") {
+        Ok(stmt) => stmt,
+        Err(error) => return (format!("integrity_check failed: {error}"), false),
+    };
+
+    let rows = match stmt.query_map([], |r| r.get::<_, String>(0)) {
+        Ok(rows) => rows,
+        Err(error) => return (format!("integrity_check failed: {error}"), false),
+    };
+
+    let mut messages = Vec::new();
+    for row in rows.take(8) {
+        match row {
+            Ok(message) => {
+                let ok = message.eq_ignore_ascii_case("ok");
+                messages.push(message);
+                if ok {
+                    break;
+                }
+            }
+            Err(error) => {
+                messages.push(format!("integrity_check row failed: {error}"));
+                break;
+            }
+        }
+    }
+
+    if messages.is_empty() {
+        return ("integrity_check returned no rows".to_string(), false);
+    }
+
+    let joined = messages.join(" | ");
+    let ok = messages.len() == 1 && messages[0].eq_ignore_ascii_case("ok");
+    (joined, ok)
+}
+
+fn rebuild_posts_fts(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(
+        r"
+        DROP TRIGGER IF EXISTS posts_ai;
+        DROP TRIGGER IF EXISTS posts_ad;
+        DROP TRIGGER IF EXISTS posts_au;
+        DROP TABLE IF EXISTS posts_fts;
+
+        CREATE VIRTUAL TABLE posts_fts
+        USING fts5(body, content='posts', content_rowid='id', tokenize='unicode61');
+
+        CREATE TRIGGER posts_ai AFTER INSERT ON posts BEGIN
+            INSERT INTO posts_fts(rowid, body) VALUES (new.id, new.body);
+        END;
+
+        CREATE TRIGGER posts_ad AFTER DELETE ON posts BEGIN
+            INSERT INTO posts_fts(posts_fts, rowid, body) VALUES('delete', old.id, old.body);
+        END;
+
+        CREATE TRIGGER posts_au AFTER UPDATE OF body ON posts BEGIN
+            INSERT INTO posts_fts(posts_fts, rowid, body) VALUES('delete', old.id, old.body);
+            INSERT INTO posts_fts(rowid, body) VALUES (new.id, new.body);
+        END;
+
+        INSERT INTO posts_fts(posts_fts) VALUES('rebuild');
+        ",
+    )
+    .context("Failed to recreate posts_fts search index")
+}
+
+pub fn check_db_health(conn: &rusqlite::Connection) -> DbHealthReport {
+    let (before_check, before_ok) = integrity_check_status(conn);
+    DbHealthReport {
+        before_check,
+        before_ok,
+        repair_attempted: false,
+        repair_steps: Vec::new(),
+        after_check: None,
+        after_ok: None,
+    }
+}
+
+pub fn attempt_db_repair(conn: &rusqlite::Connection) -> DbHealthReport {
+    let (before_check, before_ok) = integrity_check_status(conn);
+    let mut repair_steps = Vec::new();
+
+    if before_ok {
+        repair_steps.push(
+            "Initial integrity_check was ok; running deeper index/search-index rebuild anyway."
+                .to_string(),
+        );
+    }
+
+    match conn.execute_batch("REINDEX;") {
+        Ok(()) => repair_steps.push("Rebuilt SQLite indexes with REINDEX.".to_string()),
+        Err(error) => repair_steps.push(format!("REINDEX failed: {error}")),
+    }
+
+    match rebuild_posts_fts(conn) {
+        Ok(()) => repair_steps
+            .push("Recreated the posts full-text search table and triggers.".to_string()),
+        Err(error) => repair_steps.push(format!("posts_fts recreate failed: {error}")),
+    }
+
+    match conn.execute_batch("PRAGMA optimize;") {
+        Ok(()) => repair_steps.push("Ran PRAGMA optimize.".to_string()),
+        Err(error) => repair_steps.push(format!("PRAGMA optimize failed: {error}")),
+    }
+
+    let (after_check, after_ok) = integrity_check_status(conn);
+
+    DbHealthReport {
+        before_check,
+        before_ok,
+        repair_attempted: true,
+        repair_steps,
+        after_check: Some(after_check),
+        after_ok: Some(after_ok),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{file_ban_appeal, BanAppealSubmission};
+    use super::{attempt_db_repair, check_db_health, file_ban_appeal, BanAppealSubmission};
 
     #[test]
     fn ban_appeal_submission_is_deduplicated_within_window() {
@@ -816,5 +944,27 @@ mod tests {
 
         let result = file_ban_appeal(&conn, "hash2", "please unban").expect("appeal result");
         assert_eq!(result, BanAppealSubmission::NotBanned);
+    }
+
+    #[test]
+    fn db_health_check_reports_ok_for_clean_test_db() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+
+        let report = check_db_health(&conn);
+        assert!(report.before_ok);
+        assert_eq!(report.before_check, "ok");
+        assert!(!report.repair_attempted);
+    }
+
+    #[test]
+    fn db_health_repair_noops_when_db_is_already_clean() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+
+        let report = attempt_db_repair(&conn);
+        assert!(report.before_ok);
+        assert_eq!(report.after_check.as_deref(), Some("ok"));
+        assert_eq!(report.after_ok, Some(true));
     }
 }

@@ -142,9 +142,34 @@ pub async fn delete_board(
                     |r| r.get(0),
                 )
                 .ok();
+            if let Some(ref short) = short_name {
+                let health = db::check_db_health(&conn);
+                if !health.before_ok {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Board delete aborted for /{short}/: live DB integrity check failed: {}. \
+                         Run database integrity check/repair from the admin panel first, or restore a known-good full backup.",
+                        health.before_check
+                    )));
+                }
+            }
 
             // delete_board returns all file paths for posts in this board.
-            let paths = db::delete_board(&conn, form.board_id)?;
+            let paths = db::delete_board(&conn, form.board_id).map_err(|error| {
+                let chain = error
+                    .chain()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                if chain.contains("database disk image is malformed") {
+                    let board_label = short_name.as_deref().unwrap_or("unknown");
+                    AppError::Internal(anyhow::anyhow!(
+                        "Board delete failed for /{board_label}/: {chain}. \
+                         The live database appears corrupted. Run database integrity check/repair from the admin panel, or restore a known-good full backup."
+                    ))
+                } else {
+                    AppError::Internal(anyhow::anyhow!(error))
+                }
+            })?;
 
             // Delete every tracked file and thumbnail from disk.
             for p in &paths {

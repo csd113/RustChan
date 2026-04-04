@@ -478,6 +478,12 @@ pub struct VacuumForm {
     pub csrf: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct DbMaintenanceForm {
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+}
+
 pub async fn admin_vacuum(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -520,6 +526,93 @@ pub async fn admin_vacuum(
             Ok(crate::templates::admin_vacuum_result_page(
                 size_before,
                 size_after,
+                &csrf_clone,
+            ))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok((jar, Html(html)).into_response())
+}
+
+pub async fn admin_db_check(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<DbMaintenanceForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
+    {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    let (jar, csrf) = ensure_csrf(jar);
+    let html = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let csrf_clone = csrf.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+
+            let report = db::check_db_health(&conn);
+            tracing::info!(
+                target: "admin",
+                ok = report.before_ok,
+                before = report.before_check,
+                "Admin ran database integrity check"
+            );
+
+            Ok(crate::templates::admin_db_health_result_page(
+                &report,
+                false,
+                &csrf_clone,
+            ))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok((jar, Html(html)).into_response())
+}
+
+pub async fn admin_db_repair(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<DbMaintenanceForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
+    {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    let (jar, csrf) = ensure_csrf(jar);
+    let html = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let csrf_clone = csrf.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+
+            let report = db::attempt_db_repair(&conn);
+            tracing::info!(
+                target: "admin",
+                before_ok = report.before_ok,
+                after_ok = report.after_ok,
+                steps = report.repair_steps.len(),
+                "Admin ran database repair attempt"
+            );
+
+            Ok(crate::templates::admin_db_health_result_page(
+                &report,
+                true,
                 &csrf_clone,
             ))
         }

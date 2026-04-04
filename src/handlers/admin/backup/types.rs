@@ -65,6 +65,8 @@ pub(super) mod board_backup_types {
         pub bumped_at: i64,
         pub locked: bool,
         pub sticky: bool,
+        #[serde(default)]
+        pub archived: bool,
         pub reply_count: i64,
     }
 

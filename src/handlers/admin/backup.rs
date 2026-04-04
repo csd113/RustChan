@@ -182,6 +182,73 @@ fn parse_board_backup_manifest_from_zip<R: std::io::Read + std::io::Seek>(
         .map_err(|error| AppError::BadRequest(format!("Invalid board.json: {error}")))
 }
 
+fn validate_full_restore_archive_layout<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<()> {
+    if archive.file_names().any(|name| name == "chan.db") {
+        return Ok(());
+    }
+
+    if archive.file_names().any(|name| name == "board.json") {
+        return Err(AppError::BadRequest(
+            "Invalid full backup: zip must contain 'chan.db' at the root. \
+             This archive looks like a board backup; use Board restore instead."
+                .into(),
+        ));
+    }
+
+    Err(AppError::BadRequest(
+        "Invalid full backup: zip must contain 'chan.db' at the root.".into(),
+    ))
+}
+
+fn run_restore_db_quick_check(
+    conn: &rusqlite::Connection,
+    restore_label: &str,
+    board_short: &str,
+) -> Result<()> {
+    let result: String = conn
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+        .map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "{restore_label}: run DB quick_check for /{board_short}/: {error}"
+            ))
+        })?;
+
+    if result.eq_ignore_ascii_case("ok") {
+        return Ok(());
+    }
+
+    Err(AppError::Internal(anyhow::anyhow!(
+        "{restore_label}: live database integrity check failed before modifying /{board_short}/: \
+         {result}. The live DB appears corrupted; board restore was aborted before deleting data."
+    )))
+}
+
+fn map_board_restore_sqlite_error(
+    restore_label: &str,
+    board_short: &str,
+    context: &str,
+    error: rusqlite::Error,
+) -> AppError {
+    let message = error.to_string();
+    if message.contains("database disk image is malformed")
+        || matches!(
+            error,
+            rusqlite::Error::SqliteFailure(ref inner, _)
+                if inner.code == rusqlite::ErrorCode::DatabaseCorrupt
+                    || inner.code == rusqlite::ErrorCode::NotADatabase
+        )
+    {
+        AppError::Internal(anyhow::anyhow!(
+            "{restore_label}: {context} failed while replacing /{board_short}/: {message}. \
+             The live database appears corrupted. Restore was aborted before the backup could be applied."
+        ))
+    } else {
+        AppError::Internal(anyhow::anyhow!("{context}: {message}"))
+    }
+}
+
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 fn execute_board_restore<F>(
     conn: &mut rusqlite::Connection,
@@ -232,6 +299,9 @@ where
             |row| row.get(0),
         )
         .ok();
+    if existing_id.is_some() {
+        run_restore_db_quick_check(conn, restore_label, &board_short)?;
+    }
     let temp_dir = std::env::temp_dir();
     let db_snapshot = temp_dir.join(format!(
         "board_restore_live_before_{}.db",
@@ -252,7 +322,9 @@ where
                 "DELETE FROM threads WHERE board_id = ?1",
                 params![existing_id],
             )
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Clear threads: {error}")))?;
+            .map_err(|error| {
+                map_board_restore_sqlite_error(restore_label, &board_short, "Clear threads", error)
+            })?;
             conn.execute(
                 "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                  max_threads=?4, max_archived_threads=?5, bump_limit=?6,
@@ -325,8 +397,8 @@ where
         for thread in &manifest.threads {
             conn.execute(
                 "INSERT INTO threads (board_id, subject, created_at, bumped_at,
-                 locked, sticky, reply_count)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                 locked, sticky, archived, reply_count)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     live_board_id,
                     thread.subject,
@@ -334,6 +406,7 @@ where
                     thread.bumped_at,
                     i64::from(thread.locked),
                     i64::from(thread.sticky),
+                    i64::from(thread.archived),
                     thread.reply_count,
                 ],
             )
@@ -583,12 +656,7 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     suspicious_entry_log: &str,
     session_warning_log: &str,
 ) -> Result<String> {
-    let has_db = archive.file_names().any(|name| name == "chan.db");
-    if !has_db {
-        return Err(AppError::BadRequest(
-            "Invalid backup: zip must contain 'chan.db' at the root.".into(),
-        ));
-    }
+    validate_full_restore_archive_layout(archive)?;
 
     let temp_dir = std::env::temp_dir();
     let tmp_id = uuid::Uuid::new_v4().simple().to_string();
@@ -1083,154 +1151,245 @@ pub async fn admin_restore(
     jar: CookieJar,
     headers: HeaderMap,
     request: Request,
-) -> Result<Response> {
+) -> Response {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let content_length = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok());
+
+    tracing::info!(
+        target: "admin",
+        route = "/admin/restore",
+        content_type = content_type.unwrap_or(""),
+        content_length = content_length.unwrap_or(""),
+        has_session_cookie = jar.get(super::SESSION_COOKIE).is_some(),
+        has_csrf_cookie = jar.get("csrf_token").is_some(),
+        "Full restore upload started"
+    );
+
     let mut multipart = match Multipart::from_request(request, &state).await {
         Ok(multipart) => multipart,
         Err(error) => {
+            tracing::error!(
+                target: "admin",
+                route = "/admin/restore",
+                error = %error,
+                "Full restore multipart parsing failed before handler body"
+            );
             let target = format!(
                 "/admin/panel?restore_error={}",
                 encode_q(&format!("Upload parsing failed: {error}"))
             );
-            return Ok(redirect_page_response(&target, "Restore upload failed."));
+            return redirect_page_response(&target, "Restore upload failed.");
         }
     };
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
-    super::require_same_origin_request(&headers)?;
-    {
-        let pool = state.db.clone();
-        let session_id = session_id.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            Ok(())
+
+    let result: Result<String> = async {
+        let session_id = jar
+            .get(super::SESSION_COOKIE)
+            .map(|c| c.value().to_string());
+        super::require_same_origin_request(&headers)?;
+        {
+            let pool = state.db.clone();
+            let session_id = session_id.clone();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let conn = pool.get()?;
+                super::require_admin_session_sid(&conn, session_id.as_deref())?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Admin auth preflight task failed: {error}"))
+            })??;
+        }
+
+        let mut zip_tmp: Option<tempfile::NamedTempFile> = None;
+        let mut form_csrf: Option<String> = None;
+        let mut uploaded_filename: Option<String> = None;
+        let mut uploaded_content_type: Option<String> = None;
+        let mut uploaded_bytes = 0u64;
+
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
+        {
+            let field_name = field.name().unwrap_or("<unnamed>").to_string();
+            match field.name() {
+                Some("_csrf") => {
+                    tracing::debug!(
+                        target: "admin",
+                        route = "/admin/restore",
+                        field = "_csrf",
+                        "Full restore received CSRF field"
+                    );
+                    form_csrf = Some(
+                        field
+                            .text()
+                            .await
+                            .map_err(|e| AppError::BadRequest(e.to_string()))?,
+                    );
+                }
+                Some("backup_file") => {
+                    uploaded_filename = field.file_name().map(str::to_string);
+                    uploaded_content_type = field.content_type().map(str::to_string);
+                    tracing::info!(
+                        target: "admin",
+                        route = "/admin/restore",
+                        field = field_name,
+                        filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
+                        mime = uploaded_content_type.as_deref().unwrap_or("<missing>"),
+                        "Full restore received backup file field"
+                    );
+                    let tmp = tempfile::NamedTempFile::new()
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Tempfile: {e}")))?;
+                    let std_clone = tmp
+                        .as_file()
+                        .try_clone()
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Clone fd: {e}")))?;
+                    let async_file = tokio::fs::File::from_std(std_clone);
+                    let mut writer = tokio::io::BufWriter::new(async_file);
+                    let mut field = field;
+                    while let Some(chunk) = field
+                        .chunk()
+                        .await
+                        .map_err(|e| AppError::BadRequest(e.to_string()))?
+                    {
+                        uploaded_bytes = uploaded_bytes
+                            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                        writer
+                            .write_all(&chunk)
+                            .await
+                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write chunk: {e}")))?;
+                    }
+                    writer
+                        .flush()
+                        .await
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush: {e}")))?;
+                    zip_tmp = Some(tmp);
+                }
+                _ => {
+                    tracing::debug!(
+                        target: "admin",
+                        route = "/admin/restore",
+                        field = field_name,
+                        "Full restore ignored unexpected multipart field"
+                    );
+                    let _ = field.bytes().await;
+                }
+            }
+        }
+
+        let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+        if !crate::middleware::validate_csrf(
+            csrf_cookie.as_deref(),
+            form_csrf.as_deref().unwrap_or(""),
+        ) {
+            tracing::warn!(
+                target: "admin",
+                route = "/admin/restore",
+                has_csrf_cookie = csrf_cookie.is_some(),
+                has_form_csrf = form_csrf.is_some(),
+                "Full restore failed CSRF validation"
+            );
+            return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+        }
+
+        let zip_tmp =
+            zip_tmp.ok_or_else(|| AppError::BadRequest("No backup file uploaded.".into()))?;
+        let zip_size = zip_tmp
+            .as_file()
+            .seek(std::io::SeekFrom::End(0))
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek check: {e}")))?;
+        if zip_size == 0 {
+            return Err(AppError::BadRequest(
+                "Uploaded backup file is empty.".into(),
+            ));
+        }
+
+        tracing::info!(
+            target: "admin",
+            route = "/admin/restore",
+            filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
+            mime = uploaded_content_type.as_deref().unwrap_or("<missing>"),
+            streamed_bytes = uploaded_bytes,
+            temp_file_size = zip_size,
+            "Full restore upload streamed to disk"
+        );
+
+        let upload_dir = CONFIG.upload_dir.clone();
+
+        tokio::task::spawn_blocking({
+            let pool = state.db.clone();
+            move || -> Result<String> {
+                let mut live_conn = pool.get()?;
+                let admin_id = super::require_admin_session_sid(&live_conn, session_id.as_deref())?;
+
+                let zip_file = zip_tmp
+                    .reopen()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen zip: {e}")))?;
+                let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
+                    .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
+
+                if let Err(error) = validate_full_restore_archive_layout(&mut archive) {
+                    tracing::warn!(
+                        target: "admin",
+                        route = "/admin/restore",
+                        filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
+                        error = %error,
+                        "Full restore archive layout validation failed"
+                    );
+                    return Err(error);
+                }
+
+                execute_full_restore(
+                    &mut live_conn,
+                    admin_id,
+                    &upload_dir,
+                    &mut archive,
+                    "Restore",
+                    "Restore completed, new session issued",
+                    "Restore",
+                    "Restore",
+                )
+            }
         })
         .await
-        .map_err(|error| {
-            AppError::Internal(anyhow::anyhow!("Admin auth preflight task failed: {error}"))
-        })??;
+        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
     }
+    .await;
 
-    // Stream the uploaded zip to a NamedTempFile on disk instead of
-    // buffering the entire upload into a Vec<u8>.  Full-site backups can be
-    // several GiB; loading them entirely into the heap exhausts available memory.
-    let mut zip_tmp: Option<tempfile::NamedTempFile> = None;
-    let mut form_csrf: Option<String> = None;
+    match result {
+        Ok(fresh_sid) => {
+            if fresh_sid.is_empty() {
+                let jar = jar.remove(Cookie::from(super::SESSION_COOKIE));
+                return (jar, Redirect::to("/admin")).into_response();
+            }
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
-    {
-        match field.name() {
-            Some("_csrf") => {
-                form_csrf = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|e| AppError::BadRequest(e.to_string()))?,
-                );
-            }
-            Some("backup_file") => {
-                let tmp = tempfile::NamedTempFile::new()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Tempfile: {e}")))?;
-                // Clone the underlying fd for async writing; the original
-                // NamedTempFile retains ownership and the delete-on-drop guard.
-                let std_clone = tmp
-                    .as_file()
-                    .try_clone()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Clone fd: {e}")))?;
-                let async_file = tokio::fs::File::from_std(std_clone);
-                let mut writer = tokio::io::BufWriter::new(async_file);
-                let mut field = field;
-                while let Some(chunk) = field
-                    .chunk()
-                    .await
-                    .map_err(|e| AppError::BadRequest(e.to_string()))?
-                {
-                    writer
-                        .write_all(&chunk)
-                        .await
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Write chunk: {e}")))?;
-                }
-                writer
-                    .flush()
-                    .await
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush: {e}")))?;
-                zip_tmp = Some(tmp);
-            }
-            _ => {
-                // Drain unknown fields so the multipart stream advances.
-                let _ = field.bytes().await;
-            }
+            let mut new_cookie = Cookie::new(super::SESSION_COOKIE, fresh_sid);
+            new_cookie.set_http_only(true);
+            new_cookie.set_same_site(SameSite::Strict);
+            new_cookie.set_path("/");
+            new_cookie.set_secure(super::should_set_secure_cookie(&headers));
+            new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
+
+            (jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response()
         }
-    }
-
-    // CSRF check.
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form_csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
-
-    let zip_tmp = zip_tmp.ok_or_else(|| AppError::BadRequest("No backup file uploaded.".into()))?;
-    // Determine size without reading into RAM: seeking to end gives the byte count.
-    let zip_size = zip_tmp
-        .as_file()
-        .seek(std::io::SeekFrom::End(0))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek check: {e}")))?;
-    if zip_size == 0 {
-        return Err(AppError::BadRequest(
-            "Uploaded backup file is empty.".into(),
-        ));
-    }
-
-    let upload_dir = CONFIG.upload_dir.clone();
-
-    let fresh_sid: String = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<String> {
-            let mut live_conn = pool.get()?;
-            let admin_id = super::require_admin_session_sid(&live_conn, session_id.as_deref())?;
-
-            let zip_file = zip_tmp
-                .reopen()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen zip: {e}")))?;
-            let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
-                .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
-            execute_full_restore(
-                &mut live_conn,
-                admin_id,
-                &upload_dir,
-                &mut archive,
-                "Restore",
-                "Restore completed, new session issued",
-                "Restore",
-                "Restore",
+        Err(e) => {
+            tracing::error!(
+                target: "admin",
+                route = "/admin/restore",
+                error = %e,
+                "Full restore failed"
+            );
+            redirect_page_response(
+                &format!("/admin/panel?restore_error={}", encode_q(&e.to_string())),
+                "Restore failed.",
             )
         }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    // If we got a valid session ID back, replace the cookie and go to the
-    // panel.  If not (admin didn't exist in the backup), go to login instead.
-    if fresh_sid.is_empty() {
-        let jar = jar.remove(Cookie::from(super::SESSION_COOKIE));
-        return Ok((jar, Redirect::to("/admin")).into_response());
     }
-
-    let mut new_cookie = Cookie::new(super::SESSION_COOKIE, fresh_sid);
-    new_cookie.set_http_only(true);
-    new_cookie.set_same_site(SameSite::Strict);
-    new_cookie.set_path("/");
-    new_cookie.set_secure(super::should_set_secure_cookie(&headers));
-    // Set Max-Age so the browser expires the cookie after the configured
-    // session lifetime — matching the behaviour of the normal login handler.
-    new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
-
-    Ok((jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response())
 }
 
 // ─── Zip decompression size limiter ────────────────────────────────────
@@ -2197,6 +2356,47 @@ pub async fn board_restore(
                 &format!("/admin/panel?restore_error={}", encode_q(&e.to_string())),
                 "Board restore failed.",
             )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_full_restore_archive_layout;
+    use crate::error::AppError;
+    use std::io::{Cursor, Write as _};
+
+    fn zip_with_entries(entries: &[(&str, &[u8])]) -> zip::ZipArchive<Cursor<Vec<u8>>> {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            let options = zip::write::SimpleFileOptions::default();
+            for (name, body) in entries {
+                writer.start_file(*name, options).expect("start file");
+                writer.write_all(body).expect("write file");
+            }
+            writer.finish().expect("finish zip");
+        }
+        cursor.set_position(0);
+        zip::ZipArchive::new(cursor).expect("zip archive")
+    }
+
+    #[test]
+    fn full_restore_layout_accepts_full_backup_archive() {
+        let mut archive = zip_with_entries(&[("chan.db", b"SQLite format 3\0stub")]);
+        assert!(validate_full_restore_archive_layout(&mut archive).is_ok());
+    }
+
+    #[test]
+    fn full_restore_layout_rejects_board_backup_archive_with_helpful_hint() {
+        let mut archive = zip_with_entries(&[("board.json", br#"{"version":1}"#)]);
+        let error = validate_full_restore_archive_layout(&mut archive).expect_err("should fail");
+        match error {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("board backup"));
+                assert!(message.contains("Board restore"));
+            }
+            other => panic!("unexpected error: {other}"),
         }
     }
 }
