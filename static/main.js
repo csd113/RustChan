@@ -192,7 +192,7 @@ function startSubmitButtonAnimation(form) {
   stopSubmitButtonAnimation(form);
 
   var frame = 0;
-  var labels = ['Posting.', 'Posting..', 'Posting...'];
+  var labels = ['Posting', 'Posting.', 'Posting..', 'Posting...'];
   var buttons = Array.prototype.slice.call(form.querySelectorAll('button[type="submit"]'));
   if (!buttons.length) return;
 
@@ -205,7 +205,7 @@ function startSubmitButtonAnimation(form) {
   }
 
   render();
-  form._submitButtonAnimationTimer = window.setInterval(render, 450);
+  form._submitButtonAnimationTimer = window.setInterval(render, 900);
 }
 
 function stopSubmitButtonAnimation(form) {
