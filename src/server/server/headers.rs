@@ -45,7 +45,11 @@ pub(super) async fn safe_timeout_middleware(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let method = req.method().clone();
+    let path = req.uri().path();
     if !matches!(method, http::Method::GET | http::Method::HEAD) {
+        return next.run(req).await;
+    }
+    if path.starts_with("/admin/backup/download/") {
         return next.run(req).await;
     }
 
