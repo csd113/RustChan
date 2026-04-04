@@ -476,9 +476,13 @@ pub async fn create_board_backup(
             .is_some_and(|value| value == "1");
 
     if wants_json {
+        let download_token = new_session_id();
+        super::write_temp_board_download_token(&filename, &download_token)?;
         let body = serde_json::json!({
             "filename": filename,
-            "download_url": format!("/admin/backup/download/temp-board/{filename}?cleanup=1"),
+            "download_url": format!(
+                "/admin/backup/download/temp-board/{filename}?cleanup=1&token={download_token}"
+            ),
             "board": board_short_for_flash,
         });
         return Ok((
@@ -489,8 +493,10 @@ pub async fn create_board_backup(
     }
 
     if form.download_after_create.as_deref() == Some("1") {
+        let download_token = new_session_id();
+        super::write_temp_board_download_token(&filename, &download_token)?;
         return Ok(Redirect::to(&format!(
-            "/admin/backup/download/temp-board/{filename}?cleanup=1"
+            "/admin/backup/download/temp-board/{filename}?cleanup=1&token={download_token}"
         ))
         .into_response());
     }

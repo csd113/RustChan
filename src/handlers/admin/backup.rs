@@ -1540,6 +1540,40 @@ pub fn temp_board_download_dir() -> PathBuf {
     crate::config::runtime_temp_board_downloads_dir()
 }
 
+fn temp_board_download_token_path(filename: &str) -> PathBuf {
+    temp_board_download_dir().join(format!("{filename}.token"))
+}
+
+pub fn write_temp_board_download_token(filename: &str, token: &str) -> Result<()> {
+    std::fs::create_dir_all(temp_board_download_dir()).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Create temp board backup dir: {error}"))
+    })?;
+    std::fs::write(temp_board_download_token_path(filename), token).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Write temp board download token: {error}"))
+    })?;
+    Ok(())
+}
+
+fn consume_temp_board_download_token(filename: &str, token: &str) -> Result<bool> {
+    let token_path = temp_board_download_token_path(filename);
+    let stored = match std::fs::read_to_string(&token_path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "Read temp board download token: {error}"
+            )));
+        }
+    };
+    if stored.trim() != token {
+        return Ok(false);
+    }
+    std::fs::remove_file(token_path).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Remove temp board download token: {error}"))
+    })?;
+    Ok(true)
+}
+
 fn prune_stale_temp_board_downloads() {
     let dir = temp_board_download_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1566,6 +1600,9 @@ fn prune_stale_temp_board_downloads() {
         };
         if age >= cutoff {
             let _ = std::fs::remove_file(path);
+            if let Some(filename) = entry.file_name().to_str() {
+                let _ = std::fs::remove_file(temp_board_download_token_path(filename));
+            }
         }
     }
 }
@@ -1677,18 +1714,6 @@ pub async fn download_backup(
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
 
-    // Auth check.
-    tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<()> {
-            let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
     // Validate filename — only allow safe characters to prevent path traversal.
     let safe_filename: String = filename
         .chars()
@@ -1706,14 +1731,46 @@ pub async fn download_backup(
         ));
     }
 
+    match kind.as_str() {
+        "temp-board" => {
+            prune_stale_temp_board_downloads();
+            if let Some(token) = query.token.as_deref() {
+                if !consume_temp_board_download_token(&safe_filename, token)? {
+                    return Err(AppError::Forbidden("Invalid or expired download token.".into()));
+                }
+            } else {
+                tokio::task::spawn_blocking({
+                    let pool = state.db.clone();
+                    move || -> Result<()> {
+                        let conn = pool.get()?;
+                        super::require_admin_session_sid(&conn, session_id.as_deref())?;
+                        Ok(())
+                    }
+                })
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+            }
+        }
+        "full" | "board" => {
+            tokio::task::spawn_blocking({
+                let pool = state.db.clone();
+                move || -> Result<()> {
+                    let conn = pool.get()?;
+                    super::require_admin_session_sid(&conn, session_id.as_deref())?;
+                    Ok(())
+                }
+            })
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+        }
+        _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
+    }
+
     let backup_dir = match kind.as_str() {
         "full" => full_backup_dir(),
         "board" => board_backup_dir(),
-        "temp-board" => {
-            prune_stale_temp_board_downloads();
-            temp_board_download_dir()
-        }
-        _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
+        "temp-board" => temp_board_download_dir(),
+        _ => unreachable!("validated above"),
     };
 
     let path = backup_dir.join(&safe_filename);
@@ -1798,6 +1855,7 @@ pub async fn backup_progress_json(
 #[derive(Default, Deserialize)]
 pub struct DownloadBackupQuery {
     cleanup: Option<String>,
+    token: Option<String>,
 }
 
 // ─── POST /admin/backup/delete ────────────────────────────────────────────────
@@ -2434,7 +2492,10 @@ pub async fn board_restore(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_full_restore_archive_layout;
+    use super::{
+        consume_temp_board_download_token, temp_board_download_token_path,
+        validate_full_restore_archive_layout, write_temp_board_download_token,
+    };
     use crate::error::AppError;
     use std::io::{Cursor, Write as _};
 
@@ -2470,5 +2531,17 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn temp_board_download_token_is_one_time_use() {
+        let filename = "rustchan-board-test-20990101_000000.zip";
+        let token = "token-123";
+        let token_path = temp_board_download_token_path(filename);
+        let _ = std::fs::remove_file(&token_path);
+
+        write_temp_board_download_token(filename, token).expect("write token");
+        assert!(consume_temp_board_download_token(filename, token).expect("consume token"));
+        assert!(!consume_temp_board_download_token(filename, token).expect("token removed"));
     }
 }
