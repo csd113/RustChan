@@ -1175,7 +1175,7 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
             let mut src = std::fs::File::open(&path).map_err(|e| {
                 AppError::Internal(anyhow::anyhow!("open {}: {}", path.display(), e))
             })?;
-            zip.start_file(&zip_path, opts)
+            zip.start_file(&zip_path, zip_file_options_for_path(&path))
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("zip file entry: {e}")))?;
             let copied = std::io::copy(&mut src, zip).map_err(|e| {
                 AppError::Internal(anyhow::anyhow!("copy {} to zip: {}", path.display(), e))
@@ -1186,6 +1186,53 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
         }
     }
     Ok(())
+}
+
+fn zip_file_options_for_path(path: &Path) -> zip::write::SimpleFileOptions {
+    let method = if should_store_without_recompress(path) {
+        zip::CompressionMethod::Stored
+    } else {
+        zip::CompressionMethod::Deflated
+    };
+    zip::write::SimpleFileOptions::default().compression_method(method)
+}
+
+fn should_store_without_recompress(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "7z"
+                    | "aac"
+                    | "avif"
+                    | "bz2"
+                    | "flac"
+                    | "gif"
+                    | "gz"
+                    | "jpeg"
+                    | "jpg"
+                    | "m4a"
+                    | "m4v"
+                    | "mkv"
+                    | "mov"
+                    | "mp3"
+                    | "mp4"
+                    | "ogg"
+                    | "opus"
+                    | "png"
+                    | "rar"
+                    | "tbz"
+                    | "tbz2"
+                    | "tgz"
+                    | "wav"
+                    | "webm"
+                    | "webp"
+                    | "xz"
+                    | "zip"
+                    | "zst"
+            )
+        })
 }
 
 // ─── POST /admin/restore ──────────────────────────────────────────────────────
@@ -2493,11 +2540,13 @@ pub async fn board_restore(
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_temp_board_download_token, temp_board_download_token_path,
-        validate_full_restore_archive_layout, write_temp_board_download_token,
+        consume_temp_board_download_token, should_store_without_recompress,
+        temp_board_download_token_path, validate_full_restore_archive_layout,
+        write_temp_board_download_token,
     };
     use crate::error::AppError;
     use std::io::{Cursor, Write as _};
+    use std::path::Path;
 
     fn zip_with_entries(entries: &[(&str, &[u8])]) -> zip::ZipArchive<Cursor<Vec<u8>>> {
         let mut cursor = Cursor::new(Vec::new());
@@ -2543,5 +2592,14 @@ mod tests {
         write_temp_board_download_token(filename, token).expect("write token");
         assert!(consume_temp_board_download_token(filename, token).expect("consume token"));
         assert!(!consume_temp_board_download_token(filename, token).expect("token removed"));
+    }
+
+    #[test]
+    fn already_compressed_media_is_stored_without_recompression() {
+        assert!(should_store_without_recompress(Path::new("uploads/mu/track.FLAC")));
+        assert!(should_store_without_recompress(Path::new("uploads/mu/cover.webp")));
+        assert!(should_store_without_recompress(Path::new("uploads/mu/video.webm")));
+        assert!(!should_store_without_recompress(Path::new("board.json")));
+        assert!(!should_store_without_recompress(Path::new("uploads/mu/readme.txt")));
     }
 }

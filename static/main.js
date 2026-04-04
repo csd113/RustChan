@@ -2423,7 +2423,7 @@ document.addEventListener('click', function (e) {
           a.click();
           setTimeout(function () {
             if (a.parentNode) a.parentNode.removeChild(a);
-            window.location.reload();
+            hideBackupModal();
           }, 1500);
           return;
         }

@@ -26,7 +26,11 @@ fn now_secs() -> u64 {
 #[allow(clippy::arithmetic_side_effects)]
 pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    if path.starts_with("/static/") || path.starts_with("/boards/") {
+    if path.starts_with("/static/")
+        || path.starts_with("/boards/")
+        || path == "/admin/log/live"
+        || path == "/admin/backup/progress"
+    {
         return next.run(req).await;
     }
 
