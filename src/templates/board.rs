@@ -56,6 +56,279 @@ fn board_reorder_controls(
     )
 }
 
+fn render_board_card(
+    stats: &crate::models::BoardStats,
+    nsfw_consent: bool,
+    csrf_token: &str,
+    show_reorder_controls: bool,
+    is_first: bool,
+    is_last: bool,
+) -> String {
+    let board = &stats.board;
+    let nsfw_badge = if board.nsfw {
+        r#"<span class="nsfw-badge">NSFW</span>"#
+    } else {
+        ""
+    };
+    let href = if board.nsfw && !nsfw_consent {
+        format!("/?nsfw={}", urlencoding_simple(&board.short_name))
+    } else {
+        format!("/{}/catalog", escape_html(&board.short_name))
+    };
+    let action_attr = if board.nsfw && !nsfw_consent {
+        " data-action=\"open-nsfw-disclaimer\""
+    } else {
+        ""
+    };
+    let return_to_attr = if board.nsfw {
+        format!(
+            r#" data-return-to="/{}/catalog" data-board-label="/{}/""#,
+            escape_html(&board.short_name),
+            escape_html(&board.short_name)
+        )
+    } else {
+        String::new()
+    };
+    let thread_word = if stats.thread_count == 1 {
+        "thread"
+    } else {
+        "threads"
+    };
+    let reorder_controls = if show_reorder_controls {
+        board_reorder_controls(board, csrf_token, "/", is_first, is_last)
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"<div class="board-card">
+  {reorder_controls}
+  <a class="board-card-link" href="{href}"{action_attr}{return_to_attr}>
+    <div class="board-card-short">/{sh}/</div>
+    <div class="board-card-name">{name}{nsfw}</div>
+    <div class="board-card-desc">{description}</div>
+    <div class="board-card-stats">{thread_count} {thread_word}</div>
+  </a>
+</div>"#,
+        reorder_controls = reorder_controls,
+        href = href,
+        action_attr = action_attr,
+        return_to_attr = return_to_attr,
+        sh = escape_html(&board.short_name),
+        name = escape_html(&board.name),
+        nsfw = nsfw_badge,
+        description = escape_html(&board.description),
+        thread_count = stats.thread_count,
+        thread_word = thread_word,
+    )
+}
+
+fn render_catalog_thumb(thread: &Thread) -> String {
+    let badges = super::thread::render_thread_state_badges(thread.sticky, thread.locked);
+    let media = thread.op_thumb.as_ref().map_or_else(
+        || {
+            thread
+                .op_body
+                .as_deref()
+                .and_then(embed_thumb_from_body)
+                .map_or_else(
+                    || r#"<div class="catalog-no-image">no img</div>"#.to_string(),
+                    |embed_thumb| {
+                        format!(
+                            r#"<img class="catalog-thumb embed-catalog-thumb" src="{}" loading="lazy" alt="video thumbnail">"#,
+                            escape_html(&embed_thumb)
+                        )
+                    },
+                )
+        },
+        |thumb| {
+            format!(
+                r#"<img class="catalog-thumb" src="/boards/{}" loading="lazy" alt="">"#,
+                escape_html(thumb)
+            )
+        },
+    );
+
+    format!(r#"<div class="catalog-card-media">{media}{badges}</div>"#)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_catalog_actions(
+    board_short: &str,
+    thread: &Thread,
+    csrf_token: &str,
+    pin_action: &str,
+    pin_label: &str,
+    hide_action: &str,
+    hide_label: &str,
+    return_to: &str,
+) -> String {
+    format!(
+        r#"<div class="catalog-card-actions">
+  <button type="button" class="catalog-thread-menu-toggle" data-action="toggle-thread-menu" aria-haspopup="true" aria-expanded="false" aria-label="Thread actions"></button>
+  <div class="catalog-thread-menu" hidden>
+    <button type="button" class="catalog-thread-menu-item" data-action="open-report" data-pid="{post_id}" data-tid="{thread_id}" data-board="{board}" data-csrf="{csrf}" data-report-label="Reporting thread No.{thread_id}">Report thread</button>
+    <form method="POST" action="/{board}/thread-preference">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <input type="hidden" name="thread_id" value="{thread_id}">
+      <input type="hidden" name="board" value="{board}">
+      <input type="hidden" name="action" value="{pin_action}">
+      <input type="hidden" name="return_to" value="{return_to}">
+      <button type="submit" class="catalog-thread-menu-item">{pin_label}</button>
+    </form>
+    <form method="POST" action="/{board}/thread-preference">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <input type="hidden" name="thread_id" value="{thread_id}">
+      <input type="hidden" name="board" value="{board}">
+      <input type="hidden" name="action" value="{hide_action}">
+      <input type="hidden" name="return_to" value="{return_to}">
+      <button type="submit" class="catalog-thread-menu-item">{hide_label}</button>
+    </form>
+  </div>
+</div>"#,
+        post_id = thread.op_id.unwrap_or(thread.id),
+        thread_id = thread.id,
+        board = escape_html(board_short),
+        csrf = escape_html(csrf_token),
+        pin_action = pin_action,
+        pin_label = pin_label,
+        hide_action = hide_action,
+        hide_label = hide_label,
+        return_to = escape_html(return_to),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_catalog_card(
+    board: &Board,
+    thread: &Thread,
+    is_pinned: bool,
+    csrf_token: &str,
+    pin_action: &str,
+    pin_label: &str,
+    hide_action: &str,
+    hide_label: &str,
+    return_to: &str,
+) -> String {
+    let subject_preview: String = thread
+        .subject
+        .as_deref()
+        .unwrap_or("")
+        .chars()
+        .take(80)
+        .collect();
+    let comment_preview: String = thread
+        .op_body
+        .as_deref()
+        .unwrap_or("")
+        .chars()
+        .take(140)
+        .collect();
+    let subject_html = if subject_preview.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<p class="catalog-subject">{}</p>"#,
+            escape_html(&subject_preview)
+        )
+    };
+    let comment_html = if comment_preview.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<p class="catalog-comment">{}</p>"#,
+            escape_html(&comment_preview)
+        )
+    };
+    let actions_html = render_catalog_actions(
+        &board.short_name,
+        thread,
+        csrf_token,
+        pin_action,
+        pin_label,
+        hide_action,
+        hide_label,
+        return_to,
+    );
+
+    format!(
+        r#"<div class="catalog-item{sticky}{pinned_class}" data-replies="{replies}" data-created="{created}" data-bumped="{bumped}" data-sticky="{is_sticky}" data-pinned="{is_pinned}">
+{actions}
+<a class="catalog-card-link" href="/{board}/thread/{thread_id}">
+  {thumb}
+  <div class="catalog-info">
+    <div class="catalog-meta-row">
+      <div class="catalog-meta-center">
+        <span class="catalog-replies">R: {replies} / F: {images}</span>
+      </div>
+    </div>
+    {subject}
+    {comment}
+  </div>
+</a>
+</div>"#,
+        sticky = if thread.sticky { " sticky" } else { "" },
+        pinned_class = if is_pinned { " is-pinned" } else { "" },
+        replies = thread.reply_count,
+        created = thread.created_at,
+        bumped = thread.bumped_at,
+        is_sticky = if thread.sticky { "1" } else { "0" },
+        is_pinned = if is_pinned { "1" } else { "0" },
+        board = escape_html(&board.short_name),
+        thread_id = thread.id,
+        thumb = render_catalog_thumb(thread),
+        images = thread.image_count,
+        actions = actions_html,
+        subject = subject_html,
+        comment = comment_html,
+    )
+}
+
+fn render_archive_row(board_short: &str, thread: &Thread) -> String {
+    let preview: String = thread
+        .op_body
+        .as_deref()
+        .unwrap_or("")
+        .chars()
+        .take(120)
+        .collect();
+    let subject_html = thread.subject.as_ref().map_or_else(String::new, |subject| {
+        format!(
+            r#"<span class="archive-thread-subj">{}</span> - "#,
+            escape_html(subject)
+        )
+    });
+    let thumb_html = thread.op_thumb.as_ref().map_or_else(String::new, |thumb| {
+        format!(
+            r#"<div class="archive-row-media"><img src="/boards/{}" class="archive-thumb" alt="thumb" loading="lazy">{}</div>"#,
+            escape_html(thumb),
+            super::thread::render_thread_state_badges(thread.sticky, thread.locked),
+        )
+    });
+    let thread_state_badges =
+        super::thread::render_thread_state_badges(thread.sticky, thread.locked);
+
+    format!(
+        r#"<a href="/{board}/thread/{thread_id}" class="archive-row archive-thread-link">
+  {thumb}
+  <div class="archive-row-info">
+    <span class="archive-thread-link-text">
+      {subject}<span class="archive-preview">{preview}</span>
+    </span>
+    <span class="archive-meta">No.{thread_id}{state_badges} - {replies} replies - {created_at} &#128190;</span>
+  </div>
+</a>"#,
+        board = escape_html(board_short),
+        thread_id = thread.id,
+        thumb = thumb_html,
+        subject = subject_html,
+        preview = escape_html(&preview),
+        state_badges = thread_state_badges,
+        replies = thread.reply_count,
+        created_at = fmt_ts(thread.created_at),
+    )
+}
+
 fn board_cards(
     list: &[&crate::models::BoardStats],
     nsfw_consent: bool,
@@ -64,63 +337,14 @@ fn board_cards(
 ) -> String {
     let mut out = String::new();
     for (index, s) in list.iter().enumerate() {
-        let b = &s.board;
-        let nsfw_badge = if b.nsfw {
-            r#"<span class="nsfw-badge">NSFW</span>"#
-        } else {
-            ""
-        };
-        let href = if b.nsfw && !nsfw_consent {
-            format!("/?nsfw={}", urlencoding_simple(&b.short_name))
-        } else {
-            format!("/{}/catalog", escape_html(&b.short_name))
-        };
-        let action_attr = if b.nsfw && !nsfw_consent {
-            " data-action=\"open-nsfw-disclaimer\""
-        } else {
-            ""
-        };
-        let return_to_attr = if b.nsfw {
-            format!(
-                r#" data-return-to="/{}/catalog" data-board-label="/{}/""#,
-                escape_html(&b.short_name),
-                escape_html(&b.short_name)
-            )
-        } else {
-            String::new()
-        };
-        let thread_word = if s.thread_count == 1 {
-            "thread"
-        } else {
-            "threads"
-        };
-        let reorder_controls = if show_reorder_controls {
-            board_reorder_controls(b, csrf_token, "/", index == 0, index + 1 == list.len())
-        } else {
-            String::new()
-        };
-        let _ = write!(
-            out,
-            r#"<div class="board-card">
-  {reorder_controls}
-  <a class="board-card-link" href="{href}"{action_attr}{return_to_attr}>
-    <div class="board-card-short">/{sh}/</div>
-    <div class="board-card-name">{n}{nsfw}</div>
-    <div class="board-card-desc">{d}</div>
-    <div class="board-card-stats">{tc} {tw}</div>
-  </a>
-</div>"#,
-            reorder_controls = reorder_controls,
-            href = href,
-            action_attr = action_attr,
-            return_to_attr = return_to_attr,
-            sh = escape_html(&b.short_name),
-            n = escape_html(&b.name),
-            nsfw = nsfw_badge,
-            d = escape_html(&b.description),
-            tc = s.thread_count,
-            tw = thread_word,
-        );
+        out.push_str(&render_board_card(
+            s,
+            nsfw_consent,
+            csrf_token,
+            show_reorder_controls,
+            index == 0,
+            index + 1 == list.len(),
+        ));
     }
     out
 }
@@ -427,7 +651,7 @@ fn render_thread_summary(
     if let (Some(_file), Some(thumb)) = (&t.op_file, &t.op_thumb) {
         let _ = write!(
             html,
-            r#"<div class="file-container catalog-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image">{badges}</a></div>"#,
+            r#"<div class="file-container catalog-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image"></a>{badges}</div>"#,
             board = escape_html(board_short),
             tid = t.id,
             th = escape_html(thumb),
@@ -436,7 +660,7 @@ fn render_thread_summary(
     } else if let Some(embed_thumb) = t.op_body.as_deref().and_then(embed_thumb_from_body) {
         let _ = write!(
             html,
-            r#"<div class="file-container catalog-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" alt="video thumbnail">{badges}</a></div>"#,
+            r#"<div class="file-container catalog-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" alt="video thumbnail"></a>{badges}</div>"#,
             board = escape_html(board_short),
             tid = t.id,
             src = escape_html(&embed_thumb),
@@ -700,49 +924,6 @@ pub fn catalog_page(
     );
 
     for t in threads {
-        let thumb_html = t.op_thumb.as_ref().map_or_else(|| {
-            t.op_body.as_deref().and_then(embed_thumb_from_body).map_or_else(
-                || r#"<div class="catalog-no-image">no img</div>"#.to_string(),
-                |embed_thumb| format!(
-                    r#"<img class="catalog-thumb embed-catalog-thumb" src="{}" loading="lazy" alt="video thumbnail">"#,
-                    escape_html(&embed_thumb)
-                ),
-            )
-        }, |th| format!(
-            r#"<img class="catalog-thumb" src="/boards/{}" loading="lazy" alt="">"#,
-            escape_html(th)
-        ));
-
-        let subject_preview: String = t
-            .subject
-            .as_deref()
-            .unwrap_or("")
-            .chars()
-            .take(80)
-            .collect();
-        let comment_preview: String = t
-            .op_body
-            .as_deref()
-            .unwrap_or("")
-            .chars()
-            .take(140)
-            .collect();
-        let subject_html = if subject_preview.is_empty() {
-            String::new()
-        } else {
-            format!(
-                r#"<p class="catalog-subject">{}</p>"#,
-                escape_html(&subject_preview)
-            )
-        };
-        let comment_html = if comment_preview.is_empty() {
-            String::new()
-        } else {
-            format!(
-                r#"<p class="catalog-comment">{}</p>"#,
-                escape_html(&comment_preview)
-            )
-        };
         let is_pinned = pinned_ids.contains(&t.id);
         let menu_hide_action = if hidden_view { "unhide" } else { "hide" };
         let menu_hide_label = if hidden_view {
@@ -763,66 +944,17 @@ pub fn catalog_page(
         } else {
             format!("/{}/catalog", board.short_name)
         };
-
-        let _ = write!(
-            body,
-            r#"<div class="catalog-item{sticky}{pinned_class}" data-replies="{replies}" data-created="{created}" data-bumped="{bumped}" data-sticky="{is_sticky}" data-pinned="{is_pinned}">
-<a class="catalog-card-link" href="/{board}/thread/{tid}">
-{thumb}
-<div class="catalog-info">
-<div class="catalog-meta-row">
-<div class="catalog-meta-center">
-<span class="catalog-replies">R: {replies} / F: {images}</span>
-<div class="catalog-card-actions">
-  <button type="button" class="catalog-thread-menu-toggle" data-action="toggle-thread-menu" aria-haspopup="true" aria-expanded="false" aria-label="Thread actions"></button>
-  <div class="catalog-thread-menu" hidden>
-    <button type="button" class="catalog-thread-menu-item" data-action="open-report" data-pid="{post_id}" data-tid="{tid}" data-board="{board}" data-csrf="{csrf}" data-report-label="Reporting thread No.{tid}">Report thread</button>
-    <form method="POST" action="/{board}/thread-preference">
-      <input type="hidden" name="_csrf" value="{csrf}">
-      <input type="hidden" name="thread_id" value="{tid}">
-      <input type="hidden" name="board" value="{board}">
-      <input type="hidden" name="action" value="{pin_action}">
-      <input type="hidden" name="return_to" value="{return_to}">
-      <button type="submit" class="catalog-thread-menu-item">{pin_label}</button>
-    </form>
-    <form method="POST" action="/{board}/thread-preference">
-      <input type="hidden" name="_csrf" value="{csrf}">
-      <input type="hidden" name="thread_id" value="{tid}">
-      <input type="hidden" name="board" value="{board}">
-      <input type="hidden" name="action" value="{menu_hide_action}">
-      <input type="hidden" name="return_to" value="{return_to}">
-      <button type="submit" class="catalog-thread-menu-item">{menu_hide_label}</button>
-    </form>
-  </div>
-</div>
-</div>
-</div>
-{subject}
-{comment}
-</div>
-</a>
-</div>"#,
-            sticky = if t.sticky { " sticky" } else { "" },
-            pinned_class = if is_pinned { " is-pinned" } else { "" },
-            is_pinned = if is_pinned { "1" } else { "0" },
-            is_sticky = if t.sticky { "1" } else { "0" },
-            board = escape_html(&board.short_name),
-            tid = t.id,
-            post_id = t.op_id.unwrap_or(t.id),
-            thumb = thumb_html,
-            replies = t.reply_count,
-            images = t.image_count,
-            subject = subject_html,
-            comment = comment_html,
-            created = t.created_at,
-            bumped = t.bumped_at,
-            csrf = escape_html(csrf_token),
-            pin_action = pin_action,
-            pin_label = pin_label,
-            menu_hide_action = menu_hide_action,
-            menu_hide_label = menu_hide_label,
-            return_to = escape_html(&return_to)
-        );
+        body.push_str(&render_catalog_card(
+            board,
+            t,
+            is_pinned,
+            csrf_token,
+            pin_action,
+            pin_label,
+            menu_hide_action,
+            menu_hide_label,
+            &return_to,
+        ));
     }
 
     if threads.is_empty() {
@@ -983,45 +1115,7 @@ pub fn archive_page(
     } else {
         body.push_str(r#"<div class="archive-list">"#);
         for t in threads {
-            let preview: String = t
-                .op_body
-                .as_deref()
-                .unwrap_or("")
-                .chars()
-                .take(120)
-                .collect();
-            let subj = t.subject.as_ref().map_or_else(String::new, |s| {
-                format!(
-                    r#"<span class="archive-thread-subj">{}</span> — "#,
-                    escape_html(s)
-                )
-            });
-            let thumb_html = t.op_thumb.as_ref().map_or_else(String::new, |thumb| {
-                format!(
-                    r#"<img src="/boards/{}" class="archive-thumb" alt="thumb" loading="lazy">"#,
-                    escape_html(thumb)
-                )
-            });
-            let ts = fmt_ts(t.created_at);
-            let _ = write!(
-                body,
-                r#"<a href="/{board}/thread/{tid}" class="archive-row archive-thread-link">
-  {thumb}
-  <div class="archive-row-info">
-    <span class="archive-thread-link-text">
-      {subj}<span class="archive-preview">{preview}</span>
-    </span>
-    <span class="archive-meta">No.{tid} &mdash; {replies} replies &mdash; {ts} &#128190;</span>
-  </div>
-</a>"#,
-                thumb = thumb_html,
-                board = bs,
-                tid = t.id,
-                subj = subj,
-                preview = escape_html(&preview),
-                replies = t.reply_count,
-                ts = ts
-            );
+            body.push_str(&render_archive_row(&board.short_name, t));
         }
         body.push_str("</div>");
         // escape before embedding in pagination URL.
@@ -1041,4 +1135,153 @@ pub fn archive_page(
         collapse_greentext,
         &format!("/{}/archive", board.short_name),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{archive_page, board_cards, catalog_page, render_catalog_card};
+    use crate::models::{Board, BoardStats, Thread};
+    use std::collections::HashSet;
+
+    fn sample_board() -> Board {
+        Board {
+            id: 1,
+            display_order: 0,
+            short_name: "test".into(),
+            name: "Test".into(),
+            description: "Board description".into(),
+            nsfw: false,
+            max_threads: 100,
+            max_archived_threads: 100,
+            bump_limit: 300,
+            allow_images: true,
+            allow_video: true,
+            allow_audio: true,
+            allow_any_files: false,
+            allow_tripcodes: true,
+            allow_editing: false,
+            edit_window_secs: 0,
+            allow_archive: true,
+            allow_video_embeds: true,
+            allow_captcha: false,
+            show_poster_ids: false,
+            collapse_greentext: false,
+            post_cooldown_secs: 0,
+            created_at: 1_700_000_000,
+        }
+    }
+
+    fn sample_thread() -> Thread {
+        Thread {
+            id: 87,
+            board_id: 1,
+            subject: Some("Thread subject".into()),
+            created_at: 1_700_000_000,
+            bumped_at: 1_700_000_100,
+            locked: true,
+            sticky: true,
+            archived: false,
+            reply_count: 12,
+            image_count: 3,
+            op_body: Some("Thread body preview".into()),
+            op_file: Some("test/image.webp".into()),
+            op_thumb: Some("test/thumbs/image.webp".into()),
+            op_name: Some("anon".into()),
+            op_tripcode: None,
+            op_id: Some(87),
+        }
+    }
+
+    #[test]
+    fn board_cards_render_reorder_controls_only_when_enabled() {
+        let board = sample_board();
+        let stats = BoardStats {
+            board,
+            thread_count: 4,
+        };
+
+        let html_without_controls = board_cards(&[&stats], true, "csrf", false);
+        assert!(html_without_controls.contains("board-card-link"));
+        assert!(!html_without_controls.contains("board-reorder-menu"));
+
+        let html_with_controls = board_cards(&[&stats], true, "csrf", true);
+        assert!(html_with_controls.contains("board-reorder-menu"));
+    }
+
+    #[test]
+    fn catalog_page_renders_componentized_card_with_state_badges() {
+        let board = sample_board();
+        let thread = sample_thread();
+        let mut pinned_ids = HashSet::new();
+        pinned_ids.insert(thread.id);
+
+        let html = catalog_page(
+            &board,
+            &[thread],
+            &pinned_ids,
+            0,
+            false,
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            false,
+        );
+
+        assert!(html.contains("catalog-card-link"));
+        assert!(html.contains("catalog-card-media"));
+        assert!(html.contains("thread-state-badge-pin"));
+        assert!(html.contains("thread-state-badge-lock"));
+        assert!(html.contains(r#"data-pinned="1""#));
+    }
+
+    #[test]
+    fn catalog_actions_render_outside_card_link() {
+        let board = sample_board();
+        let thread = sample_thread();
+
+        let html = render_catalog_card(
+            &board,
+            &thread,
+            false,
+            "csrf",
+            "pin",
+            "Pin thread",
+            "hide",
+            "Hide thread",
+            "/test/catalog",
+        );
+
+        let actions_idx = html
+            .find("catalog-card-actions")
+            .expect("catalog actions should exist");
+        let link_idx = html
+            .find("catalog-card-link")
+            .expect("catalog link should exist");
+        assert!(
+            actions_idx < link_idx,
+            "interactive actions should render outside the card link"
+        );
+    }
+
+    #[test]
+    fn archive_page_renders_state_badges_and_media_wrapper() {
+        let board = sample_board();
+        let thread = sample_thread();
+
+        let html = archive_page(
+            &board,
+            &[thread],
+            &crate::models::Pagination::new(1, 10, 1),
+            "csrf",
+            std::slice::from_ref(&board),
+            None,
+            false,
+        );
+
+        assert!(html.contains("archive-row-media"));
+        assert!(html.contains("thread-state-badge-pin"));
+        assert!(html.contains("thread-state-badge-lock"));
+        assert!(html.contains("archive-meta"));
+    }
 }
