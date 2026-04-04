@@ -106,7 +106,7 @@ pub(super) fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> S
 
 pub(super) fn render_restored_body_html(body: &str) -> String {
     let escaped = crate::utils::sanitize::escape_html(body);
-    crate::utils::sanitize::render_post_body(&escaped)
+    crate::utils::sanitize::render_post_body(&escaped, false)
 }
 
 #[allow(clippy::arithmetic_side_effects)]

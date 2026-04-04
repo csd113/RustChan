@@ -393,6 +393,9 @@ pub fn admin_panel_page(
 
     // ── Report inbox ──────────────────────────────────────────────────────────
     let report_count = reports.len();
+    let appeal_count = appeals.len();
+    let ban_count = bans.len();
+    let filter_count = filters.len();
     let report_badge = if report_count > 0 {
         format!(r#" <span class="report-badge">{report_count}</span>"#)
     } else {
@@ -447,17 +450,16 @@ pub fn admin_panel_page(
     }
 
     // ── Ban appeals ───────────────────────────────────────────────────────────
-    let appeal_badge = if appeals.is_empty() {
+    let appeal_badge = if appeal_count > 0 {
+        format!(r#" <span class="report-badge">{appeal_count}</span>"#)
+    } else {
         String::new()
-    } else {
-        format!(r#" <span class="report-badge">{}</span>"#, appeals.len())
     };
-    let moderation_open_attr = if report_count > 0 || !appeals.is_empty() {
-        " open"
-    } else {
-        ""
-    };
-    let moderation_summary_badges = format!("{report_badge}{appeal_badge}");
+    let ban_badge = format!(r#" <span class="admin-count-badge">{ban_count}</span>"#);
+    let filter_badge = format!(r#" <span class="admin-count-badge">{filter_count}</span>"#);
+    let moderation_open_attr = " open";
+    let moderation_summary_badges =
+        format!("{report_badge}{appeal_badge}{ban_badge}{filter_badge}");
 
     let mut appeal_rows = String::new();
     if appeals.is_empty() {
@@ -628,52 +630,80 @@ old boards to prevent query performance degradation.
 <details class="admin-dropdown"{moderation_open_attr}>
 <summary><span>// moderation</span><span class="admin-dropdown-badges">{moderation_summary_badges}</span></summary>
 <div class="admin-dropdown-content">
-<div class="admin-subsection">
-<h3>// moderation log <a href="/admin/mod-log" style="font-size:0.78rem;margin-left:0.6rem;color:var(--text-dim)">[ view full log ]</a></h3>
-<p style="color:var(--text-dim);font-size:0.82rem">All admin actions are recorded in the moderation log. Click <em>view full log</em> to browse the history.</p>
-</div>
+<p class="admin-moderation-intro">
+  Live queues come first, policy controls come second, and the log stays available for historical review.
+</p>
+<div class="admin-moderation-grid">
+  <section class="admin-moderation-card admin-moderation-card-review">
+    <div class="admin-card-header">
+      <h3>// review queue</h3>
+      <p>Handle open reports and ban appeals before changing policy.</p>
+    </div>
+    <div class="admin-subsection admin-subsection-tight">
+      <h4>// report inbox{report_badge}</h4>
+      <table class="admin-table">
+        <thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
+        <tbody>{report_rows}</tbody>
+      </table>
+    </div>
 
-<div class="admin-subsection">
-<h3>// report inbox{report_badge}</h3>
-<table class="admin-table">
-<thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
-<tbody>{report_rows}</tbody>
-</table>
-</div>
+    <div class="admin-subsection admin-subsection-tight">
+      <h4 id="appeals">// ban appeals{appeal_badge}</h4>
+      <table class="admin-table">
+        <thead><tr><th>ip (partial)</th><th>appeal message</th><th>filed</th><th>action</th></tr></thead>
+        <tbody>{appeal_rows}</tbody>
+      </table>
+    </div>
+  </section>
 
-<div class="admin-subsection">
-<h3 id="appeals">// ban appeals{appeal_badge}</h3>
-<table class="admin-table">
-<thead><tr><th>ip (partial)</th><th>appeal message</th><th>filed</th><th>action</th></tr></thead>
-<tbody>{appeal_rows}</tbody>
-</table>
+  <section class="admin-moderation-card admin-moderation-card-controls">
+    <div class="admin-card-header">
+      <h3>// policy controls</h3>
+      <p>Manage bans and automated word replacements.</p>
+    </div>
 
-<h3 style="margin-top:1.5rem">// active bans</h3>
-<table class="admin-table">
-<thead><tr><th>ip hash (partial)</th><th>reason</th><th>expires</th><th>action</th></tr></thead>
-<tbody>{ban_rows}</tbody>
-</table>
-<h4>add ban</h4>
-<form method="POST" action="/admin/ban/add">
-<input type="hidden" name="_csrf" value="{csrf}">
-<input type="text" name="ip_hash" placeholder="ip hash" required>
-<input type="text" name="reason" placeholder="reason">
-<input type="text" name="duration_hours" placeholder="hours (blank=perm)" style="width:120px">
-<button type="submit">ban</button>
-</form>
+    <div class="admin-subsection admin-subsection-tight" id="active-bans">
+      <h4>// active bans{ban_badge}</h4>
+      <table class="admin-table">
+        <thead><tr><th>ip hash (partial)</th><th>reason</th><th>expires</th><th>action</th></tr></thead>
+        <tbody>{ban_rows}</tbody>
+      </table>
+      <h4>add ban</h4>
+      <form method="POST" action="/admin/ban/add" class="admin-moderation-form">
+        <input type="hidden" name="_csrf" value="{csrf}">
+        <input type="text" name="ip_hash" placeholder="ip hash" required>
+        <input type="text" name="reason" placeholder="reason">
+        <input type="text" name="duration_hours" placeholder="hours (blank=perm)" style="width:120px">
+        <button type="submit">ban</button>
+      </form>
+    </div>
 
-<h3 style="margin-top:1.5rem">// word filters</h3>
-<table class="admin-table">
-<thead><tr><th>pattern</th><th>replacement</th><th>action</th></tr></thead>
-<tbody>{filter_rows}</tbody>
-</table>
-<h4>add filter</h4>
-<form method="POST" action="/admin/filter/add">
-<input type="hidden" name="_csrf" value="{csrf}">
-<input type="text" name="pattern" placeholder="pattern to match" required>
-<input type="text" name="replacement" placeholder="replace with">
-<button type="submit">add</button>
-</form>
+    <div class="admin-subsection admin-subsection-tight" id="word-filters">
+      <h4>// word filters{filter_badge}</h4>
+      <table class="admin-table">
+        <thead><tr><th>pattern</th><th>replacement</th><th>action</th></tr></thead>
+        <tbody>{filter_rows}</tbody>
+      </table>
+      <h4>add filter</h4>
+      <form method="POST" action="/admin/filter/add" class="admin-moderation-form">
+        <input type="hidden" name="_csrf" value="{csrf}">
+        <input type="text" name="pattern" placeholder="pattern to match" required>
+        <input type="text" name="replacement" placeholder="replace with">
+        <button type="submit">add</button>
+      </form>
+    </div>
+  </section>
+
+  <section class="admin-moderation-card admin-moderation-card-log">
+    <div class="admin-card-header">
+      <h3>// audit trail</h3>
+      <p>Every moderation action is recorded here.</p>
+    </div>
+    <div class="admin-card-actions">
+      <a href="/admin/mod-log" class="admin-link-button">view full log</a>
+    </div>
+    <p class="admin-card-note">Use the full log for history and follow-up. The live queues stay visible in this panel.</p>
+  </section>
 </div>
 </div>
 </details>

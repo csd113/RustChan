@@ -46,6 +46,29 @@ fn render_thread_nav(board_short: &str, reply_count: i64, is_bottom: bool) -> St
     )
 }
 
+#[must_use]
+pub fn render_thread_state_badges(sticky: bool, locked: bool) -> String {
+    let mut badges = String::new();
+
+    if sticky {
+        badges.push_str(
+            r#"<span class="thread-state-badge thread-state-badge-pin" title="Pinned" aria-label="Pinned">&#128204;</span>"#,
+        );
+    }
+
+    if locked {
+        badges.push_str(
+            r#"<span class="thread-state-badge thread-state-badge-lock" title="Locked" aria-label="Locked">&#128274;</span>"#,
+        );
+    }
+
+    if badges.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<span class="thread-state-badges">{badges}</span>"#)
+    }
+}
+
 // ─── Thread page ──────────────────────────────────────────────────────────────
 
 #[must_use]
@@ -186,6 +209,8 @@ pub fn thread_page(
                 show_media: true,
                 allow_editing: board.allow_editing,
                 show_poster_ids: board.show_poster_ids,
+                collapse_greentext: board.collapse_greentext,
+                thread_state: Some((thread.sticky, thread.locked)),
                 thread_op_id: thread.op_id,
             },
             board.edit_window_secs,
@@ -384,6 +409,8 @@ pub struct RenderPostOpts {
     pub show_media: bool,
     pub allow_editing: bool,
     pub show_poster_ids: bool,
+    pub collapse_greentext: bool,
+    pub thread_state: Option<(bool, bool)>,
     pub thread_op_id: Option<i64>,
 }
 
@@ -493,6 +520,8 @@ pub fn render_post(
         show_media,
         allow_editing,
         show_poster_ids,
+        collapse_greentext,
+        thread_state,
         thread_op_id,
     } = opts;
     let poster_id = render_poster_id(post, show_poster_ids);
@@ -535,13 +564,20 @@ pub fn render_post(
             escape_html(subject)
         )
     });
+    let post_state_badges = if post.is_op {
+        thread_state
+            .map(|(sticky, locked)| render_thread_state_badges(sticky, locked))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     let mut html = format!(
         r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}>
 <div class="post-meta">
 {subject_html}<strong class="name">{name}</strong>{tripcode}{poster_id_html}
 <span class="post-time" data-utc="{ts}">{time}</span>{edited}
-<a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>
+<a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>{post_state_badges}
 <span class="backrefs" id="backrefs-{id}"></span>
 </div>"##,
         op_class = op_class,
@@ -555,6 +591,7 @@ pub fn render_post(
         ts = post.created_at,
         time = fmt_ts_short(post.created_at),
         edited = edited_html,
+        post_state_badges = post_state_badges,
     );
 
     // Image / Video / Audio
@@ -734,7 +771,9 @@ pub fn render_post(
     }
 
     // Post body (pre-rendered, sanitised HTML)
-    let body_html = annotate_op_quotelinks(&post.body_html, thread_op_id);
+    let body_html =
+        crate::utils::sanitize::normalize_greentext_blocks(&post.body_html, collapse_greentext);
+    let body_html = annotate_op_quotelinks(&body_html, thread_op_id);
     let _ = write!(html, r#"<div class="post-body">{body_html}</div>"#);
 
     // Edit link + report button (only on thread pages where show_delete=true)
@@ -935,6 +974,8 @@ mod tests {
                 show_media: true,
                 allow_editing: false,
                 show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
                 thread_op_id: Some(1),
             },
             0,

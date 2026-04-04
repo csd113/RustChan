@@ -361,6 +361,7 @@ pub fn board_page(
             csrf_token,
             is_admin,
             board.show_poster_ids,
+            board.collapse_greentext,
         ));
     }
 
@@ -397,6 +398,7 @@ fn render_thread_summary(
     csrf_token: &str,
     is_admin: bool,
     show_poster_ids: bool,
+    collapse_greentext: bool,
 ) -> String {
     let t = &summary.thread;
     let mut html = String::new();
@@ -420,21 +422,25 @@ fn render_thread_summary(
         op_id = t.op_id.unwrap_or(0)
     );
 
+    let thread_state_badges = super::thread::render_thread_state_badges(t.sticky, t.locked);
+
     if let (Some(_file), Some(thumb)) = (&t.op_file, &t.op_thumb) {
         let _ = write!(
             html,
-            r#"<div class="file-container"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image"></a></div>"#,
+            r#"<div class="file-container catalog-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image">{badges}</a></div>"#,
             board = escape_html(board_short),
             tid = t.id,
-            th = escape_html(thumb)
+            th = escape_html(thumb),
+            badges = thread_state_badges
         );
     } else if let Some(embed_thumb) = t.op_body.as_deref().and_then(embed_thumb_from_body) {
         let _ = write!(
             html,
-            r#"<div class="file-container"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" alt="video thumbnail"></a></div>"#,
+            r#"<div class="file-container catalog-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" alt="video thumbnail">{badges}</a></div>"#,
             board = escape_html(board_short),
             tid = t.id,
-            src = escape_html(&embed_thumb)
+            src = escape_html(&embed_thumb),
+            badges = thread_state_badges
         );
     }
 
@@ -569,6 +575,8 @@ fn render_thread_summary(
                 show_media: true,
                 allow_editing: false, // no edit link on board index previews
                 show_poster_ids,
+                collapse_greentext,
+                thread_state: None,
                 thread_op_id: summary.thread.op_id,
             },
             0,
@@ -904,6 +912,8 @@ pub fn search_page(
                     show_media: true,
                     allow_editing: false, // no edit link on search results
                     show_poster_ids: board.show_poster_ids,
+                    collapse_greentext: board.collapse_greentext,
+                    thread_state: None,
                     thread_op_id: None,
                 },
                 0,

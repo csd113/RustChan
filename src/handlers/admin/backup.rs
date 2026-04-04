@@ -1203,8 +1203,7 @@ fn should_store_without_recompress(path: &Path) -> bool {
         .is_some_and(|ext| {
             matches!(
                 ext.to_ascii_lowercase().as_str(),
-                "7z"
-                    | "aac"
+                "7z" | "aac"
                     | "avif"
                     | "bz2"
                     | "flac"
@@ -1783,7 +1782,9 @@ pub async fn download_backup(
             prune_stale_temp_board_downloads();
             if let Some(token) = query.token.as_deref() {
                 if !consume_temp_board_download_token(&safe_filename, token)? {
-                    return Err(AppError::Forbidden("Invalid or expired download token.".into()));
+                    return Err(AppError::Forbidden(
+                        "Invalid or expired download token.".into(),
+                    ));
                 }
             } else {
                 tokio::task::spawn_blocking({
@@ -2596,10 +2597,18 @@ mod tests {
 
     #[test]
     fn already_compressed_media_is_stored_without_recompression() {
-        assert!(should_store_without_recompress(Path::new("uploads/mu/track.FLAC")));
-        assert!(should_store_without_recompress(Path::new("uploads/mu/cover.webp")));
-        assert!(should_store_without_recompress(Path::new("uploads/mu/video.webm")));
+        assert!(should_store_without_recompress(Path::new(
+            "uploads/mu/track.FLAC"
+        )));
+        assert!(should_store_without_recompress(Path::new(
+            "uploads/mu/cover.webp"
+        )));
+        assert!(should_store_without_recompress(Path::new(
+            "uploads/mu/video.webm"
+        )));
         assert!(!should_store_without_recompress(Path::new("board.json")));
-        assert!(!should_store_without_recompress(Path::new("uploads/mu/readme.txt")));
+        assert!(!should_store_without_recompress(Path::new(
+            "uploads/mu/readme.txt"
+        )));
     }
 }

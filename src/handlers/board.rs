@@ -387,7 +387,13 @@ pub async fn create_thread(
                 || (crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files);
             let has_file = file_data.is_some() || audio_file_data.is_some() || image_file_data.is_some();
             let (body_text, body_html) =
-                posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;
+                posting::build_post_body(
+                    &raw_body,
+                    has_file,
+                    board_allows_media,
+                    board.collapse_greentext,
+                    &filters,
+                )?;
 
             let uploads = posting::process_uploads(
                 image_file_data,
@@ -1225,6 +1231,8 @@ pub async fn api_post_preview(
             let conn = pool.get()?;
 
             // Fetch the post, validating it belongs to this board.
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
             let post = db::get_post_on_board(&conn, &board_short, post_id)?;
             match post {
                 None => Ok(None),
@@ -1240,6 +1248,8 @@ pub async fn api_post_preview(
                             show_media: true,
                             allow_editing: false, // no edit link in read-only preview
                             show_poster_ids: false,
+                            collapse_greentext: board.collapse_greentext,
+                            thread_state: None,
                             thread_op_id: None,
                         },
                         0, // no edit window

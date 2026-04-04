@@ -223,7 +223,7 @@ pub fn insert_reply_into_thread(
     // `deletion_token` is a fresh UUID v4 so that local admins can delete
     // gateway-inserted posts through the normal deletion interface.
     let deletion_token = Uuid::new_v4().to_string();
-    let body_html = render_post_body(&escape_html(content));
+    let body_html = render_post_body(&escape_html(content), false);
 
     let gateway_post = crate::db::NewPost {
         thread_id,

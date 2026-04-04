@@ -94,14 +94,12 @@ const MAX_BODY_BYTES: usize = 32 * 1024; // 32 KiB
 /// Returns an error notice if the input exceeds `MAX_BODY_BYTES` to prevent `DoS`
 /// via extremely large inputs through the regex pipeline.
 ///
-/// When 3 or more consecutive greentext lines appear they are wrapped in a
+/// When 3 or more consecutive greentext lines appear they can be wrapped in a
 /// `<details open>` block — expanded by default. A board's admin settings
-/// can enable "collapse greentext walls", which is handled purely on
-/// the client side (JS removes the `open` attribute when the page-level
-/// `data-collapse-greentext` attribute is present on `<body>`).
+/// control whether the collapsible wrapper is emitted at all.
 #[must_use]
 #[allow(clippy::arithmetic_side_effects)]
-pub fn render_post_body(escaped: &str) -> String {
+pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
     // Hard length guard before touching any regex. Must be enforced here
     // (not only at the HTTP layer) because the sanitizer is also called
     // from background workers and tests.
@@ -137,11 +135,11 @@ pub fn render_post_body(escaped: &str) -> String {
                 }
             }
 
-            // 3+ consecutive greentext lines → collapsible block, open by default.
-            // The `open` attribute keeps it expanded; the admin "collapse walls"
-            // setting removes it client-side via JS without changing stored HTML.
+            // 3+ consecutive greentext lines → collapsible block, open by default
+            // when the board enables collapse_greentext. Otherwise we render the
+            // quote lines plainly so no collapse UI exists at all.
             #[allow(clippy::items_after_statements)]
-            if group.len() >= 3 {
+            if collapse_greentext && group.len() >= 3 {
                 let count = group.len();
                 use std::fmt::Write as _;
                 let _ = write!(html, "<details open class=\"greentext-block\"><summary class=\"quote\">&gt; {count} lines</summary>");
@@ -177,6 +175,46 @@ pub fn render_post_body(escaped: &str) -> String {
     }
 
     html
+}
+
+/// Normalize stored post HTML to match the current greentext collapse setting.
+///
+/// When collapse is disabled, this strips the generated `<details>` wrapper
+/// from any existing greentext blocks while keeping the quote lines intact.
+#[must_use]
+pub fn normalize_greentext_blocks(body_html: &str, collapse_greentext: bool) -> String {
+    if collapse_greentext {
+        return body_html.to_string();
+    }
+
+    const OPEN_TAG: &str = "<details open class=\"greentext-block\">";
+    const SUMMARY_SUFFIX: &str = "</summary>";
+    const CLOSE_TAG: &str = "</details>";
+
+    let mut out = String::with_capacity(body_html.len());
+    let mut rest = body_html;
+
+    while let Some(start) = rest.find(OPEN_TAG) {
+        out.push_str(&rest[..start]);
+
+        let after_open = &rest[start + OPEN_TAG.len()..];
+        let Some(summary_end) = after_open.find(SUMMARY_SUFFIX) else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+
+        let inner_start = summary_end + SUMMARY_SUFFIX.len();
+        let Some(close_rel) = after_open[inner_start..].find(CLOSE_TAG) else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+
+        out.push_str(&after_open[inner_start..inner_start + close_rel]);
+        rest = &after_open[inner_start + close_rel + CLOSE_TAG.len()..];
+    }
+
+    out.push_str(rest);
+    out
 }
 
 /// Apply all inline markup transformations to a single line of HTML-escaped text.
@@ -367,26 +405,25 @@ mod tests {
     #[test]
     fn test_greentext() {
         let escaped = escape_html(">be me");
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(html.contains("class=\"quote\""));
     }
 
     #[test]
     fn test_reply_link() {
         let escaped = escape_html(">>12345 nice post");
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(html.contains("class=\"quotelink\""));
         assert!(html.contains("#p12345"));
     }
 
     #[test]
     fn test_collapsible_greentext() {
-        // 3+ consecutive greentext lines are always wrapped in <details open>.
-        // The `open` attribute keeps them expanded by default; the admin toggle
-        // removes it client-side via JS without touching server-rendered HTML.
+        // 3+ consecutive greentext lines are wrapped in <details open> when
+        // the board enables collapse_greentext.
         let raw = ">line1\n>line2\n>line3";
         let escaped = escape_html(raw);
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, true);
         assert!(
             html.contains("<details"),
             "3+ greentext lines should produce a <details> block"
@@ -411,7 +448,7 @@ mod tests {
         // Fewer than 3 lines must NOT produce a <details> block.
         let raw = ">one line only";
         let escaped = escape_html(raw);
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, true);
         assert!(
             !html.contains("<details"),
             "1–2 greentext lines should not be wrapped in <details>"
@@ -422,7 +459,7 @@ mod tests {
     #[test]
     fn test_spoiler() {
         // [spoiler] is our own markup, not HTML — pass the raw tag directly.
-        let html = render_post_body("[spoiler]secret[/spoiler]");
+        let html = render_post_body("[spoiler]secret[/spoiler]", false);
         assert!(html.contains("class=\"spoiler\""));
         assert!(html.contains("data-action=\"toggle-spoiler\""));
         assert!(html.contains("secret"));
@@ -430,7 +467,7 @@ mod tests {
 
     #[test]
     fn test_emoji_shortcode() {
-        let html = render_post_body(":fire: hot take");
+        let html = render_post_body(":fire: hot take", false);
         assert!(html.contains("🔥"));
     }
 
@@ -445,7 +482,7 @@ mod tests {
     #[test]
     fn test_crosspost_link() {
         let escaped = escape_html(">>>/tech/42");
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(html.contains("class=\"quotelink crosslink\""));
         // href now resolves via the post-redirect endpoint, not a raw thread URL
         assert!(html.contains("/tech/post/42"));
@@ -458,7 +495,7 @@ mod tests {
         // RE_CROSSBOARD must not re-match the display text inside an already-replaced
         // crosspost anchor and produce a double-wrapped or href-corrupted link.
         let escaped = escape_html(">>>/b/12345");
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         // Exactly one anchor tag
         assert_eq!(
             html.matches("<a ").count(),
@@ -482,7 +519,7 @@ mod tests {
         // href uses the canonical slash-free form; the trailing-slash middleware
         // redirects any /b/ URLs at runtime so both forms resolve correctly.
         let escaped = escape_html(">>>/b/");
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(html.contains("href=\"/b\""));
     }
 
@@ -507,7 +544,7 @@ mod tests {
     #[test]
     fn test_url_trailing_punct() {
         let escaped = escape_html("see https://example.com/foo. and https://example.com/bar,");
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(!html.contains("href=\"https://example.com/foo.\""));
         assert!(!html.contains("href=\"https://example.com/bar,\""));
     }
@@ -518,7 +555,7 @@ mod tests {
     fn test_xss_script_tag() {
         let input = "<script>alert(1)</script>";
         let escaped = escape_html(input);
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(
             !html.contains("<script>"),
             "raw <script> must not appear in output"
@@ -533,7 +570,7 @@ mod tests {
     fn test_xss_event_attribute() {
         let input = "<img onerror=alert(1)>";
         let escaped = escape_html(input);
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(
             !html.contains("<img"),
             "raw HTML tags must not pass through"
@@ -545,7 +582,7 @@ mod tests {
         // javascript: URLs must not become clickable hrefs
         let input = "javascript:alert(1)";
         let escaped = escape_html(input);
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         // RE_URL only matches http:// and https:// — javascript: must not be linked
         assert!(
             !html.contains("href=\"javascript:"),
@@ -557,7 +594,7 @@ mod tests {
     fn test_xss_data_uri() {
         let input = "data:text/html,<script>alert(1)</script>";
         let escaped = escape_html(input);
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(
             !html.contains("href=\"data:"),
             "data: URI must not be linkified"
@@ -568,7 +605,7 @@ mod tests {
     fn test_xss_style_attribute() {
         let input = "<p style=\"background:url(javascript:alert(1))\">x</p>";
         let escaped = escape_html(input);
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(!html.contains("<p "), "raw p tag must not appear");
     }
 
@@ -578,7 +615,7 @@ mod tests {
         let input = "&lt;script&gt;alert(1)&lt;/script&gt;";
         // Already escaped by a hypothetical upstream — escape_html again to simulate
         let escaped = escape_html(input);
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(
             !html.contains("<script>"),
             "double-encoded script must not become executable"
@@ -591,7 +628,7 @@ mod tests {
     fn test_max_body_length_guard() {
         // Input exceeding MAX_BODY_BYTES must be rejected without panicking
         let huge = "A".repeat(MAX_BODY_BYTES + 1);
-        let result = render_post_body(&huge);
+        let result = render_post_body(&huge, false);
         assert!(
             result.contains("too large"),
             "oversized input must produce a truncation notice"
@@ -603,7 +640,7 @@ mod tests {
         // Deeply nested spoilers should not panic or produce runaway output
         let depth = 50;
         let input = "[spoiler]".repeat(depth) + "x" + &"[/spoiler]".repeat(depth);
-        let result = render_post_body(&input);
+        let result = render_post_body(&input, false);
         // Must complete without panic; output length should be bounded
         assert!(
             result.len() < input.len() * 10,
@@ -615,7 +652,7 @@ mod tests {
     fn test_malformed_crossboard_link() {
         // Invalid board slug characters must not produce broken HTML
         let escaped = escape_html(">>>/BOARD_WITH_CAPS/123");
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         // Should not match RE_CROSSLINK (which only accepts [a-z0-9]+)
         assert!(
             !html.contains("crosslink"),
@@ -627,7 +664,7 @@ mod tests {
     fn test_reply_link_no_numeric_overflow() {
         // Extremely large post IDs should not cause integer overflow
         let escaped = escape_html(">>99999999999999999999");
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         // Must render as a link regardless of numeric size
         assert!(
             html.contains("quotelink"),
@@ -640,7 +677,7 @@ mod tests {
         // Input consisting entirely of > characters should not panic or loop
         let input: String = ">".repeat(1000);
         let escaped = escape_html(&input);
-        let _html = render_post_body(&escaped); // must not panic
+        let _html = render_post_body(&escaped, false); // must not panic
     }
 
     #[test]
@@ -651,7 +688,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let escaped = escape_html(&raw);
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, true);
         assert_eq!(
             html.matches("<details").count(),
             1,
@@ -665,7 +702,7 @@ mod tests {
 
     #[test]
     fn test_empty_input_does_not_panic() {
-        let html = render_post_body("");
+        let html = render_post_body("", false);
         // Empty input → empty output (no crash)
         assert!(html.is_empty() || html.len() < 10);
     }
@@ -675,11 +712,22 @@ mod tests {
         // **<script>** and __<script>__ must not inject HTML
         let input = "**<script>alert(1)</script>**";
         let escaped = escape_html(input);
-        let html = render_post_body(&escaped);
+        let html = render_post_body(&escaped, false);
         assert!(
             !html.contains("<script>"),
             "bold markup must not bypass XSS escaping"
         );
         assert!(html.contains("<strong>"), "bold markup should still render");
+    }
+
+    #[test]
+    fn test_strip_collapsible_greentext_blocks() {
+        let raw = ">line1\n>line2\n>line3";
+        let escaped = escape_html(raw);
+        let html = render_post_body(&escaped, true);
+        let stripped = normalize_greentext_blocks(&html, false);
+        assert!(!stripped.contains("<details"));
+        assert!(stripped.contains("class=\"quote\""));
+        assert!(stripped.contains("line1"));
     }
 }
