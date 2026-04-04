@@ -38,29 +38,6 @@ fn bold(s: &str) -> String {
     format!("\x1b[1m{s}\x1b[0m")
 }
 
-fn clean_status_message(message: &str) -> String {
-    let trimmed = message.trim();
-    for prefix in ["error:", "error "] {
-        if trimmed.to_ascii_lowercase().starts_with(prefix) {
-            return trimmed[prefix.len()..].trim().to_string();
-        }
-    }
-    trimmed.to_string()
-}
-
-fn ngrok_status_text(state: &crate::server::ngrok::NgrokState) -> String {
-    match state {
-        crate::server::ngrok::NgrokState::Disabled => red("DISABLED"),
-        crate::server::ngrok::NgrokState::Starting => yellow("STARTING"),
-        crate::server::ngrok::NgrokState::Ready { .. } => green("READY"),
-        crate::server::ngrok::NgrokState::NotInstalled => red("NOT INSTALLED"),
-        crate::server::ngrok::NgrokState::NotConfigured => yellow("NOT SET UP"),
-        crate::server::ngrok::NgrokState::Error { message } => {
-            format!("{}  {}", red("ERROR"), dim(&clean_status_message(message)))
-        }
-    }
-}
-
 const RULE: &str = "\x1b[2m\
 \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\
 \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\
@@ -179,10 +156,6 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
         }
     }
 
-    if CONFIG.ngrok_enabled {
-        row(&mut out, "Ngrok", &ngrok_status_text(&stats.ngrok));
-    }
-
     writeln!(out).ok();
 
     // ── Endpoints ─────────────────────────────────────────────────────────────
@@ -210,25 +183,6 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
             row(&mut out, "Onion", &dim("waiting for Tor\u{2026}"));
         }
         None => {}
-    }
-
-    if CONFIG.ngrok_enabled {
-        match &stats.ngrok {
-            crate::server::ngrok::NgrokState::Ready { url } => {
-                row(&mut out, "Public", &cyan(url));
-            }
-            crate::server::ngrok::NgrokState::Starting => {
-                row(&mut out, "Public", &dim("waiting for ngrok\u{2026}"));
-            }
-            crate::server::ngrok::NgrokState::NotInstalled
-            | crate::server::ngrok::NgrokState::NotConfigured => {
-                row(&mut out, "Public", &dim("ngrok not set up"));
-            }
-            crate::server::ngrok::NgrokState::Error { message } => {
-                row(&mut out, "Public", &dim(&clean_status_message(message)));
-            }
-            crate::server::ngrok::NgrokState::Disabled => {}
-        }
     }
 
     writeln!(out).ok();
@@ -286,17 +240,10 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
 
     // ── Footer ────────────────────────────────────────────────────────────────
     writeln!(out, "{RULE}").ok();
-    if CONFIG.ngrok_enabled {
-        writeln!(out,
-            " {} Help  {} Reload  {} Ngrok  {} Boards  {} New board  {} New admin  {} Del thread  {} Logs  {} Quit",
-            bold("[H]"), bold("[R]"), bold("[T]"), bold("[B]"), bold("[C]"), bold("[A]"), bold("[D]"), bold("[L]"), bold("[Q]"),
-        ).ok();
-    } else {
-        writeln!(out,
-            " {} Help  {} Reload  {} Boards  {} New board  {} New admin  {} Del thread  {} Logs  {} Quit",
-            bold("[H]"), bold("[R]"), bold("[B]"), bold("[C]"), bold("[A]"), bold("[D]"), bold("[L]"), bold("[Q]"),
-        ).ok();
-    }
+    writeln!(out,
+        " {} Help  {} Reload  {} Boards  {} New board  {} New admin  {} Del thread  {} Logs  {} Quit",
+        bold("[H]"), bold("[R]"), bold("[B]"), bold("[C]"), bold("[A]"), bold("[D]"), bold("[L]"), bold("[Q]"),
+    ).ok();
     writeln!(out, "{RULE}").ok();
 
     out
@@ -419,23 +366,7 @@ pub fn render_help() -> String {
     writeln!(out, " {} Key Reference", bold("\u{25c8}")).ok();
     writeln!(out, "{RULE}").ok();
     writeln!(out).ok();
-    let keys_with_ngrok: &[(&str, &str)] = &[
-        ("[H]", "Help"),
-        ("[R]", "Force-reload stats"),
-        ("[T]", "Open ngrok controls"),
-        ("[S]", "Start/stop ngrok (ngrok screen)"),
-        ("[L]", "Log view"),
-        ("[B]", "Board list"),
-        ("[C]", "Create board wizard"),
-        ("[A]", "Create admin wizard"),
-        ("[D]", "Delete thread wizard"),
-        ("[Q]", "Quit (confirmation)"),
-        ("[Y]", "Confirm"),
-        ("[N]", "Cancel / back"),
-        ("Esc", "Back to dashboard"),
-        ("Ctrl-C", "Force quit"),
-    ];
-    let keys_without_ngrok: &[(&str, &str)] = &[
+    let keys: &[(&str, &str)] = &[
         ("[H]", "Help"),
         ("[R]", "Force-reload stats"),
         ("[L]", "Log view"),
@@ -449,76 +380,12 @@ pub fn render_help() -> String {
         ("Esc", "Back to dashboard"),
         ("Ctrl-C", "Force quit"),
     ];
-    let keys = if CONFIG.ngrok_enabled {
-        keys_with_ngrok
-    } else {
-        keys_without_ngrok
-    };
     for (key, desc) in keys {
         writeln!(out, " {:<10}  {}", bold(key), desc).ok();
     }
     writeln!(out).ok();
     writeln!(out, "{RULE}").ok();
     writeln!(out, " {} Back", bold("[H]")).ok();
-    writeln!(out, "{RULE}").ok();
-    out
-}
-
-pub fn render_ngrok_control(stats: &ChanStats) -> String {
-    use std::fmt::Write as _;
-
-    let mut out = String::with_capacity(1024);
-    writeln!(out, "{RULE}").ok();
-    writeln!(out, " {} Ngrok Controls", bold("\u{25c8}")).ok();
-    writeln!(out, "{RULE}").ok();
-    writeln!(out).ok();
-
-    row(&mut out, "Status", &ngrok_status_text(&stats.ngrok));
-
-    match &stats.ngrok {
-        crate::server::ngrok::NgrokState::Ready { url } => {
-            row(&mut out, "Public URL", &cyan(url));
-            row(&mut out, "Action", &green("Press [S] to stop ngrok"));
-        }
-        crate::server::ngrok::NgrokState::Starting => {
-            row(&mut out, "Public URL", &dim("waiting for ngrok\u{2026}"));
-            row(&mut out, "Action", &yellow("Press [S] to stop startup"));
-        }
-        crate::server::ngrok::NgrokState::Disabled => {
-            row(&mut out, "Public URL", &dim("not running"));
-            row(&mut out, "Action", &green("Press [S] to start ngrok"));
-        }
-        crate::server::ngrok::NgrokState::NotInstalled => {
-            row(&mut out, "Public URL", &dim("ngrok CLI not installed"));
-            row(&mut out, "Action", &yellow("Press [S] for setup guidance"));
-        }
-        crate::server::ngrok::NgrokState::NotConfigured => {
-            row(&mut out, "Public URL", &dim("ngrok is not set up"));
-            row(&mut out, "Action", &yellow("Press [S] for setup guidance"));
-        }
-        crate::server::ngrok::NgrokState::Error { message } => {
-            row(&mut out, "Public URL", &dim("unavailable"));
-            row(&mut out, "Error", &dim(&clean_status_message(message)));
-            row(&mut out, "Action", &green("Press [S] to retry ngrok"));
-        }
-    }
-
-    writeln!(out).ok();
-    writeln!(
-        out,
-        " {}",
-        dim("ngrok uses the official ngrok CLI and tunnels the active RustChan HTTP port.")
-    )
-    .ok();
-    writeln!(
-        out,
-        " {}",
-        dim("Detailed ngrok errors are written to rustchan-data/logs/rustchan.YYYY-MM-DD.log")
-    )
-    .ok();
-    writeln!(out).ok();
-    writeln!(out, "{RULE}").ok();
-    writeln!(out, " {} Start/Stop   {} Back", bold("[S]"), bold("[T]")).ok();
     writeln!(out, "{RULE}").ok();
     out
 }

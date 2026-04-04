@@ -247,8 +247,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         None
     };
 
-    let ngrok_controller = crate::server::ngrok::NgrokController::new();
-
     let state = AppState {
         db: pool.clone(),
         ffmpeg_available,
@@ -257,7 +255,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
         chan_ledger,
         onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        ngrok: ngrok_controller.clone(),
     };
 
     // worker_cancel is the shutdown token threaded through all background tasks
@@ -545,7 +542,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let stats_w = shared_stats.clone();
         let cancel_stats = worker_cancel.clone();
         let onion_addr = state.onion_address.clone();
-        let ngrok = ngrok_controller.clone();
         let force_reload = force_reload_notify.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(3));
@@ -565,7 +561,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     }
                 }
                 let onion = onion_addr.read().await.clone();
-                let ngrok_state = ngrok.snapshot().await;
                 let snap = tokio::task::block_in_place(|| {
                     super::console::collect_stats(
                         &pool_stats,
@@ -575,7 +570,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                         &mut prev_threads,
                         &mut prev_posts,
                         onion,
-                        ngrok_state,
                     )
                 });
                 *stats_w.write().await = snap;
@@ -588,20 +582,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // detect.rs checks is_tui_active() and skips its onion-address banner
     // box — the dashboard shows the address on its next render tick instead.
     let (mut key_rx, _force_reload_render) = super::console::start(&shared_stats, &shared_mode);
-
-    if CONFIG.ngrok_enabled {
-        let result = ngrok_controller.start(bind_port).await;
-        force_reload_notify.notify_one();
-        if matches!(
-            result,
-            crate::server::ngrok::ToggleOutcome::NeedsSetupPrompt
-        ) {
-            tracing::warn!(
-                target: "ngrok",
-                "ngrok is enabled in settings, but setup is incomplete"
-            );
-        }
-    }
 
     // Tor: spawned after the TUI is up. F-04: handle awaited on shutdown.
     let tor_handle = crate::detect::detect_tor(
@@ -619,7 +599,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let cancel_d = worker_cancel.clone();
         let shutdown_tx = worker_cancel.clone();
         let force_reload = force_reload_notify.clone();
-        let ngrok = ngrok_controller.clone();
         tokio::spawn(async move {
             while let Some(key) = key_rx.recv().await {
                 use super::console::input::KeyEvent;
@@ -630,48 +609,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 match key {
                     KeyEvent::Reload => {
                         force_reload.notify_one();
-                    }
-                    KeyEvent::NgrokScreen => {
-                        if !CONFIG.ngrok_enabled {
-                            tracing::debug!(
-                                target: "ngrok",
-                                "ignoring ngrok controls because ngrok.enabled=false"
-                            );
-                            continue;
-                        }
-                        let next = if current == ConsoleMode::NgrokControl {
-                            ConsoleMode::Dashboard
-                        } else {
-                            ConsoleMode::NgrokControl
-                        };
-                        *mode_d.write().await = next;
-                    }
-                    KeyEvent::NgrokAction => {
-                        if current != ConsoleMode::NgrokControl {
-                            continue;
-                        }
-                        let result = if ngrok.is_running().await {
-                            ngrok.stop().await;
-                            crate::server::ngrok::ToggleOutcome::Disabled
-                        } else {
-                            ngrok.start(bind_port).await
-                        };
-                        force_reload.notify_one();
-                        if matches!(
-                            result,
-                            crate::server::ngrok::ToggleOutcome::NeedsSetupPrompt
-                        ) {
-                            *mode_d.write().await = ConsoleMode::Wizard(WizardKind::NgrokSetup);
-                            let pool_w = pool_d.clone();
-                            let mode_w = mode_d.clone();
-                            tokio::task::spawn_blocking(move || {
-                                super::console::wizard::run_wizard(
-                                    &WizardKind::NgrokSetup,
-                                    &pool_w,
-                                    &mode_w,
-                                );
-                            });
-                        }
                     }
                     KeyEvent::ToggleLogs => {
                         let next = if current == ConsoleMode::LogView {
@@ -706,7 +643,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     KeyEvent::Confirm => {
                         if current == ConsoleMode::ConfirmQuit {
                             tracing::info!(target: "server", "Graceful shutdown initiated from console");
-                            ngrok.shutdown().await;
                             super::console::cleanup();
                             shutdown_tx.cancel();
                             return;
@@ -714,7 +650,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     }
                     KeyEvent::ForceQuit => {
                         tracing::info!(target: "server", "Force quit from console (Ctrl-C)");
-                        ngrok.shutdown().await;
                         super::console::cleanup();
                         shutdown_tx.cancel();
                         return;
@@ -929,7 +864,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 Ok(())
             }
         };
-    ngrok_controller.shutdown().await;
     server_result?;
     // timeout, replacing the previous blind 10-second sleep. Each worker is
     // given up to (ffmpeg_timeout + 10)s to finish its in-flight job.

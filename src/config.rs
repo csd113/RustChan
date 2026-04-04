@@ -239,7 +239,6 @@ struct SettingsFile {
     /// Must be at least 32 characters. Leave empty to disable the endpoints.
     /// Set via `CHAN_NET_API_KEY` environment variable or `settings.toml`.
     chan_net_api_key: Option<String>,
-    ngrok: Option<NgrokConfig>,
     /// TLS/HTTPS configuration. Omitting this section keeps TLS disabled.
     tls: Option<TlsConfig>,
 }
@@ -278,18 +277,6 @@ pub fn generate_settings_file_if_missing() {
 }
 
 // ─── TLS configuration ───────────────────────────────────────────────────────
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct NgrokConfig {
-    #[serde(default)]
-    pub enabled: bool,
-}
-
-impl Default for NgrokConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct TlsConfig {
     #[serde(default)]
@@ -398,8 +385,6 @@ pub struct Config {
     pub ffmpeg_path: String,
     /// Explicit ffprobe binary path, or plain "ffprobe" for PATH lookup.
     pub ffprobe_path: String,
-    /// Master switch for terminal ngrok integration.
-    pub ngrok_enabled: bool,
     /// Global feature gate for arbitrary uploads. Boards can only enable the
     /// per-board toggle when this is true.
     pub enable_any_file_uploads_feature: bool,
@@ -466,7 +451,6 @@ impl Config {
     pub fn from_env() -> Self {
         let s = load_settings_file();
         let tls = s.tls.clone().unwrap_or_default();
-        let ngrok = s.ngrok.clone().unwrap_or_default();
         let data_dir = data_dir();
         let default_db = data_dir.join("chan.db").to_string_lossy().into_owned();
         let default_uploads = data_dir.join("boards").to_string_lossy().into_owned();
@@ -588,7 +572,6 @@ impl Config {
                 .ok()
                 .or(s.ffprobe_path)
                 .unwrap_or_else(|| "ffprobe".to_string()),
-            ngrok_enabled: env_bool("CHAN_ENABLE_NGROK", ngrok.enabled),
             enable_any_file_uploads_feature: env_bool(
                 "CHAN_ENABLE_ANY_FILE_UPLOADS_FEATURE",
                 s.enable_any_file_uploads_feature.unwrap_or(false),

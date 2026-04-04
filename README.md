@@ -21,7 +21,7 @@
 
 <br>
 
-[**Quick Start**](#-quick-start) · [**Features**](#-features) · [**ChanNet API**](#-channet-api) · [**Optional Integrations**](#-optional-integrations-ffmpeg-tor-and-ngrok) · [**Configuration**](#-configuration) · [**Backup System**](#-backup--restore) · [**Deployment**](#-production-deployment) · [**Themes**](#-themes) · [**Changelog**](CHANGELOG.md)
+[**Quick Start**](#-quick-start) · [**Features**](#-features) · [**ChanNet API**](#-channet-api) · [**Optional Integrations**](#-optional-integrations-ffmpeg-and-tor) · [**Configuration**](#-configuration) · [**Backup System**](#-backup--restore) · [**Deployment**](#-production-deployment) · [**Themes**](#-themes) · [**Changelog**](CHANGELOG.md)
 
 <br>
 
@@ -31,7 +31,7 @@
 
 RustChan is a fully-featured imageboard engine compiled into a **single Rust binary**. Deploy it on a VPS, a Raspberry Pi, or a local machine — no containers, no runtime, no package manager required. All persistent data lives in a single directory alongside the binary, making migrations as simple as `cp -r`.
 
-**[ffmpeg](#ffmpeg--video--audio-processing)** is supported as an optional enhancement for video transcoding and audio waveforms. **[Tor](#tor--onion-service)** onion service hosting is built in via [Arti](https://gitlab.torproject.org/tpo/core/arti) — no system `tor` installation required. **[ngrok](#ngrok--quick-public-url-sharing)** is supported through the official `ngrok` CLI for quick public URL sharing from the operator console. All three degrade gracefully when disabled.
+**[ffmpeg](#ffmpeg--video--audio-processing)** is supported as an optional enhancement for video transcoding and audio waveforms. **[Tor](#tor--onion-service)** onion service hosting is built in via [Arti](https://gitlab.torproject.org/tpo/core/arti) — no system `tor` installation required. Both degrade gracefully when disabled.
 
 <br>
 
@@ -145,7 +145,7 @@ RustChan is a fully-featured imageboard engine compiled into a **single Rust bin
 - **Site subtitle** — `site_subtitle` in `settings.toml` customises the home page tagline at install time
 - **Live stats** — total posts, uploads, and content size displayed on the home page
 - **Background worker system** — video transcoding, waveform generation, and thread cleanup run asynchronously; duplicate media jobs coalesced; configurable ffmpeg timeout; exponential backoff on retries
-- **Full-screen TUI console** — replaces the old scrolling line-input shell with a static full-screen dashboard; live panels for server status, request rate, online users, content counts, per-board breakdowns, storage sizes, active upload progress, and optional ngrok public URL state; keyboard shortcuts: `[H]` help · `[R]` force-reload stats · `[T]` open ngrok controls (when enabled) · `[S]` start/stop ngrok from the ngrok screen · `[L]` log view · `[B]` board list · `[C]` create board · `[A]` create admin · `[D]` delete thread · `[Q]` quit (with confirmation); wizard flows for board/admin creation, thread deletion, and ngrok setup guidance temporarily exit raw mode for line-input, then restore the dashboard cleanly on completion; panic hook and graceful shutdown both call `cleanup()` to guarantee terminal restoration
+- **Full-screen TUI console** — replaces the old scrolling line-input shell with a static full-screen dashboard; live panels for server status, request rate, online users, content counts, per-board breakdowns, storage sizes, and active upload progress; keyboard shortcuts: `[H]` help · `[R]` force-reload stats · `[L]` log view · `[B]` board list · `[C]` create board · `[A]` create admin · `[D]` delete thread · `[Q]` quit (with confirmation); wizard flows for board/admin creation and thread deletion temporarily exit raw mode for line-input, then restore the dashboard cleanly on completion; panic hook and graceful shutdown both call `cleanup()` to guarantee terminal restoration
 
 </td>
 </tr>
@@ -255,7 +255,7 @@ If you do want to federate with other nodes, allow port 7070 selectively rather 
 
 ---
 
-## 🔌 Optional Integrations: ffmpeg, Tor, and ngrok
+## 🔌 Optional Integrations: ffmpeg and Tor
 
 RustChan is fully functional without any of these tools. When enabled or detected at startup, additional capabilities activate automatically.
 
@@ -286,30 +286,6 @@ The `.onion` address appears on the home page and in the admin panel as soon as 
 **Back up `rustchan-data/runtime/tor/state/keys/`** — this directory contains your service keypair. Losing it means a new `.onion` address on the next start. Delete it intentionally to rotate to a new address.
 
 See **[SETUP.md — Tor](SETUP.md#tor--onion-service)** for details on key management and migrating from a previous system `tor` installation.
-
-### ngrok — Quick Public URL Sharing
-
-RustChan supports ngrok through the official `ngrok` CLI. This is useful when you want a quick public HTTPS URL for testing, private sharing, or remote operator access without putting nginx in front of the instance.
-
-When ngrok integration is enabled:
-
-- the full-screen console shows ngrok status in the dashboard
-- pressing `T` starts or stops an ngrok tunnel to RustChan's current HTTP port
-- the assigned public ngrok URL is displayed directly in the dashboard
-- ngrok startup, shutdown, and error details are written to `rustchan-data/logs/`
-
-RustChan does not manage your ngrok account or auth token. Install and configure ngrok separately, then restart RustChan.
-
-The generated config includes:
-
-```toml
-[ngrok]
-enabled = true
-```
-
-Set `enabled = false` to hide ngrok completely from the dashboard and disable the console shortcut.
-
-See **[SETUP.md — Installing ngrok](SETUP.md#installing-ngrok)** for setup instructions.
 
 <br>
 
@@ -420,9 +396,6 @@ require_ffmpeg = false
 # ffprobe_path = "/usr/local/bin/ffprobe"
 # enable_any_file_uploads_feature = false
 ffmpeg_timeout_secs = 120
-
-[ngrok]
-enabled = true
 
 # Maintenance / background work.
 wal_checkpoint_interval_secs = 3600

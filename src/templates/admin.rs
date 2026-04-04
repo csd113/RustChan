@@ -68,7 +68,6 @@ pub fn admin_panel_page(
     site_subtitle: &str,
     default_theme: &str,
     tor_address: Option<&str>,
-    ngrok_url: Option<&str>,
     // Optional one-time flash message shown at the top of the panel.
     // (is_error, message) — is_error=true → red, false → green.
     flash: Option<(bool, &str)>,
@@ -837,7 +836,7 @@ old boards to prevent query performance degradation.
         } else {
             ""
         },
-        tor_section = if tor_address.is_none() && ngrok_url.is_none() {
+        tor_section = if tor_address.is_none() {
             String::new()
         } else {
             let mut addresses = String::new();
@@ -848,15 +847,6 @@ old boards to prevent query performance degradation.
   <code class="onion-addr">{}</code>
 </p>"#,
                     escape_html(addr)
-                );
-            }
-            if let Some(url) = ngrok_url {
-                let _ = write!(
-                    addresses,
-                    r#"<p class="admin-access-address">
-  <code class="onion-addr">{}</code>
-</p>"#,
-                    escape_html(url)
                 );
             }
             format!(

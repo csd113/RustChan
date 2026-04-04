@@ -13,7 +13,6 @@ pub fn app_state() -> crate::middleware::AppState {
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
         chan_ledger: None,
         onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        ngrok: crate::server::ngrok::NgrokController::new(),
     }
 }
 

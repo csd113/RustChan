@@ -133,7 +133,6 @@ pub fn index_page(
     site_stats: &crate::models::SiteStats,
     csrf_token: &str,
     onion_address: Option<&str>,
-    ngrok_url: Option<&str>,
     current_theme: Option<&str>,
     nsfw_prompt_board: Option<&Board>,
     nsfw_consent: bool,
@@ -196,13 +195,6 @@ pub fn index_page(
             access_links,
             r#"<p class="index-onion"><code class="onion-addr">{}</code></p>"#,
             escape_html(addr)
-        );
-    }
-    if let Some(url) = ngrok_url {
-        let _ = write!(
-            access_links,
-            r#"<p class="index-onion"><code class="onion-addr">{}</code></p>"#,
-            escape_html(url)
         );
     }
     let onion_html = if access_links.is_empty() {

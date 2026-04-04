@@ -37,7 +37,6 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
             WizardKind::CreateBoard => kb_create_board(pool, &mut reader),
             WizardKind::CreateAdmin => kb_create_admin(pool, &mut reader),
             WizardKind::DeleteThread => kb_delete_thread(pool, &mut reader),
-            WizardKind::NgrokSetup => kb_ngrok_setup(&mut reader),
         }
 
         // 3. Hold so the operator can read the result.
@@ -264,32 +263,6 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
         Err(e) => crate::logging::console_println(&format!("  {}[err]{} {e}", c(RED), c(RST))),
     }
     crate::logging::console_println("");
-}
-
-pub fn kb_ngrok_setup(reader: &mut dyn BufRead) {
-    crate::logging::console_print_raw(
-        "\n\
-        \x1b[36m╔══════════════════════════════════════════════════════╗\n\
-        ║               NGROK SETUP REQUIRED                  ║\n\
-        ╠══════════════════════════════════════════════════════╣\n\
-        ║  RustChan can show a public URL after ngrok is      ║\n\
-        ║  installed and configured on this system.           ║\n\
-        ╚══════════════════════════════════════════════════════╝\x1b[0m\n\n",
-    );
-    crate::logging::console_println(
-        "  Install and configure ngrok using the commands from your ngrok dashboard.",
-    );
-    crate::logging::console_println("  Website: https://ngrok.com/docs/agent/cli");
-    crate::logging::console_println(
-        "  Run the install command for your platform, then run the authtoken command from ngrok setup.",
-    );
-    crate::logging::console_println(
-        "  After setup is complete, reboot RustChan to enable ngrok integration.",
-    );
-    crate::logging::console_println("");
-
-    let mut buf = String::new();
-    let _ = reader.read_line(&mut buf);
 }
 
 // ─── kb_create_admin ─────────────────────────────────────────────────────────

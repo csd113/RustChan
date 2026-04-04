@@ -6,7 +6,6 @@ This guide reflects the current RustChan architecture:
 
 - Tor onion hosting is built in via Arti. You do not install or manage a separate `tor` service.
 - `ffmpeg` is optional, but strongly recommended if you want WebP thumbnails, WebM transcoding, video thumbnails, and audio waveforms.
-- ngrok support is provided through the official `ngrok` CLI and controlled from the RustChan terminal dashboard.
 
 ## Contents
 
@@ -15,17 +14,16 @@ This guide reflects the current RustChan architecture:
 3. [Install Rust](#install-rust)
 4. [Install ffmpeg](#install-ffmpeg)
 5. [Verify WebP and WebM Support](#verify-webp-and-webm-support)
-6. [Install ngrok](#install-ngrok)
-7. [Build and Run](#build-and-run)
-8. [First-Run Files and Layout](#first-run-files-and-layout)
-9. [Important settings.toml Options](#important-settingstoml-options)
-10. [Tor Onion Service](#tor-onion-service)
-11. [HTTPS and TLS](#https-and-tls)
-12. [Linux Service Setup](#linux-service-setup)
-13. [Reverse Proxy Notes](#reverse-proxy-notes)
-14. [Admin Bootstrapping](#admin-bootstrapping)
-15. [Updating](#updating)
-16. [Troubleshooting](#troubleshooting)
+6. [Build and Run](#build-and-run)
+7. [First-Run Files and Layout](#first-run-files-and-layout)
+8. [Important settings.toml Options](#important-settingstoml-options)
+9. [Tor Onion Service](#tor-onion-service)
+10. [HTTPS and TLS](#https-and-tls)
+11. [Linux Service Setup](#linux-service-setup)
+12. [Reverse Proxy Notes](#reverse-proxy-notes)
+13. [Admin Bootstrapping](#admin-bootstrapping)
+14. [Updating](#updating)
+15. [Troubleshooting](#troubleshooting)
 
 ## What RustChan Needs
 
@@ -213,56 +211,6 @@ RustChan will log warnings and continue:
 
 These warnings appear in the console at startup and in `rustchan-data/logs/`.
 
-## Install ngrok
-
-RustChan uses the official `ngrok` CLI. It does not manage your ngrok account or auth token for you.
-
-### 1. Install ngrok
-
-Use the official ngrok instructions:
-
-- [ngrok CLI docs](https://ngrok.com/docs/agent/cli)
-- [ngrok setup](https://dashboard.ngrok.com/get-started/setup)
-
-### 2. Authenticate ngrok
-
-Run the auth command from your ngrok dashboard, for example:
-
-```bash
-ngrok config add-authtoken <your-token>
-```
-
-### 3. Verify ngrok
-
-```bash
-ngrok version
-```
-
-### 4. Leave ngrok Enabled in RustChan
-
-The generated `settings.toml` includes:
-
-```toml
-[ngrok]
-enabled = true
-```
-
-When enabled:
-
-- the TUI dashboard shows ngrok status
-- `T` opens the ngrok control screen
-- `S` starts or stops the tunnel from that screen
-- the assigned public HTTPS URL appears in the dashboard
-
-If ngrok is not installed or not configured, RustChan will show setup guidance in the terminal dashboard and log the error details.
-
-Set this to disable the entire integration:
-
-```toml
-[ngrok]
-enabled = false
-```
-
 ## Build and Run
 
 ### Build
@@ -344,9 +292,6 @@ require_ffmpeg = false
 # ffprobe_path = "/usr/local/bin/ffprobe"
 ffmpeg_timeout_secs = 120
 
-[ngrok]
-enabled = true
-
 [tls]
 enabled = true
 port = 8443
@@ -359,7 +304,6 @@ port = 8443
 - `enable_tor_support = true`: built-in onion service is on
 - `tor_only = true`: bind RustChan to loopback and serve only through Tor
 - `require_ffmpeg = true`: fail startup if ffmpeg is missing
-- `[ngrok].enabled = false`: disable ngrok controls entirely
 - `[tls].enabled = true`: enable RustChan's native HTTPS listener
 - `ffmpeg_timeout_secs = 120`: max runtime for a single ffmpeg job
 
@@ -594,17 +538,6 @@ ffmpeg -encoders | rg 'libwebp|libvpx-vp9|libopus'
 ```
 
 If one of those encoders is missing, RustChan will still run but some media features will be downgraded.
-
-### The TUI says ngrok is not set up
-
-Verify:
-
-```bash
-ngrok version
-ngrok config check
-```
-
-Then make sure you already ran your ngrok auth token command.
 
 ### Tor never becomes ready
 

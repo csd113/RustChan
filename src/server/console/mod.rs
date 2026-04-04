@@ -37,7 +37,6 @@ static RAW_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConsoleMode {
     Dashboard,
-    NgrokControl,
     LogView,
     Help,
     BoardList,
@@ -50,7 +49,6 @@ pub enum WizardKind {
     CreateBoard,
     CreateAdmin,
     DeleteThread,
-    NgrokSetup,
 }
 
 pub type SharedConsoleMode = Arc<RwLock<ConsoleMode>>;
@@ -83,8 +81,6 @@ pub struct ChanStats {
     pub spinner_tick: u8,
     /// Live onion address once Tor has bootstrapped, None while bootstrapping.
     pub onion_address: Option<String>,
-    /// Current ngrok tunnel state, if the operator has toggled it.
-    pub ngrok: crate::server::ngrok::NgrokState,
 }
 
 impl Default for ChanStats {
@@ -105,7 +101,6 @@ impl Default for ChanStats {
             active_uploads: 0,
             spinner_tick: 0,
             onion_address: None,
-            ngrok: crate::server::ngrok::NgrokState::Disabled,
         }
     }
 }
@@ -139,7 +134,6 @@ async fn render(mode: &SharedConsoleMode, stats: &SharedStats, last_rendered: &m
         match current_mode {
             ConsoleMode::Wizard(_) => return,
             ConsoleMode::Dashboard => dashboard::render_dashboard(&snap),
-            ConsoleMode::NgrokControl => dashboard::render_ngrok_control(&snap),
             ConsoleMode::LogView => dashboard::render_log_view(),
             ConsoleMode::Help => dashboard::render_help(),
             ConsoleMode::BoardList => dashboard::render_board_list(&snap),
@@ -252,7 +246,6 @@ pub fn collect_stats(
     prev_threads: &mut i64,
     prev_posts: &mut i64,
     onion_address: Option<String>,
-    ngrok: crate::server::ngrok::NgrokState,
 ) -> ChanStats {
     use std::sync::atomic::Ordering;
 
@@ -325,7 +318,6 @@ pub fn collect_stats(
         active_uploads,
         spinner_tick,
         onion_address,
-        ngrok,
     }
 }
 
