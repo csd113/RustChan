@@ -457,7 +457,7 @@ pub fn admin_panel_page(
     };
     let ban_badge = format!(r#" <span class="admin-count-badge">{ban_count}</span>"#);
     let filter_badge = format!(r#" <span class="admin-count-badge">{filter_count}</span>"#);
-    let moderation_open_attr = " open";
+    let moderation_open_attr = "";
     let moderation_summary_badges =
         format!("{report_badge}{appeal_badge}{ban_badge}{filter_badge}");
 

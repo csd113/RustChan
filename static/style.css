@@ -2028,9 +2028,9 @@ html:not([data-theme]) .poster-id-btn {
 }
 
 .admin-moderation-card {
-  background: rgba(0,0,0,0.07);
-  border: 1px solid rgba(26,46,26,0.65);
-  padding: 12px;
+  background: transparent;
+  border: 0;
+  padding: 0;
 }
 
 .admin-card-header {
@@ -2040,8 +2040,8 @@ html:not([data-theme]) .poster-id-btn {
   gap: 10px;
   flex-wrap: wrap;
   margin-bottom: 8px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid rgba(26,46,26,0.55);
+  padding-bottom: 0;
+  border-bottom: 0;
 }
 
 .admin-card-header h3 {
