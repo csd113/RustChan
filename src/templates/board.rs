@@ -253,15 +253,15 @@ fn render_catalog_card(
 
     format!(
         r#"<div class="catalog-item{sticky}{pinned_class}" data-replies="{replies}" data-created="{created}" data-bumped="{bumped}" data-sticky="{is_sticky}" data-pinned="{is_pinned}">
-{actions}
 <a class="catalog-card-link" href="/{board}/thread/{thread_id}">
   {thumb}
+</a>
+<div class="catalog-meta-row">
+  <span class="catalog-replies">R: {replies} / F: {images}</span>
+  {actions}
+</div>
+<a class="catalog-card-link" href="/{board}/thread/{thread_id}">
   <div class="catalog-info">
-    <div class="catalog-meta-row">
-      <div class="catalog-meta-center">
-        <span class="catalog-replies">R: {replies} / F: {images}</span>
-      </div>
-    </div>
     {subject}
     {comment}
   </div>
@@ -300,13 +300,11 @@ fn render_archive_row(board_short: &str, thread: &Thread) -> String {
     });
     let thumb_html = thread.op_thumb.as_ref().map_or_else(String::new, |thumb| {
         format!(
-            r#"<div class="archive-row-media"><img src="/boards/{}" class="archive-thumb" alt="thumb" loading="lazy">{}</div>"#,
+            r#"<div class="archive-row-media"><img src="/boards/{}" class="archive-thumb" alt="thumb" loading="lazy"></div>"#,
             escape_html(thumb),
-            super::thread::render_thread_state_badges(thread.sticky, thread.locked),
         )
     });
-    let thread_state_badges =
-        super::thread::render_thread_state_badges(thread.sticky, thread.locked);
+    let thread_state_badges = super::thread::render_archive_state_badges(thread.sticky);
 
     format!(
         r#"<a href="/{board}/thread/{thread_id}" class="archive-row archive-thread-link">
@@ -315,7 +313,7 @@ fn render_archive_row(board_short: &str, thread: &Thread) -> String {
     <span class="archive-thread-link-text">
       {subject}<span class="archive-preview">{preview}</span>
     </span>
-    <span class="archive-meta">No.{thread_id}{state_badges} - {replies} replies - {created_at} &#128190;</span>
+    <span class="archive-meta">No.{thread_id}{state_badges} - {replies} replies - {created_at}</span>
   </div>
 </a>"#,
         board = escape_html(board_short),
@@ -1255,12 +1253,41 @@ mod tests {
         let actions_idx = html
             .find("catalog-card-actions")
             .expect("catalog actions should exist");
-        let link_idx = html
-            .find("catalog-card-link")
-            .expect("catalog link should exist");
+        let link_close_idx = html.find("</a>").expect("catalog link should close");
         assert!(
-            actions_idx < link_idx,
-            "interactive actions should render outside the card link"
+            actions_idx > link_close_idx,
+            "interactive actions should render after the card link"
+        );
+    }
+
+    #[test]
+    fn catalog_reply_counter_renders_between_thumbnail_and_body() {
+        let board = sample_board();
+        let thread = sample_thread();
+
+        let html = render_catalog_card(
+            &board,
+            &thread,
+            false,
+            "csrf",
+            "pin",
+            "Pin thread",
+            "hide",
+            "Hide thread",
+            "/test/catalog",
+        );
+
+        let thumb_idx = html
+            .find("catalog-card-media")
+            .expect("thumbnail should exist");
+        let meta_idx = html
+            .find("catalog-meta-row")
+            .expect("meta row should exist");
+        let info_idx = html.find("catalog-info").expect("body block should exist");
+
+        assert!(
+            thumb_idx < meta_idx && meta_idx < info_idx,
+            "reply counter should render directly under the thumbnail before the body text"
         );
     }
 
@@ -1281,7 +1308,8 @@ mod tests {
 
         assert!(html.contains("archive-row-media"));
         assert!(html.contains("thread-state-badge-pin"));
-        assert!(html.contains("thread-state-badge-lock"));
+        assert!(html.contains("thread-state-badge-archive"));
+        assert!(!html.contains("thread-state-badge-lock"));
         assert!(html.contains("archive-meta"));
     }
 }
