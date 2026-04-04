@@ -143,16 +143,20 @@ pub fn set_site_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> 
 /// Returns the admin-configured site name, or falls back to `CONFIG.forum_name`.
 pub fn get_site_name(conn: &rusqlite::Connection) -> String {
     get_site_setting(conn, "site_name")
-        .ok()
-        .flatten()
+        .unwrap_or_else(|error| {
+            tracing::warn!(target: "db", %error, "Failed to read site_name setting");
+            None
+        })
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| crate::config::CONFIG.forum_name.clone())
 }
 
 pub fn get_site_subtitle(conn: &rusqlite::Connection) -> String {
     get_site_setting(conn, "site_subtitle")
-        .ok()
-        .flatten()
+        .unwrap_or_else(|error| {
+            tracing::warn!(target: "db", %error, "Failed to read site_subtitle setting");
+            None
+        })
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "select board to proceed".to_string())
 }
@@ -160,8 +164,10 @@ pub fn get_site_subtitle(conn: &rusqlite::Connection) -> String {
 /// Convenience: read the admin-configured default UI theme (empty = "terminal").
 pub fn get_default_user_theme(conn: &rusqlite::Connection) -> String {
     get_site_setting(conn, "default_theme")
-        .ok()
-        .flatten()
+        .unwrap_or_else(|error| {
+            tracing::warn!(target: "db", %error, "Failed to read default_theme setting");
+            None
+        })
         .unwrap_or_default()
 }
 

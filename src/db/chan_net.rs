@@ -26,6 +26,7 @@
 
 use anyhow::Result;
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
 // SnapshotPost is defined in src/models.rs (not chan_net::snapshot) so that
@@ -58,7 +59,7 @@ pub fn insert_board_if_absent(conn: &Connection, short_name: &str, title: &str) 
             rusqlite::params![short_name],
             |row| row.get(0),
         )
-        .ok();
+        .optional()?;
 
     if let Some(id) = existing {
         return Ok(id);
@@ -69,7 +70,7 @@ pub fn insert_board_if_absent(conn: &Connection, short_name: &str, title: &str) 
     // write on the same connection between the INSERT and this call would return
     // the wrong row ID.
     let id: i64 = conn.query_row(
-        "INSERT INTO boards (short_name, title, description, nsfw, max_threads, bump_limit)
+        "INSERT INTO boards (short_name, name, description, nsfw, max_threads, bump_limit)
          VALUES (?1, ?2, '', 0, 100, 300) RETURNING id",
         rusqlite::params![short_name, title],
         |r| r.get(0),
@@ -200,13 +201,13 @@ pub fn insert_reply_into_thread(
             "SELECT t.id, t.board_id
              FROM threads t
              JOIN boards b ON t.board_id = b.id
-             WHERE t.id        = ?1
+            WHERE t.id        = ?1
                AND b.short_name = ?2
                AND t.archived   = 0",
             rusqlite::params![thread_id, board_short_name],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .ok();
+        .optional()?;
 
     let (_, board_id) = row.ok_or_else(|| {
         anyhow::anyhow!(

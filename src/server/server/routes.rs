@@ -360,7 +360,10 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(
-            response.headers().get(header::LOCATION).unwrap(),
+            response
+                .headers()
+                .get(header::LOCATION)
+                .expect("redirect location header"),
             "/admin/panel"
         );
     }

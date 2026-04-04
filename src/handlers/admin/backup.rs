@@ -21,7 +21,7 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::Utc;
 use futures::stream::Stream;
-use rusqlite::{backup::Backup, params};
+use rusqlite::{backup::Backup, params, OptionalExtension};
 use serde::Deserialize;
 use serde_json;
 use std::io::{Seek, Write};
@@ -249,6 +249,80 @@ fn map_board_restore_sqlite_error(
     }
 }
 
+fn insert_returning_id<P>(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: P,
+) -> std::result::Result<i64, rusqlite::Error>
+where
+    P: rusqlite::Params,
+{
+    conn.query_row(sql, params, |row| row.get(0))
+}
+
+fn insert_or_validate_restored_file_hash(
+    conn: &rusqlite::Connection,
+    file_hash: &board_backup_types::FileHashRow,
+) -> Result<()> {
+    match conn.execute(
+        "INSERT INTO file_hashes
+         (sha256, file_path, thumb_path, mime_type, created_at)
+         VALUES (?1,?2,?3,?4,?5)",
+        params![
+            file_hash.sha256,
+            file_hash.file_path,
+            file_hash.thumb_path,
+            file_hash.mime_type,
+            file_hash.created_at
+        ],
+    ) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(inner, _))
+            if inner.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            let existing: Option<(String, String, String, i64)> = conn
+                .query_row(
+                    "SELECT file_path, thumb_path, mime_type, created_at
+                     FROM file_hashes
+                     WHERE sha256 = ?1",
+                    params![file_hash.sha256],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
+                .map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!(
+                        "Read existing file_hash {}: {error}",
+                        file_hash.sha256
+                    ))
+                })?;
+
+            let Some((file_path, thumb_path, mime_type, created_at)) = existing else {
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "File hash {} hit a uniqueness error but could not be reloaded",
+                    file_hash.sha256
+                )));
+            };
+
+            if file_path == file_hash.file_path
+                && thumb_path == file_hash.thumb_path
+                && mime_type == file_hash.mime_type
+                && created_at == file_hash.created_at
+            {
+                Ok(())
+            } else {
+                Err(AppError::Internal(anyhow::anyhow!(
+                    "Restore file_hash collision for sha256 {}: existing row points to different media",
+                    file_hash.sha256
+                )))
+            }
+        }
+        Err(error) => Err(AppError::Internal(anyhow::anyhow!(
+            "Insert file_hash {}: {error}",
+            file_hash.sha256
+        ))),
+    }
+}
+
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 fn execute_board_restore<F>(
     conn: &mut rusqlite::Connection,
@@ -359,12 +433,14 @@ where
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Update board: {error}")))?;
             existing_id
         } else {
-            conn.execute(
+            insert_returning_id(
+                conn,
                 "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
                  max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
                  allow_tripcodes, edit_window_secs, allow_editing, allow_archive,
                  allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
+                 RETURNING id",
                 params![
                     manifest.board.short_name,
                     manifest.board.name,
@@ -389,16 +465,17 @@ where
                     manifest.board.created_at,
                 ],
             )
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Insert board: {error}")))?;
-            conn.last_insert_rowid()
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Insert board: {error}")))?
         };
 
         let mut thread_id_map: HashMap<i64, i64> = HashMap::new();
         for thread in &manifest.threads {
-            conn.execute(
+            let new_thread_id = insert_returning_id(
+                conn,
                 "INSERT INTO threads (board_id, subject, created_at, bumped_at,
                  locked, sticky, archived, reply_count)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                 RETURNING id",
                 params![
                     live_board_id,
                     thread.subject,
@@ -413,7 +490,7 @@ where
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert thread {}: {error}", thread.id))
             })?;
-            thread_id_map.insert(thread.id, conn.last_insert_rowid());
+            thread_id_map.insert(thread.id, new_thread_id);
         }
 
         let mut post_id_map: HashMap<i64, i64> = HashMap::new();
@@ -425,11 +502,13 @@ where
                     post.thread_id
                 ))
             })?;
-            conn.execute(
+            let new_post_id = insert_returning_id(
+                conn,
                 "INSERT INTO posts (thread_id, board_id, name, tripcode, subject,
                  body, body_html, ip_hash, file_path, file_name, file_size,
                  thumb_path, mime_type, media_type, created_at, deletion_token, is_op)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+                 RETURNING id",
                 params![
                     new_thread_id,
                     live_board_id,
@@ -453,7 +532,7 @@ where
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert post {}: {error}", post.id))
             })?;
-            post_id_map.insert(post.id, conn.last_insert_rowid());
+            post_id_map.insert(post.id, new_post_id);
         }
 
         let any_changed = post_id_map.iter().any(|(old, new)| old != new);
@@ -495,9 +574,11 @@ where
                     poll.thread_id
                 ))
             })?;
-            conn.execute(
+            let new_poll_id = insert_returning_id(
+                conn,
                 "INSERT INTO polls (thread_id, question, expires_at, created_at)
-                 VALUES (?1,?2,?3,?4)",
+                 VALUES (?1,?2,?3,?4)
+                 RETURNING id",
                 params![
                     new_thread_id,
                     poll.question,
@@ -508,7 +589,7 @@ where
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert poll {}: {error}", poll.id))
             })?;
-            poll_id_map.insert(poll.id, conn.last_insert_rowid());
+            poll_id_map.insert(poll.id, new_poll_id);
         }
 
         let mut option_id_map: HashMap<i64, i64> = HashMap::new();
@@ -520,14 +601,17 @@ where
                     option.poll_id
                 ))
             })?;
-            conn.execute(
-                "INSERT INTO poll_options (poll_id, text, position) VALUES (?1,?2,?3)",
+            let new_option_id = insert_returning_id(
+                conn,
+                "INSERT INTO poll_options (poll_id, text, position)
+                 VALUES (?1,?2,?3)
+                 RETURNING id",
                 params![new_poll_id, option.text, option.position],
             )
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert option {}: {error}", option.id))
             })?;
-            option_id_map.insert(option.id, conn.last_insert_rowid());
+            option_id_map.insert(option.id, new_option_id);
         }
 
         for vote in &manifest.poll_votes {
@@ -546,7 +630,7 @@ where
                 ))
             })?;
             conn.execute(
-                "INSERT OR IGNORE INTO poll_votes
+                "INSERT INTO poll_votes
                  (poll_id, option_id, ip_hash) VALUES (?1,?2,?3)",
                 params![new_poll_id, new_option_id, vote.ip_hash],
             )
@@ -556,19 +640,7 @@ where
         }
 
         for file_hash in &manifest.file_hashes {
-            conn.execute(
-                "INSERT OR IGNORE INTO file_hashes
-                 (sha256, file_path, thumb_path, mime_type, created_at)
-                 VALUES (?1,?2,?3,?4,?5)",
-                params![
-                    file_hash.sha256,
-                    file_hash.file_path,
-                    file_hash.thumb_path,
-                    file_hash.mime_type,
-                    file_hash.created_at
-                ],
-            )
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Insert file_hash: {error}")))?;
+            insert_or_validate_restored_file_hash(conn, file_hash)?;
         }
 
         db::insert_pending_fs_op(conn, &pending_board_restore_op)?;

@@ -142,15 +142,15 @@ const MIGRATIONS: &[(i64, &str)] = &[
 ];
 
 pub(super) fn apply_migrations(conn: &rusqlite::Connection) -> Result<()> {
-    conn.execute_batch(&format!(
+    conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (
             version    INTEGER NOT NULL DEFAULT 0,
             UNIQUE(version)
          );
          INSERT INTO schema_version (version)
-         SELECT {CURRENT_MAX_MIGRATION}
+         SELECT 0
          WHERE NOT EXISTS (SELECT 1 FROM schema_version);",
-    ))
+    )
     .context("Failed to create schema_version table")?;
 
     let current_version: i64 = conn

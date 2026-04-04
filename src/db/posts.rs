@@ -323,36 +323,68 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
         .context("Failed to begin delete_post transaction")?;
 
     let result: anyhow::Result<Vec<String>> = (|| {
-        let candidates = {
+        let (thread_id, is_op, candidates) = {
             let mut candidates = Vec::new();
             let mut stmt = conn.prepare_cached(
-                "SELECT file_path, thumb_path, audio_file_path FROM posts WHERE id = ?1",
+                "SELECT thread_id, is_op, file_path, thumb_path, audio_file_path
+                 FROM posts WHERE id = ?1",
             )?;
-            if let Some((f, t, a)) = stmt
+            let row = stmt
                 .query_row(params![post_id], |r| {
                     Ok((
-                        r.get::<_, Option<String>>(0)?,
-                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i32>(1)? != 0,
                         r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
                     ))
                 })
-                .optional()?
-            {
-                if let Some(p) = f {
-                    candidates.push(p);
-                }
-                if let Some(p) = t {
-                    candidates.push(p);
-                }
-                if let Some(p) = a {
-                    candidates.push(p);
-                }
+                .optional()?;
+
+            let Some((thread_id, is_op, f, t, a)) = row else {
+                anyhow::bail!("Post id {post_id} not found");
+            };
+
+            if is_op {
+                anyhow::bail!(
+                    "Post id {post_id} is the OP for thread {thread_id}; delete the thread instead"
+                );
             }
-            candidates
+
+            if let Some(p) = f {
+                candidates.push(p);
+            }
+            if let Some(p) = t {
+                candidates.push(p);
+            }
+            if let Some(p) = a {
+                candidates.push(p);
+            }
+
+            (thread_id, is_op, candidates)
         };
 
-        conn.execute("DELETE FROM posts WHERE id = ?1", params![post_id])
+        debug_assert!(!is_op, "OP posts must be deleted through delete_thread");
+
+        let deleted = conn
+            .execute("DELETE FROM posts WHERE id = ?1", params![post_id])
             .context("Failed to delete post")?;
+        if deleted == 0 {
+            anyhow::bail!("Post id {post_id} not found");
+        }
+
+        let updated = conn.execute(
+            "UPDATE threads
+             SET reply_count = CASE
+                 WHEN reply_count > 0 THEN reply_count - 1
+                 ELSE 0
+             END
+             WHERE id = ?1",
+            params![thread_id],
+        )?;
+        if updated == 0 {
+            anyhow::bail!("Thread id {thread_id} not found while updating reply count");
+        }
 
         // Check which paths are now safe — runs inside the transaction so it sees
         // the just-deleted state.

@@ -26,6 +26,7 @@ pub struct DbHealthReport {
     pub before_check: String,
     pub before_ok: bool,
     pub repair_attempted: bool,
+    pub repair_summary: Vec<String>,
     pub repair_steps: Vec<String>,
     pub after_check: Option<String>,
     pub after_ok: Option<bool>,
@@ -316,59 +317,50 @@ pub fn remove_word_filter(conn: &rusqlite::Connection, id: i64) -> Result<()> {
 
 // ─── Reports ──────────────────────────────────────────────────────────────────
 
-/// Guard helper: returns true if `reporter_hash` has already filed a report
-/// against `post_id` that is still open.
-///
-/// Prevents a user from spamming the report queue with duplicate
-/// reports on the same post. Called inside `file_report` before the INSERT.
-///
-/// Note: There is a TOCTOU race between `has_reported_post` and the INSERT in
-/// `file_report` (two concurrent requests can both pass the check). A full fix
-/// would require a schema-level `UNIQUE(post_id, reporter_hash)` constraint, but
-/// that would block re-reporting after a resolved report. The guard here is
-/// sufficient to prevent accidental spam; deliberate concurrent abuse is
-/// extremely unlikely in practice.
-fn has_reported_post(
-    conn: &rusqlite::Connection,
-    post_id: i64,
-    reporter_hash: &str,
-) -> Result<bool> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM reports
-         WHERE post_id = ?1 AND reporter_hash = ?2 AND status = 'open'",
-        params![post_id, reporter_hash],
-        |r| r.get(0),
-    )?;
-    Ok(count > 0)
+fn is_open_report_unique_violation(error: &rusqlite::Error) -> bool {
+    match error {
+        rusqlite::Error::SqliteFailure(inner, message) => {
+            inner.code == rusqlite::ErrorCode::ConstraintViolation
+                && message.as_deref().is_some_and(|text| {
+                    text.contains("idx_reports_open_unique")
+                        || (text.contains("reports.post_id")
+                            && text.contains("reports.reporter_hash"))
+                })
+        }
+        _ => false,
+    }
 }
 
 /// File a new report against a post. Returns the new report id.
 ///
 /// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
-/// Duplicate-report guard added via `has_reported_post`.
+/// Duplicate open reports from the same reporter are blocked by the
+/// `idx_reports_open_unique` partial unique index.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn file_report(
     conn: &rusqlite::Connection,
     post_id: i64,
-    thread_id: i64,
-    board_id: i64,
     reason: &str,
     reporter_hash: &str,
 ) -> Result<i64> {
-    if has_reported_post(conn, post_id, reporter_hash)? {
-        anyhow::bail!("Already reported post {post_id}");
+    match conn.query_row(
+        "INSERT INTO reports (post_id, thread_id, board_id, reason, reporter_hash)
+         SELECT p.id, p.thread_id, p.board_id, ?2, ?3
+         FROM posts p
+         WHERE p.id = ?1
+         RETURNING id",
+        params![post_id, reason, reporter_hash],
+        |r| r.get(0),
+    ) {
+        Ok(id) => Ok(id),
+        Err(error) if is_open_report_unique_violation(&error) => {
+            anyhow::bail!("Already reported post {post_id}")
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => anyhow::bail!("Post id {post_id} not found"),
+        Err(error) => Err(error).context("Failed to insert report"),
     }
-    let id: i64 = conn
-        .query_row(
-            "INSERT INTO reports (post_id, thread_id, board_id, reason, reporter_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
-            params![post_id, thread_id, board_id, reason, reporter_hash],
-            |r| r.get(0),
-        )
-        .context("Failed to insert report")?;
-    Ok(id)
 }
 
 /// Return all open reports enriched with board name and post preview.
@@ -835,7 +827,7 @@ fn integrity_check_status(conn: &rusqlite::Connection) -> (String, bool) {
     }
 
     let joined = messages.join(" | ");
-    let ok = messages.len() == 1 && messages[0].eq_ignore_ascii_case("ok");
+    let ok = matches!(messages.as_slice(), [message] if message.eq_ignore_ascii_case("ok"));
     (joined, ok)
 }
 
@@ -875,6 +867,7 @@ pub fn check_db_health(conn: &rusqlite::Connection) -> DbHealthReport {
         before_check,
         before_ok,
         repair_attempted: false,
+        repair_summary: Vec::new(),
         repair_steps: Vec::new(),
         after_check: None,
         after_ok: None,
@@ -883,37 +876,67 @@ pub fn check_db_health(conn: &rusqlite::Connection) -> DbHealthReport {
 
 pub fn attempt_db_repair(conn: &rusqlite::Connection) -> DbHealthReport {
     let (before_check, before_ok) = integrity_check_status(conn);
+    let mut repair_summary = Vec::new();
     let mut repair_steps = Vec::new();
 
     if before_ok {
-        repair_steps.push(
-            "Initial integrity_check was ok; running deeper index/search-index rebuild anyway."
+        repair_summary
+            .push("No integrity problems were detected before the repair run.".to_string());
+        repair_summary.push(
+            "No corruption-specific fixes were required; the system only ran maintenance and index rebuild steps."
+                .to_string(),
+        );
+    } else {
+        repair_summary.push(
+            "The initial integrity check reported a database problem, so repair steps were attempted."
                 .to_string(),
         );
     }
 
     match conn.execute_batch("REINDEX;") {
-        Ok(()) => repair_steps.push("Rebuilt SQLite indexes with REINDEX.".to_string()),
-        Err(error) => repair_steps.push(format!("REINDEX failed: {error}")),
+        Ok(()) => repair_steps.push("Rebuilt SQLite indexes.".to_string()),
+        Err(error) => repair_steps.push(format!("Could not rebuild SQLite indexes: {error}")),
     }
 
     match rebuild_posts_fts(conn) {
         Ok(()) => repair_steps
-            .push("Recreated the posts full-text search table and triggers.".to_string()),
-        Err(error) => repair_steps.push(format!("posts_fts recreate failed: {error}")),
+            .push("Rebuilt the post search index and recreated its update triggers.".to_string()),
+        Err(error) => repair_steps.push(format!(
+            "Could not rebuild the post search index and triggers: {error}"
+        )),
     }
 
     match conn.execute_batch("PRAGMA optimize;") {
-        Ok(()) => repair_steps.push("Ran PRAGMA optimize.".to_string()),
-        Err(error) => repair_steps.push(format!("PRAGMA optimize failed: {error}")),
+        Ok(()) => repair_steps.push("Optimized SQLite query-planner statistics.".to_string()),
+        Err(error) => repair_steps.push(format!(
+            "Could not optimize SQLite query-planner statistics: {error}"
+        )),
     }
 
     let (after_check, after_ok) = integrity_check_status(conn);
+
+    if before_ok && after_ok {
+        repair_summary.push(
+            "The final integrity check still passed, confirming that no additional repairs were needed."
+                .to_string(),
+        );
+    } else if after_ok {
+        repair_summary.push(
+            "The final integrity check passed after the repair run, so the detected problem was cleared."
+                .to_string(),
+        );
+    } else {
+        repair_summary.push(
+            "The repair run finished, but the final integrity check still reports a problem."
+                .to_string(),
+        );
+    }
 
     DbHealthReport {
         before_check,
         before_ok,
         repair_attempted: true,
+        repair_summary,
         repair_steps,
         after_check: Some(after_check),
         after_ok: Some(after_ok),
@@ -955,6 +978,7 @@ mod tests {
         assert!(report.before_ok);
         assert_eq!(report.before_check, "ok");
         assert!(!report.repair_attempted);
+        assert!(report.repair_summary.is_empty());
     }
 
     #[test]
@@ -966,5 +990,9 @@ mod tests {
         assert!(report.before_ok);
         assert_eq!(report.after_check.as_deref(), Some("ok"));
         assert_eq!(report.after_ok, Some(true));
+        assert!(report
+            .repair_summary
+            .iter()
+            .any(|line| line.contains("No corruption-specific fixes were required")));
     }
 }

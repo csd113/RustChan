@@ -1049,10 +1049,24 @@ pub fn admin_db_health_result_page(
         )
     };
 
+    let mut repair_summary_html = String::new();
+    if report.repair_summary.is_empty() {
+        repair_summary_html
+            .push_str(r#"<li style="color:var(--text-dim)">No repairs were run.</li>"#);
+    } else {
+        for line in &report.repair_summary {
+            let _ = write!(
+                repair_summary_html,
+                r#"<li>{line}</li>"#,
+                line = escape_html(line)
+            );
+        }
+    }
+
     let mut repair_steps_html = String::new();
     if report.repair_steps.is_empty() {
         repair_steps_html
-            .push_str(r#"<li style="color:var(--text-dim)">No repair steps were needed.</li>"#);
+            .push_str(r#"<li style="color:var(--text-dim)">No maintenance steps were run.</li>"#);
     } else {
         for step in &report.repair_steps {
             let _ = write!(
@@ -1076,7 +1090,11 @@ pub fn admin_db_health_result_page(
 <p><strong>After:</strong> {after_status}</p>
 <p><strong>Final output:</strong> <code>{after}</code></p>
 </div>
-<h2 style="margin-top:1rem">// what was done</h2>
+<h2 style="margin-top:1rem">// repair outcome</h2>
+<ul style="margin:0.75rem 0 0 1.25rem;max-width:760px">
+{repair_summary}
+</ul>
+<h2 style="margin-top:1rem">// maintenance actions run</h2>
 <ul style="margin:0.75rem 0 0 1.25rem;max-width:760px">
 {repair_steps}
 </ul>
@@ -1104,6 +1122,7 @@ pub fn admin_db_health_result_page(
             Some(false) => r#"<span style="color:var(--red-bright)">Problem found</span>"#,
             None => "Not run",
         },
+        repair_summary = repair_summary_html,
         repair_steps = repair_steps_html,
         repair_action = repair_action,
     );

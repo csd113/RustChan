@@ -87,7 +87,8 @@ pub fn paths_safe_to_delete(
                 params![path],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .ok();
+            .optional()
+            .context("Query file_hashes safe-delete candidate failed")?;
 
         if let Some((file_path, _thumb_path)) = maybe_row {
             if safe_set.contains(file_path.as_str()) {

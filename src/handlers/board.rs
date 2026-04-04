@@ -1047,14 +1047,7 @@ pub async fn file_report(
             }
             // Use the DB's thread_id for the redirect — not the user-submitted value.
             let authoritative_thread_id = post.thread_id;
-            db::file_report(
-                &conn,
-                post_id,
-                authoritative_thread_id,
-                board.id,
-                &reason,
-                &ip_hash,
-            )?;
+            db::file_report(&conn, post_id, &reason, &ip_hash)?;
             Ok(authoritative_thread_id)
         }
     })
