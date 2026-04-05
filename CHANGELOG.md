@@ -40,14 +40,6 @@ All notable changes to RustChan will be documented in this file.
 - Theme validation drift is eliminated: duplicated hardcoded theme lists, mismatched validators, and stale per-layer defaults were replaced with registry-backed validation and one canonical fallback path.
 - Renaming or deleting custom themes now updates dependent site and board defaults safely instead of leaving stale references behind, and saved cookie or localStorage themes now fall back cleanly when a theme is disabled or removed.
 
-### Validation
-
-- `cargo fmt`
-- `env -u RUSTC_WRAPPER cargo check`
-- `env -u RUSTC_WRAPPER cargo test --quiet`
-- `env -u RUSTC_WRAPPER cargo clippy --all-targets --all-features -- -D warnings`
-- `env -u RUSTC_WRAPPER cargo clippy -- -D warnings`
-
 ## [1.1.1]
 
 ### Added
