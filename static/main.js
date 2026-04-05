@@ -1019,8 +1019,9 @@ function toggleThreadMenu(toggle) {
 // ─── Theme picker ─────────────────────────────────────────────────────────────
 
 (function () {
-  // Must match VALID_THEMES in src/handlers/admin.rs
-  var THEMES = ['terminal', 'aero', 'dorfic', 'fluorogrid', 'neoncubicle', 'chanclassic'];
+  var THEMES = (document.documentElement.getAttribute('data-theme-slugs') || '')
+    .split(',')
+    .filter(function (value) { return value; });
 
   function persistTheme(t, href) {
     var url = href || ('/theme/' + encodeURIComponent(t));
@@ -1032,12 +1033,28 @@ function toggleThreadMenu(toggle) {
     } catch (e) {}
   }
 
+  function applyThemeStylesheet(t) {
+    var el = document.getElementById('active-theme-stylesheet');
+    if (!t || t === 'terminal') {
+      if (el) el.remove();
+      return;
+    }
+    if (!el) {
+      el = document.createElement('link');
+      el.id = 'active-theme-stylesheet';
+      el.rel = 'stylesheet';
+      document.head.appendChild(el);
+    }
+    el.href = '/theme-css/' + encodeURIComponent(t);
+  }
+
   function applyTheme(t) {
     if (t === 'terminal') {
       document.documentElement.removeAttribute('data-theme');
     } else {
       document.documentElement.setAttribute('data-theme', t);
     }
+    applyThemeStylesheet(t);
     // Match by data-theme attribute so order in DOM doesn't matter.
     document.querySelectorAll('.tp-option').forEach(function (el) {
       el.classList.toggle('active', el.dataset.theme === t);

@@ -214,11 +214,7 @@ pub async fn admin_login(
     }
 
     // CSRF check
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let username = form.username.trim().to_string();
     let username_log = redact_login_username(&username);
@@ -333,11 +329,7 @@ pub async fn admin_logout(
     Form(form): Form<super::CsrfOnly>,
 ) -> Result<Response> {
     // Verify CSRF to prevent forced-logout attacks
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     if let Some(session_cookie) = jar.get(super::SESSION_COOKIE) {
         let session_id = session_cookie.value().to_string();

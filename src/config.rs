@@ -164,8 +164,10 @@ struct SettingsFile {
     /// Home page subtitle shown below the site name.
     site_subtitle: Option<String>,
     /// Default theme served to first-time visitors before they pick one.
-    /// Valid values: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
+    /// Valid values include built-ins and admin-created custom theme slugs.
     default_theme: Option<String>,
+    /// Built-in theme whitelist applied when seeding the themes table.
+    enabled_builtin_themes: Option<Vec<String>>,
     port: Option<u16>,
     max_image_size_mb: Option<u32>,
     max_video_size_mb: Option<u32>,
@@ -360,8 +362,10 @@ pub struct Config {
     /// Initial subtitle shown on the home page (seeds the DB on first run).
     pub initial_site_subtitle: String,
     /// Initial default theme slug (seeds the DB on first run).
-    /// Valid: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
+    /// Valid: built-in or custom theme slug present in the themes table.
     pub initial_default_theme: String,
+    /// Built-in themes enabled by default when the site seeds its theme catalog.
+    pub initial_enabled_builtin_themes: Vec<String>,
     #[allow(dead_code)] // read by CLI subcommands and printed at startup
     pub port: u16,
     pub max_image_size: usize, // bytes
@@ -468,6 +472,12 @@ impl Config {
             "CHAN_DEFAULT_THEME",
             s.default_theme.as_deref().unwrap_or("fluorogrid"),
         );
+        let initial_enabled_builtin_themes = s.enabled_builtin_themes.unwrap_or_else(|| {
+            crate::theme::builtin_theme_slugs()
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        });
         let port: u16 = env_parse("CHAN_PORT", s.port.unwrap_or(8080));
         let max_image_mb: u32 = env_parse("CHAN_MAX_IMAGE_MB", s.max_image_size_mb.unwrap_or(8));
         let max_video_mb: u32 = env_parse("CHAN_MAX_VIDEO_MB", s.max_video_size_mb.unwrap_or(50));
@@ -539,6 +549,7 @@ impl Config {
             forum_name,
             initial_site_subtitle,
             initial_default_theme,
+            initial_enabled_builtin_themes,
             port,
             max_image_size: (max_image_mb as usize)
                 .saturating_mul(1024)

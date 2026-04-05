@@ -28,6 +28,7 @@ const BASE_SCHEMA_SQL: &str = "
         show_poster_ids     INTEGER NOT NULL DEFAULT 0,
         collapse_greentext  INTEGER NOT NULL DEFAULT 0,
         post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
+        default_theme       TEXT NOT NULL DEFAULT '',
         created_at      INTEGER NOT NULL DEFAULT (unixepoch())
     );
 
@@ -146,6 +147,17 @@ const BASE_SCHEMA_SQL: &str = "
     CREATE TABLE IF NOT EXISTS site_settings (
         key        TEXT PRIMARY KEY,
         value      TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS themes (
+        slug         TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        description  TEXT NOT NULL DEFAULT '',
+        swatch_hex   TEXT NOT NULL DEFAULT '#888888',
+        enabled      INTEGER NOT NULL DEFAULT 1,
+        sort_order   INTEGER NOT NULL DEFAULT 0,
+        is_builtin   INTEGER NOT NULL DEFAULT 0,
+        custom_css   TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS reports (

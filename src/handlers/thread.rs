@@ -9,8 +9,11 @@ use crate::{
     config::CONFIG,
     db::{self},
     error::{AppError, Result},
-    handlers::{board::ensure_csrf, parse_post_multipart, posting, render},
-    middleware::{validate_csrf, AppState},
+    handlers::{
+        board::{check_csrf_jar, ensure_csrf},
+        parse_post_multipart, posting, render,
+    },
+    middleware::AppState,
     utils::crypto::{hash_ip, verify_pow},
 };
 use axum::{
@@ -423,17 +426,18 @@ pub async fn edit_post_post(
     jar: CookieJar,
     Form(form): Form<EditForm>,
 ) -> Result<Response> {
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let raw_body = form.body;
     let token = form.deletion_token;
+    let csrf_clone = jar
+        .get("csrf_token")
+        .map(|c| c.value().to_string())
+        .unwrap_or_default();
 
     let outcome = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-            let csrf_clone = csrf_cookie.clone().unwrap_or_default();
+        let csrf_clone = csrf_clone.clone();
         let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
         move || -> Result<EditOutcome> {
             let conn = pool.get()?;
@@ -537,10 +541,7 @@ pub async fn vote_handler(
     jar: CookieJar,
     Form(form): Form<VoteForm>,
 ) -> Result<Response> {
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let cookie_secret = CONFIG.cookie_secret.clone();
     let option_id = form.option_id;

@@ -316,6 +316,7 @@ pub fn thread_page(
         csrf_token,
         boards,
         current_theme,
+        Some(&board.default_theme),
         collapse_greentext,
         &format!("/{}/thread/{}", board.short_name, thread.id),
     )
@@ -945,6 +946,7 @@ pub fn edit_post_page(
         csrf_token,
         boards,
         current_theme,
+        Some(&board.default_theme),
         collapse_greentext,
         &format!(
             "/{}/thread/{}#p{}",

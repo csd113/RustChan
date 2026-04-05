@@ -41,7 +41,8 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         show_poster_ids: row.get::<_, i32>(19)? != 0,
         collapse_greentext: row.get::<_, i32>(20)? != 0,
         post_cooldown_secs: row.get(21)?,
-        created_at: row.get(22)?,
+        default_theme: row.get(22)?,
+        created_at: row.get(23)?,
     })
 }
 
@@ -181,7 +182,7 @@ pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
             "SELECT id, display_order, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                 edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs, created_at
+                allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs, default_theme, created_at
          FROM boards ORDER BY {BOARD_ORDER_SQL}"
         ),
     )?;
@@ -206,7 +207,7 @@ pub fn get_all_boards_with_stats(
                 b.max_archived_threads, b.bump_limit, b.allow_images, b.allow_video, b.allow_audio,
                 b.allow_any_files, b.allow_tripcodes, b.edit_window_secs, b.allow_editing,
                 b.allow_archive, b.allow_video_embeds, b.allow_captcha, b.show_poster_ids,
-                b.collapse_greentext, b.post_cooldown_secs, b.created_at,
+                b.collapse_greentext, b.post_cooldown_secs, b.default_theme, b.created_at,
                 COUNT(t.id) AS thread_count
          FROM boards b
          LEFT JOIN threads t ON t.board_id = b.id AND t.archived = 0
@@ -216,7 +217,7 @@ pub fn get_all_boards_with_stats(
     let out = stmt
         .query_map([], |row| {
             let board = map_board(row)?;
-            let thread_count: i64 = row.get(23)?;
+            let thread_count: i64 = row.get(24)?;
             Ok(crate::models::BoardStats {
                 board,
                 thread_count,
@@ -233,7 +234,7 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
         "SELECT id, display_order, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
                 allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                 edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs, created_at
+                allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs, default_theme, created_at
          FROM boards WHERE short_name = ?1",
     )?;
     Ok(stmt.query_row(params![short], map_board).optional()?)
@@ -403,6 +404,7 @@ pub fn update_board_settings(
     show_poster_ids: bool,
     collapse_greentext: bool,
     post_cooldown_secs: i64,
+    default_theme: &str,
 ) -> Result<()> {
     let tx = conn.transaction()?;
     let current_nsfw: bool = tx.query_row(
@@ -418,8 +420,9 @@ pub fn update_board_settings(
              allow_images=?7, allow_video=?8, allow_audio=?9, allow_any_files=?10,
              allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13,
              allow_archive=?14, allow_video_embeds=?15, allow_captcha=?16,
-             show_poster_ids=?17, collapse_greentext=?18, post_cooldown_secs=?19
-             WHERE id=?20",
+             show_poster_ids=?17, collapse_greentext=?18, post_cooldown_secs=?19,
+             default_theme=?20
+             WHERE id=?21",
             params![
                 name,
                 description,
@@ -440,6 +443,7 @@ pub fn update_board_settings(
                 i32::from(show_poster_ids),
                 i32::from(collapse_greentext),
                 post_cooldown_secs,
+                default_theme,
                 id,
             ],
         )
@@ -451,8 +455,9 @@ pub fn update_board_settings(
              allow_images=?8, allow_video=?9, allow_audio=?10, allow_any_files=?11,
              allow_tripcodes=?12, edit_window_secs=?13, allow_editing=?14,
              allow_archive=?15, allow_video_embeds=?16, allow_captcha=?17,
-             show_poster_ids=?18, collapse_greentext=?19, post_cooldown_secs=?20
-             WHERE id=?21",
+             show_poster_ids=?18, collapse_greentext=?19, post_cooldown_secs=?20,
+             default_theme=?21
+             WHERE id=?22",
             params![
                 name,
                 description,
@@ -474,6 +479,7 @@ pub fn update_board_settings(
                 i32::from(show_poster_ids),
                 i32::from(collapse_greentext),
                 post_cooldown_secs,
+                default_theme,
                 id,
             ],
         )

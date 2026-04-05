@@ -140,8 +140,8 @@ RustChan is a fully-featured imageboard engine compiled into a **single Rust bin
 ### 📱 Mobile & UX
 - **Mobile reply drawer** — floating action button slides up a full-width reply panel on small screens
 - **Cross-board hover previews** — `>>>/board/123` links show a floating popup with client-side caching
-- **Six built-in themes** — user-selectable via a floating picker; persisted in `localStorage` with no flash
-- **Default theme** — `default_theme` in `settings.toml` sets the server-side default for new visitors; also configurable from the admin panel
+- **Modular theme system** — built-in themes plus admin-created custom themes, all surfaced through one floating picker and persisted in `localStorage` with no flash
+- **Theme controls** — site-wide defaults, per-board defaults, and runtime theme enable/disable are all configurable from the admin panel
 - **Site subtitle** — `site_subtitle` in `settings.toml` customises the home page tagline at install time
 - **Live stats** — total posts, uploads, and content size displayed on the home page
 - **Background worker system** — video transcoding, waveform generation, and thread cleanup run asynchronously; duplicate media jobs coalesced; configurable ffmpeg timeout; exponential backoff on retries
@@ -710,13 +710,14 @@ __text__                  italic
 
 ## 🎨 Themes
 
-Six built-in themes, selectable via the floating picker on every page. Persisted in `localStorage` with no flash on load. The site-wide default for new visitors is set via `default_theme` in `settings.toml` or from the admin panel.
+Built-in and admin-created custom themes are selectable from the floating picker on every page. Theme choice is persisted in `localStorage` with no flash on load, while the server also tracks a site-wide default and optional per-board defaults.
 
 | Theme | Description |
 |---|---|
 | **Terminal** *(default)* | Dark background, matrix-green monospace, glowing accents |
 | **Frutiger Aero** | Frosted glass panels, pearl-blue gradients, rounded corners |
 | **DORFic Aero** | Dark stone walls, torchlit amber/copper glass panels |
+| **Forest** | Deep woodland greens, warm brown panels, parchment text |
 | **FluoroGrid** | Pale sage, muted teal grid lines, dusty lavender panels |
 | **NeonCubicle** | Cool off-white, horizontal scanlines, steel-teal borders |
 | **ChanClassic** | Light tan/beige background, maroon accents, blue post-number links — classic imageboard styling |

@@ -1400,15 +1400,12 @@ pub async fn admin_restore(
             }
         }
 
-        let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-        if !crate::middleware::validate_csrf(
-            csrf_cookie.as_deref(),
-            form_csrf.as_deref().unwrap_or(""),
-        ) {
+        let has_csrf_cookie = jar.get("csrf_token").is_some();
+        if super::check_csrf_jar(&jar, form_csrf.as_deref()).is_err() {
             tracing::warn!(
                 target: "admin",
                 route = "/admin/restore",
-                has_csrf_cookie = csrf_cookie.is_some(),
+                has_csrf_cookie = has_csrf_cookie,
                 has_form_csrf = form_csrf.is_some(),
                 "Full restore failed CSRF validation"
             );
@@ -2336,15 +2333,12 @@ pub async fn board_restore(
             }
         }
 
-        let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-        if !crate::middleware::validate_csrf(
-            csrf_cookie.as_deref(),
-            form_csrf.as_deref().unwrap_or(""),
-        ) {
+        let has_csrf_cookie = jar.get("csrf_token").is_some();
+        if super::check_csrf_jar(&jar, form_csrf.as_deref()).is_err() {
             tracing::warn!(
                 target: "admin",
                 route = "/admin/board/restore",
-                has_csrf_cookie = csrf_cookie.is_some(),
+                has_csrf_cookie = has_csrf_cookie,
                 has_form_csrf = form_csrf.is_some(),
                 "Board restore failed CSRF validation"
             );

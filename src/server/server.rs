@@ -180,7 +180,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
             // Seed default_theme from settings.toml if not yet configured in DB.
             let default_theme = crate::db::get_default_user_theme(&conn);
-            let default_theme = if default_theme.is_empty()
+            if default_theme.is_empty()
                 && !CONFIG.initial_default_theme.is_empty()
                 && CONFIG.initial_default_theme != "fluorogrid"
             {
@@ -189,11 +189,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     "default_theme",
                     &CONFIG.initial_default_theme,
                 );
-                CONFIG.initial_default_theme.clone()
-            } else {
-                default_theme
-            };
-            crate::templates::set_live_default_theme(&default_theme);
+            }
+            let _ = crate::db::sync_live_theme_state(&conn);
 
             // Seed the live board list used by error pages and ban pages.
             if let Ok(boards) = crate::db::get_all_boards(&conn) {

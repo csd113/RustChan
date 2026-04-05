@@ -42,6 +42,7 @@ pub fn init_pool() -> Result<DbPool> {
 
     let conn = pool.get().context("Failed to get DB connection")?;
     create_schema(&conn)?;
+    super::upsert_builtin_themes(&conn)?;
 
     tracing::info!(target: "db", path = db_path, "Database initialised");
     Ok(pool)
@@ -73,6 +74,7 @@ pub fn init_test_pool() -> Result<DbPool> {
 
     let conn = pool.get().context("Failed to get test DB connection")?;
     create_schema(&conn)?;
+    super::upsert_builtin_themes(&conn)?;
     Ok(pool)
 }
 

@@ -40,7 +40,15 @@ const HTML_CACHE_CONTROL: &str = "private, no-cache, must-revalidate";
 pub fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
     jar.get(USER_THEME_COOKIE)
         .and_then(|cookie| crate::templates::normalize_theme_slug(cookie.value()))
-        .map(str::to_string)
+}
+
+pub fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    if validate_csrf(csrf_cookie.as_deref(), form_token.unwrap_or("")) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden("CSRF token mismatch.".into()))
+    }
 }
 
 pub fn has_nsfw_consent(jar: &CookieJar) -> bool {
@@ -881,6 +889,40 @@ pub async fn set_theme(
     Ok((jar, Redirect::to(redirect_to)).into_response())
 }
 
+pub async fn serve_theme_css(
+    State(state): State<AppState>,
+    Path(theme): Path<String>,
+) -> Result<Response> {
+    let css = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<Option<String>> {
+            let conn = pool.get()?;
+            db::theme_css_response(&conn, &theme).map_err(Into::into)
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let Some(css) = css else {
+        return Err(AppError::NotFound("Theme stylesheet not found.".into()));
+    };
+
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/css; charset=utf-8"),
+            ),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=86400"),
+            ),
+        ],
+        css,
+    )
+        .into_response())
+}
+
 #[derive(serde::Deserialize)]
 pub struct NsfwConsentForm {
     #[serde(rename = "_csrf")]
@@ -889,10 +931,7 @@ pub struct NsfwConsentForm {
 }
 
 pub async fn accept_nsfw(jar: CookieJar, Form(form): Form<NsfwConsentForm>) -> Result<Response> {
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let mut cookie = Cookie::new(NSFW_CONSENT_COOKIE, "1");
     cookie.set_http_only(false);
@@ -922,10 +961,7 @@ pub async fn update_thread_preference(
     jar: CookieJar,
     Form(form): Form<ThreadPreferenceForm>,
 ) -> Result<Response> {
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let board_from_form = form
         .board
@@ -993,10 +1029,7 @@ pub async fn file_report(
     jar: CookieJar,
     Form(form): Form<ReportForm>,
 ) -> Result<Response> {
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let ip_hash = hash_ip(&identity_key(&client_ip, &jar), &CONFIG.cookie_secret);
     let reason = form
@@ -1334,9 +1367,7 @@ pub async fn submit_appeal(
 ) -> impl axum::response::IntoResponse {
     use axum::response::Html;
 
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
+    if check_csrf_jar(&jar, form.csrf.as_deref()).is_err() {
         return Html(crate::templates::error_page(403, "CSRF token mismatch.")).into_response();
     }
 
@@ -1446,7 +1477,7 @@ mod tests {
             crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
             crate::db::update_board_settings(
                 &mut conn, 1, "Test", "", false, 500, 100, 150, false, false, false, false, true,
-                0, false, true, false, false, false, false, 0,
+                0, false, true, false, false, false, false, 0, "",
             )
             .expect("update board settings");
         }

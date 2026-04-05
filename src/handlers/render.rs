@@ -186,26 +186,13 @@ mod tests {
             id: 1,
             display_order: 0,
             short_name: "t".into(),
-            name: "Test".into(),
-            description: String::new(),
-            nsfw: false,
-            max_threads: 100,
             max_archived_threads: 100,
             bump_limit: 300,
-            allow_images: true,
-            allow_video: true,
-            allow_audio: true,
-            allow_any_files: false,
-            allow_tripcodes: true,
             allow_editing: true,
             edit_window_secs: 300,
-            allow_archive: true,
             allow_video_embeds: true,
-            allow_captcha: false,
             show_poster_ids: true,
-            collapse_greentext: false,
-            post_cooldown_secs: 0,
-            created_at: 0,
+            ..crate::test_fixtures::sample_board()
         }
     }
 

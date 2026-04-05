@@ -42,6 +42,10 @@ pub(super) fn public_routes() -> Router<AppState> {
         )
         .route("/nsfw/accept", post(crate::handlers::board::accept_nsfw))
         .route("/theme/{theme}", get(crate::handlers::board::set_theme))
+        .route(
+            "/theme-css/{theme}",
+            get(crate::handlers::board::serve_theme_css),
+        )
         .route("/", get(crate::handlers::board::index))
         .route("/{board}", get(crate::handlers::board::board_index))
         .route(
@@ -205,6 +209,18 @@ fn admin_moderation_routes() -> Router<AppState> {
         .route(
             "/admin/site/settings",
             post(crate::handlers::admin::update_site_settings),
+        )
+        .route(
+            "/admin/theme/create",
+            post(crate::handlers::admin::create_theme),
+        )
+        .route(
+            "/admin/theme/update",
+            post(crate::handlers::admin::update_theme),
+        )
+        .route(
+            "/admin/theme/delete",
+            post(crate::handlers::admin::delete_theme),
         )
         .route(
             "/admin/db/check",

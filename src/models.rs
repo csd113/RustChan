@@ -108,7 +108,21 @@ pub struct Board {
     pub show_poster_ids: bool,    // per-board thread-local poster IDs in post headers
     pub collapse_greentext: bool, // per-board long greentext auto-collapse toggle
     pub post_cooldown_secs: i64,  // seconds a user must wait between posts (0 = disabled)
+    pub default_theme: String,    // blank = inherit site default
     pub created_at: i64,          // Unix timestamp
+}
+
+/// A configurable UI theme that may be built-in or admin-defined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Theme {
+    pub slug: String,
+    pub display_name: String,
+    pub description: String,
+    pub swatch_hex: String,
+    pub enabled: bool,
+    pub sort_order: i64,
+    pub is_builtin: bool,
+    pub custom_css: String,
 }
 
 /// A thread (the OP post + its replies share this record for metadata)

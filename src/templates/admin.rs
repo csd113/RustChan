@@ -45,6 +45,7 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
         csrf_token,
         boards,
         None,
+        None,
         false,
         "/admin",
     )
@@ -67,6 +68,7 @@ pub fn admin_panel_page(
     site_name: &str,
     site_subtitle: &str,
     default_theme: &str,
+    themes: &[crate::models::Theme],
     tor_address: Option<&str>,
     // Optional one-time flash message shown at the top of the panel.
     // (is_error, message) — is_error=true → red, false → green.
@@ -75,6 +77,24 @@ pub fn admin_panel_page(
     let global_favicon_exists = crate::favicon::global_has_custom_favicon();
     let global_favicon_version =
         crate::favicon::favicon_version_for_board(None).unwrap_or_default();
+    let enabled_theme_options = themes
+        .iter()
+        .filter(|theme| theme.enabled)
+        .map(|theme| {
+            format!(
+                r#"<option value="{slug}"{selected}>{label}</option>"#,
+                slug = escape_html(&theme.slug),
+                selected = if theme.slug == default_theme {
+                    " selected"
+                } else {
+                    ""
+                },
+                label = escape_html(&theme.display_name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let mut theme_cards = String::new();
     let mut board_cards = String::new();
     for (index, b) in boards.iter().enumerate() {
         let checked = |v: bool| if v { " checked" } else { "" };
@@ -118,6 +138,12 @@ pub fn admin_panel_page(
   <label>Bump limit<input type="number" name="bump_limit" value="{bump}" min="1" max="10000"></label>
   <label>Max threads<input type="number" name="max_threads" value="{maxt}" min="1" max="1000"></label>
   <label>Max archived threads<input type="number" name="max_archived_threads" value="{max_archived}" min="1" max="10000"></label>
+  <label>Board default theme
+    <select name="default_theme">
+      <option value=""{inherit_theme_selected}>Inherit site default</option>
+      {board_theme_options}
+    </select>
+  </label>
 </div>
 <div class="board-settings-checks">
   <label><input type="checkbox" name="nsfw"            value="1"{nsfw_ck}> NSFW</label>
@@ -206,6 +232,28 @@ pub fn admin_panel_page(
             bump = b.bump_limit,
             maxt = b.max_threads,
             max_archived = b.max_archived_threads,
+            inherit_theme_selected = if b.default_theme.is_empty() {
+                " selected"
+            } else {
+                ""
+            },
+            board_theme_options = themes
+                .iter()
+                .filter(|theme| theme.enabled)
+                .map(|theme| {
+                    format!(
+                        r#"<option value="{slug}"{selected}>{label}</option>"#,
+                        slug = escape_html(&theme.slug),
+                        selected = if theme.slug == b.default_theme {
+                            " selected"
+                        } else {
+                            ""
+                        },
+                        label = escape_html(&theme.display_name)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(""),
             edit_win = b.edit_window_secs,
             edit_win_display = if b.allow_editing { "" } else { "display:none" },
             cooldown = b.post_cooldown_secs,
@@ -501,6 +549,75 @@ pub fn admin_panel_page(
         );
     }
 
+    if themes.is_empty() {
+        theme_cards.push_str(r#"<p style="color:var(--text-dim);margin:0">No themes loaded.</p>"#);
+    } else {
+        for theme in themes {
+            let _ = write!(
+                theme_cards,
+                r#"<details class="board-settings-card">
+<summary>{name} <code>/{slug}/</code>{builtin_tag}{disabled_tag}</summary>
+<form method="POST" action="/admin/theme/update" class="board-settings-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="existing_slug" value="{slug}">
+  <div class="board-settings-grid">
+    <label>Display name<input type="text" name="display_name" value="{name}" maxlength="64" required></label>
+    <label>Slug<input type="text" name="slug" value="{slug}" maxlength="32"{slug_readonly}></label>
+    <label>Swatch<input type="text" name="swatch_hex" value="{swatch}" maxlength="7"></label>
+  </div>
+  <div class="board-settings-grid" style="margin-top:0.5rem">
+    <label>Description<input type="text" name="description" value="{description}" maxlength="256"></label>
+  </div>
+  <div class="board-settings-checks">
+    <label><input type="checkbox" name="enabled" value="1"{enabled_ck}> Enabled</label>
+  </div>
+  <div class="board-settings-grid" style="margin-top:0.5rem;{custom_css_display}">
+    <label>Custom CSS
+      <textarea name="custom_css" rows="10" placeholder="--bg: #111; --text: #eee; or full scoped CSS">{custom_css}</textarea>
+    </label>
+  </div>
+  <div class="board-settings-actions">
+    <button type="submit">save theme</button>
+  </div>
+</form>
+{delete_form}
+</details>"#,
+                csrf = escape_html(csrf_token),
+                name = escape_html(&theme.display_name),
+                slug = escape_html(&theme.slug),
+                builtin_tag = if theme.is_builtin {
+                    r#" <span class="tag">built-in</span>"#
+                } else {
+                    ""
+                },
+                disabled_tag = if theme.enabled {
+                    ""
+                } else {
+                    r#" <span class="tag locked">disabled</span>"#
+                },
+                slug_readonly = if theme.is_builtin { " readonly" } else { "" },
+                swatch = escape_html(&theme.swatch_hex),
+                description = escape_html(&theme.description),
+                enabled_ck = if theme.enabled { " checked" } else { "" },
+                custom_css_display = if theme.is_builtin { "display:none" } else { "" },
+                custom_css = escape_html(&theme.custom_css),
+                delete_form = if theme.is_builtin {
+                    String::new()
+                } else {
+                    format!(
+                        r#"<form method="POST" action="/admin/theme/delete" style="display:inline-block;margin-top:0.5rem">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="slug" value="{slug}">
+  <button type="submit" class="btn-danger" data-confirm="Delete custom theme {slug}?">delete theme</button>
+</form>"#,
+                        csrf = escape_html(csrf_token),
+                        slug = escape_html(&theme.slug)
+                    )
+                }
+            );
+        }
+    }
+
     let flash_html = match flash {
         Some((is_error, msg)) => {
             let cls = if is_error { "flash-error" } else { "flash-ok" };
@@ -576,12 +693,7 @@ old boards to prevent query performance degradation.
   </label>
   <label>Default theme
     <select name="default_theme" style="font-family:inherit;padding:0.25rem 0.4rem;background:var(--bg-input);color:var(--text);border:1px solid var(--border)">
-      <option value="terminal"{sel_terminal}>Terminal (default dark)</option>
-      <option value="aero"{sel_aero}>Frutiger Aero</option>
-      <option value="dorfic"{sel_dorfic}>DORFic</option>
-      <option value="fluorogrid"{sel_fluorogrid}>FluoroGrid</option>
-      <option value="neoncubicle"{sel_neoncubicle}>NeonCubicle</option>
-      <option value="chanclassic"{sel_chanclassic}>ChanClassic</option>
+      {enabled_theme_options}
     </select>
   </label>
 </div>
@@ -603,6 +715,35 @@ old boards to prevent query performance degradation.
 <p style="color:var(--text-dim);font-size:0.78rem;margin:0.45rem 0 0">
   {global_favicon_status}
 </p>
+</section>
+
+<section class="admin-section" id="theme-catalog">
+<h2>// themes</h2>
+<p style="color:var(--text-dim);font-size:0.85rem">Built-in themes can be enabled or disabled at runtime. Custom themes can be added here and selected globally or per-board once enabled.</p>
+<div class="admin-board-cards">{theme_cards}</div>
+<h3>create custom theme</h3>
+<form method="POST" action="/admin/theme/create">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <div class="board-settings-grid">
+    <label>Display name<input type="text" name="display_name" maxlength="64" required></label>
+    <label>Slug<input type="text" name="slug" maxlength="32" required></label>
+    <label>Swatch<input type="text" name="swatch_hex" maxlength="7" placeholder="7ab84e"></label>
+  </div>
+  <div class="board-settings-grid" style="margin-top:0.5rem">
+    <label>Description<input type="text" name="description" maxlength="256"></label>
+  </div>
+  <div class="board-settings-checks">
+    <label><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
+  </div>
+  <div class="board-settings-grid" style="margin-top:0.5rem">
+    <label>Custom CSS
+      <textarea name="custom_css" rows="10" placeholder="Add CSS variables or full scoped CSS for this theme." required></textarea>
+    </label>
+  </div>
+  <div class="board-settings-actions">
+    <button type="submit">create theme</button>
+  </div>
+</form>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -831,40 +972,12 @@ old boards to prevent query performance degradation.
         },
         site_name_val = escape_html(site_name),
         site_subtitle_val = escape_html(site_subtitle),
+        enabled_theme_options = enabled_theme_options,
+        theme_cards = theme_cards,
         global_favicon_status = if global_favicon_exists {
             "Custom global favicon is active and stored under rustchan-data/runtime/favicon/."
         } else {
             "No custom global favicon uploaded yet."
-        },
-        sel_terminal = if default_theme == "terminal" || default_theme.is_empty() {
-            " selected"
-        } else {
-            ""
-        },
-        sel_aero = if default_theme == "aero" {
-            " selected"
-        } else {
-            ""
-        },
-        sel_dorfic = if default_theme == "dorfic" {
-            " selected"
-        } else {
-            ""
-        },
-        sel_fluorogrid = if default_theme == "fluorogrid" {
-            " selected"
-        } else {
-            ""
-        },
-        sel_neoncubicle = if default_theme == "neoncubicle" {
-            " selected"
-        } else {
-            ""
-        },
-        sel_chanclassic = if default_theme == "chanclassic" {
-            " selected"
-        } else {
-            ""
         },
         tor_section = if tor_address.is_none() {
             String::new()
@@ -894,6 +1007,7 @@ old boards to prevent query performance degradation.
         &body,
         csrf_token,
         boards,
+        None,
         None,
         false,
         "/admin",
@@ -972,6 +1086,7 @@ pub fn mod_log_page(
         csrf_token,
         boards,
         None,
+        None,
         false,
         "/admin/log",
     )
@@ -1022,6 +1137,7 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
         &body,
         csrf_token,
         &[],
+        None,
         None,
         false,
         "/admin",
@@ -1154,6 +1270,7 @@ pub fn admin_db_health_result_page(
         csrf_token,
         &[],
         None,
+        None,
         false,
         "/admin",
     )
@@ -1275,6 +1392,7 @@ pub fn admin_ip_history_page(
         &body,
         csrf_token,
         all_boards,
+        None,
         None,
         false,
         &format!("/admin/ip/{ip_hash}"),

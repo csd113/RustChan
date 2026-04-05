@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 33;
+pub(super) const CURRENT_MAX_MIGRATION: i64 = 35;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
@@ -138,6 +138,24 @@ const MIGRATIONS: &[(i64, &str)] = &[
             ) THEN 1
             ELSE 0
         END",
+    ),
+    (
+        34,
+        r"ALTER TABLE boards ADD COLUMN default_theme TEXT NOT NULL DEFAULT '';
+        CREATE TABLE IF NOT EXISTS themes (
+            slug         TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            description  TEXT NOT NULL DEFAULT '',
+            swatch_hex   TEXT NOT NULL DEFAULT '#888888',
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            is_builtin   INTEGER NOT NULL DEFAULT 0,
+            custom_css   TEXT NOT NULL DEFAULT ''
+        )",
+    ),
+    (
+        35,
+        "CREATE INDEX IF NOT EXISTS idx_themes_enabled_sort ON themes(enabled, sort_order, slug)",
     ),
 ];
 

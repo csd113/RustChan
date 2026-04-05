@@ -15,7 +15,7 @@
 //   forms.rs  — new_thread_form, reply_form
 
 use crate::config::CONFIG;
-use crate::models::{Board, Pagination};
+use crate::models::{Board, Pagination, Theme};
 use crate::utils::sanitize::escape_html;
 use chrono::{TimeZone, Utc};
 use parking_lot::RwLock;
@@ -29,15 +29,6 @@ pub mod admin;
 pub mod board;
 pub mod forms;
 pub mod thread;
-
-pub const VALID_THEMES: &[&str] = &[
-    "terminal",
-    "aero",
-    "dorfic",
-    "fluorogrid",
-    "neoncubicle",
-    "chanclassic",
-];
 
 // Re-export every public symbol so all existing call-sites (templates::foo)
 // continue to compile without any changes.
@@ -62,6 +53,8 @@ static LIVE_SITE_SUBTITLE: LazyLock<RwLock<Arc<str>>> =
 /// change without requiring a server restart or extra DB round-trip per request.
 static LIVE_DEFAULT_THEME: LazyLock<RwLock<Arc<str>>> =
     LazyLock::new(|| RwLock::new(Arc::from("")));
+static LIVE_THEMES: LazyLock<RwLock<Arc<Vec<Theme>>>> =
+    LazyLock::new(|| RwLock::new(Arc::new(Vec::new())));
 
 /// In-memory cache of the current board list, used by standalone pages (error
 /// pages, ban pages) that don't have DB access at render time.  Updated by
@@ -163,6 +156,14 @@ pub fn live_default_theme() -> Arc<str> {
     Arc::clone(&*LIVE_DEFAULT_THEME.read())
 }
 
+pub fn set_live_themes(themes: Vec<Theme>) {
+    *LIVE_THEMES.write() = Arc::new(themes);
+}
+
+pub fn live_themes() -> Arc<Vec<Theme>> {
+    Arc::clone(&*LIVE_THEMES.read())
+}
+
 /// Read the current live site name.
 pub fn live_site_name() -> Arc<str> {
     Arc::clone(&*LIVE_SITE_NAME.read())
@@ -173,11 +174,38 @@ pub fn live_site_subtitle() -> Arc<str> {
 }
 
 #[must_use]
-pub fn normalize_theme_slug(theme: &str) -> Option<&'static str> {
-    VALID_THEMES
+pub fn normalize_theme_slug(theme: &str) -> Option<String> {
+    live_themes()
         .iter()
-        .copied()
-        .find(|candidate| candidate.eq_ignore_ascii_case(theme.trim()))
+        .find(|candidate| candidate.enabled && candidate.slug.eq_ignore_ascii_case(theme.trim()))
+        .map(|candidate| candidate.slug.clone())
+}
+
+fn fallback_theme_slug() -> String {
+    let themes = live_themes();
+    normalize_theme_slug(crate::theme::HARD_DEFAULT_THEME)
+        .or_else(|| {
+            themes
+                .iter()
+                .find(|theme| theme.enabled)
+                .map(|theme| theme.slug.clone())
+        })
+        .unwrap_or_else(|| crate::theme::HARD_DEFAULT_THEME.to_string())
+}
+
+fn resolve_page_default_theme(board_default_theme: Option<&str>) -> String {
+    board_default_theme
+        .and_then(normalize_theme_slug)
+        .or_else(|| normalize_theme_slug(&live_default_theme()))
+        .unwrap_or_else(fallback_theme_slug)
+}
+
+fn theme_css_href(theme: &str) -> String {
+    format!(
+        "/theme-css/{}?v={}",
+        escape_html(theme),
+        *STATIC_ASSET_VERSION
+    )
 }
 
 fn board_nav_groups(boards: &[Board]) -> (Vec<&Board>, Vec<&Board>) {
@@ -419,6 +447,7 @@ pub fn base_layout(
     csrf_token: &str,
     boards: &[Board],
     current_theme: Option<&str>,
+    board_default_theme: Option<&str>,
     collapse_greentext: bool,
     current_path: &str,
 ) -> String {
@@ -457,23 +486,26 @@ pub fn base_layout(
         )
     });
 
-    let default_theme = live_default_theme();
-    let configured_default = if default_theme.is_empty() {
-        "fluorogrid"
-    } else {
-        &default_theme
-    };
+    let enabled_themes = live_themes();
+    let enabled_theme_slugs = enabled_themes
+        .iter()
+        .filter(|theme| theme.enabled)
+        .map(|theme| theme.slug.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let default_theme = resolve_page_default_theme(board_default_theme);
     let active_theme = current_theme
         .and_then(normalize_theme_slug)
-        .unwrap_or_else(|| normalize_theme_slug(configured_default).unwrap_or("fluorogrid"));
-    let default_theme_attr = format!(
-        r#" data-default-theme="{}""#,
-        escape_html(configured_default)
+        .unwrap_or_else(|| default_theme.clone());
+    let default_theme_attr = format!(r#" data-default-theme="{}""#, escape_html(&default_theme));
+    let theme_slugs_attr = format!(
+        r#" data-theme-slugs="{}""#,
+        escape_html(&enabled_theme_slugs)
     );
     let active_theme_attr = if active_theme == "terminal" {
         String::new()
     } else {
-        format!(r#" data-theme="{}""#, escape_html(active_theme))
+        format!(r#" data-theme="{}""#, escape_html(&active_theme))
     };
     let theme_href = |theme: &str| {
         format!(
@@ -485,10 +517,45 @@ pub fn base_layout(
     let stylesheet_href = static_asset_url("/static/style.css");
     let theme_init_src = static_asset_url("/static/theme-init.js");
     let main_js_src = static_asset_url("/static/main.js");
+    let theme_stylesheet_href = if active_theme == "terminal" {
+        String::new()
+    } else {
+        theme_css_href(&active_theme)
+    };
+    let theme_stylesheet_link = if active_theme == "terminal" {
+        String::new()
+    } else {
+        format!(
+            r#"<link rel="stylesheet" id="active-theme-stylesheet" href="{}">"#,
+            theme_stylesheet_href
+        )
+    };
+    let mut theme_picker_fallback = String::new();
+    let mut theme_picker_panel = String::new();
+    for theme in enabled_themes.iter().filter(|theme| theme.enabled) {
+        let href = theme_href(&theme.slug);
+        let _ = write!(
+            theme_picker_fallback,
+            r#" <a href="{href}">{label}</a>"#,
+            href = href,
+            label = escape_html(&theme.display_name)
+        );
+        let _ = write!(
+            theme_picker_panel,
+            r#"<a class="tp-option" data-action="set-theme" data-theme="{slug}" href="{href}" title="{description}">
+    <span class="tp-swatch" style="background:{swatch};"></span>{label}
+  </a>"#,
+            slug = escape_html(&theme.slug),
+            href = href,
+            description = escape_html(&theme.description),
+            swatch = escape_html(&theme.swatch_hex),
+            label = escape_html(&theme.display_name)
+        );
+    }
 
     format!(
         r#"<!DOCTYPE html>
-<html lang="en" class="no-js"{default_theme_attr}{active_theme_attr}>
+<html lang="en" class="no-js"{default_theme_attr}{theme_slugs_attr}{active_theme_attr}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -496,6 +563,7 @@ pub fn base_layout(
 <title>{title}</title>
 {favicon_head}
 <link rel="stylesheet" href="{stylesheet_href}">
+{theme_stylesheet_link}
 <script src="{theme_init_src}"></script>
 </head>
 <body{collapse_attr}>
@@ -516,12 +584,7 @@ pub fn base_layout(
   <p>{forum_name} &mdash; <a href="/">home</a></p>
   <nav class="theme-picker-fallback" aria-label="Theme selector">
     <span class="theme-picker-fallback-title">Theme:</span>
-    <a href="{terminal_theme_href}">Terminal</a>
-    <a href="{dorfic_theme_href}">DORFic</a>
-    <a href="{chanclassic_theme_href}">ChanClassic</a>
-    <a href="{aero_theme_href}">Frutiger Aero</a>
-    <a href="{neoncubicle_theme_href}">NeonCubicle</a>
-    <a href="{fluorogrid_theme_href}">FluoroGrid</a>
+    {theme_picker_fallback}
   </nav>
 </footer>
 
@@ -529,24 +592,7 @@ pub fn base_layout(
 <button id="theme-picker-btn" data-action="toggle-theme-picker" title="Select Theme">&#127912; Theme</button>
 <div id="theme-picker-panel">
   <div class="tp-title">// SELECT THEME</div>
-  <a class="tp-option" data-action="set-theme" data-theme="terminal" href="{terminal_theme_href}">
-    <span class="tp-swatch" style="background:#00ff41;"></span>Terminal
-  </a>
-  <a class="tp-option" data-action="set-theme" data-theme="dorfic" href="{dorfic_theme_href}">
-    <span class="tp-swatch" style="background:#ffcc66;"></span>DORFic
-  </a>
-  <a class="tp-option" data-action="set-theme" data-theme="chanclassic" href="{chanclassic_theme_href}">
-    <span class="tp-swatch" style="background:#800000;"></span>ChanClassic
-  </a>
-  <a class="tp-option" data-action="set-theme" data-theme="aero" href="{aero_theme_href}">
-    <span class="tp-swatch" style="background:#6aaed6;"></span>Frutiger Aero
-  </a>
-  <a class="tp-option" data-action="set-theme" data-theme="neoncubicle" href="{neoncubicle_theme_href}">
-    <span class="tp-swatch" style="background:#b03888;"></span>NeonCubicle
-  </a>
-  <a class="tp-option" data-action="set-theme" data-theme="fluorogrid" href="{fluorogrid_theme_href}">
-    <span class="tp-swatch" style="background:#8833aa;"></span>FluoroGrid
-  </a>
+  {theme_picker_panel}
 </div>
 
 <input type="hidden" id="csrf_global" value="{csrf_token}">
@@ -556,6 +602,7 @@ pub fn base_layout(
         title = escape_html(title),
         favicon_head = crate::favicon::favicon_head_html(board_short),
         stylesheet_href = stylesheet_href,
+        theme_stylesheet_link = theme_stylesheet_link,
         theme_init_src = theme_init_src,
         board_links = board_links,
         search_bar = search_bar,
@@ -565,13 +612,10 @@ pub fn base_layout(
         csrf_token = escape_html(csrf_token),
         main_js_src = main_js_src,
         default_theme_attr = default_theme_attr,
+        theme_slugs_attr = theme_slugs_attr,
         active_theme_attr = active_theme_attr,
-        terminal_theme_href = theme_href("terminal"),
-        aero_theme_href = theme_href("aero"),
-        dorfic_theme_href = theme_href("dorfic"),
-        fluorogrid_theme_href = theme_href("fluorogrid"),
-        neoncubicle_theme_href = theme_href("neoncubicle"),
-        chanclassic_theme_href = theme_href("chanclassic"),
+        theme_picker_fallback = theme_picker_fallback,
+        theme_picker_panel = theme_picker_panel,
         collapse_attr = if collapse_greentext {
             " data-collapse-greentext=\"1\""
         } else {
@@ -587,32 +631,46 @@ pub fn base_layout(
 // server's CSRF check, making the appeal feature completely non-functional.
 #[must_use]
 pub fn ban_page(reason: &str, csrf_token: &str) -> String {
-    let default_theme = live_default_theme();
-    let configured_default = if default_theme.is_empty() {
-        "fluorogrid"
-    } else {
-        &default_theme
-    };
+    let enabled_theme_slugs = live_themes()
+        .iter()
+        .filter(|theme| theme.enabled)
+        .map(|theme| theme.slug.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let configured_default = resolve_page_default_theme(None);
     let default_theme_attr = format!(
         r#" data-default-theme="{}""#,
-        escape_html(configured_default)
+        escape_html(&configured_default)
+    );
+    let theme_slugs_attr = format!(
+        r#" data-theme-slugs="{}""#,
+        escape_html(&enabled_theme_slugs)
     );
     let active_theme_attr = if configured_default == "terminal" {
         String::new()
     } else {
-        format!(r#" data-theme="{}""#, escape_html(configured_default))
+        format!(r#" data-theme="{}""#, escape_html(&configured_default))
     };
     let stylesheet_href = static_asset_url("/static/style.css");
     let theme_init_src = static_asset_url("/static/theme-init.js");
     let main_js_src = static_asset_url("/static/main.js");
+    let theme_stylesheet_link = if configured_default == "terminal" {
+        String::new()
+    } else {
+        format!(
+            r#"<link rel="stylesheet" id="active-theme-stylesheet" href="{}">"#,
+            theme_css_href(&configured_default)
+        )
+    };
     format!(
         r#"<!DOCTYPE html>
-<html lang="en" class="no-js"{default_theme_attr}{active_theme_attr}>
+<html lang="en" class="no-js"{default_theme_attr}{theme_slugs_attr}{active_theme_attr}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>You Are Banned</title>
 <link rel="stylesheet" href="{stylesheet_href}">
+{theme_stylesheet_link}
 <script src="{theme_init_src}"></script>
 </head>
 <body>
@@ -636,8 +694,10 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
 </body>
 </html>"#,
         default_theme_attr = default_theme_attr,
+        theme_slugs_attr = theme_slugs_attr,
         active_theme_attr = active_theme_attr,
         stylesheet_href = stylesheet_href,
+        theme_stylesheet_link = theme_stylesheet_link,
         theme_init_src = theme_init_src,
         reason = escape_html(reason),
         csrf = escape_html(csrf_token),
@@ -666,6 +726,7 @@ pub fn error_page(code: u16, message: &str) -> String {
         &body,
         "",
         &boards,
+        None,
         None,
         false,
         "/",

@@ -46,6 +46,8 @@ use serde::Deserialize;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::IpAddr;
 
+pub(super) use crate::handlers::board::check_csrf_jar;
+
 // ─── Shared constant ──────────────────────────────────────────────────────────
 
 const SESSION_COOKIE: &str = "chan_admin_session";
@@ -73,15 +75,6 @@ fn require_admin_session_with_name(
 }
 
 /// Check CSRF using the cookie jar. Returns error on mismatch.
-fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
-    let cookie_token = jar.get("csrf_token").map(|c| c.value().to_string());
-    if crate::middleware::validate_csrf(cookie_token.as_deref(), form_token.unwrap_or("")) {
-        Ok(())
-    } else {
-        Err(AppError::Forbidden("CSRF token mismatch.".into()))
-    }
-}
-
 /// Verify admin session from a session ID string.
 /// For use inside `spawn_blocking` closures where we have an open connection.
 fn require_admin_session_sid(conn: &rusqlite::Connection, session_id: Option<&str>) -> Result<i64> {
@@ -241,6 +234,92 @@ pub struct LiveLogQuery {
     pub bytes: Option<usize>,
 }
 
+struct AdminPanelSnapshot {
+    boards: Vec<crate::models::Board>,
+    bans: Vec<crate::models::Ban>,
+    filters: Vec<crate::models::WordFilter>,
+    reports: Vec<crate::models::ReportWithContext>,
+    appeals: Vec<crate::models::BanAppeal>,
+    site_name: String,
+    site_subtitle: String,
+    default_theme: String,
+    themes: Vec<crate::models::Theme>,
+    full_backups: Vec<crate::models::BackupInfo>,
+    board_backups: Vec<crate::models::BackupInfo>,
+    db_size_bytes: i64,
+    db_size_warning: bool,
+}
+
+fn load_admin_panel_snapshot(
+    conn: &rusqlite::Connection,
+    onion_address_val: Option<String>,
+) -> Result<(AdminPanelSnapshot, Option<String>)> {
+    let boards = db::get_all_boards(conn)?;
+    let bans = db::list_bans(conn)?;
+    let filters = db::get_word_filters(conn)?;
+    let reports = db::get_open_reports(conn)?;
+    let appeals = db::get_open_ban_appeals(conn)?;
+    let site_name = db::get_site_name(conn);
+    let site_subtitle = db::get_site_subtitle(conn);
+    let default_theme = db::get_default_user_theme(conn);
+    let themes = db::load_themes(conn)?;
+    let full_backups = list_backup_files(&full_backup_dir());
+    let board_backups = list_backup_files(&board_backup_dir());
+    let db_size_bytes = db::get_db_size_bytes(conn).unwrap_or(0);
+    let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
+        let file_size = std::fs::metadata(&CONFIG.database_path)
+            .map_or_else(|_| db_size_bytes.cast_unsigned(), |m| m.len());
+        file_size >= CONFIG.db_warn_threshold_bytes
+    } else {
+        false
+    };
+    Ok((
+        AdminPanelSnapshot {
+            boards,
+            bans,
+            filters,
+            reports,
+            appeals,
+            site_name,
+            site_subtitle,
+            default_theme,
+            themes,
+            full_backups,
+            board_backups,
+            db_size_bytes,
+            db_size_warning,
+        },
+        onion_address_val,
+    ))
+}
+
+fn render_admin_panel_from_snapshot(
+    snapshot: AdminPanelSnapshot,
+    csrf_token: &str,
+    tor_address: Option<String>,
+    flash: Option<(bool, String)>,
+) -> String {
+    let flash_ref = flash.as_ref().map(|(is_err, msg)| (*is_err, msg.as_str()));
+    crate::templates::admin_panel_page(
+        &snapshot.boards,
+        &snapshot.bans,
+        &snapshot.filters,
+        csrf_token,
+        &snapshot.full_backups,
+        &snapshot.board_backups,
+        snapshot.db_size_bytes,
+        snapshot.db_size_warning,
+        &snapshot.reports,
+        &snapshot.appeals,
+        &snapshot.site_name,
+        &snapshot.site_subtitle,
+        &snapshot.default_theme,
+        &snapshot.themes,
+        tor_address.as_deref(),
+        flash_ref,
+    )
+}
+
 pub async fn admin_panel(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -289,53 +368,12 @@ pub async fn admin_panel(
             db::get_session(&conn, &sid)?
                 .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
 
-            let boards = db::get_all_boards(&conn)?;
-            let bans = db::list_bans(&conn)?;
-            let filters = db::get_word_filters(&conn)?;
-            let reports = db::get_open_reports(&conn)?;
-            let appeals = db::get_open_ban_appeals(&conn)?;
-            let site_name = db::get_site_name(&conn);
-            let site_subtitle = db::get_site_subtitle(&conn);
-            let default_theme = db::get_default_user_theme(&conn);
-
-            // Collect saved backup file lists (read from disk, not DB).
-            let full_backups = list_backup_files(&full_backup_dir());
-            let board_backups_list = list_backup_files(&board_backup_dir());
-
-            let db_size_bytes = db::get_db_size_bytes(&conn).unwrap_or(0);
-
-            // 1.8: Compute whether the DB file size exceeds the configured
-            // warning threshold. Uses the on-disk file size (via fs::metadata)
-            // rather than SQLite's PRAGMA page_count estimate for accuracy,
-            // falling back to the pragma value if the path is unavailable.
-            let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
-                let file_size = std::fs::metadata(&CONFIG.database_path)
-                    .map_or_else(|_| db_size_bytes.cast_unsigned(), |m| m.len());
-                file_size >= CONFIG.db_warn_threshold_bytes
-            } else {
-                false
-            };
-
-            // Onion address resolved before spawn_blocking (see above).
-            let tor_address: Option<String> = onion_address_val;
-            let flash_ref = flash.as_ref().map(|(is_err, msg)| (*is_err, msg.as_str()));
-
-            Ok(crate::templates::admin_panel_page(
-                &boards,
-                &bans,
-                &filters,
+            let (snapshot, tor_address) = load_admin_panel_snapshot(&conn, onion_address_val)?;
+            Ok(render_admin_panel_from_snapshot(
+                snapshot,
                 &csrf_clone,
-                &full_backups,
-                &board_backups_list,
-                db_size_bytes,
-                db_size_warning,
-                &reports,
-                &appeals,
-                &site_name,
-                &site_subtitle,
-                &default_theme,
-                tor_address.as_deref(),
-                flash_ref,
+                tor_address,
+                flash,
             ))
         }
     })

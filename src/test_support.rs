@@ -1,9 +1,12 @@
 #[cfg(test)]
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-#[cfg(test)]
 pub fn app_state() -> crate::middleware::AppState {
     let pool = crate::db::init_test_pool().expect("test pool");
+    if let Ok(conn) = pool.get() {
+        let _ = crate::db::sync_live_theme_state(&conn);
+        crate::templates::set_live_boards(crate::db::get_all_boards(&conn).unwrap_or_default());
+    }
     let job_queue = std::sync::Arc::new(crate::workers::JobQueue::new(pool.clone()));
     crate::middleware::AppState {
         db: pool,

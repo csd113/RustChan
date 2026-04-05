@@ -502,6 +502,7 @@ pub fn index_page(
         csrf_token,
         &all_boards,
         current_theme,
+        None,
         false,
         "/",
     )
@@ -606,6 +607,7 @@ pub fn board_page(
         csrf_token,
         boards,
         current_theme,
+        Some(&board.default_theme),
         collapse_greentext,
         &format!("/{}", board.short_name),
     )
@@ -987,6 +989,7 @@ pub fn catalog_page(
         csrf_token,
         boards,
         current_theme,
+        Some(&board.default_theme),
         collapse_greentext,
         &if hidden_view {
             format!("/{}/hidden", board.short_name)
@@ -1067,6 +1070,7 @@ pub fn search_page(
         csrf_token,
         boards,
         current_theme,
+        Some(&board.default_theme),
         collapse_greentext,
         &format!(
             "/{}/search?q={}",
@@ -1130,6 +1134,7 @@ pub fn archive_page(
         csrf_token,
         boards,
         current_theme,
+        Some(&board.default_theme),
         collapse_greentext,
         &format!("/{}/archive", board.short_name),
     )
@@ -1143,29 +1148,13 @@ mod tests {
 
     fn sample_board() -> Board {
         Board {
-            id: 1,
             display_order: 0,
-            short_name: "test".into(),
-            name: "Test".into(),
             description: "Board description".into(),
-            nsfw: false,
-            max_threads: 100,
-            max_archived_threads: 100,
             bump_limit: 300,
-            allow_images: true,
-            allow_video: true,
-            allow_audio: true,
-            allow_any_files: false,
-            allow_tripcodes: true,
-            allow_editing: false,
-            edit_window_secs: 0,
-            allow_archive: true,
             allow_video_embeds: true,
-            allow_captcha: false,
-            show_poster_ids: false,
-            collapse_greentext: false,
-            post_cooldown_secs: 0,
+            default_theme: String::new(),
             created_at: 1_700_000_000,
+            ..crate::test_fixtures::sample_board()
         }
     }
 

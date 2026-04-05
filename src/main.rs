@@ -38,7 +38,10 @@ mod pending_fs;
 mod server;
 mod templates;
 #[cfg(test)]
+mod test_fixtures;
+#[cfg(test)]
 mod test_support;
+mod theme;
 pub(crate) mod tls;
 mod utils;
 mod workers;

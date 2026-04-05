@@ -13,6 +13,7 @@ mod migrations;
 mod pool;
 pub mod posts;
 mod schema;
+pub mod themes;
 pub mod threads;
 mod types;
 mod user_thread_prefs;
@@ -27,6 +28,7 @@ pub use admin::*;
 pub use boards::*;
 pub use fs_ops::*;
 pub use posts::*;
+pub use themes::*;
 pub use threads::*;
 pub use user_thread_prefs::*;
 
