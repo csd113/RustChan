@@ -2,14 +2,14 @@
 
 All notable changes to RustChan will be documented in this file.
 
----
-
 ## [1.1.2]
 
 ### Added
 
 - Shared board ordering controls, backed by a persistent `display_order` field, so admins can reorder boards once and see the same order reflected across the homepage, top header board list, and admin panel.
 - Live upload progress bars for post media uploads and admin restore uploads, covering image/video/audio post forms plus full-site and per-board backup restore uploads from local files.
+- Modular theme infrastructure backed by a runtime theme registry, database-managed theme records, dynamic `/theme-css/{theme}` delivery, and board-level default theme support so built-in and custom themes can be managed through one system.
+- Admin theme management for enabling and disabling built-in themes, creating custom themes, editing custom theme metadata and CSS, deleting custom themes, and choosing both site-wide and per-board default themes.
 
 ### Improved
 
@@ -18,6 +18,9 @@ All notable changes to RustChan will be documented in this file.
 - Board navigation and admin ordering now split SFW and NSFW boards into separate groups, with independent per-group move controls and safer reordering when a board is retagged between normal and NSFW.
 - Post headers now render subjects inline ahead of poster names, with theme-appropriate subject colors and separators so titles remain distinct from usernames across Terminal, DORFic, ChanClassic, Frutiger Aero, FluoroGrid, and NeonCubicle.
 - Theme presentation is more polished through reordered theme-picker menus, softer ChanClassic header link contrast, and rounder shared controls in Frutiger Aero and NeonCubicle so top-level navigation matches those themes' bubbly styling better.
+- Theme resolution, rendering, and picker behavior are now centralized around the live theme registry, so normal pages, admin pages, ban pages, JS bootstrap, no-JS fallbacks, startup seeding, and runtime cache refreshes all follow the same precedence rules.
+- Theme picker and admin theme controls are now fully data-driven, so adding, renaming, disabling, or reordering themes no longer requires parallel hardcoded edits across Rust templates, handlers, and client JavaScript.
+- Theme-related admin and test internals are leaner through one shared admin dashboard snapshot loader, one shared live-theme synchronization path, a unified CSS response path for built-in and custom themes, shared CSRF jar-check handling, and a reusable `Board` test fixture.
 - Catalog page presentation is cleaner through centered sort/display selectors and larger board-description text on both board headers and homepage board cards.
 - The admin site-settings layout is tidier, with the save button aligned into the form action row instead of floating awkwardly above the global favicon controls.
 - Database maintenance is more user-friendly through a clearer integrity/repair results page and deeper admin repair tooling that now rebuilds SQLite indexes plus the `posts_fts` search table and triggers instead of only reporting a bare integrity status.
@@ -33,6 +36,8 @@ All notable changes to RustChan will be documented in this file.
 - Spoilers on legacy posts now keep working under the stricter CSP by upgrading older inline-click spoiler markup to the shared delegated `data-action` handler at runtime.
 - Board backup restore now preserves archived-thread state, so threads that were already in a board archive stay archived after restore instead of being pulled back onto the live board index.
 - Admin board delete and board restore now surface SQLite corruption failures more clearly, and the new integrity/repair tools are wired into the admin maintenance flow to help diagnose FTS/index corruption before destructive operations.
+- Theme validation drift is eliminated: duplicated hardcoded theme lists, mismatched validators, and stale per-layer defaults were replaced with registry-backed validation and one canonical fallback path.
+- Renaming or deleting custom themes now updates dependent site and board defaults safely instead of leaving stale references behind, and saved cookie or localStorage themes now fall back cleanly when a theme is disabled or removed.
 
 ### Validation
 

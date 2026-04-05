@@ -49,7 +49,8 @@ body {
 }
 
 a { color: var(--green); text-decoration: none; }
-a:hover { color: var(--green-bright); text-shadow: 0 0 6px var(--green-bright); }
+a:hover { color: var(--green-bright); }
+html:not([data-theme]) a:hover { text-shadow: 0 0 6px var(--green-bright); }
 
 hr { border: none; border-top: 1px solid var(--border); margin: 0.6rem 0; }
 
@@ -182,11 +183,11 @@ html[data-theme="dorfic"] .site-header::before {
   line-height: 1;
   color: var(--green-bright);
   letter-spacing: 0.1em;
-  text-shadow: 0 0 14px var(--green-bright);
   white-space: nowrap;
   flex-shrink: 0;
   text-decoration: none;
 }
+html:not([data-theme]) .site-name { text-shadow: 0 0 14px var(--green-bright); }
 [data-theme="aero"] .site-name,
 [data-theme="neoncubicle"] .site-name { text-shadow: none; font-family: var(--font); font-size: 1.1rem; font-weight: bold; letter-spacing: 0.06em; }
 [data-theme="fluorogrid"] .site-name { text-shadow: none; }
@@ -288,8 +289,8 @@ html[data-theme="dorfic"] .site-header::before {
 
 .board-nav-link:hover {
   color: var(--green-bright);
-  text-shadow: 0 0 6px var(--green-bright);
 }
+html:not([data-theme]) .board-nav-link:hover { text-shadow: 0 0 6px var(--green-bright); }
 
 .board-nav-link.active {
   color: var(--green-bright);
@@ -398,9 +399,9 @@ main {
 .board-header h1 {
   font-size: 2rem;
   color: var(--green-bright);
-  text-shadow: 0 0 10px rgba(0,255,65,0.4);
   letter-spacing: 0.05em;
 }
+html:not([data-theme]) .board-header h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4); }
 
 /* Centered title on board index and catalog */
 .board-index-header,
@@ -419,11 +420,11 @@ main {
   font-size: 2rem;
   font-weight: bold;
   color: var(--green-bright);
-  text-shadow: 0 0 10px rgba(0,255,65,0.4);
   letter-spacing: 0.05em;
   padding-bottom: 4px;
   text-align: center;
 }
+html:not([data-theme]) .board-thread-header { text-shadow: 0 0 10px rgba(0,255,65,0.4); }
 
 /* ── Catalog header row with controls ─────────────────────────────────────── */
 
@@ -1504,9 +1505,9 @@ html:not([data-theme]) .poster-id-btn {
 .index-title {
   font-size: 1.6rem;
   color: var(--green-bright);
-  text-shadow: 0 0 18px rgba(0,255,65,0.5);
   letter-spacing: 0.12em;
 }
+html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); }
 
 .index-subtitle { color: var(--text-dim); margin-top: 6px; font-size: 0.85rem; }
 
@@ -1810,8 +1811,8 @@ html:not([data-theme]) .poster-id-btn {
   font-size: 1.1rem;
   letter-spacing: 0.1em;
   margin-bottom: 12px;
-  text-shadow: 0 0 10px rgba(0,255,65,0.4);
 }
+html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4); }
 
 .admin-section {
   background: var(--bg-panel);
@@ -2281,8 +2282,8 @@ html:not([data-theme]) .poster-id-btn {
 .error-page h1 {
   font-size: 2rem;
   color: var(--red);
-  text-shadow: 0 0 14px rgba(255,34,68,0.5);
 }
+html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5); }
 
 .error-page p { color: var(--text-dim); margin-top: 10px; font-size: 0.88rem; }
 
@@ -2555,7 +2556,7 @@ html:not([data-theme]) .poster-id-btn {
   -webkit-backdrop-filter: blur(8px);
 }
 [data-theme="dorfic"] a { color: #d4a040; }
-[data-theme="dorfic"] a:hover { color: #ffcc66; text-shadow: 0 0 8px rgba(255,200,80,0.5); }
+[data-theme="dorfic"] a:hover { color: #ffcc66; text-shadow: none; }
 [data-theme="dorfic"] button,
 [data-theme="dorfic"] .btn,
 [data-theme="dorfic"] input[type="submit"] {
@@ -3461,7 +3462,8 @@ details.greentext-block[open] > summary { color: var(--green-pale); }
   font-weight: bold;
 }
 
-.crosslink:hover { color: #ffd060; text-shadow: 0 0 6px rgba(255,179,0,0.5); }
+.crosslink:hover { color: #ffd060; }
+html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.5); }
 
 /* ── Video embed unfurl widget ──────────────────────────────────────────────── */
 
@@ -4320,9 +4322,9 @@ html:not([data-theme]) .compress-do-btn {
   font-weight: bold;
   color: var(--green-bright);
   letter-spacing: 0.06em;
-  text-shadow: 0 0 10px rgba(0,255,65,0.35);
   padding: 6px 0 4px;
 }
+html:not([data-theme]) .thread-board-banner { text-shadow: 0 0 10px rgba(0,255,65,0.35); }
 
 .thread-nav {
   display: flex;
@@ -4357,8 +4359,8 @@ html:not([data-theme]) .compress-do-btn {
 
 .thread-nav-btn.active {
   color: var(--green-bright);
-  text-shadow: 0 0 8px rgba(0,255,65,0.6);
 }
+html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,65,0.6); }
 
 .autoupdate-status {
   color: var(--green-bright);
