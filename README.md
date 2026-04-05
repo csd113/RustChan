@@ -21,7 +21,7 @@
 
 <br>
 
-[**Quick Start**](#-quick-start) · [**Features**](#-features) · [**ChanNet API**](#-channet-api) · [**Optional Integrations**](#-optional-integrations-ffmpeg--tor) · [**Configuration**](#-configuration) · [**Backup System**](#-backup--restore) · [**Deployment**](#-production-deployment) · [**Themes**](#-themes) · [**Changelog**](CHANGELOG.md)
+[**Quick Start**](#-quick-start) · [**Features**](#-features) · [**ChanNet API**](#-channet-api) · [**Optional Integrations**](#-optional-integrations-ffmpeg-and-tor) · [**Configuration**](#-configuration) · [**Backup System**](#-backup--restore) · [**Deployment**](#-production-deployment) · [**Themes**](#-themes) · [**Changelog**](CHANGELOG.md)
 
 <br>
 
@@ -140,8 +140,8 @@ RustChan is a fully-featured imageboard engine compiled into a **single Rust bin
 ### 📱 Mobile & UX
 - **Mobile reply drawer** — floating action button slides up a full-width reply panel on small screens
 - **Cross-board hover previews** — `>>>/board/123` links show a floating popup with client-side caching
-- **Six built-in themes** — user-selectable via a floating picker; persisted in `localStorage` with no flash
-- **Default theme** — `default_theme` in `settings.toml` sets the server-side default for new visitors; also configurable from the admin panel
+- **Modular theme system** — built-in themes plus admin-created custom themes, all surfaced through one floating picker and persisted in `localStorage` with no flash
+- **Theme controls** — site-wide defaults, per-board defaults, and runtime theme enable/disable are all configurable from the admin panel
 - **Site subtitle** — `site_subtitle` in `settings.toml` customises the home page tagline at install time
 - **Live stats** — total posts, uploads, and content size displayed on the home page
 - **Background worker system** — video transcoding, waveform generation, and thread cleanup run asynchronously; duplicate media jobs coalesced; configurable ffmpeg timeout; exponential backoff on retries
@@ -255,9 +255,9 @@ If you do want to federate with other nodes, allow port 7070 selectively rather 
 
 ---
 
-## 🔌 Optional Integrations: ffmpeg & Tor
+## 🔌 Optional Integrations: ffmpeg and Tor
 
-RustChan is fully functional without either tool. When detected at startup, additional capabilities activate automatically.
+RustChan is fully functional without any of these tools. When enabled or detected at startup, additional capabilities activate automatically.
 
 ### ffmpeg — Video & Audio Processing
 
@@ -277,13 +277,13 @@ See **[SETUP.md — Installing ffmpeg](SETUP.md#installing-ffmpeg)** for platfor
 RustChan includes **built-in Tor onion service support via [Arti](https://gitlab.torproject.org/tpo/core/arti)** — no system `tor` installation required. Set `enable_tor_support = true` in `settings.toml` and restart. On first launch RustChan will:
 
 1. Download ~2 MB of Tor directory data and bootstrap to the network (~30 seconds)
-2. Generate a persistent Ed25519 keypair in `rustchan-data/arti_state/keys/`
+2. Generate a persistent Ed25519 keypair in `rustchan-data/runtime/tor/state/keys/`
 3. Derive your permanent `.onion` address from that keypair and start the hidden service
 4. Begin accepting and proxying inbound onion connections to the local HTTP port
 
-The `.onion` address appears on the home page and in the admin panel as soon as the service is ready. Subsequent starts are ready in ~5 seconds using the cached consensus in `rustchan-data/arti_cache/`.
+The `.onion` address appears on the home page and in the admin panel as soon as the service is ready. Subsequent starts are ready in ~5 seconds using the cached consensus in `rustchan-data/runtime/tor/cache/`.
 
-**Back up `rustchan-data/arti_state/keys/`** — this directory contains your service keypair. Losing it means a new `.onion` address on the next start. Delete it intentionally to rotate to a new address.
+**Back up `rustchan-data/runtime/tor/state/keys/`** — this directory contains your service keypair. Losing it means a new `.onion` address on the next start. Delete it intentionally to rotate to a new address.
 
 See **[SETUP.md — Tor](SETUP.md#tor--onion-service)** for details on key management and migrating from a previous system `tor` installation.
 
@@ -325,17 +325,23 @@ rustchan-data/
 ├── chan.db-shm                           ← SQLite shared-memory sidecar
 ├── logs/
 │   └── rustchan.YYYY-MM-DD.log           ← daily rotated human-readable logs
-├── full-backups/                         ← full site backups
-│   └── rustchan-backup-20260304_120000.zip
-├── board-backups/                        ← per-board backups
-│   └── rustchan-board-tech-20260304_120000.zip
-├── tls/
-│   ├── dev/
-│   │   ├── self-signed.crt               ← auto-generated localhost dev cert
-│   │   └── self-signed.key
-│   └── acme/                             ← ACME cache when [tls.acme] is enabled
-├── arti_state/                           ← Tor onion-service key material/state
-├── arti_cache/                           ← Tor cache data
+├── backups/
+│   ├── full/                             ← full site backups
+│   │   └── rustchan-backup-20260304_120000.zip
+│   └── boards/                           ← per-board backups
+│       └── rustchan-board-tech-20260304_120000.zip
+├── runtime/
+│   ├── tls/
+│   │   ├── dev/
+│   │   │   ├── self-signed.crt           ← auto-generated localhost dev cert
+│   │   │   └── self-signed.key
+│   │   └── acme/                         ← ACME cache when [tls.acme] is enabled
+│   ├── tor/
+│   │   ├── state/                        ← Tor onion-service key material/state
+│   │   └── cache/                        ← Tor cache data
+│   ├── favicon/                          ← generated global favicon assets
+│   └── tmp/
+│       └── board-downloads/              ← temporary admin backup download files
 └── boards/
     ├── .pending/                         ← crash-safe staging area for uploads/restores
     ├── b/
@@ -418,7 +424,7 @@ port = 8443
 # staging = true
 # domains = ["example.com"]
 # email = "admin@example.com"
-# cache_dir = "tls/acme"
+# cache_dir = "runtime/tls/acme"
 ```
 
 ### Environment Variables
@@ -451,7 +457,7 @@ All settings can be overridden via environment variables, which take precedence 
 | `CHAN_TOR_ONLY` | `false` | Bind loopback-only and serve exclusively over Tor |
 | `CHAN_TOR_BOOTSTRAP_TIMEOUT` | `120` | Tor bootstrap timeout (seconds) |
 | `CHAN_TOR_MAX_STREAMS` | `512` | Max simultaneous inbound Tor streams |
-| `CHAN_TOR_NICKNAME` | `rustchan` | Onion service nickname under `arti_state/` |
+| `CHAN_TOR_NICKNAME` | `rustchan` | Onion service nickname under `runtime/tor/state/` |
 | `CHAN_REQUIRE_FFMPEG` | `false` | Exit at startup if ffmpeg is unavailable |
 | `CHAN_FFMPEG_PATH` | `ffmpeg` | ffmpeg executable path |
 | `CHAN_FFPROBE_PATH` | `ffprobe` | ffprobe executable path |
@@ -485,7 +491,7 @@ A full backup is a `.zip` containing a consistent SQLite snapshot (via `VACUUM I
 
 | Action | Description |
 |---|---|
-| **💾 Save** | Creates a backup and writes it to `rustchan-data/full-backups/` |
+| **💾 Save** | Creates a backup and writes it to `rustchan-data/backups/full/` |
 | **⬇ Download** | Streams a saved backup to your browser |
 | **↺ Restore (server)** | Restores from a file already on the server |
 | **↺ Restore (upload)** | Restores from a `.zip` uploaded from your computer (max 512 MiB) |
@@ -704,13 +710,14 @@ __text__                  italic
 
 ## 🎨 Themes
 
-Six built-in themes, selectable via the floating picker on every page. Persisted in `localStorage` with no flash on load. The site-wide default for new visitors is set via `default_theme` in `settings.toml` or from the admin panel.
+Built-in and admin-created custom themes are selectable from the floating picker on every page. Theme choice is persisted in `localStorage` with no flash on load, while the server also tracks a site-wide default and optional per-board defaults.
 
 | Theme | Description |
 |---|---|
 | **Terminal** *(default)* | Dark background, matrix-green monospace, glowing accents |
 | **Frutiger Aero** | Frosted glass panels, pearl-blue gradients, rounded corners |
 | **DORFic Aero** | Dark stone walls, torchlit amber/copper glass panels |
+| **Forest** | Deep woodland greens, warm brown panels, parchment text |
 | **FluoroGrid** | Pale sage, muted teal grid lines, dusty lavender panels |
 | **NeonCubicle** | Cool off-white, horizontal scanlines, steel-teal borders |
 | **ChanClassic** | Light tan/beige background, maroon accents, blue post-number links — classic imageboard styling |

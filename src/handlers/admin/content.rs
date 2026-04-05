@@ -38,11 +38,7 @@ pub async fn create_board(
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let short = form
         .short_name
@@ -73,7 +69,7 @@ pub async fn create_board(
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             db::create_board(&conn, &short, &name, &description, nsfw)?;
-            tracing::info!(target: "admin", board = %short, "Board created");
+            tracing::info!(target: "admin", board = %short, "Created board");
             // Refresh live board list so the top bar on any subsequent error
             // page includes the newly created board.
             crate::templates::set_live_boards(db::get_all_boards(&conn)?);
@@ -93,6 +89,26 @@ pub struct BoardIdForm {
     board_id: i64,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ReorderBoardForm {
+    board_id: i64,
+    direction: String,
+    return_to: Option<String>,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+}
+
+fn safe_return_to(path: Option<&str>) -> &str {
+    let Some(path) = path else {
+        return "/admin/panel";
+    };
+    if path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\") {
+        path
+    } else {
+        "/admin/panel"
+    }
 }
 
 pub async fn delete_board(
@@ -122,9 +138,34 @@ pub async fn delete_board(
                     |r| r.get(0),
                 )
                 .ok();
+            if let Some(ref short) = short_name {
+                let health = db::check_db_health(&conn);
+                if !health.before_ok {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Board delete aborted for /{short}/: live DB integrity check failed: {}. \
+                         Run database integrity check/repair from the admin panel first, or restore a known-good full backup.",
+                        health.before_check
+                    )));
+                }
+            }
 
             // delete_board returns all file paths for posts in this board.
-            let paths = db::delete_board(&conn, form.board_id)?;
+            let paths = db::delete_board(&conn, form.board_id).map_err(|error| {
+                let chain = error
+                    .chain()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                if chain.contains("database disk image is malformed") {
+                    let board_label = short_name.as_deref().unwrap_or("unknown");
+                    AppError::Internal(anyhow::anyhow!(
+                        "Board delete failed for /{board_label}/: {chain}. \
+                         The live database appears corrupted. Run database integrity check/repair from the admin panel, or restore a known-good full backup."
+                    ))
+                } else {
+                    AppError::Internal(anyhow::anyhow!(error))
+                }
+            })?;
 
             // Delete every tracked file and thumbnail from disk.
             for p in &paths {
@@ -153,6 +194,46 @@ pub async fn delete_board(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(super::admin_panel_redirect("Board deleted.").into_response())
+}
+
+// ─── POST /admin/board/reorder ───────────────────────────────────────────────
+
+pub async fn reorder_board(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<ReorderBoardForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+
+    let move_up = match form.direction.as_str() {
+        "up" => true,
+        "down" => false,
+        _ => {
+            return Err(AppError::BadRequest(
+                "Unknown board reorder direction.".into(),
+            ))
+        }
+    };
+    let return_to = safe_return_to(form.return_to.as_deref()).to_string();
+    let board_id = form.board_id;
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let mut conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            db::move_board(&mut conn, board_id, move_up)?;
+            crate::templates::set_live_boards(db::get_all_boards(&conn)?);
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok(Redirect::to(&return_to).into_response())
 }
 
 // ─── POST /admin/thread/action ────────────────────────────────────────────────

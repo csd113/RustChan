@@ -9,8 +9,11 @@ use crate::{
     config::CONFIG,
     db::{self},
     error::{AppError, Result},
-    handlers::{board::ensure_csrf, parse_post_multipart, posting, render},
-    middleware::{validate_csrf, AppState},
+    handlers::{
+        board::{check_csrf_jar, ensure_csrf},
+        parse_post_multipart, posting, render,
+    },
+    middleware::AppState,
     utils::crypto::{hash_ip, verify_pow},
 };
 use axum::{
@@ -54,10 +57,13 @@ pub async fn view_thread(
             // page (without delete controls) to a user who has since logged in.
             let boards_ver = crate::templates::live_boards_version();
             let admin_tag = if page_data.is_admin { "-a" } else { "" };
-            let etag = format!(
-                "\"{}-b{boards_ver}{admin_tag}\"",
-                page_data.thread.bumped_at
-            );
+            let greentext_tag = if page_data.board.collapse_greentext {
+                "-cg1"
+            } else {
+                "-cg0"
+            };
+            let thread_sig = render::thread_page_etag_signature(&page_data);
+            let etag = format!("\"{thread_sig}-b{boards_ver}{admin_tag}{greentext_tag}\"");
             let html =
                 render::render_thread_page(&page_data, &csrf, None, current_theme.as_deref());
             Ok((etag, html, page_data.is_admin))
@@ -213,7 +219,13 @@ pub async fn post_reply(
                 || (crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files);
             let has_file = file_data.is_some() || audio_file_data.is_some() || image_file_data.is_some();
             let (body_text, body_html) =
-                posting::build_post_body(&raw_body, has_file, board_allows_media, &filters)?;
+                posting::build_post_body(
+                    &raw_body,
+                    has_file,
+                    board_allows_media,
+                    board.collapse_greentext,
+                    &filters,
+                )?;
 
             let uploads = posting::process_uploads(
                 image_file_data,
@@ -370,7 +382,6 @@ pub async fn edit_post_get(
             }
 
             let all_boards = crate::templates::live_boards();
-            let collapse_greentext = crate::templates::live_collapse_greentext();
 
             Ok(crate::templates::edit_post_page(
                 &board,
@@ -380,7 +391,7 @@ pub async fn edit_post_get(
                 &prefill_token,
                 None,
                 current_theme.as_deref(),
-                collapse_greentext,
+                board.collapse_greentext,
             ))
         }
     })
@@ -415,17 +426,18 @@ pub async fn edit_post_post(
     jar: CookieJar,
     Form(form): Form<EditForm>,
 ) -> Result<Response> {
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let raw_body = form.body;
     let token = form.deletion_token;
+    let csrf_clone = jar
+        .get("csrf_token")
+        .map(|c| c.value().to_string())
+        .unwrap_or_default();
 
     let outcome = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-            let csrf_clone = csrf_cookie.clone().unwrap_or_default();
+        let csrf_clone = csrf_clone.clone();
         let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
         move || -> Result<EditOutcome> {
             let conn = pool.get()?;
@@ -458,7 +470,8 @@ pub async fn edit_post_post(
 
             let filtered = crate::utils::sanitize::apply_word_filters(&body_text, &filters);
             let escaped = crate::utils::sanitize::escape_html(&filtered);
-            let body_html = crate::utils::sanitize::render_post_body(&escaped);
+            let body_html =
+                crate::utils::sanitize::render_post_body(&escaped, board.collapse_greentext);
 
             let success = db::edit_post(
                 &conn,
@@ -474,7 +487,6 @@ pub async fn edit_post_post(
             // window is actually configured.
             if !success {
                 let all_boards = crate::templates::live_boards();
-                let collapse_greentext = crate::templates::live_collapse_greentext();
                 let err_msg = if board.edit_window_secs > 0 {
                     let now = chrono::Utc::now().timestamp();
                     if now - post.created_at > board.edit_window_secs {
@@ -493,7 +505,7 @@ pub async fn edit_post_post(
                     &token,
                     Some(err_msg),
                     current_theme.as_deref(),
-                    collapse_greentext,
+                    board.collapse_greentext,
                 );
                 return Ok(EditOutcome::ErrorPage(html));
             }
@@ -529,10 +541,7 @@ pub async fn vote_handler(
     jar: CookieJar,
     Form(form): Form<VoteForm>,
 ) -> Result<Response> {
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or("")) {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let cookie_secret = CONFIG.cookie_secret.clone();
     let option_id = form.option_id;
@@ -663,6 +672,8 @@ pub async fn thread_updates(
                             show_media: true,
                             allow_editing: false, // no edit link in auto-appended HTML; reload restores it
                             show_poster_ids: thread.board_id == board.id && board.show_poster_ids,
+                            collapse_greentext: board.collapse_greentext,
+                            thread_state: None,
                             thread_op_id: thread.op_id,
                         },
                         0,

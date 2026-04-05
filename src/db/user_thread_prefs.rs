@@ -36,6 +36,10 @@ fn cleanup_if_default(conn: &rusqlite::Connection, user_hash: &str, thread_id: i
     Ok(())
 }
 
+/// Mark a thread as hidden or visible for one anonymous user hash.
+///
+/// # Errors
+/// Returns an error if the preference cannot be read or written in `SQLite`.
 pub fn set_thread_hidden(
     conn: &rusqlite::Connection,
     user_hash: &str,
@@ -48,6 +52,10 @@ pub fn set_thread_hidden(
     Ok(())
 }
 
+/// Mark a thread as pinned or unpinned for one anonymous user hash.
+///
+/// # Errors
+/// Returns an error if the preference cannot be read or written in `SQLite`.
 pub fn set_thread_pinned(
     conn: &rusqlite::Connection,
     user_hash: &str,
@@ -60,6 +68,10 @@ pub fn set_thread_pinned(
     Ok(())
 }
 
+/// Fetch the saved thread preference for one user and thread pair.
+///
+/// # Errors
+/// Returns an error if the preference lookup fails in `SQLite`.
 pub fn get_thread_preference(
     conn: &rusqlite::Connection,
     user_hash: &str,
@@ -81,6 +93,10 @@ pub fn get_thread_preference(
     .map_err(Into::into)
 }
 
+/// Fetch all saved thread preferences for one user on one board.
+///
+/// # Errors
+/// Returns an error if the board preference query fails in `SQLite`.
 pub fn get_preferences_for_board(
     conn: &rusqlite::Connection,
     user_hash: &str,

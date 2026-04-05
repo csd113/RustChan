@@ -23,7 +23,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use crate::config::{check_cookie_secret_rotation, generate_settings_file_if_missing, CONFIG};
+use crate::config::{
+    check_cookie_secret_rotation, data_dir, generate_settings_file_if_missing,
+    migrate_runtime_layout_if_needed, CONFIG,
+};
 use crate::middleware::AppState;
 
 mod assets;
@@ -89,14 +92,9 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // Err but never panics, so the let _ discard is intentional.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let early_data_dir = {
-        let exe = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p: &std::path::Path| p.to_path_buf()))
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        exe.join("rustchan-data")
-    };
+    let early_data_dir = data_dir();
     std::fs::create_dir_all(&early_data_dir)?;
+    migrate_runtime_layout_if_needed()?;
 
     generate_settings_file_if_missing();
 
@@ -180,11 +178,9 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             });
             crate::templates::set_live_site_subtitle(&subtitle);
 
-            crate::templates::set_live_collapse_greentext(crate::db::get_collapse_greentext(&conn));
-
             // Seed default_theme from settings.toml if not yet configured in DB.
             let default_theme = crate::db::get_default_user_theme(&conn);
-            let default_theme = if default_theme.is_empty()
+            if default_theme.is_empty()
                 && !CONFIG.initial_default_theme.is_empty()
                 && CONFIG.initial_default_theme != "fluorogrid"
             {
@@ -193,11 +189,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     "default_theme",
                     &CONFIG.initial_default_theme,
                 );
-                CONFIG.initial_default_theme.clone()
-            } else {
-                default_theme
-            };
-            crate::templates::set_live_default_theme(&default_theme);
+            }
+            let _ = crate::db::sync_live_theme_state(&conn);
 
             // Seed the live board list used by error pages and ban pages.
             if let Ok(boards) = crate::db::get_all_boards(&conn) {
@@ -537,7 +530,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     let shared_mode: super::console::SharedConsoleMode = std::sync::Arc::new(
         tokio::sync::RwLock::new(super::console::ConsoleMode::Dashboard),
     );
-
     // Stats refresh task — polls DB every 3 s (or immediately on [R]).
     // block_in_place keeps &mut delta locals on the same stack frame so
     // req/s and other deltas are correctly accumulated across calls.
@@ -741,7 +733,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // build_acceptor failure is now a hard error (return Err) instead
     // of a silent log-and-continue.  If TLS is enabled in config but the acceptor
     // cannot be constructed (missing cert files, bad PEM, permission denied on
-    // tls/dev/, etc.), the process exits with a clear message rather than running
+    // runtime/tls/dev/, etc.), the process exits with a clear message rather than running
     // silently as HTTP-only with no indication that HTTPS is absent.
     if CONFIG.tls.enabled {
         let data_dir_tls = data_dir.clone();
@@ -774,7 +766,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 tracing::info!(
                     target: "server",
                     url = %format!("https://{https_addr}/admin"),
-                    "Admin panel (HTTPS)"
+                    "Admin panel available over HTTPS"
                 );
 
                 tokio::spawn(async move {
@@ -794,7 +786,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 tracing::info!(
                     target: "server",
                     url = %format!("https://{https_addr}/admin"),
-                    "Admin panel (HTTPS/ACME)"
+                    "Admin panel available over HTTPS (ACME)"
                 );
 
                 tokio::spawn(async move {
@@ -835,17 +827,41 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     }
 
     let serve_cancel = worker_cancel.clone();
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        tokio::select! {
-            () = shutdown_signal() => {}
-            () = serve_cancel.cancelled() => {}
+    let wait_shutdown = worker_cancel.clone();
+    let mut http_server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            serve_cancel.cancelled().await;
+        })
+        .await
+    });
+
+    tokio::select! {
+        () = shutdown_signal() => {
+            worker_cancel.cancel();
         }
-    })
-    .await?;
+        () = wait_shutdown.cancelled() => {}
+    }
+
+    let server_result: anyhow::Result<()> =
+        match tokio::time::timeout(Duration::from_secs(1), &mut http_server).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(e.into()),
+            Ok(Err(join_err)) => Err(anyhow::anyhow!("HTTP server task failed: {join_err}")),
+            Err(_) => {
+                tracing::warn!(
+                    target: "server",
+                    "Forcing disconnect of active HTTP clients during shutdown"
+                );
+                http_server.abort();
+                let _ = http_server.await;
+                Ok(())
+            }
+        };
+    server_result?;
     // timeout, replacing the previous blind 10-second sleep. Each worker is
     // given up to (ffmpeg_timeout + 10)s to finish its in-flight job.
     tracing::info!(target: "server", "Signalling background workers to shut down…");
@@ -891,7 +907,7 @@ pub async fn run_https_static(
     // background workers and the HTTP listener.
     tokio::spawn(async move {
         cancel.cancelled().await;
-        handle_clone.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+        handle_clone.graceful_shutdown(Some(std::time::Duration::from_secs(1)));
     });
 
     // Convert tokio TcpListener → std TcpListener for axum_server::from_tcp_rustls.

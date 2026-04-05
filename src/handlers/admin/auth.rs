@@ -23,6 +23,7 @@ use crate::{
 };
 use axum::{
     extract::{Form, State},
+    http::HeaderMap,
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -199,6 +200,7 @@ pub struct LoginForm {
 pub async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     Form(form): Form<LoginForm>,
 ) -> Result<Response> {
@@ -212,11 +214,7 @@ pub async fn admin_login(
     }
 
     // CSRF check
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let username = form.username.trim().to_string();
     let username_log = redact_login_username(&username);
@@ -310,8 +308,9 @@ pub async fn admin_login(
             cookie.set_http_only(true);
             cookie.set_same_site(SameSite::Strict);
             cookie.set_path("/");
-            // Derive Secure flag from config; true when CHAN_HTTPS_COOKIES=true.
-            cookie.set_secure(CONFIG.https_cookies);
+            // Only mark the session cookie Secure when this request is actually
+            // arriving over HTTPS (direct TLS or proxy-forwarded HTTPS).
+            cookie.set_secure(super::should_set_secure_cookie(&headers));
             // Set Max-Age so browsers expire the cookie after the
             // configured session lifetime instead of persisting it indefinitely.
             cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
@@ -330,11 +329,7 @@ pub async fn admin_logout(
     Form(form): Form<super::CsrfOnly>,
 ) -> Result<Response> {
     // Verify CSRF to prevent forced-logout attacks
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     if let Some(session_cookie) = jar.get(super::SESSION_COOKIE) {
         let session_id = session_cookie.value().to_string();

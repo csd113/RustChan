@@ -12,6 +12,17 @@ struct UploadFormPolicy {
     uploads_enabled: bool,
 }
 
+const fn upload_progress_row() -> &'static str {
+    r#"    <tr class="upload-progress-row" hidden>
+        <td>upload</td>
+        <td>
+          <div class="compress-progress upload-progress-wrap" style="display:block;margin:0">
+            <div class="compress-progress-track"><div class="compress-progress-bar upload-progress-bar" style="width:0%"></div></div>
+            <div class="compress-progress-text upload-progress-text">Preparing upload…</div>
+          </div>
+        </td></tr>"#
+}
+
 const AUDIO_ACCEPT: &str =
     "audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac";
 const IMAGE_ACCEPT: &str = "image/jpeg,image/png,image/gif,image/webp";
@@ -72,12 +83,10 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
             r#"<details class="upload-secondary-toggle">
               <summary aria-label="Show optional image upload">▾ Optional Image</summary>
               <div class="upload-secondary-panel">
-                <input type="file" name="image_file" data-onchange-check-size="1" accept="{image_accept}">
+                <input type="file" name="image_file" data-onchange-check-size="1" accept="{IMAGE_ACCEPT}">
                 <span style="font-size:0.72rem;color:var(--text-dim)">{audio_image_hint} · jpg/png/gif/webp · max {image_mb} MiB</span>
               </div>
-            </details>"#,
-            image_accept = IMAGE_ACCEPT,
-            audio_image_hint = audio_image_hint,
+            </details>"#
         )
     } else {
         String::new()
@@ -122,12 +131,12 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         String::new()
     };
 
-    let uploads_disabled_row = if !upload_policy.uploads_enabled {
+    let uploads_disabled_row = if upload_policy.uploads_enabled {
+        String::new()
+    } else {
         r#"    <tr><td>uploads</td>
         <td><span style="font-size:0.8rem;color:var(--text-dim)">uploads are disabled on this board</span></td></tr>"#
             .to_string()
-    } else {
-        String::new()
     };
 
     // PoW CAPTCHA block — only rendered when the board has it enabled.
@@ -183,6 +192,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         </td></tr>
     {uploads_disabled_row}
     {upload_row}
+    {upload_progress_row}
     {edit_token_row}
     {captcha_row}
         <td colspan="2">
@@ -222,6 +232,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         csrf = escape_html(csrf_token),
         uploads_disabled_row = uploads_disabled_row,
         upload_row = upload_row,
+        upload_progress_row = upload_progress_row(),
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
     )
@@ -241,12 +252,12 @@ pub(super) fn reply_form(
         String::new()
     };
 
-    let uploads_disabled_row = if !upload_policy.uploads_enabled {
+    let uploads_disabled_row = if upload_policy.uploads_enabled {
+        String::new()
+    } else {
         r#"    <tr><td>uploads</td>
         <td><span style="font-size:0.8rem;color:var(--text-dim)">uploads are disabled on this board</span></td></tr>"#
             .to_string()
-    } else {
-        String::new()
     };
 
     let edit_token_row = if board.allow_editing {
@@ -286,6 +297,7 @@ pub(super) fn reply_form(
             <button type="submit">post reply</button></td></tr>
     {uploads_disabled_row}
     {upload_row}
+    {upload_progress_row}
     <tr><td>options</td>
         <td><label class="sage-label"><input type="checkbox" name="sage" value="1"> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
     {edit_token_row}
@@ -298,6 +310,7 @@ pub(super) fn reply_form(
         csrf = escape_html(csrf_token),
         uploads_disabled_row = uploads_disabled_row,
         upload_row = upload_row,
+        upload_progress_row = upload_progress_row(),
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
     )
@@ -309,27 +322,10 @@ mod tests {
 
     fn uploads_disabled_board() -> crate::models::Board {
         crate::models::Board {
-            id: 1,
-            short_name: "test".to_string(),
-            name: "Test".to_string(),
-            description: String::new(),
-            nsfw: false,
-            max_threads: 100,
-            max_archived_threads: 150,
-            bump_limit: 500,
             allow_images: false,
             allow_video: false,
             allow_audio: false,
-            allow_any_files: false,
-            allow_tripcodes: true,
-            edit_window_secs: 0,
-            allow_editing: false,
-            allow_archive: true,
-            allow_video_embeds: false,
-            allow_captcha: false,
-            show_poster_ids: false,
-            post_cooldown_secs: 0,
-            created_at: 0,
+            ..crate::test_fixtures::sample_board()
         }
     }
 

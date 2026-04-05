@@ -38,7 +38,7 @@ pub fn insert_pending_fs_op(
 ) -> Result<()> {
     ensure_pending_fs_ops_table(conn)?;
     conn.execute(
-        "INSERT OR REPLACE INTO pending_fs_ops (id, kind, payload_json) VALUES (?1, ?2, ?3)",
+        "INSERT INTO pending_fs_ops (id, kind, payload_json) VALUES (?1, ?2, ?3)",
         rusqlite::params![op.id, op.kind, op.payload_json],
     )
     .context("Insert pending_fs_op failed")?;

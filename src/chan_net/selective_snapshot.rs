@@ -268,7 +268,9 @@ fn board_id_by_short_name(conn: &Connection, short_name: &str) -> Result<i64> {
 /// not `title`. `GwBoard.title` is the Rust field name; it maps to the `name` SQL
 /// column via positional row.get(1).
 fn fetch_all_boards(conn: &Connection) -> Result<Vec<GwBoard>> {
-    let mut stmt = conn.prepare("SELECT short_name, name FROM boards ORDER BY id")?;
+    let mut stmt = conn.prepare(
+        "SELECT short_name, name FROM boards ORDER BY nsfw ASC, display_order ASC, id ASC",
+    )?;
     let rows = stmt
         .query_map([], |r| {
             Ok(GwBoard {

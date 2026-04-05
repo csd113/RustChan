@@ -39,11 +39,14 @@ use crate::{
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, Uri},
-    response::{Html, Redirect},
+    response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
+use std::io::{Read, Seek, SeekFrom};
 use std::net::IpAddr;
+
+pub(super) use crate::handlers::board::check_csrf_jar;
 
 // ─── Shared constant ──────────────────────────────────────────────────────────
 
@@ -72,15 +75,6 @@ fn require_admin_session_with_name(
 }
 
 /// Check CSRF using the cookie jar. Returns error on mismatch.
-fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
-    let cookie_token = jar.get("csrf_token").map(|c| c.value().to_string());
-    if crate::middleware::validate_csrf(cookie_token.as_deref(), form_token.unwrap_or("")) {
-        Ok(())
-    } else {
-        Err(AppError::Forbidden("CSRF token mismatch.".into()))
-    }
-}
-
 /// Verify admin session from a session ID string.
 /// For use inside `spawn_blocking` closures where we have an open connection.
 fn require_admin_session_sid(conn: &rusqlite::Connection, session_id: Option<&str>) -> Result<i64> {
@@ -170,13 +164,38 @@ fn encode_query_component(input: &str) -> String {
     encoded
 }
 
+pub(super) fn should_set_secure_cookie(headers: &HeaderMap) -> bool {
+    if !CONFIG.https_cookies {
+        return false;
+    }
+
+    if CONFIG.tls.enabled {
+        return true;
+    }
+
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .next()
+                .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
+        })
+}
+
 fn admin_panel_redirect_with_status(
     message: &str,
     is_error: bool,
     anchor: Option<&str>,
+    open_section: Option<&str>,
 ) -> Redirect {
     let key = if is_error { "flash_error" } else { "flash" };
     let mut url = format!("/admin/panel?{key}={}", encode_query_component(message));
+    if let Some(section) = open_section.filter(|value| !value.is_empty()) {
+        url.push_str("&open=");
+        url.push_str(&encode_query_component(section));
+    }
     if let Some(anchor) = anchor.filter(|value| !value.is_empty()) {
         url.push('#');
         url.push_str(anchor);
@@ -185,11 +204,23 @@ fn admin_panel_redirect_with_status(
 }
 
 pub(super) fn admin_panel_redirect(message: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, false, None)
+    admin_panel_redirect_with_status(message, false, None, None)
 }
 
 pub(super) fn admin_panel_redirect_anchor(message: &str, anchor: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, false, Some(anchor))
+    admin_panel_redirect_with_status(message, false, Some(anchor), None)
+}
+
+pub(super) fn admin_panel_redirect_anchor_open(
+    message: &str,
+    anchor: &str,
+    open_section: &str,
+) -> Redirect {
+    admin_panel_redirect_with_status(message, false, Some(anchor), Some(open_section))
+}
+
+pub(super) fn admin_panel_error_redirect_anchor(message: &str, anchor: &str) -> Redirect {
+    admin_panel_redirect_with_status(message, true, Some(anchor), None)
 }
 
 // ─── GET /admin/panel ─────────────────────────────────────────────────────────
@@ -200,6 +231,7 @@ pub(super) fn admin_panel_redirect_anchor(message: &str, anchor: &str) -> Redire
 pub struct AdminPanelQuery {
     pub flash: Option<String>,
     pub flash_error: Option<String>,
+    pub open: Option<String>,
     pub backup_created: Option<String>,
     pub backup_deleted: Option<String>,
     pub restored: Option<String>,
@@ -209,6 +241,99 @@ pub struct AdminPanelQuery {
     pub restore_error: Option<String>,
     /// Set by `update_site_settings` on success.
     pub settings_saved: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct LiveLogQuery {
+    pub bytes: Option<usize>,
+}
+
+struct AdminPanelSnapshot {
+    boards: Vec<crate::models::Board>,
+    bans: Vec<crate::models::Ban>,
+    filters: Vec<crate::models::WordFilter>,
+    reports: Vec<crate::models::ReportWithContext>,
+    appeals: Vec<crate::models::BanAppeal>,
+    site_name: String,
+    site_subtitle: String,
+    default_theme: String,
+    themes: Vec<crate::models::Theme>,
+    full_backups: Vec<crate::models::BackupInfo>,
+    board_backups: Vec<crate::models::BackupInfo>,
+    db_size_bytes: i64,
+    db_size_warning: bool,
+}
+
+fn load_admin_panel_snapshot(
+    conn: &rusqlite::Connection,
+    onion_address_val: Option<String>,
+) -> Result<(AdminPanelSnapshot, Option<String>)> {
+    let boards = db::get_all_boards(conn)?;
+    let bans = db::list_bans(conn)?;
+    let filters = db::get_word_filters(conn)?;
+    let reports = db::get_open_reports(conn)?;
+    let appeals = db::get_open_ban_appeals(conn)?;
+    let site_name = db::get_site_name(conn);
+    let site_subtitle = db::get_site_subtitle(conn);
+    let default_theme = db::get_default_user_theme(conn);
+    let themes = db::load_themes(conn)?;
+    let full_backups = list_backup_files(&full_backup_dir());
+    let board_backups = list_backup_files(&board_backup_dir());
+    let db_size_bytes = db::get_db_size_bytes(conn).unwrap_or(0);
+    let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
+        let file_size = std::fs::metadata(&CONFIG.database_path)
+            .map_or_else(|_| db_size_bytes.cast_unsigned(), |m| m.len());
+        file_size >= CONFIG.db_warn_threshold_bytes
+    } else {
+        false
+    };
+    Ok((
+        AdminPanelSnapshot {
+            boards,
+            bans,
+            filters,
+            reports,
+            appeals,
+            site_name,
+            site_subtitle,
+            default_theme,
+            themes,
+            full_backups,
+            board_backups,
+            db_size_bytes,
+            db_size_warning,
+        },
+        onion_address_val,
+    ))
+}
+
+fn render_admin_panel_from_snapshot(
+    snapshot: AdminPanelSnapshot,
+    csrf_token: &str,
+    tor_address: Option<String>,
+    flash: Option<(bool, String)>,
+    open_section: Option<&str>,
+) -> String {
+    let flash_ref = flash.as_ref().map(|(is_err, msg)| (*is_err, msg.as_str()));
+    crate::templates::admin_panel_page(
+        &snapshot.boards,
+        &snapshot.bans,
+        &snapshot.filters,
+        csrf_token,
+        &snapshot.full_backups,
+        &snapshot.board_backups,
+        snapshot.db_size_bytes,
+        snapshot.db_size_warning,
+        &snapshot.reports,
+        &snapshot.appeals,
+        &snapshot.site_name,
+        &snapshot.site_subtitle,
+        &snapshot.default_theme,
+        &snapshot.themes,
+        tor_address.as_deref(),
+        flash_ref,
+        open_section,
+    )
 }
 
 pub async fn admin_panel(
@@ -249,9 +374,9 @@ pub async fn admin_panel(
     } else {
         None
     };
-
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
+        let open_section = params.open.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
 
@@ -260,56 +385,13 @@ pub async fn admin_panel(
             db::get_session(&conn, &sid)?
                 .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
 
-            let boards = db::get_all_boards(&conn)?;
-            let bans = db::list_bans(&conn)?;
-            let filters = db::get_word_filters(&conn)?;
-            let collapse_greentext = db::get_collapse_greentext(&conn);
-            let reports = db::get_open_reports(&conn)?;
-            let appeals = db::get_open_ban_appeals(&conn)?;
-            let site_name = db::get_site_name(&conn);
-            let site_subtitle = db::get_site_subtitle(&conn);
-            let default_theme = db::get_default_user_theme(&conn);
-
-            // Collect saved backup file lists (read from disk, not DB).
-            let full_backups = list_backup_files(&full_backup_dir());
-            let board_backups_list = list_backup_files(&board_backup_dir());
-
-            let db_size_bytes = db::get_db_size_bytes(&conn).unwrap_or(0);
-
-            // 1.8: Compute whether the DB file size exceeds the configured
-            // warning threshold. Uses the on-disk file size (via fs::metadata)
-            // rather than SQLite's PRAGMA page_count estimate for accuracy,
-            // falling back to the pragma value if the path is unavailable.
-            let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
-                let file_size = std::fs::metadata(&CONFIG.database_path)
-                    .map_or_else(|_| db_size_bytes.cast_unsigned(), |m| m.len());
-                file_size >= CONFIG.db_warn_threshold_bytes
-            } else {
-                false
-            };
-
-            // Onion address resolved before spawn_blocking (see above).
-            let tor_address: Option<String> = onion_address_val;
-
-            let flash_ref = flash.as_ref().map(|(is_err, msg)| (*is_err, msg.as_str()));
-
-            Ok(crate::templates::admin_panel_page(
-                &boards,
-                &bans,
-                &filters,
-                collapse_greentext,
+            let (snapshot, tor_address) = load_admin_panel_snapshot(&conn, onion_address_val)?;
+            Ok(render_admin_panel_from_snapshot(
+                snapshot,
                 &csrf_clone,
-                &full_backups,
-                &board_backups_list,
-                db_size_bytes,
-                db_size_warning,
-                &reports,
-                &appeals,
-                &site_name,
-                &site_subtitle,
-                &default_theme,
-                tor_address.as_deref(),
-                flash_ref,
+                tor_address,
+                flash,
+                open_section.as_deref(),
             ))
         }
     })
@@ -319,9 +401,96 @@ pub async fn admin_panel(
     Ok((jar, Html(html)))
 }
 
+pub async fn admin_live_log(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(params): Query<LiveLogQuery>,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let max_bytes = params.bytes.unwrap_or(65_536).clamp(4_096, 262_144);
+
+    let payload = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
+
+            let logs_dir = crate::config::logs_dir();
+
+            let Some(path) = latest_log_file(&logs_dir) else {
+                return Ok(
+                    serde_json::json!({
+                        "filename": "no log file",
+                        "content": "No live log file found yet.",
+                        "truncated": false
+                    })
+                    .to_string(),
+                );
+            };
+
+            let (content, truncated) = read_log_tail(&path, max_bytes)?;
+            Ok(
+                serde_json::json!({
+                    "filename": path.file_name().and_then(|name| name.to_str()).unwrap_or("current log"),
+                    "content": content,
+                    "truncated": truncated
+                })
+                .to_string(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok((
+        [(header::CONTENT_TYPE, "application/json".to_string())],
+        payload,
+    )
+        .into_response())
+}
+
+fn latest_log_file(logs_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut files = std::fs::read_dir(logs_dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("log"))
+        .collect::<Vec<_>>();
+    files.sort();
+    files.pop()
+}
+
+fn read_log_tail(path: &std::path::Path, max_bytes: usize) -> Result<(String, bool)> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Open log: {e}")))?;
+    let len = file
+        .metadata()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Log metadata: {e}")))?
+        .len();
+    let start = len.saturating_sub(max_bytes as u64);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek log: {e}")))?;
+
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Read log: {e}")))?;
+
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let truncated = start > 0;
+    let content = if truncated {
+        match text.find('\n') {
+            Some(pos) if pos + 1 < text.len() => text[pos + 1..].to_string(),
+            _ => text,
+        }
+    } else {
+        text
+    };
+    Ok((content, truncated))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::hosts_match_for_same_origin;
+    use super::{hosts_match_for_same_origin, latest_log_file, read_log_tail};
 
     #[test]
     fn same_origin_accepts_exact_host_match() {
@@ -345,5 +514,27 @@ mod tests {
     #[test]
     fn null_origin_is_handled_by_caller_fallback() {
         assert!(!hosts_match_for_same_origin("null", "localhost"));
+    }
+
+    #[test]
+    fn picks_latest_log_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("rustchan.2026-04-01.log"), "old").expect("old");
+        std::fs::write(dir.path().join("rustchan.2026-04-02.log"), "new").expect("new");
+        let latest = latest_log_file(dir.path()).expect("latest");
+        assert_eq!(
+            latest.file_name().and_then(|name| name.to_str()),
+            Some("rustchan.2026-04-02.log")
+        );
+    }
+
+    #[test]
+    fn reads_tail_of_log_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rustchan.2026-04-02.log");
+        std::fs::write(&path, "line1\nline2\nline3\n").expect("write");
+        let (content, truncated) = read_log_tail(&path, 8).expect("tail");
+        assert!(truncated);
+        assert!(content.contains("line3"));
     }
 }

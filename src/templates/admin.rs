@@ -7,6 +7,7 @@
 //   admin_vacuum_result_page — post-VACUUM feedback
 //   admin_ip_history_page   — posts by IP hash
 
+use crate::db::DbHealthReport;
 use crate::models::{BackupInfo, Ban, Board, WordFilter};
 use crate::utils::{files::format_file_size, sanitize::escape_html};
 use std::fmt::Write;
@@ -44,6 +45,7 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
         csrf_token,
         boards,
         None,
+        None,
         false,
         "/admin",
     )
@@ -51,12 +53,68 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
 
 // ─── Admin panel ──────────────────────────────────────────────────────────────
 
+fn theme_css_starter(slug: &str, swatch_hex: &str) -> String {
+    format!(
+        r#"/* RustChan theme starter.
+   Keep everything scoped to html[data-theme="{slug}"].
+   Start with variables, then add selector overrides underneath as needed. */
+
+html[data-theme="{slug}"] {{
+  color-scheme: dark;
+  --bg:           #11161a;
+  --bg-panel:     rgba(20, 26, 32, 0.92);
+  --bg-post:      rgba(24, 32, 40, 0.92);
+  --bg-op:        rgba(28, 37, 47, 0.95);
+  --bg-input:     #0d1216;
+  --border:       #2d3d49;
+  --border-glow:  {swatch_hex};
+  --green:        {swatch_hex};
+  --green-dim:    #6f8291;
+  --green-bright: #d7f0ff;
+  --green-pale:   #9fc5da;
+  --amber:        #d5a35b;
+  --red:          #d06b6b;
+  --gray:         #5c6670;
+  --gray-light:   #88949f;
+  --text:         #dce6ee;
+  --text-dim:     #90a0ad;
+  --font:         'IBM Plex Sans', 'Segoe UI', sans-serif;
+  --font-display: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+}}
+
+html[data-theme="{slug}"] body {{
+  background: var(--bg);
+  background-image:
+    radial-gradient(circle at top, rgba(255,255,255,0.04), transparent 32%),
+    linear-gradient(180deg, rgba(255,255,255,0.02), transparent 45%);
+}}
+
+html[data-theme="{slug}"] .site-header,
+html[data-theme="{slug}"] .admin-section,
+html[data-theme="{slug}"] .page-box,
+html[data-theme="{slug}"] .post-form-container,
+html[data-theme="{slug}"] .op,
+html[data-theme="{slug}"] .reply {{
+  border-color: var(--border);
+  background: var(--bg-panel);
+}}
+
+html[data-theme="{slug}"] a {{
+  color: var(--green);
+}}
+
+html[data-theme="{slug}"] a:hover {{
+  color: var(--green-bright);
+}}
+"#
+    )
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn admin_panel_page(
     boards: &[Board],
     bans: &[Ban],
     filters: &[WordFilter],
-    collapse_greentext: bool,
     csrf_token: &str,
     full_backups: &[BackupInfo],
     board_backups: &[BackupInfo],
@@ -67,24 +125,74 @@ pub fn admin_panel_page(
     site_name: &str,
     site_subtitle: &str,
     default_theme: &str,
+    themes: &[crate::models::Theme],
     tor_address: Option<&str>,
     // Optional one-time flash message shown at the top of the panel.
     // (is_error, message) — is_error=true → red, false → green.
     flash: Option<(bool, &str)>,
+    open_section: Option<&str>,
 ) -> String {
+    let theme_catalog_open_attr = if open_section == Some("theme-catalog") {
+        " open"
+    } else {
+        ""
+    };
     let global_favicon_exists = crate::favicon::global_has_custom_favicon();
     let global_favicon_version =
         crate::favicon::favicon_version_for_board(None).unwrap_or_default();
+    let enabled_theme_options = themes
+        .iter()
+        .filter(|theme| theme.enabled)
+        .map(|theme| {
+            format!(
+                r#"<option value="{slug}"{selected}>{label}</option>"#,
+                slug = escape_html(&theme.slug),
+                selected = if theme.slug == default_theme {
+                    " selected"
+                } else {
+                    ""
+                },
+                label = escape_html(&theme.display_name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let mut builtin_theme_cards = String::new();
+    let mut custom_theme_cards = String::new();
     let mut board_cards = String::new();
-    for b in boards {
+    for (index, b) in boards.iter().enumerate() {
         let checked = |v: bool| if v { " checked" } else { "" };
+        let prev_same_group = index
+            .checked_sub(1)
+            .and_then(|prev| boards.get(prev))
+            .is_some_and(|prev| prev.nsfw == b.nsfw);
+        let next_same_group = boards
+            .get(index + 1)
+            .is_some_and(|next| next.nsfw == b.nsfw);
         let board_favicon_exists = crate::favicon::board_has_custom_favicon(&b.short_name);
         let board_favicon_version =
             crate::favicon::favicon_version_for_board(Some(&b.short_name)).unwrap_or_default();
         let _ = write!(
             board_cards,
-            r#"<details class="board-settings-card" id="board-{short}">
+            r#"{group_gap}<details class="board-settings-card" id="board-{short}">
 <summary>/{short}/ — {name} {nsfw_tag}</summary>
+<div class="board-order-toolbar">
+<span>{group_label} order: {display_order}</span>
+<form method="POST" action="/admin/board/reorder">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <input type="hidden" name="direction" value="up">
+  <input type="hidden" name="return_to" value="/admin/panel#board-{short}">
+  <button type="submit"{move_up_disabled}>move up</button>
+</form>
+<form method="POST" action="/admin/board/reorder">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <input type="hidden" name="direction" value="down">
+  <input type="hidden" name="return_to" value="/admin/panel#board-{short}">
+  <button type="submit"{move_down_disabled}>move down</button>
+</form>
+</div>
 <form method="POST" action="/admin/board/settings" class="board-settings-form">
 <input type="hidden" name="_csrf"     value="{csrf}">
 <input type="hidden" name="board_id"  value="{id}">
@@ -94,6 +202,12 @@ pub fn admin_panel_page(
   <label>Bump limit<input type="number" name="bump_limit" value="{bump}" min="1" max="10000"></label>
   <label>Max threads<input type="number" name="max_threads" value="{maxt}" min="1" max="1000"></label>
   <label>Max archived threads<input type="number" name="max_archived_threads" value="{max_archived}" min="1" max="10000"></label>
+  <label>Board default theme
+    <select name="default_theme">
+      <option value=""{inherit_theme_selected}>Inherit site default</option>
+      {board_theme_options}
+    </select>
+  </label>
 </div>
 <div class="board-settings-checks">
   <label><input type="checkbox" name="nsfw"            value="1"{nsfw_ck}> NSFW</label>
@@ -106,6 +220,9 @@ pub fn admin_panel_page(
   <label><input type="checkbox" name="allow_video_embeds" value="1"{embeds_ck}> Embed video links (YouTube / Invidious / Streamable)</label>
   <label><input type="checkbox" name="allow_captcha"      value="1"{captcha_ck}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)</label>
   <label><input type="checkbox" name="show_poster_ids"    value="1"{poster_ids_ck}> Show thread-local poster IDs</label>
+  <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block for this board. Existing posts are not affected.">
+    <input type="checkbox" name="collapse_greentext" value="1"{collapse_ck}> Collapse long greentext walls (3+ lines) into expandable blocks
+  </label>
   <label><input type="checkbox" name="allow_editing"   value="1"{edit_ck}>
     Allow post editing</label>
 </div>
@@ -146,9 +263,12 @@ pub fn admin_panel_page(
   <button type="submit" class="btn-danger"
           data-confirm="Delete /{short}/ and ALL its content?">delete board</button>
 </form>
-<a href="/admin/board/backup/{short}" class="backup-download-link" data-backup-label="/{short}/ board backup" style="display:inline-block;margin-left:0.5rem;margin-top:4px">
-  <button type="button">&#8659; download to computer /{short}/</button>
-</a>
+<form method="POST" action="/admin/board/backup/create" class="board-backup-download-form" data-board="{short}" style="display:inline-block;margin-left:0.5rem;margin-top:4px">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_short" value="{short}">
+  <input type="hidden" name="download_after_create" value="1">
+  <button type="submit">&#8659; download to computer /{short}/</button>
+</form>
 <form method="POST" action="/admin/board/backup/create" class="board-backup-create-form" data-board="{short}" style="display:inline-block;margin-left:0.25rem;margin-top:4px">
   <input type="hidden" name="_csrf" value="{csrf}">
   <input type="hidden" name="board_short" value="{short}">
@@ -164,11 +284,40 @@ pub fn admin_panel_page(
             },
             csrf = escape_html(csrf_token),
             id = b.id,
+            group_gap = if index > 0 && b.nsfw && !prev_same_group {
+                "<div class=\"admin-board-group-gap\" aria-hidden=\"true\"></div>"
+            } else {
+                ""
+            },
+            group_label = if b.nsfw { "NSFW" } else { "SFW" },
+            display_order = b.display_order,
             name_raw = escape_html(&b.name),
             desc_raw = escape_html(&b.description),
             bump = b.bump_limit,
             maxt = b.max_threads,
             max_archived = b.max_archived_threads,
+            inherit_theme_selected = if b.default_theme.is_empty() {
+                " selected"
+            } else {
+                ""
+            },
+            board_theme_options = themes
+                .iter()
+                .filter(|theme| theme.enabled)
+                .map(|theme| {
+                    format!(
+                        r#"<option value="{slug}"{selected}>{label}</option>"#,
+                        slug = escape_html(&theme.slug),
+                        selected = if theme.slug == b.default_theme {
+                            " selected"
+                        } else {
+                            ""
+                        },
+                        label = escape_html(&theme.display_name)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(""),
             edit_win = b.edit_window_secs,
             edit_win_display = if b.allow_editing { "" } else { "display:none" },
             cooldown = b.post_cooldown_secs,
@@ -190,6 +339,9 @@ pub fn admin_panel_page(
             embeds_ck = checked(b.allow_video_embeds),
             captcha_ck = checked(b.allow_captcha),
             poster_ids_ck = checked(b.show_poster_ids),
+            collapse_ck = checked(b.collapse_greentext),
+            move_up_disabled = if prev_same_group { "" } else { " disabled" },
+            move_down_disabled = if next_same_group { "" } else { " disabled" },
             board_favicon_preview = if board_favicon_exists {
                 format!(
                     r#"<img class="favicon-inline-preview" src="/boards/{short}/_favicon/favicon-32x32.png?v={version}" alt="/{short}/ favicon">"#,
@@ -353,6 +505,9 @@ pub fn admin_panel_page(
 
     // ── Report inbox ──────────────────────────────────────────────────────────
     let report_count = reports.len();
+    let appeal_count = appeals.len();
+    let ban_count = bans.len();
+    let filter_count = filters.len();
     let report_badge = if report_count > 0 {
         format!(r#" <span class="report-badge">{report_count}</span>"#)
     } else {
@@ -407,11 +562,16 @@ pub fn admin_panel_page(
     }
 
     // ── Ban appeals ───────────────────────────────────────────────────────────
-    let appeal_badge = if appeals.is_empty() {
-        String::new()
+    let appeal_badge = if appeal_count > 0 {
+        format!(r#" <span class="report-badge">{appeal_count}</span>"#)
     } else {
-        format!(r#" <span class="report-badge">{}</span>"#, appeals.len())
+        String::new()
     };
+    let ban_badge = format!(r#" <span class="admin-count-badge">{ban_count}</span>"#);
+    let filter_badge = format!(r#" <span class="admin-count-badge">{filter_count}</span>"#);
+    let moderation_open_attr = "";
+    let moderation_summary_badges =
+        format!("{report_badge}{appeal_badge}{ban_badge}{filter_badge}");
 
     let mut appeal_rows = String::new();
     if appeals.is_empty() {
@@ -453,6 +613,112 @@ pub fn admin_panel_page(
         );
     }
 
+    if !themes.is_empty() {
+        for theme in themes {
+            let theme_css_value = if theme.custom_css.trim().is_empty() {
+                theme_css_starter(&theme.slug, &theme.swatch_hex)
+            } else {
+                theme.custom_css.clone()
+            };
+            let theme_editor = if theme.is_builtin {
+                r#"<div class="theme-editor-built-in-note">
+<p>Built-in themes are maintained in <code>static/style.css</code>. You can toggle them here for the picker, but custom CSS is reserved for custom themes.</p>
+</div>"#
+                    .to_string()
+            } else {
+                format!(
+                    r#"<div class="theme-editor-css-panel">
+  <div class="theme-editor-panel-header">
+    <h4>Custom CSS</h4>
+    <p>Scope everything to <code>html[data-theme="{slug}"]</code>. This textarea accepts full CSS, not just variables.</p>
+  </div>
+  <textarea name="custom_css" rows="18" spellcheck="false">{custom_css}</textarea>
+  <p class="theme-editor-code-note">Tip: start by changing the variables block, then add selector overrides for <code>body</code>, <code>.site-header</code>, <code>.page-box</code>, <code>.op</code>, <code>.reply</code>, and buttons if you need more personality.</p>
+</div>"#,
+                    slug = escape_html(&theme.slug),
+                    custom_css = escape_html(&theme_css_value),
+                )
+            };
+            let card_markup = format!(
+                r#"<details class="board-settings-card theme-editor-card" id="theme-{slug}">
+<summary class="theme-card-summary">
+  <span class="theme-card-swatch" style="--theme-swatch:{swatch}"></span>
+  <span class="theme-card-heading">
+    <strong>{name}</strong>
+    <span class="theme-card-meta"><code>{slug}</code>{builtin_tag}{disabled_tag}</span>
+  </span>
+  <span class="theme-card-description">{description}</span>
+</summary>
+<form method="POST" action="/admin/theme/update" class="board-settings-form theme-editor-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="existing_slug" value="{slug}">
+  <div class="theme-editor-layout">
+    <div class="theme-editor-basics">
+      <div class="board-settings-grid">
+        <label>Display name<input type="text" name="display_name" value="{name}" maxlength="64" required></label>
+        <label>Slug<input type="text" name="slug" value="{slug}" maxlength="32"{slug_readonly}></label>
+        <label>Swatch<input type="text" name="swatch_hex" value="{swatch}" maxlength="7"></label>
+      </div>
+      <div class="board-settings-grid" style="margin-top:0.65rem">
+        <label>Description<input type="text" name="description" value="{description_raw}" maxlength="256"></label>
+      </div>
+      <div class="board-settings-checks">
+        <label><input type="checkbox" name="enabled" value="1"{enabled_ck}> Enabled in theme picker</label>
+      </div>
+      {theme_editor}
+    </div>
+  </div>
+  <div class="board-settings-actions">
+    <button type="submit">save theme settings</button>
+  </div>
+</form>
+{delete_form}
+</details>"#,
+                csrf = escape_html(csrf_token),
+                name = escape_html(&theme.display_name),
+                slug = escape_html(&theme.slug),
+                swatch = escape_html(&theme.swatch_hex),
+                builtin_tag = if theme.is_builtin {
+                    r#" <span class="tag">built-in</span>"#
+                } else {
+                    r#" <span class="tag">custom</span>"#
+                },
+                disabled_tag = if theme.enabled {
+                    ""
+                } else {
+                    r#" <span class="tag locked">disabled</span>"#
+                },
+                description = if theme.description.trim().is_empty() {
+                    "No description yet.".to_string()
+                } else {
+                    escape_html(&theme.description)
+                },
+                description_raw = escape_html(&theme.description),
+                slug_readonly = if theme.is_builtin { " readonly" } else { "" },
+                enabled_ck = if theme.enabled { " checked" } else { "" },
+                theme_editor = theme_editor,
+                delete_form = if theme.is_builtin {
+                    String::new()
+                } else {
+                    format!(
+                        r#"<form method="POST" action="/admin/theme/delete" class="theme-editor-delete">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="slug" value="{slug}">
+  <button type="submit" class="btn-danger" data-confirm="Delete custom theme {slug}?">delete theme</button>
+</form>"#,
+                        csrf = escape_html(csrf_token),
+                        slug = escape_html(&theme.slug)
+                    )
+                }
+            );
+            if theme.is_builtin {
+                builtin_theme_cards.push_str(&card_markup);
+            } else {
+                custom_theme_cards.push_str(&card_markup);
+            }
+        }
+    }
+
     let flash_html = match flash {
         Some((is_error, msg)) => {
             let cls = if is_error { "flash-error" } else { "flash-ok" };
@@ -489,6 +755,28 @@ old boards to prevent query performance degradation.
 </form>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
+     // live log
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<section class="admin-section" id="live-log">
+<details class="admin-dropdown">
+<summary>// live log</summary>
+<div class="admin-dropdown-content">
+<p style="color:var(--text-dim);font-size:0.85rem">
+  Watching <span id="admin-live-log-file">current log</span>. Updates every 2 seconds.
+</p>
+<div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;margin-bottom:0.6rem">
+  <button type="button" id="admin-live-log-refresh">refresh now</button>
+  <button type="button" id="admin-live-log-clear">clear</button>
+  <label style="color:var(--text-dim);font-size:0.82rem">
+    <input type="checkbox" id="admin-live-log-autoscroll" checked> auto-scroll
+  </label>
+</div>
+<pre id="admin-live-log-output" style="margin:0;max-height:24rem;overflow:auto;padding:0.85rem;border:1px solid var(--border);background:var(--bg-input);color:var(--text);font-size:0.78rem;line-height:1.45;white-space:pre-wrap;word-break:break-word">Loading live log…</pre>
+</div>
+</details>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
      // site settings
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section" id="site-settings">
@@ -506,22 +794,13 @@ old boards to prevent query performance degradation.
   </label>
   <label>Default theme
     <select name="default_theme" style="font-family:inherit;padding:0.25rem 0.4rem;background:var(--bg-input);color:var(--text);border:1px solid var(--border)">
-      <option value="terminal"{sel_terminal}>Terminal (default dark)</option>
-      <option value="aero"{sel_aero}>Frutiger Aero</option>
-      <option value="dorfic"{sel_dorfic}>DORFic</option>
-      <option value="fluorogrid"{sel_fluorogrid}>FluoroGrid</option>
-      <option value="neoncubicle"{sel_neoncubicle}>NeonCubicle</option>
-      <option value="chanclassic"{sel_chanclassic}>ChanClassic</option>
+      {enabled_theme_options}
     </select>
   </label>
 </div>
-<div class="board-settings-checks" style="margin-bottom:0.75rem">
-  <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block. Existing posts are not affected — only new posts use the current setting.">
-    <input type="checkbox" name="collapse_greentext" value="1"{collapse_ck}>
-    Collapse long greentext walls (3+ lines) into expandable blocks
-  </label>
+<div class="board-settings-actions" style="margin-top:0.2rem">
+  <button type="submit">save settings</button>
 </div>
-<button type="submit">save settings</button>
 </form>
 <div class="favicon-inline-row favicon-inline-row-global">
 {global_favicon_preview}
@@ -544,6 +823,7 @@ old boards to prevent query performance degradation.
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// boards</h2>
+<p class="admin-order-note">Board order is shared across the homepage, top bar, and this panel, with SFW and NSFW boards each keeping their own separate order.</p>
 <div class="admin-board-cards">{board_cards}</div>
 <h3>create board</h3>
 <form method="POST" action="/admin/board/create">
@@ -557,62 +837,195 @@ old boards to prevent query performance degradation.
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
-     // moderation log
+     // moderation dropdown (log + reports + moderation tools)
      ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section">
-<h2>// moderation log <a href="/admin/mod-log" style="font-size:0.78rem;margin-left:0.6rem;color:var(--text-dim)">[ view full log ]</a></h2>
-<p style="color:var(--text-dim);font-size:0.82rem">All admin actions are recorded in the moderation log. Click <em>view full log</em> to browse the history.</p>
+<section class="admin-section admin-section-collapsible" id="reports">
+<details class="admin-dropdown"{moderation_open_attr}>
+<summary><span>// moderation</span><span class="admin-dropdown-badges">{moderation_summary_badges}</span></summary>
+<div class="admin-dropdown-content">
+<p class="admin-moderation-intro">
+  Live queues come first, policy controls come second, and the log stays available for historical review.
+</p>
+<div class="admin-moderation-grid">
+  <section class="admin-moderation-card admin-moderation-card-review">
+    <div class="admin-card-header">
+      <h3>// review queue</h3>
+      <p>Handle open reports and ban appeals before changing policy.</p>
+    </div>
+    <div class="admin-subsection admin-subsection-tight">
+      <h4>// report inbox{report_badge}</h4>
+      <table class="admin-table">
+        <thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
+        <tbody>{report_rows}</tbody>
+      </table>
+    </div>
+
+    <div class="admin-subsection admin-subsection-tight">
+      <h4 id="appeals">// ban appeals{appeal_badge}</h4>
+      <table class="admin-table">
+        <thead><tr><th>ip (partial)</th><th>appeal message</th><th>filed</th><th>action</th></tr></thead>
+        <tbody>{appeal_rows}</tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="admin-moderation-card admin-moderation-card-controls">
+    <div class="admin-card-header">
+      <h3>// policy controls</h3>
+      <p>Manage bans and automated word replacements.</p>
+    </div>
+
+    <div class="admin-subsection admin-subsection-tight" id="active-bans">
+      <h4>// active bans{ban_badge}</h4>
+      <table class="admin-table">
+        <thead><tr><th>ip hash (partial)</th><th>reason</th><th>expires</th><th>action</th></tr></thead>
+        <tbody>{ban_rows}</tbody>
+      </table>
+      <h4>add ban</h4>
+      <form method="POST" action="/admin/ban/add" class="admin-moderation-form">
+        <input type="hidden" name="_csrf" value="{csrf}">
+        <input type="text" name="ip_hash" placeholder="ip hash" required>
+        <input type="text" name="reason" placeholder="reason">
+        <input type="text" name="duration_hours" placeholder="hours (blank=perm)" style="width:120px">
+        <button type="submit">ban</button>
+      </form>
+    </div>
+
+    <div class="admin-subsection admin-subsection-tight" id="word-filters">
+      <h4>// word filters{filter_badge}</h4>
+      <table class="admin-table">
+        <thead><tr><th>pattern</th><th>replacement</th><th>action</th></tr></thead>
+        <tbody>{filter_rows}</tbody>
+      </table>
+      <h4>add filter</h4>
+      <form method="POST" action="/admin/filter/add" class="admin-moderation-form">
+        <input type="hidden" name="_csrf" value="{csrf}">
+        <input type="text" name="pattern" placeholder="pattern to match" required>
+        <input type="text" name="replacement" placeholder="replace with">
+        <button type="submit">add</button>
+      </form>
+    </div>
+  </section>
+
+  <section class="admin-moderation-card admin-moderation-card-log">
+    <div class="admin-card-header">
+      <h3>// audit trail</h3>
+      <p>Every moderation action is recorded here.</p>
+    </div>
+    <div class="admin-card-actions">
+      <a href="/admin/mod-log" class="admin-link-button">view full log</a>
+    </div>
+    <p class="admin-card-note">Use the full log for history and follow-up. The live queues stay visible in this panel.</p>
+  </section>
+</div>
+</div>
+</details>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // report inbox
-     ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section" id="reports">
-<h2>// report inbox{report_badge}</h2>
-<table class="admin-table">
-<thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
-<tbody>{report_rows}</tbody>
-</table>
+<section class="admin-section admin-section-collapsible" id="theme-catalog">
+<details class="admin-dropdown"{theme_catalog_open_attr}>
+<summary><span>// themes</span></summary>
+<div class="admin-dropdown-content">
+<details class="admin-dropdown theme-workbench-dropdown">
+<summary><span>// custom theme workshop</span></summary>
+<div class="admin-dropdown-content">
+<div class="theme-manager-shell">
+  <section class="theme-guide-card">
+    <div class="admin-card-header">
+      <h3>// how RustChan themes work</h3>
+      <p>Every theme is just CSS scoped to <code>html[data-theme="slug"]</code>. Most of the site styling comes from shared variables first, then optional selector overrides for the pieces you want to customize.</p>
+    </div>
+    <div class="theme-guide-grid">
+      <div class="theme-guide-block">
+        <h4>Core variables</h4>
+        <pre class="theme-guide-code">--bg
+--bg-panel
+--bg-post
+--bg-op
+--bg-input
+--border
+--border-glow
+--green
+--green-dim
+--green-bright
+--green-pale
+--amber
+--red
+--gray
+--gray-light
+--text
+--text-dim
+--font
+--font-display</pre>
+      </div>
+      <div class="theme-guide-block">
+        <h4>Common selectors</h4>
+        <pre class="theme-guide-code">body
+.site-header
+.admin-section
+.page-box
+.post-form-container
+.op
+.reply
+a / a:hover
+button / button:hover</pre>
+      </div>
+    </div>
+    <p class="theme-guide-note">Use the starter below for new themes. Built-in theme source lives in <code>static/style.css</code> if you want examples of complete themes.</p>
+  </section>
+
+  <section class="theme-create-card">
+    <div class="admin-card-header">
+      <h3>// create custom theme</h3>
+      <p>Start from a working scaffold instead of a blank textarea, then tune variables and add overrides where needed.</p>
+    </div>
+    <form method="POST" action="/admin/theme/create" class="theme-create-form">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <div class="board-settings-grid">
+        <label>Display name<input type="text" name="display_name" maxlength="64" required></label>
+        <label>Slug<input type="text" name="slug" maxlength="32" required placeholder="mytheme"></label>
+        <label>Swatch<input type="text" name="swatch_hex" maxlength="7" placeholder="7ab84e"></label>
+      </div>
+      <div class="board-settings-grid" style="margin-top:0.65rem">
+        <label>Description<input type="text" name="description" maxlength="256" placeholder="What makes this theme distinct?"></label>
+      </div>
+      <div class="board-settings-checks">
+        <label><input type="checkbox" name="enabled" value="1" checked> Enabled in theme picker</label>
+      </div>
+      <div class="theme-editor-css-panel">
+        <div class="theme-editor-panel-header">
+          <h4>Starter CSS</h4>
+          <p>Replace <code>your-theme</code> in the selector with the slug above before saving.</p>
+        </div>
+        <textarea name="custom_css" rows="22" spellcheck="false" required>{new_theme_starter_css}</textarea>
+        <p class="theme-editor-code-note">You can keep this file variable-driven and only add selector overrides where the default site structure needs extra styling.</p>
+      </div>
+      <div class="board-settings-actions">
+        <button type="submit">create theme</button>
+      </div>
+    </form>
+  </section>
+</div>
+</div>
+</details>
+
+<section class="theme-manager-group">
+  <div class="theme-manager-group-header">
+    <h3>// built-in themes</h3>
+    <p>Toggle which shipped themes appear in the picker.</p>
+  </div>
+  <div class="theme-card-grid">{builtin_theme_cards}</div>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // moderation (ban appeals + active bans + word filters)
-     ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section">
-<h2>// moderation</h2>
-
-<h3 id="appeals">Ban appeals{appeal_badge}</h3>
-<table class="admin-table">
-<thead><tr><th>ip (partial)</th><th>appeal message</th><th>filed</th><th>action</th></tr></thead>
-<tbody>{appeal_rows}</tbody>
-</table>
-
-<h3 style="margin-top:1.5rem">Active bans</h3>
-<table class="admin-table">
-<thead><tr><th>ip hash (partial)</th><th>reason</th><th>expires</th><th>action</th></tr></thead>
-<tbody>{ban_rows}</tbody>
-</table>
-<h4>add ban</h4>
-<form method="POST" action="/admin/ban/add">
-<input type="hidden" name="_csrf" value="{csrf}">
-<input type="text" name="ip_hash" placeholder="ip hash" required>
-<input type="text" name="reason" placeholder="reason">
-<input type="text" name="duration_hours" placeholder="hours (blank=perm)" style="width:120px">
-<button type="submit">ban</button>
-</form>
-
-<h3 style="margin-top:1.5rem">Word filters</h3>
-<table class="admin-table">
-<thead><tr><th>pattern</th><th>replacement</th><th>action</th></tr></thead>
-<tbody>{filter_rows}</tbody>
-</table>
-<h4>add filter</h4>
-<form method="POST" action="/admin/filter/add">
-<input type="hidden" name="_csrf" value="{csrf}">
-<input type="text" name="pattern" placeholder="pattern to match" required>
-<input type="text" name="replacement" placeholder="replace with">
-<button type="submit">add</button>
-</form>
+<section class="theme-manager-group">
+  <div class="theme-manager-group-header">
+    <h3>// custom themes</h3>
+    <p>Edit your own themes with a full CSS editor and swatch metadata.</p>
+  </div>
+  <div class="theme-card-grid">{custom_theme_cards_or_empty}</div>
+</section>
+</div>
+</details>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -620,13 +1033,13 @@ old boards to prevent query performance degradation.
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// full site backup &amp; restore</h2>
-<p style="color:var(--text-dim);font-size:0.85rem">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/full-backups/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer.</p>
+<p style="color:var(--text-dim);font-size:0.85rem">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/backups/full/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer.</p>
 <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;margin-top:0.75rem;margin-bottom:0.75rem">
 <form method="POST" action="/admin/backup/create" id="full-backup-create-form">
 <input type="hidden" name="_csrf" value="{csrf}">
 <button type="submit" id="full-backup-btn">&#128190; save to server</button>
 </form>
-<form method="POST" action="/admin/restore" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+<form method="POST" action="/admin/restore" enctype="multipart/form-data" class="backup-restore-upload-form" data-restore-label="full backup" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="file" name="backup_file" accept=".zip" required style="color:var(--text)">
 <button type="submit" class="btn-danger"
@@ -644,9 +1057,9 @@ old boards to prevent query performance degradation.
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// board backup &amp; restore</h2>
-<p style="color:var(--text-dim);font-size:0.85rem">Board backups cover a single board. Use <em>save to server</em> on a board card above to store the backup in <code>rustchan-data/board-backups/</code>, or use the table below to download, restore, or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
+<p style="color:var(--text-dim);font-size:0.85rem">Board backups cover a single board. Use <em>save to server</em> on a board card above to store the backup in <code>rustchan-data/backups/boards/</code>, or use the table below to download, restore, or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
 <div style="margin-top:0.5rem;margin-bottom:0.75rem">
-<form method="POST" action="/admin/board/restore" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+<form method="POST" action="/admin/board/restore" enctype="multipart/form-data" class="backup-restore-upload-form" data-restore-label="board backup" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="file" name="backup_file" accept=".zip,.json" required style="color:var(--text)">
 <button type="submit" class="btn-danger"
@@ -670,11 +1083,17 @@ old boards to prevent query performance degradation.
   bulk deletions (deleted threads, pruned posts, etc.).  This may take a few seconds on large
   databases and briefly blocks writes.
 </p>
+<div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+<form method="POST" action="/admin/db/check">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <button type="submit">&#x1F50E; check integrity</button>
+</form>
 <form method="POST" action="/admin/vacuum">
   <input type="hidden" name="_csrf" value="{csrf}">
   <button type="submit"
           data-confirm="Run VACUUM? This will briefly block the database while it rebuilds. Continue?">&#x1F9F9; run VACUUM</button>
 </form>
+</div>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -698,10 +1117,10 @@ old boards to prevent query performance degradation.
 </div>"#,
         csrf = escape_html(csrf_token),
         flash = flash_html,
+        theme_catalog_open_attr = theme_catalog_open_attr,
         board_cards = board_cards,
         ban_rows = ban_rows,
         filter_rows = filter_rows,
-        collapse_ck = if collapse_greentext { " checked" } else { "" },
         full_backup_rows = full_backup_rows,
         board_backup_rows = board_backup_rows,
         db_size_str = format_file_size(db_size_bytes),
@@ -710,6 +1129,8 @@ old boards to prevent query performance degradation.
         report_badge = report_badge,
         appeal_rows = appeal_rows,
         appeal_badge = appeal_badge,
+        moderation_open_attr = moderation_open_attr,
+        moderation_summary_badges = moderation_summary_badges,
         global_favicon_preview = if global_favicon_exists {
             format!(
                 r#"<img class="favicon-inline-preview" src="/favicon-32x32.png?v={version}" alt="global favicon">"#,
@@ -730,50 +1151,39 @@ old boards to prevent query performance degradation.
         },
         site_name_val = escape_html(site_name),
         site_subtitle_val = escape_html(site_subtitle),
+        enabled_theme_options = enabled_theme_options,
+        builtin_theme_cards = builtin_theme_cards,
+        custom_theme_cards_or_empty = if custom_theme_cards.is_empty() {
+            r#"<div class="theme-empty-state">No custom themes yet. Create one above and it will show up here.</div>"#.to_string()
+        } else {
+            custom_theme_cards
+        },
+        new_theme_starter_css = escape_html(&theme_css_starter("your-theme", "#7ab84e")),
         global_favicon_status = if global_favicon_exists {
-            "Custom global favicon is active and stored alongside the main database."
+            "Custom global favicon is active and stored under rustchan-data/runtime/favicon/."
         } else {
             "No custom global favicon uploaded yet."
         },
-        sel_terminal = if default_theme == "terminal" || default_theme.is_empty() {
-            " selected"
+        tor_section = if tor_address.is_none() {
+            String::new()
         } else {
-            ""
+            let mut addresses = String::new();
+            if let Some(addr) = tor_address {
+                let _ = write!(
+                    addresses,
+                    r#"<p class="admin-access-address">
+  <code class="onion-addr">{}</code>
+</p>"#,
+                    escape_html(addr)
+                );
+            }
+            format!(
+                r#"<section class="admin-section admin-access-addresses" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
+<h2>// active access addresses</h2>
+{addresses}
+</section>"#
+            )
         },
-        sel_aero = if default_theme == "aero" {
-            " selected"
-        } else {
-            ""
-        },
-        sel_dorfic = if default_theme == "dorfic" {
-            " selected"
-        } else {
-            ""
-        },
-        sel_fluorogrid = if default_theme == "fluorogrid" {
-            " selected"
-        } else {
-            ""
-        },
-        sel_neoncubicle = if default_theme == "neoncubicle" {
-            " selected"
-        } else {
-            ""
-        },
-        sel_chanclassic = if default_theme == "chanclassic" {
-            " selected"
-        } else {
-            ""
-        },
-        tor_section = tor_address.map_or_else(String::new, |addr| format!(
-            r#"<section class="admin-section" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
-<h2>// active onion address</h2>
-<p style="color:var(--text-dim);font-size:0.82rem;margin:0">
-  <code style="user-select:all;color:var(--text)">{}</code>
-</p>
-</section>"#,
-            escape_html(addr)
-        )),
     );
 
     base_layout(
@@ -782,6 +1192,7 @@ old boards to prevent query performance degradation.
         &body,
         csrf_token,
         boards,
+        None,
         None,
         false,
         "/admin",
@@ -860,6 +1271,7 @@ pub fn mod_log_page(
         csrf_token,
         boards,
         None,
+        None,
         false,
         "/admin/log",
     )
@@ -910,6 +1322,139 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
         &body,
         csrf_token,
         &[],
+        None,
+        None,
+        false,
+        "/admin",
+    )
+}
+
+#[must_use]
+pub fn admin_db_health_result_page(
+    report: &DbHealthReport,
+    attempted_repair: bool,
+    csrf_token: &str,
+) -> String {
+    let title = if attempted_repair {
+        "[ database repair ]"
+    } else {
+        "[ database check ]"
+    };
+    let status_line = if attempted_repair {
+        match report.after_ok {
+            Some(true) => {
+                r#"<p style="color:var(--green-bright)">Repair completed. The database integrity check passed afterward.</p>"#
+            }
+            Some(false) => {
+                r#"<p class="error">Repair finished, but the database still reports a problem. Restoring a known-good full backup is recommended.</p>"#
+            }
+            None => {
+                r#"<p class="error">Repair finished, but no final integrity result was produced.</p>"#
+            }
+        }
+    } else if report.before_ok {
+        r#"<p style="color:var(--green-bright)">The database integrity check passed.</p>"#
+    } else {
+        r#"<p class="error">The database integrity check found a problem.</p>"#
+    };
+    let repair_action = if attempted_repair {
+        String::new()
+    } else {
+        format!(
+            r#"<form method="POST" action="/admin/db/repair" style="margin-top:1rem">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <button type="submit"
+          data-confirm="Attempt database repair? This will run integrity checks, REINDEX, and rebuild the search index. It is safe to try, but it may not fix true file corruption. Continue?">&#x1F6E0; attempt repair</button>
+</form>"#,
+            csrf = escape_html(csrf_token),
+        )
+    };
+
+    let mut repair_summary_html = String::new();
+    if report.repair_summary.is_empty() {
+        repair_summary_html
+            .push_str(r#"<li style="color:var(--text-dim)">No repairs were run.</li>"#);
+    } else {
+        for line in &report.repair_summary {
+            let _ = write!(
+                repair_summary_html,
+                r#"<li>{line}</li>"#,
+                line = escape_html(line)
+            );
+        }
+    }
+
+    let mut repair_steps_html = String::new();
+    if report.repair_steps.is_empty() {
+        repair_steps_html
+            .push_str(r#"<li style="color:var(--text-dim)">No maintenance steps were run.</li>"#);
+    } else {
+        for step in &report.repair_steps {
+            let _ = write!(
+                repair_steps_html,
+                r#"<li>{step}</li>"#,
+                step = escape_html(step)
+            );
+        }
+    }
+
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>{title}</h1>
+<section class="admin-section">
+<h2>// summary</h2>
+{status_line}
+<div class="page-box" style="margin-top:0.75rem;max-width:760px">
+<p><strong>Before:</strong> {before_status}</p>
+<p><strong>Check output:</strong> <code>{before}</code></p>
+<p><strong>Repair run:</strong> {repair_attempted}</p>
+<p><strong>After:</strong> {after_status}</p>
+<p><strong>Final output:</strong> <code>{after}</code></p>
+</div>
+<h2 style="margin-top:1rem">// repair outcome</h2>
+<ul style="margin:0.75rem 0 0 1.25rem;max-width:760px">
+{repair_summary}
+</ul>
+<h2 style="margin-top:1rem">// maintenance actions run</h2>
+<ul style="margin:0.75rem 0 0 1.25rem;max-width:760px">
+{repair_steps}
+</ul>
+{repair_action}
+<p style="margin-top:1rem;color:var(--text-dim)">
+  This tool can repair index and search-index issues, but true SQLite file corruption may still require restoring a known-good full backup.
+</p>
+<p style="margin-top:1rem">
+  <a href="/admin/panel">&#8592; back to admin panel</a>
+</p>
+</section>
+</div>"#,
+        title = title,
+        status_line = status_line,
+        before = escape_html(&report.before_check),
+        before_status = if report.before_ok {
+            r#"<span style="color:var(--green-bright)">Passed</span>"#
+        } else {
+            r#"<span style="color:var(--red-bright)">Problem found</span>"#
+        },
+        repair_attempted = if report.repair_attempted { "Yes" } else { "No" },
+        after = escape_html(report.after_check.as_deref().unwrap_or("not run")),
+        after_status = match report.after_ok {
+            Some(true) => r#"<span style="color:var(--green-bright)">Passed</span>"#,
+            Some(false) => r#"<span style="color:var(--red-bright)">Problem found</span>"#,
+            None => "Not run",
+        },
+        repair_summary = repair_summary_html,
+        repair_steps = repair_steps_html,
+        repair_action = repair_action,
+    );
+
+    base_layout(
+        "Database health",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        None,
         None,
         false,
         "/admin",
@@ -1032,6 +1577,7 @@ pub fn admin_ip_history_page(
         &body,
         csrf_token,
         all_boards,
+        None,
         None,
         false,
         &format!("/admin/ip/{ip_hash}"),

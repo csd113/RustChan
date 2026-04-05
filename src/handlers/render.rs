@@ -22,6 +22,52 @@ pub struct ThreadPageData {
     pub is_admin: bool,
 }
 
+#[must_use]
+pub fn board_page_etag_signature(data: &BoardPageData) -> String {
+    data.summaries
+        .iter()
+        .map(|summary| {
+            let preview_sig = summary
+                .preview_posts
+                .iter()
+                .map(|post| format!("{}:{}", post.id, post.edited_at.unwrap_or(0)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{}:{}:{}:{}:{}:{}:{}",
+                summary.thread.id,
+                summary.thread.bumped_at,
+                i32::from(summary.thread.sticky),
+                i32::from(summary.thread.archived),
+                summary.thread.reply_count,
+                summary.omitted,
+                preview_sig
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+#[must_use]
+pub fn thread_page_etag_signature(data: &ThreadPageData) -> String {
+    let post_sig = data
+        .posts
+        .iter()
+        .map(|post| format!("{}:{}", post.id, post.edited_at.unwrap_or(0)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}",
+        data.thread.id,
+        data.thread.bumped_at,
+        i32::from(data.thread.locked),
+        i32::from(data.thread.sticky),
+        i32::from(data.thread.archived),
+        data.thread.reply_count,
+        post_sig
+    )
+}
+
 pub fn load_board_page_data(
     conn: &rusqlite::Connection,
     board_short: &str,
@@ -66,7 +112,6 @@ pub fn render_board_page(
     current_theme: Option<&str>,
 ) -> String {
     let boards = templates::live_boards();
-    let collapse_greentext = templates::live_collapse_greentext();
     templates::board_page(
         &data.board,
         &data.summaries,
@@ -76,7 +121,7 @@ pub fn render_board_page(
         data.is_admin,
         error,
         current_theme,
-        collapse_greentext,
+        data.board.collapse_greentext,
     )
 }
 
@@ -115,7 +160,6 @@ pub fn render_thread_page(
     current_theme: Option<&str>,
 ) -> String {
     let boards = templates::live_boards();
-    let collapse_greentext = templates::live_collapse_greentext();
     templates::thread_page(
         &data.board,
         &data.thread,
@@ -126,6 +170,132 @@ pub fn render_thread_page(
         data.poll.as_ref(),
         error,
         current_theme,
-        collapse_greentext,
+        data.board.collapse_greentext,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        board_page_etag_signature, thread_page_etag_signature, BoardPageData, ThreadPageData,
+    };
+    use crate::models::{Board, Pagination, Post, Thread, ThreadSummary};
+
+    fn sample_board() -> Board {
+        Board {
+            id: 1,
+            display_order: 0,
+            short_name: "t".into(),
+            max_archived_threads: 100,
+            bump_limit: 300,
+            allow_editing: true,
+            edit_window_secs: 300,
+            allow_video_embeds: true,
+            show_poster_ids: true,
+            ..crate::test_fixtures::sample_board()
+        }
+    }
+
+    fn sample_thread(reply_count: i64) -> Thread {
+        Thread {
+            id: 42,
+            board_id: 1,
+            subject: Some("subject".into()),
+            created_at: 100,
+            bumped_at: 200,
+            locked: false,
+            sticky: false,
+            archived: false,
+            reply_count,
+            image_count: 0,
+            op_body: Some("op".into()),
+            op_file: None,
+            op_thumb: None,
+            op_name: Some("anon".into()),
+            op_tripcode: None,
+            op_id: Some(1),
+        }
+    }
+
+    fn sample_post(id: i64) -> Post {
+        Post {
+            id,
+            thread_id: 42,
+            board_id: 1,
+            name: "Anonymous".into(),
+            tripcode: None,
+            subject: None,
+            body: format!("post {id}"),
+            body_html: format!("post {id}"),
+            ip_hash: Some("hash".into()),
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            created_at: 100 + id,
+            deletion_token: "token".into(),
+            is_op: id == 1,
+            edited_at: None,
+        }
+    }
+
+    #[test]
+    fn thread_page_etag_changes_when_reply_is_removed() {
+        let board = sample_board();
+        let before = ThreadPageData {
+            board: board.clone(),
+            thread: sample_thread(2),
+            posts: vec![sample_post(1), sample_post(2), sample_post(3)],
+            poll: None,
+            is_admin: false,
+        };
+        let after = ThreadPageData {
+            board,
+            thread: sample_thread(1),
+            posts: vec![sample_post(1), sample_post(3)],
+            poll: None,
+            is_admin: false,
+        };
+
+        assert_ne!(
+            thread_page_etag_signature(&before),
+            thread_page_etag_signature(&after)
+        );
+    }
+
+    #[test]
+    fn board_page_etag_changes_when_reply_preview_changes() {
+        let board = sample_board();
+        let before = BoardPageData {
+            board: board.clone(),
+            pagination: Pagination::new(1, 10, 1),
+            summaries: vec![ThreadSummary {
+                thread: sample_thread(2),
+                preview_posts: vec![sample_post(2), sample_post(3)],
+                omitted: 0,
+            }],
+            is_admin: false,
+        };
+        let after = BoardPageData {
+            board,
+            pagination: Pagination::new(1, 10, 1),
+            summaries: vec![ThreadSummary {
+                thread: sample_thread(1),
+                preview_posts: vec![sample_post(3)],
+                omitted: 0,
+            }],
+            is_admin: false,
+        };
+
+        assert_ne!(
+            board_page_etag_signature(&before),
+            board_page_etag_signature(&after)
+        );
+    }
 }

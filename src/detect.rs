@@ -288,7 +288,11 @@ pub fn detect_tor(
 
         let mut attempt = 0u32;
         loop {
-            tracing::info!(target: "rustchan::detect", attempt, "Tor: starting Arti");
+            tracing::info!(
+                target: "rustchan::detect",
+                attempt = attempt + 1,
+                "Starting Tor"
+            );
             let run_start = std::time::Instant::now();
             let result = tokio::select! {
                 r = run_arti(data_dir.clone(), bind_port, onion_address.clone()) => r,
@@ -349,27 +353,27 @@ pub const fn kill_tor() {}
 // ─── Core Arti task ───────────────────────────────────────────────────────────
 
 async fn run_arti(
-    data_dir: std::path::PathBuf,
+    _data_dir: std::path::PathBuf,
     bind_port: u16,
     onion_address: Arc<RwLock<Option<String>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // arti_cache/ — consensus cache (safe to delete; re-fetched on next start).
-    // arti_state/ — service keypair. Back this up.
+    // runtime/tor/cache/ — consensus cache (safe to delete; re-fetched on next start).
+    // runtime/tor/state/ — service keypair. Back this up.
     //   Delete it only if you want a new .onion address.
     //
     // NOTE: TorClientConfigBuilder::from_directories takes AsRef<Path> directly.
     // Do NOT use the builder().storage().cache_dir(PathBuf) path — CfgPath does
     // not implement From<PathBuf> and it will not compile.
     let config = TorClientConfigBuilder::from_directories(
-        data_dir.join("arti_state"),
-        data_dir.join("arti_cache"),
+        crate::config::runtime_tor_state_dir(),
+        crate::config::runtime_tor_cache_dir(),
     )
     .build()?;
 
     tracing::info!(
         target: "rustchan::detect",
-        cache_dir  = %data_dir.join("arti_cache").display(),
-        state_dir  = %data_dir.join("arti_state").display(),
+        cache_dir  = %crate::config::runtime_tor_cache_dir().display(),
+        state_dir  = %crate::config::runtime_tor_state_dir().display(),
         "Tor: bootstrapping — first run downloads ~2 MB of directory data"
     );
 
@@ -399,7 +403,7 @@ async fn run_arti(
     // Currently left at defaults. Consider exposing these in settings.toml (F-18).
     //
     // "rustchan") so operators running multiple instances with a shared
-    // arti_state/ directory can assign distinct names and avoid key collisions.
+    // runtime/tor/state/ directory can assign distinct names and avoid key collisions.
     let svc_config = OnionServiceConfigBuilder::default()
         .nickname(crate::config::CONFIG.tor_service_nickname.parse()?)
         .build()?;
@@ -425,7 +429,7 @@ async fn run_arti(
         found.ok_or("onion_address() still None after 5 s — service key unavailable")?
     };
     let onion_name = hsid_to_onion_address(hsid);
-    publish_onion_address(&onion_name, &data_dir, &onion_address).await;
+    publish_onion_address(&onion_name, &onion_address).await;
 
     let mut stream_requests = handle_rend_requests(rend_requests);
 
@@ -504,11 +508,7 @@ async fn run_arti(
 /// plaintext in JSON log files forwarded to aggregators. Set
 /// `RUST_LOG=detect=debug` to see it in logs; the TTY banner and admin panel
 /// always show the full address.
-async fn publish_onion_address(
-    onion_name: &str,
-    data_dir: &std::path::Path,
-    onion_address: &RwLock<Option<String>>,
-) {
+async fn publish_onion_address(onion_name: &str, onion_address: &RwLock<Option<String>>) {
     tracing::debug!(target: "rustchan::detect", "Tor: hidden service active");
     tracing::info!(target: "rustchan::detect", "Tor: hidden service active");
 
@@ -531,7 +531,9 @@ async fn publish_onion_address(
             ║  Back up this directory to preserve your address.    ║\n\
             ╚══════════════════════════════════════════════════════╝\n\n",
             onion = onion_name,
-            keys = data_dir.join("arti_state/keys").display(),
+            keys = crate::config::runtime_tor_state_dir()
+                .join("keys")
+                .display(),
         ));
     }
 }

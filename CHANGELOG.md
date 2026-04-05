@@ -2,7 +2,43 @@
 
 All notable changes to RustChan will be documented in this file.
 
----
+## [1.1.2]
+
+### Added
+
+- Shared board ordering controls, backed by a persistent `display_order` field, so admins can reorder boards once and see the same order reflected across the homepage, top header board list, and admin panel.
+- Live upload progress bars for post media uploads and admin restore uploads, covering image/video/audio post forms plus full-site and per-board backup restore uploads from local files.
+- Modular theme infrastructure backed by a runtime theme registry, database-managed theme records, dynamic `/theme-css/{theme}` delivery, and board-level default theme support so built-in and custom themes can be managed through one system.
+- Admin theme management for enabling and disabling built-in themes, creating custom themes, editing custom theme metadata and CSS, deleting custom themes, and choosing both site-wide and per-board default themes.
+
+### Improved
+
+- Runtime data layout is now tidier under `rustchan-data/`, with backups grouped into `backups/full` and `backups/boards`, and generated operational state grouped under `runtime/` for Tor, TLS, favicon assets, and temporary admin files.
+- Homepage admin board reordering is now available through a subtler per-card toggle instead of always-visible controls, keeping the feature accessible without cluttering the board list.
+- Board navigation and admin ordering now split SFW and NSFW boards into separate groups, with independent per-group move controls and safer reordering when a board is retagged between normal and NSFW.
+- Post headers now render subjects inline ahead of poster names, with theme-appropriate subject colors and separators so titles remain distinct from usernames across Terminal, DORFic, ChanClassic, Frutiger Aero, FluoroGrid, and NeonCubicle.
+- Theme presentation is more polished through reordered theme-picker menus, softer ChanClassic header link contrast, and rounder shared controls in Frutiger Aero and NeonCubicle so top-level navigation matches those themes' bubbly styling better.
+- Theme resolution, rendering, and picker behavior are now centralized around the live theme registry, so normal pages, admin pages, ban pages, JS bootstrap, no-JS fallbacks, startup seeding, and runtime cache refreshes all follow the same precedence rules.
+- Theme picker and admin theme controls are now fully data-driven, so adding, renaming, disabling, or reordering themes no longer requires parallel hardcoded edits across Rust templates, handlers, and client JavaScript.
+- Theme-related admin and test internals are leaner through one shared admin dashboard snapshot loader, one shared live-theme synchronization path, a unified CSS response path for built-in and custom themes, shared CSRF jar-check handling, and a reusable `Board` test fixture.
+- Admin theme management is cleaner and easier to use through a redesigned themes panel layout, separate built-in and custom theme sections, clearer built-in/custom editing affordances, and a documented custom-theme starter scaffold that explains RustChan's scoped theme variables and common override selectors.
+- Catalog page presentation is cleaner through centered sort/display selectors and larger board-description text on both board headers and homepage board cards.
+- The admin site-settings layout is tidier, with the save button aligned into the form action row instead of floating awkwardly above the global favicon controls.
+- Database maintenance is more user-friendly through a clearer integrity/repair results page and deeper admin repair tooling that now rebuilds SQLite indexes plus the `posts_fts` search table and triggers instead of only reporting a bare integrity status.
+
+### Fixed
+
+- Existing installs now migrate old runtime folders automatically at startup, so prior `full-backups`, `board-backups`, `arti_state`, `arti_cache`, `tls`, `favicon`, and temp backup-download directories continue working under the new layout without manual moves.
+- Backup, Tor, TLS, favicon, admin UI, and documentation paths now consistently point at the reorganized filesystem structure instead of the older scattered folder names.
+- Admin-panel live access addresses now wrap correctly on mobile instead of overflowing offscreen, and the console live-log renderer now avoids panic-prone slicing flagged by strict Clippy.
+- The long-greentext collapse toggle now works as a true per-board setting instead of a global site-wide flag, with migration/backfill support for existing installs and backup/restore compatibility for the new board field.
+- Client-side auto-compress is safer for oversized media: animated images are no longer silently flattened, transparent images avoid destructive JPEG fallback when the browser cannot preserve alpha, and video re-encoding now has stronger cleanup and timeout handling so the modal is less likely to get stuck.
+- Board search no longer crashes on punctuation-heavy input such as `'`, `"`, or `>>1`; the search layer now normalizes free-form input into FTS-safe terms and returns ordinary empty results when nothing usable remains.
+- Spoilers on legacy posts now keep working under the stricter CSP by upgrading older inline-click spoiler markup to the shared delegated `data-action` handler at runtime.
+- Board backup restore now preserves archived-thread state, so threads that were already in a board archive stay archived after restore instead of being pulled back onto the live board index.
+- Admin board delete and board restore now surface SQLite corruption failures more clearly, and the new integrity/repair tools are wired into the admin maintenance flow to help diagnose FTS/index corruption before destructive operations.
+- Theme validation drift is eliminated: duplicated hardcoded theme lists, mismatched validators, and stale per-layer defaults were replaced with registry-backed validation and one canonical fallback path.
+- Renaming or deleting custom themes now updates dependent site and board defaults safely instead of leaving stale references behind, and saved cookie or localStorage themes now fall back cleanly when a theme is disabled or removed.
 
 ## [1.1.1]
 

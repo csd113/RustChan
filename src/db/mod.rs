@@ -13,6 +13,7 @@ mod migrations;
 mod pool;
 pub mod posts;
 mod schema;
+pub mod themes;
 pub mod threads;
 mod types;
 mod user_thread_prefs;
@@ -27,6 +28,7 @@ pub use admin::*;
 pub use boards::*;
 pub use fs_ops::*;
 pub use posts::*;
+pub use themes::*;
 pub use threads::*;
 pub use user_thread_prefs::*;
 
@@ -87,7 +89,8 @@ pub fn paths_safe_to_delete(
                 params![path],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .ok();
+            .optional()
+            .context("Query file_hashes safe-delete candidate failed")?;
 
         if let Some((file_path, _thumb_path)) = maybe_row {
             if safe_set.contains(file_path.as_str()) {

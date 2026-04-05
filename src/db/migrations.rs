@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 31;
+pub(super) const CURRENT_MAX_MIGRATION: i64 = 35;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
@@ -118,18 +118,57 @@ const MIGRATIONS: &[(i64, &str)] = &[
         31,
         "ALTER TABLE boards ADD COLUMN max_archived_threads INTEGER NOT NULL DEFAULT 150",
     ),
+    (
+        32,
+        r"ALTER TABLE boards ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;
+        UPDATE boards
+        SET display_order = id
+        WHERE display_order = 0",
+    ),
+    (
+        33,
+        r"ALTER TABLE boards ADD COLUMN collapse_greentext INTEGER NOT NULL DEFAULT 0;
+        UPDATE boards
+        SET collapse_greentext = CASE
+            WHEN EXISTS (
+                SELECT 1
+                FROM site_settings
+                WHERE key = 'collapse_greentext'
+                  AND (value = '1' OR lower(value) = 'true')
+            ) THEN 1
+            ELSE 0
+        END",
+    ),
+    (
+        34,
+        r"ALTER TABLE boards ADD COLUMN default_theme TEXT NOT NULL DEFAULT '';
+        CREATE TABLE IF NOT EXISTS themes (
+            slug         TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            description  TEXT NOT NULL DEFAULT '',
+            swatch_hex   TEXT NOT NULL DEFAULT '#888888',
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            is_builtin   INTEGER NOT NULL DEFAULT 0,
+            custom_css   TEXT NOT NULL DEFAULT ''
+        )",
+    ),
+    (
+        35,
+        "CREATE INDEX IF NOT EXISTS idx_themes_enabled_sort ON themes(enabled, sort_order, slug)",
+    ),
 ];
 
 pub(super) fn apply_migrations(conn: &rusqlite::Connection) -> Result<()> {
-    conn.execute_batch(&format!(
+    conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (
             version    INTEGER NOT NULL DEFAULT 0,
             UNIQUE(version)
          );
          INSERT INTO schema_version (version)
-         SELECT {CURRENT_MAX_MIGRATION}
+         SELECT 0
          WHERE NOT EXISTS (SELECT 1 FROM schema_version);",
-    ))
+    )
     .context("Failed to create schema_version table")?;
 
     let current_version: i64 = conn

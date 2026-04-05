@@ -11,7 +11,7 @@ use crate::{
     middleware::AppState,
 };
 use axum::{
-    extract::{Form, Multipart, Query, State},
+    extract::{Form, Multipart, State},
     http::HeaderMap,
     response::{Html, IntoResponse, Redirect, Response},
 };
@@ -19,6 +19,15 @@ use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 
 const MAX_FAVICON_UPLOAD_BYTES: usize = 5 * 1024 * 1024;
+
+fn format_favicon_upload_error(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(std::string::ToString::to_string)
+        .filter(|msg| !msg.trim().is_empty() && !msg.starts_with("write "))
+        .last()
+        .unwrap_or_else(|| "Favicon upload failed.".to_string())
+}
 
 async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String> {
     field
@@ -55,6 +64,7 @@ pub struct BoardSettingsForm {
     board_id: i64,
     name: String,
     description: String,
+    default_theme: Option<String>,
     bump_limit: Option<String>,
     max_threads: Option<String>,
     max_archived_threads: Option<String>,
@@ -70,6 +80,7 @@ pub struct BoardSettingsForm {
     allow_video_embeds: Option<String>,
     allow_captcha: Option<String>,
     show_poster_ids: Option<String>,
+    collapse_greentext: Option<String>,
     post_cooldown_secs: Option<String>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
@@ -129,10 +140,27 @@ pub async fn update_board_settings(
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
-            let conn = pool.get()?;
+            let mut conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            let board_short: String = conn.query_row(
+                "SELECT short_name FROM boards WHERE id = ?1",
+                rusqlite::params![board_id],
+                |row| row.get(0),
+            )?;
+            let resolved_default_theme = form
+                .default_theme
+                .as_deref()
+                .map(db::sanitize_theme_slug)
+                .filter(|slug| {
+                    slug.is_empty()
+                        || db::get_theme(&conn, slug)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|theme| theme.enabled)
+                })
+                .unwrap_or_default();
             db::update_board_settings(
-                &conn,
+                &mut conn,
                 board_id,
                 &name,
                 &description,
@@ -152,9 +180,16 @@ pub async fn update_board_settings(
                 form.allow_video_embeds.as_deref() == Some("1"),
                 form.allow_captcha.as_deref() == Some("1"),
                 form.show_poster_ids.as_deref() == Some("1"),
+                form.collapse_greentext.as_deref() == Some("1"),
                 post_cooldown_secs,
+                &resolved_default_theme,
             )?;
-            tracing::info!(target: "admin", board_id = board_id, "Board settings updated");
+            tracing::info!(
+                target: "admin",
+                board = %board_short,
+                board_id = board_id,
+                "Saved board settings"
+            );
             crate::templates::set_live_boards(db::get_all_boards(&conn)?);
             Ok(())
         }
@@ -241,7 +276,7 @@ pub async fn update_site_favicon(
     let favicon_bytes =
         favicon_bytes.ok_or_else(|| AppError::BadRequest("No favicon file uploaded.".into()))?;
 
-    tokio::task::spawn_blocking({
+    let favicon_result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -254,12 +289,21 @@ pub async fn update_site_favicon(
         }
     })
     .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    Ok(
-        super::admin_panel_redirect_anchor("Global favicon updated.", "site-settings")
-            .into_response(),
-    )
+    match favicon_result {
+        Ok(()) => Ok(super::admin_panel_redirect_anchor(
+            "Global favicon updated.",
+            "site-settings",
+        )
+        .into_response()),
+        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor(
+            &format_favicon_upload_error(&error),
+            "site-settings",
+        )
+        .into_response()),
+        Err(error) => Err(error),
+    }
 }
 
 pub async fn update_board_favicon(
@@ -302,7 +346,7 @@ pub async fn update_board_favicon(
     let favicon_bytes =
         favicon_bytes.ok_or_else(|| AppError::BadRequest("No favicon file uploaded.".into()))?;
 
-    let board_short = tokio::task::spawn_blocking({
+    let favicon_result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -320,13 +364,21 @@ pub async fn update_board_favicon(
         }
     })
     .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    Ok(super::admin_panel_redirect_anchor(
-        &format!("Board /{board_short}/ favicon updated."),
-        &format!("board-{board_short}"),
-    )
-    .into_response())
+    match favicon_result {
+        Ok(board_short) => Ok(super::admin_panel_redirect_anchor(
+            &format!("Board /{board_short}/ favicon updated."),
+            &format!("board-{board_short}"),
+        )
+        .into_response()),
+        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor(
+            &format_favicon_upload_error(&error),
+            "site-settings",
+        )
+        .into_response()),
+        Err(error) => Err(error),
+    }
 }
 
 // ─── POST /admin/site/settings ────────────────────────────────────────────────
@@ -335,14 +387,11 @@ pub async fn update_board_favicon(
 pub struct SiteSettingsForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
-    /// Checkbox: present = "1", absent = not submitted (treat as false)
-    pub collapse_greentext: Option<String>,
     /// Custom site name (replaces [ `RustChan` ] on home page and footer).
     pub site_name: Option<String>,
     /// Custom home page subtitle line below the site name.
     pub site_subtitle: Option<String>,
     /// Default theme served to first-time visitors.
-    /// Valid slugs: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
     pub default_theme: Option<String>,
 }
 
@@ -354,33 +403,13 @@ pub async fn update_site_settings(
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
-            const VALID_THEMES: &[&str] = &[
-                "terminal",
-                "aero",
-                "dorfic",
-                "fluorogrid",
-                "neoncubicle",
-                "chanclassic",
-            ];
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            let val = if form.collapse_greentext.as_deref() == Some("1") {
-                "1"
-            } else {
-                "0"
-            };
-            db::set_site_setting(&conn, "collapse_greentext", val)?;
-            crate::templates::set_live_collapse_greentext(val == "1");
-            tracing::info!(target: "admin", value = val, "Site setting collapse_greentext updated");
 
             // Save the custom site name (trimmed, max 64 chars).
             let new_name = form
@@ -418,16 +447,17 @@ pub async fn update_site_settings(
             let new_theme = form
                 .default_theme
                 .as_deref()
-                .unwrap_or("terminal")
-                .trim()
-                .to_string();
-            let new_theme = if VALID_THEMES.contains(&new_theme.as_str()) {
+                .map(db::sanitize_theme_slug)
+                .unwrap_or_default();
+            let new_theme = if new_theme.is_empty() {
+                crate::theme::HARD_DEFAULT_THEME.to_string()
+            } else if db::get_theme(&conn, &new_theme)?.is_some_and(|theme| theme.enabled) {
                 new_theme
             } else {
-                "terminal".to_string()
+                crate::theme::HARD_DEFAULT_THEME.to_string()
             };
             db::set_site_setting(&conn, "default_theme", &new_theme)?;
-            crate::templates::set_live_default_theme(&new_theme);
+            db::sync_live_theme_state(&conn)?;
             tracing::info!(target: "admin", "Default theme updated");
 
             Ok(())
@@ -437,6 +467,157 @@ pub async fn update_site_settings(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(Redirect::to("/admin/panel?settings_saved=1").into_response())
+}
+
+#[derive(Deserialize)]
+pub struct CreateThemeForm {
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+    pub slug: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub swatch_hex: Option<String>,
+    pub custom_css: String,
+    pub enabled: Option<String>,
+}
+
+pub async fn create_theme(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<CreateThemeForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            let slug = db::sanitize_theme_slug(&form.slug);
+            if slug.is_empty() {
+                return Err(AppError::BadRequest("Theme slug is required.".into()));
+            }
+            if db::is_builtin_slug(&slug) {
+                return Err(AppError::BadRequest(
+                    "That slug is reserved by a built-in theme.".into(),
+                ));
+            }
+            db::create_custom_theme(
+                &conn,
+                &slug,
+                &db::sanitize_theme_name(&form.display_name),
+                &db::sanitize_theme_description(form.description.as_deref().unwrap_or("")),
+                &db::sanitize_theme_swatch(form.swatch_hex.as_deref().unwrap_or("")),
+                &db::sanitize_theme_css(&form.custom_css),
+                form.enabled.as_deref() == Some("1"),
+            )?;
+            db::sync_live_theme_state(&conn)?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    Ok(
+        super::admin_panel_redirect_anchor_open("Theme created.", "theme-catalog", "theme-catalog")
+            .into_response(),
+    )
+}
+
+#[derive(Deserialize)]
+pub struct UpdateThemeForm {
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+    pub existing_slug: String,
+    pub slug: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub swatch_hex: Option<String>,
+    pub custom_css: Option<String>,
+    pub enabled: Option<String>,
+}
+
+pub async fn update_theme(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<UpdateThemeForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            let existing_slug = db::sanitize_theme_slug(&form.existing_slug);
+            let theme = db::get_theme(&conn, &existing_slug)?
+                .ok_or_else(|| AppError::BadRequest("Theme not found.".into()))?;
+            let mut new_slug = db::sanitize_theme_slug(&form.slug);
+            if theme.is_builtin {
+                new_slug = existing_slug.clone();
+            }
+            if new_slug.is_empty() {
+                return Err(AppError::BadRequest("Theme slug is required.".into()));
+            }
+            let custom_css = form.custom_css.as_deref().map(db::sanitize_theme_css);
+            db::update_theme(
+                &conn,
+                &existing_slug,
+                &new_slug,
+                &db::sanitize_theme_name(&form.display_name),
+                &db::sanitize_theme_description(form.description.as_deref().unwrap_or("")),
+                &db::sanitize_theme_swatch(form.swatch_hex.as_deref().unwrap_or("")),
+                form.enabled.as_deref() == Some("1"),
+                custom_css.as_deref(),
+            )?;
+            db::sync_live_theme_state(&conn)?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    Ok(
+        super::admin_panel_redirect_anchor_open("Theme updated.", "theme-catalog", "theme-catalog")
+            .into_response(),
+    )
+}
+
+#[derive(Deserialize)]
+pub struct DeleteThemeForm {
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+    pub slug: String,
+}
+
+pub async fn delete_theme(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<DeleteThemeForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            let slug = db::sanitize_theme_slug(&form.slug);
+            db::delete_custom_theme(&conn, &slug)?;
+            db::sync_live_theme_state(&conn)?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    Ok(
+        super::admin_panel_redirect_anchor_open("Theme deleted.", "theme-catalog", "theme-catalog")
+            .into_response(),
+    )
 }
 
 // ─── POST /admin/vacuum ───────────────────────────────────────────────────────
@@ -450,6 +631,12 @@ pub struct VacuumForm {
     pub csrf: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct DbMaintenanceForm {
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+}
+
 pub async fn admin_vacuum(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -458,11 +645,7 @@ pub async fn admin_vacuum(
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if !crate::middleware::validate_csrf(csrf_cookie.as_deref(), form.csrf.as_deref().unwrap_or(""))
-    {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-    }
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let (jar, csrf) = ensure_csrf(jar);
 
@@ -502,118 +685,81 @@ pub async fn admin_vacuum(
     Ok((jar, Html(html)).into_response())
 }
 
-// ─── GET /admin/panel ─────────────────────────────────────────────────────────
-
-/// Query params accepted by GET /admin/panel.
-/// All fields are optional — missing = no flash message.
-#[allow(dead_code)]
-#[derive(Deserialize, Default)]
-pub struct AdminPanelQuery {
-    /// Set by `board_restore` on success: the `short_name` of the restored board.
-    pub board_restored: Option<String>,
-    /// Set by `board_restore` / `restore_saved_board_backup` on failure.
-    pub restore_error: Option<String>,
-    /// Set by `update_site_settings` on success.
-    pub settings_saved: Option<String>,
-}
-
-#[allow(dead_code)]
-pub async fn admin_panel(
+pub async fn admin_db_check(
     State(state): State<AppState>,
     jar: CookieJar,
-    Query(params): Query<AdminPanelQuery>,
-) -> Result<(CookieJar, Html<String>)> {
-    // Move auth check and all DB calls into spawn_blocking.
+    Form(form): Form<DbMaintenanceForm>,
+) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+
     let (jar, csrf) = ensure_csrf(jar);
-    let csrf_clone = csrf.clone();
-
-    // Build the flash message from query params before entering spawn_blocking.
-    let flash: Option<(bool, String)> = if let Some(err) = params.restore_error {
-        Some((true, format!("Restore failed: {err}")))
-    } else if let Some(board) = params.board_restored {
-        Some((false, format!("Board /{board}/ restored successfully.")))
-    } else if params.settings_saved.is_some() {
-        Some((false, "Site settings saved.".to_string()))
-    } else {
-        None
-    };
-
-    // Read onion address before entering spawn_blocking — await is not allowed
-    // inside the synchronous closure.
-    let onion_address_val: Option<String> = if CONFIG.enable_tor_support {
-        state.onion_address.read().await.clone()
-    } else {
-        None
-    };
-
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
+        let csrf_clone = csrf.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
-            // Auth check inside blocking task
-            let sid = session_id.ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
-            db::get_session(&conn, &sid)?
-                .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
+            let report = db::check_db_health(&conn);
+            tracing::info!(
+                target: "admin",
+                ok = report.before_ok,
+                before = report.before_check,
+                "Admin ran database integrity check"
+            );
 
-            let boards = db::get_all_boards(&conn)?;
-            let bans = db::list_bans(&conn)?;
-            let filters = db::get_word_filters(&conn)?;
-            let collapse_greentext = db::get_collapse_greentext(&conn);
-            let reports = db::get_open_reports(&conn)?;
-            let appeals = db::get_open_ban_appeals(&conn)?;
-            let site_name = db::get_site_name(&conn);
-            let site_subtitle = db::get_site_subtitle(&conn);
-            let default_theme = db::get_default_user_theme(&conn);
-
-            // Collect saved backup file lists (read from disk, not DB).
-            let full_backups = super::list_backup_files(&super::full_backup_dir());
-            let board_backups_list = super::list_backup_files(&super::board_backup_dir());
-
-            let db_size_bytes = db::get_db_size_bytes(&conn).unwrap_or(0);
-
-            // 1.8: Compute whether the DB file size exceeds the configured
-            // warning threshold. Uses the on-disk file size (via fs::metadata)
-            // rather than SQLite's PRAGMA page_count estimate for accuracy,
-            // falling back to the pragma value if the path is unavailable.
-            let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
-                let file_size = std::fs::metadata(&CONFIG.database_path)
-                    .map_or_else(|_| db_size_bytes.cast_unsigned(), |m| m.len());
-                file_size >= CONFIG.db_warn_threshold_bytes
-            } else {
-                false
-            };
-
-            // Onion address resolved before spawn_blocking (see above).
-            let tor_address: Option<String> = onion_address_val;
-
-            let flash_ref = flash.as_ref().map(|(is_err, msg)| (*is_err, msg.as_str()));
-
-            Ok(crate::templates::admin_panel_page(
-                &boards,
-                &bans,
-                &filters,
-                collapse_greentext,
+            Ok(crate::templates::admin_db_health_result_page(
+                &report,
+                false,
                 &csrf_clone,
-                &full_backups,
-                &board_backups_list,
-                db_size_bytes,
-                db_size_warning,
-                &reports,
-                &appeals,
-                &site_name,
-                &site_subtitle,
-                &default_theme,
-                tor_address.as_deref(),
-                flash_ref,
             ))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)))
+    Ok((jar, Html(html)).into_response())
+}
+
+pub async fn admin_db_repair(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<DbMaintenanceForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+
+    let (jar, csrf) = ensure_csrf(jar);
+    let html = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let csrf_clone = csrf.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+
+            let report = db::attempt_db_repair(&conn);
+            tracing::info!(
+                target: "admin",
+                before_ok = report.before_ok,
+                after_ok = report.after_ok,
+                steps = report.repair_steps.len(),
+                "Admin ran database repair attempt"
+            );
+
+            Ok(crate::templates::admin_db_health_result_page(
+                &report,
+                true,
+                &csrf_clone,
+            ))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok((jar, Html(html)).into_response())
 }

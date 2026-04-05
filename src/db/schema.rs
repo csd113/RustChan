@@ -7,6 +7,7 @@ use super::migrations::{apply_migrations, CURRENT_MAX_MIGRATION};
 const BASE_SCHEMA_SQL: &str = "
     CREATE TABLE IF NOT EXISTS boards (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        display_order   INTEGER NOT NULL DEFAULT 0,
         short_name      TEXT NOT NULL UNIQUE,
         name            TEXT NOT NULL,
         description     TEXT NOT NULL DEFAULT '',
@@ -25,7 +26,9 @@ const BASE_SCHEMA_SQL: &str = "
         allow_video_embeds  INTEGER NOT NULL DEFAULT 0,
         allow_captcha       INTEGER NOT NULL DEFAULT 0,
         show_poster_ids     INTEGER NOT NULL DEFAULT 0,
+        collapse_greentext  INTEGER NOT NULL DEFAULT 0,
         post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
+        default_theme       TEXT NOT NULL DEFAULT '',
         created_at      INTEGER NOT NULL DEFAULT (unixepoch())
     );
 
@@ -146,17 +149,28 @@ const BASE_SCHEMA_SQL: &str = "
         value      TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS themes (
+        slug         TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        description  TEXT NOT NULL DEFAULT '',
+        swatch_hex   TEXT NOT NULL DEFAULT '#888888',
+        enabled      INTEGER NOT NULL DEFAULT 1,
+        sort_order   INTEGER NOT NULL DEFAULT 0,
+        is_builtin   INTEGER NOT NULL DEFAULT 0,
+        custom_css   TEXT NOT NULL DEFAULT ''
+    );
+
     CREATE TABLE IF NOT EXISTS reports (
         id             INTEGER PRIMARY KEY AUTOINCREMENT,
         post_id        INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-        thread_id      INTEGER NOT NULL,
-        board_id       INTEGER NOT NULL,
+        thread_id      INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        board_id       INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
         reason         TEXT NOT NULL DEFAULT '',
         reporter_hash  TEXT NOT NULL,
         status         TEXT NOT NULL DEFAULT 'open',
         created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
         resolved_at    INTEGER,
-        resolved_by    INTEGER
+        resolved_by    INTEGER REFERENCES admin_users(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS mod_log (
@@ -228,12 +242,18 @@ const INDEX_SCHEMA_SQL: &str = "
         ON background_jobs(status, priority DESC, created_at ASC);
     CREATE INDEX IF NOT EXISTS idx_reports_status
         ON reports(status, created_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_open_unique
+        ON reports(post_id, reporter_hash)
+        WHERE status = 'open';
     CREATE INDEX IF NOT EXISTS idx_mod_log_created
         ON mod_log(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posts_thread_id
         ON posts(thread_id);
     CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
         ON posts(ip_hash);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_one_op_per_thread
+        ON posts(thread_id)
+        WHERE is_op = 1;
     CREATE INDEX IF NOT EXISTS idx_threads_archived
         ON threads(board_id, archived, bumped_at DESC);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_chan_net_posts_remote
@@ -250,7 +270,9 @@ pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 
     let _ = CURRENT_MAX_MIGRATION;
     apply_migrations(conn)?;
+    ensure_reports_table_integrity(conn)?;
     ensure_posts_search_index(conn)?;
+    ensure_post_invariants(conn)?;
     relax_posts_ip_hash(conn)?;
     backfill_media_type(conn)?;
     Ok(())
@@ -301,6 +323,147 @@ fn ensure_posts_search_index(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+fn ensure_post_invariants(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(
+        r"
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_one_op_per_thread
+            ON posts(thread_id)
+            WHERE is_op = 1;
+
+        CREATE TRIGGER IF NOT EXISTS posts_board_match_insert
+        BEFORE INSERT ON posts
+        FOR EACH ROW
+        WHEN NEW.board_id != (SELECT board_id FROM threads WHERE id = NEW.thread_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'posts.board_id must match thread board_id');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS posts_board_match_update
+        BEFORE UPDATE OF thread_id, board_id ON posts
+        FOR EACH ROW
+        WHEN NEW.board_id != (SELECT board_id FROM threads WHERE id = NEW.thread_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'posts.board_id must match thread board_id');
+        END;
+        ",
+    )
+    .context("Post invariant creation failed")
+}
+
+fn reports_has_full_foreign_keys(conn: &rusqlite::Connection) -> Result<bool> {
+    let mut stmt = conn
+        .prepare("SELECT \"from\", \"table\", on_delete FROM pragma_foreign_key_list('reports')")
+        .context("Prepare reports foreign-key inspection failed")?;
+    let foreign_keys = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .context("Query reports foreign keys failed")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("Read reports foreign keys failed")?;
+
+    Ok(foreign_keys.iter().any(|(from, table, on_delete)| {
+        from == "post_id" && table == "posts" && on_delete.eq_ignore_ascii_case("CASCADE")
+    }) && foreign_keys.iter().any(|(from, table, on_delete)| {
+        from == "thread_id" && table == "threads" && on_delete.eq_ignore_ascii_case("CASCADE")
+    }) && foreign_keys.iter().any(|(from, table, on_delete)| {
+        from == "board_id" && table == "boards" && on_delete.eq_ignore_ascii_case("CASCADE")
+    }) && foreign_keys.iter().any(|(from, table, on_delete)| {
+        from == "resolved_by"
+            && table == "admin_users"
+            && on_delete.eq_ignore_ascii_case("SET NULL")
+    }))
+}
+
+fn ensure_reports_table_integrity(conn: &rusqlite::Connection) -> Result<()> {
+    if reports_has_full_foreign_keys(conn)? {
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_open_unique
+             ON reports(post_id, reporter_hash)
+             WHERE status = 'open';",
+        )
+        .context("Reports unique-index creation failed")?;
+        return Ok(());
+    }
+
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .context("Disable foreign keys for reports rebuild failed")?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Begin reports rebuild transaction failed")?;
+
+    let result = conn.execute_batch(
+        r"
+        CREATE TABLE reports_new (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id        INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+            thread_id      INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+            board_id       INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            reason         TEXT NOT NULL DEFAULT '',
+            reporter_hash  TEXT NOT NULL,
+            status         TEXT NOT NULL DEFAULT 'open',
+            created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+            resolved_at    INTEGER,
+            resolved_by    INTEGER REFERENCES admin_users(id) ON DELETE SET NULL
+        );
+
+        INSERT INTO reports_new
+            (id, post_id, thread_id, board_id, reason, reporter_hash,
+             status, created_at, resolved_at, resolved_by)
+        SELECT r.id,
+               r.post_id,
+               p.thread_id,
+               p.board_id,
+               r.reason,
+               r.reporter_hash,
+               r.status,
+               r.created_at,
+               r.resolved_at,
+               CASE
+                   WHEN r.resolved_by IS NULL THEN NULL
+                   WHEN EXISTS (
+                       SELECT 1 FROM admin_users au
+                       WHERE au.id = r.resolved_by
+                   ) THEN r.resolved_by
+                   ELSE NULL
+               END
+        FROM reports r
+        JOIN posts p ON p.id = r.post_id;
+
+        DROP TABLE reports;
+        ALTER TABLE reports_new RENAME TO reports;
+
+        CREATE INDEX idx_reports_status
+            ON reports(status, created_at DESC);
+        CREATE UNIQUE INDEX idx_reports_open_unique
+            ON reports(post_id, reporter_hash)
+            WHERE status = 'open';
+        ",
+    );
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .context("Commit reports rebuild transaction failed")?;
+            conn.execute_batch("PRAGMA foreign_keys = ON;")
+                .context("Re-enable foreign keys after reports rebuild failed")?;
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
+            return Err(error).context(
+                "Structural migration: rebuild reports table with full foreign keys failed",
+            );
+        }
+    }
+
+    tracing::info!(target: "db", "Applied structural migration: reports table integrity hardened");
+    Ok(())
+}
+
 fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {
     let ip_hash_notnull: i64 = conn
         .query_row(
@@ -311,11 +474,13 @@ fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {
         .context("Failed to read ip_hash nullability from pragma_table_info")?;
 
     if ip_hash_notnull == 1 {
-        conn.execute_batch(
-            "PRAGMA foreign_keys = OFF;
-             BEGIN;
+        conn.execute_batch("PRAGMA foreign_keys = OFF;")
+            .context("Disable foreign keys for posts.ip_hash rebuild failed")?;
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .context("Begin posts.ip_hash rebuild transaction failed")?;
 
-             CREATE TABLE posts_new (
+        let result = conn.execute_batch(
+            "CREATE TABLE posts_new (
                  id               INTEGER PRIMARY KEY AUTOINCREMENT,
                  thread_id        INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
                  board_id         INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
@@ -352,12 +517,23 @@ fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {
              CREATE INDEX IF NOT EXISTS idx_posts_thread_id
                  ON posts(thread_id);
              CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
-                 ON posts(ip_hash);
+                 ON posts(ip_hash);",
+        );
 
-             COMMIT;
-             PRAGMA foreign_keys = ON;",
-        )
-        .context("Structural migration: make posts.ip_hash nullable failed")?;
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")
+                    .context("Commit posts.ip_hash rebuild transaction failed")?;
+                conn.execute_batch("PRAGMA foreign_keys = ON;")
+                    .context("Re-enable foreign keys after posts.ip_hash rebuild failed")?;
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
+                return Err(error)
+                    .context("Structural migration: make posts.ip_hash nullable failed");
+            }
+        }
 
         tracing::info!(target: "db", "Applied structural migration: posts.ip_hash is now nullable");
     }

@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(clippy::too_many_lines)]
 pub async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -21,6 +22,7 @@ pub async fn create_full_backup(
             super::super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
+            log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
 
             let temp_dir = std::env::temp_dir();
             let tmp_id = uuid::Uuid::new_v4().simple().to_string();
@@ -35,6 +37,7 @@ pub async fn create_full_backup(
             drop(conn);
 
             progress.reset(crate::middleware::backup_phase::COUNT_FILES);
+            log_backup_phase(crate::middleware::backup_phase::COUNT_FILES);
             let uploads_base = std::path::Path::new(&upload_dir);
             let favicon_file_count = super::count_files_in_dir(&global_favicon_dir);
             let file_count =
@@ -45,10 +48,11 @@ pub async fn create_full_backup(
 
             let backup_dir = super::full_backup_dir();
             std::fs::create_dir_all(&backup_dir).map_err(|error| {
-                AppError::Internal(anyhow::anyhow!("Create full-backups dir: {error}"))
+                AppError::Internal(anyhow::anyhow!("Create full backup dir: {error}"))
             })?;
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
-            let filename = format!("rustchan-backup-{ts}.zip");
+            let filename =
+                super::unique_backup_filename(&backup_dir, &format!("rustchan-backup-{ts}.zip"));
             let final_path = backup_dir.join(&filename);
             let tmp_path = backup_dir.join(format!("{filename}.tmp"));
 
@@ -63,6 +67,7 @@ pub async fn create_full_backup(
                     .compression_method(zip::CompressionMethod::Deflated);
 
                 progress.reset(crate::middleware::backup_phase::COMPRESS);
+                log_backup_phase(crate::middleware::backup_phase::COMPRESS);
                 progress
                     .files_total
                     .store(file_count.saturating_add(1), Ordering::Relaxed);
@@ -79,6 +84,7 @@ pub async fn create_full_backup(
                 let _ = std::fs::remove_file(&temp_db);
                 progress.files_done.fetch_add(1, Ordering::Relaxed);
                 progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
+                log_backup_progress(&progress);
 
                 if uploads_base.exists() {
                     super::add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
@@ -118,6 +124,7 @@ pub async fn create_full_backup(
             progress
                 .phase
                 .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
+            log_backup_phase(crate::middleware::backup_phase::DONE);
             Ok(())
         }
     })
@@ -130,6 +137,7 @@ pub async fn create_full_backup(
 #[derive(Deserialize)]
 pub struct BoardBackupCreateForm {
     board_short: String,
+    download_after_create: Option<String>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
@@ -138,6 +146,7 @@ pub struct BoardBackupCreateForm {
 pub async fn create_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     Form(form): Form<BoardBackupCreateForm>,
 ) -> Result<Response> {
     use super::board_backup_types::{
@@ -160,22 +169,24 @@ pub async fn create_board_backup(
         return Err(AppError::BadRequest("Invalid board name.".into()));
     }
     let board_short_for_flash = board_short.clone();
+    let download_after_create = form.download_after_create.as_deref() == Some("1");
 
     let upload_dir = CONFIG.upload_dir.clone();
     let progress = state.backup_progress.clone();
 
-    tokio::task::spawn_blocking({
+    let filename = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<()> {
+        move || -> Result<String> {
             let conn = pool.get()?;
             super::super::require_admin_session_sid(&conn, session_id.as_deref())?;
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
+            log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
             let board: BoardRow = conn
                 .query_row(
                     "SELECT id, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
                              allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                              edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                             allow_captcha, show_poster_ids, post_cooldown_secs, created_at
+                             allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs, created_at
                       FROM boards WHERE short_name = ?1",
                     params![board_short],
                     |row| {
@@ -199,8 +210,9 @@ pub async fn create_board_backup(
                             allow_video_embeds: row.get::<_, i64>(16)? != 0,
                             allow_captcha: row.get::<_, i64>(17)? != 0,
                             show_poster_ids: row.get::<_, i64>(18)? != 0,
-                            post_cooldown_secs: row.get(19)?,
-                            created_at: row.get(20)?,
+                            collapse_greentext: row.get::<_, i64>(19)? != 0,
+                            post_cooldown_secs: row.get(20)?,
+                            created_at: row.get(21)?,
                         })
                     },
                 )
@@ -210,7 +222,7 @@ pub async fn create_board_backup(
             let threads = collect_rows(
                 &conn,
                 board_id,
-                "SELECT id, board_id, subject, created_at, bumped_at, locked, sticky, reply_count
+                "SELECT id, board_id, subject, created_at, bumped_at, locked, sticky, archived, reply_count
                  FROM threads WHERE board_id = ?1 ORDER BY id ASC",
                 |row| {
                     Ok(ThreadRow {
@@ -221,7 +233,8 @@ pub async fn create_board_backup(
                         bumped_at: row.get(4)?,
                         locked: row.get::<_, i64>(5)? != 0,
                         sticky: row.get::<_, i64>(6)? != 0,
-                        reply_count: row.get(7)?,
+                        archived: row.get::<_, i64>(7)? != 0,
+                        reply_count: row.get(8)?,
                     })
                 },
             )?;
@@ -349,12 +362,20 @@ pub async fn create_board_backup(
                 "Board backup manifest assembled"
             );
 
-            let backup_dir = super::board_backup_dir();
+            let backup_dir = if download_after_create {
+                super::prune_stale_temp_board_downloads();
+                super::temp_board_download_dir()
+            } else {
+                super::board_backup_dir()
+            };
             std::fs::create_dir_all(&backup_dir).map_err(|error| {
-                AppError::Internal(anyhow::anyhow!("Create board-backups dir: {error}"))
+                AppError::Internal(anyhow::anyhow!("Create board backup dir: {error}"))
             })?;
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
-            let filename = format!("rustchan-board-{board_short}-{ts}.zip");
+            let filename = super::unique_backup_filename(
+                &backup_dir,
+                &format!("rustchan-board-{board_short}-{ts}.zip"),
+            );
             let final_path = backup_dir.join(&filename);
             let tmp_path = backup_dir.join(format!("{filename}.tmp"));
 
@@ -369,6 +390,7 @@ pub async fn create_board_backup(
                 "Board backup starting zip build"
             );
             progress.reset(crate::middleware::backup_phase::COMPRESS);
+            log_backup_phase(crate::middleware::backup_phase::COMPRESS);
             progress
                 .files_total
                 .store(file_count.saturating_add(1), Ordering::Relaxed);
@@ -394,6 +416,7 @@ pub async fn create_board_backup(
                     u64::try_from(manifest_json.len()).unwrap_or(u64::MAX),
                     Ordering::Relaxed,
                 );
+                log_backup_progress(&progress);
 
                 if board_upload_path.exists() {
                     super::add_dir_to_zip(
@@ -436,11 +459,47 @@ pub async fn create_board_backup(
             progress
                 .phase
                 .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
-            Ok(())
+            log_backup_phase(crate::middleware::backup_phase::DONE);
+            Ok(filename)
         }
     })
     .await
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+
+    let wants_json = headers
+        .get("x-requested-with")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
+        && headers
+            .get("x-rustchan-download-after-create")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == "1");
+
+    if wants_json {
+        let download_token = new_session_id();
+        super::write_temp_board_download_token(&filename, &download_token)?;
+        let body = serde_json::json!({
+            "filename": filename,
+            "download_url": format!(
+                "/admin/backup/download/temp-board/{filename}?cleanup=1&token={download_token}"
+            ),
+            "board": board_short_for_flash,
+        });
+        return Ok((
+            [(header::CONTENT_TYPE, "application/json".to_string())],
+            body.to_string(),
+        )
+            .into_response());
+    }
+
+    if form.download_after_create.as_deref() == Some("1") {
+        let download_token = new_session_id();
+        super::write_temp_board_download_token(&filename, &download_token)?;
+        return Ok(Redirect::to(&format!(
+            "/admin/backup/download/temp-board/{filename}?cleanup=1&token={download_token}"
+        ))
+        .into_response());
+    }
 
     Ok(super::super::admin_panel_redirect(&format!(
         "Board /{board_short_for_flash}/ backup saved on the server."

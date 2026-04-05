@@ -6,11 +6,16 @@
 
 'use strict';
 
+var MOBILE_FORM_BREAKPOINT_PX = 700;
+
 document.documentElement.classList.remove('no-js');
 document.documentElement.classList.add('js');
 
 function isMobileViewport() {
-  return window.matchMedia && window.matchMedia('(max-width: 700px)').matches;
+  return (
+    window.matchMedia &&
+    window.matchMedia('(max-width: ' + MOBILE_FORM_BREAKPOINT_PX + 'px)').matches
+  );
 }
 
 function isTouchLikeDevice() {
@@ -43,7 +48,7 @@ function setPostFormOpen(open, opts) {
   syncPostFormState();
   if (open) {
     var first = wrap.querySelector('input[type="text"], textarea');
-    if (first) first.focus();
+    if (first && !isMobileViewport()) first.focus();
     if (isMobileViewport() || (opts && opts.scrollIntoView)) {
       setTimeout(function () {
         wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -81,8 +86,17 @@ function localizePostTimes(root) {
   });
 }
 
+function upgradeLegacySpoilers(root) {
+  (root || document).querySelectorAll('.spoiler:not([data-action])').forEach(function (el) {
+    // Older posts were rendered with inline onclick handlers that are blocked by CSP.
+    el.dataset.action = 'toggle-spoiler';
+    el.removeAttribute('onclick');
+  });
+}
+
 document.addEventListener('DOMContentLoaded', function () {
   localizePostTimes(document);
+  upgradeLegacySpoilers(document);
 });
 
 // Hook into new-post insertions (thread auto-update, quote popups, etc.)
@@ -90,6 +104,7 @@ document.addEventListener('DOMContentLoaded', function () {
   var _origLocalize = window._onNewPostsInserted;
   window._onNewPostsInserted = function (container) {
     localizePostTimes(container);
+    upgradeLegacySpoilers(container);
     if (_origLocalize) _origLocalize(container);
   };
 }());
@@ -109,11 +124,174 @@ function appendReply(id) {
     setPostFormOpen(true, { scrollIntoView: true });
   }
   var ta = document.getElementById('reply-body');
-  if (ta) { ta.value += '>>' + id + '\n'; ta.focus(); }
+  if (ta) {
+    ta.value += '>>' + id + '\n';
+    if (!isMobileViewport()) ta.focus();
+  }
   return false;
 }
 
 document.addEventListener('DOMContentLoaded', syncPostFormState);
+
+function formatBytes(bytes) {
+  if (typeof bytes !== 'number' || !isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return bytes + ' B';
+  var units = ['KiB', 'MiB', 'GiB'];
+  var value = bytes / 1024;
+  var unitIndex = 0;
+  while (value >= 1024 && unitIndex + 1 < units.length) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return value.toFixed(value >= 10 ? 0 : 1) + ' ' + units[unitIndex];
+}
+
+function fileInputsHaveSelection(form) {
+  var fileInputs = form.querySelectorAll('input[type="file"]');
+  for (var i = 0; i < fileInputs.length; i += 1) {
+    if (fileInputs[i].files && fileInputs[i].files.length > 0) return true;
+  }
+  return false;
+}
+
+function setUploadProgress(form, percent, message) {
+  var row = form.querySelector('.upload-progress-row');
+  if (!row) return;
+  row.hidden = false;
+  var bar = row.querySelector('.upload-progress-bar');
+  var text = row.querySelector('.upload-progress-text');
+  if (bar && typeof percent === 'number' && isFinite(percent)) {
+    var clamped = Math.max(0, Math.min(100, percent));
+    bar.style.width = clamped + '%';
+  }
+  if (text && message) text.textContent = message;
+}
+
+function resetUploadProgress(form) {
+  var row = form.querySelector('.upload-progress-row');
+  if (!row) return;
+  row.hidden = true;
+  var bar = row.querySelector('.upload-progress-bar');
+  var text = row.querySelector('.upload-progress-text');
+  if (bar) bar.style.width = '0%';
+  if (text) text.textContent = 'Preparing upload…';
+}
+
+function setSubmittingState(form, submitting) {
+  form.dataset.uploadSubmitting = submitting ? '1' : '';
+  form.querySelectorAll('button[type="submit"]').forEach(function (button) {
+    button.disabled = submitting;
+
+    if (!button.dataset.uploadOriginalLabel) {
+      button.dataset.uploadOriginalLabel = button.textContent;
+    }
+  });
+}
+
+function startSubmitButtonAnimation(form) {
+  stopSubmitButtonAnimation(form);
+
+  var frame = 0;
+  var labels = ['Posting', 'Posting.', 'Posting..', 'Posting...'];
+  var buttons = Array.prototype.slice.call(form.querySelectorAll('button[type="submit"]'));
+  if (!buttons.length) return;
+
+  function render() {
+    var label = labels[frame];
+    buttons.forEach(function (button) {
+      button.textContent = label;
+    });
+    frame = (frame + 1) % labels.length;
+  }
+
+  render();
+  form._submitButtonAnimationTimer = window.setInterval(render, 900);
+}
+
+function stopSubmitButtonAnimation(form) {
+  if (form._submitButtonAnimationTimer) {
+    window.clearInterval(form._submitButtonAnimationTimer);
+    form._submitButtonAnimationTimer = null;
+  }
+
+  form.querySelectorAll('button[type="submit"]').forEach(function (button) {
+    if (button.dataset.uploadOriginalLabel) {
+      button.textContent = button.dataset.uploadOriginalLabel;
+    }
+  });
+}
+
+function submitPostFormWithProgress(form) {
+  if (!window.XMLHttpRequest || form.dataset.uploadSubmitting === '1') return false;
+  if (!fileInputsHaveSelection(form)) return false;
+
+  var xhr = new XMLHttpRequest();
+  xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
+  xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+  setSubmittingState(form, true);
+  startSubmitButtonAnimation(form);
+  setUploadProgress(form, 0, 'Starting upload…');
+
+  xhr.upload.addEventListener('progress', function (event) {
+    if (event.lengthComputable && event.total > 0) {
+      var percent = (event.loaded / event.total) * 100;
+      setUploadProgress(
+        form,
+        percent,
+        'Uploading ' + formatBytes(event.loaded) + ' / ' + formatBytes(event.total) + ' (' + Math.round(percent) + '%)'
+      );
+    } else {
+      setUploadProgress(form, 100, 'Uploading…');
+    }
+  });
+
+  xhr.addEventListener('load', function () {
+    stopSubmitButtonAnimation(form);
+    setSubmittingState(form, false);
+    setUploadProgress(form, 100, 'Finishing…');
+
+    var finalUrl = xhr.responseURL || form.action;
+    var contentType = xhr.getResponseHeader('Content-Type') || '';
+    var isHtml = contentType.indexOf('text/html') !== -1;
+
+    if (xhr.status >= 200 && xhr.status < 400 && finalUrl && finalUrl !== window.location.href) {
+      window.location.assign(finalUrl);
+      return;
+    }
+
+    if (isHtml && xhr.responseText) {
+      document.open();
+      document.write(xhr.responseText);
+      document.close();
+      return;
+    }
+
+    if (xhr.status >= 200 && xhr.status < 400) {
+      window.location.reload();
+      return;
+    }
+
+    resetUploadProgress(form);
+    alert('Upload failed. Please try again.');
+  });
+
+  xhr.addEventListener('error', function () {
+    stopSubmitButtonAnimation(form);
+    setSubmittingState(form, false);
+    resetUploadProgress(form);
+    alert('Upload failed. Please check your connection and try again.');
+  });
+
+  xhr.addEventListener('abort', function () {
+    stopSubmitButtonAnimation(form);
+    setSubmittingState(form, false);
+    resetUploadProgress(form);
+  });
+
+  xhr.send(new FormData(form));
+  return true;
+}
 
 // ─── NSFW disclaimer overlay ────────────────────────────────────────────────
 
@@ -383,6 +561,7 @@ function collapseVideoEmbed(btn) {
 
 (function () {
   var _input = null, _file = null, _max = 0, _compressing = false;
+  var VIDEO_COMPRESS_TIMEOUT_MS = 120000;
 
   function getMax(type) {
     var modal = document.getElementById('compress-modal');
@@ -390,6 +569,111 @@ function collapseVideoEmbed(btn) {
     if (type === 'image') return parseInt(modal.dataset.maxImage, 10) || 0;
     if (type === 'video') return parseInt(modal.dataset.maxVideo, 10) || 0;
     return 0;
+  }
+
+  function imageOutputType(file) {
+    if (file.type === 'image/jpeg' || file.type === 'image/jpg') return 'image/jpeg';
+    if (file.type === 'image/png' || file.type === 'image/webp') {
+      return canvasSupportsType('image/webp') ? 'image/webp' : 'image/jpeg';
+    }
+    return 'image/jpeg';
+  }
+
+  function imageOutputExt(type) {
+    return type === 'image/webp' ? 'webp' : 'jpg';
+  }
+
+  function canvasSupportsType(type) {
+    var canvas = document.createElement('canvas');
+    return canvas.toDataURL(type).indexOf('data:' + type) === 0;
+  }
+
+  function hasAnimatedWebP(bytes) {
+    var marker = [0x41, 0x4e, 0x49, 0x4d]; // ANIM
+    for (var i = 0; i <= bytes.length - marker.length; i += 1) {
+      var matched = true;
+      for (var j = 0; j < marker.length; j += 1) {
+        if (bytes[i + j] !== marker[j]) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) return true;
+    }
+    return false;
+  }
+
+  function hasAnimatedGif(bytes) {
+    var frameMarkers = 0;
+    for (var i = 0; i <= bytes.length - 2; i += 1) {
+      if (bytes[i] === 0x21 && bytes[i + 1] === 0xf9) {
+        frameMarkers += 1;
+        if (frameMarkers > 1) return true;
+      }
+    }
+    return false;
+  }
+
+  function isAnimatedImage(file) {
+    if (!file || !file.arrayBuffer) return Promise.resolve(false);
+    if (file.type !== 'image/gif' && file.type !== 'image/webp') return Promise.resolve(false);
+    return file.arrayBuffer().then(function (buffer) {
+      var bytes = new Uint8Array(buffer);
+      if (file.type === 'image/gif') return hasAnimatedGif(bytes);
+      if (file.type === 'image/webp') return hasAnimatedWebP(bytes);
+      return false;
+    }).catch(function () {
+      return false;
+    });
+  }
+
+  function imageHasTransparency(img) {
+    var sample = document.createElement('canvas');
+    var sampleCtx = sample.getContext('2d');
+    if (!sampleCtx) return false;
+    sample.width = Math.min(img.naturalWidth || img.width || 1, 64);
+    sample.height = Math.min(img.naturalHeight || img.height || 1, 64);
+    sampleCtx.drawImage(img, 0, 0, sample.width, sample.height);
+    var data = sampleCtx.getImageData(0, 0, sample.width, sample.height).data;
+    for (var i = 3; i < data.length; i += 4) {
+      if (data[i] !== 255) return true;
+    }
+    return false;
+  }
+
+  function stripFileExtension(name) {
+    return /\.[^.]+$/.test(name) ? name.replace(/\.[^.]+$/, '') : name;
+  }
+
+  function stopMediaStream(stream) {
+    if (!stream || !stream.getTracks) return;
+    stream.getTracks().forEach(function (track) {
+      try { track.stop(); } catch (e) {}
+    });
+  }
+
+  function cleanupVideoElement(videoEl) {
+    if (!videoEl) return;
+    try { videoEl.pause(); } catch (e) {}
+    try {
+      videoEl.removeAttribute('src');
+      videoEl.load();
+    } catch (e) {}
+  }
+
+  function videoRecorderMimeType() {
+    if (!window.MediaRecorder) return '';
+    var types = [
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp9',
+      'video/webm;codecs=vp8,opus',
+      'video/webm;codecs=vp8',
+      'video/webm'
+    ];
+    for (var i = 0; i < types.length; i += 1) {
+      if (MediaRecorder.isTypeSupported(types[i])) return types[i];
+    }
+    return '';
   }
 
   window.checkFileSize = function (input) {
@@ -438,8 +722,8 @@ function collapseVideoEmbed(btn) {
         _setView('done');
         return;
       }
-      var ext = isImg ? 'jpg' : 'webm';
-      var newName = _file.name.replace(/\.[^.]+$/, '') + '_compressed.' + ext;
+      var ext = isImg ? imageOutputExt(blob.type) : 'webm';
+      var newName = stripFileExtension(_file.name) + '_compressed.' + ext;
       var dt = new DataTransfer();
       dt.items.add(new File([blob], newName, { type: blob.type }));
       _input.files = dt.files;
@@ -476,79 +760,219 @@ function collapseVideoEmbed(btn) {
 
   function _compressImage(file, maxBytes) {
     return new Promise(function (resolve, reject) {
-      var img = new Image();
-      var url = URL.createObjectURL(file);
-      img.onload = function () {
-        URL.revokeObjectURL(url);
-        var w = img.naturalWidth, h = img.naturalHeight;
-        var scale = 1.0, quality = 0.85;
-        var canvas = document.createElement('canvas');
-        var ctx = canvas.getContext('2d');
-        var attempt = 0;
-        function tryEncode() {
-          attempt++;
-          canvas.width = Math.round(w * scale);
-          canvas.height = Math.round(h * scale);
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          canvas.toBlob(function (blob) {
-            _setProgress(Math.min(attempt * 15, 90), 'Compressing\u2026 attempt ' + attempt);
-            if (!blob) { reject(new Error('Canvas toBlob failed')); return; }
-            if (blob.size <= maxBytes) { resolve(blob); return; }
-            if (attempt >= 8) { resolve(blob); return; }
-            quality -= 0.1;
-            if (quality < 0.3) { quality = 0.5; scale *= 0.75; }
-            tryEncode();
-          }, 'image/jpeg', quality);
+      isAnimatedImage(file).then(function (animated) {
+        if (animated) {
+          reject(new Error('Animated images are not auto-compressed to avoid losing animation'));
+          return;
         }
-        tryEncode();
-      };
-      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('Image load failed')); };
-      img.src = url;
+        var img = new Image();
+        var url = URL.createObjectURL(file);
+        img.onload = function () {
+          URL.revokeObjectURL(url);
+          var w = img.naturalWidth, h = img.naturalHeight;
+          var scale = 1.0, quality = 0.85;
+          var outputType = imageOutputType(file);
+          if (outputType === 'image/jpeg' && imageHasTransparency(img)) {
+            reject(new Error('This image uses transparency and this browser cannot safely auto-compress it'));
+            return;
+          }
+          var canvas = document.createElement('canvas');
+          var ctx = canvas.getContext('2d');
+          if (!ctx) {
+            reject(new Error('Canvas 2D context unavailable'));
+            return;
+          }
+          var attempt = 0;
+          function tryEncode() {
+            attempt++;
+            canvas.width = Math.round(w * scale);
+            canvas.height = Math.round(h * scale);
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            canvas.toBlob(function (blob) {
+              _setProgress(Math.min(attempt * 15, 90), 'Compressing\u2026 attempt ' + attempt);
+              if (!blob) { reject(new Error('Canvas toBlob failed')); return; }
+              if (blob.size <= maxBytes) { resolve(blob); return; }
+              if (attempt >= 8) { resolve(blob); return; }
+              quality -= 0.1;
+              if (quality < 0.3) { quality = 0.5; scale *= 0.75; }
+              tryEncode();
+            }, outputType, quality);
+          }
+          tryEncode();
+        };
+        img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('Image load failed')); };
+        img.src = url;
+      });
     });
   }
 
   function _compressVideo(file, maxBytes) {
     return new Promise(function (resolve, reject) {
       if (!window.MediaRecorder) { reject(new Error('MediaRecorder not supported')); return; }
+      var mimeType = videoRecorderMimeType();
+      if (!mimeType) { reject(new Error('No supported WebM encoder available in this browser')); return; }
       var url = URL.createObjectURL(file);
       var videoEl = document.createElement('video');
+      videoEl.preload = 'auto';
       videoEl.muted = true;
+      videoEl.playsInline = true;
       videoEl.src = url;
       var duration = 0;
+      var stream = null;
+      var recorder = null;
+      var progressTimer = null;
+      var safetyTimer = null;
+      var settled = false;
+
+      function finish(err, blob) {
+        if (settled) return;
+        settled = true;
+        if (progressTimer) clearInterval(progressTimer);
+        if (safetyTimer) clearTimeout(safetyTimer);
+        stopMediaStream(stream);
+        cleanupVideoElement(videoEl);
+        URL.revokeObjectURL(url);
+        if (err) {
+          reject(err);
+        } else {
+          resolve(blob);
+        }
+      }
+
       videoEl.onloadedmetadata = function () {
         duration = videoEl.duration;
-        if (!duration || !isFinite(duration)) { URL.revokeObjectURL(url); reject(new Error('Cannot determine video duration')); return; }
+        if (!duration || !isFinite(duration)) { finish(new Error('Cannot determine video duration')); return; }
         _setProgress(10, 'Analysing video\u2026');
         var targetBitsPerSec = Math.floor((maxBytes * 8) / duration * 0.9);
-        var mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
-        var stream = null;
-        try { stream = videoEl.captureStream ? videoEl.captureStream() : videoEl.mozCaptureStream(); } catch (e) { URL.revokeObjectURL(url); reject(e); return; }
-        var recorder = new MediaRecorder(stream, { mimeType: mimeType, videoBitsPerSecond: targetBitsPerSec });
+        try {
+          stream = videoEl.captureStream ? videoEl.captureStream() : videoEl.mozCaptureStream();
+        } catch (e) {
+          finish(e);
+          return;
+        }
+        if (!stream) {
+          finish(new Error('Video capture stream is not available'));
+          return;
+        }
+        try {
+          recorder = new MediaRecorder(stream, {
+            mimeType: mimeType,
+            videoBitsPerSecond: Math.max(targetBitsPerSec, 120000)
+          });
+        } catch (e) {
+          finish(e);
+          return;
+        }
         var chunks = [];
         recorder.ondataavailable = function (e) { if (e.data && e.data.size > 0) chunks.push(e.data); };
         recorder.onstop = function () {
-          URL.revokeObjectURL(url);
-          resolve(new Blob(chunks, { type: 'video/webm' }));
+          finish(null, new Blob(chunks, { type: 'video/webm' }));
         };
-        recorder.onerror = function (e) { URL.revokeObjectURL(url); reject(e.error || new Error('MediaRecorder error')); };
+        recorder.onerror = function (e) { finish(e.error || new Error('MediaRecorder error')); };
         videoEl.currentTime = 0;
-        videoEl.play().catch(function () {});
-        recorder.start();
-        var progressTimer = setInterval(function () {
+        recorder.start(1000);
+        progressTimer = setInterval(function () {
           _setProgress(Math.min(10 + Math.round((videoEl.currentTime / duration) * 80), 90), 'Re-encoding\u2026 ' + Math.round((videoEl.currentTime / duration) * 100) + '%');
         }, 500);
-        videoEl.addEventListener('timeupdate', function captureFrame() {
-          if (videoEl.currentTime >= duration - 0.1) {
-            clearInterval(progressTimer);
-            recorder.stop();
-            videoEl.removeEventListener('timeupdate', captureFrame);
+        safetyTimer = setTimeout(function () {
+          if (recorder && recorder.state !== 'inactive') {
+            try { recorder.stop(); } catch (e) {}
+          }
+          finish(new Error('Video compression timed out'));
+        }, VIDEO_COMPRESS_TIMEOUT_MS);
+        videoEl.addEventListener('ended', function handleEnded() {
+          videoEl.removeEventListener('ended', handleEnded);
+          if (recorder && recorder.state !== 'inactive') {
+            try { recorder.stop(); } catch (e) { finish(e); }
           }
         });
+        videoEl.play().catch(function (err) {
+          finish(err || new Error('Video playback failed during compression'));
+        });
       };
-      videoEl.onerror = function () { URL.revokeObjectURL(url); reject(new Error('Video load error')); };
+      videoEl.onerror = function () { finish(new Error('Video load error')); };
       videoEl.load();
     });
   }
+})();
+
+(function () {
+  function initAdminLiveLog() {
+    var output = document.getElementById('admin-live-log-output');
+    var fileLabel = document.getElementById('admin-live-log-file');
+    var refreshBtn = document.getElementById('admin-live-log-refresh');
+    var clearBtn = document.getElementById('admin-live-log-clear');
+    var autoscroll = document.getElementById('admin-live-log-autoscroll');
+    if (!output) return;
+
+    var timer = null;
+    var lastText = '';
+    var clearedBaseline = '';
+    var clearedFile = '';
+
+    function visibleText(fullText, fileName) {
+      if (!clearedBaseline || clearedFile !== fileName) {
+        return fullText;
+      }
+      if (fullText === clearedBaseline) {
+        return '';
+      }
+      if (fullText.indexOf(clearedBaseline) === 0) {
+        return fullText.slice(clearedBaseline.length).replace(/^\n+/, '');
+      }
+      return fullText;
+    }
+
+    function fetchLog() {
+      fetch('/admin/log/live?bytes=65536', { credentials: 'same-origin' })
+        .then(function (resp) { return resp.json(); })
+        .then(function (data) {
+          var fileName = data.filename || 'current log';
+          var fullText = data.content || '';
+          if (data.truncated) {
+            fullText = '[showing latest log tail]\n' + fullText;
+          }
+          if (fileLabel) fileLabel.textContent = fileName;
+          if (fileName !== clearedFile) {
+            clearedBaseline = '';
+            clearedFile = fileName;
+          }
+          if (fullText === lastText) return;
+          lastText = fullText;
+          var text = visibleText(fullText, fileName);
+          output.textContent = text || 'Waiting for new log lines…';
+          if (!autoscroll || autoscroll.checked) {
+            output.scrollTop = output.scrollHeight;
+          }
+        })
+        .catch(function () {
+          output.textContent = 'Failed to load live log.';
+        });
+    }
+
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', function () {
+        fetchLog();
+      });
+    }
+
+    if (clearBtn) {
+      clearBtn.addEventListener('click', function () {
+        clearedBaseline = lastText;
+        clearedFile = fileLabel ? fileLabel.textContent : '';
+        output.textContent = 'Waiting for new log lines…';
+      });
+    }
+
+    fetchLog();
+    timer = setInterval(fetchLog, 2000);
+
+    window.addEventListener('beforeunload', function () {
+      if (timer) clearInterval(timer);
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', initAdminLiveLog);
 })();
 
 // ─── Report modal ─────────────────────────────────────────────────────────────
@@ -595,8 +1019,9 @@ function toggleThreadMenu(toggle) {
 // ─── Theme picker ─────────────────────────────────────────────────────────────
 
 (function () {
-  // Must match VALID_THEMES in src/handlers/admin.rs
-  var THEMES = ['terminal', 'aero', 'dorfic', 'fluorogrid', 'neoncubicle', 'chanclassic'];
+  var THEMES = (document.documentElement.getAttribute('data-theme-slugs') || '')
+    .split(',')
+    .filter(function (value) { return value; });
 
   function persistTheme(t, href) {
     var url = href || ('/theme/' + encodeURIComponent(t));
@@ -608,12 +1033,28 @@ function toggleThreadMenu(toggle) {
     } catch (e) {}
   }
 
+  function applyThemeStylesheet(t) {
+    var el = document.getElementById('active-theme-stylesheet');
+    if (!t || t === 'terminal') {
+      if (el) el.remove();
+      return;
+    }
+    if (!el) {
+      el = document.createElement('link');
+      el.id = 'active-theme-stylesheet';
+      el.rel = 'stylesheet';
+      document.head.appendChild(el);
+    }
+    el.href = '/theme-css/' + encodeURIComponent(t);
+  }
+
   function applyTheme(t) {
     if (t === 'terminal') {
       document.documentElement.removeAttribute('data-theme');
     } else {
       document.documentElement.setAttribute('data-theme', t);
     }
+    applyThemeStylesheet(t);
     // Match by data-theme attribute so order in DOM doesn't matter.
     document.querySelectorAll('.tp-option').forEach(function (el) {
       el.classList.toggle('active', el.dataset.theme === t);
@@ -1532,6 +1973,12 @@ document.addEventListener('change', function (e) {
 document.addEventListener('submit', function (e) {
   closeThreadMenus();
   var form = e.target;
+  if (form.matches && form.matches('form.post-form')) {
+    if (submitPostFormWithProgress(form)) {
+      e.preventDefault();
+      return;
+    }
+  }
   // data-confirm-submit: prompt before form submission
   if (form.dataset.confirmSubmit) {
     if (!confirm(form.dataset.confirmSubmit)) {
@@ -1827,23 +2274,177 @@ document.addEventListener('click', function (e) {
     if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
   }
 
+  function _absoluteUrl(url) {
+    if (!url) return '';
+    try {
+      return new URL(url, window.location.href).toString();
+    } catch (_err) {
+      return '';
+    }
+  }
+
+  function _extractRefreshTarget(refreshValue) {
+    if (!refreshValue) return '';
+    var match = refreshValue.match(/url\s*=\s*(.+)$/i);
+    if (!match) return '';
+    return match[1].trim().replace(/^["']|["']$/g, '');
+  }
+
+  function _extractRedirectTargetFromHtml(html) {
+    if (!html) return '';
+
+    var metaMatch = html.match(/<meta[^>]+http-equiv=["']refresh["'][^>]+content=["'][^"']*url=([^"'>]+)["']/i);
+    if (metaMatch && metaMatch[1]) return metaMatch[1].trim();
+
+    var linkMatch = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*>\s*Continue\s*<\/a>/i);
+    if (linkMatch && linkMatch[1]) return linkMatch[1].trim();
+
+    return '';
+  }
+
+  function _resolveRestoreRedirectTarget(xhr, form) {
+    var refreshTarget = _extractRefreshTarget(xhr.getResponseHeader('refresh') || '');
+    var htmlTarget = _extractRedirectTargetFromHtml(xhr.responseText || '');
+    var responseUrl = _absoluteUrl(xhr.responseURL || '');
+    var formAction = _absoluteUrl(form.action || '');
+    var current = _absoluteUrl(window.location.href);
+    var target = _absoluteUrl(refreshTarget || htmlTarget || '');
+
+    if (target && target !== current) return target;
+    if (responseUrl && responseUrl !== current && responseUrl !== formAction) return responseUrl;
+    return '';
+  }
+
+  function _submitRestoreUploadForm(form, title) {
+    var xhr = null;
+    _downloadMode = false;
+    _stopPolling();
+    showBackupModal(title);
+    _setBkProgress(0, 'Starting upload…');
+
+    form.querySelectorAll('button[type="submit"]').forEach(function (button) {
+      button.disabled = true;
+    });
+
+    xhr = new XMLHttpRequest();
+    xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+    xhr.upload.addEventListener('progress', function (event) {
+      if (event.lengthComputable && event.total > 0) {
+        var pct = Math.round((event.loaded / event.total) * 100);
+        _setBkProgress(
+          pct,
+          'Uploading restore file… ' +
+          formatBytes(event.loaded) + ' / ' + formatBytes(event.total) +
+          ' (' + pct + '%)'
+        );
+      } else {
+        _setBkProgress(15, 'Uploading restore file…');
+      }
+    });
+
+    function _restoreFormDone() {
+      form.querySelectorAll('button[type="submit"]').forEach(function (button) {
+        button.disabled = false;
+      });
+    }
+
+    xhr.addEventListener('load', function () {
+      _restoreFormDone();
+      if (xhr.status >= 200 && xhr.status < 400) {
+        _setBkProgress(100, 'Upload complete. Restoring backup…');
+        var redirectTarget = _resolveRestoreRedirectTarget(xhr, form);
+        if (redirectTarget) {
+          window.location.assign(redirectTarget);
+          return;
+        }
+        var contentType = xhr.getResponseHeader('content-type') || '';
+        if (contentType.indexOf('text/html') !== -1 && xhr.responseText) {
+          document.open();
+          document.write(xhr.responseText);
+          document.close();
+          return;
+        }
+        window.location.reload();
+        return;
+      }
+      _setBkProgress(0, 'Restore upload failed (' + xhr.status + ')');
+      showDoneButton();
+    });
+
+    xhr.addEventListener('error', function () {
+      _restoreFormDone();
+      _setBkProgress(0, 'Restore upload failed. Please try again.');
+      showDoneButton();
+    });
+
+    xhr.addEventListener('abort', function () {
+      _restoreFormDone();
+      _setBkProgress(0, 'Restore upload cancelled.');
+      showDoneButton();
+    });
+
+    xhr.send(new FormData(form));
+  }
+
   // ── Flow A: "Save to server" forms ──────────────────────────────────────────
 
-  function _submitBackupForm(form, title) {
+  function _submitBackupForm(form, title, options) {
+    options = options || {};
     _downloadMode = false;
     showBackupModal(title);
     _startPolling(null);
 
     // URLSearchParams → application/x-www-form-urlencoded, required by Axum's Form<>.
     var params = new URLSearchParams(new FormData(form));
-    fetch(form.action, { method: 'POST', body: params, credentials: 'same-origin' })
+    var headers = {};
+    if (options.downloadAfterCreate) {
+      headers['X-Requested-With'] = 'XMLHttpRequest';
+      headers['X-Rustchan-Download-After-Create'] = '1';
+    }
+
+    fetch(form.action, {
+      method: 'POST',
+      body: params,
+      credentials: 'same-origin',
+      headers: headers
+    })
       .then(function (resp) {
         _stopPolling();
-        if (resp.ok || resp.redirected) {
-          _setBkProgress(100, '\u2713 Backup saved to server!');
-        } else {
+        if (!resp.ok && !resp.redirected) {
           _setBkProgress(0, 'Server returned an error (' + resp.status + ')');
+          showDoneButton();
+          return null;
         }
+
+        var contentType = resp.headers.get('content-type') || '';
+        if (contentType.indexOf('application/json') !== -1) {
+          return resp.json();
+        }
+
+        _setBkProgress(100, '\u2713 Backup saved to server!');
+        showDoneButton();
+        return null;
+      })
+      .then(function (data) {
+        if (!data) return;
+        if (data.download_url) {
+          _setBkProgress(100, '\u2713 Backup ready! Starting download\u2026');
+          var a = document.createElement('a');
+          a.href = data.download_url;
+          a.download = '';
+          a.style.display = 'none';
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(function () {
+            if (a.parentNode) a.parentNode.removeChild(a);
+            hideBackupModal();
+          }, 1500);
+          return;
+        }
+        _setBkProgress(100, '\u2713 Backup saved to server!');
         showDoneButton();
       })
       .catch(function (err) {
@@ -1899,12 +2500,32 @@ document.addEventListener('click', function (e) {
       });
     });
 
+    document.querySelectorAll('.board-backup-download-form').forEach(function (form) {
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var board = form.dataset.board || '';
+        _submitBackupForm(
+          form,
+          '\uD83D\uDCBE Preparing /' + board + '/ download\u2026',
+          { downloadAfterCreate: true }
+        );
+      });
+    });
+
     // Flow B — all "download to computer" links
     document.querySelectorAll('a.backup-download-link').forEach(function (link) {
       link.addEventListener('click', function (e) {
         e.preventDefault();
         var label = link.dataset.backupLabel || 'backup';
         _triggerDownload(link.href, label);
+      });
+    });
+
+    document.querySelectorAll('form.backup-restore-upload-form').forEach(function (form) {
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var label = form.dataset.restoreLabel || 'backup';
+        _submitRestoreUploadForm(form, '\u21bb Uploading ' + label + '…');
       });
     });
   });

@@ -13,7 +13,7 @@
 use rand_core::{OsRng, RngCore};
 use serde::Deserialize;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 mod template;
@@ -41,6 +41,122 @@ fn settings_file_path() -> PathBuf {
     data_dir.join("settings.toml")
 }
 
+#[must_use]
+pub fn data_dir() -> PathBuf {
+    binary_dir().join("rustchan-data")
+}
+
+#[must_use]
+pub fn runtime_dir() -> PathBuf {
+    data_dir().join("runtime")
+}
+
+#[must_use]
+pub fn logs_dir() -> PathBuf {
+    data_dir().join("logs")
+}
+
+#[must_use]
+pub fn backups_dir() -> PathBuf {
+    data_dir().join("backups")
+}
+
+#[must_use]
+pub fn full_backups_dir() -> PathBuf {
+    backups_dir().join("full")
+}
+
+#[must_use]
+pub fn board_backups_dir() -> PathBuf {
+    backups_dir().join("boards")
+}
+
+#[must_use]
+pub fn runtime_tmp_dir() -> PathBuf {
+    runtime_dir().join("tmp")
+}
+
+#[must_use]
+pub fn runtime_temp_board_downloads_dir() -> PathBuf {
+    runtime_tmp_dir().join("board-downloads")
+}
+
+#[must_use]
+pub fn runtime_tor_dir() -> PathBuf {
+    runtime_dir().join("tor")
+}
+
+#[must_use]
+pub fn runtime_tor_state_dir() -> PathBuf {
+    runtime_tor_dir().join("state")
+}
+
+#[must_use]
+pub fn runtime_tor_cache_dir() -> PathBuf {
+    runtime_tor_dir().join("cache")
+}
+
+#[must_use]
+pub fn runtime_tls_dir() -> PathBuf {
+    runtime_dir().join("tls")
+}
+
+#[must_use]
+pub fn runtime_favicon_dir() -> PathBuf {
+    runtime_dir().join("favicon")
+}
+
+fn migrate_dir_if_present(old_path: &Path, new_path: &Path) -> anyhow::Result<()> {
+    if !old_path.exists() {
+        return Ok(());
+    }
+    if new_path.exists() {
+        if !old_path.is_dir() || !new_path.is_dir() {
+            anyhow::bail!(
+                "cannot migrate {} to {} because one path is not a directory",
+                old_path.display(),
+                new_path.display()
+            );
+        }
+        for entry in std::fs::read_dir(old_path)? {
+            let entry = entry?;
+            let source = entry.path();
+            let destination = new_path.join(entry.file_name());
+            migrate_dir_if_present(&source, &destination)?;
+        }
+        std::fs::remove_dir(old_path)?;
+        return Ok(());
+    }
+    if let Some(parent) = new_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(old_path, new_path)?;
+    Ok(())
+}
+
+/// Move legacy top-level runtime folders into the newer grouped layout.
+///
+/// # Errors
+/// Returns an error if a filesystem move fails, if a directory cannot be
+/// created or removed, or if an old and new path conflict by type.
+pub fn migrate_runtime_layout_if_needed() -> anyhow::Result<()> {
+    let data_dir = data_dir();
+    std::fs::create_dir_all(&data_dir)?;
+
+    migrate_dir_if_present(&data_dir.join("full-backups"), &full_backups_dir())?;
+    migrate_dir_if_present(&data_dir.join("board-backups"), &board_backups_dir())?;
+    migrate_dir_if_present(
+        &data_dir.join("tmp-board-downloads"),
+        &runtime_temp_board_downloads_dir(),
+    )?;
+    migrate_dir_if_present(&data_dir.join("arti_state"), &runtime_tor_state_dir())?;
+    migrate_dir_if_present(&data_dir.join("arti_cache"), &runtime_tor_cache_dir())?;
+    migrate_dir_if_present(&data_dir.join("tls"), &runtime_tls_dir())?;
+    migrate_dir_if_present(&data_dir.join("favicon"), &runtime_favicon_dir())?;
+
+    Ok(())
+}
+
 // ─── Settings file structure ──────────────────────────────────────────────────
 #[derive(Deserialize, Default)]
 struct SettingsFile {
@@ -48,8 +164,10 @@ struct SettingsFile {
     /// Home page subtitle shown below the site name.
     site_subtitle: Option<String>,
     /// Default theme served to first-time visitors before they pick one.
-    /// Valid values: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
+    /// Valid values include built-ins and admin-created custom theme slugs.
     default_theme: Option<String>,
+    /// Built-in theme whitelist applied when seeding the themes table.
+    enabled_builtin_themes: Option<Vec<String>>,
     port: Option<u16>,
     max_image_size_mb: Option<u32>,
     max_video_size_mb: Option<u32>,
@@ -71,7 +189,7 @@ struct SettingsFile {
     /// Default: 512.
     tor_max_concurrent_streams: Option<usize>,
     /// Nickname for the Arti onion service key.
-    /// Must be unique per `arti_state/` directory. Change this when running
+    /// Must be unique per `runtime/tor/state/` directory. Change this when running
     /// multiple instances that share the same storage to avoid key collisions.
     /// Default: "rustchan".
     tor_service_nickname: Option<String>,
@@ -231,7 +349,7 @@ const fn default_true() -> bool {
 }
 
 fn default_acme_dir() -> String {
-    "tls/acme".into()
+    "runtime/tls/acme".into()
 }
 
 // ─── Runtime config ───────────────────────────────────────────────────────────
@@ -244,8 +362,10 @@ pub struct Config {
     /// Initial subtitle shown on the home page (seeds the DB on first run).
     pub initial_site_subtitle: String,
     /// Initial default theme slug (seeds the DB on first run).
-    /// Valid: terminal, aero, dorfic, fluorogrid, neoncubicle, chanclassic
+    /// Valid: built-in or custom theme slug present in the themes table.
     pub initial_default_theme: String,
+    /// Built-in themes enabled by default when the site seeds its theme catalog.
+    pub initial_enabled_builtin_themes: Vec<String>,
     #[allow(dead_code)] // read by CLI subcommands and printed at startup
     pub port: u16,
     pub max_image_size: usize, // bytes
@@ -261,7 +381,7 @@ pub struct Config {
     pub tor_bootstrap_timeout_secs: u64,
     /// Maximum simultaneous inbound Tor proxy tasks.
     pub tor_max_concurrent_streams: usize,
-    /// Nickname for the Arti onion service. Unique per `arti_state/` directory.
+    /// Nickname for the Arti onion service. Unique per `runtime/tor/state/` directory.
     pub tor_service_nickname: String,
     /// When true, the server exits if ffmpeg is missing.
     pub require_ffmpeg: bool,
@@ -335,7 +455,7 @@ impl Config {
     pub fn from_env() -> Self {
         let s = load_settings_file();
         let tls = s.tls.clone().unwrap_or_default();
-        let data_dir = binary_dir().join("rustchan-data");
+        let data_dir = data_dir();
         let default_db = data_dir.join("chan.db").to_string_lossy().into_owned();
         let default_uploads = data_dir.join("boards").to_string_lossy().into_owned();
         let forum_name = env_str(
@@ -352,6 +472,12 @@ impl Config {
             "CHAN_DEFAULT_THEME",
             s.default_theme.as_deref().unwrap_or("fluorogrid"),
         );
+        let initial_enabled_builtin_themes = s.enabled_builtin_themes.unwrap_or_else(|| {
+            crate::theme::builtin_theme_slugs()
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        });
         let port: u16 = env_parse("CHAN_PORT", s.port.unwrap_or(8080));
         let max_image_mb: u32 = env_parse("CHAN_MAX_IMAGE_MB", s.max_image_size_mb.unwrap_or(8));
         let max_video_mb: u32 = env_parse("CHAN_MAX_VIDEO_MB", s.max_video_size_mb.unwrap_or(50));
@@ -423,6 +549,7 @@ impl Config {
             forum_name,
             initial_site_subtitle,
             initial_default_theme,
+            initial_enabled_builtin_themes,
             port,
             max_image_size: (max_image_mb as usize)
                 .saturating_mul(1024)
@@ -544,6 +671,7 @@ impl Config {
     /// # Errors
     /// Returns an error if any configuration value is out of an acceptable range,
     /// or if the upload directory is not writable.
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> anyhow::Result<()> {
         fn url_host_is_loopback(url: &str) -> bool {
             reqwest::Url::parse(url).ok().is_some_and(|parsed| {
@@ -622,22 +750,16 @@ impl Config {
         // Without this, a permissions error on these dirs only surfaces ~30 s
         // into bootstrap as a cryptic internal error — invisible at startup.
         if self.enable_tor_support {
-            let exe = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-                .unwrap_or_else(|| std::path::PathBuf::from("."));
-            let data_dir = exe.join("rustchan-data");
-            for subdir in ["arti_state", "arti_cache"] {
-                let dir = data_dir.join(subdir);
+            for dir in [runtime_tor_state_dir(), runtime_tor_cache_dir()] {
                 std::fs::create_dir_all(&dir).map_err(|e| {
                     anyhow::anyhow!("CONFIG ERROR: cannot create Tor dir {}: {e}", dir.display())
                 })?;
-                // Arti requires arti_state/ to have permissions 0700 (no group
+                // Arti requires runtime/tor/state/ to have permissions 0700 (no group
                 // or other read access) for its key material. create_dir_all
                 // respects the process umask, typically yielding 0755, which
                 // Arti rejects with "problem with filesystem permissions".
                 // Explicitly set 0700 on Unix so Arti accepts the directory.
-                // arti_cache/ holds no sensitive data and is left at normal
+                // runtime/tor/cache/ holds no sensitive data and is left at normal
                 // permissions, but we restrict it too for defence-in-depth.
                 #[cfg(unix)]
                 {

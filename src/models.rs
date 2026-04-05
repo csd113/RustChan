@@ -87,6 +87,7 @@ impl std::fmt::Display for MediaType {
 #[allow(clippy::struct_excessive_bools)]
 pub struct Board {
     pub id: i64,
+    pub display_order: i64,
     pub short_name: String, // "tech" (no slashes)
     pub name: String,       // "Technology"
     pub description: String,
@@ -105,8 +106,23 @@ pub struct Board {
     pub allow_video_embeds: bool, // per-board inline video embed unfurling (YouTube/Invidious/Streamable)
     pub allow_captcha: bool,      // per-board PoW CAPTCHA on threads and replies (hashcash-style)
     pub show_poster_ids: bool,    // per-board thread-local poster IDs in post headers
+    pub collapse_greentext: bool, // per-board long greentext auto-collapse toggle
     pub post_cooldown_secs: i64,  // seconds a user must wait between posts (0 = disabled)
+    pub default_theme: String,    // blank = inherit site default
     pub created_at: i64,          // Unix timestamp
+}
+
+/// A configurable UI theme that may be built-in or admin-defined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Theme {
+    pub slug: String,
+    pub display_name: String,
+    pub description: String,
+    pub swatch_hex: String,
+    pub enabled: bool,
+    pub sort_order: i64,
+    pub is_builtin: bool,
+    pub custom_css: String,
 }
 
 /// A thread (the OP post + its replies share this record for metadata)

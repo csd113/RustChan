@@ -262,19 +262,25 @@ pub fn create_reply_with_thread_update(
 
     let result: Result<i64> = (|| {
         let post_id = super::posts::create_post_inner(conn, post)?;
-        if should_bump {
+        let updated = if should_bump {
             conn.execute(
                 "UPDATE threads
                  SET bumped_at = unixepoch(),
                      reply_count = reply_count + 1
                  WHERE id = ?1",
                 params![post.thread_id],
-            )?;
+            )?
         } else {
             conn.execute(
                 "UPDATE threads SET reply_count = reply_count + 1 WHERE id = ?1",
                 params![post.thread_id],
-            )?;
+            )?
+        };
+        if updated == 0 {
+            anyhow::bail!(
+                "Thread id {} not found while updating reply metadata",
+                post.thread_id
+            );
         }
         if let Some(op) = pending_fs_op {
             super::insert_pending_fs_op(conn, op)?;
@@ -298,20 +304,26 @@ pub fn create_reply_with_thread_update(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn set_thread_sticky(conn: &rusqlite::Connection, thread_id: i64, sticky: bool) -> Result<()> {
-    conn.execute(
+    let updated = conn.execute(
         "UPDATE threads SET sticky = ?1 WHERE id = ?2",
         params![i32::from(sticky), thread_id],
     )?;
+    if updated == 0 {
+        anyhow::bail!("Thread id {thread_id} not found");
+    }
     Ok(())
 }
 
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn set_thread_locked(conn: &rusqlite::Connection, thread_id: i64, locked: bool) -> Result<()> {
-    conn.execute(
+    let updated = conn.execute(
         "UPDATE threads SET locked = ?1 WHERE id = ?2",
         params![i32::from(locked), thread_id],
     )?;
+    if updated == 0 {
+        anyhow::bail!("Thread id {thread_id} not found");
+    }
     Ok(())
 }
 
@@ -333,13 +345,16 @@ pub fn set_thread_archived(
     thread_id: i64,
     archived: bool,
 ) -> Result<()> {
-    conn.execute(
+    let updated = conn.execute(
         "UPDATE threads
          SET archived = ?1,
              locked   = CASE WHEN ?1 = 1 THEN 1 ELSE locked END
          WHERE id = ?2",
         params![i32::from(archived), thread_id],
     )?;
+    if updated == 0 {
+        anyhow::bail!("Thread id {thread_id} not found");
+    }
     Ok(())
 }
 
@@ -370,8 +385,12 @@ pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<
         let candidates = collect_thread_file_paths(conn, &[thread_id])?;
 
         // Step 2: delete thread (CASCADE removes posts).
-        conn.execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
+        let deleted = conn
+            .execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
             .context("Failed to delete thread")?;
+        if deleted == 0 {
+            anyhow::bail!("Thread id {thread_id} not found");
+        }
 
         // Step 3: determine which paths are now unreferenced.
         // paths_safe_to_delete sees the post-delete state because we're still
@@ -572,6 +591,11 @@ pub fn prune_old_threads(
 ///
 /// The ordering uses `bumped_at DESC`, matching the archive page and ensuring
 /// we keep the most recently-active archived threads.
+///
+/// # Errors
+/// Returns an error if the transaction cannot be opened or committed, if the
+/// candidate threads cannot be queried, or if the bulk delete/safe-path
+/// calculation fails.
 pub fn prune_old_archived_threads(
     conn: &rusqlite::Connection,
     board_id: i64,

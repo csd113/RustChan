@@ -46,6 +46,55 @@ fn render_thread_nav(board_short: &str, reply_count: i64, is_bottom: bool) -> St
     )
 }
 
+#[must_use]
+pub fn render_thread_state_badges_full(sticky: bool, locked: bool, archived: bool) -> String {
+    let mut badges = String::new();
+
+    if sticky {
+        badges.push_str(
+            r#"<span class="thread-state-badge thread-state-badge-pin" title="Pinned" aria-label="Pinned">&#128204;</span>"#,
+        );
+    }
+
+    if archived {
+        badges.push_str(
+            r#"<span class="thread-state-badge thread-state-badge-archive" title="Archived" aria-label="Archived">&#128190;</span>"#,
+        );
+    } else if locked {
+        badges.push_str(
+            r#"<span class="thread-state-badge thread-state-badge-lock" title="Locked" aria-label="Locked">&#128274;</span>"#,
+        );
+    }
+
+    if badges.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<span class="thread-state-badges">{badges}</span>"#)
+    }
+}
+
+#[must_use]
+pub fn render_thread_state_badges(sticky: bool, locked: bool) -> String {
+    render_thread_state_badges_full(sticky, locked, false)
+}
+
+#[must_use]
+pub fn render_archive_state_badges(sticky: bool) -> String {
+    let mut badges = String::new();
+
+    if sticky {
+        badges.push_str(
+            r#"<span class="thread-state-badge thread-state-badge-pin" title="Pinned" aria-label="Pinned">&#128204;</span>"#,
+        );
+    }
+
+    badges.push_str(
+        r#"<span class="thread-state-badge thread-state-badge-archive" title="Archived" aria-label="Archived">&#128190;</span>"#,
+    );
+
+    format!(r#"<span class="thread-state-badges">{badges}</span>"#)
+}
+
 // ─── Thread page ──────────────────────────────────────────────────────────────
 
 #[must_use]
@@ -146,7 +195,9 @@ pub fn thread_page(
         );
     }
 
-    let locked_notice = if thread.locked {
+    let thread_notice = if thread.archived {
+        r#"<div class="notice locked-notice">This thread is archived. - You cannot reply anymore.</div>"#
+    } else if thread.locked {
         r#"<div class="notice locked-notice">this thread is locked — no new replies allowed</div>"#
     } else {
         ""
@@ -154,14 +205,14 @@ pub fn thread_page(
 
     let _ = write!(
         body,
-        r##"<div id="top"></div>
+        r#"<div id="top"></div>
 <div class="thread-board-banner board-thread-header">/{s}/ — {bn}</div>
-{top_nav}"##,
+{top_nav}"#,
         s = escape_html(&board.short_name),
         bn = escape_html(&board.name),
         top_nav = render_thread_nav(&board.short_name, thread.reply_count, false)
     );
-    body.push_str(locked_notice);
+    body.push_str(thread_notice);
 
     if let Some(pd) = poll {
         body.push_str(&render_poll(pd, thread.id, &board.short_name, csrf_token));
@@ -186,6 +237,8 @@ pub fn thread_page(
                 show_media: true,
                 allow_editing: board.allow_editing,
                 show_poster_ids: board.show_poster_ids,
+                collapse_greentext: board.collapse_greentext,
+                thread_state: Some((thread.sticky, thread.locked, thread.archived)),
                 thread_op_id: thread.op_id,
             },
             board.edit_window_secs,
@@ -194,7 +247,7 @@ pub fn thread_page(
 
     body.push_str("</div><!-- #thread-posts -->\n");
 
-    if !thread.locked {
+    if !thread.locked && !thread.archived {
         let form_html = super::forms::reply_form(&board.short_name, thread.id, csrf_token, board);
         let _ = write!(
             body,
@@ -263,6 +316,7 @@ pub fn thread_page(
         csrf_token,
         boards,
         current_theme,
+        Some(&board.default_theme),
         collapse_greentext,
         &format!("/{}/thread/{}", board.short_name, thread.id),
     )
@@ -384,6 +438,8 @@ pub struct RenderPostOpts {
     pub show_media: bool,
     pub allow_editing: bool,
     pub show_poster_ids: bool,
+    pub collapse_greentext: bool,
+    pub thread_state: Option<(bool, bool, bool)>,
     pub thread_op_id: Option<i64>,
 }
 
@@ -493,6 +549,8 @@ pub fn render_post(
         show_media,
         allow_editing,
         show_poster_ids,
+        collapse_greentext,
+        thread_state,
         thread_op_id,
     } = opts;
     let poster_id = render_poster_id(post, show_poster_ids);
@@ -529,33 +587,43 @@ pub fn render_post(
         format!(r#" data-poster-id="{}""#, escape_html(poster_id))
     });
 
+    let subject_html = post.subject.as_ref().map_or_else(String::new, |subject| {
+        format!(
+            r#"<span class="subject"><strong>{}</strong></span>"#,
+            escape_html(subject)
+        )
+    });
+    let post_state_badges = if post.is_op {
+        thread_state
+            .map(|(sticky, locked, archived)| {
+                render_thread_state_badges_full(sticky, locked, archived)
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
     let mut html = format!(
         r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}>
 <div class="post-meta">
-<strong class="name">{name}</strong>{tripcode}{poster_id_html}
+{subject_html}<strong class="name">{name}</strong>{tripcode}{poster_id_html}
 <span class="post-time" data-utc="{ts}">{time}</span>{edited}
-<a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>
+<a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>{post_state_badges}
 <span class="backrefs" id="backrefs-{id}"></span>
 </div>"##,
         op_class = op_class,
         id = post.id,
         thread_id = post.thread_id,
         poster_attr = poster_attr,
+        subject_html = subject_html,
         name = escape_html(&post.name),
         tripcode = tripcode_html,
         poster_id_html = poster_id_html,
         ts = post.created_at,
         time = fmt_ts_short(post.created_at),
         edited = edited_html,
+        post_state_badges = post_state_badges,
     );
-
-    if let Some(subject) = &post.subject {
-        let _ = write!(
-            html,
-            r#"<div class="subject"><strong>{}</strong></div>"#,
-            escape_html(subject)
-        );
-    }
 
     // Image / Video / Audio
     if show_media {
@@ -734,7 +802,9 @@ pub fn render_post(
     }
 
     // Post body (pre-rendered, sanitised HTML)
-    let body_html = annotate_op_quotelinks(&post.body_html, thread_op_id);
+    let body_html =
+        crate::utils::sanitize::normalize_greentext_blocks(&post.body_html, collapse_greentext);
+    let body_html = annotate_op_quotelinks(&body_html, thread_op_id);
     let _ = write!(html, r#"<div class="post-body">{body_html}</div>"#);
 
     // Edit link + report button (only on thread pages where show_delete=true)
@@ -876,6 +946,7 @@ pub fn edit_post_page(
         csrf_token,
         boards,
         current_theme,
+        Some(&board.default_theme),
         collapse_greentext,
         &format!(
             "/{}/thread/{}#p{}",
@@ -935,6 +1006,8 @@ mod tests {
                 show_media: true,
                 allow_editing: false,
                 show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
                 thread_op_id: Some(1),
             },
             0,
@@ -943,5 +1016,32 @@ mod tests {
         assert!(html.contains("file-container image-audio-combo"));
         assert!(html.contains(r#"Audio: <a href="/boards/test/song.flac""#));
         assert!(!html.contains("file-container audio-container audio-combo"));
+    }
+
+    #[test]
+    fn op_post_uses_archive_badge_instead_of_lock_badge_for_archived_threads() {
+        let mut post = sample_post();
+        post.is_op = true;
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: false,
+                allow_editing: false,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: Some((true, true, true)),
+                thread_op_id: Some(post.id),
+            },
+            0,
+        );
+
+        assert!(html.contains("thread-state-badge-pin"));
+        assert!(html.contains("thread-state-badge-archive"));
+        assert!(!html.contains("thread-state-badge-lock"));
     }
 }

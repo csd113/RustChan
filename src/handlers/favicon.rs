@@ -41,7 +41,7 @@ async fn serve_named_global_favicon(
     )
 }
 
-fn cache_control_for_favicon(has_version: bool) -> &'static str {
+const fn cache_control_for_favicon(has_version: bool) -> &'static str {
     if has_version {
         "public, max-age=31536000, immutable"
     } else {

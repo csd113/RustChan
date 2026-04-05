@@ -196,6 +196,7 @@ pub fn build_post_body(
     raw_body: &str,
     has_file: bool,
     board_allows_media: bool,
+    collapse_greentext: bool,
     filters: &[(String, String)],
 ) -> Result<(String, String)> {
     let body_text = if board_allows_media {
@@ -207,7 +208,7 @@ pub fn build_post_body(
     };
     let filtered_body = apply_word_filters(&body_text, filters);
     let escaped_body = escape_html(&filtered_body);
-    let body_html = render_post_body(&escaped_body);
+    let body_html = render_post_body(&escaped_body, collapse_greentext);
     Ok((body_text, body_html))
 }
 
