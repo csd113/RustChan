@@ -215,20 +215,7 @@ pub async fn board_index(
             // 3.2: Derive ETag from the most-recently-bumped thread on this page
             // combined with the page number.  This is a cheap proxy for "has
             // anything on this page changed?".
-            let page_sig = page_data
-                .summaries
-                .iter()
-                .map(|summary| {
-                    format!(
-                        "{}:{}:{}:{}",
-                        summary.thread.id,
-                        summary.thread.bumped_at,
-                        i32::from(summary.thread.sticky),
-                        i32::from(summary.thread.archived)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("|");
+            let page_sig = render::board_page_etag_signature(&page_data);
             // Include is_admin in the ETag so admin and non-admin responses
             // have distinct cache keys and the browser doesn't serve a cached
             // non-admin page (missing delete controls) to a logged-in admin.

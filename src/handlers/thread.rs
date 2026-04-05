@@ -59,10 +59,8 @@ pub async fn view_thread(
             } else {
                 "-cg0"
             };
-            let etag = format!(
-                "\"{}-b{boards_ver}{admin_tag}{greentext_tag}\"",
-                page_data.thread.bumped_at
-            );
+            let thread_sig = render::thread_page_etag_signature(&page_data);
+            let etag = format!("\"{thread_sig}-b{boards_ver}{admin_tag}{greentext_tag}\"");
             let html =
                 render::render_thread_page(&page_data, &csrf, None, current_theme.as_deref());
             Ok((etag, html, page_data.is_admin))
