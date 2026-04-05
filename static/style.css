@@ -1899,6 +1899,186 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   margin-bottom: 16px;
 }
 
+.theme-manager-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.25fr);
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.theme-guide-card,
+.theme-create-card,
+.theme-manager-group {
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  padding: 14px;
+}
+
+.theme-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.theme-guide-block {
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  background: color-mix(in srgb, var(--bg-panel) 65%, transparent);
+  padding: 12px;
+}
+
+.theme-guide-block h4,
+.theme-editor-panel-header h4,
+.theme-manager-group-header h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.9rem;
+}
+
+.theme-guide-code {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 0.77rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.theme-guide-note,
+.theme-editor-code-note,
+.theme-manager-group-header p,
+.theme-card-description,
+.theme-editor-panel-header p,
+.theme-editor-built-in-note p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.theme-create-form,
+.theme-editor-form {
+  margin-top: 12px;
+}
+
+.theme-editor-css-panel {
+  margin-top: 0.8rem;
+}
+
+.theme-editor-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.theme-editor-css-panel textarea {
+  width: 100%;
+  min-height: 22rem;
+  resize: vertical;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 0.8rem;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.theme-card-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.theme-manager-group + .theme-manager-group {
+  margin-top: 14px;
+}
+
+.theme-manager-group-header {
+  margin-bottom: 12px;
+}
+
+.theme-editor-card {
+  overflow: hidden;
+}
+
+.theme-card-summary {
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    "swatch heading"
+    "swatch description";
+  column-gap: 12px;
+  row-gap: 3px;
+  align-items: center;
+}
+
+.theme-card-swatch {
+  grid-area: swatch;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--theme-swatch, var(--green));
+  border: 1px solid rgba(255,255,255,0.25);
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.35);
+}
+
+.theme-card-heading {
+  grid-area: heading;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.theme-card-heading strong {
+  font-size: 0.95rem;
+  color: var(--text);
+}
+
+.theme-card-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  color: var(--text-dim);
+  font-size: 0.76rem;
+}
+
+.theme-card-description {
+  grid-area: description;
+}
+
+.theme-editor-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
+
+.theme-editor-basics {
+  min-width: 0;
+}
+
+.theme-editor-built-in-note {
+  margin-top: 0.8rem;
+  padding: 10px 12px;
+  border: 1px dashed color-mix(in srgb, var(--border) 75%, transparent);
+  background: color-mix(in srgb, var(--bg-panel) 55%, transparent);
+}
+
+.theme-editor-delete {
+  padding: 0 14px 14px;
+}
+
+.theme-empty-state {
+  padding: 14px;
+  border: 1px dashed color-mix(in srgb, var(--border) 70%, transparent);
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--bg-panel) 55%, transparent);
+  font-size: 0.84rem;
+}
+
 .admin-board-group-gap {
   height: 10px;
 }
@@ -2014,6 +2194,10 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   border-top: 1px solid var(--border);
 }
 
+#theme-catalog .admin-dropdown-content {
+  padding-top: 14px;
+}
+
 .admin-moderation-intro {
   margin: 0;
   padding: 10px 0 2px;
@@ -2114,6 +2298,17 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
   .admin-moderation-card-log {
     grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 900px) {
+  .theme-manager-shell,
+  .theme-guide-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .theme-editor-panel-header {
+    align-items: flex-start;
   }
 }
 

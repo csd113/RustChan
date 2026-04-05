@@ -53,6 +53,63 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
 
 // ─── Admin panel ──────────────────────────────────────────────────────────────
 
+fn theme_css_starter(slug: &str, swatch_hex: &str) -> String {
+    format!(
+        r#"/* RustChan theme starter.
+   Keep everything scoped to html[data-theme="{slug}"].
+   Start with variables, then add selector overrides underneath as needed. */
+
+html[data-theme="{slug}"] {{
+  color-scheme: dark;
+  --bg:           #11161a;
+  --bg-panel:     rgba(20, 26, 32, 0.92);
+  --bg-post:      rgba(24, 32, 40, 0.92);
+  --bg-op:        rgba(28, 37, 47, 0.95);
+  --bg-input:     #0d1216;
+  --border:       #2d3d49;
+  --border-glow:  {swatch_hex};
+  --green:        {swatch_hex};
+  --green-dim:    #6f8291;
+  --green-bright: #d7f0ff;
+  --green-pale:   #9fc5da;
+  --amber:        #d5a35b;
+  --red:          #d06b6b;
+  --gray:         #5c6670;
+  --gray-light:   #88949f;
+  --text:         #dce6ee;
+  --text-dim:     #90a0ad;
+  --font:         'IBM Plex Sans', 'Segoe UI', sans-serif;
+  --font-display: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+}}
+
+html[data-theme="{slug}"] body {{
+  background: var(--bg);
+  background-image:
+    radial-gradient(circle at top, rgba(255,255,255,0.04), transparent 32%),
+    linear-gradient(180deg, rgba(255,255,255,0.02), transparent 45%);
+}}
+
+html[data-theme="{slug}"] .site-header,
+html[data-theme="{slug}"] .admin-section,
+html[data-theme="{slug}"] .page-box,
+html[data-theme="{slug}"] .post-form-container,
+html[data-theme="{slug}"] .op,
+html[data-theme="{slug}"] .reply {{
+  border-color: var(--border);
+  background: var(--bg-panel);
+}}
+
+html[data-theme="{slug}"] a {{
+  color: var(--green);
+}}
+
+html[data-theme="{slug}"] a:hover {{
+  color: var(--green-bright);
+}}
+"#
+    )
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn admin_panel_page(
     boards: &[Board],
@@ -94,7 +151,8 @@ pub fn admin_panel_page(
         })
         .collect::<Vec<_>>()
         .join("");
-    let mut theme_cards = String::new();
+    let mut builtin_theme_cards = String::new();
+    let mut custom_theme_cards = String::new();
     let mut board_cards = String::new();
     for (index, b) in boards.iter().enumerate() {
         let checked = |v: bool| if v { " checked" } else { "" };
@@ -549,32 +607,61 @@ pub fn admin_panel_page(
         );
     }
 
-    if themes.is_empty() {
-        theme_cards.push_str(r#"<p style="color:var(--text-dim);margin:0">No themes loaded.</p>"#);
-    } else {
+    if !themes.is_empty() {
         for theme in themes {
-            let _ = write!(
-                theme_cards,
-                r#"<details class="board-settings-card">
-<summary>{name} <code>/{slug}/</code>{builtin_tag}{disabled_tag}</summary>
-<form method="POST" action="/admin/theme/update" class="board-settings-form">
+            let theme_css_value = if theme.custom_css.trim().is_empty() {
+                theme_css_starter(&theme.slug, &theme.swatch_hex)
+            } else {
+                theme.custom_css.clone()
+            };
+            let theme_editor = if theme.is_builtin {
+                format!(
+                    r#"<div class="theme-editor-built-in-note">
+<p>Built-in themes are maintained in <code>static/style.css</code>. You can toggle them here for the picker, but custom CSS is reserved for custom themes.</p>
+</div>"#
+                )
+            } else {
+                format!(
+                    r#"<div class="theme-editor-css-panel">
+  <div class="theme-editor-panel-header">
+    <h4>Custom CSS</h4>
+    <p>Scope everything to <code>html[data-theme="{slug}"]</code>. This textarea accepts full CSS, not just variables.</p>
+  </div>
+  <textarea name="custom_css" rows="18" spellcheck="false">{custom_css}</textarea>
+  <p class="theme-editor-code-note">Tip: start by changing the variables block, then add selector overrides for <code>body</code>, <code>.site-header</code>, <code>.page-box</code>, <code>.op</code>, <code>.reply</code>, and buttons if you need more personality.</p>
+</div>"#,
+                    slug = escape_html(&theme.slug),
+                    custom_css = escape_html(&theme_css_value),
+                )
+            };
+            let card_markup = format!(
+                r#"<details class="board-settings-card theme-editor-card" id="theme-{slug}">
+<summary class="theme-card-summary">
+  <span class="theme-card-swatch" style="--theme-swatch:{swatch}"></span>
+  <span class="theme-card-heading">
+    <strong>{name}</strong>
+    <span class="theme-card-meta"><code>{slug}</code>{builtin_tag}{disabled_tag}</span>
+  </span>
+  <span class="theme-card-description">{description}</span>
+</summary>
+<form method="POST" action="/admin/theme/update" class="board-settings-form theme-editor-form">
   <input type="hidden" name="_csrf" value="{csrf}">
   <input type="hidden" name="existing_slug" value="{slug}">
-  <div class="board-settings-grid">
-    <label>Display name<input type="text" name="display_name" value="{name}" maxlength="64" required></label>
-    <label>Slug<input type="text" name="slug" value="{slug}" maxlength="32"{slug_readonly}></label>
-    <label>Swatch<input type="text" name="swatch_hex" value="{swatch}" maxlength="7"></label>
-  </div>
-  <div class="board-settings-grid" style="margin-top:0.5rem">
-    <label>Description<input type="text" name="description" value="{description}" maxlength="256"></label>
-  </div>
-  <div class="board-settings-checks">
-    <label><input type="checkbox" name="enabled" value="1"{enabled_ck}> Enabled</label>
-  </div>
-  <div class="board-settings-grid" style="margin-top:0.5rem;{custom_css_display}">
-    <label>Custom CSS
-      <textarea name="custom_css" rows="10" placeholder="--bg: #111; --text: #eee; or full scoped CSS">{custom_css}</textarea>
-    </label>
+  <div class="theme-editor-layout">
+    <div class="theme-editor-basics">
+      <div class="board-settings-grid">
+        <label>Display name<input type="text" name="display_name" value="{name}" maxlength="64" required></label>
+        <label>Slug<input type="text" name="slug" value="{slug}" maxlength="32"{slug_readonly}></label>
+        <label>Swatch<input type="text" name="swatch_hex" value="{swatch}" maxlength="7"></label>
+      </div>
+      <div class="board-settings-grid" style="margin-top:0.65rem">
+        <label>Description<input type="text" name="description" value="{description_raw}" maxlength="256"></label>
+      </div>
+      <div class="board-settings-checks">
+        <label><input type="checkbox" name="enabled" value="1"{enabled_ck}> Enabled in theme picker</label>
+      </div>
+      {theme_editor}
+    </div>
   </div>
   <div class="board-settings-actions">
     <button type="submit">save theme</button>
@@ -585,27 +672,31 @@ pub fn admin_panel_page(
                 csrf = escape_html(csrf_token),
                 name = escape_html(&theme.display_name),
                 slug = escape_html(&theme.slug),
+                swatch = escape_html(&theme.swatch_hex),
                 builtin_tag = if theme.is_builtin {
                     r#" <span class="tag">built-in</span>"#
                 } else {
-                    ""
+                    r#" <span class="tag">custom</span>"#
                 },
                 disabled_tag = if theme.enabled {
                     ""
                 } else {
                     r#" <span class="tag locked">disabled</span>"#
                 },
+                description = if theme.description.trim().is_empty() {
+                    "No description yet.".to_string()
+                } else {
+                    escape_html(&theme.description)
+                },
+                description_raw = escape_html(&theme.description),
                 slug_readonly = if theme.is_builtin { " readonly" } else { "" },
-                swatch = escape_html(&theme.swatch_hex),
-                description = escape_html(&theme.description),
                 enabled_ck = if theme.enabled { " checked" } else { "" },
-                custom_css_display = if theme.is_builtin { "display:none" } else { "" },
-                custom_css = escape_html(&theme.custom_css),
+                theme_editor = theme_editor,
                 delete_form = if theme.is_builtin {
                     String::new()
                 } else {
                     format!(
-                        r#"<form method="POST" action="/admin/theme/delete" style="display:inline-block;margin-top:0.5rem">
+                        r#"<form method="POST" action="/admin/theme/delete" class="theme-editor-delete">
   <input type="hidden" name="_csrf" value="{csrf}">
   <input type="hidden" name="slug" value="{slug}">
   <button type="submit" class="btn-danger" data-confirm="Delete custom theme {slug}?">delete theme</button>
@@ -615,6 +706,11 @@ pub fn admin_panel_page(
                     )
                 }
             );
+            if theme.is_builtin {
+                builtin_theme_cards.push_str(&card_markup);
+            } else {
+                custom_theme_cards.push_str(&card_markup);
+            }
         }
     }
 
@@ -825,31 +921,99 @@ old boards to prevent query performance degradation.
 <details class="admin-dropdown">
 <summary><span>// themes</span></summary>
 <div class="admin-dropdown-content">
-<p style="color:var(--text-dim);font-size:0.85rem">Built-in themes can be enabled or disabled at runtime. Custom themes can be added here and selected globally or per-board once enabled.</p>
-<div class="admin-board-cards">{theme_cards}</div>
-<h3>create custom theme</h3>
-<form method="POST" action="/admin/theme/create">
-  <input type="hidden" name="_csrf" value="{csrf}">
-  <div class="board-settings-grid">
-    <label>Display name<input type="text" name="display_name" maxlength="64" required></label>
-    <label>Slug<input type="text" name="slug" maxlength="32" required></label>
-    <label>Swatch<input type="text" name="swatch_hex" maxlength="7" placeholder="7ab84e"></label>
+<div class="theme-manager-shell">
+  <section class="theme-guide-card">
+    <div class="admin-card-header">
+      <h3>// how RustChan themes work</h3>
+      <p>Every theme is just CSS scoped to <code>html[data-theme="slug"]</code>. Most of the site styling comes from shared variables first, then optional selector overrides for the pieces you want to customize.</p>
+    </div>
+    <div class="theme-guide-grid">
+      <div class="theme-guide-block">
+        <h4>Core variables</h4>
+        <pre class="theme-guide-code">--bg
+--bg-panel
+--bg-post
+--bg-op
+--bg-input
+--border
+--border-glow
+--green
+--green-dim
+--green-bright
+--green-pale
+--amber
+--red
+--gray
+--gray-light
+--text
+--text-dim
+--font
+--font-display</pre>
+      </div>
+      <div class="theme-guide-block">
+        <h4>Common selectors</h4>
+        <pre class="theme-guide-code">body
+.site-header
+.admin-section
+.page-box
+.post-form-container
+.op
+.reply
+a / a:hover
+button / button:hover</pre>
+      </div>
+    </div>
+    <p class="theme-guide-note">Use the starter below for new themes. Built-in theme source lives in <code>static/style.css</code> if you want examples of complete themes.</p>
+  </section>
+
+  <section class="theme-create-card">
+    <div class="admin-card-header">
+      <h3>// create custom theme</h3>
+      <p>Start from a working scaffold instead of a blank textarea, then tune variables and add overrides where needed.</p>
+    </div>
+    <form method="POST" action="/admin/theme/create" class="theme-create-form">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <div class="board-settings-grid">
+        <label>Display name<input type="text" name="display_name" maxlength="64" required></label>
+        <label>Slug<input type="text" name="slug" maxlength="32" required placeholder="mytheme"></label>
+        <label>Swatch<input type="text" name="swatch_hex" maxlength="7" placeholder="7ab84e"></label>
+      </div>
+      <div class="board-settings-grid" style="margin-top:0.65rem">
+        <label>Description<input type="text" name="description" maxlength="256" placeholder="What makes this theme distinct?"></label>
+      </div>
+      <div class="board-settings-checks">
+        <label><input type="checkbox" name="enabled" value="1" checked> Enabled in theme picker</label>
+      </div>
+      <div class="theme-editor-css-panel">
+        <div class="theme-editor-panel-header">
+          <h4>Starter CSS</h4>
+          <p>Replace <code>your-theme</code> in the selector with the slug above before saving.</p>
+        </div>
+        <textarea name="custom_css" rows="22" spellcheck="false" required>{new_theme_starter_css}</textarea>
+        <p class="theme-editor-code-note">You can keep this file variable-driven and only add selector overrides where the default site structure needs extra styling.</p>
+      </div>
+      <div class="board-settings-actions">
+        <button type="submit">create theme</button>
+      </div>
+    </form>
+  </section>
+</div>
+
+<section class="theme-manager-group">
+  <div class="theme-manager-group-header">
+    <h3>// built-in themes</h3>
+    <p>Toggle which shipped themes appear in the picker.</p>
   </div>
-  <div class="board-settings-grid" style="margin-top:0.5rem">
-    <label>Description<input type="text" name="description" maxlength="256"></label>
+  <div class="theme-card-grid">{builtin_theme_cards}</div>
+</section>
+
+<section class="theme-manager-group">
+  <div class="theme-manager-group-header">
+    <h3>// custom themes</h3>
+    <p>Edit your own themes with a full CSS editor and swatch metadata.</p>
   </div>
-  <div class="board-settings-checks">
-    <label><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
-  </div>
-  <div class="board-settings-grid" style="margin-top:0.5rem">
-    <label>Custom CSS
-      <textarea name="custom_css" rows="10" placeholder="Add CSS variables or full scoped CSS for this theme." required></textarea>
-    </label>
-  </div>
-  <div class="board-settings-actions">
-    <button type="submit">create theme</button>
-  </div>
-</form>
+  <div class="theme-card-grid">{custom_theme_cards_or_empty}</div>
+</section>
 </div>
 </details>
 </section>
@@ -977,7 +1141,13 @@ old boards to prevent query performance degradation.
         site_name_val = escape_html(site_name),
         site_subtitle_val = escape_html(site_subtitle),
         enabled_theme_options = enabled_theme_options,
-        theme_cards = theme_cards,
+        builtin_theme_cards = builtin_theme_cards,
+        custom_theme_cards_or_empty = if custom_theme_cards.is_empty() {
+            r#"<div class="theme-empty-state">No custom themes yet. Create one above and it will show up here.</div>"#.to_string()
+        } else {
+            custom_theme_cards
+        },
+        new_theme_starter_css = escape_html(&theme_css_starter("your-theme", "#7ab84e")),
         global_favicon_status = if global_favicon_exists {
             "Custom global favicon is active and stored under rustchan-data/runtime/favicon/."
         } else {
