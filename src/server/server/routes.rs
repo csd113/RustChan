@@ -424,6 +424,7 @@ mod tests {
                         header::COOKIE,
                         "csrf_token=csrf123; chan_admin_session=session123",
                     )
+                    .extension(crate::test_support::connect_info())
                     .body(Body::from(body))
                     .expect("request"),
             )

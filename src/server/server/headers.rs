@@ -4,6 +4,7 @@ use axum::{
     http::{self, header},
     response::IntoResponse,
 };
+use std::net::SocketAddr;
 
 pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      script-src 'self'; \
@@ -21,14 +22,16 @@ pub(super) async fn hsts_middleware_with_mode(
     req: axum::extract::Request,
     next: axum::middleware::Next,
     direct_https: bool,
+    behind_proxy: bool,
 ) -> axum::response::Response {
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0);
+
     let is_https = direct_https
         || req.uri().scheme_str() == Some("https")
-        || req
-            .headers()
-            .get("x-forwarded-proto")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.eq_ignore_ascii_case("https"));
+        || crate::middleware::forwarded_proto_is_https(req.headers(), peer, behind_proxy);
 
     let mut resp = next.run(req).await;
     if is_https {
@@ -44,16 +47,17 @@ pub(super) async fn safe_timeout_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let method = req.method().clone();
     let path = req.uri().path();
-    if !matches!(method, http::Method::GET | http::Method::HEAD) {
-        return next.run(req).await;
-    }
     if path.starts_with("/admin/backup/download/") {
         return next.run(req).await;
     }
 
-    tokio::time::timeout(std::time::Duration::from_secs(30), next.run(req))
+    let timeout = match *req.method() {
+        http::Method::GET | http::Method::HEAD => std::time::Duration::from_secs(30),
+        _ => std::time::Duration::from_secs(300),
+    };
+
+    tokio::time::timeout(timeout, next.run(req))
         .await
         .unwrap_or_else(|_| {
             (http::StatusCode::REQUEST_TIMEOUT, "Request timed out").into_response()
@@ -93,7 +97,7 @@ mod tests {
         let app = Router::new()
             .route("/", get(|| async { "ok".into_response() }))
             .layer(from_fn(|req, next| {
-                hsts_middleware_with_mode(req, next, true)
+                hsts_middleware_with_mode(req, next, true, false)
             }));
 
         let response = app
@@ -107,5 +111,30 @@ mod tests {
             .expect("response");
 
         assert!(response.headers().contains_key("strict-transport-security"));
+    }
+
+    #[tokio::test]
+    async fn hsts_ignores_spoofed_forwarded_proto_from_public_peer() {
+        use axum::extract::ConnectInfo;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let app = Router::new()
+            .route("/", get(|| async { "ok".into_response() }))
+            .layer(from_fn(|req, next| {
+                hsts_middleware_with_mode(req, next, false, true)
+            }));
+
+        let mut request = Request::builder()
+            .uri("/")
+            .header("x-forwarded-proto", "https")
+            .body(Body::empty())
+            .expect("request");
+        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)),
+            8080,
+        )));
+
+        let response = app.oneshot(request).await.expect("response");
+        assert!(!response.headers().contains_key("strict-transport-security"));
     }
 }

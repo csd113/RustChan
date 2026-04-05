@@ -45,6 +45,7 @@ use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::IpAddr;
+use std::net::SocketAddr;
 
 pub(super) use crate::handlers::board::check_csrf_jar;
 
@@ -164,7 +165,7 @@ fn encode_query_component(input: &str) -> String {
     encoded
 }
 
-pub(super) fn should_set_secure_cookie(headers: &HeaderMap) -> bool {
+pub(super) fn should_set_secure_cookie(headers: &HeaderMap, peer: Option<SocketAddr>) -> bool {
     if !CONFIG.https_cookies {
         return false;
     }
@@ -173,15 +174,7 @@ pub(super) fn should_set_secure_cookie(headers: &HeaderMap) -> bool {
         return true;
     }
 
-    headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .next()
-                .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
-        })
+    crate::middleware::forwarded_proto_is_https(headers, peer, CONFIG.behind_proxy)
 }
 
 fn admin_panel_redirect_with_status(

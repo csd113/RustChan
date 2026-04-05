@@ -201,6 +201,7 @@ pub async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     Form(form): Form<LoginForm>,
 ) -> Result<Response> {
@@ -310,7 +311,7 @@ pub async fn admin_login(
             cookie.set_path("/");
             // Only mark the session cookie Secure when this request is actually
             // arriving over HTTPS (direct TLS or proxy-forwarded HTTPS).
-            cookie.set_secure(super::should_set_secure_cookie(&headers));
+            cookie.set_secure(super::should_set_secure_cookie(&headers, Some(peer)));
             // Set Max-Age so browsers expire the cookie after the
             // configured session lifetime instead of persisting it indefinitely.
             cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));

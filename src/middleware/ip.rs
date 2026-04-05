@@ -8,11 +8,31 @@ fn forwarded_client_ip(value: &str) -> Option<&str> {
     value.split(',').map(str::trim).find(|ip| !ip.is_empty())
 }
 
-fn trusted_proxy_peer(peer: Option<SocketAddr>) -> bool {
+pub(crate) fn trusted_proxy_peer(peer: Option<SocketAddr>) -> bool {
     peer.is_some_and(|addr| match addr.ip() {
         IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
         IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
     })
+}
+
+pub(crate) fn forwarded_proto_is_https(
+    headers: &axum::http::HeaderMap,
+    peer: Option<SocketAddr>,
+    behind_proxy: bool,
+) -> bool {
+    if !behind_proxy || !trusted_proxy_peer(peer) {
+        return false;
+    }
+
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .next()
+                .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
+        })
 }
 
 fn forwarded_ip_from_headers(

@@ -1268,6 +1268,7 @@ pub async fn admin_restore(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     request: Request,
 ) -> Response {
     let content_type = headers
@@ -1487,7 +1488,7 @@ pub async fn admin_restore(
             new_cookie.set_http_only(true);
             new_cookie.set_same_site(SameSite::Strict);
             new_cookie.set_path("/");
-            new_cookie.set_secure(super::should_set_secure_cookie(&headers));
+            new_cookie.set_secure(super::should_set_secure_cookie(&headers, Some(peer)));
             new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
             (jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response()
@@ -1985,6 +1986,7 @@ pub async fn restore_saved_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
     let session_id = jar
@@ -2048,7 +2050,7 @@ pub async fn restore_saved_full_backup(
     new_cookie.set_http_only(true);
     new_cookie.set_same_site(SameSite::Strict);
     new_cookie.set_path("/");
-    new_cookie.set_secure(super::should_set_secure_cookie(&headers));
+    new_cookie.set_secure(super::should_set_secure_cookie(&headers, Some(peer)));
     // Set Max-Age to match normal login behaviour.
     new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
     Ok((jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response())
