@@ -38,6 +38,8 @@ body {
   color: var(--text);
   line-height: 1.55;
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
   /* subtle scanline */
   background-image: repeating-linear-gradient(
     0deg,
@@ -374,6 +376,7 @@ button:hover,
 /* ── Main layout ──────────────────────────────────────────────────────────── */
 
 main {
+  flex: 1 0 auto;
   max-width: 960px;
   margin: 0 auto;
   padding: 16px 10px 12px;
@@ -2494,9 +2497,9 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 /* ── Footer ───────────────────────────────────────────────────────────────── */
 
 .site-footer {
+  margin-top: auto;
   text-align: center;
   padding: 12px;
-  margin-top: 20px;
   border-top: 1px solid var(--border);
   font-size: 0.75rem;
   color: var(--text-dim);
