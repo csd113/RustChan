@@ -717,35 +717,6 @@ old boards to prevent query performance degradation.
 </p>
 </section>
 
-<section class="admin-section" id="theme-catalog">
-<h2>// themes</h2>
-<p style="color:var(--text-dim);font-size:0.85rem">Built-in themes can be enabled or disabled at runtime. Custom themes can be added here and selected globally or per-board once enabled.</p>
-<div class="admin-board-cards">{theme_cards}</div>
-<h3>create custom theme</h3>
-<form method="POST" action="/admin/theme/create">
-  <input type="hidden" name="_csrf" value="{csrf}">
-  <div class="board-settings-grid">
-    <label>Display name<input type="text" name="display_name" maxlength="64" required></label>
-    <label>Slug<input type="text" name="slug" maxlength="32" required></label>
-    <label>Swatch<input type="text" name="swatch_hex" maxlength="7" placeholder="7ab84e"></label>
-  </div>
-  <div class="board-settings-grid" style="margin-top:0.5rem">
-    <label>Description<input type="text" name="description" maxlength="256"></label>
-  </div>
-  <div class="board-settings-checks">
-    <label><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
-  </div>
-  <div class="board-settings-grid" style="margin-top:0.5rem">
-    <label>Custom CSS
-      <textarea name="custom_css" rows="10" placeholder="Add CSS variables or full scoped CSS for this theme." required></textarea>
-    </label>
-  </div>
-  <div class="board-settings-actions">
-    <button type="submit">create theme</button>
-  </div>
-</form>
-</section>
-
 <!-- ═══════════════════════════════════════════════════════════════════════════
      // boards
      ═══════════════════════════════════════════════════════════════════════════ -->
@@ -846,6 +817,39 @@ old boards to prevent query performance degradation.
     <p class="admin-card-note">Use the full log for history and follow-up. The live queues stay visible in this panel.</p>
   </section>
 </div>
+</div>
+</details>
+</section>
+
+<section class="admin-section admin-section-collapsible" id="theme-catalog">
+<details class="admin-dropdown">
+<summary><span>// themes</span></summary>
+<div class="admin-dropdown-content">
+<p style="color:var(--text-dim);font-size:0.85rem">Built-in themes can be enabled or disabled at runtime. Custom themes can be added here and selected globally or per-board once enabled.</p>
+<div class="admin-board-cards">{theme_cards}</div>
+<h3>create custom theme</h3>
+<form method="POST" action="/admin/theme/create">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <div class="board-settings-grid">
+    <label>Display name<input type="text" name="display_name" maxlength="64" required></label>
+    <label>Slug<input type="text" name="slug" maxlength="32" required></label>
+    <label>Swatch<input type="text" name="swatch_hex" maxlength="7" placeholder="7ab84e"></label>
+  </div>
+  <div class="board-settings-grid" style="margin-top:0.5rem">
+    <label>Description<input type="text" name="description" maxlength="256"></label>
+  </div>
+  <div class="board-settings-checks">
+    <label><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
+  </div>
+  <div class="board-settings-grid" style="margin-top:0.5rem">
+    <label>Custom CSS
+      <textarea name="custom_css" rows="10" placeholder="Add CSS variables or full scoped CSS for this theme." required></textarea>
+    </label>
+  </div>
+  <div class="board-settings-actions">
+    <button type="submit">create theme</button>
+  </div>
+</form>
 </div>
 </details>
 </section>
