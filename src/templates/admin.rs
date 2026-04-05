@@ -621,11 +621,10 @@ pub fn admin_panel_page(
                 theme.custom_css.clone()
             };
             let theme_editor = if theme.is_builtin {
-                format!(
-                    r#"<div class="theme-editor-built-in-note">
+                r#"<div class="theme-editor-built-in-note">
 <p>Built-in themes are maintained in <code>static/style.css</code>. You can toggle them here for the picker, but custom CSS is reserved for custom themes.</p>
 </div>"#
-                )
+                    .to_string()
             } else {
                 format!(
                     r#"<div class="theme-editor-css-panel">
