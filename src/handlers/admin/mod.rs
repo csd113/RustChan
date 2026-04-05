@@ -188,9 +188,14 @@ fn admin_panel_redirect_with_status(
     message: &str,
     is_error: bool,
     anchor: Option<&str>,
+    open_section: Option<&str>,
 ) -> Redirect {
     let key = if is_error { "flash_error" } else { "flash" };
     let mut url = format!("/admin/panel?{key}={}", encode_query_component(message));
+    if let Some(section) = open_section.filter(|value| !value.is_empty()) {
+        url.push_str("&open=");
+        url.push_str(&encode_query_component(section));
+    }
     if let Some(anchor) = anchor.filter(|value| !value.is_empty()) {
         url.push('#');
         url.push_str(anchor);
@@ -199,15 +204,23 @@ fn admin_panel_redirect_with_status(
 }
 
 pub(super) fn admin_panel_redirect(message: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, false, None)
+    admin_panel_redirect_with_status(message, false, None, None)
 }
 
 pub(super) fn admin_panel_redirect_anchor(message: &str, anchor: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, false, Some(anchor))
+    admin_panel_redirect_with_status(message, false, Some(anchor), None)
+}
+
+pub(super) fn admin_panel_redirect_anchor_open(
+    message: &str,
+    anchor: &str,
+    open_section: &str,
+) -> Redirect {
+    admin_panel_redirect_with_status(message, false, Some(anchor), Some(open_section))
 }
 
 pub(super) fn admin_panel_error_redirect_anchor(message: &str, anchor: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, true, Some(anchor))
+    admin_panel_redirect_with_status(message, true, Some(anchor), None)
 }
 
 // ─── GET /admin/panel ─────────────────────────────────────────────────────────
@@ -218,6 +231,7 @@ pub(super) fn admin_panel_error_redirect_anchor(message: &str, anchor: &str) -> 
 pub struct AdminPanelQuery {
     pub flash: Option<String>,
     pub flash_error: Option<String>,
+    pub open: Option<String>,
     pub backup_created: Option<String>,
     pub backup_deleted: Option<String>,
     pub restored: Option<String>,
@@ -298,6 +312,7 @@ fn render_admin_panel_from_snapshot(
     csrf_token: &str,
     tor_address: Option<String>,
     flash: Option<(bool, String)>,
+    open_section: Option<&str>,
 ) -> String {
     let flash_ref = flash.as_ref().map(|(is_err, msg)| (*is_err, msg.as_str()));
     crate::templates::admin_panel_page(
@@ -317,6 +332,7 @@ fn render_admin_panel_from_snapshot(
         &snapshot.themes,
         tor_address.as_deref(),
         flash_ref,
+        open_section,
     )
 }
 
@@ -360,6 +376,7 @@ pub async fn admin_panel(
     };
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
+        let open_section = params.open.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
 
@@ -374,6 +391,7 @@ pub async fn admin_panel(
                 &csrf_clone,
                 tor_address,
                 flash,
+                open_section.as_deref(),
             ))
         }
     })

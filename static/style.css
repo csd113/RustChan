@@ -1906,6 +1906,15 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   margin-bottom: 18px;
 }
 
+.theme-workbench-dropdown {
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+}
+
+.theme-workbench-dropdown > summary {
+  background: color-mix(in srgb, var(--bg-panel) 82%, transparent);
+}
+
 .theme-guide-card,
 .theme-create-card,
 .theme-manager-group {

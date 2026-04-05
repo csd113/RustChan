@@ -519,7 +519,7 @@ pub async fn create_theme(
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    Ok(super::admin_panel_redirect_anchor("Theme created.", "theme-catalog").into_response())
+    Ok(super::admin_panel_redirect_anchor_open("Theme created.", "theme-catalog", "theme-catalog").into_response())
 }
 
 #[derive(Deserialize)]
@@ -576,7 +576,7 @@ pub async fn update_theme(
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    Ok(super::admin_panel_redirect_anchor("Theme updated.", "theme-catalog").into_response())
+    Ok(super::admin_panel_redirect_anchor_open("Theme updated.", "theme-catalog", "theme-catalog").into_response())
 }
 
 #[derive(Deserialize)]
@@ -608,7 +608,7 @@ pub async fn delete_theme(
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    Ok(super::admin_panel_redirect_anchor("Theme deleted.", "theme-catalog").into_response())
+    Ok(super::admin_panel_redirect_anchor_open("Theme deleted.", "theme-catalog", "theme-catalog").into_response())
 }
 
 // ─── POST /admin/vacuum ───────────────────────────────────────────────────────

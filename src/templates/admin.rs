@@ -130,7 +130,13 @@ pub fn admin_panel_page(
     // Optional one-time flash message shown at the top of the panel.
     // (is_error, message) — is_error=true → red, false → green.
     flash: Option<(bool, &str)>,
+    open_section: Option<&str>,
 ) -> String {
+    let theme_catalog_open_attr = if open_section == Some("theme-catalog") {
+        " open"
+    } else {
+        ""
+    };
     let global_favicon_exists = crate::favicon::global_has_custom_favicon();
     let global_favicon_version =
         crate::favicon::favicon_version_for_board(None).unwrap_or_default();
@@ -664,7 +670,7 @@ pub fn admin_panel_page(
     </div>
   </div>
   <div class="board-settings-actions">
-    <button type="submit">save theme</button>
+    <button type="submit">save theme settings</button>
   </div>
 </form>
 {delete_form}
@@ -918,8 +924,11 @@ old boards to prevent query performance degradation.
 </section>
 
 <section class="admin-section admin-section-collapsible" id="theme-catalog">
-<details class="admin-dropdown">
+<details class="admin-dropdown"{theme_catalog_open_attr}>
 <summary><span>// themes</span></summary>
+<div class="admin-dropdown-content">
+<details class="admin-dropdown theme-workbench-dropdown">
+<summary><span>// custom theme workshop</span></summary>
 <div class="admin-dropdown-content">
 <div class="theme-manager-shell">
   <section class="theme-guide-card">
@@ -998,6 +1007,8 @@ button / button:hover</pre>
     </form>
   </section>
 </div>
+</div>
+</details>
 
 <section class="theme-manager-group">
   <div class="theme-manager-group-header">
@@ -1107,6 +1118,7 @@ button / button:hover</pre>
 </div>"#,
         csrf = escape_html(csrf_token),
         flash = flash_html,
+        theme_catalog_open_attr = theme_catalog_open_attr,
         board_cards = board_cards,
         ban_rows = ban_rows,
         filter_rows = filter_rows,
