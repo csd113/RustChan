@@ -2322,6 +2322,25 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   .theme-editor-panel-header {
     align-items: flex-start;
   }
+
+  .board-settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .admin-table thead,
+  .admin-table tbody,
+  .admin-table tfoot {
+    display: table;
+    width: 100%;
+    min-width: 40rem;
+  }
 }
 
 .admin-subsection {
@@ -4065,7 +4084,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
 
   .mobile-board-menu[open] .mobile-board-menu-panel {
     position: fixed;
-    top: 58px;
+    top: calc(var(--mobile-header-offset, 58px) + 6px);
     left: 10px;
     right: 10px;
     width: auto;

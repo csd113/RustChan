@@ -16,6 +16,7 @@ All notable changes to RustChan will be documented in this file.
 
 - Requests coming directly from untrusted public peers can no longer spoof `X-Forwarded-Proto` to make the app believe they arrived over HTTPS.
 - Timeout coverage no longer leaves upload-heavy and admin mutation endpoints outside the request-timeout middleware.
+- Mobile layout resilience is stronger across the updated style system: the header board menu now follows the real wrapped header height instead of a fixed offset, admin board-settings forms collapse cleanly to one column on narrow screens, and wide admin tables stay usable on phones through horizontal scrolling.
 
 ### Validation
 

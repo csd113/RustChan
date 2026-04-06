@@ -25,6 +25,15 @@ function isTouchLikeDevice() {
   );
 }
 
+function syncMobileHeaderOffset() {
+  var header = document.querySelector('.site-header');
+  if (!header) return;
+  document.documentElement.style.setProperty(
+    '--mobile-header-offset',
+    Math.ceil(header.getBoundingClientRect().height) + 'px'
+  );
+}
+
 function syncPostFormState() {
   var wrap = document.getElementById('post-form-wrap');
   var btns = document.querySelectorAll('.post-toggle-btn[data-action="toggle-post-form"]');
@@ -97,7 +106,18 @@ function upgradeLegacySpoilers(root) {
 document.addEventListener('DOMContentLoaded', function () {
   localizePostTimes(document);
   upgradeLegacySpoilers(document);
+  syncMobileHeaderOffset();
+
+  if (window.ResizeObserver) {
+    var header = document.querySelector('.site-header');
+    if (header) {
+      var observer = new ResizeObserver(syncMobileHeaderOffset);
+      observer.observe(header);
+    }
+  }
 });
+
+window.addEventListener('resize', syncMobileHeaderOffset);
 
 // Hook into new-post insertions (thread auto-update, quote popups, etc.)
 (function () {
