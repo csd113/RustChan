@@ -257,23 +257,25 @@ pub fn admin_panel_page(
   {board_favicon_status}
 </p>
 <!-- Delete form is now OUTSIDE the settings form. -->
-<form method="POST" action="/admin/board/delete" style="display:inline;margin-top:4px">
-  <input type="hidden" name="_csrf"     value="{csrf}">
-  <input type="hidden" name="board_id"  value="{id}">
-  <button type="submit" class="btn-danger"
-          data-confirm="Delete /{short}/ and ALL its content?">delete board</button>
-</form>
-<form method="POST" action="/admin/board/backup/create" class="board-backup-download-form" data-board="{short}" style="display:inline-block;margin-left:0.5rem;margin-top:4px">
-  <input type="hidden" name="_csrf" value="{csrf}">
-  <input type="hidden" name="board_short" value="{short}">
-  <input type="hidden" name="download_after_create" value="1">
-  <button type="submit">&#8659; download to computer /{short}/</button>
-</form>
-<form method="POST" action="/admin/board/backup/create" class="board-backup-create-form" data-board="{short}" style="display:inline-block;margin-left:0.25rem;margin-top:4px">
-  <input type="hidden" name="_csrf" value="{csrf}">
-  <input type="hidden" name="board_short" value="{short}">
-  <button type="submit">&#128190; save to server /{short}/</button>
-</form>
+<div class="board-card-footer-actions">
+  <form method="POST" action="/admin/board/delete">
+    <input type="hidden" name="_csrf"     value="{csrf}">
+    <input type="hidden" name="board_id"  value="{id}">
+    <button type="submit" class="btn-danger"
+            data-confirm="Delete /{short}/ and ALL its content?">delete board</button>
+  </form>
+  <form method="POST" action="/admin/board/backup/create" class="board-backup-download-form" data-board="{short}">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="board_short" value="{short}">
+    <input type="hidden" name="download_after_create" value="1">
+    <button type="submit">&#8659; download to computer /{short}/</button>
+  </form>
+  <form method="POST" action="/admin/board/backup/create" class="board-backup-create-form" data-board="{short}">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="board_short" value="{short}">
+    <button type="submit">&#128190; save to server /{short}/</button>
+  </form>
+</div>
 </details>"#,
             short = escape_html(&b.short_name),
             name = escape_html(&b.name),
@@ -826,7 +828,7 @@ old boards to prevent query performance degradation.
 <p class="admin-order-note">Board order is shared across the homepage, top bar, and this panel, with SFW and NSFW boards each keeping their own separate order.</p>
 <div class="admin-board-cards">{board_cards}</div>
 <h3>create board</h3>
-<form method="POST" action="/admin/board/create">
+<form method="POST" action="/admin/board/create" class="admin-board-create-form">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="text" name="short_name" placeholder="short (e.g. tech)" maxlength="8" required>
 <input type="text" name="name" placeholder="full name" maxlength="64" required>

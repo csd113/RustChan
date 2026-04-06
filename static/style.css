@@ -2449,6 +2449,18 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   align-items: center;
 }
 
+.board-card-footer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.board-card-footer-actions form {
+  margin: 0;
+}
+
 .favicon-inline-row {
   display: flex;
   align-items: center;
@@ -2537,10 +2549,13 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 @media (max-width: 700px) {
   .admin-panel {
     max-width: none;
+    width: 100%;
+    box-sizing: border-box;
   }
 
   .admin-section {
     padding: 8px;
+    overflow-x: clip;
   }
 
   .admin-panel h1 {
@@ -2620,12 +2635,14 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
   .board-order-toolbar,
   .board-settings-actions,
+  .board-card-footer-actions,
   .favicon-inline-row,
   .favicon-inline-form,
   .favicon-inline-clear,
   .admin-card-actions,
   .admin-inline-actions,
   .admin-moderation-form,
+  .admin-board-create-form,
   .backup-restore-upload-form,
   .admin-section form.admin-moderation-form,
   .admin-section .admin-inline-actions form,
@@ -2636,11 +2653,13 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
   .board-order-toolbar form,
   .board-settings-actions > *,
+  .board-card-footer-actions > *,
   .favicon-inline-form > *,
   .favicon-inline-clear > *,
   .admin-card-actions > *,
   .admin-inline-actions > *,
   .admin-moderation-form > *,
+  .admin-board-create-form > *,
   .backup-restore-upload-form > * {
     width: 100%;
     box-sizing: border-box;
@@ -2649,9 +2668,11 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   .admin-link-button,
   .admin-inline-actions button,
   .admin-moderation-form button,
+  .admin-board-create-form button,
   .backup-restore-upload-form button,
   .board-order-toolbar button,
   .board-settings-actions button,
+  .board-card-footer-actions button,
   .favicon-inline-row button {
     width: 100%;
     min-height: 42px;
@@ -2703,7 +2724,7 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
   .admin-table-wrap .admin-table,
   .admin-table-wrap > table {
-    min-width: 34rem;
+    min-width: 26rem;
   }
 
   .admin-table th,
@@ -2836,19 +2857,33 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
   .catalog-header-row { flex-direction: column; gap: 6px; }
   .catalog-controls { align-self: center; }
 
+  body {
+    padding-bottom: calc(84px + env(safe-area-inset-bottom));
+  }
+
   #theme-picker-btn {
-    right: max(12px, env(safe-area-inset-right));
-    bottom: max(12px, env(safe-area-inset-bottom));
-    min-width: 48px;
-    min-height: 48px;
-    padding: 10px 14px;
-    font-size: 0.82rem;
+    left: max(10px, env(safe-area-inset-left));
+    right: max(10px, env(safe-area-inset-right));
+    bottom: max(10px, env(safe-area-inset-bottom));
+    width: auto;
+    min-width: 0;
+    min-height: 52px;
+    padding: 12px 16px;
+    font-size: 0.84rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--bg-panel) 88%, rgba(0, 0, 0, 0.8));
+    box-shadow: 0 10px 28px rgba(0,0,0,0.42);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
   }
 
   #theme-picker-panel {
     left: 10px;
     right: 10px;
-    bottom: calc(max(12px, env(safe-area-inset-bottom)) + 58px);
+    bottom: calc(max(10px, env(safe-area-inset-bottom)) + 64px);
     min-width: 0;
     max-width: none;
     padding: 12px;
