@@ -25,7 +25,7 @@ use axum::{
     http::HeaderMap,
     response::{Html, IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use axum_extra::extract::cookie::{Cookie, CookieJar};
 use chrono::Utc;
 use dashmap::DashMap;
 use serde::Deserialize;
@@ -168,7 +168,9 @@ fn ensure_admin_login_csrf(
 
     let mut cookie = Cookie::new("csrf_token", token.clone());
     cookie.set_http_only(false);
-    cookie.set_same_site(SameSite::Strict);
+    // `Lax` keeps the login and redirect flow working in mobile browsers and
+    // embedded webviews while CSRF validation still guards the POST itself.
+    cookie.set_same_site(super::ADMIN_COOKIE_SAME_SITE);
     cookie.set_path("/");
     cookie.set_secure(super::should_set_secure_cookie(headers, peer));
 
@@ -332,17 +334,31 @@ pub async fn admin_login(
 
             let mut cookie = Cookie::new(super::SESSION_COOKIE, session_id);
             cookie.set_http_only(true);
-            cookie.set_same_site(SameSite::Strict);
+            // `Strict` can drop the freshly issued session on some mobile
+            // redirect chains into `/admin/panel`; `Lax` preserves that
+            // top-level navigation while same-origin + CSRF checks protect
+            // admin mutations.
+            cookie.set_same_site(super::ADMIN_COOKIE_SAME_SITE);
             cookie.set_path("/");
             // Only mark the session cookie Secure when this request is actually
             // arriving over HTTPS (direct TLS or proxy-forwarded HTTPS).
-            cookie.set_secure(super::should_set_secure_cookie(&headers, Some(peer)));
+            let cookie_secure = super::should_set_secure_cookie(&headers, Some(peer));
+            cookie.set_secure(cookie_secure);
             // Set Max-Age so browsers expire the cookie after the
             // configured session lifetime instead of persisting it indefinitely.
             cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
             tracing::info!(target: "admin", admin_id = admin_id, "Admin logged in");
-            Ok((jar.add(cookie), Redirect::to("/admin/panel")).into_response())
+            let redirect = if cookie_secure {
+                Redirect::to("/admin/panel")
+            } else {
+                let bootstrap = super::create_admin_session_bootstrap(cookie.value());
+                Redirect::to(&format!(
+                    "/admin/panel?bootstrap={}",
+                    super::encode_query_component(&bootstrap)
+                ))
+            };
+            Ok((jar.add(cookie), redirect).into_response())
         }
     }
 }
@@ -522,5 +538,85 @@ mod tests {
             .find(|value| value.contains(super::super::SESSION_COOKIE))
             .expect("session cookie");
         assert!(session_cookie.contains("HttpOnly"));
+        assert!(session_cookie.contains("SameSite=Lax"));
+    }
+
+    #[tokio::test]
+    async fn admin_login_marks_session_cookie_secure_for_https_tunnel_origin() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "demo.serveo.net")
+                    .header(header::REFERER, "https://demo.serveo.net/admin")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from("username=admin&password=hunter2&_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let session_cookie = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.contains(super::super::SESSION_COOKIE))
+            .expect("session cookie");
+        assert_eq!(session_cookie.contains("Secure"), crate::config::CONFIG.https_cookies);
+    }
+
+    #[tokio::test]
+    async fn insecure_admin_login_redirects_through_bootstrap() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "192.168.1.20:8080")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from("username=admin&password=hunter2&_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("location header");
+        assert!(location.starts_with("/admin/panel?bootstrap="));
     }
 }

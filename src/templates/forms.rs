@@ -12,6 +12,10 @@ struct UploadFormPolicy {
     uploads_enabled: bool,
 }
 
+fn new_submission_token() -> String {
+    crate::utils::crypto::random_hex(16)
+}
+
 const fn upload_progress_row() -> &'static str {
     r#"    <tr class="upload-progress-row" hidden>
         <td>upload</td>
@@ -124,6 +128,7 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
 /// New-thread submission form. Embedded on board index and catalog pages.
 #[allow(clippy::too_many_lines)]
 pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String {
+    let submission_token = new_submission_token();
     let upload_policy = build_upload_form_policy(board);
     let upload_row = if upload_policy.uploads_enabled {
         render_single_upload_row(board, "optional cover image for the audio post")
@@ -172,6 +177,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
 <div class="post-form-title">[ new thread ]</div>
 <form class="post-form" method="POST" action="/{board}" enctype="multipart/form-data">
   <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="submission_token" value="{submission_token}">
   <table>
     <tr><td>name</td>
         <td><input type="text" name="name" placeholder="Anonymous" maxlength="64"></td></tr>
@@ -230,6 +236,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         // poll scripts moved to /static/main.js
         board = escape_html(board_short),
         csrf = escape_html(csrf_token),
+        submission_token = escape_html(&submission_token),
         uploads_disabled_row = uploads_disabled_row,
         upload_row = upload_row,
         upload_progress_row = upload_progress_row(),
@@ -245,6 +252,7 @@ pub(super) fn reply_form(
     csrf_token: &str,
     board: &Board,
 ) -> String {
+    let submission_token = new_submission_token();
     let upload_policy = build_upload_form_policy(board);
     let upload_row = if upload_policy.uploads_enabled {
         render_single_upload_row(board, "optional cover image for the audio reply")
@@ -289,6 +297,7 @@ pub(super) fn reply_form(
 <div class="post-form-title">[ reply to thread ]</div>
 <form class="post-form" method="POST" action="/{board}/thread/{tid}" enctype="multipart/form-data">
   <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="submission_token" value="{submission_token}">
   <table>
     <tr><td>name</td>
         <td><input type="text" name="name" placeholder="Anonymous" maxlength="64"></td></tr>
@@ -308,6 +317,7 @@ pub(super) fn reply_form(
         board = escape_html(board_short),
         tid = thread_id,
         csrf = escape_html(csrf_token),
+        submission_token = escape_html(&submission_token),
         uploads_disabled_row = uploads_disabled_row,
         upload_row = upload_row,
         upload_progress_row = upload_progress_row(),
@@ -393,5 +403,15 @@ mod tests {
         assert!(html.contains("name=\"file\""));
         assert!(!html.contains("name=\"audio_file\""));
         assert!(!html.contains("name=\"image_file\""));
+    }
+
+    #[test]
+    fn post_forms_include_submission_token() {
+        let board = uploads_disabled_board();
+        let thread_html = new_thread_form("test", "csrf", &board);
+        let reply_html = reply_form("test", 42, "csrf", &board);
+
+        assert!(thread_html.contains("name=\"submission_token\""));
+        assert!(reply_html.contains("name=\"submission_token\""));
     }
 }

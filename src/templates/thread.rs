@@ -695,7 +695,7 @@ pub fn render_post(
   <img class="thumb" src="/boards/{th}" loading="lazy" alt="video thumbnail">
   <div class="media-expand-overlay">&#9654;</div>
 </a>
-<video class="media-expanded" controls preload="none" style="display:none">
+<video class="media-expanded media-expanded-video" controls preload="none" playsinline webkit-playsinline style="display:none">
   <source src="/boards/{f}" type="{mime}">
 </video>
 </div>"#,
@@ -718,7 +718,7 @@ pub fn render_post(
   <img class="thumb" src="/boards/{th}" loading="lazy" alt="image">
   <div class="media-expand-overlay">&#x2922;</div>
 </a>
-<img class="media-expanded" src="" data-src="/boards/{f}" style="display:none"
+<img class="media-expanded media-expanded-image" src="" data-src="/boards/{f}" style="display:none"
      alt="image" draggable="false">
 {audio_combo_html}
 </div>"#,

@@ -300,7 +300,7 @@ function submitPostFormWithProgress(form) {
     stopSubmitButtonAnimation(form);
     setSubmittingState(form, false);
     resetUploadProgress(form);
-    alert('Upload failed. Please check your connection and try again.');
+    alert('Connection dropped before the server response arrived. Your post may still have succeeded. Refresh the thread or board before trying again.');
   });
 
   xhr.addEventListener('abort', function () {
@@ -362,6 +362,8 @@ function expandMedia(preview) {
   // widening the float and shoving text off to the right.
   container.classList.add('media-is-expanded');
   if (expanded.tagName === 'VIDEO') {
+    expanded.setAttribute('playsinline', '');
+    expanded.setAttribute('webkit-playsinline', '');
     expanded.play().catch(function () {});
   }
   syncComboAudio(container, true);
@@ -374,17 +376,6 @@ function expandMedia(preview) {
       expanded.addEventListener('click', function () {
         var btn = expanded.closest('.file-container').querySelector('.media-close-btn');
         if (btn) collapseMedia(btn);
-      });
-    } else if (expanded.tagName === 'VIDEO') {
-      // Clicking the video *outside* the native controls bar collapses it.
-      // The controls bar is roughly the bottom 40px of the element.
-      expanded.addEventListener('click', function (e) {
-        var rect = expanded.getBoundingClientRect();
-        var controlsHeight = 40;
-        if (e.clientY < rect.bottom - controlsHeight) {
-          var btn = expanded.closest('.file-container').querySelector('.media-close-btn');
-          if (btn) collapseMedia(btn);
-        }
       });
     }
   }

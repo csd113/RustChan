@@ -232,6 +232,80 @@ pub(super) fn create_post_inner(conn: &rusqlite::Connection, p: &super::NewPost)
     Ok(post_id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostSubmissionRecord {
+    pub thread_id: i64,
+    pub post_id: i64,
+    pub is_thread: bool,
+}
+
+pub fn get_post_submission(
+    conn: &rusqlite::Connection,
+    submission_token: &str,
+    ip_hash: &str,
+    board_id: i64,
+) -> Result<Option<PostSubmissionRecord>> {
+    if submission_token.trim().is_empty() {
+        return Ok(None);
+    }
+
+    Ok(conn
+        .query_row(
+            "SELECT thread_id, post_id, is_thread
+             FROM post_submissions
+             WHERE submission_token = ?1
+               AND ip_hash = ?2
+               AND board_id = ?3
+             LIMIT 1",
+            params![submission_token, ip_hash, board_id],
+            |row| {
+                Ok(PostSubmissionRecord {
+                    thread_id: row.get(0)?,
+                    post_id: row.get(1)?,
+                    is_thread: row.get::<_, i32>(2)? != 0,
+                })
+            },
+        )
+        .optional()?)
+}
+
+pub fn record_post_submission(
+    conn: &rusqlite::Connection,
+    submission_token: &str,
+    ip_hash: &str,
+    board_id: i64,
+    thread_id: i64,
+    post_id: i64,
+    is_thread: bool,
+) -> Result<()> {
+    if submission_token.trim().is_empty() {
+        return Ok(());
+    }
+
+    conn.execute(
+        "INSERT OR IGNORE INTO post_submissions
+         (submission_token, ip_hash, board_id, thread_id, post_id, is_thread)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            submission_token,
+            ip_hash,
+            board_id,
+            thread_id,
+            post_id,
+            i32::from(is_thread)
+        ],
+    )
+    .context("Failed to record post submission token")?;
+
+    conn.execute(
+        "DELETE FROM post_submissions WHERE created_at < unixepoch() - 604800",
+        [],
+    )
+    .context("Failed to prune expired post submission tokens")?;
+
+    Ok(())
+}
+
 /// Insert a poll row and its options using the caller's existing transaction.
 ///
 /// # Errors
@@ -1063,7 +1137,10 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{count_search_results, search_posts, search_terms, to_fts_query};
+    use super::{
+        count_search_results, get_post_submission, record_post_submission, search_posts,
+        search_terms, to_fts_query,
+    };
     use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
     use rusqlite::Connection;
 
@@ -1101,7 +1178,7 @@ mod tests {
             is_op: true,
         };
         let (thread_id, post_id, _) =
-            create_thread_with_optional_poll(conn, board.id, None, &post, None, None)
+            create_thread_with_optional_poll(conn, board.id, None, &post, "", None, None)
                 .expect("create thread");
         assert!(thread_id > 0);
         post_id
@@ -1196,5 +1273,24 @@ mod tests {
 
         assert_eq!(total, 0);
         assert!(posts.is_empty());
+    }
+
+    #[test]
+    fn post_submission_token_resolves_existing_post() {
+        let conn = test_conn();
+        let post_id = seed_search_post(&conn, "dup", "hello");
+        let board = get_board_by_short(&conn, "dup")
+            .expect("load board")
+            .expect("board exists");
+
+        record_post_submission(&conn, "token-1", "iphash", board.id, 1, post_id, true)
+            .expect("record submission token");
+
+        let record = get_post_submission(&conn, "token-1", "iphash", board.id)
+            .expect("lookup token")
+            .expect("record should exist");
+        assert_eq!(record.thread_id, 1);
+        assert_eq!(record.post_id, post_id);
+        assert!(record.is_thread);
     }
 }

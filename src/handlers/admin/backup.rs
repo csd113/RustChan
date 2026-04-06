@@ -18,7 +18,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use axum_extra::extract::cookie::{Cookie, CookieJar};
 use chrono::Utc;
 use futures::stream::Stream;
 use rusqlite::{backup::Backup, params, OptionalExtension};
@@ -1486,7 +1486,7 @@ pub async fn admin_restore(
 
             let mut new_cookie = Cookie::new(super::SESSION_COOKIE, fresh_sid);
             new_cookie.set_http_only(true);
-            new_cookie.set_same_site(SameSite::Strict);
+            new_cookie.set_same_site(super::ADMIN_COOKIE_SAME_SITE);
             new_cookie.set_path("/");
             new_cookie.set_secure(super::should_set_secure_cookie(&headers, Some(peer)));
             new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
@@ -2048,7 +2048,7 @@ pub async fn restore_saved_full_backup(
 
     let mut new_cookie = Cookie::new(super::SESSION_COOKIE, fresh_sid);
     new_cookie.set_http_only(true);
-    new_cookie.set_same_site(SameSite::Strict);
+    new_cookie.set_same_site(super::ADMIN_COOKIE_SAME_SITE);
     new_cookie.set_path("/");
     new_cookie.set_secure(super::should_set_secure_cookie(&headers, Some(peer)));
     // Set Max-Age to match normal login behaviour.

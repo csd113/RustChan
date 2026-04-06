@@ -101,6 +101,7 @@ pub struct TempUpload {
 /// Parsed fields from a post/thread creation multipart form.
 pub struct PostFormData {
     pub csrf_verified: bool,
+    pub submission_token: String,
     pub name: String,
     pub subject: String,
     pub body: String,
@@ -130,6 +131,7 @@ pub async fn parse_post_multipart(
     csrf_cookie: Option<&str>,
 ) -> Result<PostFormData> {
     let mut csrf_verified = false;
+    let mut submission_token = String::new();
     let mut name = String::new();
     let mut subject = String::new();
     let mut body = String::new();
@@ -156,6 +158,7 @@ pub async fn parse_post_multipart(
                     csrf_verified = true;
                 }
             }
+            Some("submission_token") => submission_token = read_text_field(field).await?,
             Some("name") => name = read_text_field(field).await?,
             Some("subject") => subject = read_text_field(field).await?,
             Some("body") => body = read_text_field(field).await?,
@@ -251,6 +254,7 @@ pub async fn parse_post_multipart(
 
     Ok(PostFormData {
         csrf_verified,
+        submission_token,
         name,
         subject,
         body,

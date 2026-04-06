@@ -1146,22 +1146,35 @@ html:not([data-theme]) .poster-id-btn {
   clear: left;
 }
 
+.media-expanded-video {
+  width: min(100%, 640px);
+  height: auto;
+}
+
+.media-expanded-image {
+  height: auto;
+}
+
 .media-close-btn {
   display: none; /* shown via JS as inline-flex */
   align-items: center;
-  gap: 5px;
-  margin-left: 8px;
-  padding: 2px 9px;
-  background: rgba(255,34,68,0.12);
+  justify-content: center;
+  gap: 0;
+  margin-left: 6px;
+  padding: 1px 6px;
+  min-height: 24px;
+  background: rgba(255,34,68,0.1);
   border: 1px solid var(--red);
   color: var(--red);
   font-family: var(--font);
-  font-size: 0.75rem;
+  font-size: 0.68rem;
+  line-height: 1;
   cursor: pointer;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
   transition: background 0.15s, box-shadow 0.15s;
   vertical-align: middle;
   touch-action: manipulation;
+  border-radius: 999px;
 }
 
 .media-close-btn:hover {
@@ -1891,6 +1904,23 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
 .admin-table tr:hover td { background: rgba(0,200,64,0.03); }
 
+.admin-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.admin-table-wrap .admin-table,
+.admin-table-wrap > table {
+  min-width: 40rem;
+  margin-bottom: 0;
+}
+
+.admin-table-wrap-compact .admin-table,
+.admin-table-wrap-compact > table {
+  min-width: 20rem;
+}
+
 .ip-hash { font-size: 0.72rem; color: var(--text-dim); }
 
 /* ── Board settings cards (admin panel) ───────────────────────────────────── */
@@ -2277,6 +2307,13 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   color: var(--green-bright);
 }
 
+.admin-inline-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
 .admin-subsection-tight {
   padding-top: 10px;
 }
@@ -2497,6 +2534,184 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
 .admin-login input:focus { border-color: var(--border-glow); }
 
+@media (max-width: 700px) {
+  .admin-panel {
+    max-width: none;
+  }
+
+  .admin-section {
+    padding: 8px;
+  }
+
+  .admin-panel h1 {
+    font-size: 1rem;
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+  }
+
+  .admin-dropdown > summary,
+  .board-settings-card > summary {
+    align-items: flex-start;
+    line-height: 1.4;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    padding: 9px 10px;
+    font-size: 0.78rem;
+    letter-spacing: 0.03em;
+  }
+
+  .admin-dropdown > summary {
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .admin-dropdown > summary::before,
+  .board-settings-card > summary::before {
+    margin-right: 0;
+    flex: 0 0 auto;
+  }
+
+  .admin-dropdown > summary > span:first-child,
+  .theme-card-heading,
+  .theme-card-description {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .admin-dropdown-badges {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+    gap: 0.25rem;
+  }
+
+  .admin-dropdown-badges .report-badge,
+  .admin-count-badge {
+    min-width: 1.35rem;
+    padding: 0.08rem 0.35rem;
+    font-size: 0.68rem;
+  }
+
+  .theme-card-summary {
+    grid-template-columns: 14px minmax(0, 1fr);
+    column-gap: 8px;
+    row-gap: 4px;
+    padding-right: 2px;
+  }
+
+  .theme-card-heading {
+    gap: 0.4rem;
+  }
+
+  .theme-card-heading strong {
+    font-size: 0.84rem;
+  }
+
+  .theme-card-meta,
+  .board-order-toolbar,
+  .admin-order-note,
+  .admin-card-header p,
+  .admin-card-note,
+  .admin-moderation-intro {
+    font-size: 0.74rem;
+  }
+
+  .board-order-toolbar,
+  .board-settings-actions,
+  .favicon-inline-row,
+  .favicon-inline-form,
+  .favicon-inline-clear,
+  .admin-card-actions,
+  .admin-inline-actions,
+  .admin-moderation-form,
+  .backup-restore-upload-form,
+  .admin-section form.admin-moderation-form,
+  .admin-section .admin-inline-actions form,
+  .admin-section .backup-restore-upload-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .board-order-toolbar form,
+  .board-settings-actions > *,
+  .favicon-inline-form > *,
+  .favicon-inline-clear > *,
+  .admin-card-actions > *,
+  .admin-inline-actions > *,
+  .admin-moderation-form > *,
+  .backup-restore-upload-form > * {
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .admin-link-button,
+  .admin-inline-actions button,
+  .admin-moderation-form button,
+  .backup-restore-upload-form button,
+  .board-order-toolbar button,
+  .board-settings-actions button,
+  .favicon-inline-row button {
+    width: 100%;
+    min-height: 42px;
+  }
+
+  .admin-section input[type="text"],
+  .admin-section input[type="password"],
+  .admin-section input[type="number"],
+  .admin-section select,
+  .admin-section textarea,
+  .admin-login input {
+    font-size: 16px;
+  }
+
+  .admin-login {
+    max-width: none;
+    margin: 20px auto;
+  }
+
+  .admin-login-table,
+  .admin-login-table tbody,
+  .admin-login-table tr,
+  .admin-login-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .admin-login-table tr + tr {
+    margin-top: 0.7rem;
+  }
+
+  .admin-login table td:first-child {
+    padding: 0 0 0.25rem;
+  }
+
+  .admin-login input,
+  .admin-login button {
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .admin-login button {
+    min-height: 42px;
+  }
+
+  .admin-table-wrap {
+    margin-top: 0.4rem;
+  }
+
+  .admin-table-wrap .admin-table,
+  .admin-table-wrap > table {
+    min-width: 34rem;
+  }
+
+  .admin-table th,
+  .admin-table td {
+    padding: 6px 7px;
+  }
+}
+
 /* ── Error page ───────────────────────────────────────────────────────────── */
 
 .error-page {
@@ -2613,8 +2828,8 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
     width: 100%;
   }
   .media-close-btn {
-    min-height: 38px;
-    padding: 6px 12px;
+    min-height: 28px;
+    padding: 2px 8px;
   }
 
   /* Catalog header row: stack controls below title */

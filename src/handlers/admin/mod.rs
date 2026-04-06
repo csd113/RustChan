@@ -46,12 +46,21 @@ use serde::Deserialize;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::IpAddr;
 use std::net::SocketAddr;
+use axum_extra::extract::cookie::SameSite;
+use dashmap::DashMap;
+use std::sync::LazyLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) use crate::handlers::board::check_csrf_jar;
 
 // ─── Shared constant ──────────────────────────────────────────────────────────
 
 const SESSION_COOKIE: &str = "chan_admin_session";
+const ADMIN_COOKIE_SAME_SITE: SameSite = SameSite::Lax;
+const ADMIN_BOOTSTRAP_TTL_SECS: u64 = 120;
+
+static ADMIN_SESSION_BOOTSTRAPS: LazyLock<DashMap<String, (String, u64)>> =
+    LazyLock::new(DashMap::new);
 
 // ─── Shared form type used by auth and backup ─────────────────────────────────
 
@@ -170,11 +179,62 @@ pub(super) fn should_set_secure_cookie(headers: &HeaderMap, peer: Option<SocketA
         return false;
     }
 
-    if CONFIG.tls.enabled {
+    if crate::middleware::forwarded_proto_is_https(headers, peer, CONFIG.behind_proxy) {
         return true;
     }
 
-    crate::middleware::forwarded_proto_is_https(headers, peer, CONFIG.behind_proxy)
+    if !CONFIG.tls.enabled {
+        return request_origin_uses_https(headers);
+    }
+
+    host_header_uses_https_port(headers) || request_origin_uses_https(headers)
+}
+
+fn host_header_uses_https_port(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(header::HOST).and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+
+    let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+
+    match authority.port_u16() {
+        Some(port) => port == CONFIG.tls.port,
+        None => CONFIG.tls.port == 443,
+    }
+}
+
+fn request_origin_uses_https(headers: &HeaderMap) -> bool {
+    let request_host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+        .map(|authority| authority.host().to_string());
+
+    let Some(source) = headers
+        .get(header::ORIGIN)
+        .or_else(|| headers.get(header::REFERER))
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+
+    let Ok(source_uri) = source.parse::<Uri>() else {
+        return false;
+    };
+
+    if source_uri.scheme_str() != Some("https") {
+        return false;
+    }
+
+    let Some(source_host) = source_uri.authority().map(axum::http::uri::Authority::host) else {
+        return false;
+    };
+
+    request_host
+        .as_deref()
+        .is_some_and(|request_host| hosts_match_for_same_origin(source_host, request_host))
 }
 
 fn admin_panel_redirect_with_status(
@@ -225,6 +285,7 @@ pub struct AdminPanelQuery {
     pub flash: Option<String>,
     pub flash_error: Option<String>,
     pub open: Option<String>,
+    pub bootstrap: Option<String>,
     pub backup_created: Option<String>,
     pub backup_deleted: Option<String>,
     pub restored: Option<String>,
@@ -332,10 +393,31 @@ fn render_admin_panel_from_snapshot(
 pub async fn admin_panel(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Query(params): Query<AdminPanelQuery>,
 ) -> Result<(CookieJar, Html<String>)> {
     // Move auth check and all DB calls into spawn_blocking.
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let cookie_secure = should_set_secure_cookie(&headers, Some(peer));
+    let mut session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let mut jar = jar;
+    if session_id.is_none() {
+        if let Some(bootstrap_token) = params.bootstrap.as_deref() {
+            if let Some(bootstrapped_session_id) = consume_admin_session_bootstrap(bootstrap_token) {
+                let mut cookie = axum_extra::extract::cookie::Cookie::new(
+                    SESSION_COOKIE,
+                    bootstrapped_session_id.clone(),
+                );
+                cookie.set_http_only(true);
+                cookie.set_same_site(ADMIN_COOKIE_SAME_SITE);
+                cookie.set_path("/");
+                cookie.set_secure(cookie_secure);
+                cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
+                jar = jar.add(cookie);
+                session_id = Some(bootstrapped_session_id);
+            }
+        }
+    }
     let (jar, csrf) = ensure_csrf(jar);
     let csrf_clone = csrf.clone();
 
@@ -483,7 +565,12 @@ fn read_log_tail(path: &std::path::Path, max_bytes: usize) -> Result<(String, bo
 
 #[cfg(test)]
 mod tests {
-    use super::{hosts_match_for_same_origin, latest_log_file, read_log_tail};
+    use super::{
+        consume_admin_session_bootstrap, create_admin_session_bootstrap,
+        host_header_uses_https_port, hosts_match_for_same_origin, latest_log_file, read_log_tail,
+        request_origin_uses_https,
+    };
+    use axum::http::{header, HeaderMap, HeaderValue};
 
     #[test]
     fn same_origin_accepts_exact_host_match() {
@@ -510,6 +597,53 @@ mod tests {
     }
 
     #[test]
+    fn https_host_port_marks_request_secure() {
+        let mut headers = HeaderMap::new();
+        let host = format!("example.test:{}", crate::config::CONFIG.tls.port);
+        headers.insert(header::HOST, HeaderValue::from_str(&host).expect("host header"));
+        assert!(host_header_uses_https_port(&headers));
+    }
+
+    #[test]
+    fn http_host_port_does_not_mark_request_secure() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("example.test:8080"));
+        assert!(!host_header_uses_https_port(&headers));
+    }
+
+    #[test]
+    fn https_origin_marks_tunneled_request_secure() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("demo.serveo.net"));
+        headers.insert(
+            header::REFERER,
+            HeaderValue::from_static("https://demo.serveo.net/admin"),
+        );
+        assert!(request_origin_uses_https(&headers));
+    }
+
+    #[test]
+    fn mismatched_https_origin_does_not_mark_request_secure() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("demo.serveo.net"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        assert!(!request_origin_uses_https(&headers));
+    }
+
+    #[test]
+    fn admin_session_bootstrap_is_one_time() {
+        let token = create_admin_session_bootstrap("session-123");
+        assert_eq!(
+            consume_admin_session_bootstrap(&token).as_deref(),
+            Some("session-123")
+        );
+        assert!(consume_admin_session_bootstrap(&token).is_none());
+    }
+
+    #[test]
     fn picks_latest_log_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("rustchan.2026-04-01.log"), "old").expect("old");
@@ -530,4 +664,26 @@ mod tests {
         assert!(truncated);
         assert!(content.contains("line3"));
     }
+}
+
+fn admin_bootstrap_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+pub(super) fn create_admin_session_bootstrap(session_id: &str) -> String {
+    let token = crate::utils::crypto::new_session_id();
+    let expires_at = admin_bootstrap_now_secs().saturating_add(ADMIN_BOOTSTRAP_TTL_SECS);
+    ADMIN_SESSION_BOOTSTRAPS.insert(token.clone(), (session_id.to_string(), expires_at));
+    token
+}
+
+pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
+    let now = admin_bootstrap_now_secs();
+    ADMIN_SESSION_BOOTSTRAPS.retain(|_, (_, expires_at)| *expires_at > now);
+
+    let (session_id, expires_at) = ADMIN_SESSION_BOOTSTRAPS.remove(token)?.1;
+    (expires_at > now).then_some(session_id)
 }

@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 35;
+pub(super) const CURRENT_MAX_MIGRATION: i64 = 36;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
@@ -156,6 +156,20 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         35,
         "CREATE INDEX IF NOT EXISTS idx_themes_enabled_sort ON themes(enabled, sort_order, slug)",
+    ),
+    (
+        36,
+        r"CREATE TABLE IF NOT EXISTS post_submissions (
+            submission_token TEXT PRIMARY KEY,
+            ip_hash          TEXT NOT NULL,
+            board_id         INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            thread_id        INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+            post_id          INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+            is_thread        INTEGER NOT NULL DEFAULT 0,
+            created_at       INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE INDEX IF NOT EXISTS idx_post_submissions_created_at
+            ON post_submissions(created_at ASC)",
     ),
 ];
 

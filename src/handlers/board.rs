@@ -315,6 +315,7 @@ pub async fn create_thread(
     let name_val = form.name;
     let subject_val = form.subject;
     let del_token_val = form.deletion_token;
+    let submission_token = form.submission_token;
     let poll_question = form.poll_question;
     let poll_options = form.poll_options;
     let poll_duration = form.poll_duration_secs;
@@ -348,6 +349,14 @@ pub async fn create_thread(
                     },
                     csrf_token: ban_csrf_token,
                 });
+            }
+            if let Some(existing) =
+                db::get_post_submission(&conn, &submission_token, &ip_hash, board.id)?
+            {
+                return Ok(format!(
+                    "/{}/thread/{}#p{}",
+                    board_short, existing.thread_id, existing.post_id
+                ));
             }
 
             // Verify admin session — admins bypass the per-board cooldown entirely.
@@ -451,6 +460,7 @@ pub async fn create_thread(
                 board.id,
                 subject.as_deref(),
                 &new_post,
+                &submission_token,
                 poll_insert.as_ref(),
                 pending_upload_op.as_ref(),
             );
@@ -1456,7 +1466,7 @@ mod tests {
                 deletion_token: "token".to_string(),
                 is_op: true,
             };
-            crate::db::create_thread_with_optional_poll(&conn, board_id, None, &post, None, None)
+            crate::db::create_thread_with_optional_poll(&conn, board_id, None, &post, "", None, None)
                 .expect("create thread");
         }
 

@@ -28,7 +28,7 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
 {err}
 <form method="POST" action="/admin/login">
 <input type="hidden" name="_csrf" value="{csrf}">
-<table>
+<table class="admin-login-table">
 <tr><td>username</td><td><input type="text" name="username" autofocus required autocomplete="username"></td></tr>
 <tr><td>password</td><td><input type="password" name="password" required autocomplete="current-password"></td></tr>
 <tr><td></td><td><button type="submit">authenticate</button></td></tr>
@@ -854,18 +854,22 @@ old boards to prevent query performance degradation.
     </div>
     <div class="admin-subsection admin-subsection-tight">
       <h4>// report inbox{report_badge}</h4>
+      <div class="admin-table-wrap">
       <table class="admin-table">
         <thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
         <tbody>{report_rows}</tbody>
       </table>
+      </div>
     </div>
 
     <div class="admin-subsection admin-subsection-tight">
       <h4 id="appeals">// ban appeals{appeal_badge}</h4>
+      <div class="admin-table-wrap">
       <table class="admin-table">
         <thead><tr><th>ip (partial)</th><th>appeal message</th><th>filed</th><th>action</th></tr></thead>
         <tbody>{appeal_rows}</tbody>
       </table>
+      </div>
     </div>
   </section>
 
@@ -877,10 +881,12 @@ old boards to prevent query performance degradation.
 
     <div class="admin-subsection admin-subsection-tight" id="active-bans">
       <h4>// active bans{ban_badge}</h4>
+      <div class="admin-table-wrap">
       <table class="admin-table">
         <thead><tr><th>ip hash (partial)</th><th>reason</th><th>expires</th><th>action</th></tr></thead>
         <tbody>{ban_rows}</tbody>
       </table>
+      </div>
       <h4>add ban</h4>
       <form method="POST" action="/admin/ban/add" class="admin-moderation-form">
         <input type="hidden" name="_csrf" value="{csrf}">
@@ -893,10 +899,12 @@ old boards to prevent query performance degradation.
 
     <div class="admin-subsection admin-subsection-tight" id="word-filters">
       <h4>// word filters{filter_badge}</h4>
+      <div class="admin-table-wrap">
       <table class="admin-table">
         <thead><tr><th>pattern</th><th>replacement</th><th>action</th></tr></thead>
         <tbody>{filter_rows}</tbody>
       </table>
+      </div>
       <h4>add filter</h4>
       <form method="POST" action="/admin/filter/add" class="admin-moderation-form">
         <input type="hidden" name="_csrf" value="{csrf}">
@@ -1034,7 +1042,7 @@ button / button:hover</pre>
 <section class="admin-section">
 <h2>// full site backup &amp; restore</h2>
 <p style="color:var(--text-dim);font-size:0.85rem">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/backups/full/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer.</p>
-<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;margin-top:0.75rem;margin-bottom:0.75rem">
+<div class="admin-inline-actions" style="margin-top:0.75rem;margin-bottom:0.75rem">
 <form method="POST" action="/admin/backup/create" id="full-backup-create-form">
 <input type="hidden" name="_csrf" value="{csrf}">
 <button type="submit" id="full-backup-btn">&#128190; save to server</button>
@@ -1046,10 +1054,12 @@ button / button:hover</pre>
         data-confirm="WARNING: This will overwrite the database and all uploaded files. Cannot be undone. Continue?">&#8635; restore from local file</button>
 </form>
 </div>
+<div class="admin-table-wrap">
 <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
 <thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th></th></tr></thead>
 <tbody>{full_backup_rows}</tbody>
 </table>
+</div>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -1066,10 +1076,12 @@ button / button:hover</pre>
         data-confirm="WARNING: This will wipe and replace the board from the backup. Other boards are unaffected. Continue?">&#8635; restore board from local file</button>
 </form>
 </div>
+<div class="admin-table-wrap">
 <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
 <thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th></th></tr></thead>
 <tbody>{board_backup_rows}</tbody>
 </table>
+</div>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -1083,7 +1095,7 @@ button / button:hover</pre>
   bulk deletions (deleted threads, pruned posts, etc.).  This may take a few seconds on large
   databases and briefly blocks writes.
 </p>
-<div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+<div class="admin-inline-actions">
 <form method="POST" action="/admin/db/check">
   <input type="hidden" name="_csrf" value="{csrf}">
   <button type="submit">&#x1F50E; check integrity</button>
@@ -1251,12 +1263,14 @@ pub fn mod_log_page(
   <h2 style="margin:0.5rem 0 0.25rem">// moderation log</h2>
   <p style="color:var(--text-dim);font-size:0.82rem">{total} total entries</p>
 </div>
+<div class="admin-table-wrap">
 <table class="admin-table" style="width:100%;font-size:0.85rem">
 <thead><tr>
   <th>time</th><th>admin</th><th>action</th><th>target</th><th>board</th><th>detail</th>
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>
+</div>
 {pagination}
 </div>"#,
         total = pagination.total,
@@ -1298,6 +1312,7 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
 <h1>[ VACUUM complete ]</h1>
 <section class="admin-section">
 <h2>// result</h2>
+<div class="admin-table-wrap admin-table-wrap-compact">
 <table class="admin-table" style="max-width:420px">
 <tbody>
   <tr><td>Before</td><td><strong>{before}</strong></td></tr>
@@ -1305,6 +1320,7 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
   <tr><td>Reclaimed</td><td><strong style="color:var(--green-bright)">{saved}</strong> ({pct}%)</td></tr>
 </tbody>
 </table>
+</div>
 <p style="margin-top:1rem">
   <a href="/admin/panel">&#8592; back to admin panel</a>
 </p>
@@ -1551,6 +1567,7 @@ pub fn admin_ip_history_page(
   {total} post{plural} found across all boards.
   <a href="/admin/panel" style="margin-left:1rem">&#8592; back to panel</a>
 </p>
+<div class="admin-table-wrap">
 <table class="admin-table" style="width:100%">
 <thead><tr>
   <th style="text-align:left">time</th>
@@ -1561,6 +1578,7 @@ pub fn admin_ip_history_page(
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>
+</div>
 {pagination}
 </section>
 </div>"#,

@@ -141,6 +141,7 @@ pub async fn post_reply(
     let image_file_data = form.image_file;
     let name_val = form.name;
     let del_token_val = form.deletion_token;
+    let submission_token = form.submission_token;
     let form_sage = form.sage;
     let pow_nonce = form.pow_nonce; // needed for per-reply PoW check
                                     // Extract admin session before spawn_blocking so we can skip the per-board
@@ -185,6 +186,14 @@ pub async fn post_reply(
                     },
                     csrf_token: ban_csrf_token,
                 });
+            }
+            if let Some(existing) =
+                db::get_post_submission(&conn, &submission_token, &ip_hash, board.id)?
+            {
+                return Ok(format!(
+                    "/{}/thread/{}#p{}",
+                    board_short, existing.thread_id, existing.post_id
+                ));
             }
 
             // Per-board post cooldown — the SOLE post rate control.
@@ -266,6 +275,7 @@ pub async fn post_reply(
             let post_id = match db::create_reply_with_thread_update(
                 &conn,
                 &new_post,
+                &submission_token,
                 should_bump,
                 pending_upload_op.as_ref(),
             ) {

@@ -221,6 +221,16 @@ const BASE_SCHEMA_SQL: &str = "
         updated_at  INTEGER NOT NULL DEFAULT (unixepoch()),
         PRIMARY KEY(user_hash, thread_id)
     );
+
+    CREATE TABLE IF NOT EXISTS post_submissions (
+        submission_token TEXT PRIMARY KEY,
+        ip_hash          TEXT NOT NULL,
+        board_id         INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        thread_id        INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        post_id          INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+        is_thread        INTEGER NOT NULL DEFAULT 0,
+        created_at       INTEGER NOT NULL DEFAULT (unixepoch())
+    );
 ";
 
 const INDEX_SCHEMA_SQL: &str = "
@@ -262,6 +272,8 @@ const INDEX_SCHEMA_SQL: &str = "
         ON user_thread_preferences(user_hash, hidden);
     CREATE INDEX IF NOT EXISTS idx_user_thread_preferences_thread
         ON user_thread_preferences(thread_id);
+    CREATE INDEX IF NOT EXISTS idx_post_submissions_created_at
+        ON post_submissions(created_at ASC);
 ";
 
 pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
