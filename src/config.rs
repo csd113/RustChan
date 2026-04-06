@@ -106,6 +106,18 @@ pub fn runtime_favicon_dir() -> PathBuf {
     runtime_dir().join("favicon")
 }
 
+type RuntimeDirMigration = (&'static str, fn() -> PathBuf);
+
+const RUNTIME_LAYOUT_MIGRATIONS: &[RuntimeDirMigration] = &[
+    ("full-backups", full_backups_dir),
+    ("board-backups", board_backups_dir),
+    ("tmp-board-downloads", runtime_temp_board_downloads_dir),
+    ("arti_state", runtime_tor_state_dir),
+    ("arti_cache", runtime_tor_cache_dir),
+    ("tls", runtime_tls_dir),
+    ("favicon", runtime_favicon_dir),
+];
+
 fn migrate_dir_if_present(old_path: &Path, new_path: &Path) -> anyhow::Result<()> {
     if !old_path.exists() {
         return Ok(());
@@ -143,16 +155,9 @@ pub fn migrate_runtime_layout_if_needed() -> anyhow::Result<()> {
     let data_dir = data_dir();
     std::fs::create_dir_all(&data_dir)?;
 
-    migrate_dir_if_present(&data_dir.join("full-backups"), &full_backups_dir())?;
-    migrate_dir_if_present(&data_dir.join("board-backups"), &board_backups_dir())?;
-    migrate_dir_if_present(
-        &data_dir.join("tmp-board-downloads"),
-        &runtime_temp_board_downloads_dir(),
-    )?;
-    migrate_dir_if_present(&data_dir.join("arti_state"), &runtime_tor_state_dir())?;
-    migrate_dir_if_present(&data_dir.join("arti_cache"), &runtime_tor_cache_dir())?;
-    migrate_dir_if_present(&data_dir.join("tls"), &runtime_tls_dir())?;
-    migrate_dir_if_present(&data_dir.join("favicon"), &runtime_favicon_dir())?;
+    for &(legacy_name, destination) in RUNTIME_LAYOUT_MIGRATIONS {
+        migrate_dir_if_present(&data_dir.join(legacy_name), &destination())?;
+    }
 
     Ok(())
 }

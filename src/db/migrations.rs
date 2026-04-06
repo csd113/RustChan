@@ -198,25 +198,7 @@ pub(super) fn apply_migrations(conn: &rusqlite::Connection) -> Result<()> {
             continue;
         }
 
-        match conn.execute_batch(sql) {
-            Ok(()) => {
-                tracing::debug!("Applied migration v{version}");
-            }
-            Err(rusqlite::Error::SqliteFailure(ref error, ref msg))
-                if error.code == rusqlite::ErrorCode::Unknown
-                    && msg.as_deref().is_some_and(|message| {
-                        message.contains("duplicate column name")
-                            || message.contains("already exists")
-                    }) =>
-            {
-                tracing::warn!("Migration v{version} already applied (idempotent), skipping");
-            }
-            Err(error) => {
-                return Err(anyhow::anyhow!(
-                    "Migration v{version} failed: {error} — SQL: {sql}"
-                ));
-            }
-        }
+        apply_migration(conn, version, sql)?;
 
         conn.execute(
             "UPDATE schema_version SET version = ?1",
@@ -226,4 +208,25 @@ pub(super) fn apply_migrations(conn: &rusqlite::Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn apply_migration(conn: &rusqlite::Connection, version: i64, sql: &str) -> Result<()> {
+    match conn.execute_batch(sql) {
+        Ok(()) => {
+            tracing::debug!("Applied migration v{version}");
+            Ok(())
+        }
+        Err(rusqlite::Error::SqliteFailure(ref error, ref msg))
+            if error.code == rusqlite::ErrorCode::Unknown
+                && msg.as_deref().is_some_and(|message| {
+                    message.contains("duplicate column name") || message.contains("already exists")
+                }) =>
+        {
+            tracing::warn!("Migration v{version} already applied (idempotent), skipping");
+            Ok(())
+        }
+        Err(error) => Err(anyhow::anyhow!(
+            "Migration v{version} failed: {error} — SQL: {sql}"
+        )),
+    }
 }

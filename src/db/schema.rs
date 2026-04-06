@@ -362,6 +362,42 @@ fn ensure_post_invariants(conn: &rusqlite::Connection) -> Result<()> {
     .context("Post invariant creation failed")
 }
 
+fn read_column_notnull(conn: &rusqlite::Connection, table: &str, column: &str) -> Result<bool> {
+    let query = format!("SELECT \"notnull\" FROM pragma_table_info('{table}') WHERE name = ?1");
+    let notnull: i64 = conn
+        .query_row(&query, [column], |row| row.get(0))
+        .with_context(|| format!("Failed to read {table}.{column} nullability"))?;
+    Ok(notnull == 1)
+}
+
+fn run_structural_migration(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    failure_context: &str,
+    success_log: &str,
+) -> Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .with_context(|| format!("Disable foreign keys for {failure_context}"))?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .with_context(|| format!("Begin transaction for {failure_context}"))?;
+
+    match conn.execute_batch(sql) {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .with_context(|| format!("Commit {failure_context}"))?;
+            conn.execute_batch("PRAGMA foreign_keys = ON;")
+                .with_context(|| format!("Re-enable foreign keys after {failure_context}"))?;
+            tracing::info!(target: "db", "{success_log}");
+            Ok(())
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
+            Err(error).context(failure_context.to_owned())
+        }
+    }
+}
+
 fn reports_has_full_foreign_keys(conn: &rusqlite::Connection) -> Result<bool> {
     let mut stmt = conn
         .prepare("SELECT \"from\", \"table\", on_delete FROM pragma_foreign_key_list('reports')")
@@ -402,12 +438,8 @@ fn ensure_reports_table_integrity(conn: &rusqlite::Connection) -> Result<()> {
         return Ok(());
     }
 
-    conn.execute_batch("PRAGMA foreign_keys = OFF;")
-        .context("Disable foreign keys for reports rebuild failed")?;
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .context("Begin reports rebuild transaction failed")?;
-
-    let result = conn.execute_batch(
+    run_structural_migration(
+        conn,
         r"
         CREATE TABLE reports_new (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -454,44 +486,15 @@ fn ensure_reports_table_integrity(conn: &rusqlite::Connection) -> Result<()> {
             ON reports(post_id, reporter_hash)
             WHERE status = 'open';
         ",
-    );
-
-    match result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")
-                .context("Commit reports rebuild transaction failed")?;
-            conn.execute_batch("PRAGMA foreign_keys = ON;")
-                .context("Re-enable foreign keys after reports rebuild failed")?;
-        }
-        Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
-            return Err(error).context(
-                "Structural migration: rebuild reports table with full foreign keys failed",
-            );
-        }
-    }
-
-    tracing::info!(target: "db", "Applied structural migration: reports table integrity hardened");
-    Ok(())
+        "Structural migration: rebuild reports table with full foreign keys failed",
+        "Applied structural migration: reports table integrity hardened",
+    )
 }
 
 fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {
-    let ip_hash_notnull: i64 = conn
-        .query_row(
-            "SELECT \"notnull\" FROM pragma_table_info('posts') WHERE name = 'ip_hash'",
-            [],
-            |r| r.get(0),
-        )
-        .context("Failed to read ip_hash nullability from pragma_table_info")?;
-
-    if ip_hash_notnull == 1 {
-        conn.execute_batch("PRAGMA foreign_keys = OFF;")
-            .context("Disable foreign keys for posts.ip_hash rebuild failed")?;
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .context("Begin posts.ip_hash rebuild transaction failed")?;
-
-        let result = conn.execute_batch(
+    if read_column_notnull(conn, "posts", "ip_hash")? {
+        run_structural_migration(
+            conn,
             "CREATE TABLE posts_new (
                  id               INTEGER PRIMARY KEY AUTOINCREMENT,
                  thread_id        INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
@@ -530,24 +533,9 @@ fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {
                  ON posts(thread_id);
              CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
                  ON posts(ip_hash);",
-        );
-
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")
-                    .context("Commit posts.ip_hash rebuild transaction failed")?;
-                conn.execute_batch("PRAGMA foreign_keys = ON;")
-                    .context("Re-enable foreign keys after posts.ip_hash rebuild failed")?;
-            }
-            Err(error) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
-                return Err(error)
-                    .context("Structural migration: make posts.ip_hash nullable failed");
-            }
-        }
-
-        tracing::info!(target: "db", "Applied structural migration: posts.ip_hash is now nullable");
+            "Structural migration: make posts.ip_hash nullable failed",
+            "Applied structural migration: posts.ip_hash is now nullable",
+        )?;
     }
 
     Ok(())
