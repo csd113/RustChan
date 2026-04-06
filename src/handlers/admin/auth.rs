@@ -16,10 +16,9 @@ use crate::{
     config::CONFIG,
     db,
     error::{AppError, Result},
-    handlers::board::ensure_csrf,
     middleware::AppState,
     templates,
-    utils::crypto::{new_session_id, verify_password},
+    utils::crypto::{make_csrf_form_token, new_csrf_token, new_session_id, verify_password},
 };
 use axum::{
     extract::{Form, State},
@@ -32,6 +31,7 @@ use dashmap::DashMap;
 use serde::Deserialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
+use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use time;
 use tracing::warn;
@@ -155,9 +155,34 @@ pub fn is_admin_session(jar: &CookieJar, pool: &crate::db::DbPool) -> bool {
     require_admin_sync(jar, pool).is_ok()
 }
 
+fn ensure_admin_login_csrf(
+    jar: CookieJar,
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+) -> (CookieJar, String) {
+    let token = jar
+        .get("csrf_token")
+        .map(|cookie| cookie.value().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(new_csrf_token);
+
+    let mut cookie = Cookie::new("csrf_token", token.clone());
+    cookie.set_http_only(false);
+    cookie.set_same_site(SameSite::Strict);
+    cookie.set_path("/");
+    cookie.set_secure(super::should_set_secure_cookie(headers, peer));
+
+    (jar.add(cookie), make_csrf_form_token(&token, &CONFIG.cookie_secret))
+}
+
 // ─── GET /admin ───────────────────────────────────────────────────────────────
 
-pub async fn admin_index(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
+pub async fn admin_index(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+) -> Result<Response> {
     // Move DB I/O into spawn_blocking.
     let session_id = jar
         .get(super::SESSION_COOKIE)
@@ -181,7 +206,7 @@ pub async fn admin_index(State(state): State<AppState>, jar: CookieJar) -> Resul
         return Ok(Redirect::to("/admin/panel").into_response());
     }
 
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_admin_login_csrf(jar, &headers, Some(peer));
     Ok((jar, Html(templates::admin_login_page(None, &csrf, &boards))).into_response())
 }
 
@@ -220,7 +245,7 @@ pub async fn admin_login(
     let username = form.username.trim().to_string();
     let username_log = redact_login_username(&username);
     if username.is_empty() || username.len() > 64 {
-        let (jar, csrf) = ensure_csrf(jar);
+        let (jar, csrf) = ensure_admin_login_csrf(jar, &headers, Some(peer));
         let boards = tokio::task::spawn_blocking({
             let pool = state.db.clone();
             move || {
@@ -261,7 +286,7 @@ pub async fn admin_login(
     match result {
         None => {
             warn!(username = %username_log, "Failed admin login attempt");
-            let (jar, csrf) = ensure_csrf(jar);
+            let (jar, csrf) = ensure_admin_login_csrf(jar, &headers, Some(peer));
             let boards = tokio::task::spawn_blocking({
                 let pool = state.db.clone();
                 move || {

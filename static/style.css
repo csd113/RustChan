@@ -3570,72 +3570,6 @@ body.mobile-overlay-open {
   overflow: hidden;
 }
 
-.mobile-media-viewer {
-  position: fixed;
-  inset: 0;
-  z-index: 10050;
-}
-
-.mobile-media-viewer[hidden] {
-  display: none;
-}
-
-.mobile-media-viewer__backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(0,0,0,0.82);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
-}
-
-.mobile-media-viewer__dialog {
-  position: relative;
-  z-index: 1;
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 56px 12px 18px;
-}
-
-.mobile-media-viewer__close {
-  position: absolute;
-  top: max(10px, env(safe-area-inset-top));
-  right: max(10px, env(safe-area-inset-right));
-  min-width: 44px;
-  min-height: 44px;
-  border-radius: 999px;
-  background: rgba(0,0,0,0.7);
-  border-color: rgba(255,255,255,0.24);
-  color: #fff;
-  font-size: 1rem;
-  padding: 0;
-}
-
-.mobile-media-viewer__stage {
-  width: 100%;
-  max-width: 960px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.mobile-media-viewer__media {
-  display: block;
-  width: 100%;
-  max-width: 100%;
-  max-height: min(82vh, 960px);
-  border: 1px solid rgba(255,255,255,0.14);
-  background: #000;
-  object-fit: contain;
-}
-
-.mobile-media-viewer__embed {
-  aspect-ratio: 16 / 9;
-  min-height: 220px;
-}
-
 /* ── Thread ID link ───────────────────────────────────────────────────────── */
 
 .thread-id-link {
@@ -4186,8 +4120,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   }
 
   .media-preview .media-expand-overlay {
-    opacity: 1;
-    background: linear-gradient(to top, rgba(0,0,0,0.5), rgba(0,0,0,0.15));
+    display: none;
   }
 
   .media-preview {
@@ -4245,7 +4178,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   }
 
   .media-preview .media-expand-overlay {
-    opacity: 1;
+    display: none;
   }
 }
 

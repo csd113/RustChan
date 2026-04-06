@@ -347,122 +347,10 @@ document.addEventListener('DOMContentLoaded', function () {
 
 // ─── Media expand / collapse ─────────────────────────────────────────────────
 
-var mobileMediaViewer = (function () {
-  var overlay = null;
-  var stage = null;
-  var closeBtn = null;
-  var activeContainer = null;
-
-  function ensure() {
-    if (overlay) return;
-    overlay = document.createElement('div');
-    overlay.className = 'mobile-media-viewer';
-    overlay.hidden = true;
-    overlay.innerHTML =
-      '<div class="mobile-media-viewer__backdrop" data-action="close-mobile-media-viewer"></div>' +
-      '<div class="mobile-media-viewer__dialog" role="dialog" aria-modal="true" aria-label="Expanded media">' +
-      '<button type="button" class="mobile-media-viewer__close" data-action="close-mobile-media-viewer" aria-label="Close media viewer">&#x2715;</button>' +
-      '<div class="mobile-media-viewer__stage"></div>' +
-      '</div>';
-    document.body.appendChild(overlay);
-    stage = overlay.querySelector('.mobile-media-viewer__stage');
-    closeBtn = overlay.querySelector('.mobile-media-viewer__close');
-
-    overlay.addEventListener('click', function (e) {
-      if (e.target.closest('[data-action="close-mobile-media-viewer"]')) {
-        close();
-      }
-    });
-
-    document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && overlay && !overlay.hidden) close();
-    });
-  }
-
-  function fill(node) {
-    ensure();
-    stage.innerHTML = '';
-    stage.appendChild(node);
-  }
-
-  function open(node) {
-    fill(node);
-    overlay.hidden = false;
-    document.body.classList.add('mobile-overlay-open');
-    if (closeBtn) closeBtn.focus();
-  }
-
-  function close() {
-    if (!overlay) return;
-    syncComboAudio(activeContainer, false);
-    activeContainer = null;
-    stage.innerHTML = '';
-    overlay.hidden = true;
-    document.body.classList.remove('mobile-overlay-open');
-  }
-
-  return {
-    openImage: function (src, alt, container) {
-      activeContainer = container || null;
-      var img = document.createElement('img');
-      img.className = 'mobile-media-viewer__media mobile-media-viewer__image';
-      img.src = src;
-      img.alt = alt || 'image';
-      open(img);
-    },
-    openVideo: function (src, type, container) {
-      activeContainer = container || null;
-      var video = document.createElement('video');
-      video.className = 'mobile-media-viewer__media mobile-media-viewer__video';
-      video.controls = true;
-      video.autoplay = true;
-      video.playsInline = true;
-      video.preload = 'metadata';
-      if (type) {
-        var source = document.createElement('source');
-        source.src = src;
-        source.type = type;
-        video.appendChild(source);
-      } else {
-        video.src = src;
-      }
-      open(video);
-    },
-    openEmbed: function (src, title) {
-      var iframe = document.createElement('iframe');
-      iframe.className = 'mobile-media-viewer__media mobile-media-viewer__embed';
-      iframe.src = src;
-      iframe.title = title || 'Embedded video';
-      iframe.setAttribute('frameborder', '0');
-      iframe.setAttribute('allowfullscreen', '');
-      iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen');
-      iframe.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
-      open(iframe);
-    },
-    close: close
-  };
-}());
-
 function expandMedia(preview) {
   var container = preview.closest('.file-container');
   var expanded = container.querySelector('.media-expanded');
   var closeBtn = container.querySelector('.media-close-btn');
-  if (isMobileViewport()) {
-    if (expanded.tagName === 'IMG') {
-      syncComboAudio(container, true);
-      mobileMediaViewer.openImage(expanded.dataset.src || expanded.src, expanded.alt, container);
-      return;
-    }
-    if (expanded.tagName === 'VIDEO') {
-      var source = expanded.querySelector('source');
-      mobileMediaViewer.openVideo(
-        source ? source.src : expanded.currentSrc || expanded.src,
-        source ? source.type : '',
-        container
-      );
-      return;
-    }
-  }
   if (expanded.tagName === 'IMG' && expanded.dataset.src) {
     expanded.src = expanded.dataset.src;
     delete expanded.dataset.src;
@@ -540,10 +428,6 @@ function expandVideoEmbed(preview, type, id, container) {
     src = 'https://streamable.com/e/' + id + '?autoplay=1';
     title = 'Streamable player';
   }
-  if (isMobileViewport()) {
-    mobileMediaViewer.openEmbed(src, title);
-    return;
-  }
 
   var iframe = document.createElement('iframe');
   if (type === 'youtube') {
@@ -561,6 +445,7 @@ function expandVideoEmbed(preview, type, id, container) {
   preview.style.display = 'none';
   var closeBtn = container.querySelector('.media-close-btn');
   if (closeBtn) closeBtn.style.display = 'inline-flex';
+  container.classList.add('media-is-expanded');
   container.appendChild(iframe);
 }
 
@@ -571,6 +456,7 @@ function collapseVideoEmbed(btn) {
   var preview = container.querySelector('.media-preview');
   if (iframe) { iframe.src = ''; iframe.remove(); }
   if (preview) preview.style.display = '';
+  container.classList.remove('media-is-expanded');
   btn.style.display = 'none';
 }
 
