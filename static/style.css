@@ -38,8 +38,8 @@ body {
   color: var(--text);
   line-height: 1.55;
   min-height: 100vh;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
   /* subtle scanline */
   background-image: repeating-linear-gradient(
     0deg,
@@ -376,7 +376,7 @@ button:hover,
 /* ── Main layout ──────────────────────────────────────────────────────────── */
 
 main {
-  flex: 1 0 auto;
+  width: min(960px, calc(100% - 20px));
   max-width: 960px;
   margin: 0 auto;
   padding: 16px 10px 12px;
@@ -2497,15 +2497,56 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 /* ── Footer ───────────────────────────────────────────────────────────────── */
 
 .site-footer {
-  margin-top: auto;
   text-align: center;
   padding: 12px;
+  background: var(--bg-panel);
   border-top: 1px solid var(--border);
   font-size: 0.75rem;
   color: var(--text-dim);
 }
 
 .site-footer a { color: var(--green-dim); }
+
+/* Shared "glass pill" navigation treatment used by the lighter themes.
+   Theme blocks set the variables so structure stays in one place. */
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .home-btn,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .admin-header-link,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .mobile-board-menu-btn,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav-btn,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-list a {
+  border-radius: var(--glass-nav-radius, 999px);
+}
+
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .home-btn,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .admin-header-link,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .mobile-board-menu-btn,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav-btn,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn {
+  border-color: var(--glass-nav-control-border);
+  background: var(--glass-nav-control-bg);
+  box-shadow: var(--glass-nav-control-shadow);
+}
+
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-list a {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--glass-nav-link-bg);
+}
+
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn {
+  padding-left: 0.7rem;
+  padding-right: 0.7rem;
+}
+
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-list a:hover,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .home-btn:hover,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .admin-header-link:hover,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .mobile-board-menu-btn:hover,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav-btn:hover,
+html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover {
+  background: var(--glass-nav-hover-bg);
+}
 
 /* ── Responsive ───────────────────────────────────────────────────────────── */
 
@@ -2626,6 +2667,12 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
   --text-dim:     #486070;
   --font:         'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
   --font-display: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  --glass-nav-radius: 999px;
+  --glass-nav-control-border: rgba(90,155,200,0.32);
+  --glass-nav-control-bg: rgba(255,255,255,0.42);
+  --glass-nav-control-shadow: inset 0 1px 0 rgba(255,255,255,0.68);
+  --glass-nav-link-bg: rgba(255,255,255,0.28);
+  --glass-nav-hover-bg: rgba(255,255,255,0.56);
 }
 [data-theme="aero"] body {
   background: #deeef7;
@@ -2661,40 +2708,6 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
   border-color: #6aaed6; color: #0d5a8a;
   background: rgba(106,174,214,0.10);
   box-shadow: none;
-}
-[data-theme="aero"] .home-btn,
-[data-theme="aero"] .admin-header-link,
-[data-theme="aero"] .mobile-board-menu-btn,
-[data-theme="aero"] .thread-nav-btn,
-[data-theme="aero"] .post-toggle-btn,
-[data-theme="aero"] .board-list a {
-  border-radius: 999px;
-}
-[data-theme="aero"] .home-btn,
-[data-theme="aero"] .admin-header-link,
-[data-theme="aero"] .mobile-board-menu-btn,
-[data-theme="aero"] .thread-nav-btn,
-[data-theme="aero"] .post-toggle-btn {
-  border-color: rgba(90,155,200,0.32);
-  background: rgba(255,255,255,0.42);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.68);
-}
-[data-theme="aero"] .board-list a {
-  display: inline-block;
-  padding: 2px 8px;
-  background: rgba(255,255,255,0.28);
-}
-[data-theme="aero"] .post-toggle-btn {
-  padding-left: 0.7rem;
-  padding-right: 0.7rem;
-}
-[data-theme="aero"] .board-list a:hover,
-[data-theme="aero"] .home-btn:hover,
-[data-theme="aero"] .admin-header-link:hover,
-[data-theme="aero"] .mobile-board-menu-btn:hover,
-[data-theme="aero"] .thread-nav-btn:hover,
-[data-theme="aero"] .post-toggle-btn:hover {
-  background: rgba(255,255,255,0.56);
 }
 [data-theme="aero"] .board-card { border-radius: 8px; }
 [data-theme="aero"] .catalog-item { border-radius: 8px; }
@@ -2807,6 +2820,30 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
   --text-dim:     #8a7560;
   --font:         Georgia, 'Palatino Linotype', 'Book Antiqua', serif;
   --font-display: Georgia, 'Palatino Linotype', 'Book Antiqua', serif;
+  --forest-header-bg: #111a0e;
+  --forest-panel-bg: linear-gradient(180deg, rgba(55,40,24,0.98) 0%, rgba(43,31,19,0.98) 100%);
+  --forest-elevated-bg: linear-gradient(180deg, rgba(74,55,40,0.92) 0%, rgba(58,42,26,0.97) 100%);
+  --forest-panel-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  --forest-surface-border: #5c3d1e;
+  --forest-surface-hover-border: #7a5230;
+  --forest-link: #6fa84a;
+  --forest-link-visited: #4e7a35;
+  --forest-link-hover: #93cc65;
+  --forest-nav-text: #d4c4a0;
+  --forest-nav-hover-bg: rgba(122, 82, 48, 0.16);
+  --forest-nav-hover-text: #e8d8b0;
+  --forest-button-bg: #3e2610;
+  --forest-button-hover-bg: #5c3a18;
+  --forest-success-bg: #3a5c28;
+  --forest-success-border: #6fa84a;
+  --forest-success-hover-bg: #4b7333;
+  --forest-success-hover-border: #93cc65;
+  --forest-danger-bg: #4a2210;
+  --forest-danger-border: #7a3b20;
+  --forest-danger-hover-bg: #5e2b14;
+  --forest-danger-hover-border: #9b5232;
+  --forest-input-border: #3f2b14;
+  --forest-muted: #8a7560;
   --accept-btn-bg: #3a5c28;
   --accept-btn-accent: #93cc65;
   --accept-btn-fg: #d4e8c0;
@@ -2843,7 +2880,7 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 }
 [data-theme="forest"] .site-header,
 [data-theme="forest"] .site-footer {
-  background: #111a0e;
+  background: var(--forest-header-bg);
 }
 [data-theme="forest"] .site-header {
   border-bottom: 1px solid #5c3d1e;
@@ -2864,14 +2901,14 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 [data-theme="forest"] .admin-section,
 [data-theme="forest"] .catalog-item,
 [data-theme="forest"] .board-card {
-  background: linear-gradient(180deg, rgba(55,40,24,0.98) 0%, rgba(43,31,19,0.98) 100%);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  background: var(--forest-panel-bg);
+  box-shadow: var(--forest-panel-shadow);
 }
 [data-theme="forest"] .reply,
 [data-theme="forest"] .quotelink-popup,
 [data-theme="forest"] .mobile-board-menu-panel {
-  background: linear-gradient(180deg, rgba(74,55,40,0.92) 0%, rgba(58,42,26,0.97) 100%);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  background: var(--forest-elevated-bg);
+  box-shadow: var(--forest-panel-shadow);
 }
 [data-theme="forest"] .board-card,
 [data-theme="forest"] .catalog-item,
@@ -2880,21 +2917,21 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 [data-theme="forest"] .admin-section,
 [data-theme="forest"] .op,
 [data-theme="forest"] .reply {
-  border-color: #5c3d1e;
+  border-color: var(--forest-surface-border);
 }
 [data-theme="forest"] .reply:hover,
 [data-theme="forest"] .catalog-item:hover,
 [data-theme="forest"] .board-card:hover {
-  border-color: #7a5230;
+  border-color: var(--forest-surface-hover-border);
 }
 [data-theme="forest"] a {
-  color: #6fa84a;
+  color: var(--forest-link);
 }
 [data-theme="forest"] a:visited {
-  color: #4e7a35;
+  color: var(--forest-link-visited);
 }
 [data-theme="forest"] a:hover {
-  color: #93cc65;
+  color: var(--forest-link-hover);
   text-shadow: none;
 }
 [data-theme="forest"] .home-btn,
@@ -2903,8 +2940,8 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 [data-theme="forest"] .thread-nav-btn,
 [data-theme="forest"] .post-toggle-btn,
 [data-theme="forest"] .board-list a {
-  border-color: #5c3d1e;
-  color: #d4c4a0;
+  border-color: var(--forest-surface-border);
+  color: var(--forest-nav-text);
 }
 [data-theme="forest"] .home-btn:hover,
 [data-theme="forest"] .admin-header-link:hover,
@@ -2912,48 +2949,48 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 [data-theme="forest"] .thread-nav-btn:hover,
 [data-theme="forest"] .post-toggle-btn:hover,
 [data-theme="forest"] .board-list a:hover {
-  background: rgba(122, 82, 48, 0.16);
-  color: #e8d8b0 !important;
+  background: var(--forest-nav-hover-bg);
+  color: var(--forest-nav-hover-text) !important;
 }
 [data-theme="forest"] button,
 [data-theme="forest"] .btn,
 [data-theme="forest"] input[type="submit"] {
-  background: #3e2610;
-  border-color: #5c3d1e;
+  background: var(--forest-button-bg);
+  border-color: var(--forest-surface-border);
   color: #e8d8b0;
 }
 [data-theme="forest"] button:hover,
 [data-theme="forest"] .btn:hover,
 [data-theme="forest"] input[type="submit"]:hover {
-  background: #5c3a18;
-  border-color: #7a5230;
+  background: var(--forest-button-hover-bg);
+  border-color: var(--forest-surface-hover-border);
   color: #f1e6c8;
   box-shadow: none;
 }
 [data-theme="forest"] .post-form button[type="submit"],
 [data-theme="forest"] .compress-do-btn,
 [data-theme="forest"] .poll-vote-submit {
-  background: #3a5c28;
-  border-color: #6fa84a;
+  background: var(--forest-success-bg);
+  border-color: var(--forest-success-border);
   color: #d4e8c0;
 }
 [data-theme="forest"] .post-form button[type="submit"]:hover,
 [data-theme="forest"] .compress-do-btn:hover,
 [data-theme="forest"] .poll-vote-submit:hover {
-  background: #4b7333;
-  border-color: #93cc65;
+  background: var(--forest-success-hover-bg);
+  border-color: var(--forest-success-hover-border);
   color: #eff8e3;
 }
 [data-theme="forest"] .btn-danger,
 [data-theme="forest"] .compress-cancel-btn {
-  background: #4a2210;
-  border-color: #7a3b20;
+  background: var(--forest-danger-bg);
+  border-color: var(--forest-danger-border);
   color: #e8c0b0;
 }
 [data-theme="forest"] .btn-danger:hover,
 [data-theme="forest"] .compress-cancel-btn:hover {
-  background: #5e2b14;
-  border-color: #9b5232;
+  background: var(--forest-danger-hover-bg);
+  border-color: var(--forest-danger-hover-border);
   color: #f0d3c7;
 }
 [data-theme="forest"] .header-search input,
@@ -2967,7 +3004,7 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 [data-theme="forest"] .poll-option-row input {
   background: #221810;
   color: #d4c4a0;
-  border-color: #3f2b14;
+  border-color: var(--forest-input-border);
   box-shadow: inset 0 1px 2px rgba(0,0,0,0.45);
 }
 [data-theme="forest"] .header-search input:focus,
@@ -2979,7 +3016,7 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 [data-theme="forest"] .board-settings-grid input:focus,
 [data-theme="forest"] .poll-creator-row input:focus,
 [data-theme="forest"] .poll-option-row input:focus {
-  border-color: #7a5230;
+  border-color: var(--forest-surface-hover-border);
   outline: none;
 }
 [data-theme="forest"] .name {
@@ -3001,13 +3038,13 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 [data-theme="forest"] .board-desc,
 [data-theme="forest"] .site-footer,
 [data-theme="forest"] .site-footer a {
-  color: #8a7560;
+  color: var(--forest-muted);
 }
 [data-theme="forest"] .post-num,
 [data-theme="forest"] .post-ref,
 [data-theme="forest"] .post-body .quotelink,
 [data-theme="forest"] .backrefs .backref {
-  color: #6fa84a;
+  color: var(--forest-link);
 }
 [data-theme="forest"] .post-body .quote,
 [data-theme="forest"] .greentext,
@@ -3109,6 +3146,12 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
   --text-dim:     #504468;
   --font:         'Segoe UI', Arial, sans-serif;
   --font-display: 'Segoe UI', Arial, sans-serif;
+  --glass-nav-radius: 999px;
+  --glass-nav-control-border: rgba(130,206,206,0.42);
+  --glass-nav-control-bg: rgba(255,255,255,0.36);
+  --glass-nav-control-shadow: inset 0 1px 0 rgba(255,255,255,0.62);
+  --glass-nav-link-bg: rgba(255,255,255,0.22);
+  --glass-nav-hover-bg: rgba(255,255,255,0.48);
 }
 [data-theme="neoncubicle"] body {
   background: #f0f2f6;
@@ -3134,40 +3177,6 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
   background: rgba(74,184,200,0.09);
   border-color: #4ab8c8; color: #c84898;
   box-shadow: 0 0 7px rgba(200,72,152,0.18);
-}
-[data-theme="neoncubicle"] .home-btn,
-[data-theme="neoncubicle"] .admin-header-link,
-[data-theme="neoncubicle"] .mobile-board-menu-btn,
-[data-theme="neoncubicle"] .thread-nav-btn,
-[data-theme="neoncubicle"] .post-toggle-btn,
-[data-theme="neoncubicle"] .board-list a {
-  border-radius: 999px;
-}
-[data-theme="neoncubicle"] .home-btn,
-[data-theme="neoncubicle"] .admin-header-link,
-[data-theme="neoncubicle"] .mobile-board-menu-btn,
-[data-theme="neoncubicle"] .thread-nav-btn,
-[data-theme="neoncubicle"] .post-toggle-btn {
-  border-color: rgba(130,206,206,0.42);
-  background: rgba(255,255,255,0.36);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.62);
-}
-[data-theme="neoncubicle"] .board-list a {
-  display: inline-block;
-  padding: 2px 8px;
-  background: rgba(255,255,255,0.22);
-}
-[data-theme="neoncubicle"] .post-toggle-btn {
-  padding-left: 0.7rem;
-  padding-right: 0.7rem;
-}
-[data-theme="neoncubicle"] .board-list a:hover,
-[data-theme="neoncubicle"] .home-btn:hover,
-[data-theme="neoncubicle"] .admin-header-link:hover,
-[data-theme="neoncubicle"] .mobile-board-menu-btn:hover,
-[data-theme="neoncubicle"] .thread-nav-btn:hover,
-[data-theme="neoncubicle"] .post-toggle-btn:hover {
-  background: rgba(255,255,255,0.48);
 }
 [data-theme="neoncubicle"] .subject strong,
 [data-theme="neoncubicle"] .subject a {

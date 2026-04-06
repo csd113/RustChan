@@ -2,6 +2,26 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.1.3]
+
+### Improved
+
+- HTTP timeout handling is now more robust across the full request pipeline: `GET` and `HEAD` requests keep the fast 30-second cutoff, while slower write paths such as uploads, restores, and admin `POST`s are now covered by a longer request timeout instead of bypassing timeout protection entirely.
+- Proxy-aware HTTPS detection is now consistent with the server's trusted-proxy IP logic, so `X-Forwarded-Proto` only influences HSTS and secure-cookie decisions when the request actually came through a trusted private or loopback proxy hop.
+- Admin session cookie issuance is now wired through real connection metadata on login and restore flows, eliminating header-only protocol trust and keeping direct-access and proxied deployments aligned.
+- The shared site footer now stays pinned to the bottom of the viewport through a dedicated fixed-footer layout, while preserving the original homepage card grid and overall 1.1.2-style page flow.
+- Theme CSS internals are cleaner and safer to maintain: the fixed footer now uses one shared height variable with safe-area-aware body padding, Frutiger Aero and NeonCubicle now share one glass-pill navigation implementation, and the Forest theme now centralizes repeated surface, link, button, and input colors behind theme-scoped variables.
+
+### Fixed
+
+- Requests coming directly from untrusted public peers can no longer spoof `X-Forwarded-Proto` to make the app believe they arrived over HTTPS.
+- Timeout coverage no longer leaves upload-heavy and admin mutation endpoints outside the request-timeout middleware.
+
+### Validation
+
+- `cargo fmt --all`
+- `cargo test --quiet`
+
 ## [1.1.2]
 
 ### Added
