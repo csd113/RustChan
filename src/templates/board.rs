@@ -7,7 +7,7 @@
 //   archive_page     — archived threads list
 //   search_page      — search results
 
-use crate::models::{Board, Pagination, Post, Thread, ThreadSummary};
+use crate::models::{Board, Pagination, Post, Thread, ThreadSummary, SEARCH_QUERY_MAX_CHARS};
 use crate::utils::sanitize::escape_html;
 use std::collections::HashSet;
 use std::fmt::Write;
@@ -1017,13 +1017,14 @@ pub fn search_page(
         r#"<div class="page-box">
 <h2 style="color:var(--green-pale);font-size:0.9rem;margin-bottom:8px">search: "{}" in /{}/</h2>
 <form method="GET" action="/{}/search">
-  <input type="text" name="q" value="{}" maxlength="64" style="background:var(--bg-input);border:1px solid var(--border);color:var(--green-pale);padding:4px 8px;font-family:var(--font)">
+  <input type="text" name="q" value="{}" maxlength="{}" style="background:var(--bg-input);border:1px solid var(--border);color:var(--green-pale);padding:4px 8px;font-family:var(--font)">
   <button type="submit">search</button>
 </form>"#,
         escape_html(query),
         escape_html(&board.short_name),
         escape_html(&board.short_name),
         escape_html(query),
+        SEARCH_QUERY_MAX_CHARS,
     );
 
     if posts.is_empty() {

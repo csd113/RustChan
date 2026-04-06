@@ -4110,8 +4110,14 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
     flex: 1 1 100%;
   }
 
-  .header-search input {
+  .header-search .search-form {
     width: 100%;
+  }
+
+  .header-search input {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
     box-sizing: border-box;
   }
 

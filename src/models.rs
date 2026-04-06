@@ -309,8 +309,11 @@ pub struct PollData {
 }
 
 /// Search query
+pub const SEARCH_QUERY_MAX_CHARS: usize = 256;
+
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
+    #[serde(default)]
     pub q: String,
     #[serde(default = "default_page")]
     pub page: i64,

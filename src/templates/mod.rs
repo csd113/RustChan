@@ -15,7 +15,7 @@
 //   forms.rs  — new_thread_form, reply_form
 
 use crate::config::CONFIG;
-use crate::models::{Board, Pagination, Theme};
+use crate::models::{Board, Pagination, Theme, SEARCH_QUERY_MAX_CHARS};
 use crate::utils::sanitize::escape_html;
 use chrono::{TimeZone, Utc};
 use parking_lot::RwLock;
@@ -479,10 +479,11 @@ pub fn base_layout(
     let search_bar = board_short.map_or_else(String::new, |b| {
         format!(
             r#"<form class="search-form" method="GET" action="/{b}/search">
-<input type="text" name="q" placeholder="search /{b}/…" maxlength="64">
+<input type="text" name="q" placeholder="search /{b}/…" maxlength="{max_len}">
 <button type="submit">go</button>
 </form>"#,
-            b = escape_html(b)
+            b = escape_html(b),
+            max_len = SEARCH_QUERY_MAX_CHARS
         )
     });
 

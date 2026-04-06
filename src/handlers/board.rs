@@ -14,7 +14,7 @@ use crate::{
     error::{AppError, Result},
     handlers::{parse_post_multipart, posting, render},
     middleware::{validate_csrf, AppState},
-    models::{Pagination, SearchQuery},
+    models::{Pagination, SearchQuery, SEARCH_QUERY_MAX_CHARS},
     templates,
     utils::{
         crypto::{hash_ip, new_csrf_token, verify_pow},
@@ -770,7 +770,7 @@ pub async fn search(
     let (jar, csrf) = ensure_csrf(jar);
 
     // Cap query length to prevent excessively large LIKE pattern scans.
-    let query_str: String = q.q.trim().chars().take(256).collect();
+    let query_str: String = q.q.trim().chars().take(SEARCH_QUERY_MAX_CHARS).collect();
     let page = q.page.max(1);
 
     let html = tokio::task::spawn_blocking({
@@ -1422,10 +1422,103 @@ mod tests {
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
-        routing::post,
+        routing::{get, post},
         Router,
     };
     use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn search_returns_results_without_500() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let board_id =
+                crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            let post = crate::db::NewPost {
+                thread_id: 0,
+                board_id,
+                name: "anon".to_string(),
+                tripcode: None,
+                subject: Some("subject".to_string()),
+                body: "rust search body".to_string(),
+                body_html: "rust search body".to_string(),
+                ip_hash: None,
+                file_path: None,
+                file_name: None,
+                file_size: None,
+                thumb_path: None,
+                mime_type: None,
+                media_type: None,
+                audio_file_path: None,
+                audio_file_name: None,
+                audio_file_size: None,
+                audio_mime_type: None,
+                deletion_token: "token".to_string(),
+                is_op: true,
+            };
+            crate::db::create_thread_with_optional_poll(&conn, board_id, None, &post, None, None)
+                .expect("create thread");
+        }
+
+        let router = Router::new()
+            .route("/{board}/search", get(super::search))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/test/search?q=rust")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains("rust search body"));
+    }
+
+    #[tokio::test]
+    async fn search_without_q_param_returns_empty_results_page() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/{board}/search", get(super::search))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/test/search")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains("no results found."));
+    }
 
     #[tokio::test]
     async fn create_thread_accepts_valid_multipart_submission() {

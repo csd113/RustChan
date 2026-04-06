@@ -549,7 +549,9 @@ fn search_terms(query: &str) -> Vec<String> {
 
     for ch in query.chars() {
         if ch.is_alphanumeric() {
-            current.push(ch);
+            for lower in ch.to_lowercase() {
+                current.push(lower);
+            }
             continue;
         }
 
@@ -597,11 +599,12 @@ pub fn search_posts(
         return Ok(Vec::new());
     };
     let mut stmt = conn.prepare_cached(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at
+        "SELECT posts.id, posts.thread_id, posts.board_id, posts.name, posts.tripcode,
+                posts.subject, posts.body, posts.body_html, posts.ip_hash,
+                posts.file_path, posts.file_name, posts.file_size, posts.thumb_path,
+                posts.mime_type, posts.created_at, posts.deletion_token, posts.is_op,
+                posts.media_type, posts.audio_file_path, posts.audio_file_name,
+                posts.audio_file_size, posts.audio_mime_type, posts.edited_at
          FROM posts
          JOIN posts_fts ON posts_fts.rowid = posts.id
          WHERE posts.board_id = ?1 AND posts_fts MATCH ?2
@@ -1060,7 +1063,49 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{search_terms, to_fts_query};
+    use super::{count_search_results, search_posts, search_terms, to_fts_query};
+    use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
+    use rusqlite::Connection;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        super::super::schema::create_schema(&conn).expect("create schema");
+        conn
+    }
+
+    fn seed_search_post(conn: &Connection, board_short: &str, body: &str) -> i64 {
+        create_board(conn, board_short, board_short, "", false).expect("create board");
+        let board = get_board_by_short(conn, board_short)
+            .expect("load board")
+            .expect("board exists");
+        let post = NewPost {
+            thread_id: 0,
+            board_id: board.id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some(format!("{board_short} subject")),
+            body: body.to_string(),
+            body_html: body.to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: true,
+        };
+        let (thread_id, post_id, _) =
+            create_thread_with_optional_poll(conn, board.id, None, &post, None, None)
+                .expect("create thread");
+        assert!(thread_id > 0);
+        post_id
+    }
 
     #[test]
     fn search_query_ignores_punctuation_only_input() {
@@ -1080,11 +1125,76 @@ mod tests {
     fn search_query_keeps_text_terms_usable() {
         assert_eq!(
             search_terms("rock'n'roll C++ anime"),
-            vec!["rock", "n", "roll", "C", "anime"]
+            vec!["rock", "n", "roll", "c", "anime"]
         );
         assert_eq!(
             to_fts_query("hello world"),
             Some("\"hello\"* AND \"world\"*".to_string())
         );
+    }
+
+    #[test]
+    fn search_query_lowercases_even_when_token_cap_is_hit() {
+        assert_eq!(
+            search_terms("A B C D E F G H I J K L M"),
+            vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
+        );
+    }
+
+    #[test]
+    fn search_posts_reads_joined_fts_rows_without_ambiguous_columns() {
+        let conn = test_conn();
+        seed_search_post(&conn, "tech", "rust search body");
+        let board = get_board_by_short(&conn, "tech")
+            .expect("load board")
+            .expect("board exists");
+
+        let posts = search_posts(&conn, board.id, "rust", 20, 0).expect("search posts");
+
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].body, "rust search body");
+    }
+
+    #[test]
+    fn search_posts_stays_scoped_to_board() {
+        let conn = test_conn();
+        seed_search_post(&conn, "tech", "shared rust term");
+        seed_search_post(&conn, "meta", "shared rust term");
+        let tech = get_board_by_short(&conn, "tech")
+            .expect("load tech board")
+            .expect("tech board exists");
+
+        let posts = search_posts(&conn, tech.id, "rust", 20, 0).expect("search posts");
+        let total = count_search_results(&conn, tech.id, "rust").expect("count search results");
+
+        assert_eq!(posts.len(), 1);
+        assert_eq!(total, 1);
+        assert_eq!(posts[0].board_id, tech.id);
+    }
+
+    #[test]
+    fn search_posts_matches_case_insensitively() {
+        let conn = test_conn();
+        seed_search_post(&conn, "tech", "AI will find this");
+        let board = get_board_by_short(&conn, "tech")
+            .expect("load board")
+            .expect("board exists");
+
+        let posts = search_posts(&conn, board.id, "ai", 20, 0).expect("search posts");
+        let total = count_search_results(&conn, board.id, "ai").expect("count search results");
+
+        assert_eq!(posts.len(), 1);
+        assert_eq!(total, 1);
+        assert_eq!(posts[0].body, "AI will find this");
+    }
+
+    #[test]
+    fn search_posts_ignores_punctuation_only_queries_without_error() {
+        let conn = test_conn();
+        let total = count_search_results(&conn, 1, ">>1 ' \" %").expect("count search results");
+        let posts = search_posts(&conn, 1, ">>1 ' \" %", 20, 0).expect("search posts");
+
+        assert_eq!(total, 0);
+        assert!(posts.is_empty());
     }
 }
