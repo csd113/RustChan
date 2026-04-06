@@ -23,7 +23,7 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
         display_name: "Frutiger Aero",
         description: "Bright glossy blues with soft rounded chrome.",
         swatch_hex: "#6aaed6",
-        sort_order: 20,
+        sort_order: 55,
     },
     BuiltinTheme {
         slug: "dorfic",

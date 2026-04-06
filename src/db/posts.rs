@@ -1229,7 +1229,10 @@ mod tests {
         let posts = search_posts(&conn, board.id, "rust", 20, 0).expect("search posts");
 
         assert_eq!(posts.len(), 1);
-        assert_eq!(posts[0].body, "rust search body");
+        assert_eq!(
+            posts.first().map(|post| post.body.as_str()),
+            Some("rust search body")
+        );
     }
 
     #[test]
@@ -1246,7 +1249,7 @@ mod tests {
 
         assert_eq!(posts.len(), 1);
         assert_eq!(total, 1);
-        assert_eq!(posts[0].board_id, tech.id);
+        assert_eq!(posts.first().map(|post| post.board_id), Some(tech.id));
     }
 
     #[test]
@@ -1262,7 +1265,10 @@ mod tests {
 
         assert_eq!(posts.len(), 1);
         assert_eq!(total, 1);
-        assert_eq!(posts[0].body, "AI will find this");
+        assert_eq!(
+            posts.first().map(|post| post.body.as_str()),
+            Some("AI will find this")
+        );
     }
 
     #[test]

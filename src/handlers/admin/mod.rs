@@ -42,12 +42,12 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
+use axum_extra::extract::cookie::SameSite;
+use dashmap::DashMap;
 use serde::Deserialize;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::IpAddr;
 use std::net::SocketAddr;
-use axum_extra::extract::cookie::SameSite;
-use dashmap::DashMap;
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -191,7 +191,10 @@ pub(super) fn should_set_secure_cookie(headers: &HeaderMap, peer: Option<SocketA
 }
 
 fn host_header_uses_https_port(headers: &HeaderMap) -> bool {
-    let Some(host) = headers.get(header::HOST).and_then(|value| value.to_str().ok()) else {
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
         return false;
     };
 
@@ -403,7 +406,8 @@ pub async fn admin_panel(
     let mut jar = jar;
     if session_id.is_none() {
         if let Some(bootstrap_token) = params.bootstrap.as_deref() {
-            if let Some(bootstrapped_session_id) = consume_admin_session_bootstrap(bootstrap_token) {
+            if let Some(bootstrapped_session_id) = consume_admin_session_bootstrap(bootstrap_token)
+            {
                 let mut cookie = axum_extra::extract::cookie::Cookie::new(
                     SESSION_COOKIE,
                     bootstrapped_session_id.clone(),
@@ -563,6 +567,28 @@ fn read_log_tail(path: &std::path::Path, max_bytes: usize) -> Result<(String, bo
     Ok((content, truncated))
 }
 
+fn admin_bootstrap_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+pub(super) fn create_admin_session_bootstrap(session_id: &str) -> String {
+    let token = crate::utils::crypto::new_session_id();
+    let expires_at = admin_bootstrap_now_secs().saturating_add(ADMIN_BOOTSTRAP_TTL_SECS);
+    ADMIN_SESSION_BOOTSTRAPS.insert(token.clone(), (session_id.to_string(), expires_at));
+    token
+}
+
+pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
+    let now = admin_bootstrap_now_secs();
+    ADMIN_SESSION_BOOTSTRAPS.retain(|_, (_, expires_at)| *expires_at > now);
+
+    let (session_id, expires_at) = ADMIN_SESSION_BOOTSTRAPS.remove(token)?.1;
+    (expires_at > now).then_some(session_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -600,7 +626,10 @@ mod tests {
     fn https_host_port_marks_request_secure() {
         let mut headers = HeaderMap::new();
         let host = format!("example.test:{}", crate::config::CONFIG.tls.port);
-        headers.insert(header::HOST, HeaderValue::from_str(&host).expect("host header"));
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_str(&host).expect("host header"),
+        );
         assert!(host_header_uses_https_port(&headers));
     }
 
@@ -664,26 +693,4 @@ mod tests {
         assert!(truncated);
         assert!(content.contains("line3"));
     }
-}
-
-fn admin_bootstrap_now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-pub(super) fn create_admin_session_bootstrap(session_id: &str) -> String {
-    let token = crate::utils::crypto::new_session_id();
-    let expires_at = admin_bootstrap_now_secs().saturating_add(ADMIN_BOOTSTRAP_TTL_SECS);
-    ADMIN_SESSION_BOOTSTRAPS.insert(token.clone(), (session_id.to_string(), expires_at));
-    token
-}
-
-pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
-    let now = admin_bootstrap_now_secs();
-    ADMIN_SESSION_BOOTSTRAPS.retain(|_, (_, expires_at)| *expires_at > now);
-
-    let (session_id, expires_at) = ADMIN_SESSION_BOOTSTRAPS.remove(token)?.1;
-    (expires_at > now).then_some(session_id)
 }

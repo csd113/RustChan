@@ -1466,8 +1466,10 @@ mod tests {
                 deletion_token: "token".to_string(),
                 is_op: true,
             };
-            crate::db::create_thread_with_optional_poll(&conn, board_id, None, &post, "", None, None)
-                .expect("create thread");
+            crate::db::create_thread_with_optional_poll(
+                &conn, board_id, None, &post, "", None, None,
+            )
+            .expect("create thread");
         }
 
         let router = Router::new()

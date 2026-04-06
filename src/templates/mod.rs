@@ -582,19 +582,19 @@ pub fn base_layout(
 {body}
 </main>
 <footer class="site-footer">
-  <p>{forum_name} &mdash; <a href="/">home</a></p>
-  <nav class="theme-picker-fallback" aria-label="Theme selector">
-    <span class="theme-picker-fallback-title">Theme:</span>
-    {theme_picker_fallback}
-  </nav>
+  <p class="site-footer-copy">{forum_name} &mdash; <a href="/">home</a></p>
+  <div class="site-footer-theme">
+    <nav class="theme-picker-fallback" aria-label="Theme selector">
+      <span class="theme-picker-fallback-title">Theme:</span>
+      {theme_picker_fallback}
+    </nav>
+    <button id="theme-picker-btn" data-action="toggle-theme-picker" title="Select Theme">&#127912; Theme</button>
+    <div id="theme-picker-panel">
+      <div class="tp-title">// SELECT THEME</div>
+      {theme_picker_panel}
+    </div>
+  </div>
 </footer>
-
-<!-- Theme Picker — onclick= replaced with data-action= attributes -->
-<button id="theme-picker-btn" data-action="toggle-theme-picker" title="Select Theme">&#127912; Theme</button>
-<div id="theme-picker-panel">
-  <div class="tp-title">// SELECT THEME</div>
-  {theme_picker_panel}
-</div>
 
 <input type="hidden" id="csrf_global" value="{csrf_token}">
 <script src="{main_js_src}" defer></script>

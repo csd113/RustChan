@@ -29,9 +29,9 @@ use axum_extra::extract::cookie::{Cookie, CookieJar};
 use chrono::Utc;
 use dashmap::DashMap;
 use serde::Deserialize;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
-use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use time;
 use tracing::warn;
@@ -174,7 +174,10 @@ fn ensure_admin_login_csrf(
     cookie.set_path("/");
     cookie.set_secure(super::should_set_secure_cookie(headers, peer));
 
-    (jar.add(cookie), make_csrf_form_token(&token, &CONFIG.cookie_secret))
+    (
+        jar.add(cookie),
+        make_csrf_form_token(&token, &CONFIG.cookie_secret),
+    )
 }
 
 // ─── GET /admin ───────────────────────────────────────────────────────────────
@@ -579,7 +582,10 @@ mod tests {
             .filter_map(|value| value.to_str().ok())
             .find(|value| value.contains(super::super::SESSION_COOKIE))
             .expect("session cookie");
-        assert_eq!(session_cookie.contains("Secure"), crate::config::CONFIG.https_cookies);
+        assert_eq!(
+            session_cookie.contains("Secure"),
+            crate::config::CONFIG.https_cookies
+        );
     }
 
     #[tokio::test]
