@@ -2234,6 +2234,7 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 .admin-dropdown-content {
   padding: 0 14px 14px;
   border-top: 1px solid var(--border);
+  min-width: 0;
 }
 
 #theme-catalog .admin-dropdown-content {
@@ -2252,12 +2253,14 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   grid-template-columns: 1fr;
   gap: 12px;
   margin-top: 12px;
+  min-width: 0;
 }
 
 .admin-moderation-card {
   background: transparent;
   border: 0;
   padding: 0;
+  min-width: 0;
 }
 
 .admin-card-header {
@@ -2730,6 +2733,31 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   .admin-table th,
   .admin-table td {
     padding: 6px 7px;
+  }
+
+  .admin-moderation-card .admin-table,
+  .admin-moderation-card .admin-table thead,
+  .admin-moderation-card .admin-table tbody,
+  .admin-moderation-card .admin-table tfoot,
+  .admin-moderation-card .admin-table-wrap > table {
+    min-width: 22rem;
+  }
+
+  .admin-moderation-card .admin-table {
+    font-size: 0.74rem;
+  }
+
+  .admin-moderation-card .admin-table th,
+  .admin-moderation-card .admin-table td {
+    padding: 5px 6px;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .admin-moderation-card .admin-table th:last-child,
+  .admin-moderation-card .admin-table td:last-child {
+    white-space: nowrap;
   }
 }
 
