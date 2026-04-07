@@ -3,6 +3,7 @@
 use crate::{
     error::{AppError, Result},
     middleware::{backup_phase, BackupProgress},
+    models::BackupBoardSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Seek;
@@ -22,6 +23,8 @@ pub(super) struct FullBackupManifest {
     pub db_bytes: u64,
     pub upload_file_count: u64,
     pub favicon_file_count: u64,
+    #[serde(default)]
+    pub boards: Vec<BackupBoardSummary>,
 }
 
 pub(super) fn log_backup_phase(phase: u64) {
@@ -266,23 +269,7 @@ pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> 
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|error| AppError::BadRequest(format!("Invalid zip backup: {error}")))?;
 
-    let manifest: FullBackupManifest = {
-        let mut entry = archive.by_name(FULL_BACKUP_MANIFEST_NAME).map_err(|_| {
-            AppError::BadRequest(format!(
-                "Invalid full backup: missing {FULL_BACKUP_MANIFEST_NAME}"
-            ))
-        })?;
-        let bytes = read_limited_bytes(
-            &mut entry,
-            BOARD_MANIFEST_MAX_BYTES,
-            FULL_BACKUP_MANIFEST_NAME,
-        )?;
-        serde_json::from_slice(&bytes).map_err(|error| {
-            AppError::BadRequest(format!(
-                "Invalid full backup manifest {FULL_BACKUP_MANIFEST_NAME}: {error}"
-            ))
-        })?
-    };
+    let manifest = read_full_backup_manifest_from_archive(&mut archive)?;
 
     let mut db_entry = archive.by_name("chan.db").map_err(|_| {
         AppError::BadRequest("Invalid full backup: zip must contain 'chan.db' at the root.".into())
@@ -330,6 +317,26 @@ pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> 
     }
 
     Ok(manifest)
+}
+
+pub(super) fn read_full_backup_manifest_from_archive<R: std::io::Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<FullBackupManifest> {
+    let mut entry = archive.by_name(FULL_BACKUP_MANIFEST_NAME).map_err(|_| {
+        AppError::BadRequest(format!(
+            "Invalid full backup: missing {FULL_BACKUP_MANIFEST_NAME}"
+        ))
+    })?;
+    let bytes = read_limited_bytes(
+        &mut entry,
+        BOARD_MANIFEST_MAX_BYTES,
+        FULL_BACKUP_MANIFEST_NAME,
+    )?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        AppError::BadRequest(format!(
+            "Invalid full backup manifest {FULL_BACKUP_MANIFEST_NAME}: {error}"
+        ))
+    })
 }
 
 pub(super) fn verify_board_backup_zip(
@@ -418,6 +425,10 @@ mod tests {
             db_bytes: 4096,
             upload_file_count: 1,
             favicon_file_count: 1,
+            boards: vec![crate::models::BackupBoardSummary {
+                short_name: "b".into(),
+                name: "Random".into(),
+            }],
         };
         let manifest_json = serde_json::to_vec(&manifest).expect("manifest json");
         write_zip(
@@ -433,6 +444,7 @@ mod tests {
         let verified = verify_full_backup_zip(&zip_path).expect("verify full backup");
         assert_eq!(verified.upload_file_count, 1);
         assert_eq!(verified.favicon_file_count, 1);
+        assert_eq!(verified.boards.len(), 1);
     }
 
     #[test]

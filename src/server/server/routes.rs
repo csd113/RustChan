@@ -293,6 +293,10 @@ fn admin_backup_routes() -> Router<AppState> {
             post(crate::handlers::admin::restore_saved_full_backup),
         )
         .route(
+            "/admin/backup/extract-board",
+            post(crate::handlers::admin::extract_board_from_full_backup),
+        )
+        .route(
             "/admin/board/backup/restore-saved",
             post(crate::handlers::admin::restore_saved_board_backup),
         )

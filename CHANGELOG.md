@@ -16,6 +16,7 @@ All notable changes to RustChan will be documented in this file.
 - The theme picker now lives in a footer-docked control bar on both desktop and mobile, giving theme switching one consistent home and keeping it from floating over page content.
 - Backup and media-processing observability are stronger: posts now expose pending and failed async media state, `/readyz` and `/metrics` report media backlog, backup freshness, and maintenance activity, and the admin panel surfaces backup verification health instead of assuming saved ZIPs are restorable.
 - Heavy admin maintenance now coordinates through a shared maintenance gate and less aggressive background scheduling, so backups, restores, integrity checks, repair, and scheduled `VACUUM`/WAL work are less likely to pile onto live request traffic or each other.
+- Full backup recovery is now more flexible without adding scheduler clutter: new full backups record the boards they contain, and the admin panel can derive a single-board restore or downloadable board backup directly from a saved full-site archive.
 
 ### Fixed
 
@@ -34,6 +35,7 @@ All notable changes to RustChan will be documented in this file.
 - Background media processing now degrades more honestly under pressure: queue-capacity drops and permanent worker failures are persisted onto the post, failed previews fall back to the original file link, and operators can see pending and failed media work instead of silently missing thumbnails or waveforms.
 - Saved backups are now verified before they are exposed as healthy: full backups include a manifest and SQLite-header checks, board backups are validated before save and in the admin listing, and backup freshness/verification status is now visible in both the admin UI and readiness metrics.
 - Admin backup progress polling no longer conflicts with the maintenance lock during an active backup or restore, and failed backup builds now clean up temporary artifacts instead of leaving behind stale `.tmp` ZIPs or database snapshots.
+- Saved full backups are now easier to work with on desktop and mobile: backup table actions stack more cleanly, per-row board extraction stays collapsed until needed, and older full backups without the new board index can still be extracted by entering a board short name manually.
 
 ### Validation
 

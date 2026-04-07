@@ -459,33 +459,96 @@ pub fn admin_panel_page(
                 title = escape_html(&bf.verification_note)
             )
         };
+        let board_options = bf
+            .boards
+            .iter()
+            .map(|board| {
+                format!(
+                    r#"<option value="{short}">/{short}/ — {name}</option>"#,
+                    short = escape_html(&board.short_name),
+                    name = escape_html(&board.name)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        let board_picker = if bf.boards.is_empty() {
+            r#"<label>
+        Board short name
+        <input type="text" name="board_short" maxlength="8" pattern="[A-Za-z0-9]{1,8}" required placeholder="tech">
+      </label>"#
+                .to_string()
+        } else {
+            format!(
+                r#"<label>
+        Board
+        <select name="board_short" required>
+          <option value="">Select a board</option>
+          {board_options}
+        </select>
+      </label>"#
+            )
+        };
+        let board_help = if bf.boards.is_empty() {
+            "This backup predates board indexing. Enter the board short name manually, like tech or b."
+        } else {
+            "Pick a board from this backup to restore it directly or download a board-only package."
+        };
+        let indexed_boards_summary = if bf.boards.is_empty() {
+            "boards not indexed".to_string()
+        } else {
+            format!("{} boards indexed", bf.boards.len())
+        };
         let _ = write!(
             full_backup_rows,
             r#"<tr>
-<td style="word-break:break-all">{fname}</td>
-<td style="white-space:nowrap">{size}</td>
-<td style="white-space:nowrap">{modified}</td>
-<td style="white-space:nowrap">{status}</td>
-<td style="white-space:nowrap">
-  <a href="/admin/backup/download/full/{fname}" class="backup-download-link" data-backup-label="full backup" style="margin-right:0.4rem">&#8659; download to computer</a>
-  <form method="POST" action="/admin/backup/restore-saved" style="display:inline;margin-right:0.4rem">
-    <input type="hidden" name="_csrf" value="{csrf}">
-    <input type="hidden" name="filename" value="{fname}">
-    <button type="submit" data-confirm="WARNING: Restore from {fname}? This will overwrite the live database and all uploads. Cannot be undone.">&#8635; restore</button>
-  </form>
-  <form method="POST" action="/admin/backup/delete" style="display:inline">
-    <input type="hidden" name="_csrf" value="{csrf}">
-    <input type="hidden" name="kind" value="full">
-    <input type="hidden" name="filename" value="{fname}">
-    <button type="submit" class="btn-danger" data-confirm="Delete {fname}? This cannot be undone.">&#10005; delete</button>
-  </form>
+<td class="backup-filename-cell">
+  <div class="backup-filename">{fname}</div>
+  <div class="backup-submeta">{indexed_boards_summary}</div>
+</td>
+<td class="backup-meta-cell">{size}</td>
+<td class="backup-meta-cell">{modified}</td>
+<td class="backup-status-cell">{status}</td>
+<td class="backup-actions-cell">
+  <div class="backup-actions-stack">
+    <div class="backup-primary-actions">
+      <a href="/admin/backup/download/full/{fname}" class="backup-download-link" data-backup-label="full backup">&#8659; download zip</a>
+      <form method="POST" action="/admin/backup/restore-saved" class="backup-inline-form">
+        <input type="hidden" name="_csrf" value="{csrf}">
+        <input type="hidden" name="filename" value="{fname}">
+        <button type="submit" data-confirm="WARNING: Restore from {fname}? This will overwrite the live database and all uploads. Cannot be undone.">&#8635; restore site</button>
+      </form>
+      <form method="POST" action="/admin/backup/delete" class="backup-inline-form">
+        <input type="hidden" name="_csrf" value="{csrf}">
+        <input type="hidden" name="kind" value="full">
+        <input type="hidden" name="filename" value="{fname}">
+        <button type="submit" class="btn-danger" data-confirm="Delete {fname}? This cannot be undone.">&#10005; delete</button>
+      </form>
+    </div>
+    <details class="backup-extract-details">
+      <summary>board tools</summary>
+      <form method="POST" action="/admin/backup/extract-board" class="backup-extract-form">
+        <input type="hidden" name="_csrf" value="{csrf}">
+        <input type="hidden" name="filename" value="{fname}">
+        {board_picker}
+        <p class="backup-extract-help">{board_help}</p>
+        <div class="backup-extract-actions">
+          <button type="submit" name="action" value="download">download board zip</button>
+          <button type="submit" name="action" value="restore" class="btn-danger"
+                  data-confirm="WARNING: Restore one board from {fname}? This will wipe and replace that board only. Continue?">&#8635; restore board</button>
+        </div>
+      </form>
+    </details>
+  </div>
 </td>
 </tr>"#,
             fname = escape_html(&bf.filename),
+            indexed_boards_summary = escape_html(&indexed_boards_summary),
             size = size_fmt,
             modified = escape_html(&bf.modified),
             status = status_html,
-            csrf = escape_html(csrf_token)
+            csrf = escape_html(csrf_token),
+            board_picker = board_picker,
+            board_help = escape_html(board_help),
         );
     }
 
@@ -512,23 +575,29 @@ pub fn admin_panel_page(
         let _ = write!(
             board_backup_rows,
             r#"<tr>
-<td style="word-break:break-all">{fname}</td>
-<td style="white-space:nowrap">{size}</td>
-<td style="white-space:nowrap">{modified}</td>
-<td style="white-space:nowrap">{status}</td>
-<td style="white-space:nowrap">
-  <a href="/admin/backup/download/board/{fname}" class="backup-download-link" data-backup-label="board backup" style="margin-right:0.4rem">&#8659; download to computer</a>
-  <form method="POST" action="/admin/board/backup/restore-saved" style="display:inline;margin-right:0.4rem">
-    <input type="hidden" name="_csrf" value="{csrf}">
-    <input type="hidden" name="filename" value="{fname}">
-    <button type="submit" data-confirm="WARNING: Restore board from {fname}? This will wipe and replace that board. Cannot be undone.">&#8635; restore</button>
-  </form>
-  <form method="POST" action="/admin/backup/delete" style="display:inline">
-    <input type="hidden" name="_csrf" value="{csrf}">
-    <input type="hidden" name="kind" value="board">
-    <input type="hidden" name="filename" value="{fname}">
-    <button type="submit" class="btn-danger" data-confirm="Delete {fname}? This cannot be undone.">&#10005; delete</button>
-  </form>
+<td class="backup-filename-cell">
+  <div class="backup-filename">{fname}</div>
+</td>
+<td class="backup-meta-cell">{size}</td>
+<td class="backup-meta-cell">{modified}</td>
+<td class="backup-status-cell">{status}</td>
+<td class="backup-actions-cell">
+  <div class="backup-actions-stack">
+    <div class="backup-primary-actions">
+      <a href="/admin/backup/download/board/{fname}" class="backup-download-link" data-backup-label="board backup">&#8659; download zip</a>
+      <form method="POST" action="/admin/board/backup/restore-saved" class="backup-inline-form">
+        <input type="hidden" name="_csrf" value="{csrf}">
+        <input type="hidden" name="filename" value="{fname}">
+        <button type="submit" data-confirm="WARNING: Restore board from {fname}? This will wipe and replace that board. Cannot be undone.">&#8635; restore board</button>
+      </form>
+      <form method="POST" action="/admin/backup/delete" class="backup-inline-form">
+        <input type="hidden" name="_csrf" value="{csrf}">
+        <input type="hidden" name="kind" value="board">
+        <input type="hidden" name="filename" value="{fname}">
+        <button type="submit" class="btn-danger" data-confirm="Delete {fname}? This cannot be undone.">&#10005; delete</button>
+      </form>
+    </div>
+  </div>
 </td>
 </tr>"#,
             fname = escape_html(&bf.filename),
@@ -1077,7 +1146,7 @@ button / button:hover</pre>
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// full site backup &amp; restore</h2>
-<p style="color:var(--text-dim);font-size:0.85rem">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/backups/full/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer.</p>
+<p style="color:var(--text-dim);font-size:0.85rem">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/backups/full/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer. Saved full backups can also be used to extract or directly restore a single board without scheduling separate per-board backups.</p>
 {backup_warning_html}
 <p style="color:var(--text-dim);font-size:0.85rem"><strong>Backup health:</strong> {backup_status_line}</p>
 <div class="admin-inline-actions" style="margin-top:0.75rem;margin-bottom:0.75rem">
@@ -1093,7 +1162,7 @@ button / button:hover</pre>
 </form>
 </div>
 <div class="admin-table-wrap">
-<table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+<table class="admin-table backup-table" style="width:100%;border-collapse:collapse;font-size:0.85rem">
 <thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th style="text-align:left">status</th><th></th></tr></thead>
 <tbody>{full_backup_rows}</tbody>
 </table>
@@ -1115,7 +1184,7 @@ button / button:hover</pre>
 </form>
 </div>
 <div class="admin-table-wrap">
-<table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+<table class="admin-table backup-table" style="width:100%;border-collapse:collapse;font-size:0.85rem">
 <thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th style="text-align:left">status</th><th></th></tr></thead>
 <tbody>{board_backup_rows}</tbody>
 </table>

@@ -443,6 +443,13 @@ pub struct ModLogEntry {
 }
 
 /// Represents a saved backup file on disk (shown in admin panel).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupBoardSummary {
+    pub short_name: String,
+    pub name: String,
+}
+
+/// Represents a saved backup file on disk (shown in admin panel).
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupInfo {
     /// Filename only (no directory path).
@@ -457,6 +464,8 @@ pub struct BackupInfo {
     pub verified: bool,
     /// Short note describing verification status or the detected problem.
     pub verification_note: String,
+    /// Boards indexed inside the backup when available.
+    pub boards: Vec<BackupBoardSummary>,
 }
 
 /// A user-submitted ban appeal

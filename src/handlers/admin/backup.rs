@@ -178,6 +178,34 @@ fn format_magic_bytes(bytes: &[u8]) -> String {
         .join(" ")
 }
 
+fn sanitize_backup_zip_filename(filename: &str) -> Result<String> {
+    let safe_filename: String = filename
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+        .collect();
+    if safe_filename != filename
+        || safe_filename.contains("..")
+        || !Path::new(&safe_filename)
+            .extension()
+            .is_some_and(|e: &std::ffi::OsStr| e.eq_ignore_ascii_case("zip"))
+    {
+        return Err(AppError::BadRequest("Invalid filename.".into()));
+    }
+    Ok(safe_filename)
+}
+
+fn sanitize_board_short_value(board_short: &str) -> Result<String> {
+    let safe_board = board_short
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect::<String>();
+    if safe_board.is_empty() {
+        return Err(AppError::BadRequest("Invalid board name.".into()));
+    }
+    Ok(safe_board)
+}
+
 pub(super) fn parse_board_backup_manifest_from_zip<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<board_backup_types::BoardBackupManifest> {
@@ -976,6 +1004,130 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     }
 }
 
+fn extract_sqlite_db_from_full_backup_archive<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    temp_db: &Path,
+) -> Result<()> {
+    let mut db_entry = archive.by_name("chan.db").map_err(|_| {
+        AppError::BadRequest("Invalid full backup: zip must contain 'chan.db' at the root.".into())
+    })?;
+    let mut out = std::fs::File::create(temp_db)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Create temp DB: {error}")))?;
+    copy_limited(&mut db_entry, &mut out, ZIP_ENTRY_MAX_BYTES)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Write temp DB: {error}")))?;
+    drop(out);
+
+    let mut header = [0u8; 16];
+    let mut file = std::fs::File::open(temp_db)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Open temp DB: {error}")))?;
+    std::io::Read::read_exact(&mut file, &mut header).map_err(|error| {
+        AppError::BadRequest(format!("Invalid full backup database entry: {error}"))
+    })?;
+    if header.as_slice() != SQLITE_HEADER {
+        return Err(AppError::BadRequest(
+            "Invalid full backup: chan.db does not look like a SQLite database.".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn copy_board_upload_entries_from_full_backup<R: std::io::Read + std::io::Seek, W: Write + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    zip: &mut zip::ZipWriter<W>,
+    board_short: &str,
+) -> Result<()> {
+    let board_prefix = format!("uploads/{board_short}/");
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip[{index}]: {error}")))?;
+        let name = entry.name().to_string();
+        common::validate_restore_safe_entry_name(&name)?;
+        if !name.starts_with(&board_prefix) {
+            continue;
+        }
+        if entry.is_dir() {
+            zip.add_directory(
+                &name,
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated),
+            )
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip dir: {error}")))?;
+            continue;
+        }
+        zip.start_file(&name, zip_file_options_for_path(Path::new(&name)))
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip file entry: {error}")))?;
+        std::io::copy(&mut entry, zip)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy board upload: {error}")))?;
+    }
+    Ok(())
+}
+
+fn create_temp_board_backup_from_full_backup_path(
+    full_backup_path: &Path,
+    board_short: &str,
+) -> Result<(PathBuf, String)> {
+    prune_stale_temp_board_downloads();
+    std::fs::create_dir_all(temp_board_download_dir()).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Create temp board backup dir: {error}"))
+    })?;
+
+    let zip_file = std::fs::File::open(full_backup_path)
+        .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
+        .map_err(|error| AppError::BadRequest(format!("Invalid zip: {error}")))?;
+    validate_full_restore_archive_layout(&mut archive)?;
+    let _ = common::read_full_backup_manifest_from_archive(&mut archive)?;
+
+    let temp_db = std::env::temp_dir().join(format!(
+        "full_backup_extract_{}_{}.db",
+        board_short,
+        uuid::Uuid::new_v4().simple()
+    ));
+    extract_sqlite_db_from_full_backup_archive(&mut archive, &temp_db)?;
+
+    let manifest_result = (|| -> Result<board_backup_types::BoardBackupManifest> {
+        let conn = rusqlite::Connection::open(&temp_db)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Open temp DB: {error}")))?;
+        create::build_board_backup_manifest(&conn, board_short)
+    })();
+    let _ = std::fs::remove_file(&temp_db);
+    let manifest = manifest_result?;
+    let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Serialize board manifest: {error}"))
+    })?;
+
+    let backup_dir = temp_board_download_dir();
+    let ts = Utc::now().format("%Y%m%d_%H%M%S");
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let filename = unique_backup_filename(
+        &backup_dir,
+        &format!("rustchan-board-{board_short}-from-full-{ts}-{nonce}.zip"),
+    );
+    let final_path = backup_dir.join(&filename);
+    let tmp_path = backup_dir.join(format!("{filename}.tmp"));
+
+    let write_result = create::write_board_backup_archive(&tmp_path, &manifest_json, None, |zip| {
+        copy_board_upload_entries_from_full_backup(&mut archive, zip, board_short)
+    });
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+
+    if let Err(error) = common::verify_board_backup_zip(&tmp_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+
+    std::fs::rename(&tmp_path, &final_path).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp_path);
+        AppError::Internal(anyhow::anyhow!("Rename extracted board backup: {error}"))
+    })?;
+
+    Ok((final_path, filename))
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
     let _maintenance_guard = state.maintenance_gate.try_begin("Full backup download")?;
@@ -991,6 +1143,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
         move || -> Result<(PathBuf, String, u64)> {
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            let uploads_base = std::path::Path::new(&upload_dir);
 
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
             log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
@@ -1005,17 +1158,22 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 
             conn.execute_batch(&format!("VACUUM INTO '{temp_db_str}'"))
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO failed: {e}")))?;
-            drop(conn);
 
             // Count files for progress bar before compressing.
             progress.reset(crate::middleware::backup_phase::COUNT_FILES);
             log_backup_phase(crate::middleware::backup_phase::COUNT_FILES);
-            let uploads_base = std::path::Path::new(&upload_dir);
             let favicon_file_count = count_files_in_dir(&global_favicon_dir);
             let file_count = count_files_in_dir(uploads_base).saturating_add(favicon_file_count);
             let db_snapshot_size = std::fs::metadata(&temp_db)
                 .map(|metadata| metadata.len())
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {e}")))?;
+            let manifest = create::build_full_backup_manifest(
+                &conn,
+                db_snapshot_size,
+                file_count.saturating_sub(favicon_file_count),
+                favicon_file_count,
+            )?;
+            drop(conn);
             // +2 for backup.json and chan.db
             progress
                 .files_total
@@ -1039,14 +1197,6 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                     .files_total
                     .store(file_count.saturating_add(2), Ordering::Relaxed);
 
-                let manifest = common::FullBackupManifest {
-                    version: 1,
-                    generated_at: Utc::now().timestamp(),
-                    rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
-                    db_bytes: db_snapshot_size,
-                    upload_file_count: file_count.saturating_sub(favicon_file_count),
-                    favicon_file_count,
-                };
                 let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|e| {
                     AppError::Internal(anyhow::anyhow!("Serialize full backup manifest: {e}"))
                 })?;
@@ -1815,14 +1965,27 @@ pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<Bac
                             .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
                     })
                     .unwrap_or_default();
-                let verification = match kind {
-                    BackupListKind::Full => common::verify_full_backup_zip(&path)
-                        .map(|manifest| format!("verified v{} backup", manifest.version)),
-                    BackupListKind::Board => {
-                        common::verify_board_backup_zip(&path).map(|manifest| {
-                            format!("verified board /{}/ backup", manifest.board.short_name)
-                        })
-                    }
+                let (verification, boards) = match kind {
+                    BackupListKind::Full => match common::verify_full_backup_zip(&path) {
+                        Ok(manifest) => (
+                            Ok(format!("verified v{} backup", manifest.version)),
+                            manifest.boards,
+                        ),
+                        Err(error) => (Err(error), Vec::new()),
+                    },
+                    BackupListKind::Board => match common::verify_board_backup_zip(&path) {
+                        Ok(manifest) => (
+                            Ok(format!(
+                                "verified board /{}/ backup",
+                                manifest.board.short_name
+                            )),
+                            vec![crate::models::BackupBoardSummary {
+                                short_name: manifest.board.short_name,
+                                name: manifest.board.name,
+                            }],
+                        ),
+                        Err(error) => (Err(error), Vec::new()),
+                    },
                 };
                 files.push(BackupInfo {
                     filename: name,
@@ -1831,6 +1994,7 @@ pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<Bac
                     modified_epoch,
                     verified: verification.is_ok(),
                     verification_note: verification.unwrap_or_else(|error| error.to_string()),
+                    boards,
                 });
             }
         }
@@ -1875,21 +2039,7 @@ pub async fn download_backup(
         .map(|c| c.value().to_string());
 
     // Validate filename — only allow safe characters to prevent path traversal.
-    let safe_filename: String = filename
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
-        .collect();
-    if safe_filename != filename || safe_filename.contains("..") {
-        return Err(AppError::BadRequest("Invalid filename.".into()));
-    }
-    if !std::path::Path::new(&safe_filename)
-        .extension()
-        .is_some_and(|e: &std::ffi::OsStr| e.eq_ignore_ascii_case("zip"))
-    {
-        return Err(AppError::BadRequest(
-            "Only .zip files can be downloaded.".into(),
-        ));
-    }
+    let safe_filename = sanitize_backup_zip_filename(&filename)?;
 
     match kind.as_str() {
         "temp-board" => {
@@ -2042,22 +2192,7 @@ pub async fn delete_backup(
     super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     // Validate filename.
-    let safe_filename: String = form
-        .filename
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
-        .collect();
-    if safe_filename != form.filename || safe_filename.contains("..") {
-        return Err(AppError::BadRequest("Invalid filename.".into()));
-    }
-    if !std::path::Path::new(&safe_filename)
-        .extension()
-        .is_some_and(|e: &std::ffi::OsStr| e.eq_ignore_ascii_case("zip"))
-    {
-        return Err(AppError::BadRequest(
-            "Only .zip files can be deleted.".into(),
-        ));
-    }
+    let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
 
     let backup_dir = match form.kind.as_str() {
         "full" => full_backup_dir(),
@@ -2101,6 +2236,15 @@ pub struct RestoreSavedForm {
     csrf: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct ExtractBoardFromFullBackupForm {
+    filename: String,
+    board_short: String,
+    action: String,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+}
+
 /// Restore a full backup from a saved file in backups/full/.
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::arithmetic_side_effects)]
@@ -2116,19 +2260,7 @@ pub async fn restore_saved_full_backup(
         .map(|c| c.value().to_string());
     super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
-    let safe_filename: String = form
-        .filename
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
-        .collect();
-    if safe_filename != form.filename
-        || safe_filename.contains("..")
-        || !std::path::Path::new(&safe_filename)
-            .extension()
-            .is_some_and(|e: &std::ffi::OsStr| e.eq_ignore_ascii_case("zip"))
-    {
-        return Err(AppError::BadRequest("Invalid filename.".into()));
-    }
+    let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
 
     let path = full_backup_dir().join(&safe_filename);
     // Do NOT read the file in the async context before auth is verified.
@@ -2178,6 +2310,103 @@ pub async fn restore_saved_full_backup(
     Ok((jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response())
 }
 
+enum ExtractBoardFromFullBackupOutcome {
+    Download { filename: String },
+    Restore { board_short: String },
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn extract_board_from_full_backup(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<ExtractBoardFromFullBackupForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+
+    let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
+    let safe_board = sanitize_board_short_value(&form.board_short)?;
+    let action = form.action.clone();
+    let upload_dir = CONFIG.upload_dir.clone();
+
+    let outcome = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<ExtractBoardFromFullBackupOutcome> {
+            let mut conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+
+            let full_backup_path = full_backup_dir().join(&safe_filename);
+            let (temp_board_backup_path, temp_board_backup_filename) =
+                create_temp_board_backup_from_full_backup_path(&full_backup_path, &safe_board)?;
+
+            match action.as_str() {
+                "download" => Ok(ExtractBoardFromFullBackupOutcome::Download {
+                    filename: temp_board_backup_filename,
+                }),
+                "restore" => {
+                    let restore_result = (|| -> Result<String> {
+                        let zip_file =
+                            std::fs::File::open(&temp_board_backup_path).map_err(|_| {
+                                AppError::NotFound("Extracted board backup file not found.".into())
+                            })?;
+                        let mut manifest_archive = zip::ZipArchive::new(std::io::BufReader::new(
+                            zip_file,
+                        ))
+                        .map_err(|error| AppError::BadRequest(format!("Invalid zip: {error}")))?;
+                        let manifest = parse_board_backup_manifest_from_zip(&mut manifest_archive)?;
+
+                        let extract_file =
+                            std::fs::File::open(&temp_board_backup_path).map_err(|_| {
+                                AppError::NotFound("Extracted board backup file not found.".into())
+                            })?;
+                        let mut extract_archive = zip::ZipArchive::new(std::io::BufReader::new(
+                            extract_file,
+                        ))
+                        .map_err(|error| AppError::BadRequest(format!("Invalid zip: {error}")))?;
+
+                        execute_board_restore(
+                            &mut conn,
+                            &upload_dir,
+                            manifest,
+                            |staged_root| extract_uploads_to_dir(&mut extract_archive, staged_root),
+                            "Board restore-from-full",
+                            "Board restore-from-full completed",
+                        )
+                    })();
+                    let _ = std::fs::remove_file(&temp_board_backup_path);
+                    restore_result.map(|board_short| ExtractBoardFromFullBackupOutcome::Restore {
+                        board_short,
+                    })
+                }
+                _ => {
+                    let _ = std::fs::remove_file(&temp_board_backup_path);
+                    Err(AppError::BadRequest(
+                        "Unknown board extraction action.".into(),
+                    ))
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+
+    match outcome {
+        ExtractBoardFromFullBackupOutcome::Download { filename } => {
+            let download_token = new_session_id();
+            write_temp_board_download_token(&filename, &download_token)?;
+            Ok(Redirect::to(&format!(
+                "/admin/backup/download/temp-board/{filename}?cleanup=1&token={download_token}"
+            ))
+            .into_response())
+        }
+        ExtractBoardFromFullBackupOutcome::Restore { board_short } => {
+            Ok(Redirect::to(&format!("/admin/panel?board_restored={board_short}")).into_response())
+        }
+    }
+}
+
 // ─── POST /admin/board/backup/restore-saved ───────────────────────────────────
 
 /// Restore a board backup from a saved file in backups/boards/.
@@ -2193,19 +2422,7 @@ pub async fn restore_saved_board_backup(
         .map(|c| c.value().to_string());
     super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
-    let safe_filename: String = form
-        .filename
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
-        .collect();
-    if safe_filename != form.filename
-        || safe_filename.contains("..")
-        || !std::path::Path::new(&safe_filename)
-            .extension()
-            .is_some_and(|e: &std::ffi::OsStr| e.eq_ignore_ascii_case("zip"))
-    {
-        return Err(AppError::BadRequest("Invalid filename.".into()));
-    }
+    let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
 
     let path = board_backup_dir().join(&safe_filename);
     // Defer the blocking file read until after auth is verified inside
@@ -2671,11 +2888,12 @@ pub async fn board_restore(
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_temp_board_download_token, should_store_without_recompress,
-        temp_board_download_token_path, validate_full_restore_archive_layout,
-        write_temp_board_download_token,
+        consume_temp_board_download_token, create_temp_board_backup_from_full_backup_path,
+        should_store_without_recompress, temp_board_download_token_path,
+        validate_full_restore_archive_layout, write_temp_board_download_token,
     };
     use crate::error::AppError;
+    use crate::models::BackupBoardSummary;
     use std::io::{Cursor, Write as _};
     use std::path::Path;
 
@@ -2740,5 +2958,127 @@ mod tests {
         assert!(!should_store_without_recompress(Path::new(
             "uploads/mu/readme.txt"
         )));
+    }
+
+    fn build_sample_full_backup_zip(indexed_boards: bool) -> std::path::PathBuf {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("full.zip");
+        let db_path = temp_dir.path().join("snapshot.db");
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        {
+            let conn = pool.get().expect("db conn");
+            crate::db::create_board(&conn, "tech", "Technology", "", false).expect("create board");
+            let board = crate::db::get_board_by_short(&conn, "tech")
+                .expect("get board")
+                .expect("board exists");
+            let post = crate::db::NewPost {
+                thread_id: 0,
+                board_id: board.id,
+                name: "anon".into(),
+                tripcode: None,
+                subject: Some("backup test".into()),
+                body: "hello".into(),
+                body_html: "hello".into(),
+                ip_hash: Some("hash".into()),
+                file_path: Some("tech/hello.txt".into()),
+                file_name: Some("hello.txt".into()),
+                file_size: Some(5),
+                thumb_path: None,
+                mime_type: Some("text/plain".into()),
+                media_type: Some("other".into()),
+                audio_file_path: None,
+                audio_file_name: None,
+                audio_file_size: None,
+                audio_mime_type: None,
+                deletion_token: "token".into(),
+                is_op: true,
+            };
+            crate::db::create_thread_with_optional_poll(
+                &conn,
+                board.id,
+                Some("backup test"),
+                &post,
+                "",
+                None,
+                None,
+            )
+            .expect("create thread");
+
+            let db_path_str = db_path.to_str().expect("db path").replace('\'', "''");
+            conn.execute_batch(&format!("VACUUM INTO '{db_path_str}'"))
+                .expect("vacuum into snapshot");
+        }
+
+        let manifest = super::common::FullBackupManifest {
+            version: if indexed_boards { 2 } else { 1 },
+            generated_at: 1_700_000_000,
+            rustchan_version: "1.1.3".into(),
+            db_bytes: std::fs::metadata(&db_path).expect("db meta").len(),
+            upload_file_count: 1,
+            favicon_file_count: 0,
+            boards: if indexed_boards {
+                vec![BackupBoardSummary {
+                    short_name: "tech".into(),
+                    name: "Technology".into(),
+                }]
+            } else {
+                Vec::new()
+            },
+        };
+        let manifest_json = serde_json::to_vec(&manifest).expect("manifest json");
+        let db_bytes = std::fs::read(&db_path).expect("read db");
+
+        {
+            let file = std::fs::File::create(&zip_path).expect("zip file");
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file(super::common::FULL_BACKUP_MANIFEST_NAME, options)
+                .expect("start manifest");
+            zip.write_all(&manifest_json).expect("write manifest");
+            zip.start_file("chan.db", options).expect("start db");
+            zip.write_all(&db_bytes).expect("write db");
+            zip.start_file("uploads/tech/hello.txt", options)
+                .expect("start upload");
+            zip.write_all(b"hello").expect("write upload");
+            zip.finish().expect("finish zip");
+        }
+
+        let persisted = temp_dir.keep();
+        persisted.join("full.zip")
+    }
+
+    #[test]
+    fn full_backup_can_extract_board_backup() {
+        let zip_path = build_sample_full_backup_zip(true);
+        let (board_zip_path, filename) =
+            create_temp_board_backup_from_full_backup_path(&zip_path, "tech")
+                .expect("extract board backup");
+
+        assert!(filename.contains("from-full"));
+        let manifest =
+            super::common::verify_board_backup_zip(&board_zip_path).expect("verify board zip");
+        assert_eq!(manifest.board.short_name, "tech");
+
+        let file = std::fs::File::open(&board_zip_path).expect("open board zip");
+        let mut archive = zip::ZipArchive::new(file).expect("archive");
+        assert!(archive.by_name("uploads/tech/hello.txt").is_ok());
+
+        let _ = std::fs::remove_file(board_zip_path);
+        let _ = std::fs::remove_file(zip_path);
+    }
+
+    #[test]
+    fn older_full_backup_without_board_index_still_extracts_board_backup() {
+        let zip_path = build_sample_full_backup_zip(false);
+        let (board_zip_path, _) = create_temp_board_backup_from_full_backup_path(&zip_path, "tech")
+            .expect("extract board backup from legacy full backup");
+
+        let manifest =
+            super::common::verify_board_backup_zip(&board_zip_path).expect("verify board zip");
+        assert_eq!(manifest.board.short_name, "tech");
+
+        let _ = std::fs::remove_file(board_zip_path);
+        let _ = std::fs::remove_file(zip_path);
     }
 }
