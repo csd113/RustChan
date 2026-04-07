@@ -452,7 +452,9 @@ All settings can be overridden via environment variables, which take precedence 
 | `CHAN_RATE_WINDOW` | `60` | Rate-limit window (seconds) |
 | `CHAN_SESSION_SECS` | `28800` | Admin session duration (default: 8 hours) |
 | `CHAN_BEHIND_PROXY` | `false` | Trust `X-Forwarded-For` behind a reverse proxy |
+| `CHAN_TRUSTED_PROXY_CIDRS` | `127.0.0.1/32,::1/128` | Comma-separated CIDRs allowed to supply forwarding headers |
 | `CHAN_HTTPS_COOKIES` | *(auto: true when behind proxy or TLS enabled)* | Set `Secure` flag on session cookies |
+| `CHAN_PUBLIC_HOSTS` | *(empty)* | Comma-separated public hosts accepted by the HTTP→HTTPS redirect listener |
 | `CHAN_TOR_SUPPORT` | `true` | Enable the built-in Arti onion service |
 | `CHAN_TOR_ONLY` | `false` | Bind loopback-only and serve exclusively over Tor |
 | `CHAN_TOR_BOOTSTRAP_TIMEOUT` | `120` | Tor bootstrap timeout (seconds) |

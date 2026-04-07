@@ -44,7 +44,8 @@ pub fn generate_or_load(data_dir: &Path) -> Result<(Arc<TlsAcceptor>, Arc<Server
         ))
     })?;
 
-    if needs_regeneration(&cert_path) {
+    let should_regenerate = needs_regeneration(&cert_path, &key_path);
+    if should_regenerate {
         tracing::info!("TLS: generating self-signed certificate for {CERT_SANS:?}");
         write_self_signed_cert(&cert_path, &key_path)?;
     } else {
@@ -53,7 +54,19 @@ pub fn generate_or_load(data_dir: &Path) -> Result<(Arc<TlsAcceptor>, Arc<Server
             cert_path.display()
         );
     }
-    super::load_pem_as_acceptor(&cert_path, &key_path)
+
+    match super::load_pem_as_acceptor(&cert_path, &key_path) {
+        Ok(acceptor) => Ok(acceptor),
+        Err(error) if !should_regenerate => {
+            tracing::warn!(
+                "TLS: existing self-signed cert/key pair could not be loaded ({}); regenerating",
+                error
+            );
+            write_self_signed_cert(&cert_path, &key_path)?;
+            super::load_pem_as_acceptor(&cert_path, &key_path)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -141,8 +154,9 @@ fn san_for(s: &str) -> rcgen::SanType {
 // ---------------------------------------------------------------------------
 /// Return `true` if the cert file is absent, unreadable, or will expire
 /// within [`REGENERATE_BEFORE_DAYS`] days.
-fn needs_regeneration(cert_path: &Path) -> bool {
-    remaining_validity_days(cert_path).is_none_or(|rem| rem < REGENERATE_BEFORE_DAYS)
+fn needs_regeneration(cert_path: &Path, key_path: &Path) -> bool {
+    !key_path.exists()
+        || remaining_validity_days(cert_path).is_none_or(|rem| rem < REGENERATE_BEFORE_DAYS)
 }
 
 /// Parse the `notAfter` field of a PEM certificate and return how many whole
@@ -240,7 +254,31 @@ mod tests {
 
     #[test]
     fn needs_regeneration_returns_true_for_missing_file() {
-        assert!(needs_regeneration(Path::new("/nonexistent/path/cert.pem")));
+        assert!(needs_regeneration(
+            Path::new("/nonexistent/path/cert.pem"),
+            Path::new("/nonexistent/path/key.pem")
+        ));
+    }
+
+    #[test]
+    fn missing_key_triggers_regeneration_on_next_startup() {
+        ensure_crypto_provider();
+        let tmp = TempDir::new().unwrap();
+        generate_or_load(tmp.path()).unwrap();
+
+        let cert_path = tmp.path().join("runtime/tls/dev/self-signed.crt");
+        let key_path = tmp.path().join("runtime/tls/dev/self-signed.key");
+        let original_cert = std::fs::read(&cert_path).unwrap();
+        std::fs::remove_file(&key_path).unwrap();
+
+        generate_or_load(tmp.path()).unwrap();
+
+        let regenerated_cert = std::fs::read(&cert_path).unwrap();
+        assert!(key_path.exists(), "missing key should be regenerated");
+        assert_ne!(
+            original_cert, regenerated_cert,
+            "cert should be rewritten when the key file is missing"
+        );
     }
 
     #[test]

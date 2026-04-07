@@ -221,6 +221,13 @@ struct SettingsFile {
     /// Maximum seconds to allow a single `FFmpeg` transcode or waveform job to
     /// run before it is killed. Default: 120.
     ffmpeg_timeout_secs: Option<u64>,
+    /// Explicit proxy CIDR allowlist for trusted forwarding headers.
+    /// Examples: ["127.0.0.1/32", "::1/128", "10.0.0.0/8"]
+    trusted_proxy_cidrs: Option<Vec<String>>,
+    /// Public hostnames accepted by the HTTP→HTTPS redirect listener.
+    /// Needed when RustChan binds to a wildcard address but serves a manual-cert
+    /// public domain.
+    public_hosts: Option<Vec<String>>,
     /// When true, overflow threads are always archived rather than hard-deleted,
     /// even on boards with `allow_archive` = false. Default: true.
     archive_before_prune: Option<bool>,
@@ -412,7 +419,11 @@ pub struct Config {
     pub cookie_secret: String,
     pub session_duration: i64,
     pub behind_proxy: bool,
+    /// Trusted proxy CIDR allowlist for forwarding headers.
+    pub trusted_proxy_cidrs: Vec<String>,
     pub https_cookies: bool,
+    /// Public hostnames accepted by the HTTP→HTTPS redirect listener.
+    pub public_hosts: Vec<String>,
     /// Interval in seconds between WAL checkpoint runs. 0 = disabled.
     pub wal_checkpoint_interval: u64,
     /// Interval in hours between automatic VACUUM runs. 0 = disabled.
@@ -509,6 +520,12 @@ impl Config {
         };
         let behind_proxy = env_bool("CHAN_BEHIND_PROXY", false);
         let https_cookies_default = behind_proxy || tls.enabled;
+        let trusted_proxy_cidrs = env_list(
+            "CHAN_TRUSTED_PROXY_CIDRS",
+            s.trusted_proxy_cidrs,
+            &["127.0.0.1/32", "::1/128"],
+        );
+        let public_hosts = env_list("CHAN_PUBLIC_HOSTS", s.public_hosts, &[]);
         // Resolve cookie_secret from env > settings.toml.
         // generate_settings_file_if_missing() ensures settings.toml always has
         // a generated secret, so this fallback should only fire in abnormal cases.
@@ -603,7 +620,9 @@ impl Config {
             cookie_secret,
             session_duration: env_parse("CHAN_SESSION_SECS", 8 * 3600),
             behind_proxy,
+            trusted_proxy_cidrs,
             https_cookies: env_bool("CHAN_HTTPS_COOKIES", https_cookies_default),
+            public_hosts,
             wal_checkpoint_interval: env_parse(
                 "CHAN_WAL_CHECKPOINT_SECS",
                 s.wal_checkpoint_interval_secs.unwrap_or(3600),
@@ -738,6 +757,23 @@ impl Config {
                 "CONFIG ERROR: bind_addr '{}' is not a valid host:port address.",
                 self.bind_addr
             );
+        }
+        for cidr in &self.trusted_proxy_cidrs {
+            cidr.parse::<ipnet::IpNet>().map_err(|error| {
+                anyhow::anyhow!(
+                    "CONFIG ERROR: trusted_proxy_cidrs entry '{}' is not valid CIDR: {}",
+                    cidr,
+                    error
+                )
+            })?;
+        }
+        for host in &self.public_hosts {
+            normalize_public_host(host).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "CONFIG ERROR: public_hosts entry '{}' must be a bare hostname or IP literal.",
+                    host
+                )
+            })?;
         }
         // Verify the upload directory is writable.
         let upload_path = std::path::Path::new(&self.upload_dir);
@@ -978,6 +1014,44 @@ fn env_bool(key: &str, default: bool) -> bool {
     env::var(key)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(default)
+}
+
+fn env_list(key: &str, file_value: Option<Vec<String>>, default: &[&str]) -> Vec<String> {
+    env::var(key)
+        .ok()
+        .map(|value| split_list(&value))
+        .or(file_value)
+        .unwrap_or_else(|| default.iter().map(|value| (*value).to_string()).collect())
+}
+
+fn split_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+pub fn normalize_public_host(host: &str) -> Option<String> {
+    let trimmed = host.trim();
+    if trimmed.is_empty() || trimmed.contains('/') || trimmed.contains('@') {
+        return None;
+    }
+
+    let unbracketed = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(trimmed);
+
+    if unbracketed.parse::<std::net::IpAddr>().is_ok() {
+        return Some(unbracketed.to_string());
+    }
+
+    if unbracketed.contains(':') || unbracketed.contains(char::is_whitespace) {
+        return None;
+    }
+
+    Some(unbracketed.to_string())
 }
 
 fn split_bind_addr(addr: &str) -> Option<(&str, &str)> {

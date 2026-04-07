@@ -169,6 +169,10 @@ port = 8443
 # Redirect plain HTTP → HTTPS (binds an extra listener on http_port).
 # redirect_http = true
 # http_port = 8080
+#
+# When binding to 0.0.0.0/:: with a manual certificate, set the public host(s)
+# accepted by the redirect listener:
+# public_hosts = ["example.com", "www.example.com"]
 
 # Let's Encrypt via ACME (requires the tls-acme Cargo feature):
 # [tls.acme]

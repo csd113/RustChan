@@ -1107,22 +1107,38 @@ fn redirect_host(req: &axum::extract::Request) -> Option<String> {
 }
 
 fn redirect_trusted_hosts() -> Vec<String> {
+    redirect_trusted_hosts_with(
+        &CONFIG.public_hosts,
+        CONFIG.tls.acme.enabled,
+        &CONFIG.tls.acme.domains,
+        &CONFIG.bind_addr,
+    )
+}
+
+fn redirect_trusted_hosts_with(
+    public_hosts: &[String],
+    acme_enabled: bool,
+    acme_domains: &[String],
+    bind_addr: &str,
+) -> Vec<String> {
     let mut hosts = Vec::new();
 
-    if CONFIG.tls.acme.enabled {
+    hosts.extend(
+        public_hosts
+            .iter()
+            .filter_map(|host| crate::config::normalize_public_host(host)),
+    );
+
+    if acme_enabled {
         hosts.extend(
-            CONFIG
-                .tls
-                .acme
-                .domains
+            acme_domains
                 .iter()
-                .filter(|domain| !domain.trim().is_empty())
-                .map(|domain| domain.trim().to_string()),
+                .filter_map(|domain| crate::config::normalize_public_host(domain)),
         );
     }
 
     if let Some(bind_host) =
-        parse_bind_host(&CONFIG.bind_addr).filter(|host| !matches!(host.as_str(), "0.0.0.0" | "::"))
+        parse_bind_host(bind_addr).filter(|host| !matches!(host.as_str(), "0.0.0.0" | "::"))
     {
         hosts.push(bind_host);
     }
@@ -1222,7 +1238,10 @@ async fn onion_location_middleware(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_redirect_response, format_redirect_authority, redirect_host};
+    use super::{
+        build_redirect_response, format_redirect_authority, redirect_host,
+        redirect_trusted_hosts_with,
+    };
     use axum::{body::Body, extract::Request, http::header};
 
     fn request_with_host(host: &str) -> Request {
@@ -1249,5 +1268,17 @@ mod tests {
     #[test]
     fn redirect_formats_ipv6_authorities_with_brackets() {
         assert_eq!(format_redirect_authority("::1", 8443), "[::1]:8443");
+    }
+
+    #[test]
+    fn redirect_trusted_hosts_include_configured_public_hosts_for_manual_cert_setups() {
+        let hosts = redirect_trusted_hosts_with(
+            &["example.com".to_string(), "www.example.com".to_string()],
+            false,
+            &[],
+            "0.0.0.0:8080",
+        );
+        assert!(hosts.iter().any(|host| host == "example.com"));
+        assert!(hosts.iter().any(|host| host == "www.example.com"));
     }
 }

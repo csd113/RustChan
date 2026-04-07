@@ -670,7 +670,7 @@ pub fn render_post(
   File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
 <div class="audio-thumb">
-  <img class="thumb" src="/boards/{th}" loading="lazy" alt="audio">
+  <img class="thumb" src="/boards/{th}" loading="eager" alt="audio">
 </div>
 <audio controls preload="none" class="audio-player" data-audio-title="{orig}">
   <source src="/boards/{f}" type="{mime}">
@@ -691,8 +691,8 @@ pub fn render_post(
   File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<a class="media-preview" data-action="expand-media" href="/boards/{f}" target="_blank" rel="noreferrer" title="click to play">
-  <img class="thumb" src="/boards/{th}" loading="lazy" alt="video thumbnail">
+<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to play">
+  <img class="thumb" src="/boards/{th}" loading="eager" alt="video thumbnail">
   <div class="media-expand-overlay">&#9654;</div>
 </a>
 <video class="media-expanded media-expanded-video" controls preload="none" playsinline webkit-playsinline style="display:none">
@@ -707,6 +707,9 @@ pub fn render_post(
                 );
             } else {
                 // Image
+                // Keep the preview as an inline expansion control rather than
+                // a new tab so a slow JS load or missed handler does not
+                // strand the user in a raw-file window.
                 let _ = write!(
                     html,
                     r#"<div class="file-container{combo_class}">
@@ -714,8 +717,8 @@ pub fn render_post(
   File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<a class="media-preview" data-action="expand-media" href="/boards/{f}" target="_blank" rel="noreferrer" title="click to expand">
-  <img class="thumb" src="/boards/{th}" loading="lazy" alt="image">
+<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
+  <img class="thumb" src="/boards/{th}" loading="eager" alt="image">
   <div class="media-expand-overlay">&#x2922;</div>
 </a>
 <img class="media-expanded media-expanded-image" src="" data-src="/boards/{f}" style="display:none"

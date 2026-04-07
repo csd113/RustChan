@@ -7,8 +7,9 @@ All notable changes to RustChan will be documented in this file.
 ### Improved
 
 - HTTP timeout handling is now more robust across the full request pipeline: `GET` and `HEAD` requests keep the fast 30-second cutoff, while slower write paths such as uploads, restores, and admin `POST`s are now covered by a longer request timeout instead of bypassing timeout protection entirely.
-- Proxy-aware HTTPS detection is now consistent with the server's trusted-proxy IP logic, so `X-Forwarded-Proto` only influences HSTS and secure-cookie decisions when the request actually came through a trusted private or loopback proxy hop.
+- Proxy-aware HTTPS detection is now stricter and operator-configurable: `X-Forwarded-*` headers are trusted only from explicitly allowed proxy CIDRs, with loopback remaining the safe default.
 - Admin session cookie issuance is now wired through real connection metadata on login and restore flows, eliminating header-only protocol trust and keeping direct-access and proxied deployments aligned.
+- HTTP to HTTPS redirects are now more robust on manual-certificate deployments bound to wildcard addresses, with explicit public-host configuration for production domains that are not discoverable from the local bind address.
 - The shared site footer now stays pinned to the bottom of the viewport through a dedicated fixed-footer layout, while preserving the original homepage card grid and overall 1.1.2-style page flow.
 - Theme CSS internals are cleaner and safer to maintain: the fixed footer now uses one shared height variable with safe-area-aware body padding, Frutiger Aero and NeonCubicle now share one glass-pill navigation implementation, and the Forest theme now centralizes repeated surface, link, button, and input colors behind theme-scoped variables.
 - Mobile header polish is tighter on board pages: the search bar now stretches to the same visual rails as the Home and Boards controls instead of ending short on narrow screens.
@@ -17,6 +18,7 @@ All notable changes to RustChan will be documented in this file.
 ### Fixed
 
 - Requests coming directly from untrusted public peers can no longer spoof `X-Forwarded-Proto` to make the app believe they arrived over HTTPS.
+- Built-in self-signed TLS recovery is now resilient to partially missing or corrupted dev-cert files: if the stored cert/key pair cannot be reused, RustChan regenerates a fresh pair instead of failing startup outright.
 - Timeout coverage no longer leaves upload-heavy and admin mutation endpoints outside the request-timeout middleware.
 - Mobile layout resilience is stronger across the updated style system: the header board menu now follows the real wrapped header height instead of a fixed offset, admin board-settings forms collapse cleanly to one column on narrow screens, and wide admin tables stay usable on phones through horizontal scrolling.
 - The admin panel is now substantially more mobile-friendly: dropdown headings wrap instead of running offscreen, board action controls stack cleanly on narrow screens, create-board and moderation forms fit the viewport, and the heaviest admin tables no longer force excessive horizontal overflow.
@@ -24,12 +26,14 @@ All notable changes to RustChan will be documented in this file.
 - Admin login no longer fails with a `403` after the CSS refactor on plain `http://` deployments: the login page now reissues its CSRF cookie using the real request scheme so browsers do not drop the cookie before `/admin/login` is processed.
 - Mobile media expansion behaves more predictably: tapping a video thumbnail now keeps playback inline on the page instead of collapsing back or jumping toward fullscreen, the filename remains the explicit open-in-new-tab path for fullscreen viewing, and image/video close buttons now use a smaller control footprint.
 - Mobile image and video viewing now matches desktop more closely: the old floating media viewer has been removed, images and videos expand inline on the page with the same close-button flow as desktop, and the blue double-arrow/expand overlay is no longer shown over media on touch layouts.
+- Desktop and mobile audio MiniPlayers now use the attached post image as album art for image+audio combo posts, while audio-only posts continue falling back to the current favicon artwork.
 - Duplicate threads and replies are now prevented on unstable connections: post forms carry a per-render submission token, successful submissions are recorded server-side, and a retried POST now redirects back to the already-created post instead of inserting a second copy when the first response was lost in transit.
 - Board search no longer fails when the FTS join exposes duplicate column names, and search queries are now normalized consistently so lowercase searches such as `ai` also match uppercase post text like `AI`.
 
 ### Validation
 
 - `cargo fmt --all`
+- `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --quiet`
 
 ## [1.1.2]
