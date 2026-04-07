@@ -6,6 +6,7 @@ All notable changes to RustChan will be documented in this file.
 
 ### Improved
 
+- Homepage board cards and board catalog thread cards now keep a more consistent square visual rhythm: the main content rail is wider on desktop, homepage NSFW badges sit beside board IDs for faster scanning, and catalog size toggles once again distinguish compact and large thread cards while preserving more uniform tile heights.
 - HTTP timeout handling is now more robust across the full request pipeline: `GET` and `HEAD` requests keep the fast 30-second cutoff, while slower write paths such as uploads, restores, and admin `POST`s are now covered by a longer request timeout instead of bypassing timeout protection entirely.
 - Proxy-aware HTTPS detection is now stricter and operator-configurable: `X-Forwarded-*` headers are trusted only from explicitly allowed proxy CIDRs, with loopback remaining the safe default.
 - Admin session cookie issuance is now wired through real connection metadata on login and restore flows, eliminating header-only protocol trust and keeping direct-access and proxied deployments aligned.

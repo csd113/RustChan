@@ -376,8 +376,8 @@ button:hover,
 /* ── Main layout ──────────────────────────────────────────────────────────── */
 
 main {
-  width: min(960px, calc(100% - 20px));
-  max-width: 960px;
+  width: min(1320px, calc(100% - 20px));
+  max-width: 1320px;
   margin: 0 auto;
   padding: 16px 10px 12px;
 }
@@ -1290,11 +1290,15 @@ html:not([data-theme]) .poster-id-btn {
 
 .catalog-item {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   padding: 6px;
   text-align: center;
   transition: border-color 0.2s;
+  aspect-ratio: 1 / 1;
 }
 
 .catalog-item:hover { border-color: var(--border-glow); }
@@ -1303,15 +1307,28 @@ html:not([data-theme]) .poster-id-btn {
 
 .catalog-card-link {
   color: var(--text);
-  display: block;
+  display: flex;
+  flex-direction: column;
   text-decoration: none;
+}
+
+.catalog-item > .catalog-card-link:first-of-type {
+  flex: 0 0 auto;
+}
+
+.catalog-item > .catalog-card-link:last-of-type {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .catalog-thumb-wrap,
 .catalog-card-media {
   position: relative;
-  display: inline-block;
+  display: block;
   line-height: 0;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
 }
 
 .catalog-thumb-wrap .thread-state-badges,
@@ -1454,7 +1471,7 @@ html:not([data-theme]) .poster-id-btn {
 
 .catalog-thumb {
   width: 100%;
-  max-height: 100px;
+  height: 100%;
   object-fit: cover;
   border: 1px solid var(--border);
   display: block;
@@ -1463,7 +1480,7 @@ html:not([data-theme]) .poster-id-btn {
 
 .catalog-no-image {
   width: 100%;
-  height: 80px;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1473,16 +1490,37 @@ html:not([data-theme]) .poster-id-btn {
   margin-bottom: 0;
 }
 
-.catalog-info { font-size: 0.72rem; }
+.catalog-info {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  font-size: 0.72rem;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+}
 .catalog-replies { color: var(--green-dim); font-size: 0.72rem; font-weight: bold; letter-spacing: 0.03em; white-space: nowrap; line-height: 1; }
-.catalog-subject { color: var(--text-dim); font-weight: bold; margin-top: 2px; }
+.catalog-subject {
+  color: var(--text-dim);
+  font-weight: bold;
+  margin-top: 2px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
 .catalog-comment {
   color: var(--text);
   font-weight: normal;
   margin-top: 4px;
   line-height: 1.35;
   text-align: center;
-  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .catalog-grid.catalog-large {
@@ -1490,11 +1528,11 @@ html:not([data-theme]) .poster-id-btn {
 }
 
 .catalog-grid.catalog-large .catalog-thumb {
-  max-height: 148px;
+  max-height: none;
 }
 
 .catalog-grid.catalog-large .catalog-no-image {
-  height: 128px;
+  height: 100%;
 }
 
 .catalog-grid.catalog-comments-off .catalog-comment {
@@ -1546,12 +1584,14 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
 
 .board-card {
   position: relative;
+  display: flex;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-left: 3px solid var(--green-dim);
   padding: 8px 10px;
   color: var(--text);
   transition: all 0.15s;
+  aspect-ratio: 1 / 1;
 }
 
 .board-card:hover {
@@ -1563,7 +1603,10 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
 }
 
 .board-card-link {
-  display: block;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
   color: inherit;
   text-decoration: none;
 }
@@ -1576,7 +1619,12 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
 }
 
 .board-card-name { font-size: 0.85rem; color: var(--text); margin-top: 2px; }
-.board-card-desc { font-size: 0.84rem; color: var(--text-dim); margin-top: 4px; }
+.board-card-desc {
+  font-size: 0.84rem;
+  color: var(--text-dim);
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
 
 .nsfw-badge {
   font-size: 0.65rem;
@@ -1647,16 +1695,20 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
 .board-card-stats {
   font-size: 0.72rem;
   color: var(--green-dim);
-  margin-top: 4px;
+  margin-top: auto;
   font-weight: bold;
   letter-spacing: 0.03em;
+  padding-top: 4px;
 }
 
 @media (min-width: 701px) {
   .board-cards,
-  .catalog-grid,
-  .catalog-grid.catalog-large {
+  .catalog-grid {
     grid-template-columns: repeat(8, minmax(0, 1fr));
+  }
+
+  .catalog-grid.catalog-large {
+    grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
   }
 }
 

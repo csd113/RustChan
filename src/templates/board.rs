@@ -65,6 +65,7 @@ fn render_board_card(
     is_last: bool,
 ) -> String {
     let board = &stats.board;
+    let description_preview = preview_text(&board.description, 88);
     let nsfw_badge = if board.nsfw {
         r#"<span class="nsfw-badge">NSFW</span>"#
     } else {
@@ -104,8 +105,8 @@ fn render_board_card(
         r#"<div class="board-card">
   {reorder_controls}
   <a class="board-card-link" href="{href}"{action_attr}{return_to_attr}>
-    <div class="board-card-short">/{sh}/</div>
-    <div class="board-card-name">{name}{nsfw}</div>
+    <div class="board-card-short">/{sh}/{nsfw}</div>
+    <div class="board-card-name">{name}</div>
     <div class="board-card-desc">{description}</div>
     <div class="board-card-stats">{thread_count} {thread_word}</div>
   </a>
@@ -117,10 +118,25 @@ fn render_board_card(
         sh = escape_html(&board.short_name),
         name = escape_html(&board.name),
         nsfw = nsfw_badge,
-        description = escape_html(&board.description),
+        description = escape_html(&description_preview),
         thread_count = stats.thread_count,
         thread_word = thread_word,
     )
+}
+
+fn preview_text(input: &str, max_chars: usize) -> String {
+    let mut preview = String::new();
+    let mut chars = input.chars();
+
+    for ch in chars.by_ref().take(max_chars) {
+        preview.push(ch);
+    }
+
+    if chars.next().is_some() {
+        preview.push_str("...");
+    }
+
+    preview
 }
 
 fn render_catalog_thumb(thread: &Thread) -> String {
@@ -213,17 +229,11 @@ fn render_catalog_card(
     let subject_preview: String = thread
         .subject
         .as_deref()
-        .unwrap_or("")
-        .chars()
-        .take(80)
-        .collect();
+        .map_or_else(String::new, |subject| preview_text(subject, 44));
     let comment_preview: String = thread
         .op_body
         .as_deref()
-        .unwrap_or("")
-        .chars()
-        .take(140)
-        .collect();
+        .map_or_else(String::new, |body| preview_text(body, 88));
     let subject_html = if subject_preview.is_empty() {
         String::new()
     } else {
