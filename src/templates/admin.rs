@@ -891,7 +891,7 @@ old boards to prevent query performance degradation.
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section" id="site-settings">
 <h2>// site settings</h2>
-<form method="POST" action="/admin/site/settings">
+<form method="POST" action="/admin/site/settings" class="admin-site-settings-form">
 <input type="hidden" name="_csrf" value="{csrf}">
 <div class="board-settings-grid admin-settings-grid">
   <label>Site name
