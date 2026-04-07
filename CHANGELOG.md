@@ -4,6 +4,10 @@ All notable changes to RustChan will be documented in this file.
 
 ## [1.1.3]
 
+### Added
+
+- Automated saved full-site backups with admin-configurable cadence and retention: the full backup panel and `settings.toml` now expose how many hours to wait between runs and how many saved full backups to keep, with automated runs pruning the oldest saved full backups after each new server-side full backup completes.
+
 ### Improved
 
 - Homepage board cards and board catalog thread cards now keep a more consistent square visual rhythm: the main content rail is wider on desktop, homepage NSFW badges sit beside board IDs for faster scanning, and catalog size toggles once again distinguish compact and large thread cards while preserving more uniform tile heights.

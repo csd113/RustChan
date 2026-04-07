@@ -1,5 +1,175 @@
 use super::*;
 
+pub(crate) fn create_full_backup_to_server(
+    pool: &crate::db::DbPool,
+    session_id: Option<&str>,
+    progress: &std::sync::Arc<crate::middleware::BackupProgress>,
+    copies_to_keep: u64,
+) -> Result<String> {
+    let conn = pool.get()?;
+    if let Some(session_id) = session_id {
+        super::super::require_admin_session_sid(&conn, Some(session_id))?;
+    }
+    let uploads_base = std::path::Path::new(&CONFIG.upload_dir);
+    let global_favicon_dir = crate::favicon::global_backup_source_dir();
+
+    progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
+    log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
+
+    let temp_dir = std::env::temp_dir();
+    let tmp_id = uuid::Uuid::new_v4().simple().to_string();
+    let temp_db = temp_dir.join(format!("chan_backup_{tmp_id}.db"));
+    let temp_db_str = temp_db
+        .to_str()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path non-UTF-8")))?
+        .replace('\'', "''");
+
+    conn.execute_batch(&format!("VACUUM INTO '{temp_db_str}'"))
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {error}")))?;
+
+    progress.reset(crate::middleware::backup_phase::COUNT_FILES);
+    log_backup_phase(crate::middleware::backup_phase::COUNT_FILES);
+    let favicon_file_count = super::count_files_in_dir(&global_favicon_dir);
+    let file_count = super::count_files_in_dir(uploads_base).saturating_add(favicon_file_count);
+    let db_snapshot_size = std::fs::metadata(&temp_db)
+        .map(|metadata| metadata.len())
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;
+    let manifest = build_full_backup_manifest(
+        &conn,
+        db_snapshot_size,
+        file_count.saturating_sub(favicon_file_count),
+        favicon_file_count,
+    )?;
+    drop(conn);
+    progress
+        .files_total
+        .store(file_count.saturating_add(2), Ordering::Relaxed);
+
+    let backup_dir = super::full_backup_dir();
+    std::fs::create_dir_all(&backup_dir)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Create full backup dir: {error}")))?;
+    let ts = Utc::now().format("%Y%m%d_%H%M%S");
+    let filename = super::unique_backup_filename(&backup_dir, &format!("rustchan-backup-{ts}.zip"));
+    let final_path = backup_dir.join(&filename);
+    let tmp_path = backup_dir.join(format!("{filename}.tmp"));
+
+    let build_result = (|| -> Result<()> {
+        let out_file = std::io::BufWriter::new(
+            std::fs::File::create(&tmp_path)
+                .map_err(|error| AppError::Internal(anyhow::anyhow!("Create zip tmp: {error}")))?,
+        );
+        let mut zip = zip::ZipWriter::new(out_file);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        progress.reset(crate::middleware::backup_phase::COMPRESS);
+        log_backup_phase(crate::middleware::backup_phase::COMPRESS);
+        progress
+            .files_total
+            .store(file_count.saturating_add(2), Ordering::Relaxed);
+
+        let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Serialize full backup manifest: {error}"))
+        })?;
+        zip.start_file(super::common::FULL_BACKUP_MANIFEST_NAME, opts)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip backup manifest: {error}")))?;
+        zip.write_all(&manifest_json).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Write backup manifest: {error}"))
+        })?;
+
+        zip.start_file("chan.db", opts)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip DB: {error}")))?;
+        let mut db_src = std::fs::File::open(&temp_db)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Open DB snapshot: {error}")))?;
+        let copied = std::io::copy(&mut db_src, &mut zip)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Stream DB to zip: {error}")))?;
+        drop(db_src);
+        let _ = std::fs::remove_file(&temp_db);
+        progress.files_done.fetch_add(1, Ordering::Relaxed);
+        progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
+        log_backup_progress(progress);
+
+        if uploads_base.exists() {
+            super::add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, progress)?;
+        }
+        if global_favicon_dir.exists() {
+            super::add_dir_to_zip_with_prefix(
+                &mut zip,
+                &global_favicon_dir,
+                &global_favicon_dir,
+                "favicon",
+                opts,
+                progress,
+            )?;
+        }
+
+        let writer = zip
+            .finish()
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Finalise zip: {error}")))?;
+        writer
+            .into_inner()
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Flush zip writer: {error}")))?
+            .sync_all()
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Sync zip file: {error}")))?;
+        Ok(())
+    })();
+
+    if let Err(error) = build_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        let _ = std::fs::remove_file(&temp_db);
+        return Err(error);
+    }
+
+    if let Err(error) = super::common::verify_full_backup_zip(&tmp_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        let _ = std::fs::remove_file(&temp_db);
+        return Err(error);
+    }
+
+    std::fs::rename(&tmp_path, &final_path).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp_path);
+        let _ = std::fs::remove_file(&temp_db);
+        AppError::Internal(anyhow::anyhow!("Rename backup: {error}"))
+    })?;
+    super::invalidate_backup_list_cache(&backup_dir, super::BackupListKind::Full);
+
+    match super::enforce_full_backup_retention(copies_to_keep) {
+        Ok(removed) if !removed.is_empty() => {
+            tracing::info!(
+                target: "admin",
+                removed = removed.len(),
+                copies_to_keep = copies_to_keep.max(1),
+                "Trimmed older saved full backups after creating a new saved full backup"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                target: "admin",
+                error = %error,
+                copies_to_keep = copies_to_keep.max(1),
+                "Full backup retention trim failed after creating a saved full backup"
+            );
+        }
+    }
+
+    let size = std::fs::metadata(&final_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    tracing::info!(
+        target: "admin",
+        filename = %filename,
+        bytes = size,
+        automated = session_id.is_none(),
+        "Full backup created"
+    );
+    progress
+        .phase
+        .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
+    log_backup_phase(crate::middleware::backup_phase::DONE);
+    Ok(filename)
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn create_full_backup(
     State(state): State<AppState>,
@@ -11,156 +181,13 @@ pub async fn create_full_backup(
         .get(super::super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
     super::super::check_csrf_jar(&jar, form.csrf.as_deref())?;
-
-    let upload_dir = CONFIG.upload_dir.clone();
     let progress = state.backup_progress.clone();
+    let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
-            let conn = pool.get()?;
-            super::super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            let uploads_base = std::path::Path::new(&upload_dir);
-            let global_favicon_dir = crate::favicon::global_backup_source_dir();
-
-            progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
-            log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
-
-            let temp_dir = std::env::temp_dir();
-            let tmp_id = uuid::Uuid::new_v4().simple().to_string();
-            let temp_db = temp_dir.join(format!("chan_backup_{tmp_id}.db"));
-            let temp_db_str = temp_db
-                .to_str()
-                .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path non-UTF-8")))?
-                .replace('\'', "''");
-
-            conn.execute_batch(&format!("VACUUM INTO '{temp_db_str}'"))
-                .map_err(|error| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {error}")))?;
-
-            progress.reset(crate::middleware::backup_phase::COUNT_FILES);
-            log_backup_phase(crate::middleware::backup_phase::COUNT_FILES);
-            let favicon_file_count = super::count_files_in_dir(&global_favicon_dir);
-            let file_count =
-                super::count_files_in_dir(uploads_base).saturating_add(favicon_file_count);
-            let db_snapshot_size = std::fs::metadata(&temp_db).map(|metadata| metadata.len()).map_err(
-                |error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}"))
-            )?;
-            let manifest = build_full_backup_manifest(
-                &conn,
-                db_snapshot_size,
-                file_count.saturating_sub(favicon_file_count),
-                favicon_file_count,
-            )?;
-            drop(conn);
-            progress
-                .files_total
-                .store(file_count.saturating_add(2), Ordering::Relaxed);
-
-            let backup_dir = super::full_backup_dir();
-            std::fs::create_dir_all(&backup_dir).map_err(|error| {
-                AppError::Internal(anyhow::anyhow!("Create full backup dir: {error}"))
-            })?;
-            let ts = Utc::now().format("%Y%m%d_%H%M%S");
-            let filename =
-                super::unique_backup_filename(&backup_dir, &format!("rustchan-backup-{ts}.zip"));
-            let final_path = backup_dir.join(&filename);
-            let tmp_path = backup_dir.join(format!("{filename}.tmp"));
-
-            let build_result = (|| -> Result<()> {
-                let out_file = std::io::BufWriter::new(
-                    std::fs::File::create(&tmp_path).map_err(|error| {
-                        AppError::Internal(anyhow::anyhow!("Create zip tmp: {error}"))
-                    })?,
-                );
-                let mut zip = zip::ZipWriter::new(out_file);
-                let opts = zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Deflated);
-
-                progress.reset(crate::middleware::backup_phase::COMPRESS);
-                log_backup_phase(crate::middleware::backup_phase::COMPRESS);
-                progress
-                    .files_total
-                    .store(file_count.saturating_add(2), Ordering::Relaxed);
-
-                let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!("Serialize full backup manifest: {error}"))
-                })?;
-                zip.start_file(super::common::FULL_BACKUP_MANIFEST_NAME, opts)
-                    .map_err(|error| {
-                        AppError::Internal(anyhow::anyhow!("Zip backup manifest: {error}"))
-                    })?;
-                zip.write_all(&manifest_json).map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!("Write backup manifest: {error}"))
-                })?;
-
-                zip.start_file("chan.db", opts)
-                    .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip DB: {error}")))?;
-                let mut db_src = std::fs::File::open(&temp_db).map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!("Open DB snapshot: {error}"))
-                })?;
-                let copied = std::io::copy(&mut db_src, &mut zip).map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!("Stream DB to zip: {error}"))
-                })?;
-                drop(db_src);
-                let _ = std::fs::remove_file(&temp_db);
-                progress.files_done.fetch_add(1, Ordering::Relaxed);
-                progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
-                log_backup_progress(&progress);
-
-                if uploads_base.exists() {
-                    super::add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
-                }
-                if global_favicon_dir.exists() {
-                    super::add_dir_to_zip_with_prefix(
-                        &mut zip,
-                        &global_favicon_dir,
-                        &global_favicon_dir,
-                        "favicon",
-                        opts,
-                        &progress,
-                    )?;
-                }
-
-                let writer = zip.finish().map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!("Finalise zip: {error}"))
-                })?;
-                writer
-                    .into_inner()
-                    .map_err(|error| {
-                        AppError::Internal(anyhow::anyhow!("Flush zip writer: {error}"))
-                    })?
-                    .sync_all()
-                    .map_err(|error| {
-                        AppError::Internal(anyhow::anyhow!("Sync zip file: {error}"))
-                    })?;
-                Ok(())
-            })();
-
-            if let Err(error) = build_result {
-                let _ = std::fs::remove_file(&tmp_path);
-                let _ = std::fs::remove_file(&temp_db);
-                return Err(error);
-            }
-
-            if let Err(error) = super::common::verify_full_backup_zip(&tmp_path) {
-                let _ = std::fs::remove_file(&tmp_path);
-                let _ = std::fs::remove_file(&temp_db);
-                return Err(error);
-            }
-
-            std::fs::rename(&tmp_path, &final_path).map_err(|error| {
-                let _ = std::fs::remove_file(&tmp_path);
-                let _ = std::fs::remove_file(&temp_db);
-                AppError::Internal(anyhow::anyhow!("Rename backup: {error}"))
-            })?;
-            super::invalidate_backup_list_cache(&backup_dir, super::BackupListKind::Full);
-
-            let size = std::fs::metadata(&final_path).map(|metadata| metadata.len()).unwrap_or(0);
-            tracing::info!(target: "admin", filename = %filename, bytes = size, "Full backup created");
-            progress
-                .phase
-                .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
-            log_backup_phase(crate::middleware::backup_phase::DONE);
+            create_full_backup_to_server(&pool, session_id.as_deref(), &progress, copies_to_keep)?;
             Ok(())
         }
     })

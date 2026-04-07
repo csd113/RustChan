@@ -273,6 +273,10 @@ fn admin_backup_routes() -> Router<AppState> {
             post(crate::handlers::admin::create_full_backup),
         )
         .route(
+            "/admin/backup/settings",
+            post(crate::handlers::admin::update_full_backup_settings),
+        )
+        .route(
             "/admin/board/backup/create",
             post(crate::handlers::admin::create_board_backup),
         )

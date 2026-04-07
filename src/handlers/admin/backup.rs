@@ -2217,6 +2217,69 @@ pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<Bac
     files
 }
 
+fn prune_full_backup_dir_to_limit(dir: &Path, keep_limit: usize) -> Result<Vec<String>> {
+    let keep_limit = keep_limit.max(1);
+    let mut backups = list_backup_files(dir, BackupListKind::Full);
+    if backups.len() <= keep_limit {
+        return Ok(Vec::new());
+    }
+
+    let to_remove = backups.split_off(keep_limit);
+    let mut removed = Vec::with_capacity(to_remove.len());
+    for backup in to_remove {
+        let path = dir.join(&backup.filename);
+        if !path.exists() {
+            continue;
+        }
+        std::fs::remove_file(&path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Delete retained full backup '{}': {error}",
+                backup.filename
+            ))
+        })?;
+        removed.push(backup.filename);
+    }
+
+    if !removed.is_empty() {
+        invalidate_backup_list_cache(dir, BackupListKind::Full);
+    }
+
+    Ok(removed)
+}
+
+pub(crate) fn enforce_full_backup_retention(copies_to_keep: u64) -> Result<Vec<String>> {
+    prune_full_backup_dir_to_limit(&full_backup_dir(), copies_to_keep.max(1) as usize)
+}
+
+fn latest_verified_full_backup_modified_time_in_dir(dir: &Path) -> Option<SystemTime> {
+    let mut candidates = Vec::new();
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("zip") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        candidates.push((modified, path));
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    for (modified, path) in candidates {
+        if common::verify_full_backup_zip(&path).is_ok() {
+            return Some(modified);
+        }
+    }
+    None
+}
+
+pub(crate) fn latest_verified_full_backup_modified_time() -> Option<SystemTime> {
+    latest_verified_full_backup_modified_time_in_dir(&full_backup_dir())
+}
+
 // ─── POST /admin/backup/create ────────────────────────────────────────────────
 
 // Create/save handlers live in `backup/create.rs`.
@@ -3095,7 +3158,8 @@ mod tests {
     use super::{
         build_board_backup_manifest, consume_temp_board_download_token,
         create_temp_board_backup_from_full_backup_path, execute_board_restore,
-        render_restored_body_html, should_store_without_recompress, temp_board_download_token_path,
+        latest_verified_full_backup_modified_time_in_dir, render_restored_body_html,
+        should_store_without_recompress, temp_board_download_token_path,
         validate_full_restore_archive_layout, write_temp_board_download_token,
     };
     use crate::error::AppError;
@@ -3192,9 +3256,8 @@ mod tests {
         )));
     }
 
-    fn build_sample_full_backup_zip(indexed_boards: bool) -> std::path::PathBuf {
+    fn write_sample_full_backup_zip_at(zip_path: &std::path::Path, indexed_boards: bool) {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let zip_path = temp_dir.path().join("full.zip");
         let db_path = temp_dir.path().join("snapshot.db");
 
         let pool = crate::db::init_test_pool().expect("test pool");
@@ -3262,7 +3325,7 @@ mod tests {
         let db_bytes = std::fs::read(&db_path).expect("read db");
 
         {
-            let file = std::fs::File::create(&zip_path).expect("zip file");
+            let file = std::fs::File::create(zip_path).expect("zip file");
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
             zip.start_file(super::common::FULL_BACKUP_MANIFEST_NAME, options)
@@ -3275,9 +3338,59 @@ mod tests {
             zip.write_all(b"hello").expect("write upload");
             zip.finish().expect("finish zip");
         }
+    }
 
+    fn build_sample_full_backup_zip(indexed_boards: bool) -> std::path::PathBuf {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("full.zip");
+        write_sample_full_backup_zip_at(&zip_path, indexed_boards);
         let persisted = temp_dir.keep();
         persisted.join("full.zip")
+    }
+
+    #[test]
+    fn prune_full_backup_dir_to_limit_removes_oldest_saved_backups() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let oldest = dir.path().join("rustchan-backup-20260101_000000.zip");
+        let middle = dir.path().join("rustchan-backup-20260102_000000.zip");
+        let newest = dir.path().join("rustchan-backup-20260103_000000.zip");
+        write_sample_full_backup_zip_at(&oldest, true);
+        write_sample_full_backup_zip_at(&middle, true);
+        write_sample_full_backup_zip_at(&newest, true);
+
+        let removed = super::prune_full_backup_dir_to_limit(dir.path(), 2).expect("prune");
+
+        assert_eq!(
+            removed,
+            vec!["rustchan-backup-20260101_000000.zip".to_string()]
+        );
+        assert!(!oldest.exists());
+        assert!(middle.exists());
+        assert!(newest.exists());
+    }
+
+    #[test]
+    fn latest_verified_full_backup_modified_time_ignores_newer_invalid_zip() {
+        let backup_dir = tempfile::tempdir().expect("tempdir");
+        let valid_path = backup_dir
+            .path()
+            .join("rustchan-backup-20990101_000001-valid.zip");
+        let invalid_path = backup_dir
+            .path()
+            .join("rustchan-backup-20990101_000002-invalid.zip");
+
+        write_sample_full_backup_zip_at(&valid_path, true);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&invalid_path, b"not a zip archive").expect("write invalid zip");
+
+        let modified = latest_verified_full_backup_modified_time_in_dir(backup_dir.path())
+            .expect("verified backup time");
+        let valid_modified = std::fs::metadata(&valid_path)
+            .expect("valid metadata")
+            .modified()
+            .expect("valid mtime");
+
+        assert_eq!(modified, valid_modified);
     }
 
     #[test]

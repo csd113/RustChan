@@ -208,6 +208,12 @@ struct SettingsFile {
     /// How often to run VACUUM to reclaim disk space, in hours.
     /// Set to 0 to disable. Default: 24 (daily).
     auto_vacuum_interval_hours: Option<u64>,
+    /// How often to create a saved full-site backup automatically, in hours.
+    /// Set to 0 to disable. Default: 24 (daily).
+    auto_full_backup_interval_hours: Option<u64>,
+    /// How many saved full-site backups to keep on disk after a new saved
+    /// backup completes. Minimum 1. Default: 1.
+    auto_full_backup_copies_to_keep: Option<u64>,
     /// How often to purge vote records for expired polls, in hours.
     /// Set to 0 to disable. Default: 72 (every 3 days).
     poll_cleanup_interval_hours: Option<u64>,
@@ -428,6 +434,11 @@ pub struct Config {
     pub wal_checkpoint_interval: u64,
     /// Interval in hours between automatic VACUUM runs. 0 = disabled.
     pub auto_vacuum_interval_hours: u64,
+    /// Interval in hours between automatic saved full backups. 0 = disabled.
+    pub auto_full_backup_interval_hours: u64,
+    /// Maximum number of saved full backups kept on disk after each new saved
+    /// full backup completes. Minimum 1.
+    pub auto_full_backup_copies_to_keep: u64,
     /// Interval in hours between expired poll vote cleanup runs. 0 = disabled.
     pub poll_cleanup_interval_hours: u64,
     /// DB file size threshold in bytes above which admin panel shows a warning.
@@ -631,6 +642,15 @@ impl Config {
                 "CHAN_AUTO_VACUUM_HOURS",
                 s.auto_vacuum_interval_hours.unwrap_or(24),
             ),
+            auto_full_backup_interval_hours: env_parse(
+                "CHAN_AUTO_FULL_BACKUP_HOURS",
+                s.auto_full_backup_interval_hours.unwrap_or(24),
+            ),
+            auto_full_backup_copies_to_keep: env_parse::<u64>(
+                "CHAN_AUTO_FULL_BACKUP_COPIES",
+                s.auto_full_backup_copies_to_keep.unwrap_or(1),
+            )
+            .max(1),
             poll_cleanup_interval_hours: env_parse(
                 "CHAN_POLL_CLEANUP_HOURS",
                 s.poll_cleanup_interval_hours.unwrap_or(72),
@@ -875,12 +895,75 @@ impl Config {
 /// key (it won't append new lines — the file is only updated if the key already
 /// exists). On a fresh install `generate_settings_file_if_missing` always
 /// writes both keys, so this is only a concern for manually-crafted files.
-pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
-    // Escape backslash and double-quote, then wrap in double quotes.
-    fn toml_quote(s: &str) -> String {
-        let inner = s.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\"{inner}\"")
+fn toml_quote(s: &str) -> String {
+    let inner = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{inner}\"")
+}
+
+fn rewrite_settings_file_lines(
+    content: &str,
+    updates: &[(&str, String)],
+    insert_missing_before: Option<&str>,
+) -> String {
+    use std::collections::BTreeSet;
+
+    let trailing_newline = content.ends_with('\n');
+    let mut seen_keys = BTreeSet::new();
+    let mut updated: Vec<String> = content
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            for (key, value) in updates {
+                if trimmed.starts_with(key) && line.contains('=') {
+                    seen_keys.insert(*key);
+                    return format!("{key} = {value}");
+                }
+            }
+            line.to_string()
+        })
+        .collect();
+
+    let missing = updates
+        .iter()
+        .filter(|(key, _)| !seen_keys.contains(key))
+        .map(|(key, value)| format!("{key} = {value}"))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        let insert_idx = insert_missing_before
+            .and_then(|anchor| {
+                updated
+                    .iter()
+                    .position(|line| line.trim_start().starts_with(anchor))
+            })
+            .or_else(|| {
+                updated
+                    .iter()
+                    .position(|line| line.trim_start().starts_with('['))
+            })
+            .unwrap_or(updated.len());
+        let mut insertion_block = missing;
+        let previous_line = insert_idx
+            .checked_sub(1)
+            .and_then(|index| updated.get(index));
+        if previous_line.is_some_and(|line| !line.trim().is_empty()) {
+            insertion_block.insert(0, String::new());
+        }
+        let next_line = updated.get(insert_idx);
+        if next_line.is_some_and(|line| !line.trim().is_empty()) {
+            insertion_block.push(String::new());
+        }
+        updated.splice(insert_idx..insert_idx, insertion_block);
     }
+
+    let mut out = updated.join("\n");
+    if trailing_newline {
+        out.push('\n');
+    }
+    out
+}
+
+fn update_settings_file_entries(updates: &[(&str, String)], insert_missing_before: Option<&str>) {
+    // Escape backslash and double-quote, then wrap in double quotes.
     let path = settings_file_path();
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -894,27 +977,9 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
             return;
         }
     };
-    // Replace the value portion of `key = "..."` lines while preserving
-    // indentation, comments on the same line, and surrounding whitespace.
-    // We use a simple line-by-line scan so that file comments are untouched.
-    let trailing_newline = content.ends_with('\n');
-    let updated: Vec<String> = content
-        .lines()
-        .map(|line| {
-            // Match `forum_name = ...` (possibly with surrounding spaces).
-            if line.trim_start().starts_with("forum_name") && line.contains('=') {
-                return format!("forum_name = {}", toml_quote(forum_name));
-            }
-            if line.trim_start().starts_with("site_subtitle") && line.contains('=') {
-                return format!("site_subtitle = {}", toml_quote(site_subtitle));
-            }
-            line.to_string()
-        })
-        .collect();
-    let mut out = updated.join("\n");
-    if trailing_newline {
-        out.push('\n');
-    }
+    // Replace the value portion of `key = ...` lines while preserving file
+    // order and unrelated comments.
+    let out = rewrite_settings_file_lines(&content, updates, insert_missing_before);
     // Atomic write: write to a temp file in the same directory, then rename
     // over the target. This prevents a partial write from corrupting settings.toml
     // if the process is killed mid-write (rename(2) is atomic on POSIX).
@@ -954,6 +1019,32 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
             }
         }
     }
+}
+
+pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
+    update_settings_file_entries(
+        &[
+            ("forum_name", toml_quote(forum_name)),
+            ("site_subtitle", toml_quote(site_subtitle)),
+        ],
+        Some("# ── Network / web server"),
+    );
+}
+
+pub fn update_settings_file_auto_full_backup(interval_hours: u64, copies_to_keep: u64) {
+    update_settings_file_entries(
+        &[
+            (
+                "auto_full_backup_interval_hours",
+                interval_hours.to_string(),
+            ),
+            (
+                "auto_full_backup_copies_to_keep",
+                copies_to_keep.max(1).to_string(),
+            ),
+        ],
+        Some("# ── Federation / ChanNet gateway"),
+    );
 }
 
 // ─── Cookie secret rotation check ────────────────────────────────────────────
@@ -1094,4 +1185,71 @@ fn loopback_addr_for_family(addr: &str, port: u16) -> String {
 
 fn port_from_bind_addr(addr: &str) -> Option<u16> {
     split_bind_addr(addr).and_then(|(_, port)| port.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_settings_file_lines;
+
+    #[test]
+    fn rewrite_settings_file_lines_updates_requested_keys_and_preserves_comments() {
+        let input = r#"# RustChan settings.toml
+forum_name = "RustChan"
+site_subtitle = "select board to proceed"
+auto_full_backup_interval_hours = 24
+auto_full_backup_copies_to_keep = 1
+"#;
+
+        let output = rewrite_settings_file_lines(
+            input,
+            &[
+                ("forum_name", "\"BackupChan\"".to_string()),
+                ("auto_full_backup_interval_hours", "12".to_string()),
+                ("auto_full_backup_copies_to_keep", "3".to_string()),
+            ],
+            None,
+        );
+
+        assert!(output.starts_with("# RustChan settings.toml\n"));
+        assert!(output.contains("forum_name = \"BackupChan\"\n"));
+        assert!(output.contains("site_subtitle = \"select board to proceed\"\n"));
+        assert!(output.contains("auto_full_backup_interval_hours = 12\n"));
+        assert!(output.contains("auto_full_backup_copies_to_keep = 3\n"));
+        assert!(output.ends_with('\n'));
+    }
+
+    #[test]
+    fn rewrite_settings_file_lines_inserts_missing_root_keys_before_anchor_section() {
+        let input = r#"# RustChan settings.toml
+forum_name = "RustChan"
+
+# ── Federation / ChanNet gateway ──────────────────────────────────────────────
+[tls]
+enabled = true
+"#;
+
+        let output = rewrite_settings_file_lines(
+            input,
+            &[
+                ("auto_full_backup_interval_hours", "24".to_string()),
+                ("auto_full_backup_copies_to_keep", "1".to_string()),
+            ],
+            Some("# ── Federation / ChanNet gateway"),
+        );
+
+        let backup_hours_idx = output
+            .find("auto_full_backup_interval_hours = 24")
+            .expect("backup hours key inserted");
+        let backup_copies_idx = output
+            .find("auto_full_backup_copies_to_keep = 1")
+            .expect("backup copies key inserted");
+        let anchor_idx = output
+            .find("# ── Federation / ChanNet gateway")
+            .expect("anchor comment present");
+        let tls_idx = output.find("[tls]").expect("tls section present");
+
+        assert!(backup_hours_idx < anchor_idx);
+        assert!(backup_copies_idx < anchor_idx);
+        assert!(anchor_idx < tls_idx);
+    }
 }

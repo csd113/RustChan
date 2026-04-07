@@ -127,6 +127,8 @@ pub fn admin_panel_page(
     site_name: &str,
     site_subtitle: &str,
     default_theme: &str,
+    auto_full_backup_interval_hours: u64,
+    auto_full_backup_copies_to_keep: u64,
     themes: &[crate::models::Theme],
     tor_address: Option<&str>,
     // Optional one-time flash message shown at the top of the panel.
@@ -1149,11 +1151,30 @@ button / button:hover</pre>
 <!-- ═══════════════════════════════════════════════════════════════════════════
      // full site backup & restore
      ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section">
+<section class="admin-section" id="full-backup-restore">
 <h2>// full site backup &amp; restore</h2>
 <p class="admin-copy">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/backups/full/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer. Saved full backups can also be used to extract or directly restore a single board without scheduling separate per-board backups.</p>
 {backup_warning_html}
 <p class="admin-copy"><strong>Backup health:</strong> {backup_status_line}</p>
+<form method="POST" action="/admin/backup/settings" class="admin-site-settings-form">
+<input type="hidden" name="_csrf" value="{csrf}">
+<div class="board-settings-grid admin-settings-grid">
+  <label title="0 disables scheduled full backups.">
+    Hours between automated backups
+    <input type="number" name="auto_full_backup_interval_hours" value="{auto_full_backup_interval_hours}" min="0" max="8760" style="font-family:inherit">
+  </label>
+  <label title="When a saved full backup completes, the oldest saved full backups beyond this limit are deleted.">
+    Full backups to keep
+    <input type="number" name="auto_full_backup_copies_to_keep" value="{auto_full_backup_copies_to_keep}" min="1" max="1000" style="font-family:inherit">
+  </label>
+</div>
+<div class="board-settings-actions">
+  <button type="submit">save automated backup settings</button>
+</div>
+</form>
+<p class="admin-meta-note admin-meta-note-spaced">
+  Set hours to <code>0</code> to disable automated full backups. Saving a full backup to server, including automated runs, trims the oldest saved full backups beyond the keep limit.
+</p>
 <div class="admin-inline-actions admin-inline-actions-spaced">
 <form method="POST" action="/admin/backup/create" id="full-backup-create-form">
 <input type="hidden" name="_csrf" value="{csrf}">
@@ -1276,6 +1297,8 @@ button / button:hover</pre>
         site_name_val = escape_html(site_name),
         site_subtitle_val = escape_html(site_subtitle),
         enabled_theme_options = enabled_theme_options,
+        auto_full_backup_interval_hours = auto_full_backup_interval_hours,
+        auto_full_backup_copies_to_keep = auto_full_backup_copies_to_keep,
         builtin_theme_cards = builtin_theme_cards,
         custom_theme_cards_or_empty = if custom_theme_cards.is_empty() {
             r#"<div class="theme-empty-state">No custom themes yet. Create one above and it will show up here.</div>"#.to_string()

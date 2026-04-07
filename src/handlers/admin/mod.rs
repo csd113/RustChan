@@ -315,6 +315,8 @@ struct AdminPanelSnapshot {
     site_name: String,
     site_subtitle: String,
     default_theme: String,
+    auto_full_backup_interval_hours: u64,
+    auto_full_backup_copies_to_keep: u64,
     themes: Vec<crate::models::Theme>,
     full_backups: Vec<crate::models::BackupInfo>,
     board_backups: Vec<crate::models::BackupInfo>,
@@ -332,6 +334,7 @@ struct BackupSummary {
 fn load_admin_panel_snapshot(
     conn: &rusqlite::Connection,
     onion_address_val: Option<String>,
+    auto_full_backup_settings: crate::middleware::AutoFullBackupSettingsSnapshot,
 ) -> Result<(AdminPanelSnapshot, Option<String>)> {
     let boards = db::get_all_boards(conn)?;
     let bans = db::list_bans(conn)?;
@@ -363,6 +366,8 @@ fn load_admin_panel_snapshot(
             site_name,
             site_subtitle,
             default_theme,
+            auto_full_backup_interval_hours: auto_full_backup_settings.interval_hours,
+            auto_full_backup_copies_to_keep: auto_full_backup_settings.copies_to_keep,
             themes,
             full_backups,
             board_backups,
@@ -443,6 +448,8 @@ fn render_admin_panel_from_snapshot(
         &snapshot.site_name,
         &snapshot.site_subtitle,
         &snapshot.default_theme,
+        snapshot.auto_full_backup_interval_hours,
+        snapshot.auto_full_backup_copies_to_keep,
         &snapshot.themes,
         tor_address.as_deref(),
         flash_ref,
@@ -510,6 +517,7 @@ pub async fn admin_panel(
     } else {
         None
     };
+    let auto_full_backup_settings = state.auto_full_backup_settings.snapshot();
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let open_section = params.open.clone();
@@ -521,7 +529,8 @@ pub async fn admin_panel(
             db::get_session(&conn, &sid)?
                 .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
 
-            let (snapshot, tor_address) = load_admin_panel_snapshot(&conn, onion_address_val)?;
+            let (snapshot, tor_address) =
+                load_admin_panel_snapshot(&conn, onion_address_val, auto_full_backup_settings)?;
             Ok(render_admin_panel_from_snapshot(
                 snapshot,
                 &csrf_clone,
