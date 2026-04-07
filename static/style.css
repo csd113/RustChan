@@ -1106,6 +1106,7 @@ html:not([data-theme]) .poster-id-btn {
     font-size: 0.65rem;
   }
 
+  .thread-summary-thumb-wrap .thread-state-badges,
   .catalog-thumb-wrap .thread-state-badges,
   .catalog-card-media .thread-state-badges {
     top: 4px;
@@ -1598,6 +1599,29 @@ html:not([data-theme]) .poster-id-btn {
 .catalog-item > .catalog-card-link:last-of-type {
   flex: 1 1 auto;
   min-height: 0;
+}
+
+.thread-summary-thumb-wrap {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+
+.thread-summary-thumb-wrap .thread-state-badges {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 2;
+  display: inline-flex;
+  gap: 3px;
+  padding: 2px;
+  pointer-events: none;
+}
+
+.thread-summary-thumb-wrap .thread-state-badges .thread-state-badge {
+  opacity: 0.98;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.45);
+  background: rgba(0,0,0,0.55);
 }
 
 .catalog-thumb-wrap,

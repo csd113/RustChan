@@ -818,7 +818,7 @@ fn render_thread_summary(
     if let (Some(_file), Some(thumb)) = (&t.op_file, &t.op_thumb) {
         let _ = write!(
             html,
-            r#"<div class="file-container catalog-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image"></a>{badges}</div>"#,
+            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image"></a>{badges}</div>"#,
             board = escape_html(board_short),
             tid = t.id,
             th = escape_html(thumb),
@@ -827,7 +827,7 @@ fn render_thread_summary(
     } else if let Some(embed_thumb) = t.op_body.as_deref().and_then(embed_thumb_from_body) {
         let _ = write!(
             html,
-            r#"<div class="file-container catalog-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" alt="video thumbnail"></a>{badges}</div>"#,
+            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" alt="video thumbnail"></a>{badges}</div>"#,
             board = escape_html(board_short),
             tid = t.id,
             src = escape_html(&embed_thumb),
