@@ -1206,6 +1206,55 @@ function toggleThreadMenu(toggle) {
 
   var POSTS_KEY = 'rustchan_my_posts_' + board + '_' + threadId;
   var PENDING_KEY = 'rustchan_you_pending_' + board + '_' + threadId;
+  var SCROLL_KEY = 'rustchan_reply_scroll_' + board + '_' + threadId;
+
+  function saveReplyScrollPosition() {
+    try {
+      sessionStorage.setItem(
+        SCROLL_KEY,
+        JSON.stringify({
+          path: window.location.pathname,
+          x: window.pageXOffset || window.scrollX || 0,
+          y: window.pageYOffset || window.scrollY || 0,
+          ts: Date.now()
+        })
+      );
+    } catch (e) {}
+  }
+
+  function restoreReplyScrollPosition() {
+    var raw = null;
+    try {
+      raw = sessionStorage.getItem(SCROLL_KEY);
+    } catch (e) {}
+    if (!raw) return;
+
+    var saved = null;
+    try {
+      saved = JSON.parse(raw);
+    } catch (e) {}
+    try {
+      sessionStorage.removeItem(SCROLL_KEY);
+    } catch (e) {}
+
+    if (!saved || saved.path !== window.location.pathname) return;
+    if (saved.ts && Date.now() - saved.ts > 2 * 60 * 1000) return;
+
+    function restore() {
+      window.scrollTo(saved.x || 0, saved.y || 0);
+    }
+
+    // Successful reply redirects include #p<id>; once we've recorded "(You)",
+    // drop the fragment so the browser doesn't yank the viewport away again.
+    if (/^#p\d+$/.test(window.location.hash) && window.history && window.history.replaceState) {
+      window.history.replaceState({}, document.title, window.location.pathname + window.location.search);
+    }
+
+    restore();
+    if (window.requestAnimationFrame) window.requestAnimationFrame(restore);
+    window.setTimeout(restore, 0);
+    window.addEventListener('load', restore, { once: true });
+  }
 
   try {
     var pending = localStorage.getItem(PENDING_KEY);
@@ -1221,6 +1270,8 @@ function toggleThreadMenu(toggle) {
       }
     }
   } catch (e) {}
+
+  restoreReplyScrollPosition();
 
   window._applyYouBadges = function () {
     try {
@@ -1254,6 +1305,7 @@ function toggleThreadMenu(toggle) {
       if (form.dataset.youWired) return;
       form.dataset.youWired = '1';
       form.addEventListener('submit', function () {
+        saveReplyScrollPosition();
         try { localStorage.setItem(PENDING_KEY, '1'); } catch (e) {}
       });
     });

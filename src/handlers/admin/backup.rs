@@ -303,6 +303,86 @@ where
     conn.query_row(sql, params, |row| row.get(0))
 }
 
+fn can_reuse_row_ids<I>(conn: &rusqlite::Connection, table: &'static str, ids: I) -> Result<bool>
+where
+    I: IntoIterator<Item = i64>,
+{
+    debug_assert!(matches!(
+        table,
+        "threads" | "posts" | "polls" | "poll_options"
+    ));
+    let sql = format!("SELECT 1 FROM {table} WHERE id = ?1 LIMIT 1");
+    let mut stmt = conn.prepare_cached(&sql).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Prepare {table} ID probe: {error}"))
+    })?;
+    for id in ids {
+        let exists = stmt.exists(params![id]).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Probe {table} ID {id} during restore: {error}"
+            ))
+        })?;
+        if exists {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn sync_autoincrement_sequence(
+    conn: &rusqlite::Connection,
+    table: &'static str,
+    max_id: Option<i64>,
+) -> Result<()> {
+    debug_assert!(matches!(
+        table,
+        "threads" | "posts" | "polls" | "poll_options"
+    ));
+    let Some(max_id) = max_id else {
+        return Ok(());
+    };
+
+    let current_seq: Option<i64> = conn
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name = ?1",
+            params![table],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Read sqlite_sequence for {table} during restore: {error}"
+            ))
+        })?;
+
+    match current_seq {
+        Some(seq) if seq >= max_id => Ok(()),
+        Some(_) => {
+            conn.execute(
+                "UPDATE sqlite_sequence SET seq = ?2 WHERE name = ?1",
+                params![table, max_id],
+            )
+            .map_err(|error| {
+                AppError::Internal(anyhow::anyhow!(
+                    "Advance sqlite_sequence for {table} during restore: {error}"
+                ))
+            })?;
+            Ok(())
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES (?1, ?2)",
+                params![table, max_id],
+            )
+            .map_err(|error| {
+                AppError::Internal(anyhow::anyhow!(
+                    "Insert sqlite_sequence for {table} during restore: {error}"
+                ))
+            })?;
+            Ok(())
+        }
+    }
+}
+
 fn insert_or_validate_restored_file_hash(
     conn: &rusqlite::Connection,
     file_hash: &board_backup_types::FileHashRow,
@@ -511,29 +591,72 @@ where
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Insert board: {error}")))?
         };
 
+        let preserve_thread_ids = can_reuse_row_ids(
+            conn,
+            "threads",
+            manifest.threads.iter().map(|thread| thread.id),
+        )?;
+        let preserve_post_ids =
+            can_reuse_row_ids(conn, "posts", manifest.posts.iter().map(|post| post.id))?;
+        let preserve_poll_ids =
+            can_reuse_row_ids(conn, "polls", manifest.polls.iter().map(|poll| poll.id))?;
+        let preserve_option_ids = can_reuse_row_ids(
+            conn,
+            "poll_options",
+            manifest.poll_options.iter().map(|option| option.id),
+        )?;
+
         let mut thread_id_map: HashMap<i64, i64> = HashMap::new();
         for thread in &manifest.threads {
-            let new_thread_id = insert_returning_id(
-                conn,
-                "INSERT INTO threads (board_id, subject, created_at, bumped_at,
-                 locked, sticky, archived, reply_count)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-                 RETURNING id",
-                params![
-                    live_board_id,
-                    thread.subject,
-                    thread.created_at,
-                    thread.bumped_at,
-                    i64::from(thread.locked),
-                    i64::from(thread.sticky),
-                    i64::from(thread.archived),
-                    thread.reply_count,
-                ],
-            )
+            let new_thread_id = if preserve_thread_ids {
+                insert_returning_id(
+                    conn,
+                    "INSERT INTO threads (id, board_id, subject, created_at, bumped_at,
+                     locked, sticky, archived, reply_count)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                     RETURNING id",
+                    params![
+                        thread.id,
+                        live_board_id,
+                        thread.subject,
+                        thread.created_at,
+                        thread.bumped_at,
+                        i64::from(thread.locked),
+                        i64::from(thread.sticky),
+                        i64::from(thread.archived),
+                        thread.reply_count,
+                    ],
+                )
+            } else {
+                insert_returning_id(
+                    conn,
+                    "INSERT INTO threads (board_id, subject, created_at, bumped_at,
+                     locked, sticky, archived, reply_count)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                     RETURNING id",
+                    params![
+                        live_board_id,
+                        thread.subject,
+                        thread.created_at,
+                        thread.bumped_at,
+                        i64::from(thread.locked),
+                        i64::from(thread.sticky),
+                        i64::from(thread.archived),
+                        thread.reply_count,
+                    ],
+                )
+            }
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert thread {}: {error}", thread.id))
             })?;
             thread_id_map.insert(thread.id, new_thread_id);
+        }
+        if preserve_thread_ids {
+            sync_autoincrement_sequence(
+                conn,
+                "threads",
+                manifest.threads.iter().map(|thread| thread.id).max(),
+            )?;
         }
 
         let mut post_id_map: HashMap<i64, i64> = HashMap::new();
@@ -545,40 +668,81 @@ where
                     post.thread_id
                 ))
             })?;
-            let new_post_id = insert_returning_id(
-                conn,
-                "INSERT INTO posts (thread_id, board_id, name, tripcode, subject,
-                 body, body_html, ip_hash, file_path, file_name, file_size,
-                 thumb_path, mime_type, media_type, created_at, deletion_token, is_op,
-                 media_processing_state, media_processing_error)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
-                 RETURNING id",
-                params![
-                    new_thread_id,
-                    live_board_id,
-                    post.name,
-                    post.tripcode,
-                    post.subject,
-                    post.body,
-                    render_restored_body_html(&post.body),
-                    post.ip_hash,
-                    post.file_path,
-                    post.file_name,
-                    post.file_size,
-                    post.thumb_path,
-                    post.mime_type,
-                    post.media_type,
-                    post.created_at,
-                    post.deletion_token,
-                    i64::from(post.is_op),
-                    post.media_processing_state,
-                    post.media_processing_error,
-                ],
-            )
+            let new_post_id = if preserve_post_ids {
+                insert_returning_id(
+                    conn,
+                    "INSERT INTO posts (id, thread_id, board_id, name, tripcode, subject,
+                     body, body_html, ip_hash, file_path, file_name, file_size,
+                     thumb_path, mime_type, media_type, created_at, deletion_token, is_op,
+                     media_processing_state, media_processing_error)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+                     RETURNING id",
+                    params![
+                        post.id,
+                        new_thread_id,
+                        live_board_id,
+                        post.name,
+                        post.tripcode,
+                        post.subject,
+                        post.body,
+                        render_restored_body_html(&post.body),
+                        post.ip_hash,
+                        post.file_path,
+                        post.file_name,
+                        post.file_size,
+                        post.thumb_path,
+                        post.mime_type,
+                        post.media_type,
+                        post.created_at,
+                        post.deletion_token,
+                        i64::from(post.is_op),
+                        post.media_processing_state,
+                        post.media_processing_error,
+                    ],
+                )
+            } else {
+                insert_returning_id(
+                    conn,
+                    "INSERT INTO posts (thread_id, board_id, name, tripcode, subject,
+                     body, body_html, ip_hash, file_path, file_name, file_size,
+                     thumb_path, mime_type, media_type, created_at, deletion_token, is_op,
+                     media_processing_state, media_processing_error)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+                     RETURNING id",
+                    params![
+                        new_thread_id,
+                        live_board_id,
+                        post.name,
+                        post.tripcode,
+                        post.subject,
+                        post.body,
+                        render_restored_body_html(&post.body),
+                        post.ip_hash,
+                        post.file_path,
+                        post.file_name,
+                        post.file_size,
+                        post.thumb_path,
+                        post.mime_type,
+                        post.media_type,
+                        post.created_at,
+                        post.deletion_token,
+                        i64::from(post.is_op),
+                        post.media_processing_state,
+                        post.media_processing_error,
+                    ],
+                )
+            }
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert post {}: {error}", post.id))
             })?;
             post_id_map.insert(post.id, new_post_id);
+        }
+        if preserve_post_ids {
+            sync_autoincrement_sequence(
+                conn,
+                "posts",
+                manifest.posts.iter().map(|post| post.id).max(),
+            )?;
         }
 
         let any_changed = post_id_map.iter().any(|(old, new)| old != new);
@@ -595,7 +759,7 @@ where
                     continue;
                 };
 
-                let new_body = remap_body_quotelinks(&post.body, &pairs);
+                let new_body = remap_body_quotelinks(&post.body, &board_short, &pairs);
                 let new_body_html = render_restored_body_html(&new_body);
                 if new_body != post.body {
                     conn.execute(
@@ -620,22 +784,45 @@ where
                     poll.thread_id
                 ))
             })?;
-            let new_poll_id = insert_returning_id(
-                conn,
-                "INSERT INTO polls (thread_id, question, expires_at, created_at)
-                 VALUES (?1,?2,?3,?4)
-                 RETURNING id",
-                params![
-                    new_thread_id,
-                    poll.question,
-                    poll.expires_at,
-                    poll.created_at
-                ],
-            )
+            let new_poll_id = if preserve_poll_ids {
+                insert_returning_id(
+                    conn,
+                    "INSERT INTO polls (id, thread_id, question, expires_at, created_at)
+                     VALUES (?1,?2,?3,?4,?5)
+                     RETURNING id",
+                    params![
+                        poll.id,
+                        new_thread_id,
+                        poll.question,
+                        poll.expires_at,
+                        poll.created_at
+                    ],
+                )
+            } else {
+                insert_returning_id(
+                    conn,
+                    "INSERT INTO polls (thread_id, question, expires_at, created_at)
+                     VALUES (?1,?2,?3,?4)
+                     RETURNING id",
+                    params![
+                        new_thread_id,
+                        poll.question,
+                        poll.expires_at,
+                        poll.created_at
+                    ],
+                )
+            }
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert poll {}: {error}", poll.id))
             })?;
             poll_id_map.insert(poll.id, new_poll_id);
+        }
+        if preserve_poll_ids {
+            sync_autoincrement_sequence(
+                conn,
+                "polls",
+                manifest.polls.iter().map(|poll| poll.id).max(),
+            )?;
         }
 
         let mut option_id_map: HashMap<i64, i64> = HashMap::new();
@@ -647,17 +834,34 @@ where
                     option.poll_id
                 ))
             })?;
-            let new_option_id = insert_returning_id(
-                conn,
-                "INSERT INTO poll_options (poll_id, text, position)
-                 VALUES (?1,?2,?3)
-                 RETURNING id",
-                params![new_poll_id, option.text, option.position],
-            )
+            let new_option_id = if preserve_option_ids {
+                insert_returning_id(
+                    conn,
+                    "INSERT INTO poll_options (id, poll_id, text, position)
+                     VALUES (?1,?2,?3,?4)
+                     RETURNING id",
+                    params![option.id, new_poll_id, option.text, option.position],
+                )
+            } else {
+                insert_returning_id(
+                    conn,
+                    "INSERT INTO poll_options (poll_id, text, position)
+                     VALUES (?1,?2,?3)
+                     RETURNING id",
+                    params![new_poll_id, option.text, option.position],
+                )
+            }
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert option {}: {error}", option.id))
             })?;
             option_id_map.insert(option.id, new_option_id);
+        }
+        if preserve_option_ids {
+            sync_autoincrement_sequence(
+                conn,
+                "poll_options",
+                manifest.poll_options.iter().map(|option| option.id).max(),
+            )?;
         }
 
         for vote in &manifest.poll_votes {
@@ -1731,10 +1935,10 @@ pub async fn admin_restore(
 // entries (large videos, the SQLite DB) can legitimately be several GiB.
 // ─── Quotelink ID remapping ───────────────────────────────────────────────────
 //
-// When a board backup is restored, posts receive new auto-incremented IDs
-// because other boards' posts already occupy the original IDs in the global
-// `posts` table. `remap_body_quotelinks` rewrites the raw text of each restored
-// post so that in-board quotelinks point to the new IDs instead of the now-stale
+// When a board backup is restored into a site where the original post IDs are
+// already occupied, the restore falls back to fresh auto-incremented IDs.
+// `remap_body_quotelinks` then rewrites the raw text of each restored post so
+// that in-board quotelinks point to the new IDs instead of the now-stale
 // original ones; HTML is then re-rendered from the trusted raw body.
 //
 // Design constraints:
@@ -1750,12 +1954,13 @@ pub async fn admin_restore(
 //      pairs = [("1000","2500"), ("100","800"), ("10","50"), ("1","3")]
 //    Processing "1000" before "100" prevents "1000" → "8000" (wrong first).
 //
-// 3. `body` stores the original markdown-like text the user typed.  In-board
-//    quotelinks appear as `>>{old_id}` (e.g. `>>500`).  A regex-free approach
-//    is used: for each (old, new) pair, replace `>>{old}` followed by a
-//    non-digit (or end-of-string) to avoid `>>100` matching inside `>>1000`.
+// 3. `body` stores the original markdown-like text the user typed.  Same-board
+//    references can appear as `>>{old_id}` or `>>>/{board}/{old_id}`. A
+//    regex-free approach is used so replacements only fire when the matched ID
+//    is followed by a non-digit (or end-of-string), avoiding `>>100` matching
+//    inside `>>1000`.
 //
-// Rewrite in-board `>>{old_id}` references in the raw post body.
+// Rewrite in-board post references in the raw post body.
 // `pairs` must be pre-sorted by old-ID string length descending.
 /// rustchan-data/backups/full/
 pub fn full_backup_dir() -> PathBuf {
@@ -2888,12 +3093,14 @@ pub async fn board_restore(
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_temp_board_download_token, create_temp_board_backup_from_full_backup_path,
-        should_store_without_recompress, temp_board_download_token_path,
+        build_board_backup_manifest, consume_temp_board_download_token,
+        create_temp_board_backup_from_full_backup_path, execute_board_restore,
+        render_restored_body_html, should_store_without_recompress, temp_board_download_token_path,
         validate_full_restore_archive_layout, write_temp_board_download_token,
     };
     use crate::error::AppError;
     use crate::models::BackupBoardSummary;
+    use rusqlite::params;
     use std::io::{Cursor, Write as _};
     use std::path::Path;
 
@@ -2910,6 +3117,31 @@ mod tests {
         }
         cursor.set_position(0);
         zip::ZipArchive::new(cursor).expect("zip archive")
+    }
+
+    fn sample_post(board_id: i64, thread_id: i64, body: &str, is_op: bool) -> crate::db::NewPost {
+        crate::db::NewPost {
+            thread_id,
+            board_id,
+            name: "anon".into(),
+            tripcode: None,
+            subject: None,
+            body: body.into(),
+            body_html: render_restored_body_html(body),
+            ip_hash: Some("hash".into()),
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".into(),
+            is_op,
+        }
     }
 
     #[test]
@@ -3080,5 +3312,308 @@ mod tests {
 
         let _ = std::fs::remove_file(board_zip_path);
         let _ = std::fs::remove_file(zip_path);
+    }
+
+    #[test]
+    fn board_restore_preserves_original_post_ids_when_they_are_free() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let mut conn = pool.get().expect("db conn");
+
+        crate::db::create_board(&conn, "tech", "Technology", "", false).expect("create board");
+        let tech_board = crate::db::get_board_by_short(&conn, "tech")
+            .expect("load board")
+            .expect("tech board");
+
+        let (thread_id, op_post_id, _) = crate::db::create_thread_with_optional_poll(
+            &conn,
+            tech_board.id,
+            Some("quoted thread"),
+            &sample_post(tech_board.id, 0, "op body", true),
+            "",
+            None,
+            None,
+        )
+        .expect("create thread");
+        let reply_body = format!(">>{op_post_id}\nreply body");
+        let reply_post_id = crate::db::create_reply_with_thread_update(
+            &conn,
+            &sample_post(tech_board.id, thread_id, &reply_body, false),
+            "",
+            true,
+            None,
+        )
+        .expect("create reply");
+
+        let manifest = build_board_backup_manifest(&conn, "tech").expect("build manifest");
+        crate::db::delete_board(&conn, tech_board.id).expect("delete board");
+
+        crate::db::create_board(&conn, "b", "Random", "", false).expect("create other board");
+        let other_board = crate::db::get_board_by_short(&conn, "b")
+            .expect("load other board")
+            .expect("other board");
+        let (_, other_post_id, _) = crate::db::create_thread_with_optional_poll(
+            &conn,
+            other_board.id,
+            Some("other thread"),
+            &sample_post(other_board.id, 0, "other post", true),
+            "",
+            None,
+            None,
+        )
+        .expect("create other thread");
+        assert!(other_post_id > reply_post_id);
+
+        execute_board_restore(
+            &mut conn,
+            upload_dir.path().to_str().expect("upload dir path"),
+            manifest,
+            |_| Ok(()),
+            "Test board restore",
+            "Test board restore completed",
+        )
+        .expect("restore board");
+
+        let restored_op = crate::db::get_post_on_board(&conn, "tech", op_post_id)
+            .expect("load restored op")
+            .expect("restored op exists");
+        let restored_reply = crate::db::get_post_on_board(&conn, "tech", reply_post_id)
+            .expect("load restored reply")
+            .expect("restored reply exists");
+
+        assert_eq!(restored_op.id, op_post_id);
+        assert_eq!(restored_op.thread_id, thread_id);
+        assert_eq!(restored_reply.id, reply_post_id);
+        assert_eq!(restored_reply.thread_id, thread_id);
+        assert_eq!(restored_reply.body, reply_body);
+        assert!(restored_reply
+            .body_html
+            .contains(&format!("data-pid=\"{op_post_id}\"")));
+        assert!(crate::db::get_post_on_board(&conn, "b", other_post_id)
+            .expect("load other post")
+            .is_some());
+    }
+
+    #[test]
+    fn board_restore_preserves_free_ids_above_target_sequence() {
+        let source_pool = crate::db::init_test_pool().expect("source pool");
+        let source_conn = source_pool.get().expect("source conn");
+        crate::db::create_board(&source_conn, "pad", "Padding", "", false).expect("create pad");
+        let pad_board = crate::db::get_board_by_short(&source_conn, "pad")
+            .expect("load pad")
+            .expect("pad board");
+        for idx in 0..5 {
+            crate::db::create_thread_with_optional_poll(
+                &source_conn,
+                pad_board.id,
+                Some("padding"),
+                &sample_post(pad_board.id, 0, &format!("padding {idx}"), true),
+                "",
+                None,
+                None,
+            )
+            .expect("create padding thread");
+        }
+        crate::db::create_board(&source_conn, "tech", "Technology", "", false)
+            .expect("create tech");
+        let source_tech_board = crate::db::get_board_by_short(&source_conn, "tech")
+            .expect("load source tech")
+            .expect("source tech board");
+        let (source_thread_id, source_op_id, _) = crate::db::create_thread_with_optional_poll(
+            &source_conn,
+            source_tech_board.id,
+            Some("high ids"),
+            &sample_post(source_tech_board.id, 0, "source op", true),
+            "",
+            None,
+            None,
+        )
+        .expect("create source thread");
+        let source_reply_id = crate::db::create_reply_with_thread_update(
+            &source_conn,
+            &sample_post(
+                source_tech_board.id,
+                source_thread_id,
+                &format!(">>{source_op_id}\nsource reply"),
+                false,
+            ),
+            "",
+            true,
+            None,
+        )
+        .expect("create source reply");
+        assert!(source_op_id > 5);
+
+        let manifest = build_board_backup_manifest(&source_conn, "tech").expect("build manifest");
+
+        let target_pool = crate::db::init_test_pool().expect("target pool");
+        let mut target_conn = target_pool.get().expect("target conn");
+        crate::db::create_board(&target_conn, "b", "Random", "", false).expect("create target b");
+        let target_b = crate::db::get_board_by_short(&target_conn, "b")
+            .expect("load target b")
+            .expect("target b board");
+        crate::db::create_thread_with_optional_poll(
+            &target_conn,
+            target_b.id,
+            Some("low ids"),
+            &sample_post(target_b.id, 0, "target op", true),
+            "",
+            None,
+            None,
+        )
+        .expect("create target thread");
+
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        execute_board_restore(
+            &mut target_conn,
+            upload_dir.path().to_str().expect("upload dir path"),
+            manifest,
+            |_| Ok(()),
+            "Test board restore high ids",
+            "Test board restore high ids completed",
+        )
+        .expect("restore board with high ids");
+
+        let restored_op = crate::db::get_post_on_board(&target_conn, "tech", source_op_id)
+            .expect("load restored op")
+            .expect("restored op exists");
+        let restored_reply = crate::db::get_post_on_board(&target_conn, "tech", source_reply_id)
+            .expect("load restored reply")
+            .expect("restored reply exists");
+        assert_eq!(restored_op.thread_id, source_thread_id);
+        assert_eq!(restored_reply.thread_id, source_thread_id);
+
+        let restored_board = crate::db::get_board_by_short(&target_conn, "tech")
+            .expect("load restored board")
+            .expect("restored board");
+        let new_post_id = crate::db::create_reply_with_thread_update(
+            &target_conn,
+            &sample_post(
+                restored_board.id,
+                source_thread_id,
+                &format!(">>{source_op_id}\nafter restore"),
+                false,
+            ),
+            "",
+            true,
+            None,
+        )
+        .expect("create post after restore");
+        assert!(new_post_id > source_reply_id);
+    }
+
+    #[test]
+    fn board_restore_fallback_remaps_same_board_crosslinks_when_ids_collide() {
+        let source_pool = crate::db::init_test_pool().expect("source pool");
+        let source_conn = source_pool.get().expect("source conn");
+        crate::db::create_board(&source_conn, "tech", "Technology", "", false)
+            .expect("create source tech");
+        let source_board = crate::db::get_board_by_short(&source_conn, "tech")
+            .expect("load source tech")
+            .expect("source tech board");
+        let (source_thread_id, source_op_id, _) = crate::db::create_thread_with_optional_poll(
+            &source_conn,
+            source_board.id,
+            Some("crosslinks"),
+            &sample_post(source_board.id, 0, "source op", true),
+            "",
+            None,
+            None,
+        )
+        .expect("create source thread");
+        let source_reply_id = crate::db::create_reply_with_thread_update(
+            &source_conn,
+            &sample_post(
+                source_board.id,
+                source_thread_id,
+                &format!(">>{source_op_id}\n>>>/tech/{source_op_id}\n>>>/b/{source_op_id}"),
+                false,
+            ),
+            "",
+            true,
+            None,
+        )
+        .expect("create source reply");
+        assert_eq!(source_op_id, 1);
+        assert_eq!(source_reply_id, 2);
+
+        let manifest = build_board_backup_manifest(&source_conn, "tech").expect("build manifest");
+
+        let target_pool = crate::db::init_test_pool().expect("target pool");
+        let mut target_conn = target_pool.get().expect("target conn");
+        crate::db::create_board(&target_conn, "b", "Random", "", false).expect("create b");
+        let target_board = crate::db::get_board_by_short(&target_conn, "b")
+            .expect("load b")
+            .expect("target board");
+        let (existing_thread_id, existing_op_id, _) = crate::db::create_thread_with_optional_poll(
+            &target_conn,
+            target_board.id,
+            Some("existing"),
+            &sample_post(target_board.id, 0, "existing op", true),
+            "",
+            None,
+            None,
+        )
+        .expect("create existing thread");
+        let existing_reply_id = crate::db::create_reply_with_thread_update(
+            &target_conn,
+            &sample_post(target_board.id, existing_thread_id, "existing reply", false),
+            "",
+            true,
+            None,
+        )
+        .expect("create existing reply");
+        assert_eq!((existing_op_id, existing_reply_id), (1, 2));
+
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        execute_board_restore(
+            &mut target_conn,
+            upload_dir.path().to_str().expect("upload dir path"),
+            manifest,
+            |_| Ok(()),
+            "Test board restore remap",
+            "Test board restore remap completed",
+        )
+        .expect("restore board with collisions");
+
+        let restored_board_id: i64 = target_conn
+            .query_row(
+                "SELECT id FROM boards WHERE short_name = 'tech'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load restored board id");
+        let restored_op_id: i64 = target_conn
+            .query_row(
+                "SELECT id FROM posts WHERE board_id = ?1 AND is_op = 1",
+                params![restored_board_id],
+                |row| row.get(0),
+            )
+            .expect("load restored op id");
+        let (restored_reply_id, restored_body, restored_body_html): (i64, String, String) =
+            target_conn
+                .query_row(
+                    "SELECT id, body, body_html
+                     FROM posts
+                     WHERE board_id = ?1 AND is_op = 0",
+                    params![restored_board_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("load restored reply");
+
+        assert!(restored_op_id > source_op_id);
+        assert!(restored_reply_id > source_reply_id);
+        assert!(restored_body.contains(&format!(">>{restored_op_id}")));
+        assert!(restored_body.contains(&format!(">>>/tech/{restored_op_id}")));
+        assert!(restored_body.contains(">>>/b/1"));
+        assert!(
+            restored_body_html.contains(&format!("data-pid=\"{restored_op_id}\"")),
+            "same-board quotelink should point at remapped post id"
+        );
+        assert!(
+            restored_body_html.contains(&format!("/tech/post/{restored_op_id}")),
+            "same-board crosslink should point at remapped post id"
+        );
+        assert!(restored_body_html.contains("/b/post/1"));
     }
 }

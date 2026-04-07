@@ -83,14 +83,10 @@ pub(super) fn validate_board_short_name(short_name: &str) -> Result<()> {
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-pub(super) fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> String {
-    if pairs.is_empty() {
-        return body.to_string();
-    }
-
+fn remap_numeric_references(body: &str, prefix: &str, pairs: &[(String, String)]) -> String {
     let mut result = body.to_string();
     for (old, new) in pairs {
-        let needle = format!(">>{old}");
+        let needle = format!("{prefix}{old}");
         let mut out = String::with_capacity(result.len());
         let mut pos = 0;
         let bytes = result.as_bytes();
@@ -108,7 +104,7 @@ pub(super) fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> S
                     if next_is_digit {
                         out.push_str(&needle);
                     } else {
-                        out.push_str(">>");
+                        out.push_str(prefix);
                         out.push_str(new);
                     }
                     pos = after;
@@ -118,6 +114,21 @@ pub(super) fn remap_body_quotelinks(body: &str, pairs: &[(String, String)]) -> S
         result = out;
     }
     result
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+pub(super) fn remap_body_quotelinks(
+    body: &str,
+    board_short: &str,
+    pairs: &[(String, String)],
+) -> String {
+    if pairs.is_empty() {
+        return body.to_string();
+    }
+
+    let result = remap_numeric_references(body, ">>", pairs);
+    let crosslink_prefix = format!(">>>/{board_short}/");
+    remap_numeric_references(&result, &crosslink_prefix, pairs)
 }
 
 pub(super) fn render_restored_body_html(body: &str) -> String {
@@ -361,8 +372,9 @@ pub(super) fn verify_board_backup_zip(
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_uploads_to_dir, validate_board_short_name, verify_board_backup_zip,
-        verify_full_backup_zip, FullBackupManifest, FULL_BACKUP_MANIFEST_NAME,
+        extract_uploads_to_dir, remap_body_quotelinks, validate_board_short_name,
+        verify_board_backup_zip, verify_full_backup_zip, FullBackupManifest,
+        FULL_BACKUP_MANIFEST_NAME,
     };
     use serde_json::json;
     use std::io::Write as _;
@@ -384,6 +396,33 @@ mod tests {
         assert!(validate_board_short_name("test").is_ok());
         assert!(validate_board_short_name("../bad").is_err());
         assert!(validate_board_short_name("waytoolong").is_err());
+    }
+
+    #[test]
+    fn remap_body_quotelinks_updates_same_board_crosslinks() {
+        let remapped = remap_body_quotelinks(
+            "reply >>12 and >>>/tech/12 but not >>>/b/12",
+            "tech",
+            &[("12".into(), "77".into())],
+        );
+
+        assert!(remapped.contains(">>77"));
+        assert!(remapped.contains(">>>/tech/77"));
+        assert!(remapped.contains(">>>/b/12"));
+    }
+
+    #[test]
+    fn remap_body_quotelinks_preserves_longer_numeric_suffixes() {
+        let remapped = remap_body_quotelinks(
+            ">>12 >>123 >>>/tech/12 >>>/tech/123",
+            "tech",
+            &[("12".into(), "88".into())],
+        );
+
+        assert!(remapped.contains(">>88"));
+        assert!(remapped.contains(">>123"));
+        assert!(remapped.contains(">>>/tech/88"));
+        assert!(remapped.contains(">>>/tech/123"));
     }
 
     #[test]
