@@ -1652,6 +1652,14 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   letter-spacing: 0.03em;
 }
 
+@media (min-width: 701px) {
+  .board-cards,
+  .catalog-grid,
+  .catalog-grid.catalog-large {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+  }
+}
+
 .board-reorder-menu {
   position: absolute;
   top: 8px;
