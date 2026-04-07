@@ -137,7 +137,71 @@ function togglePostForm() {
   var wrap = document.getElementById('post-form-wrap');
   if (!wrap) return;
   var opening = wrap.hidden || wrap.style.display === 'none' || wrap.classList.contains('is-collapsed');
+  if (opening) {
+    clearRestoredAutoQuoteOnlyDraft();
+  }
   setPostFormOpen(opening);
+}
+
+function getReplyBodyField() {
+  return document.getElementById('reply-body');
+}
+
+function getReplyDraftStorageKey() {
+  var cfg = document.getElementById('thread-config');
+  if (!cfg) return '';
+  return cfg.dataset.draftKey || '';
+}
+
+function getReplyDraftMetaKey() {
+  var draftKey = getReplyDraftStorageKey();
+  return draftKey ? draftKey + ':mode' : '';
+}
+
+function isQuoteOnlyReplyDraft(value) {
+  if (!value) return false;
+  var trimmed = value.trim();
+  if (!trimmed) return false;
+  return trimmed.split('\n').every(function (line) {
+    var candidate = line.trim();
+    return (
+      !candidate ||
+      /^>>\d+$/.test(candidate) ||
+      /^>>>\/[a-z0-9]+\/\d+$/.test(candidate)
+    );
+  });
+}
+
+function getReplyDraftMode() {
+  var ta = getReplyBodyField();
+  if (!ta) return '';
+  return ta.dataset.draftMode || '';
+}
+
+function setReplyDraftMode(mode) {
+  var ta = getReplyBodyField();
+  if (!ta) return;
+  ta.dataset.draftMode = mode || '';
+}
+
+function clearReplyDraftStorage() {
+  var draftKey = getReplyDraftStorageKey();
+  var metaKey = getReplyDraftMetaKey();
+  try {
+    if (draftKey) localStorage.removeItem(draftKey);
+    if (metaKey) localStorage.removeItem(metaKey);
+  } catch (e) {}
+}
+
+function clearRestoredAutoQuoteOnlyDraft() {
+  var ta = getReplyBodyField();
+  if (!ta) return;
+  if (ta.dataset.draftRestored !== '1') return;
+  if (getReplyDraftMode() !== 'auto-quote-only') return;
+  ta.value = '';
+  ta.dataset.draftRestored = '0';
+  setReplyDraftMode('');
+  clearReplyDraftStorage();
 }
 
 function appendReply(id) {
@@ -145,9 +209,17 @@ function appendReply(id) {
   if (wrap && (wrap.hidden || wrap.style.display === 'none' || wrap.classList.contains('is-collapsed'))) {
     setPostFormOpen(true, { scrollIntoView: true });
   }
-  var ta = document.getElementById('reply-body');
+  var ta = getReplyBodyField();
   if (ta) {
+    var hadManualDraft =
+      getReplyDraftMode() === 'manual' ||
+      (!!ta.value && !isQuoteOnlyReplyDraft(ta.value));
+    if (ta.value && !/\n$/.test(ta.value)) {
+      ta.value += '\n';
+    }
     ta.value += '>>' + id + '\n';
+    ta.dataset.draftRestored = '0';
+    setReplyDraftMode(hadManualDraft ? 'manual' : 'auto-quote-only');
     if (!isMobileViewport()) ta.focus();
   }
   return false;
@@ -2126,26 +2198,57 @@ document.addEventListener('keydown', function (e) {
   if (!cfg) return;
   var DRAFT_KEY = cfg.dataset.draftKey;
   if (!DRAFT_KEY) return;
+  var DRAFT_META_KEY = DRAFT_KEY + ':mode';
 
-  var ta = document.getElementById('reply-body');
+  var ta = getReplyBodyField();
   if (!ta) return;
 
   // Restore saved draft on page load
   try {
     var saved = localStorage.getItem(DRAFT_KEY);
-    if (saved) { ta.value = saved; }
+    var savedMode = localStorage.getItem(DRAFT_META_KEY);
+    if (saved) {
+      ta.value = saved;
+      ta.dataset.draftRestored = '1';
+      if (savedMode) {
+        setReplyDraftMode(savedMode);
+      } else if (isQuoteOnlyReplyDraft(saved)) {
+        setReplyDraftMode('auto-quote-only');
+      } else {
+        setReplyDraftMode('manual');
+      }
+    }
   } catch (e) {}
+
+  ta.addEventListener('input', function () {
+    ta.dataset.draftRestored = '0';
+    setReplyDraftMode('manual');
+  });
 
   // Autosave every 3 seconds while the user types
   setInterval(function () {
-    try { localStorage.setItem(DRAFT_KEY, ta.value); } catch (e) {}
+    try {
+      if (ta.value) {
+        localStorage.setItem(DRAFT_KEY, ta.value);
+        if (getReplyDraftMode()) {
+          localStorage.setItem(DRAFT_META_KEY, getReplyDraftMode());
+        } else {
+          localStorage.removeItem(DRAFT_META_KEY);
+        }
+      } else {
+        localStorage.removeItem(DRAFT_KEY);
+        localStorage.removeItem(DRAFT_META_KEY);
+      }
+    } catch (e) {}
   }, 3000);
 
   // Clear draft when the reply form is submitted
   var form = ta.closest('form');
   if (form) {
     form.addEventListener('submit', function () {
-      try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+      ta.dataset.draftRestored = '0';
+      setReplyDraftMode('');
+      clearReplyDraftStorage();
     });
   }
 })();
