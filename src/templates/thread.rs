@@ -525,6 +525,45 @@ fn annotate_op_quotelinks(body_html: &str, thread_op_id: Option<i64>) -> String 
     body_html.replace(&target, &replacement)
 }
 
+const FILE_NAME_STEM_PREFIX_DISPLAY_CHARS: usize = 20;
+const FILE_NAME_TRUNCATION_MARKER: &str = "(...)";
+
+fn truncate_file_name_stem(input: &str) -> String {
+    if input.chars().count() <= FILE_NAME_STEM_PREFIX_DISPLAY_CHARS {
+        return input.to_string();
+    }
+
+    let prefix: String = input
+        .chars()
+        .take(FILE_NAME_STEM_PREFIX_DISPLAY_CHARS)
+        .collect();
+    format!("{prefix}{FILE_NAME_TRUNCATION_MARKER}")
+}
+
+fn display_file_name(name: &str) -> String {
+    match name.rfind('.') {
+        Some(dot_idx) if dot_idx > 0 => {
+            let (stem, ext) = name.split_at(dot_idx);
+            if stem.chars().count() > FILE_NAME_STEM_PREFIX_DISPLAY_CHARS {
+                format!("{}{}", truncate_file_name_stem(stem), ext)
+            } else {
+                name.to_string()
+            }
+        }
+        _ => truncate_file_name_stem(name),
+    }
+}
+
+fn render_file_link(file_path: &str, file_name: &str) -> String {
+    let display_name = display_file_name(file_name);
+    format!(
+        r#"<a href="/boards/{file_path}" target="_blank" rel="noreferrer" title="{full_name}">{display_name}</a>"#,
+        file_path = escape_html(file_path),
+        full_name = escape_html(file_name),
+        display_name = escape_html(&display_name),
+    )
+}
+
 /// Render a single post as HTML.
 /// `pub` because board.rs uses this for thread-summary preview posts and
 /// search results; all other call-sites are within this module.
@@ -648,6 +687,7 @@ pub fn render_post(
         if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
             let size_str = post.file_size.map(format_file_size).unwrap_or_default();
             let name_str = post.file_name.as_deref().unwrap_or("file");
+            let file_link = render_file_link(file, name_str);
             let mime = post
                 .mime_type
                 .as_deref()
@@ -685,7 +725,7 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container audio-container">
 <div class="file-info">
-  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: {file_link} ({sz})
 </div>
 <div class="audio-thumb">
   <img class="thumb" src="/boards/{th}" loading="eager" alt="audio">
@@ -695,6 +735,7 @@ pub fn render_post(
   Your browser does not support the audio element.
 </audio>
 </div>"#,
+                    file_link = file_link,
                     f = escape_html(file),
                     th = escape_html(thumb),
                     orig = escape_html(name_str),
@@ -706,7 +747,7 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container">
 <div class="file-info">
-  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: {file_link} ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
 <a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to play">
@@ -717,9 +758,9 @@ pub fn render_post(
   <source src="/boards/{f}" type="{mime}">
 </video>
 </div>"#,
+                    file_link = file_link,
                     f = escape_html(file),
                     th = escape_html(thumb),
-                    orig = escape_html(name_str),
                     sz = escape_html(&size_str),
                     mime = escape_html(mime)
                 );
@@ -732,7 +773,7 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container{combo_class}">
 <div class="file-info">
-  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: {file_link} ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
 <a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
@@ -748,23 +789,25 @@ pub fn render_post(
                     } else {
                         ""
                     },
+                    file_link = file_link,
                     f = escape_html(file),
                     th = escape_html(thumb),
-                    orig = escape_html(name_str),
                     sz = escape_html(&size_str),
                     audio_combo_html = combo_audio.map_or_else(
                         String::new,
                         |(aud_file, aud_mime, aud_name, aud_size)| {
+                            let audio_link = render_file_link(aud_file, aud_name);
                             format!(
                                 r#"<div class="audio-combo audio-combo-inline">
 <div class="file-info">
-  Audio: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  Audio: {audio_link} ({sz})
 </div>
 <audio controls preload="none" class="audio-player audio-player-combo" data-audio-title="{orig}" data-artwork-src="/boards/{th}">
   <source src="/boards/{f}" type="{mime}">
   Your browser does not support the audio element.
 </audio>
 </div>"#,
+                                audio_link = audio_link,
                                 f = escape_html(aud_file),
                                 th = escape_html(thumb),
                                 orig = escape_html(aud_name),
@@ -778,6 +821,7 @@ pub fn render_post(
         } else if let Some(file) = &post.file_path {
             let size_str = post.file_size.map(format_file_size).unwrap_or_default();
             let name_str = post.file_name.as_deref().unwrap_or("file");
+            let file_link = render_file_link(file, name_str);
             let status_note = match post.media_processing_state.as_deref() {
                 Some("pending") => "Preview still processing.",
                 Some("failed") => "Preview generation failed; original file is still available.",
@@ -787,12 +831,11 @@ pub fn render_post(
                 html,
                 r#"<div class="file-container">
 <div class="file-info">
-  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: {file_link} ({sz})
   <span class="post-edited" title="{status}">{status}</span>
 </div>
 </div>"#,
-                f = escape_html(file),
-                orig = escape_html(name_str),
+                file_link = file_link,
                 sz = escape_html(&size_str),
                 status = escape_html(status_note),
             );
@@ -803,15 +846,15 @@ pub fn render_post(
         if let Some(file) = &post.file_path {
             let size_str = post.file_size.map(format_file_size).unwrap_or_default();
             let name_str = post.file_name.as_deref().unwrap_or("download");
+            let file_link = render_file_link(file, name_str);
             let _ = write!(
                 html,
                 r#"<div class="file-container file-download">
 <div class="file-info">
-  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: {file_link} ({sz})
 </div>
 </div>"#,
-                f = escape_html(file),
-                orig = escape_html(name_str),
+                file_link = file_link,
                 sz = escape_html(&size_str)
             );
         }
@@ -825,17 +868,19 @@ pub fn render_post(
                 .audio_file_size
                 .map(format_file_size)
                 .unwrap_or_default();
+            let audio_link = render_file_link(aud_file, aud_name);
             let _ = write!(
                 html,
                 r#"<div class="file-container audio-container audio-combo">
 <div class="file-info">
-  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: {audio_link} ({sz})
 </div>
 <audio controls preload="none" class="audio-player" data-audio-title="{orig}">
   <source src="/boards/{f}" type="{mime}">
   Your browser does not support the audio element.
 </audio>
 </div>"#,
+                audio_link = audio_link,
                 f = escape_html(aud_file),
                 orig = escape_html(aud_name),
                 sz = escape_html(&aud_size),
@@ -1000,7 +1045,7 @@ pub fn edit_post_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{render_post, RenderPostOpts};
+    use super::{display_file_name, render_post, RenderPostOpts};
     use crate::models::{MediaType, Post};
 
     fn sample_post() -> Post {
@@ -1062,6 +1107,45 @@ mod tests {
         assert!(html.contains(r#"Audio: <a href="/boards/test/song.flac""#));
         assert!(html.contains(r#"data-artwork-src="/boards/test/thumbs/image.webp""#));
         assert!(!html.contains("file-container audio-container audio-combo"));
+    }
+
+    #[test]
+    fn display_file_name_truncates_long_stems_and_keeps_extension() {
+        assert_eq!(
+            display_file_name("A412BB86-098B-48D1-7DG12GNY78KS.jpg"),
+            "A412BB86-098B-48D1-7(...).jpg"
+        );
+        assert_eq!(display_file_name("short.webp"), "short.webp");
+        assert_eq!(
+            display_file_name("1234567890123456789012345"),
+            "12345678901234567890(...)"
+        );
+    }
+
+    #[test]
+    fn render_post_uses_truncated_filename_with_full_title() {
+        let mut post = sample_post();
+        post.file_name = Some("supercalifragilisticx.webp".into());
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: true,
+                allow_editing: false,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html
+            .contains(r#"title="supercalifragilisticx.webp">supercalifragilistic(...).webp</a>"#));
     }
 
     #[test]
