@@ -263,7 +263,7 @@ pub fn admin_panel_page(
 </form>
 {board_favicon_clear}
 </div>
-<p style="color:var(--text-dim);font-size:0.78rem;margin:0.35rem 0 0">
+<p class="favicon-inline-status">
   {board_favicon_status}
 </p>
 <!-- Delete form is now OUTSIDE the settings form. -->
@@ -677,8 +677,7 @@ pub fn admin_panel_page(
     let ban_badge = format!(r#" <span class="admin-count-badge">{ban_count}</span>"#);
     let filter_badge = format!(r#" <span class="admin-count-badge">{filter_count}</span>"#);
     let moderation_open_attr = "";
-    let moderation_summary_badges =
-        format!("{report_badge}{appeal_badge}{ban_badge}{filter_badge}");
+    let moderation_summary_counter = format!("Report inbox: [{report_count}]");
 
     let mut appeal_rows = String::new();
     if appeals.is_empty() {
@@ -953,7 +952,7 @@ old boards to prevent query performance degradation.
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section admin-section-collapsible" id="reports">
 <details class="admin-dropdown"{moderation_open_attr}>
-<summary><span>// moderation</span><span class="admin-dropdown-badges">{moderation_summary_badges}</span></summary>
+<summary><span>// moderation</span><span class="admin-dropdown-badges admin-dropdown-counter-label">{moderation_summary_counter}</span></summary>
 <div class="admin-dropdown-content">
 <p class="admin-moderation-intro">
   Live queues come first, policy controls come second, and the log stays available for historical review.
@@ -1275,7 +1274,7 @@ button / button:hover</pre>
         appeal_rows = appeal_rows,
         appeal_badge = appeal_badge,
         moderation_open_attr = moderation_open_attr,
-        moderation_summary_badges = moderation_summary_badges,
+        moderation_summary_counter = escape_html(&moderation_summary_counter),
         global_favicon_preview = if global_favicon_exists {
             format!(
                 r#"<img class="favicon-inline-preview" src="/favicon-32x32.png?v={version}" alt="global favicon">"#,

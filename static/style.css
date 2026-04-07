@@ -2549,13 +2549,19 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
 .theme-card-summary {
   display: grid !important;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: 0.8rem 18px minmax(0, 1fr);
   grid-template-areas:
-    "swatch heading"
-    "swatch description";
+    "chevron swatch heading"
+    "chevron swatch description";
   column-gap: 12px;
   row-gap: 3px;
   align-items: center;
+}
+
+.theme-card-summary::before {
+  grid-area: chevron;
+  align-self: center;
+  justify-self: center;
 }
 
 .theme-card-swatch {
@@ -2720,6 +2726,15 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   margin-left: auto;
 }
 
+.admin-dropdown-counter-label {
+  gap: 0;
+  color: var(--text-dim);
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  white-space: nowrap;
+}
+
 .admin-dropdown-badges .report-badge,
 .admin-count-badge {
   display: inline-flex;
@@ -2854,9 +2869,11 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 }
 
 .backup-actions-stack {
+  --backup-action-width: min(100%, 22rem);
   display: grid;
   gap: 0.45rem;
   align-items: start;
+  justify-items: start;
 }
 
 .backup-inline-form {
@@ -2865,10 +2882,11 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 }
 
 .backup-primary-actions {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: 0.4rem;
-  align-items: flex-start;
+  align-items: start;
+  width: var(--backup-action-width);
+  max-width: 100%;
 }
 
 .backup-table {
@@ -2913,30 +2931,31 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 .backup-download-link {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
 }
 
 .backup-primary-actions > * {
-  flex: 0 1 auto;
-  min-width: 10rem;
+  min-width: 0;
+  width: 100%;
   max-width: 100%;
 }
 
 .backup-primary-actions button,
 .backup-primary-actions .backup-download-link,
-.backup-extract-actions button {
+.backup-extract-actions button,
+.backup-extract-details summary {
   min-height: 2.15rem;
   padding: 0.45rem 0.7rem;
   font-size: 0.76rem;
   letter-spacing: 0.02em;
-  text-align: center;
+  text-align: left;
   box-sizing: border-box;
 }
 
 .backup-primary-actions .backup-inline-form {
   display: flex;
-  flex: 0 1 auto;
-  min-width: 10rem;
+  min-width: 0;
+  width: 100%;
   max-width: 100%;
 }
 
@@ -2946,40 +2965,75 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 }
 
 .backup-extract-details {
-  width: 100%;
-  max-width: 30rem;
-  border: 1px solid var(--border);
-  background: rgba(255,255,255,0.02);
-  padding: 0.32rem 0.45rem;
+  width: var(--backup-action-width);
+  max-width: 100%;
   box-sizing: border-box;
 }
 
 .backup-extract-details summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
   cursor: pointer;
   color: var(--green-pale);
-  font-size: 0.74rem;
-  letter-spacing: 0.04em;
   list-style: none;
-  text-transform: uppercase;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
 }
 
 .backup-extract-details summary::-webkit-details-marker {
   display: none;
 }
 
+.backup-extract-details summary::marker {
+  display: none;
+}
+
+.backup-extract-details summary::before {
+  content: '▶';
+  font-size: 0.65rem;
+  color: var(--green-dim);
+  flex: 0 0 auto;
+  transition: transform 0.15s;
+}
+
+.backup-extract-details[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.backup-extract-details summary:hover {
+  color: var(--green-bright);
+  border-color: var(--border-glow);
+}
+
 .backup-extract-form {
   display: grid;
   gap: 0.45rem;
   margin-top: 0.45rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .backup-extract-form label {
   display: flex;
   flex-direction: column;
   gap: 0.22rem;
+  min-width: 0;
   color: var(--text-dim);
   font-size: 0.72rem;
   letter-spacing: 0.04em;
+}
+
+.backup-extract-form input[type="text"],
+.backup-extract-form select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .backup-extract-help {
@@ -2991,7 +3045,7 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
 .backup-extract-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.5rem;
 }
 
@@ -3278,6 +3332,13 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   padding: 0 1rem;
 }
 
+.favicon-inline-status {
+  margin: 0.35rem 0 0;
+  padding: 0 1rem;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+
 .favicon-inline-row-global {
   margin-top: 0.75rem;
   padding: 0;
@@ -3451,6 +3512,10 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
     gap: 0.25rem;
   }
 
+  .admin-dropdown-counter-label {
+    white-space: normal;
+  }
+
   .admin-dropdown-badges .report-badge,
   .admin-count-badge {
     min-width: 1.35rem;
@@ -3459,7 +3524,7 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   }
 
   .theme-card-summary {
-    grid-template-columns: 14px minmax(0, 1fr);
+    grid-template-columns: 14px 18px minmax(0, 1fr);
     column-gap: 8px;
     row-gap: 4px;
     padding-right: 2px;
