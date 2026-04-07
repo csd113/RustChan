@@ -672,7 +672,7 @@ pub fn render_post(
 <div class="audio-thumb">
   <img class="thumb" src="/boards/{th}" loading="lazy" alt="audio">
 </div>
-<audio controls preload="none" class="audio-player">
+<audio controls preload="none" class="audio-player" data-audio-title="{orig}">
   <source src="/boards/{f}" type="{mime}">
   Your browser does not support the audio element.
 </audio>
@@ -739,12 +739,13 @@ pub fn render_post(
 <div class="file-info">
   Audio: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
-<audio controls preload="none" class="audio-player audio-player-combo">
+<audio controls preload="none" class="audio-player audio-player-combo" data-audio-title="{orig}" data-artwork-src="/boards/{th}">
   <source src="/boards/{f}" type="{mime}">
   Your browser does not support the audio element.
 </audio>
 </div>"#,
                                 f = escape_html(aud_file),
+                                th = escape_html(thumb),
                                 orig = escape_html(aud_name),
                                 sz = escape_html(&aud_size),
                                 mime = escape_html(aud_mime)
@@ -788,7 +789,7 @@ pub fn render_post(
 <div class="file-info">
   File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
 </div>
-<audio controls preload="none" class="audio-player">
+<audio controls preload="none" class="audio-player" data-audio-title="{orig}">
   <source src="/boards/{f}" type="{mime}">
   Your browser does not support the audio element.
 </audio>
@@ -1015,6 +1016,7 @@ mod tests {
 
         assert!(html.contains("file-container image-audio-combo"));
         assert!(html.contains(r#"Audio: <a href="/boards/test/song.flac""#));
+        assert!(html.contains(r#"data-artwork-src="/boards/test/thumbs/image.webp""#));
         assert!(!html.contains("file-container audio-container audio-combo"));
     }
 

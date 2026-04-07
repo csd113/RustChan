@@ -106,6 +106,7 @@ function upgradeLegacySpoilers(root) {
 document.addEventListener('DOMContentLoaded', function () {
   localizePostTimes(document);
   upgradeLegacySpoilers(document);
+  wireAudioMiniPlayers(document);
   syncMobileHeaderOffset();
 
   if (window.ResizeObserver) {
@@ -125,6 +126,7 @@ window.addEventListener('resize', syncMobileHeaderOffset);
   window._onNewPostsInserted = function (container) {
     localizePostTimes(container);
     upgradeLegacySpoilers(container);
+    wireAudioMiniPlayers(container);
     if (_origLocalize) _origLocalize(container);
   };
 }());
@@ -407,6 +409,53 @@ function syncComboAudio(container, shouldPlay) {
   if (shouldPlay) {
     audio.play().catch(function () {});
   }
+}
+
+function preferredMiniPlayerArtwork() {
+  var audioArtworkLink = document.querySelector(
+    'link[rel="apple-touch-icon"], link[rel="icon"][sizes="192x192"], link[rel="icon"][sizes="512x512"], link[rel="icon"][sizes="32x32"], link[rel="icon"]'
+  );
+  if (!audioArtworkLink || !audioArtworkLink.href) return [];
+  var artwork = { src: audioArtworkLink.href };
+  if (audioArtworkLink.sizes && audioArtworkLink.sizes.value) {
+    artwork.sizes = audioArtworkLink.sizes.value;
+  }
+  if (audioArtworkLink.type) {
+    artwork.type = audioArtworkLink.type;
+  }
+  return [artwork];
+}
+
+function audioMiniPlayerArtwork(audio) {
+  var artworkSrc = audio.dataset.artworkSrc;
+  if (!artworkSrc) return preferredMiniPlayerArtwork();
+  return [{ src: new URL(artworkSrc, window.location.href).href }];
+}
+
+function updateAudioMiniPlayer(audio) {
+  if (!audio || !('mediaSession' in navigator) || typeof window.MediaMetadata !== 'function') {
+    return;
+  }
+  var source = audio.querySelector('source');
+  var sourcePath = source && source.getAttribute('src');
+  var title = audio.dataset.audioTitle || (sourcePath ? sourcePath.split('/').pop() : document.title);
+  var metadata = {
+    title: title,
+    album: document.title
+  };
+  var artwork = audioMiniPlayerArtwork(audio);
+  if (artwork.length) metadata.artwork = artwork;
+  navigator.mediaSession.metadata = new MediaMetadata(metadata);
+}
+
+function wireAudioMiniPlayers(root) {
+  (root || document).querySelectorAll('audio.audio-player').forEach(function (audio) {
+    if (audio.dataset.miniplayerWired === '1') return;
+    audio.dataset.miniplayerWired = '1';
+    audio.addEventListener('play', function () {
+      updateAudioMiniPlayer(audio);
+    });
+  });
 }
 
 function expandVideoEmbed(preview, type, id, container) {
