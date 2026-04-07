@@ -282,10 +282,10 @@ const INDEX_SCHEMA_SQL: &str = "
 
 pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
     create_base_schema(conn)?;
-    create_indexes(conn)?;
 
     let _ = CURRENT_MAX_MIGRATION;
     apply_migrations(conn)?;
+    create_indexes(conn)?;
     ensure_reports_table_integrity(conn)?;
     ensure_posts_search_index(conn)?;
     ensure_post_invariants(conn)?;
@@ -522,10 +522,26 @@ fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {
                  audio_file_name  TEXT,
                  audio_file_size  INTEGER,
                  audio_mime_type  TEXT,
-                 edited_at        INTEGER
+                 edited_at        INTEGER,
+                 media_processing_state TEXT NOT NULL DEFAULT '',
+                 media_processing_error TEXT
              );
 
-             INSERT INTO posts_new SELECT * FROM posts;
+             INSERT INTO posts_new (
+                 id, thread_id, board_id, name, tripcode, subject, body, body_html,
+                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
+                 created_at, deletion_token, is_op, media_type, audio_file_path,
+                 audio_file_name, audio_file_size, audio_mime_type, edited_at,
+                 media_processing_state, media_processing_error
+             )
+             SELECT
+                 id, thread_id, board_id, name, tripcode, subject, body, body_html,
+                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
+                 created_at, deletion_token, is_op, media_type, audio_file_path,
+                 audio_file_name, audio_file_size, audio_mime_type, edited_at,
+                 '' AS media_processing_state,
+                 NULL AS media_processing_error
+             FROM posts;
              DROP TABLE posts;
              ALTER TABLE posts_new RENAME TO posts;
 
@@ -535,6 +551,8 @@ fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {
                  ON posts(board_id, created_at DESC);
              CREATE INDEX IF NOT EXISTS idx_posts_thread_id
                  ON posts(thread_id);
+             CREATE INDEX IF NOT EXISTS idx_posts_media_processing_state
+                 ON posts(media_processing_state);
              CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
                  ON posts(ip_hash);",
             "Structural migration: make posts.ip_hash nullable failed",
