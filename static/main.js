@@ -158,6 +158,11 @@ function getReplyDraftMetaKey() {
   return draftKey ? draftKey + ':mode' : '';
 }
 
+function getReplyDraftSubmitStateKey() {
+  var draftKey = getReplyDraftStorageKey();
+  return draftKey ? draftKey + ':submitted' : '';
+}
+
 function isQuoteOnlyReplyDraft(value) {
   if (!value) return false;
   var trimmed = value.trim();
@@ -184,6 +189,34 @@ function setReplyDraftMode(mode) {
   ta.dataset.draftMode = mode || '';
 }
 
+function isReplyDraftSubmitting() {
+  var ta = getReplyBodyField();
+  if (!ta) return false;
+  return ta.dataset.draftSubmitting === '1';
+}
+
+function setReplyDraftSubmitting(submitting) {
+  var ta = getReplyBodyField();
+  if (!ta) return;
+  ta.dataset.draftSubmitting = submitting ? '1' : '';
+}
+
+function markReplyDraftSubmitted() {
+  var submitKey = getReplyDraftSubmitStateKey();
+  if (!submitKey) return;
+  try {
+    sessionStorage.setItem(submitKey, '1');
+  } catch (e) {}
+}
+
+function clearReplyDraftSubmitState() {
+  var submitKey = getReplyDraftSubmitStateKey();
+  if (!submitKey) return;
+  try {
+    sessionStorage.removeItem(submitKey);
+  } catch (e) {}
+}
+
 function clearReplyDraftStorage() {
   var draftKey = getReplyDraftStorageKey();
   var metaKey = getReplyDraftMetaKey();
@@ -191,6 +224,39 @@ function clearReplyDraftStorage() {
     if (draftKey) localStorage.removeItem(draftKey);
     if (metaKey) localStorage.removeItem(metaKey);
   } catch (e) {}
+}
+
+function persistReplyDraftStorage() {
+  var ta = getReplyBodyField();
+  var draftKey = getReplyDraftStorageKey();
+  var metaKey = getReplyDraftMetaKey();
+  if (!ta || !draftKey) return;
+  try {
+    if (ta.value) {
+      localStorage.setItem(draftKey, ta.value);
+      if (getReplyDraftMode()) {
+        localStorage.setItem(metaKey, getReplyDraftMode());
+      } else {
+        localStorage.removeItem(metaKey);
+      }
+    } else {
+      clearReplyDraftStorage();
+    }
+  } catch (e) {}
+}
+
+function consumeSubmittedReplyDraft() {
+  var submitKey = getReplyDraftSubmitStateKey();
+  var submitted = '';
+  if (!submitKey) return;
+  try {
+    submitted = sessionStorage.getItem(submitKey) || '';
+  } catch (e) {}
+  if (submitted !== '1') return;
+  clearReplyDraftSubmitState();
+  if (/^#p\d+$/.test(window.location.hash)) {
+    clearReplyDraftStorage();
+  }
 }
 
 function clearRestoredAutoQuoteOnlyDraft() {
@@ -315,6 +381,13 @@ function stopSubmitButtonAnimation(form) {
   });
 }
 
+function dispatchPostFormEvent(form, name) {
+  if (!form || !name || !document.createEvent) return;
+  var ev = document.createEvent('Event');
+  ev.initEvent(name, false, false);
+  form.dispatchEvent(ev);
+}
+
 function submitPostFormWithProgress(form) {
   if (!window.XMLHttpRequest || form.dataset.uploadSubmitting === '1') return false;
   if (!fileInputsHaveSelection(form)) return false;
@@ -367,6 +440,7 @@ function submitPostFormWithProgress(form) {
     }
 
     resetUploadProgress(form);
+    dispatchPostFormEvent(form, 'rustchan:post-submit-reset');
     alert('Upload failed. Please try again.');
   });
 
@@ -374,6 +448,7 @@ function submitPostFormWithProgress(form) {
     stopSubmitButtonAnimation(form);
     setSubmittingState(form, false);
     resetUploadProgress(form);
+    dispatchPostFormEvent(form, 'rustchan:post-submit-reset');
     alert('Connection dropped before the server response arrived. Your post may still have succeeded. Refresh the thread or board before trying again.');
   });
 
@@ -381,6 +456,7 @@ function submitPostFormWithProgress(form) {
     stopSubmitButtonAnimation(form);
     setSubmittingState(form, false);
     resetUploadProgress(form);
+    dispatchPostFormEvent(form, 'rustchan:post-submit-reset');
   });
 
   xhr.send(new FormData(form));
@@ -2203,6 +2279,11 @@ document.addEventListener('keydown', function (e) {
   var ta = getReplyBodyField();
   if (!ta) return;
 
+  // If the last submit landed back on this thread with a post anchor, the
+  // redirect was successful and any saved draft should be discarded before
+  // restore runs.
+  consumeSubmittedReplyDraft();
+
   // Restore saved draft on page load
   try {
     var saved = localStorage.getItem(DRAFT_KEY);
@@ -2222,33 +2303,32 @@ document.addEventListener('keydown', function (e) {
 
   ta.addEventListener('input', function () {
     ta.dataset.draftRestored = '0';
+    setReplyDraftSubmitting(false);
+    clearReplyDraftSubmitState();
     setReplyDraftMode('manual');
   });
 
   // Autosave every 3 seconds while the user types
   setInterval(function () {
-    try {
-      if (ta.value) {
-        localStorage.setItem(DRAFT_KEY, ta.value);
-        if (getReplyDraftMode()) {
-          localStorage.setItem(DRAFT_META_KEY, getReplyDraftMode());
-        } else {
-          localStorage.removeItem(DRAFT_META_KEY);
-        }
-      } else {
-        localStorage.removeItem(DRAFT_KEY);
-        localStorage.removeItem(DRAFT_META_KEY);
-      }
-    } catch (e) {}
+    if (isReplyDraftSubmitting()) return;
+    persistReplyDraftStorage();
   }, 3000);
 
-  // Clear draft when the reply form is submitted
+  // Persist the latest draft on submit, then pause autosave until the request
+  // either redirects back successfully or the current page resumes editing.
   var form = ta.closest('form');
   if (form) {
     form.addEventListener('submit', function () {
       ta.dataset.draftRestored = '0';
-      setReplyDraftMode('');
-      clearReplyDraftStorage();
+      persistReplyDraftStorage();
+      setReplyDraftSubmitting(true);
+      markReplyDraftSubmitted();
+    });
+
+    form.addEventListener('rustchan:post-submit-reset', function () {
+      setReplyDraftSubmitting(false);
+      clearReplyDraftSubmitState();
+      persistReplyDraftStorage();
     });
   }
 })();
