@@ -853,11 +853,16 @@ old boards to prevent query performance degradation.
     let body = format!(
         r#"<div class="admin-panel">
 {flash}
-<h1>[ admin panel ]</h1>
-<form method="POST" action="/admin/logout">
-<input type="hidden" name="_csrf" value="{csrf}">
-<button type="submit">logout</button>
-</form>
+<div class="admin-panel-header">
+  <div class="admin-panel-heading">
+    <h1>[ admin panel ]</h1>
+    <p class="admin-panel-lead">Manage boards, moderation, themes, backups, and site settings from one place.</p>
+  </div>
+  <form method="POST" action="/admin/logout" class="admin-panel-logout">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <button type="submit">logout</button>
+  </form>
+</div>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
      // live log
@@ -866,17 +871,17 @@ old boards to prevent query performance degradation.
 <details class="admin-dropdown">
 <summary>// live log</summary>
 <div class="admin-dropdown-content">
-<p style="color:var(--text-dim);font-size:0.85rem">
+<p class="admin-copy">
   Watching <span id="admin-live-log-file">current log</span>. Updates every 2 seconds.
 </p>
-<div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;margin-bottom:0.6rem">
+<div class="admin-inline-actions admin-inline-actions-spaced">
   <button type="button" id="admin-live-log-refresh">refresh now</button>
   <button type="button" id="admin-live-log-clear">clear</button>
-  <label style="color:var(--text-dim);font-size:0.82rem">
+  <label class="admin-inline-toggle">
     <input type="checkbox" id="admin-live-log-autoscroll" checked> auto-scroll
   </label>
 </div>
-<pre id="admin-live-log-output" style="margin:0;max-height:24rem;overflow:auto;padding:0.85rem;border:1px solid var(--border);background:var(--bg-input);color:var(--text);font-size:0.78rem;line-height:1.45;white-space:pre-wrap;word-break:break-word">Loading live log…</pre>
+<pre id="admin-live-log-output" class="admin-log-output">Loading live log…</pre>
 </div>
 </details>
 </section>
@@ -888,7 +893,7 @@ old boards to prevent query performance degradation.
 <h2>// site settings</h2>
 <form method="POST" action="/admin/site/settings">
 <input type="hidden" name="_csrf" value="{csrf}">
-<div class="board-settings-grid" style="margin-bottom:0.75rem">
+<div class="board-settings-grid admin-settings-grid">
   <label>Site name
     <input type="text" name="site_name" value="{site_name_val}" maxlength="64" placeholder="RustChan"
            style="font-family:inherit">
@@ -903,7 +908,7 @@ old boards to prevent query performance degradation.
     </select>
   </label>
 </div>
-<div class="board-settings-actions" style="margin-top:0.2rem">
+<div class="board-settings-actions">
   <button type="submit">save settings</button>
 </div>
 </form>
@@ -918,7 +923,7 @@ old boards to prevent query performance degradation.
 <button type="submit">{global_favicon_button}</button>
 </form>
 </div>
-<p style="color:var(--text-dim);font-size:0.78rem;margin:0.45rem 0 0">
+<p class="admin-meta-note admin-meta-note-spaced">
   {global_favicon_status}
 </p>
 </section>
@@ -1146,10 +1151,10 @@ button / button:hover</pre>
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// full site backup &amp; restore</h2>
-<p style="color:var(--text-dim);font-size:0.85rem">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/backups/full/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer. Saved full backups can also be used to extract or directly restore a single board without scheduling separate per-board backups.</p>
+<p class="admin-copy">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/backups/full/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer. Saved full backups can also be used to extract or directly restore a single board without scheduling separate per-board backups.</p>
 {backup_warning_html}
-<p style="color:var(--text-dim);font-size:0.85rem"><strong>Backup health:</strong> {backup_status_line}</p>
-<div class="admin-inline-actions" style="margin-top:0.75rem;margin-bottom:0.75rem">
+<p class="admin-copy"><strong>Backup health:</strong> {backup_status_line}</p>
+<div class="admin-inline-actions admin-inline-actions-spaced">
 <form method="POST" action="/admin/backup/create" id="full-backup-create-form">
 <input type="hidden" name="_csrf" value="{csrf}">
 <button type="submit" id="full-backup-btn">&#128190; save to server</button>
@@ -1174,8 +1179,8 @@ button / button:hover</pre>
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// board backup &amp; restore</h2>
-<p style="color:var(--text-dim);font-size:0.85rem">Board backups cover a single board. Use <em>save to server</em> on a board card above to store the backup in <code>rustchan-data/backups/boards/</code>, or use the table below to download, restore, or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
-<div style="margin-top:0.5rem;margin-bottom:0.75rem">
+<p class="admin-copy">Board backups cover a single board. Use <em>save to server</em> on a board card above to store the backup in <code>rustchan-data/backups/boards/</code>, or use the table below to download, restore, or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
+<div class="admin-inline-actions admin-inline-actions-spaced">
 <form method="POST" action="/admin/board/restore" enctype="multipart/form-data" class="backup-restore-upload-form" data-restore-label="board backup" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="file" name="backup_file" accept=".zip,.json" required style="color:var(--text)">
@@ -1297,7 +1302,7 @@ button / button:hover</pre>
                 );
             }
             format!(
-                r#"<section class="admin-section admin-access-addresses" style="border-top:1px solid var(--border);padding-top:1rem;margin-top:0;text-align:center">
+                r#"<section class="admin-section admin-access-addresses admin-access-addresses-section">
 <h2>// active access addresses</h2>
 {addresses}
 </section>"#

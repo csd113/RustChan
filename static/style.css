@@ -1805,8 +1805,34 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
 }
 
 .admin-panel {
-  max-width: 900px;
+  width: min(100%, 1220px);
   margin: 0 auto;
+  padding: 1.25rem 0 2rem;
+}
+
+.admin-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.admin-panel-heading {
+  min-width: 0;
+}
+
+.admin-panel-logout {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.admin-panel-lead {
+  margin: 0.3rem 0 0;
+  color: var(--text-dim);
+  font-size: 0.86rem;
+  line-height: 1.55;
+  max-width: 46rem;
 }
 
 /* ── Admin restore flash messages ────────────────────────────────────────── */
@@ -1841,8 +1867,9 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 .admin-section {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  padding: 12px 14px;
-  margin-bottom: 14px;
+  padding: 1.05rem 1.15rem 1.15rem;
+  margin-bottom: 1rem;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
 }
 
 .admin-section h2 {
@@ -1870,22 +1897,47 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 .admin-section form {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 0.6rem;
   align-items: center;
 }
 
 .admin-section input[type="text"],
-.admin-section input[type="password"] {
+.admin-section input[type="password"],
+.admin-section input[type="number"],
+.admin-section select,
+.admin-section textarea {
   background: var(--bg-input);
   border: 1px solid var(--border);
   color: var(--green-pale);
-  padding: 4px 8px;
+  padding: 0.5rem 0.65rem;
   font-family: var(--font);
   font-size: 0.82rem;
   outline: none;
+  min-height: 2.35rem;
 }
 
-.admin-section input:focus { border-color: var(--border-glow); }
+.admin-section input[type="file"] {
+  color: var(--text);
+  max-width: 100%;
+}
+
+.admin-section input:focus,
+.admin-section select:focus,
+.admin-section textarea:focus {
+  border-color: var(--border-glow);
+}
+
+.admin-copy,
+.admin-meta-note {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.admin-meta-note-spaced {
+  margin-top: 0.45rem;
+}
 
 .admin-table {
   width: 100%;
@@ -1936,15 +1988,15 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 .admin-board-cards {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 16px;
+  gap: 0.8rem;
+  margin-bottom: 1.15rem;
 }
 
 .theme-manager-shell {
   display: grid;
-  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.25fr);
-  gap: 16px;
-  margin-bottom: 18px;
+  grid-template-columns: minmax(18rem, 0.95fr) minmax(24rem, 1.25fr);
+  gap: 1rem;
+  margin-bottom: 1.1rem;
 }
 
 .theme-workbench-dropdown {
@@ -1961,7 +2013,7 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 .theme-manager-group {
   border: 1px solid var(--border);
   background: var(--bg-input);
-  padding: 14px;
+  padding: 1rem;
 }
 
 .theme-guide-grid {
@@ -2137,19 +2189,21 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   border: 1px solid var(--border);
   background: var(--bg-input);
   border-radius: 0;
+  overflow: clip;
 }
 
 .board-settings-card > summary {
-  padding: 7px 12px;
+  padding: 0.85rem 1rem;
   cursor: pointer;
   color: var(--green-pale);
-  font-size: 0.88rem;
+  font-size: 0.9rem;
   letter-spacing: 0.04em;
   list-style: none;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 0.65rem;
   user-select: none;
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
 }
 
 .board-settings-card > summary::-webkit-details-marker { display: none; }
@@ -2171,9 +2225,9 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 .board-order-toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 0.6rem;
   flex-wrap: wrap;
-  padding: 10px 14px 0;
+  padding: 0.9rem 1rem 0;
   font-size: 0.78rem;
 }
 
@@ -2186,7 +2240,7 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 }
 
 .admin-dropdown > summary {
-  padding: 12px 14px;
+  padding: 1rem 1.15rem;
   cursor: pointer;
   color: var(--green);
   font-size: 0.88rem;
@@ -2240,13 +2294,13 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 }
 
 .admin-dropdown-content {
-  padding: 0 14px 14px;
+  padding: 0 1.15rem 1.15rem;
   border-top: 1px solid var(--border);
   min-width: 0;
 }
 
 #theme-catalog .admin-dropdown-content {
-  padding-top: 14px;
+  padding-top: 1.15rem;
 }
 
 .admin-moderation-intro {
@@ -2323,6 +2377,32 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   gap: 0.75rem;
   flex-wrap: wrap;
   align-items: center;
+}
+
+.admin-inline-actions-spaced {
+  margin: 0.8rem 0;
+}
+
+.admin-inline-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+
+.admin-log-output {
+  margin: 0;
+  max-height: 24rem;
+  overflow: auto;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .backup-actions-cell {
@@ -2555,15 +2635,20 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 }
 
 .board-settings-form {
-  padding: 10px 14px 12px;
+  padding: 1rem;
   border-top: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
 }
 
 .board-settings-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-bottom: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.8rem;
+  margin-bottom: 0.85rem;
+}
+
+.admin-settings-grid {
+  margin-bottom: 0.75rem;
 }
 
 .board-settings-grid label,
@@ -2581,22 +2666,23 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   background: var(--bg-input);
   border: 1px solid var(--border);
   color: var(--green-pale);
-  padding: 4px 7px;
+  padding: 0.5rem 0.65rem;
   font-family: var(--font);
   font-size: 0.82rem;
   outline: none;
   transition: border-color 0.2s;
   width: 100%;
   box-sizing: border-box;
+  min-height: 2.35rem;
 }
 
 .board-settings-grid input:focus { border-color: var(--border-glow); }
 
 .board-settings-checks {
-  display: flex;
-  gap: 18px;
-  margin-bottom: 10px;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 0.7rem 1rem;
+  margin-bottom: 0.9rem;
 }
 
 .board-settings-checks label {
@@ -2612,6 +2698,7 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   display: flex;
   gap: 8px;
   align-items: center;
+  margin-top: 0.35rem;
 }
 
 .board-card-footer-actions {
@@ -2619,7 +2706,8 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
-  margin-top: 4px;
+  margin-top: 0.3rem;
+  padding: 0 1rem 1rem;
 }
 
 .board-card-footer-actions form {
@@ -2632,10 +2720,12 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 0.45rem;
+  padding: 0 1rem;
 }
 
 .favicon-inline-row-global {
   margin-top: 0.75rem;
+  padding: 0;
 }
 
 .favicon-inline-preview {
@@ -2677,6 +2767,13 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   letter-spacing: 0.06em;
 }
 
+.admin-access-addresses-section {
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+  margin-top: 0;
+  text-align: center;
+}
+
 /* ── Admin login ──────────────────────────────────────────────────────────── */
 
 .admin-login {
@@ -2716,17 +2813,37 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
     max-width: none;
     width: 100%;
     box-sizing: border-box;
+    padding-top: 0.75rem;
   }
 
   .admin-section {
-    padding: 8px;
+    padding: 0.8rem;
     overflow-x: clip;
+  }
+
+  .admin-panel-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.8rem;
+  }
+
+  .admin-panel-logout {
+    width: 100%;
+  }
+
+  .admin-panel-logout button {
+    width: 100%;
+    min-height: 42px;
   }
 
   .admin-panel h1 {
     font-size: 1rem;
     letter-spacing: 0.08em;
-    margin-bottom: 10px;
+    margin-bottom: 0;
+  }
+
+  .admin-panel-lead {
+    font-size: 0.78rem;
   }
 
   .admin-dropdown > summary,
@@ -2880,6 +2997,11 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   .admin-section textarea,
   .admin-login input {
     font-size: 16px;
+  }
+
+  .board-settings-grid,
+  .board-settings-checks {
+    grid-template-columns: 1fr;
   }
 
   .admin-login {
