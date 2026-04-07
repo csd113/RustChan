@@ -101,6 +101,12 @@ impl Job {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueOutcome {
+    Enqueued(i64),
+    DroppedAtCapacity,
+}
+
 // ─── Job queue ────────────────────────────────────────────────────────────────
 
 /// Cheaply-cloneable handle to the shared job queue.
@@ -117,6 +123,7 @@ pub struct JobQueue {
     /// `FFmpeg` invocations on client retries or server-restart re-queues.
     pub in_progress: Arc<DashMap<String, bool>>,
     pending_jobs: Arc<AtomicU64>,
+    dropped_jobs: Arc<AtomicU64>,
 }
 
 impl JobQueue {
@@ -133,6 +140,7 @@ impl JobQueue {
             cancel: CancellationToken::new(),
             in_progress: Arc::new(DashMap::new()),
             pending_jobs: Arc::new(AtomicU64::new(pending_jobs)),
+            dropped_jobs: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -143,7 +151,7 @@ impl JobQueue {
     /// `CONFIG.job_queue_capacity`, the job is dropped with a warning log
     /// rather than accepted. This prevents the queue table growing without
     /// bound under a post flood.
-    pub fn enqueue(&self, job: &Job) -> Result<i64> {
+    pub fn enqueue(&self, job: &Job) -> Result<EnqueueOutcome> {
         let payload = serde_json::to_string(job)?;
 
         // Back-pressure: check pending count before inserting.
@@ -158,7 +166,7 @@ impl JobQueue {
             match crate::db::enqueue_job(&conn, job.type_str(), &payload) {
                 Ok(id) => {
                     self.notify.notify_one();
-                    Ok(id)
+                    Ok(EnqueueOutcome::Enqueued(id))
                 }
                 Err(error) => {
                     self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
@@ -166,7 +174,8 @@ impl JobQueue {
                 }
             }
         } else {
-            Ok(-1)
+            self.dropped_jobs.fetch_add(1, Ordering::Relaxed);
+            Ok(EnqueueOutcome::DroppedAtCapacity)
         }
     }
 
@@ -175,6 +184,11 @@ impl JobQueue {
     #[allow(dead_code)]
     pub fn pending_count(&self) -> i64 {
         i64::try_from(self.pending_jobs.load(Ordering::Relaxed)).unwrap_or(i64::MAX)
+    }
+
+    #[allow(dead_code)]
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped_jobs.load(Ordering::Relaxed)
     }
 
     fn reserve_pending_slot(&self, job_type: &str) -> bool {
@@ -288,10 +302,28 @@ async fn worker_loop(
                 queue.mark_job_claimed();
                 consecutive_errors = 0; // reset back-off on any successful claim
                 debug!("Worker {id}: picked up job #{job_id}");
+                let job: Job = match serde_json::from_str(&payload) {
+                    Ok(job) => job,
+                    Err(error) => {
+                        error!("Worker {id}: cannot deserialize job #{job_id}: {error}");
+                        let pool_done = queue.pool.clone();
+                        let err_msg = format!("Cannot deserialize job payload: {error}");
+                        let db_result = tokio::task::spawn_blocking(move || -> Result<()> {
+                            let c = pool_done.get().map_err(anyhow::Error::from)?;
+                            let _ = crate::db::fail_job(&c, job_id, &err_msg)?;
+                            Ok(())
+                        })
+                        .await;
+                        if let Ok(Err(db_error)) = db_result {
+                            error!("Worker {id}: failed to mark broken job #{job_id} as failed: {db_error}");
+                        }
+                        continue;
+                    }
+                };
                 let pool_done = queue.pool.clone();
+                let media_post_id = media_job_post_id(&job);
                 let result = handle_job(
-                    job_id,
-                    &payload,
+                    job,
                     ffmpeg_available,
                     ffmpeg_vp9_available,
                     queue.pool.clone(),
@@ -310,10 +342,35 @@ async fn worker_loop(
                     match result {
                         Ok(()) => {
                             crate::db::complete_job(&c, job_id)?;
+                            if let Some(post_id) = media_post_id {
+                                crate::db::set_post_media_processing_state(
+                                    &c, post_id, None, None,
+                                )?;
+                            }
                         }
                         Err(ref e) => {
                             warn!("Worker {id}: job #{job_id} failed — {e}");
-                            crate::db::fail_job(&c, job_id, &e.to_string())?;
+                            let failure_state = crate::db::fail_job(&c, job_id, &e.to_string())?;
+                            if let Some(post_id) = media_post_id {
+                                match failure_state {
+                                    crate::db::JobFailureState::Retrying => {
+                                        crate::db::set_post_media_processing_state(
+                                            &c,
+                                            post_id,
+                                            Some(crate::db::MEDIA_PROCESSING_PENDING),
+                                            None,
+                                        )?;
+                                    }
+                                    crate::db::JobFailureState::PermanentlyFailed => {
+                                        crate::db::set_post_media_processing_state(
+                                            &c,
+                                            post_id,
+                                            Some(crate::db::MEDIA_PROCESSING_FAILED),
+                                            Some(&e.to_string()),
+                                        )?;
+                                    }
+                                }
+                            }
                         }
                     }
                     Ok(())
@@ -392,17 +449,13 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
 
 #[allow(clippy::too_many_lines)]
 async fn handle_job(
-    job_id: i64,
-    payload: &str,
+    job: Job,
     ffmpeg_available: bool,
     ffmpeg_vp9_available: bool,
     pool: DbPool,
     in_progress: Arc<DashMap<String, bool>>,
 ) -> Result<()> {
-    let job: Job = serde_json::from_str(payload)
-        .map_err(|e| anyhow::anyhow!("Cannot deserialise job #{job_id}: {e}"))?;
-
-    debug!("Job #{job_id} type={}", job.type_str());
+    debug!("Dispatching {} job", job.type_str());
 
     match job {
         Job::VideoTranscode {
@@ -484,6 +537,13 @@ async fn handle_job(
             run_spam_check(post_id, &ip_hash, body_len);
             Ok(())
         }
+    }
+}
+
+fn media_job_post_id(job: &Job) -> Option<i64> {
+    match job {
+        Job::VideoTranscode { post_id, .. } | Job::AudioWaveform { post_id, .. } => Some(*post_id),
+        Job::ThreadPrune { .. } | Job::SpamCheck { .. } => None,
     }
 }
 

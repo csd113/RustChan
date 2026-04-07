@@ -25,9 +25,15 @@ use std::collections::HashMap;
 /// and `fail_job` (CASE WHEN attempts >= 3), with no guarantee they would stay in sync.
 const MAX_JOB_ATTEMPTS: i64 = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobFailureState {
+    Retrying,
+    PermanentlyFailed,
+}
+
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
-/// Map a full post row (23 columns, selected in the canonical order used
+/// Map a full post row (25 columns, selected in the canonical order used
 /// throughout this module) into a Post struct.
 ///
 /// The expected column count is asserted here so any future change
@@ -42,7 +48,8 @@ const MAX_JOB_ATTEMPTS: i64 = 3;
 ///   4  tripcode      12 `thumb_path`     20 `audio_file_size`
 ///   5  subject       13 `mime_type`      21 `audio_mime_type`
 ///   6  body          14 `created_at`     22 `edited_at`
-///   7  `body_html`     15 `deletion_token`
+///   7  `body_html`     15 `deletion_token` 23 `media_processing_state`
+///                                           24 `media_processing_error`
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -51,6 +58,12 @@ pub(super) fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
     let media_type = media_type_str
         .as_deref()
         .and_then(crate::models::MediaType::from_db_str);
+    let media_processing_state = row
+        .get::<_, Option<String>>(23)?
+        .filter(|state| !state.trim().is_empty());
+    let media_processing_error = row
+        .get::<_, Option<String>>(24)?
+        .filter(|error| !error.trim().is_empty());
 
     Ok(Post {
         id: row.get(0)?,
@@ -76,6 +89,8 @@ pub(super) fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
         audio_file_size: row.get(20)?,
         audio_mime_type: row.get(21)?,
         edited_at: row.get(22)?,
+        media_processing_state,
+        media_processing_error,
     })
 }
 
@@ -89,7 +104,7 @@ pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Resu
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at
+                edited_at, media_processing_state, media_processing_error
          FROM posts WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
     )?;
     let posts = stmt
@@ -118,7 +133,7 @@ pub fn get_new_posts_since(
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at
+                edited_at, media_processing_state, media_processing_error
          FROM posts WHERE thread_id = ?1 AND id > ?2
          ORDER BY id ASC
          LIMIT ?3",
@@ -157,13 +172,13 @@ pub fn get_preview_posts_for_threads(
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at
+                edited_at, media_processing_state, media_processing_error
          FROM (
              SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                     ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                     created_at, deletion_token, is_op, media_type,
                     audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                    edited_at,
+                    edited_at, media_processing_state, media_processing_error,
                     ROW_NUMBER() OVER (
                         PARTITION BY thread_id
                         ORDER BY created_at DESC, id DESC
@@ -349,7 +364,7 @@ pub fn get_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<Post
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at
+                edited_at, media_processing_state, media_processing_error
          FROM posts WHERE id = ?1",
     )?;
     Ok(stmt.query_row(params![post_id], map_post).optional()?)
@@ -369,7 +384,7 @@ pub fn get_post_on_board(
                 p.body, p.body_html, p.ip_hash, p.file_path, p.file_name, p.file_size,
                 p.thumb_path, p.mime_type, p.created_at, p.deletion_token, p.is_op,
                 p.media_type, p.audio_file_path, p.audio_file_name, p.audio_file_size,
-                p.audio_mime_type, p.edited_at
+                p.audio_mime_type, p.edited_at, p.media_processing_state, p.media_processing_error
          FROM posts p
          JOIN boards b ON b.id = p.board_id
          WHERE p.id = ?1 AND b.short_name = ?2
@@ -678,7 +693,8 @@ pub fn search_posts(
                 posts.file_path, posts.file_name, posts.file_size, posts.thumb_path,
                 posts.mime_type, posts.created_at, posts.deletion_token, posts.is_op,
                 posts.media_type, posts.audio_file_path, posts.audio_file_name,
-                posts.audio_file_size, posts.audio_mime_type, posts.edited_at
+                posts.audio_file_size, posts.audio_mime_type, posts.edited_at,
+                posts.media_processing_state, posts.media_processing_error
          FROM posts
          JOIN posts_fts ON posts_fts.rowid = posts.id
          WHERE posts.board_id = ?1 AND posts_fts MATCH ?2
@@ -1009,8 +1025,22 @@ pub fn complete_job(conn: &rusqlite::Connection, id: i64) -> Result<()> {
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-pub fn fail_job(conn: &rusqlite::Connection, id: i64, error: &str) -> Result<()> {
+pub fn fail_job(conn: &rusqlite::Connection, id: i64, error: &str) -> Result<JobFailureState> {
     let err_trunc: String = error.chars().take(512).collect();
+    let failure_state = conn.query_row(
+        "SELECT CASE WHEN attempts >= ?2 THEN 'failed' ELSE 'pending' END
+         FROM background_jobs
+         WHERE id = ?1 AND status = 'running'",
+        params![id, MAX_JOB_ATTEMPTS],
+        |r| {
+            let state: String = r.get(0)?;
+            Ok(if state == "failed" {
+                JobFailureState::PermanentlyFailed
+            } else {
+                JobFailureState::Retrying
+            })
+        },
+    )?;
     let n = conn.execute(
         "UPDATE background_jobs
          SET status = CASE WHEN attempts >= ?3 THEN 'failed' ELSE 'pending' END,
@@ -1022,7 +1052,7 @@ pub fn fail_job(conn: &rusqlite::Connection, id: i64, error: &str) -> Result<()>
     if n == 0 {
         anyhow::bail!("Job {id} not found or not in 'running' state");
     }
-    Ok(())
+    Ok(failure_state)
 }
 
 /// Count jobs currently in the 'pending' state (used for monitoring).
@@ -1034,6 +1064,56 @@ pub fn pending_job_count(conn: &rusqlite::Connection) -> Result<i64> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM background_jobs WHERE status = 'pending'",
         [],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
+pub const MEDIA_PROCESSING_PENDING: &str = "pending";
+pub const MEDIA_PROCESSING_FAILED: &str = "failed";
+
+/// Update a post's async media-processing state.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn set_post_media_processing_state(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    state: Option<&str>,
+    error: Option<&str>,
+) -> Result<()> {
+    let state = state.unwrap_or("").trim();
+    let normalized_state = if state.is_empty() { "" } else { state };
+    let normalized_error = error.and_then(|detail| {
+        let trimmed = detail.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.chars().take(512).collect::<String>())
+        }
+    });
+
+    conn.execute(
+        "UPDATE posts
+         SET media_processing_state = ?1,
+             media_processing_error = ?2
+         WHERE id = ?3",
+        params![normalized_state, normalized_error, post_id],
+    )?;
+    Ok(())
+}
+
+/// Count posts currently in a given async media-processing state.
+///
+/// # Errors
+/// Returns an error if the database query fails.
+pub fn count_posts_by_media_processing_state(
+    conn: &rusqlite::Connection,
+    state: &str,
+) -> Result<i64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM posts WHERE media_processing_state = ?1",
+        params![state],
         |r| r.get(0),
     )?;
     Ok(n)
@@ -1138,8 +1218,9 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        count_search_results, get_post_submission, record_post_submission, search_posts,
-        search_terms, to_fts_query,
+        count_posts_by_media_processing_state, count_search_results, get_post_submission,
+        get_posts_for_thread, record_post_submission, search_posts, search_terms,
+        set_post_media_processing_state, to_fts_query, MEDIA_PROCESSING_FAILED,
     };
     use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
     use rusqlite::Connection;
@@ -1298,5 +1379,45 @@ mod tests {
         assert_eq!(record.thread_id, 1);
         assert_eq!(record.post_id, post_id);
         assert!(record.is_thread);
+    }
+
+    #[test]
+    fn media_processing_state_round_trips_and_counts() {
+        let conn = test_conn();
+        let post_id = seed_search_post(&conn, "media", "hello");
+
+        set_post_media_processing_state(
+            &conn,
+            post_id,
+            Some(MEDIA_PROCESSING_FAILED),
+            Some("ffmpeg timed out"),
+        )
+        .expect("set failed state");
+
+        let posts = get_posts_for_thread(&conn, 1).expect("load posts");
+        let post = posts
+            .into_iter()
+            .find(|post| post.id == post_id)
+            .expect("post exists");
+        assert_eq!(
+            post.media_processing_state.as_deref(),
+            Some(MEDIA_PROCESSING_FAILED)
+        );
+        assert_eq!(
+            post.media_processing_error.as_deref(),
+            Some("ffmpeg timed out")
+        );
+        assert_eq!(
+            count_posts_by_media_processing_state(&conn, MEDIA_PROCESSING_FAILED)
+                .expect("count failed"),
+            1
+        );
+
+        set_post_media_processing_state(&conn, post_id, None, None).expect("clear state");
+        assert_eq!(
+            count_posts_by_media_processing_state(&conn, MEDIA_PROCESSING_FAILED)
+                .expect("count failed after clear"),
+            0
+        );
     }
 }

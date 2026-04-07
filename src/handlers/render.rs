@@ -242,6 +242,8 @@ mod tests {
             deletion_token: "token".into(),
             is_op: id == 1,
             edited_at: None,
+            media_processing_state: None,
+            media_processing_error: None,
         }
     }
 

@@ -38,6 +38,12 @@ mod router;
 use lifecycle::shutdown_signal;
 use router::build_router;
 
+fn should_run_background_maintenance(state: &AppState, max_in_flight: u64) -> bool {
+    !state.maintenance_gate.is_active()
+        && ACTIVE_UPLOADS.load(Ordering::Relaxed) == 0
+        && IN_FLIGHT.load(Ordering::Relaxed) <= max_in_flight
+}
+
 // ─── Global terminal state ─────────────────────────────────────────────────────
 /// Total HTTP requests handled since startup.
 pub static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -250,6 +256,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         ffmpeg_webp_available,
         job_queue: worker_queue,
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
+        maintenance_gate: crate::middleware::MaintenanceGate::new(),
         chan_ledger,
         onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
     };
@@ -293,6 +300,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // PRAGMA optimize to keep query-planner statistics current (#18).
     if CONFIG.wal_checkpoint_interval > 0 {
         let bg = pool.clone();
+        let maintenance_state = state.clone();
         let interval_secs = CONFIG.wal_checkpoint_interval;
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
@@ -306,6 +314,16 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
+                        if !should_run_background_maintenance(&maintenance_state, 3) {
+                            tracing::debug!(
+                                target: "db",
+                                in_flight = IN_FLIGHT.load(Ordering::Relaxed),
+                                active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed),
+                                maintenance_active = maintenance_state.maintenance_gate.is_active(),
+                                "Skipping WAL checkpoint while server is busy"
+                            );
+                            continue;
+                        }
                         if let Ok(conn) = bg.get() {
                             match crate::db::run_wal_checkpoint(&conn) {
                                 Ok((pages, moved, backfill)) => {
@@ -376,6 +394,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // and threads without requiring manual admin intervention.
     if CONFIG.auto_vacuum_interval_hours > 0 {
         let bg = pool.clone();
+        let maintenance_state = state.clone();
         let interval_secs = CONFIG.auto_vacuum_interval_hours * 3600;
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
@@ -389,6 +408,20 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
+                        if !should_run_background_maintenance(&maintenance_state, 0) {
+                            tracing::info!(
+                                target: "db",
+                                in_flight = IN_FLIGHT.load(Ordering::Relaxed),
+                                active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed),
+                                maintenance_active = maintenance_state.maintenance_gate.is_active(),
+                                "Skipping scheduled VACUUM because the server is busy"
+                            );
+                            continue;
+                        }
+                        let Ok(_guard) = maintenance_state.maintenance_gate.try_begin("Scheduled VACUUM") else {
+                            tracing::debug!(target: "db", "Skipping scheduled VACUUM because maintenance is already running");
+                            continue;
+                        };
                         let bg2 = bg.clone();
                         tokio::task::spawn_blocking(move || {
                             if let Ok(conn) = bg2.get() {

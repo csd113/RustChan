@@ -35,6 +35,7 @@ use crate::{
     error::{AppError, Result},
     handlers::board::ensure_csrf,
     middleware::AppState,
+    models::BackupInfo,
 };
 use axum::{
     extract::{Query, State},
@@ -319,6 +320,13 @@ struct AdminPanelSnapshot {
     board_backups: Vec<crate::models::BackupInfo>,
     db_size_bytes: i64,
     db_size_warning: bool,
+    backup_summary: BackupSummary,
+}
+
+#[derive(Clone)]
+struct BackupSummary {
+    warning: Option<String>,
+    status_line: String,
 }
 
 fn load_admin_panel_snapshot(
@@ -334,8 +342,9 @@ fn load_admin_panel_snapshot(
     let site_subtitle = db::get_site_subtitle(conn);
     let default_theme = db::get_default_user_theme(conn);
     let themes = db::load_themes(conn)?;
-    let full_backups = list_backup_files(&full_backup_dir());
-    let board_backups = list_backup_files(&board_backup_dir());
+    let full_backups = list_backup_files(&full_backup_dir(), BackupListKind::Full);
+    let board_backups = list_backup_files(&board_backup_dir(), BackupListKind::Board);
+    let backup_summary = build_backup_summary(&full_backups);
     let db_size_bytes = db::get_db_size_bytes(conn).unwrap_or(0);
     let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
         let file_size = std::fs::metadata(&CONFIG.database_path)
@@ -359,9 +368,55 @@ fn load_admin_panel_snapshot(
             board_backups,
             db_size_bytes,
             db_size_warning,
+            backup_summary,
         },
         onion_address_val,
     ))
+}
+
+fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
+    const BACKUP_WARN_AFTER_HOURS: i64 = 72;
+
+    let Some(latest) = full_backups.first() else {
+        return BackupSummary {
+            warning: Some(
+                "No saved full backup found. Create and download a verified full backup before relying on this node."
+                    .to_string(),
+            ),
+            status_line: "Latest full backup: none saved.".to_string(),
+        };
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    let age_hours = latest
+        .modified_epoch
+        .map(|ts| now.saturating_sub(ts).max(0) / 3600);
+    let age_text = age_hours
+        .map(|hours| format!("{hours}h ago"))
+        .unwrap_or_else(|| "unknown age".to_string());
+    let status_line = format!(
+        "Latest full backup: {} ({age_text}) — {}.",
+        latest.filename, latest.verification_note
+    );
+
+    let warning = if !latest.verified {
+        Some(format!(
+            "Latest full backup '{}' failed verification: {}",
+            latest.filename, latest.verification_note
+        ))
+    } else if age_hours.is_some_and(|hours| hours >= BACKUP_WARN_AFTER_HOURS) {
+        Some(format!(
+            "Latest verified full backup '{}' is older than {BACKUP_WARN_AFTER_HOURS} hours ({age_text}).",
+            latest.filename
+        ))
+    } else {
+        None
+    };
+
+    BackupSummary {
+        warning,
+        status_line,
+    }
 }
 
 fn render_admin_panel_from_snapshot(
@@ -381,6 +436,8 @@ fn render_admin_panel_from_snapshot(
         &snapshot.board_backups,
         snapshot.db_size_bytes,
         snapshot.db_size_warning,
+        &snapshot.backup_summary.status_line,
+        snapshot.backup_summary.warning.as_deref(),
         &snapshot.reports,
         &snapshot.appeals,
         &snapshot.site_name,

@@ -24,11 +24,14 @@ use futures::stream::Stream;
 use rusqlite::{backup::Backup, params, OptionalExtension};
 use serde::Deserialize;
 use serde_json;
+use std::collections::HashMap;
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
+use std::sync::LazyLock;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant, SystemTime};
 use time;
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::ReaderStream;
@@ -46,6 +49,18 @@ use common::{
 };
 pub use create::*;
 use types::board_backup_types;
+
+const BACKUP_LIST_CACHE_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Clone)]
+struct BackupListCacheEntry {
+    generated_at: Instant,
+    dir_modified: Option<SystemTime>,
+    files: Vec<BackupInfo>,
+}
+
+static BACKUP_LIST_CACHE: LazyLock<parking_lot::Mutex<HashMap<String, BackupListCacheEntry>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
 pub async fn backup_request_logging_middleware(req: Request, next: Next) -> Response {
     let method = req.method().clone();
@@ -163,7 +178,7 @@ fn format_magic_bytes(bytes: &[u8]) -> String {
         .join(" ")
 }
 
-fn parse_board_backup_manifest_from_zip<R: std::io::Read + std::io::Seek>(
+pub(super) fn parse_board_backup_manifest_from_zip<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<board_backup_types::BoardBackupManifest> {
     if !archive.file_names().any(|name| name == "board.json") {
@@ -506,8 +521,9 @@ where
                 conn,
                 "INSERT INTO posts (thread_id, board_id, name, tripcode, subject,
                  body, body_html, ip_hash, file_path, file_name, file_size,
-                 thumb_path, mime_type, media_type, created_at, deletion_token, is_op)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+                 thumb_path, mime_type, media_type, created_at, deletion_token, is_op,
+                 media_processing_state, media_processing_error)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
                  RETURNING id",
                 params![
                     new_thread_id,
@@ -527,6 +543,8 @@ where
                     post.created_at,
                     post.deletion_token,
                     i64::from(post.is_op),
+                    post.media_processing_state,
+                    post.media_processing_error,
                 ],
             )
             .map_err(|error| {
@@ -960,6 +978,7 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
 
 #[allow(clippy::too_many_lines)]
 pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
+    let _maintenance_guard = state.maintenance_gate.try_begin("Full backup download")?;
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
@@ -994,15 +1013,18 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             let uploads_base = std::path::Path::new(&upload_dir);
             let favicon_file_count = count_files_in_dir(&global_favicon_dir);
             let file_count = count_files_in_dir(uploads_base).saturating_add(favicon_file_count);
-            // +1 for chan.db
+            let db_snapshot_size = std::fs::metadata(&temp_db)
+                .map(|metadata| metadata.len())
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {e}")))?;
+            // +2 for backup.json and chan.db
             progress
                 .files_total
-                .store(file_count.saturating_add(1), Ordering::Relaxed);
+                .store(file_count.saturating_add(2), Ordering::Relaxed);
 
             // MEM-FIX: write zip directly to a NamedTempFile instead of Vec<u8>.
             let zip_tmp = tempfile::NamedTempFile::new()
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Create temp zip: {e}")))?;
-            {
+            let build_result = (|| -> Result<()> {
                 let out_file =
                     std::io::BufWriter::new(zip_tmp.as_file().try_clone().map_err(|e| {
                         AppError::Internal(anyhow::anyhow!("Clone temp file handle: {e}"))
@@ -1015,7 +1037,24 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                 log_backup_phase(crate::middleware::backup_phase::COMPRESS);
                 progress
                     .files_total
-                    .store(file_count.saturating_add(1), Ordering::Relaxed);
+                    .store(file_count.saturating_add(2), Ordering::Relaxed);
+
+                let manifest = common::FullBackupManifest {
+                    version: 1,
+                    generated_at: Utc::now().timestamp(),
+                    rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+                    db_bytes: db_snapshot_size,
+                    upload_file_count: file_count.saturating_sub(favicon_file_count),
+                    favicon_file_count,
+                };
+                let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|e| {
+                    AppError::Internal(anyhow::anyhow!("Serialize full backup manifest: {e}"))
+                })?;
+                zip.start_file(common::FULL_BACKUP_MANIFEST_NAME, opts)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip backup manifest: {e}")))?;
+                zip.write_all(&manifest_json).map_err(|e| {
+                    AppError::Internal(anyhow::anyhow!("Write backup manifest: {e}"))
+                })?;
 
                 // ── Database snapshot (streamed, not read into RAM) ────────
                 zip.start_file("chan.db", opts)
@@ -1055,6 +1094,17 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush zip writer: {e}")))?
                     .sync_all()
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Sync zip file: {e}")))?;
+                Ok(())
+            })();
+
+            if let Err(error) = build_result {
+                let _ = std::fs::remove_file(&temp_db);
+                return Err(error);
+            }
+
+            if let Err(error) = common::verify_full_backup_zip(zip_tmp.path()) {
+                let _ = std::fs::remove_file(&temp_db);
+                return Err(error);
             }
 
             let file_size = zip_tmp.as_file().metadata().map(|m| m.len()).unwrap_or(0);
@@ -1271,6 +1321,18 @@ pub async fn admin_restore(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     request: Request,
 ) -> Response {
+    let _maintenance_guard = match state.maintenance_gate.try_begin("Full restore") {
+        Ok(guard) => guard,
+        Err(error) => {
+            return redirect_page_response(
+                &format!(
+                    "/admin/panel?restore_error={}",
+                    encode_q(&error.to_string())
+                ),
+                "Restore could not start.",
+            );
+        }
+    };
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok());
@@ -1686,14 +1748,48 @@ impl Drop for TempFileStream {
 
 fn latest_board_backup_filename(board_short: &str) -> Option<String> {
     let prefix = format!("rustchan-board-{board_short}-");
-    let mut matches = list_backup_files(&board_backup_dir())
+    let mut matches = list_backup_files(&board_backup_dir(), BackupListKind::Board)
         .into_iter()
         .filter(|info| info.filename.starts_with(&prefix));
     matches.next().map(|info| info.filename)
 }
 
+#[derive(Clone, Copy)]
+pub enum BackupListKind {
+    Full,
+    Board,
+}
+
+fn backup_cache_key(dir: &Path, kind: BackupListKind) -> String {
+    let kind = match kind {
+        BackupListKind::Full => "full",
+        BackupListKind::Board => "board",
+    };
+    format!("{kind}:{}", dir.display())
+}
+
+fn current_dir_modified(dir: &Path) -> Option<SystemTime> {
+    std::fs::metadata(dir).ok()?.modified().ok()
+}
+
+pub fn invalidate_backup_list_cache(dir: &Path, kind: BackupListKind) {
+    BACKUP_LIST_CACHE
+        .lock()
+        .remove(&backup_cache_key(dir, kind));
+}
+
 /// List `.zip` files in `dir`, newest-filename-first.
-pub fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
+pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<BackupInfo> {
+    let cache_key = backup_cache_key(dir, kind);
+    let dir_modified = current_dir_modified(dir);
+    if let Some(entry) = BACKUP_LIST_CACHE.lock().get(&cache_key).cloned() {
+        if entry.generated_at.elapsed() <= BACKUP_LIST_CACHE_TTL
+            && entry.dir_modified == dir_modified
+        {
+            return entry.files;
+        }
+    }
+
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -1707,28 +1803,48 @@ pub fn list_backup_files(dir: &std::path::Path) -> Vec<BackupInfo> {
                     .map(ToString::to_string),
                 std::fs::metadata(&path),
             ) {
-                let modified = meta
+                let modified_epoch = meta
                     .modified()
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| {
-                        let secs = d.as_secs().cast_signed();
+                    .map(|d| d.as_secs().cast_signed());
+                let modified = modified_epoch
+                    .and_then(|secs| {
                         #[allow(deprecated)]
                         chrono::DateTime::<Utc>::from_timestamp(secs, 0)
                             .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-                            .unwrap_or_default()
                     })
                     .unwrap_or_default();
+                let verification = match kind {
+                    BackupListKind::Full => common::verify_full_backup_zip(&path)
+                        .map(|manifest| format!("verified v{} backup", manifest.version)),
+                    BackupListKind::Board => {
+                        common::verify_board_backup_zip(&path).map(|manifest| {
+                            format!("verified board /{}/ backup", manifest.board.short_name)
+                        })
+                    }
+                };
                 files.push(BackupInfo {
                     filename: name,
                     size_bytes: meta.len(),
                     modified,
+                    modified_epoch,
+                    verified: verification.is_ok(),
+                    verification_note: verification.unwrap_or_else(|error| error.to_string()),
                 });
             }
         }
     }
     // Sort newest first (filename encodes timestamp for full/board backups).
     files.sort_by(|a, b| b.filename.cmp(&a.filename));
+    BACKUP_LIST_CACHE.lock().insert(
+        cache_key,
+        BackupListCacheEntry {
+            generated_at: Instant::now(),
+            dir_modified,
+            files: files.clone(),
+        },
+    );
     files
 }
 
@@ -1948,6 +2064,11 @@ pub async fn delete_backup(
         "board" => board_backup_dir(),
         _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
     };
+    let backup_kind = match form.kind.as_str() {
+        "full" => BackupListKind::Full,
+        "board" => BackupListKind::Board,
+        _ => unreachable!(),
+    };
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -1959,6 +2080,7 @@ pub async fn delete_backup(
             if path.exists() {
                 std::fs::remove_file(&path)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {e}")))?;
+                invalidate_backup_list_cache(&backup_dir, backup_kind);
                 tracing::info!(target: "admin", filename = %safe_filename, "Backup file deleted");
             }
             Ok(())
@@ -2200,6 +2322,18 @@ pub async fn board_restore(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
+    let _maintenance_guard = match state.maintenance_gate.try_begin("Board restore") {
+        Ok(guard) => guard,
+        Err(error) => {
+            return redirect_page_response(
+                &format!(
+                    "/admin/panel?restore_error={}",
+                    encode_q(&error.to_string())
+                ),
+                "Board restore could not start.",
+            );
+        }
+    };
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok());

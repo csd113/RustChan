@@ -120,6 +120,8 @@ pub fn admin_panel_page(
     board_backups: &[BackupInfo],
     db_size_bytes: i64,
     db_size_warning: bool,
+    backup_status_line: &str,
+    backup_warning: Option<&str>,
     reports: &[crate::models::ReportWithContext],
     appeals: &[crate::models::BanAppeal],
     site_name: &str,
@@ -132,6 +134,12 @@ pub fn admin_panel_page(
     flash: Option<(bool, &str)>,
     open_section: Option<&str>,
 ) -> String {
+    let backup_warning_html = backup_warning.map_or_else(String::new, |message| {
+        format!(
+            r#"<div class="error" style="margin-bottom:0.75rem">{}</div>"#,
+            escape_html(message)
+        )
+    });
     let theme_catalog_open_attr = if open_section == Some("theme-catalog") {
         " open"
     } else {
@@ -435,17 +443,29 @@ pub fn admin_panel_page(
     let mut full_backup_rows = String::new();
     if full_backups.is_empty() {
         full_backup_rows.push_str(
-            "<tr><td colspan=\"4\" style=\"color:var(--text-dim);text-align:center\">no backups yet</td></tr>",
+            "<tr><td colspan=\"5\" style=\"color:var(--text-dim);text-align:center\">no backups yet</td></tr>",
         );
     }
     for bf in full_backups {
         let size_fmt = format_file_size(bf.size_bytes.cast_signed());
+        let status_html = if bf.verified {
+            format!(
+                r#"<span style="color:var(--green)">{}</span>"#,
+                escape_html(&bf.verification_note)
+            )
+        } else {
+            format!(
+                r#"<span style="color:var(--red)" title="{title}">verification failed</span>"#,
+                title = escape_html(&bf.verification_note)
+            )
+        };
         let _ = write!(
             full_backup_rows,
             r#"<tr>
 <td style="word-break:break-all">{fname}</td>
 <td style="white-space:nowrap">{size}</td>
 <td style="white-space:nowrap">{modified}</td>
+<td style="white-space:nowrap">{status}</td>
 <td style="white-space:nowrap">
   <a href="/admin/backup/download/full/{fname}" class="backup-download-link" data-backup-label="full backup" style="margin-right:0.4rem">&#8659; download to computer</a>
   <form method="POST" action="/admin/backup/restore-saved" style="display:inline;margin-right:0.4rem">
@@ -464,6 +484,7 @@ pub fn admin_panel_page(
             fname = escape_html(&bf.filename),
             size = size_fmt,
             modified = escape_html(&bf.modified),
+            status = status_html,
             csrf = escape_html(csrf_token)
         );
     }
@@ -472,17 +493,29 @@ pub fn admin_panel_page(
     let mut board_backup_rows = String::new();
     if board_backups.is_empty() {
         board_backup_rows.push_str(
-            "<tr><td colspan=\"4\" style=\"color:var(--text-dim);text-align:center\">no board backups yet</td></tr>",
+            "<tr><td colspan=\"5\" style=\"color:var(--text-dim);text-align:center\">no board backups yet</td></tr>",
         );
     }
     for bf in board_backups {
         let size_fmt = format_file_size(bf.size_bytes.cast_signed());
+        let status_html = if bf.verified {
+            format!(
+                r#"<span style="color:var(--green)">{}</span>"#,
+                escape_html(&bf.verification_note)
+            )
+        } else {
+            format!(
+                r#"<span style="color:var(--red)" title="{title}">verification failed</span>"#,
+                title = escape_html(&bf.verification_note)
+            )
+        };
         let _ = write!(
             board_backup_rows,
             r#"<tr>
 <td style="word-break:break-all">{fname}</td>
 <td style="white-space:nowrap">{size}</td>
 <td style="white-space:nowrap">{modified}</td>
+<td style="white-space:nowrap">{status}</td>
 <td style="white-space:nowrap">
   <a href="/admin/backup/download/board/{fname}" class="backup-download-link" data-backup-label="board backup" style="margin-right:0.4rem">&#8659; download to computer</a>
   <form method="POST" action="/admin/board/backup/restore-saved" style="display:inline;margin-right:0.4rem">
@@ -501,6 +534,7 @@ pub fn admin_panel_page(
             fname = escape_html(&bf.filename),
             size = size_fmt,
             modified = escape_html(&bf.modified),
+            status = status_html,
             csrf = escape_html(csrf_token)
         );
     }
@@ -1044,6 +1078,8 @@ button / button:hover</pre>
 <section class="admin-section">
 <h2>// full site backup &amp; restore</h2>
 <p style="color:var(--text-dim);font-size:0.85rem">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/backups/full/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer.</p>
+{backup_warning_html}
+<p style="color:var(--text-dim);font-size:0.85rem"><strong>Backup health:</strong> {backup_status_line}</p>
 <div class="admin-inline-actions" style="margin-top:0.75rem;margin-bottom:0.75rem">
 <form method="POST" action="/admin/backup/create" id="full-backup-create-form">
 <input type="hidden" name="_csrf" value="{csrf}">
@@ -1058,7 +1094,7 @@ button / button:hover</pre>
 </div>
 <div class="admin-table-wrap">
 <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
-<thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th></th></tr></thead>
+<thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th style="text-align:left">status</th><th></th></tr></thead>
 <tbody>{full_backup_rows}</tbody>
 </table>
 </div>
@@ -1080,7 +1116,7 @@ button / button:hover</pre>
 </div>
 <div class="admin-table-wrap">
 <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
-<thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th></th></tr></thead>
+<thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th style="text-align:left">status</th><th></th></tr></thead>
 <tbody>{board_backup_rows}</tbody>
 </table>
 </div>

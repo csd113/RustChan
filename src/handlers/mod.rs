@@ -615,6 +615,7 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
 /// post.  Shared by `create_thread` and `post_reply`.
 pub fn enqueue_post_jobs(
     job_queue: &JobQueue,
+    conn: &rusqlite::Connection,
     post_id: i64,
     ip_hash: &str,
     body_len: usize,
@@ -638,8 +639,52 @@ pub fn enqueue_post_jobs(
                 crate::models::MediaType::Image | crate::models::MediaType::Other => None,
             };
             if let Some(j) = job {
-                if let Err(e) = job_queue.enqueue(&j) {
-                    tracing::warn!("Failed to enqueue media job: {e}");
+                match job_queue.enqueue(&j) {
+                    Ok(crate::workers::EnqueueOutcome::Enqueued(_)) => {
+                        if let Err(error) = crate::db::set_post_media_processing_state(
+                            conn,
+                            post_id,
+                            Some(crate::db::MEDIA_PROCESSING_PENDING),
+                            None,
+                        ) {
+                            tracing::warn!(
+                                post_id,
+                                error = %error,
+                                "Failed to mark post media processing as pending"
+                            );
+                        }
+                    }
+                    Ok(crate::workers::EnqueueOutcome::DroppedAtCapacity) => {
+                        let detail = "Background media queue is full; upload kept original file but deferred processing was skipped.";
+                        tracing::warn!(post_id, "Media job dropped at queue capacity");
+                        if let Err(error) = crate::db::set_post_media_processing_state(
+                            conn,
+                            post_id,
+                            Some(crate::db::MEDIA_PROCESSING_FAILED),
+                            Some(detail),
+                        ) {
+                            tracing::warn!(
+                                post_id,
+                                error = %error,
+                                "Failed to persist queue-capacity media failure"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to enqueue media job: {e}");
+                        if let Err(error) = crate::db::set_post_media_processing_state(
+                            conn,
+                            post_id,
+                            Some(crate::db::MEDIA_PROCESSING_FAILED),
+                            Some(&format!("Could not enqueue background media job: {e}")),
+                        ) {
+                            tracing::warn!(
+                                post_id,
+                                error = %error,
+                                "Failed to persist media enqueue failure"
+                            );
+                        }
+                    }
                 }
             }
         }

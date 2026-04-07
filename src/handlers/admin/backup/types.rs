@@ -90,6 +90,8 @@ pub(super) mod board_backup_types {
         pub created_at: i64,
         pub deletion_token: String,
         pub is_op: bool,
+        pub media_processing_state: Option<String>,
+        pub media_processing_error: Option<String>,
     }
 
     #[derive(Serialize, Deserialize)]

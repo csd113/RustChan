@@ -178,6 +178,10 @@ pub struct Post {
     pub is_op: bool,
     /// Set when the post body has been edited; None means never edited.
     pub edited_at: Option<i64>,
+    /// Present while async media work is queued/running, or after it has failed.
+    pub media_processing_state: Option<String>,
+    /// Human-readable detail for failed async media processing.
+    pub media_processing_error: Option<String>,
 }
 
 /// Admin user record
@@ -447,6 +451,12 @@ pub struct BackupInfo {
     pub size_bytes: u64,
     /// Human-readable last-modified timestamp (UTC).
     pub modified: String,
+    /// Last-modified timestamp as a Unix epoch second when available.
+    pub modified_epoch: Option<i64>,
+    /// Whether the backup passed the app's structural verification.
+    pub verified: bool,
+    /// Short note describing verification status or the detected problem.
+    pub verification_note: String,
 }
 
 /// A user-submitted ban appeal

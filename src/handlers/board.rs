@@ -477,6 +477,7 @@ pub async fn create_thread(
             // 1 & 2. Media post-processing + spam check (shared helper)
             crate::handlers::enqueue_post_jobs(
                 &job_queue,
+                &conn,
                 post_id,
                 &ip_hash,
                 body_text.len(),

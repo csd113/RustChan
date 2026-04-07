@@ -6,6 +6,7 @@ pub async fn create_full_backup(
     jar: CookieJar,
     Form(form): Form<super::super::CsrfOnly>,
 ) -> Result<Response> {
+    let _maintenance_guard = state.maintenance_gate.try_begin("Full backup creation")?;
     let session_id = jar
         .get(super::super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
@@ -42,9 +43,12 @@ pub async fn create_full_backup(
             let favicon_file_count = super::count_files_in_dir(&global_favicon_dir);
             let file_count =
                 super::count_files_in_dir(uploads_base).saturating_add(favicon_file_count);
+            let db_snapshot_size = std::fs::metadata(&temp_db).map(|metadata| metadata.len()).map_err(
+                |error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}"))
+            )?;
             progress
                 .files_total
-                .store(file_count.saturating_add(1), Ordering::Relaxed);
+                .store(file_count.saturating_add(2), Ordering::Relaxed);
 
             let backup_dir = super::full_backup_dir();
             std::fs::create_dir_all(&backup_dir).map_err(|error| {
@@ -56,7 +60,7 @@ pub async fn create_full_backup(
             let final_path = backup_dir.join(&filename);
             let tmp_path = backup_dir.join(format!("{filename}.tmp"));
 
-            {
+            let build_result = (|| -> Result<()> {
                 let out_file = std::io::BufWriter::new(
                     std::fs::File::create(&tmp_path).map_err(|error| {
                         AppError::Internal(anyhow::anyhow!("Create zip tmp: {error}"))
@@ -70,7 +74,26 @@ pub async fn create_full_backup(
                 log_backup_phase(crate::middleware::backup_phase::COMPRESS);
                 progress
                     .files_total
-                    .store(file_count.saturating_add(1), Ordering::Relaxed);
+                    .store(file_count.saturating_add(2), Ordering::Relaxed);
+
+                let manifest = super::common::FullBackupManifest {
+                    version: 1,
+                    generated_at: Utc::now().timestamp(),
+                    rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+                    db_bytes: db_snapshot_size,
+                    upload_file_count: file_count.saturating_sub(favicon_file_count),
+                    favicon_file_count,
+                };
+                let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("Serialize full backup manifest: {error}"))
+                })?;
+                zip.start_file(super::common::FULL_BACKUP_MANIFEST_NAME, opts)
+                    .map_err(|error| {
+                        AppError::Internal(anyhow::anyhow!("Zip backup manifest: {error}"))
+                    })?;
+                zip.write_all(&manifest_json).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("Write backup manifest: {error}"))
+                })?;
 
                 zip.start_file("chan.db", opts)
                     .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip DB: {error}")))?;
@@ -112,12 +135,27 @@ pub async fn create_full_backup(
                     .map_err(|error| {
                         AppError::Internal(anyhow::anyhow!("Sync zip file: {error}"))
                     })?;
+                Ok(())
+            })();
+
+            if let Err(error) = build_result {
+                let _ = std::fs::remove_file(&tmp_path);
+                let _ = std::fs::remove_file(&temp_db);
+                return Err(error);
+            }
+
+            if let Err(error) = super::common::verify_full_backup_zip(&tmp_path) {
+                let _ = std::fs::remove_file(&tmp_path);
+                let _ = std::fs::remove_file(&temp_db);
+                return Err(error);
             }
 
             std::fs::rename(&tmp_path, &final_path).map_err(|error| {
                 let _ = std::fs::remove_file(&tmp_path);
+                let _ = std::fs::remove_file(&temp_db);
                 AppError::Internal(anyhow::anyhow!("Rename backup: {error}"))
             })?;
+            super::invalidate_backup_list_cache(&backup_dir, super::BackupListKind::Full);
 
             let size = std::fs::metadata(&final_path).map(|metadata| metadata.len()).unwrap_or(0);
             tracing::info!(target: "admin", filename = %filename, bytes = size, "Full backup created");
@@ -149,6 +187,7 @@ pub async fn create_board_backup(
     headers: HeaderMap,
     Form(form): Form<BoardBackupCreateForm>,
 ) -> Result<Response> {
+    let _maintenance_guard = state.maintenance_gate.try_begin("Board backup creation")?;
     use super::board_backup_types::{
         BoardBackupManifest, BoardRow, FileHashRow, PollOptionRow, PollRow, PollVoteRow, PostRow,
         ThreadRow,
@@ -243,7 +282,8 @@ pub async fn create_board_backup(
                 board_id,
                 "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                         ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                        media_type, created_at, deletion_token, is_op
+                        media_type, created_at, deletion_token, is_op,
+                        media_processing_state, media_processing_error
                  FROM posts WHERE board_id = ?1 ORDER BY id ASC",
                 |row| {
                     Ok(PostRow {
@@ -265,6 +305,8 @@ pub async fn create_board_backup(
                         created_at: row.get(15)?,
                         deletion_token: row.get(16)?,
                         is_op: row.get::<_, i64>(17)? != 0,
+                        media_processing_state: row.get(18)?,
+                        media_processing_error: row.get(19)?,
                     })
                 },
             )?;
@@ -395,7 +437,7 @@ pub async fn create_board_backup(
                 .files_total
                 .store(file_count.saturating_add(1), Ordering::Relaxed);
 
-            {
+            let build_result = (|| -> Result<()> {
                 let out_file = std::io::BufWriter::new(
                     std::fs::File::create(&tmp_path).map_err(|error| {
                         AppError::Internal(anyhow::anyhow!("Create zip tmp: {error}"))
@@ -440,12 +482,26 @@ pub async fn create_board_backup(
                     .map_err(|error| {
                         AppError::Internal(anyhow::anyhow!("Sync zip file: {error}"))
                     })?;
+                Ok(())
+            })();
+
+            if let Err(error) = build_result {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(error);
+            }
+
+            if let Err(error) = super::common::verify_board_backup_zip(&tmp_path) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(error);
             }
 
             std::fs::rename(&tmp_path, &final_path).map_err(|error| {
                 let _ = std::fs::remove_file(&tmp_path);
                 AppError::Internal(anyhow::anyhow!("Rename board backup: {error}"))
             })?;
+            if !download_after_create {
+                super::invalidate_backup_list_cache(&backup_dir, super::BackupListKind::Board);
+            }
 
             let size = std::fs::metadata(&final_path).map(|metadata| metadata.len()).unwrap_or(0);
             tracing::info!(

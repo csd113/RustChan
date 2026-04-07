@@ -67,7 +67,9 @@ const BASE_SCHEMA_SQL: &str = "
         audio_file_name  TEXT,
         audio_file_size  INTEGER,
         audio_mime_type  TEXT,
-        edited_at        INTEGER
+        edited_at        INTEGER,
+        media_processing_state TEXT NOT NULL DEFAULT '',
+        media_processing_error TEXT
     );
 
     CREATE TABLE IF NOT EXISTS file_hashes (
@@ -259,6 +261,8 @@ const INDEX_SCHEMA_SQL: &str = "
         ON mod_log(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posts_thread_id
         ON posts(thread_id);
+    CREATE INDEX IF NOT EXISTS idx_posts_media_processing_state
+        ON posts(media_processing_state);
     CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
         ON posts(ip_hash);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_one_op_per_thread

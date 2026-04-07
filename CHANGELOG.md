@@ -14,6 +14,8 @@ All notable changes to RustChan will be documented in this file.
 - Theme CSS internals are cleaner and safer to maintain: the fixed footer now uses one shared height variable with safe-area-aware body padding, Frutiger Aero and NeonCubicle now share one glass-pill navigation implementation, and the Forest theme now centralizes repeated surface, link, button, and input colors behind theme-scoped variables.
 - Mobile header polish is tighter on board pages: the search bar now stretches to the same visual rails as the Home and Boards controls instead of ending short on narrow screens.
 - The theme picker now lives in a footer-docked control bar on both desktop and mobile, giving theme switching one consistent home and keeping it from floating over page content.
+- Backup and media-processing observability are stronger: posts now expose pending and failed async media state, `/readyz` and `/metrics` report media backlog, backup freshness, and maintenance activity, and the admin panel surfaces backup verification health instead of assuming saved ZIPs are restorable.
+- Heavy admin maintenance now coordinates through a shared maintenance gate and less aggressive background scheduling, so backups, restores, integrity checks, repair, and scheduled `VACUUM`/WAL work are less likely to pile onto live request traffic or each other.
 
 ### Fixed
 
@@ -29,6 +31,9 @@ All notable changes to RustChan will be documented in this file.
 - Desktop and mobile audio MiniPlayers now use the attached post image as album art for image+audio combo posts, while audio-only posts continue falling back to the current favicon artwork.
 - Duplicate threads and replies are now prevented on unstable connections: post forms carry a per-render submission token, successful submissions are recorded server-side, and a retried POST now redirects back to the already-created post instead of inserting a second copy when the first response was lost in transit.
 - Board search no longer fails when the FTS join exposes duplicate column names, and search queries are now normalized consistently so lowercase searches such as `ai` also match uppercase post text like `AI`.
+- Background media processing now degrades more honestly under pressure: queue-capacity drops and permanent worker failures are persisted onto the post, failed previews fall back to the original file link, and operators can see pending and failed media work instead of silently missing thumbnails or waveforms.
+- Saved backups are now verified before they are exposed as healthy: full backups include a manifest and SQLite-header checks, board backups are validated before save and in the admin listing, and backup freshness/verification status is now visible in both the admin UI and readiness metrics.
+- Admin backup progress polling no longer conflicts with the maintenance lock during an active backup or restore, and failed backup builds now clean up temporary artifacts instead of leaving behind stale `.tmp` ZIPs or database snapshots.
 
 ### Validation
 

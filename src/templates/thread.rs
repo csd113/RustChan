@@ -602,13 +602,30 @@ pub fn render_post(
     } else {
         String::new()
     };
+    let media_processing_badge = match post.media_processing_state.as_deref() {
+        Some("pending") => {
+            r#" <span class="post-edited" title="Background media processing is still running.">(processing media)</span>"#
+                .to_string()
+        }
+        Some("failed") => {
+            let title = post
+                .media_processing_error
+                .as_deref()
+                .map(escape_html)
+                .unwrap_or_else(|| "Background media processing failed.".to_string());
+            format!(
+                r#" <span class="post-edited" title="{title}">(media processing failed)</span>"#
+            )
+        }
+        _ => String::new(),
+    };
 
     let mut html = format!(
         r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}>
 <div class="post-meta">
 {subject_html}<strong class="name">{name}</strong>{tripcode}{poster_id_html}
 <span class="post-time" data-utc="{ts}">{time}</span>{edited}
-<a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>{post_state_badges}
+<a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>{post_state_badges}{media_processing_badge}
 <span class="backrefs" id="backrefs-{id}"></span>
 </div>"##,
         op_class = op_class,
@@ -623,6 +640,7 @@ pub fn render_post(
         time = fmt_ts_short(post.created_at),
         edited = edited_html,
         post_state_badges = post_state_badges,
+        media_processing_badge = media_processing_badge,
     );
 
     // Image / Video / Audio
@@ -757,6 +775,27 @@ pub fn render_post(
                     )
                 );
             }
+        } else if let Some(file) = &post.file_path {
+            let size_str = post.file_size.map(format_file_size).unwrap_or_default();
+            let name_str = post.file_name.as_deref().unwrap_or("file");
+            let status_note = match post.media_processing_state.as_deref() {
+                Some("pending") => "Preview still processing.",
+                Some("failed") => "Preview generation failed; original file is still available.",
+                _ => "Preview unavailable.",
+            };
+            let _ = write!(
+                html,
+                r#"<div class="file-container">
+<div class="file-info">
+  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  <span class="post-edited" title="{status}">{status}</span>
+</div>
+</div>"#,
+                f = escape_html(file),
+                orig = escape_html(name_str),
+                sz = escape_html(&size_str),
+                status = escape_html(status_note),
+            );
         }
     }
 
@@ -989,6 +1028,8 @@ mod tests {
             deletion_token: "token".into(),
             is_op: false,
             edited_at: None,
+            media_processing_state: None,
+            media_processing_error: None,
         }
     }
 
@@ -1048,5 +1089,34 @@ mod tests {
         assert!(html.contains("thread-state-badge-pin"));
         assert!(html.contains("thread-state-badge-archive"));
         assert!(!html.contains("thread-state-badge-lock"));
+    }
+
+    #[test]
+    fn media_processing_failure_renders_fallback_when_thumb_is_missing() {
+        let mut post = sample_post();
+        post.thumb_path = None;
+        post.media_processing_state = Some("failed".into());
+        post.media_processing_error = Some("Queue exhausted retries".into());
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: true,
+                allow_editing: false,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html.contains("media processing failed"));
+        assert!(html.contains("Preview generation failed; original file is still available."));
+        assert!(html.contains(r#"href="/boards/test/image.webp""#));
     }
 }

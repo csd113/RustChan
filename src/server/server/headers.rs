@@ -48,7 +48,21 @@ pub(super) async fn safe_timeout_middleware(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let path = req.uri().path();
-    if path.starts_with("/admin/backup/download/") {
+    let bypass_timeout = path.starts_with("/admin/backup/download/")
+        || matches!(
+            path,
+            "/admin/backup"
+                | "/admin/backup/create"
+                | "/admin/board/backup/create"
+                | "/admin/restore"
+                | "/admin/backup/restore-saved"
+                | "/admin/board/restore"
+                | "/admin/board/backup/restore-saved"
+                | "/admin/vacuum"
+                | "/admin/db/check"
+                | "/admin/db/repair"
+        );
+    if bypass_timeout {
         return next.run(req).await;
     }
 
