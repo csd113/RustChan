@@ -29,6 +29,9 @@ const BASE_SCHEMA_SQL: &str = "
         collapse_greentext  INTEGER NOT NULL DEFAULT 0,
         post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
         default_theme       TEXT NOT NULL DEFAULT '',
+        access_mode         TEXT NOT NULL DEFAULT 'public'
+                                CHECK (access_mode IN ('public', 'view_password', 'post_password')),
+        access_password_hash TEXT NOT NULL DEFAULT '',
         created_at      INTEGER NOT NULL DEFAULT (unixepoch())
     );
 
@@ -289,6 +292,7 @@ pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
     ensure_reports_table_integrity(conn)?;
     ensure_posts_search_index(conn)?;
     ensure_post_invariants(conn)?;
+    ensure_board_access_invariants(conn)?;
     relax_posts_ip_hash(conn)?;
     backfill_media_type(conn)?;
     Ok(())
@@ -364,6 +368,49 @@ fn ensure_post_invariants(conn: &rusqlite::Connection) -> Result<()> {
         ",
     )
     .context("Post invariant creation failed")
+}
+
+fn ensure_board_access_invariants(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(
+        r"
+        UPDATE boards
+        SET access_mode = 'view_password'
+        WHERE access_mode NOT IN ('public', 'view_password', 'post_password');
+
+        CREATE TRIGGER IF NOT EXISTS boards_access_mode_insert
+        BEFORE INSERT ON boards
+        FOR EACH ROW
+        WHEN NEW.access_mode NOT IN ('public', 'view_password', 'post_password')
+        BEGIN
+            SELECT RAISE(ABORT, 'boards.access_mode must be public, view_password, or post_password');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS boards_access_mode_update
+        BEFORE UPDATE OF access_mode ON boards
+        FOR EACH ROW
+        WHEN NEW.access_mode NOT IN ('public', 'view_password', 'post_password')
+        BEGIN
+            SELECT RAISE(ABORT, 'boards.access_mode must be public, view_password, or post_password');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS boards_access_password_insert
+        BEFORE INSERT ON boards
+        FOR EACH ROW
+        WHEN NEW.access_mode IN ('view_password', 'post_password') AND NEW.access_password_hash = ''
+        BEGIN
+            SELECT RAISE(ABORT, 'protected boards require access_password_hash');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS boards_access_password_update
+        BEFORE UPDATE OF access_mode, access_password_hash ON boards
+        FOR EACH ROW
+        WHEN NEW.access_mode IN ('view_password', 'post_password') AND NEW.access_password_hash = ''
+        BEGIN
+            SELECT RAISE(ABORT, 'protected boards require access_password_hash');
+        END;
+        ",
+    )
+    .context("Board access invariant creation failed")
 }
 
 fn read_column_notnull(conn: &rusqlite::Connection, table: &str, column: &str) -> Result<bool> {

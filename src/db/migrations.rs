@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 37;
+pub(super) const CURRENT_MAX_MIGRATION: i64 = 39;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
@@ -177,6 +177,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
         ALTER TABLE posts ADD COLUMN media_processing_error TEXT;
         CREATE INDEX IF NOT EXISTS idx_posts_media_processing_state
             ON posts(media_processing_state)",
+    ),
+    (
+        38,
+        "ALTER TABLE boards ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'public'",
+    ),
+    (
+        39,
+        "ALTER TABLE boards ADD COLUMN access_password_hash TEXT NOT NULL DEFAULT ''",
     ),
 ];
 

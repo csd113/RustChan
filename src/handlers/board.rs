@@ -14,20 +14,23 @@ use crate::{
     error::{AppError, Result},
     handlers::{parse_post_multipart, posting, render},
     middleware::{validate_csrf, AppState},
-    models::{Pagination, SearchQuery, SEARCH_QUERY_MAX_CHARS},
+    models::{Board, Pagination, SearchQuery, SEARCH_QUERY_MAX_CHARS},
     templates,
     utils::{
-        crypto::{hash_ip, new_csrf_token, verify_pow},
+        crypto::{hash_ip, new_csrf_token, sha256_hex, verify_password, verify_pow},
         sanitize::validate_subject,
     },
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
-    http::{header, HeaderMap, HeaderValue},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
+use std::sync::{atomic::AtomicU64, LazyLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use time::Duration;
 
 const PREVIEW_REPLIES: i64 = 3;
@@ -35,7 +38,30 @@ const THREADS_PER_PAGE: i64 = 10;
 pub const USER_THEME_COOKIE: &str = "rustchan_theme";
 pub const NSFW_CONSENT_COOKIE: &str = "rustchan_nsfw_ok";
 pub const VISITOR_ID_COOKIE: &str = "rustchan_visitor_id";
+pub(crate) const ADMIN_SESSION_COOKIE: &str = "chan_admin_session";
+const BOARD_ACCESS_COOKIE_PREFIX: &str = "rustchan_board_access_";
+const BOARD_ACCESS_COOKIE_TTL_DAYS: i64 = 30;
+const BOARD_UNLOCK_FAIL_LIMIT: u32 = 5;
+const BOARD_UNLOCK_FAIL_WINDOW_SECS: u64 = 900;
 const HTML_CACHE_CONTROL: &str = "private, no-cache, must-revalidate";
+
+static BOARD_UNLOCK_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
+static BOARD_UNLOCK_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
+
+pub struct BoardAccessContext {
+    pub board: Board,
+    pub is_admin: bool,
+    pub can_view: bool,
+    pub can_post: bool,
+}
+
+type CatalogRenderData = (
+    Board,
+    Vec<crate::models::Thread>,
+    HashSet<i64>,
+    usize,
+    String,
+);
 
 pub fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
     jar.get(USER_THEME_COOKIE)
@@ -54,6 +80,240 @@ pub fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
 pub fn has_nsfw_consent(jar: &CookieJar) -> bool {
     jar.get(NSFW_CONSENT_COOKIE)
         .is_some_and(|cookie| cookie.value() == "1")
+}
+
+pub fn board_access_cookie_name(board_short: &str) -> String {
+    format!("{BOARD_ACCESS_COOKIE_PREFIX}{board_short}")
+}
+
+pub fn board_access_cookie_from_jar(jar: &CookieJar, board_short: &str) -> Option<String> {
+    let cookie_name = board_access_cookie_name(board_short);
+    jar.get(cookie_name.as_str())
+        .map(|cookie| cookie.value().to_string())
+}
+
+fn expected_board_access_cookie_value(board_short: &str, password_hash: &str) -> Option<String> {
+    if password_hash.is_empty() {
+        return None;
+    }
+    Some(sha256_hex(
+        format!(
+            "{}:board-access:{board_short}:{password_hash}",
+            CONFIG.cookie_secret
+        )
+        .as_bytes(),
+    ))
+}
+
+fn has_valid_board_access_cookie(
+    board_short: &str,
+    password_hash: &str,
+    cookie_value: Option<&str>,
+) -> bool {
+    let Some(expected) = expected_board_access_cookie_value(board_short, password_hash) else {
+        return false;
+    };
+    cookie_value.is_some_and(|value| value == expected)
+}
+
+pub fn can_view_board(board: &Board, is_admin: bool, access_cookie: Option<&str>) -> bool {
+    is_admin
+        || !board.access_mode.requires_view_password()
+        || has_valid_board_access_cookie(
+            &board.short_name,
+            &board.access_password_hash,
+            access_cookie,
+        )
+}
+
+pub fn can_post_to_board(board: &Board, is_admin: bool, access_cookie: Option<&str>) -> bool {
+    is_admin
+        || !board.access_mode.requires_post_password()
+        || has_valid_board_access_cookie(
+            &board.short_name,
+            &board.access_password_hash,
+            access_cookie,
+        )
+}
+
+pub fn load_board_access_context(
+    conn: &rusqlite::Connection,
+    board_short: &str,
+    admin_session_id: Option<&str>,
+    access_cookie: Option<&str>,
+) -> Result<BoardAccessContext> {
+    let board = db::get_board_by_short(conn, board_short)?
+        .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+    let is_admin = posting::is_admin_session(conn, admin_session_id);
+    Ok(BoardAccessContext {
+        can_view: can_view_board(&board, is_admin, access_cookie),
+        can_post: can_post_to_board(&board, is_admin, access_cookie),
+        board,
+        is_admin,
+    })
+}
+
+pub(crate) fn unlock_redirect_url(board_short: &str, return_to: &str) -> String {
+    format!(
+        "/{board_short}/unlock?return_to={}",
+        crate::templates::urlencoding_simple(return_to)
+    )
+}
+
+pub(crate) fn render_board_unlock_html(
+    board: &Board,
+    csrf_token: &str,
+    return_to: &str,
+    error: Option<&str>,
+    current_theme: Option<&str>,
+) -> String {
+    let boards = crate::templates::live_boards();
+    crate::templates::board_access_page(
+        board,
+        csrf_token,
+        boards.as_slice(),
+        return_to,
+        error,
+        current_theme,
+        board.collapse_greentext,
+    )
+}
+
+fn board_unlock_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn board_unlock_attempt_key(board_short: &str, client_ip: &str) -> String {
+    sha256_hex(format!("{board_short}:{client_ip}").as_bytes())
+}
+
+fn prune_board_unlock_failures(now_secs: u64) {
+    let last_cleanup = BOARD_UNLOCK_CLEANUP_SECS.load(std::sync::atomic::Ordering::Relaxed);
+    if now_secs.saturating_sub(last_cleanup) < 60 {
+        return;
+    }
+    if BOARD_UNLOCK_CLEANUP_SECS
+        .compare_exchange(
+            last_cleanup,
+            now_secs,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
+    BOARD_UNLOCK_FAILS.retain(|_, (_, window_start)| {
+        now_secs.saturating_sub(*window_start) <= BOARD_UNLOCK_FAIL_WINDOW_SECS
+    });
+}
+
+fn board_unlock_retry_after_secs(attempt_key: &str) -> Option<u64> {
+    let now_secs = board_unlock_now_secs();
+    prune_board_unlock_failures(now_secs);
+    let (count, window_start) = *BOARD_UNLOCK_FAILS.get(attempt_key)?;
+    let elapsed = now_secs.saturating_sub(window_start);
+    if elapsed > BOARD_UNLOCK_FAIL_WINDOW_SECS {
+        BOARD_UNLOCK_FAILS.remove(attempt_key);
+        return None;
+    }
+    if count < BOARD_UNLOCK_FAIL_LIMIT {
+        return None;
+    }
+    Some((BOARD_UNLOCK_FAIL_WINDOW_SECS.saturating_sub(elapsed)).max(1))
+}
+
+fn record_board_unlock_failure(attempt_key: &str) {
+    let now_secs = board_unlock_now_secs();
+    prune_board_unlock_failures(now_secs);
+    let mut entry = BOARD_UNLOCK_FAILS
+        .entry(attempt_key.to_string())
+        .or_insert((0, now_secs));
+    let (count, window_start) = entry.value_mut();
+    if now_secs.saturating_sub(*window_start) > BOARD_UNLOCK_FAIL_WINDOW_SECS {
+        *count = 1;
+        *window_start = now_secs;
+    } else {
+        *count = count.saturating_add(1);
+    }
+}
+
+fn clear_board_unlock_failures(attempt_key: &str) {
+    BOARD_UNLOCK_FAILS.remove(attempt_key);
+}
+
+fn board_unlock_rate_limit_message(retry_after_secs: u64) -> String {
+    let minutes = retry_after_secs / 60;
+    let seconds = retry_after_secs % 60;
+    if minutes > 0 && seconds > 0 {
+        format!(
+            "Too many incorrect board password attempts. Try again in {minutes} minute{} and {seconds} second{}.",
+            if minutes == 1 { "" } else { "s" },
+            if seconds == 1 { "" } else { "s" }
+        )
+    } else if minutes > 0 {
+        format!(
+            "Too many incorrect board password attempts. Try again in {minutes} minute{}.",
+            if minutes == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "Too many incorrect board password attempts. Try again in {retry_after_secs} second{}.",
+            if retry_after_secs == 1 { "" } else { "s" }
+        )
+    }
+}
+
+fn board_unlock_default_return_to(board: &Board) -> String {
+    if board.access_mode.requires_view_password() {
+        format!("/{}/catalog", board.short_name)
+    } else {
+        format!("/{}", board.short_name)
+    }
+}
+
+fn board_access_page_response(
+    jar: CookieJar,
+    html: String,
+    status: StatusCode,
+    retry_after_secs: Option<u64>,
+) -> Response {
+    let mut resp = Html(html).into_response();
+    *resp.status_mut() = status;
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(HTML_CACHE_CONTROL),
+    );
+    if let Some(retry_after_secs) = retry_after_secs {
+        if let Ok(retry_after) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+            resp.headers_mut().insert(header::RETRY_AFTER, retry_after);
+        }
+    }
+    (jar, resp).into_response()
+}
+
+pub(crate) fn board_access_required_response(jar: CookieJar, html: String) -> Response {
+    board_access_page_response(jar, html, StatusCode::FORBIDDEN, None)
+}
+
+pub(crate) fn board_access_ok_response(jar: CookieJar, html: String) -> Response {
+    board_access_page_response(jar, html, StatusCode::OK, None)
+}
+
+pub(crate) fn board_access_rate_limited_response(
+    jar: CookieJar,
+    html: String,
+    retry_after_secs: u64,
+) -> Response {
+    board_access_page_response(
+        jar,
+        html,
+        StatusCode::TOO_MANY_REQUESTS,
+        Some(retry_after_secs),
+    )
 }
 
 fn safe_return_to(path: &str) -> &str {
@@ -136,7 +396,9 @@ pub async fn index(
     let (jar, csrf) = ensure_csrf(jar);
     let nsfw_consent = has_nsfw_consent(&jar);
 
-    let admin_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
+    let admin_session = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
     let (board_stats, site_data, is_admin) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<(Vec<crate::models::BoardStats>, crate::models::SiteStats, bool)> {
@@ -165,9 +427,12 @@ pub async fn index(
 
     if nsfw_consent {
         if let Some(board) = nsfw_prompt_board {
-            return Ok(
-                (jar, Redirect::to(&format!("/{}/catalog", board.short_name))).into_response(),
-            );
+            let redirect_to = if board.access_mode.requires_view_password() {
+                format!("/{}/unlock", board.short_name)
+            } else {
+                format!("/{}/catalog", board.short_name)
+            };
+            return Ok((jar, Redirect::to(&redirect_to)).into_response());
         }
     }
 
@@ -199,17 +464,56 @@ pub async fn board_index(
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
 
     let page: i64 = params
         .get("page")
         .and_then(|p| p.parse().ok())
         .unwrap_or(1)
         .max(1);
+    let return_to = if page > 1 {
+        format!("/{board_short}?page={page}")
+    } else {
+        format!("/{board_short}")
+    };
 
-    let result = tokio::task::spawn_blocking({
+    let access_context = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
-        move || -> Result<(String, String)> {
+        let admin_session_id = admin_session_id.clone();
+        let board_short = board_short.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<BoardAccessContext> {
+            let conn = pool.get()?;
+            load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    if !access_context.can_view {
+        let html = render_board_unlock_html(
+            &access_context.board,
+            &csrf,
+            &return_to,
+            None,
+            current_theme.as_deref(),
+        );
+        return Ok(board_access_required_response(jar, html));
+    }
+
+    let page_data = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        move || -> Result<(String, render::BoardPageData)> {
             let conn = pool.get()?;
             let page_data = render::load_board_page_data(
                 &conn,
@@ -217,34 +521,27 @@ pub async fn board_index(
                 page,
                 THREADS_PER_PAGE,
                 PREVIEW_REPLIES,
-                jar_session.as_deref(),
+                admin_session_id.as_deref(),
             )?;
-
-            // 3.2: Derive ETag from the most-recently-bumped thread on this page
-            // combined with the page number.  This is a cheap proxy for "has
-            // anything on this page changed?".
-            let page_sig = render::board_page_etag_signature(&page_data);
-            // Include is_admin in the ETag so admin and non-admin responses
-            // have distinct cache keys and the browser doesn't serve a cached
-            // non-admin page (missing delete controls) to a logged-in admin.
-            let admin_tag = if page_data.is_admin { "-a" } else { "" };
-            let greentext_tag = if page_data.board.collapse_greentext {
-                "-cg1"
-            } else {
-                "-cg0"
-            };
-            let etag = format!(
-                "\"{}-{}-{page}{admin_tag}{greentext_tag}\"",
-                page_data.pagination.total, page_sig
-            );
-            let html = render::render_board_page(&page_data, &csrf, None, current_theme.as_deref());
-            Ok((etag, html))
+            Ok((render::board_page_etag_signature(&page_data), page_data))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let (etag, html) = result;
+    let can_post = access_context.can_post;
+    let (page_sig, page_data) = page_data;
+    let admin_tag = if page_data.is_admin { "-a" } else { "" };
+    let post_tag = if can_post { "-p1" } else { "-p0" };
+    let greentext_tag = if page_data.board.collapse_greentext {
+        "-cg1"
+    } else {
+        "-cg0"
+    };
+    let etag = format!(
+        "\"{}-{}-{page}{admin_tag}{post_tag}{greentext_tag}\"",
+        page_data.pagination.total, page_sig
+    );
 
     // 3.2: Return 304 Not Modified when the client's cached version is current.
     let client_etag = req_headers
@@ -270,6 +567,8 @@ pub async fn board_index(
         return Ok((jar, resp).into_response());
     }
 
+    let html =
+        render::render_board_page(&page_data, &csrf, None, current_theme.as_deref(), can_post);
     let mut resp = Html(html).into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
@@ -292,6 +591,33 @@ pub async fn create_thread(
     multipart: Multipart,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
+    let access_context = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<BoardAccessContext> {
+            let conn = pool.get()?;
+            load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    if !access_context.can_post {
+        let redirect_to = unlock_redirect_url(&board_short, &format!("/{board_short}"));
+        return Ok(Redirect::to(&redirect_to).into_response());
+    }
+
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
     let form = parse_post_multipart(multipart, csrf_cookie.as_deref()).await?;
 
@@ -321,8 +647,6 @@ pub async fn create_thread(
     let poll_duration = form.poll_duration_secs;
     let pow_nonce = form.pow_nonce;
 
-    // Extract admin session before spawn_blocking (cookie jar is !Send).
-    let admin_session_id = jar.get("chan_admin_session").map(|c| c.value().to_string());
     // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
     let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
 
@@ -530,6 +854,7 @@ pub async fn create_thread(
                     &csrf_for_error,
                     Some(&msg),
                     current_theme.as_deref(),
+                    true,
                 ))
             })
             .await
@@ -557,23 +882,53 @@ pub async fn catalog(
     let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let viewer_key = viewer_preference_key(&client_ip, &jar);
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
+    let access_context = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<BoardAccessContext> {
+            let conn = pool.get()?;
+            load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    if !access_context.can_view {
+        let html = render_board_unlock_html(
+            &access_context.board,
+            &csrf,
+            &format!("/{board_short}/catalog"),
+            None,
+            current_theme.as_deref(),
+        );
+        return Ok(board_access_required_response(jar, html));
+    }
 
     // Add ETag caching to the catalog. Previously every request
     // fetched up to 200 full thread rows and re-rendered the entire page
     // regardless of whether anything changed. The ETag is derived from the
     // most-recently-bumped thread, mirroring the board index handler.
-    let (etag, html) = tokio::task::spawn_blocking({
+    let catalog_data = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let csrf_clone = csrf.clone();
-        let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
         let viewer_key = viewer_key.clone();
-        move || -> Result<(String, String)> {
+        move || -> Result<CatalogRenderData> {
             let conn = pool.get()?;
-            let is_admin = jar_session
-                .as_deref()
-                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
-            let board = db::get_board_by_short(&conn, &board_short)?
-                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+            let access_context =
+                load_board_access_context(&conn, &board_short, admin_session_id.as_deref(), None)?;
+            let board = access_context.board;
             let all_threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
             let prefs = db::get_preferences_for_board(&conn, &viewer_key, board.id)?;
             let (threads, hidden_threads, pinned_ids) = split_catalog_threads(all_threads, &prefs);
@@ -602,31 +957,29 @@ pub async fn catalog(
                 .collect::<Vec<_>>();
             pref_sig_parts.sort();
             let pref_sig = pref_sig_parts.join("|");
-            let admin_tag = if is_admin { "-a" } else { "" };
-            let greentext_tag = if board.collapse_greentext {
-                "-cg1"
-            } else {
-                "-cg0"
-            };
-            let etag = format!("\"{catalog_sig}-{pref_sig}-catalog{admin_tag}{greentext_tag}\"");
-            let all_boards = crate::templates::live_boards();
-            let html = templates::catalog_page(
-                &board,
-                &threads,
-                &pinned_ids,
+            let etag_signature = format!("{catalog_sig}-{pref_sig}");
+            Ok((
+                board,
+                threads,
+                pinned_ids,
                 hidden_threads.len(),
-                false,
-                &csrf_clone,
-                all_boards.as_slice(),
-                is_admin,
-                current_theme.as_deref(),
-                board.collapse_greentext,
-            );
-            Ok((etag, html))
+                etag_signature,
+            ))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let can_post = access_context.can_post;
+    let (board, threads, pinned_ids, hidden_count, etag_signature) = catalog_data;
+    let admin_tag = if access_context.is_admin { "-a" } else { "" };
+    let post_tag = if can_post { "-p1" } else { "-p0" };
+    let greentext_tag = if board.collapse_greentext {
+        "-cg1"
+    } else {
+        "-cg0"
+    };
+    let etag = format!("\"{etag_signature}-catalog{admin_tag}{post_tag}{greentext_tag}\"");
 
     let client_etag = req_headers
         .get("if-none-match")
@@ -651,6 +1004,20 @@ pub async fn catalog(
         return Ok((jar, resp).into_response());
     }
 
+    let all_boards = crate::templates::live_boards();
+    let html = templates::catalog_page(
+        &board,
+        &threads,
+        &pinned_ids,
+        hidden_count,
+        false,
+        &csrf,
+        all_boards.as_slice(),
+        access_context.is_admin,
+        current_theme.as_deref(),
+        board.collapse_greentext,
+        can_post,
+    );
     let mut resp = Html(html).into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
@@ -667,21 +1034,48 @@ pub async fn hidden_threads(
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
-) -> Result<(CookieJar, Html<String>)> {
+) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let viewer_key = viewer_preference_key(&client_ip, &jar);
-    let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
+    let access_context = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<BoardAccessContext> {
+            let conn = pool.get()?;
+            load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    if !access_context.can_view {
+        let html = render_board_unlock_html(
+            &access_context.board,
+            &csrf,
+            &format!("/{board_short}/hidden"),
+            None,
+            current_theme.as_deref(),
+        );
+        return Ok(board_access_required_response(jar, html));
+    }
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let csrf_clone = csrf.clone();
-        let jar_session = jar_session.clone();
+        let board_short = board_short.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            let is_admin = jar_session
-                .as_deref()
-                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
             let all_threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
@@ -695,18 +1089,19 @@ pub async fn hidden_threads(
                 &pinned_ids,
                 hidden_threads.len(),
                 true,
-                &csrf_clone,
+                &csrf,
                 all_boards.as_slice(),
-                is_admin,
+                access_context.is_admin,
                 current_theme.as_deref(),
                 board.collapse_greentext,
+                access_context.can_post,
             ))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)))
+    Ok((jar, Html(html)).into_response())
 }
 
 // ─── GET /:board/archive ──────────────────────────────────────────────────────
@@ -716,16 +1111,53 @@ pub async fn board_archive(
     Path(board_short): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
-) -> Result<(CookieJar, Html<String>)> {
+) -> Result<Response> {
     const ARCHIVE_PER_PAGE: i64 = 20;
     let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
 
     let page: i64 = params
         .get("page")
         .and_then(|p| p.parse().ok())
         .unwrap_or(1)
         .max(1);
+    let access_context = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<BoardAccessContext> {
+            let conn = pool.get()?;
+            load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    if !access_context.can_view {
+        let return_to = if page > 1 {
+            format!("/{board_short}/archive?page={page}")
+        } else {
+            format!("/{board_short}/archive")
+        };
+        let html = render_board_unlock_html(
+            &access_context.board,
+            &csrf,
+            &return_to,
+            None,
+            current_theme.as_deref(),
+        );
+        return Ok(board_access_required_response(jar, html));
+    }
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -765,7 +1197,7 @@ pub async fn board_archive(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)))
+    Ok((jar, Html(html)).into_response())
 }
 
 // ─── GET /:board/search ───────────────────────────────────────────────────────
@@ -775,14 +1207,53 @@ pub async fn search(
     Path(board_short): Path<String>,
     Query(q): Query<SearchQuery>,
     jar: CookieJar,
-) -> Result<(CookieJar, Html<String>)> {
+) -> Result<Response> {
     const SEARCH_PER_PAGE: i64 = 20;
     let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
 
     // Cap query length to prevent excessively large LIKE pattern scans.
     let query_str: String = q.q.trim().chars().take(SEARCH_QUERY_MAX_CHARS).collect();
     let page = q.page.max(1);
+    let access_context = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<BoardAccessContext> {
+            let conn = pool.get()?;
+            load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    if !access_context.can_view {
+        let mut return_to = format!(
+            "/{board_short}/search?q={}",
+            crate::templates::urlencoding_simple(&query_str)
+        );
+        if page > 1 {
+            return_to.push_str(&format!("&page={page}"));
+        }
+        let html = render_board_unlock_html(
+            &access_context.board,
+            &csrf,
+            &return_to,
+            None,
+            current_theme.as_deref(),
+        );
+        return Ok(board_access_required_response(jar, html));
+    }
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -818,7 +1289,7 @@ pub async fn search(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)))
+    Ok((jar, Html(html)).into_response())
 }
 
 // ─── CSRF cookie helper ───────────────────────────────────────────────────────
@@ -956,6 +1427,242 @@ pub async fn accept_nsfw(jar: CookieJar, Form(form): Form<NsfwConsentForm>) -> R
 }
 
 #[derive(serde::Deserialize)]
+pub struct BoardUnlockQuery {
+    pub return_to: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct BoardUnlockForm {
+    pub password: String,
+    pub return_to: Option<String>,
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+}
+
+pub async fn board_unlock_page(
+    State(state): State<AppState>,
+    Path(board_short): Path<String>,
+    Query(query): Query<BoardUnlockQuery>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
+    jar: CookieJar,
+) -> Result<Response> {
+    let current_theme = current_theme_from_jar(&jar);
+    let (jar, csrf) = ensure_csrf(jar);
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
+    let access_context = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<BoardAccessContext> {
+            let conn = pool.get()?;
+            load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let return_to = query
+        .return_to
+        .as_deref()
+        .map(safe_return_to)
+        .map(str::to_string)
+        .unwrap_or_else(|| board_unlock_default_return_to(&access_context.board));
+
+    if access_context.can_post {
+        return Ok((jar, Redirect::to(&return_to)).into_response());
+    }
+
+    let attempt_key = board_unlock_attempt_key(&board_short, &client_ip);
+    if let Some(retry_after_secs) = board_unlock_retry_after_secs(&attempt_key) {
+        let html = render_board_unlock_html(
+            &access_context.board,
+            &csrf,
+            &return_to,
+            Some(&board_unlock_rate_limit_message(retry_after_secs)),
+            current_theme.as_deref(),
+        );
+        return Ok(board_access_rate_limited_response(
+            jar,
+            html,
+            retry_after_secs,
+        ));
+    }
+
+    let html = render_board_unlock_html(
+        &access_context.board,
+        &csrf,
+        &return_to,
+        None,
+        current_theme.as_deref(),
+    );
+    Ok(board_access_ok_response(jar, html))
+}
+
+pub async fn unlock_board_access(
+    State(state): State<AppState>,
+    Path(board_short): Path<String>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
+    jar: CookieJar,
+    Form(form): Form<BoardUnlockForm>,
+) -> Result<Response> {
+    let current_theme = current_theme_from_jar(&jar);
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
+    let (jar, csrf) = ensure_csrf(jar);
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
+    let access_context = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<BoardAccessContext> {
+            let conn = pool.get()?;
+            load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let return_to = form
+        .return_to
+        .as_deref()
+        .map(safe_return_to)
+        .map(str::to_string)
+        .unwrap_or_else(|| board_unlock_default_return_to(&access_context.board));
+
+    if access_context.can_post {
+        return Ok((jar, Redirect::to(&return_to)).into_response());
+    }
+
+    let attempt_key = board_unlock_attempt_key(&board_short, &client_ip);
+    if let Some(retry_after_secs) = board_unlock_retry_after_secs(&attempt_key) {
+        let html = render_board_unlock_html(
+            &access_context.board,
+            &csrf,
+            &return_to,
+            Some(&board_unlock_rate_limit_message(retry_after_secs)),
+            current_theme.as_deref(),
+        );
+        return Ok(board_access_rate_limited_response(
+            jar,
+            html,
+            retry_after_secs,
+        ));
+    }
+
+    let password = form.password;
+    if password.chars().count() > 256 {
+        let html = render_board_unlock_html(
+            &access_context.board,
+            &csrf,
+            &return_to,
+            Some("Board password must be 256 characters or fewer."),
+            current_theme.as_deref(),
+        );
+        return Ok(board_access_required_response(jar, html));
+    }
+
+    if access_context.board.access_mode.requires_post_password()
+        && access_context.board.access_password_hash.is_empty()
+    {
+        let html = render_board_unlock_html(
+            &access_context.board,
+            &csrf,
+            &return_to,
+            Some("This board is protected, but no password has been configured yet."),
+            current_theme.as_deref(),
+        );
+        return Ok(board_access_required_response(jar, html));
+    }
+
+    let password_hash = access_context.board.access_password_hash.clone();
+    let password_valid_result =
+        tokio::task::spawn_blocking(move || verify_password(&password, &password_hash))
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+    let password_valid = match password_valid_result {
+        Ok(valid) => valid,
+        Err(error) => {
+            tracing::warn!(
+                target: "board",
+                board = %board_short,
+                %error,
+                "Board password hash is invalid"
+            );
+            let html = render_board_unlock_html(
+                &access_context.board,
+                &csrf,
+                &return_to,
+                Some("This board password is misconfigured. Please contact an administrator."),
+                current_theme.as_deref(),
+            );
+            return Ok(board_access_required_response(jar, html));
+        }
+    };
+
+    if !password_valid {
+        record_board_unlock_failure(&attempt_key);
+        if let Some(retry_after_secs) = board_unlock_retry_after_secs(&attempt_key) {
+            let html = render_board_unlock_html(
+                &access_context.board,
+                &csrf,
+                &return_to,
+                Some(&board_unlock_rate_limit_message(retry_after_secs)),
+                current_theme.as_deref(),
+            );
+            return Ok(board_access_rate_limited_response(
+                jar,
+                html,
+                retry_after_secs,
+            ));
+        }
+        let html = render_board_unlock_html(
+            &access_context.board,
+            &csrf,
+            &return_to,
+            Some("Incorrect board password."),
+            current_theme.as_deref(),
+        );
+        return Ok(board_access_required_response(jar, html));
+    }
+
+    clear_board_unlock_failures(&attempt_key);
+    let cookie_name = board_access_cookie_name(&board_short);
+    let cookie_value = expected_board_access_cookie_value(
+        &board_short,
+        &access_context.board.access_password_hash,
+    )
+    .ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "Missing board access password hash while creating unlock cookie"
+        ))
+    })?;
+    let mut cookie = Cookie::new(cookie_name, cookie_value);
+    cookie.set_http_only(true);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_max_age(Duration::days(BOARD_ACCESS_COOKIE_TTL_DAYS));
+    Ok((jar.add(cookie), Redirect::to(&return_to)).into_response())
+}
+
+#[derive(serde::Deserialize)]
 pub struct ThreadPreferenceForm {
     pub thread_id: i64,
     pub board: String,
@@ -987,14 +1694,28 @@ pub async fn update_thread_preference(
     let viewer_key = viewer_preference_key(&client_ip, &jar);
     let action = form.action.trim().to_ascii_lowercase();
     let thread_id = form.thread_id;
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            let board = db::get_board_by_short(&conn, &board_short)?
-                .ok_or_else(|| AppError::NotFound("Board not found.".into()))?;
+            let access_context = load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )?;
+            if !access_context.can_view {
+                return Err(AppError::Forbidden(
+                    "This board requires a password.".into(),
+                ));
+            }
+            let board = access_context.board;
             let thread = db::get_thread(&conn, thread_id)?
                 .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
             if thread.board_id != board.id || thread.archived {
@@ -1059,14 +1780,28 @@ pub async fn file_report(
         .filter(char::is_ascii_alphanumeric)
         .take(8)
         .collect::<String>();
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_raw);
 
     let board_raw_closure = board_raw.clone();
     let db_thread_id = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<i64> {
             let conn = pool.get()?;
-            let board = db::get_board_by_short(&conn, &board_raw_closure)?
-                .ok_or_else(|| AppError::NotFound("Board not found.".into()))?;
+            let access_context = load_board_access_context(
+                &conn,
+                &board_raw_closure,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )?;
+            if !access_context.can_view {
+                return Err(AppError::Forbidden(
+                    "This board requires a password.".into(),
+                ));
+            }
+            let board = access_context.board;
             // Verify post exists and belongs to this board to prevent spoofed reports.
             let post = db::get_post(&conn, post_id)?
                 .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
@@ -1135,7 +1870,9 @@ fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
 // and issue a permanent redirect. All other paths are served via ServeFile.
 
 pub async fn serve_board_media(
+    State(state): State<AppState>,
     Path(media_path): Path<String>,
+    jar: CookieJar,
     req: axum::extract::Request,
 ) -> Response {
     use axum::http::header::CACHE_CONTROL;
@@ -1147,6 +1884,38 @@ pub async fn serve_board_media(
     // Reject path-traversal attempts and absolute-path escapes.
     if media_path.contains("..") || media_path.starts_with('/') {
         return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let Some(board_short) = media_path.split('/').next().filter(|part| !part.is_empty()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, board_short);
+    let access_context = match tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.to_string();
+        move || -> Result<BoardAccessContext> {
+            let conn = pool.get()?;
+            load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )
+        }
+    })
+    .await
+    {
+        Ok(Ok(context)) => context,
+        Ok(Err(AppError::NotFound(_))) => return StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(_)) | Err(_) => return StatusCode::FORBIDDEN.into_response(),
+    };
+
+    if !access_context.can_view {
+        return StatusCode::FORBIDDEN.into_response();
     }
 
     let base = PathBuf::from(&CONFIG.upload_dir);
@@ -1255,15 +2024,29 @@ const fn board_media_cache_control(has_version: bool) -> &'static str {
 pub async fn api_post_preview(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
+    jar: CookieJar,
 ) -> impl axum::response::IntoResponse {
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
+        let board_short = board_short.clone();
         move || -> crate::error::Result<Option<(String, i64)>> {
             let conn = pool.get()?;
+            let access_context = load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )?;
+            if !access_context.can_view {
+                return Ok(None);
+            }
 
             // Fetch the post, validating it belongs to this board.
-            let board = db::get_board_by_short(&conn, &board_short)?
-                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+            let board = access_context.board;
             let post = db::get_post_on_board(&conn, &board_short, post_id)?;
             match post {
                 None => Ok(None),
@@ -1324,23 +2107,43 @@ pub async fn api_post_preview(
 pub async fn redirect_to_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
+    jar: CookieJar,
 ) -> impl axum::response::IntoResponse {
     use axum::response::Redirect;
 
     let board_short_for_url = board_short.clone();
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> crate::error::Result<Option<i64>> {
+        move || -> crate::error::Result<(Option<i64>, bool)> {
             let conn = pool.get()?;
+            let access_context = load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )?;
+            if !access_context.can_view {
+                return Ok((None, true));
+            }
             let post = db::get_post_on_board(&conn, &board_short, post_id)?;
-            Ok(post.map(|p| p.thread_id))
+            Ok((post.map(|p| p.thread_id), false))
         }
     })
     .await;
 
-    if let Ok(Ok(Some(thread_id))) = result {
+    if let Ok(Ok((Some(thread_id), _))) = result {
         let url = format!("/{board_short_for_url}/thread/{thread_id}#p{post_id}");
         Redirect::to(&url).into_response()
+    } else if let Ok(Ok((None, true))) = result {
+        Redirect::to(&unlock_redirect_url(
+            &board_short_for_url,
+            &format!("/{board_short_for_url}/post/{post_id}"),
+        ))
+        .into_response()
     } else {
         // Post not found or wrong board — render the error page template
         // so the user gets a readable message instead of a blank HTTP 404.
@@ -1438,6 +2241,17 @@ mod tests {
     };
     use tower::ServiceExt as _;
 
+    #[test]
+    fn protected_board_without_password_hash_fails_closed() {
+        let board = crate::models::Board {
+            access_mode: crate::models::BoardAccessMode::ViewPassword,
+            access_password_hash: String::new(),
+            ..crate::test_fixtures::sample_board()
+        };
+        assert!(!super::can_view_board(&board, false, None));
+        assert!(!super::can_post_to_board(&board, false, None));
+    }
+
     #[tokio::test]
     async fn search_returns_results_without_500() {
         let state = crate::test_support::app_state();
@@ -1534,6 +2348,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn locked_board_search_returns_forbidden_unlock_page() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "slock", "Secret", "", false).expect("create board");
+            let password_hash =
+                crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            conn.execute(
+                "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'slock'",
+                rusqlite::params!["view_password", password_hash],
+            )
+            .expect("update board access");
+        }
+
+        let router = Router::new()
+            .route("/{board}/search", get(super::search))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/slock/search?q=rust")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(super::HTML_CACHE_CONTROL)
+        );
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains("action=\"/slock/unlock\""));
+    }
+
+    #[tokio::test]
     async fn create_thread_accepts_valid_multipart_submission() {
         let state = crate::test_support::app_state();
         {
@@ -1582,8 +2444,30 @@ mod tests {
             let mut conn = state.db.get().expect("db connection");
             crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
             crate::db::update_board_settings(
-                &mut conn, 1, "Test", "", false, 500, 100, 150, false, false, false, false, true,
-                0, false, true, false, false, false, false, 0, "",
+                &mut conn,
+                1,
+                "Test",
+                "",
+                false,
+                500,
+                100,
+                150,
+                false,
+                false,
+                false,
+                false,
+                true,
+                0,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                0,
+                "",
+                crate::models::BoardAccessMode::Public,
+                "",
             )
             .expect("update board settings");
         }
@@ -1614,6 +2498,205 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn view_locked_catalog_renders_unlock_page() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
+            let password_hash =
+                crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            conn.execute(
+                "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
+                rusqlite::params!["view_password", password_hash],
+            )
+            .expect("update board access");
+        }
+
+        let router = Router::new()
+            .route("/{board}/catalog", get(super::catalog))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/secret/catalog")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains("password protected board"));
+        assert!(body.contains("action=\"/secret/unlock\""));
+    }
+
+    #[tokio::test]
+    async fn unlock_board_access_sets_cookie_and_redirects() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
+            let password_hash =
+                crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            conn.execute(
+                "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
+                rusqlite::params!["view_password", password_hash],
+            )
+            .expect("update board access");
+        }
+
+        let router = Router::new()
+            .route("/{board}/unlock", post(super::unlock_board_access))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/secret/unlock")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(
+                        "password=swordfish&return_to=%2Fsecret%2Fcatalog&_csrf=csrf123",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/secret/catalog")
+        );
+        let set_cookie = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.contains(&super::board_access_cookie_name("secret")))
+            .expect("board access cookie");
+        assert!(set_cookie.contains("HttpOnly"));
+    }
+
+    #[tokio::test]
+    async fn unlock_board_access_rate_limits_repeated_failures() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "srate", "Secret", "", false).expect("create board");
+            let password_hash =
+                crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            conn.execute(
+                "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'srate'",
+                rusqlite::params!["view_password", password_hash],
+            )
+            .expect("update board access");
+        }
+
+        let router = Router::new()
+            .route("/{board}/unlock", post(super::unlock_board_access))
+            .with_state(state);
+
+        for _ in 0..(super::BOARD_UNLOCK_FAIL_LIMIT - 1) {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/srate/unlock")
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .header(header::COOKIE, "csrf_token=csrf123")
+                        .extension(crate::test_support::connect_info())
+                        .body(Body::from(
+                            "password=wrong&return_to=%2Fsrate%2Fcatalog&_csrf=csrf123",
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/srate/unlock")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(
+                        "password=wrong&return_to=%2Fsrate%2Fcatalog&_csrf=csrf123",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            response.headers().contains_key(header::RETRY_AFTER),
+            "rate-limited unlock should advertise retry timing"
+        );
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains("Too many incorrect board password attempts."));
+    }
+
+    #[tokio::test]
+    async fn locked_board_media_requires_unlock() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
+            let password_hash =
+                crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            conn.execute(
+                "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
+                rusqlite::params!["view_password", password_hash],
+            )
+            .expect("update board access");
+        }
+
+        let router = Router::new()
+            .route("/boards/{*media_path}", get(super::serve_board_media))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/boards/secret/thumbs/example.webp")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

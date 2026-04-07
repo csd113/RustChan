@@ -71,10 +71,15 @@ fn render_board_card(
     } else {
         ""
     };
+    let board_href = if board.access_mode.requires_view_password() {
+        format!("/{}/unlock", escape_html(&board.short_name))
+    } else {
+        format!("/{}/catalog", escape_html(&board.short_name))
+    };
     let href = if board.nsfw && !nsfw_consent {
         format!("/?nsfw={}", urlencoding_simple(&board.short_name))
     } else {
-        format!("/{}/catalog", escape_html(&board.short_name))
+        board_href
     };
     let action_attr = if board.nsfw && !nsfw_consent {
         " data-action=\"open-nsfw-disclaimer\""
@@ -83,8 +88,12 @@ fn render_board_card(
     };
     let return_to_attr = if board.nsfw {
         format!(
-            r#" data-return-to="/{}/catalog" data-board-label="/{}/""#,
-            escape_html(&board.short_name),
+            r#" data-return-to="/{}" data-board-label="/{}/""#,
+            if board.access_mode.requires_view_password() {
+                format!("{}/unlock", escape_html(&board.short_name))
+            } else {
+                format!("{}/catalog", escape_html(&board.short_name))
+            },
             escape_html(&board.short_name)
         )
     } else {
@@ -100,12 +109,13 @@ fn render_board_card(
     } else {
         String::new()
     };
+    let access_badge = board_access_badge(board);
 
     format!(
         r#"<div class="board-card">
   {reorder_controls}
   <a class="board-card-link" href="{href}"{action_attr}{return_to_attr}>
-    <div class="board-card-short">/{sh}/{nsfw}</div>
+    <div class="board-card-short">/{sh}/{nsfw}{access_badge}</div>
     <div class="board-card-name">{name}</div>
     <div class="board-card-desc">{description}</div>
     <div class="board-card-stats">{thread_count} {thread_word}</div>
@@ -118,9 +128,139 @@ fn render_board_card(
         sh = escape_html(&board.short_name),
         name = escape_html(&board.name),
         nsfw = nsfw_badge,
+        access_badge = access_badge,
         description = escape_html(&description_preview),
         thread_count = stats.thread_count,
         thread_word = thread_word,
+    )
+}
+
+pub(crate) fn board_access_badge(board: &Board) -> String {
+    match board.access_mode {
+        crate::models::BoardAccessMode::Public => String::new(),
+        crate::models::BoardAccessMode::ViewPassword => {
+            r#" <span class="tag locked">PASSWORD</span>"#.to_string()
+        }
+        crate::models::BoardAccessMode::PostPassword => {
+            r#" <span class="tag sticky">POST PASSWORD</span>"#.to_string()
+        }
+    }
+}
+
+fn board_access_copy(board: &Board) -> (&'static str, &'static str, &'static str) {
+    match board.access_mode {
+        crate::models::BoardAccessMode::Public => (
+            "public board",
+            "This board does not require a password.",
+            "continue",
+        ),
+        crate::models::BoardAccessMode::ViewPassword => (
+            "password protected board",
+            "You need the board password to view this board, its threads, search, archive, and media.",
+            "unlock board",
+        ),
+        crate::models::BoardAccessMode::PostPassword => (
+            "posting is password protected",
+            "Viewing is public, but creating threads and replies on this board requires the board password.",
+            "unlock posting",
+        ),
+    }
+}
+
+pub(crate) fn render_post_access_gate(
+    board: &Board,
+    csrf_token: &str,
+    return_to: &str,
+    title: &str,
+) -> String {
+    let (_, description, button_label) = board_access_copy(board);
+    format!(
+        r#"<div class="post-form-container board-access-gate">
+<div class="post-form-title">[ {title} ]</div>
+<form class="post-form" method="POST" action="/{board}/unlock">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="return_to" value="{return_to}">
+  <table>
+    <tr><td>status</td>
+        <td><span style="font-size:0.8rem;color:var(--text-dim)">{description}</span></td></tr>
+    <tr><td>password</td>
+        <td><input type="password" name="password" maxlength="256" autocomplete="current-password">
+            <button type="submit">{button_label}</button></td></tr>
+  </table>
+</form>
+</div>"#,
+        title = escape_html(title),
+        board = escape_html(&board.short_name),
+        csrf = escape_html(csrf_token),
+        return_to = escape_html(return_to),
+        description = escape_html(description),
+        button_label = escape_html(button_label),
+    )
+}
+
+#[must_use]
+pub fn board_access_page(
+    board: &Board,
+    csrf_token: &str,
+    boards: &[Board],
+    return_to: &str,
+    error: Option<&str>,
+    current_theme: Option<&str>,
+    collapse_greentext: bool,
+) -> String {
+    let (eyebrow, description, button_label) = board_access_copy(board);
+    let error_html = error.map_or_else(String::new, |message| {
+        format!(
+            r#"<div class="post-error-banner">&#9888; {}</div>"#,
+            escape_html(message)
+        )
+    });
+    let board_description = if board.description.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<p class="board-desc" style="margin-top:0.75rem">{}</p>"#,
+            escape_html(&board.description)
+        )
+    };
+    let body = format!(
+        r#"{error_html}<div class="page-box board-access-page">
+<h1>/{short}/ — {name}{badge}</h1>
+<p style="color:var(--text-dim)">{eyebrow}</p>
+<p>{description}</p>
+{board_description}
+<form method="POST" action="/{short}/unlock" class="board-access-form" style="margin-top:1rem">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="return_to" value="{return_to}">
+  <table class="admin-login-table">
+    <tr><td>password</td><td><input type="password" name="password" maxlength="256" autocomplete="current-password" autofocus required></td></tr>
+    <tr><td></td><td><button type="submit">{button_label}</button></td></tr>
+  </table>
+</form>
+<p style="margin-top:1rem"><a href="/">return home</a></p>
+</div>"#,
+        error_html = error_html,
+        short = escape_html(&board.short_name),
+        name = escape_html(&board.name),
+        badge = board_access_badge(board),
+        eyebrow = escape_html(eyebrow),
+        description = escape_html(description),
+        board_description = board_description,
+        csrf = escape_html(csrf_token),
+        return_to = escape_html(return_to),
+        button_label = escape_html(button_label),
+    );
+
+    base_layout(
+        &format!("/{}/ access", board.short_name),
+        None,
+        &body,
+        csrf_token,
+        boards,
+        current_theme,
+        Some(&board.default_theme),
+        collapse_greentext,
+        &format!("/{}/unlock", board.short_name),
     )
 }
 
@@ -456,7 +596,13 @@ pub fn index_page(
             .map(|b| format!("/{}/", escape_html(&b.short_name)))
             .unwrap_or_default();
         let return_to = nsfw_prompt_board
-            .map(|b| format!("/{}/catalog", escape_html(&b.short_name)))
+            .map(|b| {
+                if b.access_mode.requires_view_password() {
+                    format!("/{}/unlock", escape_html(&b.short_name))
+                } else {
+                    format!("/{}/catalog", escape_html(&b.short_name))
+                }
+            })
             .unwrap_or_default();
         format!(
             r#"<div id="nsfw-disclaimer-overlay" class="compress-modal nsfw-disclaimer-overlay{open_class}"{hidden_attr}>
@@ -533,6 +679,7 @@ pub fn board_page(
     error: Option<&str>,
     current_theme: Option<&str>,
     collapse_greentext: bool,
+    can_post: bool,
 ) -> String {
     let mut body = String::new();
 
@@ -564,6 +711,7 @@ pub fn board_page(
         let short = escape_html(&board.short_name);
         let name = escape_html(&board.name);
         let desc = escape_html(&board.description);
+        let access_badge = board_access_badge(board);
         let nav_archive = if board.allow_archive {
             format!(r#"<a class="board-nav-link" href="/{short}/archive">[Archive]</a>"#)
         } else {
@@ -571,21 +719,30 @@ pub fn board_page(
         };
         let _ = write!(
             body,
-            r#"<div class="board-header board-index-header"><h1>/{short}/  — {name}</h1><p class="board-desc">{desc}</p></div>
+            r#"<div class="board-header board-index-header"><h1>/{short}/  — {name}{access_badge}</h1><p class="board-desc">{desc}</p></div>
 <div class="board-nav"><a class="board-nav-link active" href="/{short}">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}</div>"#
         );
     }
 
-    let _ = write!(
-        body,
-        r##"<div class="post-toggle-bar centered catalog-toggle-bar">
+    if can_post {
+        let _ = write!(
+            body,
+            r##"<div class="post-toggle-bar centered catalog-toggle-bar">
   <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Post a New Thread ]</a>
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {}
 </div>"##,
-        super::forms::new_thread_form(&board.short_name, csrf_token, board)
-    );
+            super::forms::new_thread_form(&board.short_name, csrf_token, board)
+        );
+    } else if board.access_mode.requires_post_password() {
+        body.push_str(&render_post_access_gate(
+            board,
+            csrf_token,
+            &format!("/{}", board.short_name),
+            "unlock posting",
+        ));
+    }
 
     for summary in summaries {
         body.push_str(&render_thread_summary(
@@ -840,6 +997,7 @@ pub fn catalog_page(
     is_admin: bool,
     current_theme: Option<&str>,
     collapse_greentext: bool,
+    can_post: bool,
 ) -> String {
     let bs = escape_html(&board.short_name);
     let bn = escape_html(&board.name);
@@ -881,12 +1039,13 @@ pub fn catalog_page(
     } else {
         "No threads yet."
     };
+    let access_badge = board_access_badge(board);
 
     let _ = write!(
         body,
         r##"<div class="board-header catalog-header-row">
   <div class="catalog-header-left board-catalog-header">
-    <h1>/{bs}/  — {bn}{title_suffix}</h1>
+    <h1>/{bs}/  — {bn}{access_badge}{title_suffix}</h1>
     <p class="board-desc">{desc}</p>
   </div>
   <div class="catalog-controls">
@@ -915,23 +1074,40 @@ pub fn catalog_page(
     </div>
   </div>
 </div>
-<div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link{catalog_active}" href="/{bs}/catalog">[Catalog]</a>{nav_archive}{hidden_nav}</div>
-<div class="post-toggle-bar centered catalog-toggle-bar">
-  <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Start a New Thread ]</a>
-</div>
-<div class="post-form-wrap" id="post-form-wrap" style="display:none">
-  {form}
-</div>
-<div class="catalog-grid" id="catalog-grid">"##,
+<div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link{catalog_active}" href="/{bs}/catalog">[Catalog]</a>{nav_archive}{hidden_nav}</div>"##,
         bs = bs,
         bn = bn,
+        access_badge = access_badge,
         title_suffix = title_suffix,
         desc = escape_html(&board.description),
         catalog_active = if hidden_view { "" } else { " active" },
         nav_archive = nav_archive,
         hidden_nav = hidden_nav,
-        form = super::forms::new_thread_form(&board.short_name, csrf_token, board)
     );
+    if can_post {
+        let _ = write!(
+            body,
+            r##"<div class="post-toggle-bar centered catalog-toggle-bar">
+  <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Start a New Thread ]</a>
+</div>
+<div class="post-form-wrap" id="post-form-wrap" style="display:none">
+  {form}
+</div>"##,
+            form = super::forms::new_thread_form(&board.short_name, csrf_token, board)
+        );
+    } else if board.access_mode.requires_post_password() {
+        body.push_str(&render_post_access_gate(
+            board,
+            csrf_token,
+            &if hidden_view {
+                format!("/{}/hidden", board.short_name)
+            } else {
+                format!("/{}/catalog", board.short_name)
+            },
+            "unlock posting",
+        ));
+    }
+    body.push_str(r#"<div class="catalog-grid" id="catalog-grid">"#);
 
     for t in threads {
         let is_pinned = pinned_ids.contains(&t.id);
@@ -1224,6 +1400,7 @@ mod tests {
             false,
             None,
             false,
+            true,
         );
 
         assert!(html.contains("catalog-card-link"));

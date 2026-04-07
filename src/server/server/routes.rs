@@ -54,6 +54,11 @@ pub(super) fn public_routes() -> Router<AppState> {
                 CONFIG.max_video_size.max(CONFIG.max_audio_size),
             )),
         )
+        .route(
+            "/{board}/unlock",
+            get(crate::handlers::board::board_unlock_page)
+                .post(crate::handlers::board::unlock_board_access),
+        )
         .route("/{board}/catalog", get(crate::handlers::board::catalog))
         .route(
             "/{board}/hidden",

@@ -37,42 +37,78 @@ pub async fn view_thread(
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
-    let result = tokio::task::spawn_blocking({
+    let admin_session_id = jar
+        .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
+    let access_context = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let jar_session = jar.get("chan_admin_session").map(|c| c.value().to_string());
-        move || -> Result<(String, String, bool)> {
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<crate::handlers::board::BoardAccessContext> {
+            let conn = pool.get()?;
+            crate::handlers::board::load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let return_to = format!("/{board_short}/thread/{thread_id}");
+    if !access_context.can_view {
+        let html = crate::handlers::board::render_board_unlock_html(
+            &access_context.board,
+            &csrf,
+            &return_to,
+            None,
+            current_theme.as_deref(),
+        );
+        return Ok(crate::handlers::board::board_access_required_response(
+            jar, html,
+        ));
+    }
+
+    let page_data = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        move || -> Result<(String, render::ThreadPageData, bool)> {
             let conn = pool.get()?;
             let page_data = render::load_thread_page_data(
                 &conn,
                 &board_short,
                 thread_id,
                 &identity_key,
-                jar_session.as_deref(),
+                admin_session_id.as_deref(),
                 &crate::config::CONFIG.cookie_secret,
             )?;
-
-            // ETag derived from the thread's last-bump timestamp, the current
-            // board-list version, and whether the viewer is an admin.  Including
-            // admin status prevents a browser from serving a cached non-admin
-            // page (without delete controls) to a user who has since logged in.
-            let boards_ver = crate::templates::live_boards_version();
-            let admin_tag = if page_data.is_admin { "-a" } else { "" };
-            let greentext_tag = if page_data.board.collapse_greentext {
-                "-cg1"
-            } else {
-                "-cg0"
-            };
-            let thread_sig = render::thread_page_etag_signature(&page_data);
-            let etag = format!("\"{thread_sig}-b{boards_ver}{admin_tag}{greentext_tag}\"");
-            let html =
-                render::render_thread_page(&page_data, &csrf, None, current_theme.as_deref());
-            Ok((etag, html, page_data.is_admin))
+            let is_admin = page_data.is_admin;
+            Ok((
+                render::thread_page_etag_signature(&page_data),
+                page_data,
+                is_admin,
+            ))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let (etag, html, _is_admin) = result;
+    let can_post = access_context.can_post;
+    let (thread_sig, page_data, _is_admin) = page_data;
+    let boards_ver = crate::templates::live_boards_version();
+    let admin_tag = if page_data.is_admin { "-a" } else { "" };
+    let post_tag = if can_post { "-p1" } else { "-p0" };
+    let greentext_tag = if page_data.board.collapse_greentext {
+        "-cg1"
+    } else {
+        "-cg0"
+    };
+    let etag = format!("\"{thread_sig}-b{boards_ver}{admin_tag}{post_tag}{greentext_tag}\"");
 
     // 3.2: Return 304 Not Modified when client's cached copy is still current.
     let client_etag = req_headers
@@ -98,6 +134,8 @@ pub async fn view_thread(
         return Ok((jar, resp).into_response());
     }
 
+    let html =
+        render::render_thread_page(&page_data, &csrf, None, current_theme.as_deref(), can_post);
     let mut resp = Html(html).into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
@@ -119,6 +157,37 @@ pub async fn post_reply(
     jar: CookieJar,
     multipart: Multipart,
 ) -> Result<Response> {
+    let admin_session_id = jar
+        .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
+    let can_post = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<bool> {
+            let conn = pool.get()?;
+            let access_context = crate::handlers::board::load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )?;
+            Ok(access_context.can_post)
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    if !can_post {
+        let redirect_to = crate::handlers::board::unlock_redirect_url(
+            &board_short,
+            &format!("/{board_short}/thread/{thread_id}"),
+        );
+        return Ok(Redirect::to(&redirect_to).into_response());
+    }
+
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
     let form = parse_post_multipart(multipart, csrf_cookie.as_deref()).await?;
 
@@ -146,8 +215,7 @@ pub async fn post_reply(
     let pow_nonce = form.pow_nonce; // needed for per-reply PoW check
                                     // Extract admin session before spawn_blocking so we can skip the per-board
                                     // cooldown for admins (the cookie value is !Send and can't cross the boundary).
-    let admin_session_id = jar.get("chan_admin_session").map(|c| c.value().to_string());
-    // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
+                                    // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
     let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
 
     // Clones kept outside the closure so we can re-render the thread page inline on error.
@@ -327,6 +395,7 @@ pub async fn post_reply(
                     &csrf_for_error,
                     Some(&msg),
                     current_theme.as_deref(),
+                    true,
                 ))
             })
             .await
@@ -355,9 +424,51 @@ pub async fn edit_post_get(
     Path((board_short, post_id)): Path<(String, i64)>,
     Query(query): Query<EditQuery>,
     jar: CookieJar,
-) -> Result<(CookieJar, Html<String>)> {
+) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
+    let admin_session_id = jar
+        .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
+    let return_to = if let Some(token) = query.token.as_deref() {
+        format!(
+            "/{board_short}/post/{post_id}/edit?token={}",
+            crate::templates::urlencoding_simple(token)
+        )
+    } else {
+        format!("/{board_short}/post/{post_id}/edit")
+    };
+    let access_context = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<crate::handlers::board::BoardAccessContext> {
+            let conn = pool.get()?;
+            crate::handlers::board::load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    if !access_context.can_post {
+        let html = crate::handlers::board::render_board_unlock_html(
+            &access_context.board,
+            &csrf,
+            &return_to,
+            None,
+            current_theme.as_deref(),
+        );
+        return Ok(crate::handlers::board::board_access_required_response(
+            jar, html,
+        ));
+    }
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -409,7 +520,7 @@ pub async fn edit_post_get(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)))
+    Ok((jar, Html(html)).into_response())
 }
 
 // ─── POST /:board/post/:id/edit — submit edit ─────────────────────────────────
@@ -438,6 +549,36 @@ pub async fn edit_post_post(
     Form(form): Form<EditForm>,
 ) -> Result<Response> {
     check_csrf_jar(&jar, form.csrf.as_deref())?;
+    let admin_session_id = jar
+        .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
+    let can_post = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<bool> {
+            let conn = pool.get()?;
+            let access_context = crate::handlers::board::load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )?;
+            Ok(access_context.can_post)
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    if !can_post {
+        let redirect_to = crate::handlers::board::unlock_redirect_url(
+            &board_short,
+            &format!("/{board_short}/post/{post_id}/edit"),
+        );
+        return Ok(Redirect::to(&redirect_to).into_response());
+    }
 
     let raw_body = form.body;
     let token = form.deletion_token;
@@ -562,13 +703,54 @@ pub async fn vote_handler(
         return Err(AppError::BadRequest("Invalid poll option.".into()));
     }
 
+    let context = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<(i64, i64, String)> {
+            let conn = pool.get()?;
+            db::get_poll_context(&conn, option_id)?
+                .ok_or_else(|| AppError::NotFound("Poll option not found.".into()))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    let (_poll_id, thread_id, board_short) = context;
+    let admin_session_id = jar
+        .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
+    let can_post = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<bool> {
+            let conn = pool.get()?;
+            let access_context = crate::handlers::board::load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )?;
+            Ok(access_context.can_post)
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    if !can_post {
+        let redirect_to = crate::handlers::board::unlock_redirect_url(
+            &board_short,
+            &format!("/{board_short}/thread/{thread_id}#poll"),
+        );
+        return Ok(Redirect::to(&redirect_to).into_response());
+    }
+
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let redirect_url = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
             let ip_hash = hash_ip(&identity_key, &cookie_secret);
-
             let (poll_id, thread_id, board_short) = db::get_poll_context(&conn, option_id)?
                 .ok_or_else(|| AppError::NotFound("Poll option not found.".into()))?;
 
@@ -648,8 +830,40 @@ pub async fn thread_updates(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
     Query(params): Query<UpdatesQuery>,
+    jar: CookieJar,
 ) -> Result<Response> {
     let since = params.since;
+    let admin_session_id = jar
+        .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
+    let can_view = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<bool> {
+            let conn = pool.get()?;
+            let access_context = crate::handlers::board::load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )?;
+            Ok(access_context.can_view)
+        }
+    })
+    .await
+    .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!(e)))??;
+
+    if !can_view {
+        return Ok((
+            axum::http::StatusCode::FORBIDDEN,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            r#"{"error":"forbidden"}"#.to_string(),
+        )
+            .into_response());
+    }
 
     let (html, last_id, count, reply_count, bump_time, locked, sticky) =
         tokio::task::spawn_blocking({

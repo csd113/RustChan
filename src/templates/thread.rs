@@ -111,6 +111,7 @@ pub fn thread_page(
     error: Option<&str>,
     current_theme: Option<&str>,
     collapse_greentext: bool,
+    can_post: bool,
 ) -> String {
     let mut body = String::new();
 
@@ -206,10 +207,11 @@ pub fn thread_page(
     let _ = write!(
         body,
         r#"<div id="top"></div>
-<div class="thread-board-banner board-thread-header">/{s}/ — {bn}</div>
+<div class="thread-board-banner board-thread-header">/{s}/ — {bn}{access_badge}</div>
 {top_nav}"#,
         s = escape_html(&board.short_name),
         bn = escape_html(&board.name),
+        access_badge = super::board::board_access_badge(board),
         top_nav = render_thread_nav(&board.short_name, thread.reply_count, false)
     );
     body.push_str(thread_notice);
@@ -247,7 +249,7 @@ pub fn thread_page(
 
     body.push_str("</div><!-- #thread-posts -->\n");
 
-    if !thread.locked && !thread.archived {
+    if !thread.locked && !thread.archived && can_post {
         let form_html = super::forms::reply_form(&board.short_name, thread.id, csrf_token, board);
         let _ = write!(
             body,
@@ -258,6 +260,13 @@ pub fn thread_page(
   {form_html}
 </div>"##
         );
+    } else if !thread.locked && !thread.archived && board.access_mode.requires_post_password() {
+        body.push_str(&super::board::render_post_access_gate(
+            board,
+            csrf_token,
+            &format!("/{}/thread/{}", board.short_name, thread.id),
+            "unlock posting",
+        ));
     }
     body.push_str("<div id=\"bottom\"></div>\n");
     body.push_str(&render_thread_nav(

@@ -185,7 +185,7 @@ pub fn admin_panel_page(
         let _ = write!(
             board_cards,
             r#"{group_gap}<details class="board-settings-card" id="board-{short}">
-<summary>/{short}/ — {name} {nsfw_tag}</summary>
+<summary>/{short}/ — {name} {nsfw_tag}{access_tag}</summary>
 <div class="board-order-toolbar">
 <span>{group_label} order: {display_order}</span>
 <form method="POST" action="/admin/board/reorder">
@@ -218,6 +218,17 @@ pub fn admin_panel_page(
       {board_theme_options}
     </select>
   </label>
+  <label>Access mode
+    <select name="access_mode">
+      <option value="public"{access_public_selected}>Public</option>
+      <option value="view_password"{access_view_selected}>Password required to view board</option>
+      <option value="post_password"{access_post_selected}>Board is viewable, but posting requires a password</option>
+    </select>
+  </label>
+  <label>Board password
+    <input type="password" name="access_password" maxlength="256" autocomplete="new-password" placeholder="{access_password_placeholder}">
+    <span style="font-size:0.72rem;color:var(--text-dim)">{access_password_status}</span>
+  </label>
 </div>
 <div class="board-settings-checks">
   <label><input type="checkbox" name="nsfw"            value="1"{nsfw_ck}> NSFW</label>
@@ -233,6 +244,7 @@ pub fn admin_panel_page(
   <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block for this board. Existing posts are not affected.">
     <input type="checkbox" name="collapse_greentext" value="1"{collapse_ck}> Collapse long greentext walls (3+ lines) into expandable blocks
   </label>
+  <label><input type="checkbox" name="clear_access_password" value="1"> Clear saved board password</label>
   <label><input type="checkbox" name="allow_editing"   value="1"{edit_ck}>
     Allow post editing</label>
 </div>
@@ -294,6 +306,15 @@ pub fn admin_panel_page(
             } else {
                 ""
             },
+            access_tag = match b.access_mode {
+                crate::models::BoardAccessMode::Public => "",
+                crate::models::BoardAccessMode::ViewPassword => {
+                    r#" <span class="tag locked">PASSWORD</span>"#
+                }
+                crate::models::BoardAccessMode::PostPassword => {
+                    r#" <span class="tag sticky">POST PASSWORD</span>"#
+                }
+            },
             csrf = escape_html(csrf_token),
             id = b.id,
             group_gap = if index > 0 && b.nsfw && !prev_same_group {
@@ -330,6 +351,34 @@ pub fn admin_panel_page(
                 })
                 .collect::<Vec<_>>()
                 .join(""),
+            access_public_selected =
+                if matches!(b.access_mode, crate::models::BoardAccessMode::Public) {
+                    " selected"
+                } else {
+                    ""
+                },
+            access_view_selected =
+                if matches!(b.access_mode, crate::models::BoardAccessMode::ViewPassword) {
+                    " selected"
+                } else {
+                    ""
+                },
+            access_post_selected =
+                if matches!(b.access_mode, crate::models::BoardAccessMode::PostPassword) {
+                    " selected"
+                } else {
+                    ""
+                },
+            access_password_placeholder = if b.access_password_hash.is_empty() {
+                "set a board password"
+            } else {
+                "leave blank to keep current password"
+            },
+            access_password_status = if b.access_password_hash.is_empty() {
+                "No board password is currently saved."
+            } else {
+                "A board password is already saved here."
+            },
             edit_win = b.edit_window_secs,
             edit_win_display = if b.allow_editing { "" } else { "display:none" },
             cooldown = b.post_cooldown_secs,

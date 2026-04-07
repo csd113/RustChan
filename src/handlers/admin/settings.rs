@@ -9,6 +9,8 @@ use crate::{
     error::{AppError, Result},
     handlers::board::ensure_csrf,
     middleware::AppState,
+    models::BoardAccessMode,
+    utils::crypto::hash_password,
 };
 use axum::{
     extract::{Form, Multipart, State},
@@ -82,6 +84,9 @@ pub struct BoardSettingsForm {
     show_poster_ids: Option<String>,
     collapse_greentext: Option<String>,
     post_cooldown_secs: Option<String>,
+    access_mode: Option<String>,
+    access_password: Option<String>,
+    clear_access_password: Option<String>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
@@ -135,6 +140,14 @@ pub async fn update_board_settings(
         .chars()
         .take(256)
         .collect::<String>();
+    let access_mode = BoardAccessMode::from_db_str(form.access_mode.as_deref().unwrap_or("public"))
+        .ok_or_else(|| AppError::BadRequest("Invalid board access mode.".into()))?;
+    let access_password = form.access_password.clone().unwrap_or_default();
+    if access_password.chars().count() > 256 {
+        return Err(AppError::BadRequest(
+            "Board password must be 256 characters or fewer.".into(),
+        ));
+    }
     let board_id = form.board_id;
 
     tokio::task::spawn_blocking({
@@ -144,6 +157,11 @@ pub async fn update_board_settings(
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             let board_short: String = conn.query_row(
                 "SELECT short_name FROM boards WHERE id = ?1",
+                rusqlite::params![board_id],
+                |row| row.get(0),
+            )?;
+            let existing_password_hash: String = conn.query_row(
+                "SELECT access_password_hash FROM boards WHERE id = ?1",
                 rusqlite::params![board_id],
                 |row| row.get(0),
             )?;
@@ -159,6 +177,20 @@ pub async fn update_board_settings(
                             .is_some_and(|theme| theme.enabled)
                 })
                 .unwrap_or_default();
+            let access_password_hash = if access_password.is_empty() {
+                if form.clear_access_password.as_deref() == Some("1") {
+                    String::new()
+                } else {
+                    existing_password_hash
+                }
+            } else {
+                hash_password(&access_password)?
+            };
+            if access_mode.requires_post_password() && access_password_hash.is_empty() {
+                return Err(AppError::BadRequest(
+                    "Protected boards require a password before they can be saved.".into(),
+                ));
+            }
             db::update_board_settings(
                 &mut conn,
                 board_id,
@@ -183,6 +215,8 @@ pub async fn update_board_settings(
                 form.collapse_greentext.as_deref() == Some("1"),
                 post_cooldown_secs,
                 &resolved_default_theme,
+                access_mode,
+                &access_password_hash,
             )?;
             tracing::info!(
                 target: "admin",

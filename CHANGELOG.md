@@ -7,6 +7,7 @@ All notable changes to RustChan will be documented in this file.
 ### Added
 
 - Automated saved full-site backups with admin-configurable cadence and retention: the full backup panel and `settings.toml` now expose how many hours to wait between runs and how many saved full backups to keep, with automated runs pruning the oldest saved full backups after each new server-side full backup completes.
+- Per-board password protection with two modes: boards can now require a password to view the board at all or stay publicly readable while requiring the board password for posting, with admin controls for saving/clearing board passwords, unlock flows for users, and server-side enforcement across board pages, thread views, replies, edits, votes, media, and post-preview endpoints.
 
 ### Improved
 
@@ -26,6 +27,7 @@ All notable changes to RustChan will be documented in this file.
 
 ### Fixed
 
+- Per-board password protection now fails closed more reliably: invalid or partial access-mode data from backups is rejected or forced into a locked state instead of silently becoming public, password-gated pages now return consistent `403`/`429` responses with no-cache headers, and repeated board-unlock failures are temporarily throttled to make online guessing harder.
 - Requests coming directly from untrusted public peers can no longer spoof `X-Forwarded-Proto` to make the app believe they arrived over HTTPS.
 - Built-in self-signed TLS recovery is now resilient to partially missing or corrupted dev-cert files: if the stored cert/key pair cannot be reused, RustChan regenerates a fresh pair instead of failing startup outright.
 - Timeout coverage no longer leaves upload-heavy and admin mutation endpoints outside the request-timeout middleware.

@@ -419,7 +419,8 @@ pub(super) fn build_board_backup_manifest(
             "SELECT id, short_name, name, description, nsfw, max_threads, max_archived_threads, bump_limit,
                      allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                      edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
-                     allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs, created_at
+                     allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs,
+                     access_mode, access_password_hash, created_at
               FROM boards WHERE short_name = ?1",
             params![board_short],
             |row| {
@@ -445,7 +446,9 @@ pub(super) fn build_board_backup_manifest(
                     show_poster_ids: row.get::<_, i64>(18)? != 0,
                     collapse_greentext: row.get::<_, i64>(19)? != 0,
                     post_cooldown_secs: row.get(20)?,
-                    created_at: row.get(21)?,
+                    access_mode: row.get(21)?,
+                    access_password_hash: row.get(22)?,
+                    created_at: row.get(23)?,
                 })
             },
         )
@@ -573,7 +576,7 @@ pub(super) fn build_board_backup_manifest(
     )?;
 
     Ok(BoardBackupManifest {
-        version: 1,
+        version: 2,
         board,
         threads,
         posts,

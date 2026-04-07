@@ -82,6 +82,55 @@ impl std::fmt::Display for MediaType {
     }
 }
 
+/// Board-level access control mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardAccessMode {
+    #[default]
+    Public,
+    ViewPassword,
+    PostPassword,
+}
+
+impl BoardAccessMode {
+    /// Serialise to the TEXT value stored in the database.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::ViewPassword => "view_password",
+            Self::PostPassword => "post_password",
+        }
+    }
+
+    /// Deserialise from the TEXT value stored in the database.
+    #[must_use]
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "public" => Some(Self::Public),
+            "view_password" => Some(Self::ViewPassword),
+            "post_password" => Some(Self::PostPassword),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn requires_view_password(self) -> bool {
+        matches!(self, Self::ViewPassword)
+    }
+
+    #[must_use]
+    pub const fn requires_post_password(self) -> bool {
+        matches!(self, Self::ViewPassword | Self::PostPassword)
+    }
+}
+
+impl std::fmt::Display for BoardAccessMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A board, e.g. /tech/ — Technology
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
@@ -109,7 +158,9 @@ pub struct Board {
     pub collapse_greentext: bool, // per-board long greentext auto-collapse toggle
     pub post_cooldown_secs: i64,  // seconds a user must wait between posts (0 = disabled)
     pub default_theme: String,    // blank = inherit site default
-    pub created_at: i64,          // Unix timestamp
+    pub access_mode: BoardAccessMode,
+    pub access_password_hash: String,
+    pub created_at: i64, // Unix timestamp
 }
 
 /// A configurable UI theme that may be built-in or admin-defined.
@@ -583,6 +634,30 @@ mod tests {
         assert_eq!(MediaType::from_ext("mp4"), MediaType::Video);
         assert_eq!(MediaType::from_ext("flac"), MediaType::Audio);
         assert_eq!(MediaType::from_ext("exe"), MediaType::Other);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn board_access_mode_serde_matches_db_str() {
+        for access_mode in [
+            BoardAccessMode::Public,
+            BoardAccessMode::ViewPassword,
+            BoardAccessMode::PostPassword,
+        ] {
+            let json = serde_json::to_string(&access_mode)
+                .expect("BoardAccessMode always serialises to a JSON string");
+            let json_str = json.trim_matches('"');
+            assert_eq!(
+                access_mode.as_str(),
+                json_str,
+                "as_str() and serde disagree for {access_mode:?}"
+            );
+            assert_eq!(
+                BoardAccessMode::from_db_str(json_str),
+                Some(access_mode),
+                "from_db_str() round-trip failed for {access_mode:?}"
+            );
+        }
     }
 
     // ── Pagination ────────────────────────────────────────────────────────

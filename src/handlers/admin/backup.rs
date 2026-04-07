@@ -9,8 +9,8 @@ use crate::{
     db,
     error::{AppError, Result},
     middleware::AppState,
-    models::BackupInfo,
-    utils::crypto::new_session_id,
+    models::{BackupInfo, BoardAccessMode},
+    utils::crypto::{new_session_id, verify_password},
 };
 use axum::{
     extract::{Form, FromRequest, Multipart, Query, Request, State},
@@ -135,6 +135,36 @@ fn encode_q(s: &str) -> String {
         }
     }
     out
+}
+
+fn validate_board_backup_access_settings(
+    manifest: &mut board_backup_types::BoardBackupManifest,
+) -> Result<()> {
+    let access_mode =
+        BoardAccessMode::from_db_str(&manifest.board.access_mode).ok_or_else(|| {
+            AppError::BadRequest("Board backup contains an invalid access mode.".into())
+        })?;
+    manifest.board.access_mode = access_mode.as_str().to_string();
+
+    if access_mode.requires_post_password() && manifest.board.access_password_hash.is_empty() {
+        return Err(AppError::BadRequest(
+            "Protected board backups must include a password hash.".into(),
+        ));
+    }
+
+    if !manifest.board.access_password_hash.is_empty()
+        && verify_password(
+            "__rustchan_board_access_probe__",
+            &manifest.board.access_password_hash,
+        )
+        .is_err()
+    {
+        return Err(AppError::BadRequest(
+            "Board backup contains an invalid board password hash.".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn redirect_page_response(target: &str, message: &str) -> Response {
@@ -450,7 +480,7 @@ fn insert_or_validate_restored_file_hash(
 fn execute_board_restore<F>(
     conn: &mut rusqlite::Connection,
     upload_dir: &str,
-    manifest: board_backup_types::BoardBackupManifest,
+    mut manifest: board_backup_types::BoardBackupManifest,
     mut extract_uploads: F,
     restore_label: &str,
     completion_log: &str,
@@ -462,6 +492,7 @@ where
 
     let board_short = manifest.board.short_name.clone();
     validate_board_short_name(&board_short)?;
+    validate_board_backup_access_settings(&mut manifest)?;
     let upload_root = PathBuf::from(upload_dir);
     let staged_upload_root = create_staging_dir(&upload_root, "board-restore-stage")?;
     extract_uploads(&staged_upload_root)?;
@@ -526,10 +557,11 @@ where
                 "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                  max_threads=?4, max_archived_threads=?5, bump_limit=?6,
                  allow_images=?7, allow_video=?8, allow_audio=?9, allow_any_files=?10,
-                 allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13,
+                allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13,
                  allow_archive=?14, allow_video_embeds=?15, allow_captcha=?16,
-                 show_poster_ids=?17, collapse_greentext=?18, post_cooldown_secs=?19
-                 WHERE id=?20",
+                 show_poster_ids=?17, collapse_greentext=?18, post_cooldown_secs=?19,
+                 access_mode=?20, access_password_hash=?21
+                 WHERE id=?22",
                 params![
                     manifest.board.name,
                     manifest.board.description,
@@ -550,6 +582,8 @@ where
                     i64::from(manifest.board.show_poster_ids),
                     i64::from(manifest.board.collapse_greentext),
                     manifest.board.post_cooldown_secs,
+                    manifest.board.access_mode,
+                    manifest.board.access_password_hash,
                     existing_id,
                 ],
             )
@@ -561,8 +595,9 @@ where
                 "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
                  max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
                  allow_tripcodes, edit_window_secs, allow_editing, allow_archive,
-                 allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
+                 allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext,
+                 post_cooldown_secs, access_mode, access_password_hash, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
                  RETURNING id",
                 params![
                     manifest.board.short_name,
@@ -585,6 +620,8 @@ where
                     i64::from(manifest.board.show_poster_ids),
                     i64::from(manifest.board.collapse_greentext),
                     manifest.board.post_cooldown_secs,
+                    manifest.board.access_mode,
+                    manifest.board.access_password_hash,
                     manifest.board.created_at,
                 ],
             )
@@ -3205,6 +3242,67 @@ mod tests {
             audio_mime_type: None,
             deletion_token: "token".into(),
             is_op,
+        }
+    }
+
+    #[test]
+    fn board_restore_rejects_invalid_access_mode() {
+        let source_pool = crate::db::init_test_pool().expect("source pool");
+        let source_conn = source_pool.get().expect("source conn");
+        crate::db::create_board(&source_conn, "tech", "Technology", "", false)
+            .expect("create source board");
+        let mut manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
+        manifest.board.access_mode = "definitely_not_valid".to_string();
+
+        let target_pool = crate::db::init_test_pool().expect("target pool");
+        let mut target_conn = target_pool.get().expect("target conn");
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let error = execute_board_restore(
+            &mut target_conn,
+            upload_dir.path().to_str().expect("upload dir path"),
+            manifest,
+            |_| Ok(()),
+            "Test invalid access mode restore",
+            "Test invalid access mode restore completed",
+        )
+        .expect_err("restore should reject invalid access mode");
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("invalid access mode"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_restore_rejects_protected_board_without_password_hash() {
+        let source_pool = crate::db::init_test_pool().expect("source pool");
+        let source_conn = source_pool.get().expect("source conn");
+        crate::db::create_board(&source_conn, "tech", "Technology", "", false)
+            .expect("create source board");
+        let mut manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
+        manifest.board.access_mode = "view_password".to_string();
+        manifest.board.access_password_hash.clear();
+
+        let target_pool = crate::db::init_test_pool().expect("target pool");
+        let mut target_conn = target_pool.get().expect("target conn");
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let error = execute_board_restore(
+            &mut target_conn,
+            upload_dir.path().to_str().expect("upload dir path"),
+            manifest,
+            |_| Ok(()),
+            "Test missing access hash restore",
+            "Test missing access hash restore completed",
+        )
+        .expect_err("restore should reject protected board without password hash");
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("password hash"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
         }
     }
 

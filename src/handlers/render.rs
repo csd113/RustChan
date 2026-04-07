@@ -110,6 +110,7 @@ pub fn render_board_page(
     csrf_token: &str,
     error: Option<&str>,
     current_theme: Option<&str>,
+    can_post: bool,
 ) -> String {
     let boards = templates::live_boards();
     templates::board_page(
@@ -122,6 +123,7 @@ pub fn render_board_page(
         error,
         current_theme,
         data.board.collapse_greentext,
+        can_post,
     )
 }
 
@@ -158,6 +160,7 @@ pub fn render_thread_page(
     csrf_token: &str,
     error: Option<&str>,
     current_theme: Option<&str>,
+    can_post: bool,
 ) -> String {
     let boards = templates::live_boards();
     templates::thread_page(
@@ -171,6 +174,7 @@ pub fn render_thread_page(
         error,
         current_theme,
         data.board.collapse_greentext,
+        can_post,
     )
 }
 
