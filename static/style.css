@@ -3219,18 +3219,73 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
 
 @media (max-width: 700px) {
   main { padding: 8px 4px; }
-  .reply { margin-left: 6px; }
-  .catalog-grid { grid-template-columns: repeat(2, 1fr); }
-  .board-cards { grid-template-columns: repeat(2, 1fr); }
+  .page-box { padding: 10px 8px; }
+  .reply { margin-left: 0; }
+  .catalog-grid,
+  .catalog-grid.catalog-large,
+  .board-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .catalog-item,
+  .catalog-card-link,
+  .catalog-info,
+  .board-card,
+  .board-card-link {
+    min-width: 0;
+  }
+  .catalog-item,
+  .board-card {
+    width: 100%;
+  }
+  .catalog-replies,
+  .board-card-short {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .catalog-item {
+    padding: 5px;
+  }
+  .board-card {
+    padding: 7px 8px;
+  }
+  .catalog-info,
+  .board-card-desc,
+  .board-card-name {
+    font-size: 0.76rem;
+  }
+  .catalog-comment {
+    line-height: 1.25;
+  }
+  .nsfw-badge {
+    margin-left: 3px;
+    padding: 1px 3px;
+    font-size: 0.58rem;
+  }
   .thumb { max-width: 90px; max-height: 90px; }
   .post-form td:first-child { display: none; }
 
   /* Board header */
   .board-header h1 { font-size: 1.1rem; }
   .board-desc { font-size: 0.8rem; }
+  .thread-nav {
+    justify-content: center;
+    gap: 4px 6px;
+  }
+  .thread-nav a,
+  .thread-nav-btn {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 2px 4px;
+  }
+  .thread-reply-stat,
+  .autoupdate-status {
+    width: 100%;
+    text-align: center;
+    margin-left: 0;
+  }
 
   /* Thread / post layout */
   .op { padding: 8px 6px; }
+  .reply { padding: 8px 6px; }
   .post-header { flex-wrap: wrap; gap: 3px; font-size: 0.78rem; }
   .post-body { font-size: 0.88rem; line-height: 1.5; }
   .post-num {
@@ -3268,6 +3323,30 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
   /* Catalog header row: stack controls below title */
   .catalog-header-row { flex-direction: column; gap: 6px; }
   .catalog-controls { align-self: center; }
+  .archive-row {
+    gap: 8px;
+    align-items: flex-start;
+    padding: 8px 0;
+  }
+  .archive-thumb {
+    width: 40px;
+    height: 40px;
+  }
+  .archive-row-info {
+    flex: 1 1 auto;
+  }
+  .archive-thread-link {
+    font-size: 0.78rem;
+  }
+  .archive-thread-link-text,
+  .archive-meta {
+    display: block;
+    line-height: 1.35;
+  }
+  .archive-meta {
+    margin-top: 2px;
+    overflow-wrap: anywhere;
+  }
 
   #theme-picker-btn {
     min-width: 0;
