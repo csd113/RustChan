@@ -961,7 +961,7 @@ old boards to prevent query performance degradation.
      // live log
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section" id="live-log">
-<details class="admin-dropdown">
+<details class="admin-dropdown" data-admin-dropdown-key="live-log">
 <summary>// live log</summary>
 <div class="admin-dropdown-content">
 <p class="admin-copy">
@@ -1060,7 +1060,7 @@ old boards to prevent query performance degradation.
      // moderation dropdown (log + reports + moderation tools)
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section admin-section-collapsible" id="reports">
-<details class="admin-dropdown"{moderation_open_attr}>
+<details class="admin-dropdown" data-admin-dropdown-key="reports"{moderation_open_attr}>
 <summary><span>// moderation</span><span class="admin-dropdown-badges admin-dropdown-counter-label">{moderation_summary_counter}</span></summary>
 <div class="admin-dropdown-content">
 <p class="admin-moderation-intro">
@@ -1161,10 +1161,10 @@ old boards to prevent query performance degradation.
 </section>
 
 <section class="admin-section admin-section-collapsible" id="theme-catalog">
-<details class="admin-dropdown"{theme_catalog_open_attr}>
+<details class="admin-dropdown" data-admin-dropdown-key="theme-catalog"{theme_catalog_open_attr}>
 <summary><span>// themes</span></summary>
 <div class="admin-dropdown-content">
-<details class="admin-dropdown theme-workbench-dropdown">
+<details class="admin-dropdown theme-workbench-dropdown" data-admin-dropdown-key="theme-workbench">
 <summary><span>// custom theme workshop</span></summary>
 <div class="admin-dropdown-content">
 <div class="theme-manager-shell">
@@ -1269,8 +1269,10 @@ button / button:hover</pre>
 <!-- ═══════════════════════════════════════════════════════════════════════════
      // full site backup & restore
      ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section" id="full-backup-restore">
-<h2>// full site backup &amp; restore</h2>
+<section class="admin-section admin-section-collapsible" id="full-backup-restore">
+<details class="admin-dropdown" data-admin-dropdown-key="full-backup-restore" open>
+<summary><span>// full site backup &amp; restore</span></summary>
+<div class="admin-dropdown-content">
 <p class="admin-copy">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/backups/full/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer. Saved full backups can also be used to extract or directly restore a single board without scheduling separate per-board backups.</p>
 {backup_warning_html}
 <p class="admin-copy"><strong>Backup health:</strong> {backup_status_line}</p>
@@ -1332,13 +1334,17 @@ button / button:hover</pre>
   </table>
   </div>
 </div>
+</div>
+</details>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
      // board backup & restore
      ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section">
-<h2>// board backup &amp; restore</h2>
+<section class="admin-section admin-section-collapsible" id="board-backup-restore">
+<details class="admin-dropdown" data-admin-dropdown-key="board-backup-restore" open>
+<summary><span>// board backup &amp; restore</span></summary>
+<div class="admin-dropdown-content">
 <p class="admin-copy">Board backups cover a single board. Use <em>save to server</em> on a board card above to store the backup in <code>rustchan-data/backups/boards/</code>, or use the table below to download, restore, or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
 <div class="admin-subsection">
   <div class="admin-card-header">
@@ -1369,6 +1375,8 @@ button / button:hover</pre>
   </table>
   </div>
 </div>
+</div>
+</details>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -2045,9 +2053,11 @@ mod tests {
         assert!(html.contains("// automated full backups"));
         assert!(html.contains("// run or restore now"));
         assert!(html.contains("// saved full backups"));
+        assert!(html.contains("data-admin-dropdown-key=\"full-backup-restore\""));
         assert!(html.contains("single-board tools"));
         assert!(html.contains("// restore from local file"));
         assert!(html.contains("// saved board backups"));
+        assert!(html.contains("data-admin-dropdown-key=\"board-backup-restore\""));
         assert!(html.contains("single-board snapshot"));
     }
 

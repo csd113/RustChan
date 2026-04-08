@@ -1378,6 +1378,44 @@ window.requestConfirmation = requestConfirmation;
 })();
 
 (function () {
+  var ADMIN_DROPDOWN_STORAGE_PREFIX = 'rustchan_admin_dropdown:';
+
+  function readAdminDropdownState(key) {
+    try {
+      return localStorage.getItem(ADMIN_DROPDOWN_STORAGE_PREFIX + key);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeAdminDropdownState(key, isOpen) {
+    try {
+      localStorage.setItem(ADMIN_DROPDOWN_STORAGE_PREFIX + key, isOpen ? '1' : '0');
+    } catch (e) {}
+  }
+
+  function initPersistentAdminDropdowns() {
+    document.querySelectorAll('details.admin-dropdown[data-admin-dropdown-key]').forEach(function (details) {
+      var key = details.dataset.adminDropdownKey;
+      if (!key) return;
+
+      var stored = readAdminDropdownState(key);
+      if (stored === '1') {
+        details.open = true;
+      } else if (stored === '0') {
+        details.open = false;
+      }
+
+      details.addEventListener('toggle', function () {
+        writeAdminDropdownState(key, details.open);
+      });
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', initPersistentAdminDropdowns);
+})();
+
+(function () {
   function initAdminLiveLog() {
     var output = document.getElementById('admin-live-log-output');
     var fileLabel = document.getElementById('admin-live-log-file');
