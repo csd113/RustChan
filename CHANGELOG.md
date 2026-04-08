@@ -27,6 +27,7 @@ All notable changes to RustChan will be documented in this file.
 - Upload-backed posting and admin restore flows now use explicit XHR redirect/error responses instead of scraping returned HTML, so media uploads fail in-place with clearer feedback and restore uploads stay inside the existing progress modal without fragile document replacement.
 - Thread pages now separate board-level navigation from thread-specific actions more cleanly: board links live in the shared board-nav strip, reply/update controls stay in the thread nav, and the admin toolbar sits under the board context instead of leading the page.
 - Admin board management is now organized around distinct tasks instead of one dense block: each board card separates basic setup, access controls, post features, appearance, backups, and destructive actions, while the full-site and board-backup areas now split scheduling, immediate restore/create actions, and saved archives into clearer sections.
+- Handled XHR validation and restore failures are now transported without browser-level network noise: inline upload and restore errors return structured JSON that preserves the original semantic status in `X-Rustchan-Error-Status`, letting RustChan keep the same in-place error UX without Chromium surfacing expected invalid-request checks as console `Failed to load resource` errors.
 
 ### Fixed
 
@@ -52,6 +53,15 @@ All notable changes to RustChan will be documented in this file.
 - Board restore now preserves original post IDs when they are still available, and when collisions force new IDs RustChan remaps same-board quotelinks in restored post bodies and rendered HTML so restored conversations keep their internal reply links intact.
 - Auto-saved quote-only reply drafts no longer come back as stale `>>123` stubs when you reopen the reply form; only real in-progress text drafts keep persisting between visits.
 - Upload-backed post failures no longer fall back to blocking browser alerts, and media-backed ban hits now redirect to a dedicated ban page so the appeal flow still works without relying on brittle in-place HTML swaps.
+- The recent admin and thread polish pass no longer strands shared JavaScript helpers inside the media auto-compress scope: `createAsyncSubmitHelper`, `requestConfirmation`, and the shared confirmation-submit helpers are once again available to reply uploads, full backup creation, restore uploads, and `data-confirm` actions, restoring inline `.post-error-banner` feedback, confirmation-modal focus/escape/backdrop behavior, and the full backup/restore progress flows on live pages.
+
+### Validation
+
+- `node --check static/main.js`
+- `cargo fmt --all`
+- `cargo check --quiet`
+- `cargo test --quiet`
+- Live Chromium verification against `http://127.0.0.1:8080`: confirmed poll option maxlength behavior, photo and video thread creation, reply draft restore, upload-backed reply clear/update flows, inline invalid-upload error banners, search empty-state copy, admin login, filter add/remove, shared confirmation modal behavior, full backup creation, invalid full restore handling, invalid board restore handling, and no pageerrors, console errors, or HTTP `5xx` responses. No live `data-confirm-submit` control was present on `/admin/panel` during the run, so that specific variant could not be exercised end to end.
 
 ## [1.1.2]
 
