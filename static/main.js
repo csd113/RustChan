@@ -1865,13 +1865,6 @@ function sortCatalog(mode) {
   grid.appendChild(frag);
 }
 
-function setCatalogImageSize(size) {
-  try { sessionStorage.setItem('catalog_image_size', size); } catch (e) {}
-  var grid = document.getElementById('catalog-grid');
-  if (!grid) return;
-  grid.classList.toggle('catalog-large', size === 'large');
-}
-
 function setCatalogCommentVisibility(mode) {
   try { sessionStorage.setItem('catalog_show_comment', mode); } catch (e) {}
   var grid = document.getElementById('catalog-grid');
@@ -1909,13 +1902,6 @@ function togglePosterHighlights(threadId, posterId) {
     if (sortSelect) {
       sortSelect.value = sortValue;
       sortCatalog(sortValue);
-    }
-
-    var imageSize = sessionStorage.getItem('catalog_image_size') || 'small';
-    var imageSizeSelect = document.getElementById('catalog-image-size');
-    if (imageSizeSelect) {
-      imageSizeSelect.value = imageSize;
-      setCatalogImageSize(imageSize);
     }
 
     var showComment = sessionStorage.getItem('catalog_show_comment') || 'off';
@@ -2116,9 +2102,6 @@ document.addEventListener('change', function (e) {
   // Catalog sort
   if (target.id === 'catalog-sort') {
     sortCatalog(target.value);
-  }
-  if (target.id === 'catalog-image-size') {
-    setCatalogImageSize(target.value);
   }
   if (target.id === 'catalog-show-comment') {
     setCatalogCommentVisibility(target.value);

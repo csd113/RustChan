@@ -1059,13 +1059,6 @@ pub fn catalog_page(
       </select>
     </div>
     <div class="catalog-control-group">
-      <label class="catalog-sort-label" for="catalog-image-size">Image Size:</label>
-      <select id="catalog-image-size" class="catalog-sort-select" data-action="catalog-image-size">
-        <option value="small" selected>Small</option>
-        <option value="large">Large</option>
-      </select>
-    </div>
-    <div class="catalog-control-group">
       <label class="catalog-sort-label" for="catalog-show-comment">Show OP Comment:</label>
       <select id="catalog-show-comment" class="catalog-sort-select" data-action="catalog-show-comment">
         <option value="on">On</option>

@@ -1826,18 +1826,6 @@ html:not([data-theme]) .poster-id-btn {
   overflow-wrap: anywhere;
 }
 
-.catalog-grid.catalog-large {
-  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
-}
-
-.catalog-grid.catalog-large .catalog-thumb {
-  max-height: none;
-}
-
-.catalog-grid.catalog-large .catalog-no-image {
-  height: 100%;
-}
-
 .catalog-grid.catalog-comments-off .catalog-comment {
   display: none;
 }
@@ -2043,7 +2031,6 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
 
 @media (max-width: 700px) {
   .catalog-grid,
-  .catalog-grid.catalog-large,
   .board-cards {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
@@ -2097,10 +2084,6 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   .board-cards,
   .catalog-grid {
     grid-template-columns: repeat(8, minmax(0, 1fr));
-  }
-
-  .catalog-grid.catalog-large {
-    grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
   }
 }
 
