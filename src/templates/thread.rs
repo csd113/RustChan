@@ -15,29 +15,7 @@ use super::{
     thread_autoupdate_script, TOGGLE_SCRIPT,
 };
 
-fn render_thread_board_nav(board: &Board) -> String {
-    let archive_link = if board.allow_archive {
-        format!(
-            r#"<a class="board-nav-link" href="/{short}/archive">[Archive]</a>"#,
-            short = escape_html(&board.short_name)
-        )
-    } else {
-        String::new()
-    };
-
-    format!(
-        r#"<div class="board-nav">
-  <a class="board-nav-link" href="/{short}">[Index]</a>
-  <a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>
-  {archive_link}
-  <span class="board-nav-link active">[Thread]</span>
-</div>"#,
-        short = escape_html(&board.short_name),
-        archive_link = archive_link,
-    )
-}
-
-fn render_thread_nav(reply_count: i64, is_bottom: bool, reply_href: Option<&str>) -> String {
+fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String {
     let jump_link = if is_bottom { "#top" } else { "#bottom" };
     let jump_label = if is_bottom { "Top" } else { "Bottom" };
     let nav_class = if is_bottom {
@@ -45,23 +23,12 @@ fn render_thread_nav(reply_count: i64, is_bottom: bool, reply_href: Option<&str>
     } else {
         "board-header thread-nav"
     };
-    let reply_link = reply_href.map_or_else(String::new, |href| {
-        if href == "#post-form-wrap" {
-            format!(
-                r#"<a href="{href}" data-action="open-post-form">[ Reply ]</a>"#,
-                href = escape_html(href)
-            )
-        } else {
-            format!(
-                r#"<a href="{href}">[ Reply ]</a>"#,
-                href = escape_html(href)
-            )
-        }
-    });
+    let board_short = escape_html(&board.short_name);
 
     format!(
         r#"<div class="{nav_class}">
-  {reply_link}
+  <a href="/{board_short}">[ Return ]</a>
+  <a href="/{board_short}/catalog">[ Catalog ]</a>
   <a href="{jump_link}">[ {jump_label} ]</a>
   <button class="thread-nav-btn" type="button" data-action="fetch-updates" data-busy-label="[ Updating… ]">[ Update ]</button>
   <label class="autoupdate-label">
@@ -73,7 +40,7 @@ fn render_thread_nav(reply_count: i64, is_bottom: bool, reply_href: Option<&str>
 </div>
 "#,
         nav_class = nav_class,
-        reply_link = reply_link,
+        board_short = board_short,
         jump_link = jump_link,
         jump_label = jump_label,
         reply_count = reply_count,
@@ -148,13 +115,6 @@ pub fn thread_page(
     can_post: bool,
 ) -> String {
     let mut body = String::new();
-    let reply_href = if !thread.locked && !thread.archived && can_post {
-        Some("#post-form-wrap")
-    } else if !thread.locked && !thread.archived && board.access_mode.requires_post_password() {
-        Some("#board-access-gate")
-    } else {
-        None
-    };
     let admin_toolbar = if is_admin {
         let sticky_action = if thread.sticky {
             ("unsticky", "&#128204; Unsticky")
@@ -248,15 +208,13 @@ pub fn thread_page(
         body,
         r#"<div id="top"></div>
 <div class="thread-board-banner board-thread-header">/{s}/ — {bn}{access_badge}</div>
-{board_nav}
 {admin_toolbar}
 {top_nav}"#,
         s = escape_html(&board.short_name),
         bn = escape_html(&board.name),
         access_badge = super::board::board_access_badge(board),
-        board_nav = render_thread_board_nav(board),
         admin_toolbar = admin_toolbar,
-        top_nav = render_thread_nav(thread.reply_count, false, reply_href)
+        top_nav = render_thread_nav(board, thread.reply_count, false)
     );
     body.push_str(thread_notice);
 
@@ -313,7 +271,7 @@ pub fn thread_page(
         ));
     }
     body.push_str("<div id=\"bottom\"></div>\n");
-    body.push_str(&render_thread_nav(thread.reply_count, true, reply_href));
+    body.push_str(&render_thread_nav(board, thread.reply_count, true));
 
     body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
@@ -1149,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_page_renders_board_nav_and_reply_open_action() {
+    fn thread_page_renders_thread_nav_links_and_reply_open_action() {
         let board = crate::test_fixtures::sample_board();
         let thread = sample_thread();
         let posts = vec![Post {
@@ -1171,15 +1129,15 @@ mod tests {
             true,
         );
 
-        assert!(html.contains(r#"<div class="board-nav">"#));
-        assert!(html.contains(r#"href="/test">[Index]</a>"#));
-        assert!(html.contains(r#"href="/test/catalog">[Catalog]</a>"#));
-        assert!(html.contains(r#"<span class="board-nav-link active">[Thread]</span>"#));
-        assert!(html.contains(r#"data-action="open-post-form""#));
+        assert!(html.contains(r#"href="/test">[ Return ]</a>"#));
+        assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
+        assert!(html.contains(r##"href="#bottom">[ Bottom ]</a>"##));
+        assert!(html.contains(r##"href="#top">[ Top ]</a>"##));
+        assert!(html.contains(r#"data-action="toggle-post-form""#));
     }
 
     #[test]
-    fn thread_page_links_reply_nav_to_access_gate_when_posting_is_locked_behind_password() {
+    fn thread_page_renders_access_gate_when_posting_is_locked_behind_password() {
         let board = crate::models::Board {
             access_mode: BoardAccessMode::PostPassword,
             access_password_hash: "hash".into(),
@@ -1205,7 +1163,8 @@ mod tests {
             false,
         );
 
-        assert!(html.contains(r##"href="#board-access-gate">[ Reply ]</a>"##));
+        assert!(html.contains(r#"href="/test">[ Return ]</a>"#));
+        assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
         assert!(html.contains(r#"id="board-access-gate""#));
     }
 
