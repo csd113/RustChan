@@ -823,6 +823,8 @@ pub async fn vote_handler(
 //   html         — rendered HTML for any new posts since `since`
 //   last_id      — highest post ID seen (client bumps its cursor)
 //   count        — number of new posts in this response
+//   refreshed_posts — re-rendered HTML for already-loaded posts still being
+//                     watched for async media completion
 //   reply_count  — current total reply count for the thread
 //   bump_time    — current bumped_at UNIX timestamp
 //   locked       — current lock state
@@ -835,6 +837,13 @@ pub async fn vote_handler(
 #[derive(Deserialize)]
 pub struct UpdatesQuery {
     since: i64,
+    refresh: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct RefreshedPostPayload {
+    id: i64,
+    html: String,
 }
 
 #[derive(serde::Serialize)]
@@ -842,12 +851,37 @@ struct ThreadUpdatesPayload {
     html: String,
     last_id: i64,
     count: usize,
+    refreshed_posts: Vec<RefreshedPostPayload>,
     reply_count: i64,
     bump_time: i64,
     locked: bool,
     sticky: bool,
     boards_version: u64,
     nav_html: String,
+}
+
+type ThreadUpdatesRender = (
+    String,
+    i64,
+    usize,
+    Vec<RefreshedPostPayload>,
+    i64,
+    i64,
+    bool,
+    bool,
+);
+
+fn parse_refresh_post_ids(raw: Option<&str>) -> Vec<i64> {
+    let mut ids = raw
+        .unwrap_or("")
+        .split(',')
+        .filter_map(|value| value.trim().parse::<i64>().ok())
+        .filter(|id| *id > 0)
+        .take(64)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 pub async fn thread_updates(
@@ -857,6 +891,7 @@ pub async fn thread_updates(
     jar: CookieJar,
 ) -> Result<Response> {
     let since = params.since;
+    let refresh_post_ids = parse_refresh_post_ids(params.refresh.as_deref());
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
@@ -889,10 +924,11 @@ pub async fn thread_updates(
             .into_response());
     }
 
-    let (html, last_id, count, reply_count, bump_time, locked, sticky) =
+    let (html, last_id, count, refreshed_posts, reply_count, bump_time, locked, sticky) =
         tokio::task::spawn_blocking({
             let pool = state.db.clone();
-            move || -> crate::error::Result<(String, i64, usize, i64, i64, bool, bool)> {
+            let refresh_post_ids = refresh_post_ids.clone();
+            move || -> crate::error::Result<ThreadUpdatesRender> {
                 let conn = pool.get()?;
 
                 // Validate board + thread exist (returns 404 for bad URLs).
@@ -929,10 +965,40 @@ pub async fn thread_updates(
                     ));
                 }
 
+                let refreshed_posts =
+                    db::get_posts_by_ids_in_thread(&conn, thread_id, &refresh_post_ids)?
+                        .into_iter()
+                        .map(|post| RefreshedPostPayload {
+                            id: post.id,
+                            html: crate::templates::render_post(
+                                &post,
+                                &board_short,
+                                "",
+                                crate::templates::thread::RenderPostOpts {
+                                    show_delete: false,
+                                    is_admin: false,
+                                    show_media: true,
+                                    allow_editing: false,
+                                    show_poster_ids: thread.board_id == board.id
+                                        && board.show_poster_ids,
+                                    collapse_greentext: board.collapse_greentext,
+                                    thread_state: Some((
+                                        thread.sticky,
+                                        thread.locked,
+                                        thread.archived,
+                                    )),
+                                    thread_op_id: thread.op_id,
+                                },
+                                0,
+                            ),
+                        })
+                        .collect::<Vec<_>>();
+
                 Ok((
                     html,
                     last_id,
                     count,
+                    refreshed_posts,
                     thread.reply_count,
                     thread.bumped_at,
                     thread.locked,
@@ -951,6 +1017,7 @@ pub async fn thread_updates(
         html,
         last_id,
         count,
+        refreshed_posts,
         reply_count,
         bump_time,
         locked,

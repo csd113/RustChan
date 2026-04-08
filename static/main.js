@@ -1702,22 +1702,56 @@ function toggleThreadMenu(toggle) {
     if (stickyEl && data.sticky !== undefined) stickyEl.style.display = data.sticky ? '' : 'none';
   }
 
+  function collectRefreshPostIds() {
+    var ids = [];
+    container.querySelectorAll('.post[data-media-processing-state="pending"]').forEach(function (postEl) {
+      var id = parseInt((postEl.id || '').replace(/^p/, ''), 10);
+      if (!isNaN(id) && ids.indexOf(id) === -1) ids.push(id);
+    });
+    return ids;
+  }
+
+  function applyRefreshedPosts(posts) {
+    if (!Array.isArray(posts) || !posts.length) return false;
+    var changed = false;
+    posts.forEach(function (post) {
+      if (!post || typeof post.id !== 'number' || typeof post.html !== 'string') return;
+      var current = document.getElementById('p' + post.id);
+      if (!current) return;
+      var wrapper = document.createElement('div');
+      wrapper.innerHTML = post.html;
+      var replacement = wrapper.firstElementChild;
+      if (!replacement) return;
+      current.replaceWith(replacement);
+      changed = true;
+    });
+    return changed;
+  }
+
   window.fetchUpdates = function () {
     if (updating) return;
     updating = true;
     setUpdateButtonsBusy(true);
     setStatus('Updating\u2026', { state: 'working', persist: true });
-    fetch('/' + board + '/thread/' + threadId + '/updates?since=' + lastId)
+    var url = '/' + board + '/thread/' + threadId + '/updates?since=' + lastId;
+    var refreshIds = collectRefreshPostIds();
+    if (refreshIds.length) {
+      url += '&refresh=' + encodeURIComponent(refreshIds.join(','));
+    }
+    fetch(url)
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function (data) {
         applyDeltaState(data);
+        var refreshedChanged = applyRefreshedPosts(data.refreshed_posts);
         if (data.count > 0) {
           var frag = document.createElement('div');
           frag.innerHTML = data.html;
           while (frag.firstChild) container.appendChild(frag.firstChild);
           lastId = data.last_id;
-          if (window._onNewPostsInserted) window._onNewPostsInserted(container);
           showPill(data.count);
+        }
+        if ((refreshedChanged || data.count > 0) && window._onNewPostsInserted) {
+          window._onNewPostsInserted(container);
         }
         // Refresh nav bar if the board list changed since last poll.
         // boards_version is a monotonic counter incremented server-side
@@ -2020,6 +2054,8 @@ function toggleThreadMenu(toggle) {
 
   function wireQuotelinks(root) {
     root.querySelectorAll('a.quotelink[data-pid]').forEach(function (link) {
+      if (link.dataset.quotelinkWired === '1') return;
+      link.dataset.quotelinkWired = '1';
       var pid = link.getAttribute('data-pid');
       link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); showPopup(link, pid); });
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
@@ -2047,6 +2083,8 @@ function toggleThreadMenu(toggle) {
 
   function wireBackrefs(root) {
     root.querySelectorAll('a.backref[data-pid]').forEach(function (link) {
+      if (link.dataset.backrefWired === '1') return;
+      link.dataset.backrefWired = '1';
       var pid = link.getAttribute('data-pid');
       link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); showPopup(link, pid); });
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
@@ -2069,6 +2107,9 @@ function toggleThreadMenu(toggle) {
 
   function buildBackrefs() {
     var refs = {};
+    document.querySelectorAll('#thread-posts .backrefs').forEach(function (span) {
+      span.innerHTML = '';
+    });
     document.querySelectorAll('#thread-posts a.quotelink[data-pid]').forEach(function (link) {
       var citedPid = link.getAttribute('data-pid');
       var postEl = link.closest('.post');

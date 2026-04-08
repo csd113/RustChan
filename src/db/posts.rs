@@ -144,6 +144,44 @@ pub fn get_new_posts_since(
     Ok(posts)
 }
 
+/// Fetch specific posts in a thread by id, ordered oldest-first.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn get_posts_by_ids_in_thread(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+    post_ids: &[i64],
+) -> Result<Vec<Post>> {
+    if post_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = post_ids
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("?{}", index + 2))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
+                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
+                created_at, deletion_token, is_op, media_type,
+                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
+                edited_at, media_processing_state, media_processing_error
+         FROM posts
+         WHERE thread_id = ?1 AND id IN ({placeholders})
+         ORDER BY created_at ASC, id ASC"
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let params =
+        rusqlite::params_from_iter(std::iter::once(thread_id).chain(post_ids.iter().copied()));
+    let posts = stmt
+        .query_map(params, map_post)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(posts)
+}
+
 /// Fetch the latest `n` non-OP posts for every thread in `thread_ids`.
 ///
 /// The result is grouped by thread id and each thread's preview posts are

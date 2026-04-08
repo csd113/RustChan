@@ -195,6 +195,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
     } else {
         ""
     };
+    let poll_option_rows = [render_poll_option_row(1), render_poll_option_row(2)].concat();
 
     format!(
         r#"<div class="post-form-container">
@@ -265,7 +266,7 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
         poll_option_max_length = POLL_OPTION_MAX_LENGTH,
-        poll_option_rows = format!("{}{}", render_poll_option_row(1), render_poll_option_row(2)),
+        poll_option_rows = poll_option_rows,
     )
 }
 

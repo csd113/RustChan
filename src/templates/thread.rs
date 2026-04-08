@@ -665,9 +665,14 @@ pub fn render_post(
         }
         _ => String::new(),
     };
+    let media_processing_state_attr = post
+        .media_processing_state
+        .as_deref()
+        .map(|state| format!(r#" data-media-processing-state="{}""#, escape_html(state)))
+        .unwrap_or_default();
 
     let mut html = format!(
-        r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}>
+        r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}{media_processing_state_attr}>
 <div class="post-meta">
 {subject_html}<strong class="name">{name}</strong>{tripcode}{poster_id_html}
 <span class="post-time" data-utc="{ts}">{time}</span>{edited}
@@ -678,6 +683,7 @@ pub fn render_post(
         id = post.id,
         thread_id = post.thread_id,
         poster_attr = poster_attr,
+        media_processing_state_attr = media_processing_state_attr,
         subject_html = subject_html,
         name = escape_html(&post.name),
         tripcode = tripcode_html,
