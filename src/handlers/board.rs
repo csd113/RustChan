@@ -1955,7 +1955,7 @@ pub async fn file_report(
             }
             // Use the DB's thread_id for the redirect — not the user-submitted value.
             let authoritative_thread_id = post.thread_id;
-            db::file_report(&conn, post_id, &reason, &ip_hash)?;
+            let _ = db::file_report(&conn, post_id, &reason, &ip_hash)?;
             Ok(authoritative_thread_id)
         }
     })
@@ -2672,6 +2672,88 @@ mod tests {
         )
         .expect("utf8 body");
         assert!(body.contains("\"error\""));
+    }
+
+    #[tokio::test]
+    async fn duplicate_report_redirects_back_without_500() {
+        let state = crate::test_support::app_state();
+        let (thread_id, post_id) = {
+            let conn = state.db.get().expect("db connection");
+            let board_id =
+                crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            let post = crate::db::NewPost {
+                thread_id: 0,
+                board_id,
+                name: "anon".to_string(),
+                tripcode: None,
+                subject: Some("subject".to_string()),
+                body: "report me".to_string(),
+                body_html: "report me".to_string(),
+                ip_hash: None,
+                file_path: None,
+                file_name: None,
+                file_size: None,
+                thumb_path: None,
+                mime_type: None,
+                media_type: None,
+                audio_file_path: None,
+                audio_file_name: None,
+                audio_file_size: None,
+                audio_mime_type: None,
+                deletion_token: "token".to_string(),
+                is_op: true,
+            };
+            let (thread_id, post_id, _) = crate::db::create_thread_with_optional_poll(
+                &conn, board_id, None, &post, "", None, None,
+            )
+            .expect("create thread");
+            (thread_id, post_id)
+        };
+
+        let router = Router::new()
+            .route("/report", post(super::file_report))
+            .with_state(state.clone());
+
+        for _ in 0..2 {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/report")
+                        .header(
+                            header::CONTENT_TYPE,
+                            "application/x-www-form-urlencoded",
+                        )
+                        .header(header::COOKIE, "csrf_token=csrf123")
+                        .extension(crate::test_support::connect_info())
+                        .body(Body::from(format!(
+                            "post_id={post_id}&thread_id={thread_id}&board=test&reason=spam&_csrf=csrf123"
+                        )))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let location = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .expect("location header");
+            assert_eq!(location, format!("/test/thread/{thread_id}#p{post_id}"));
+        }
+
+        let open_reports = {
+            let conn = state.db.get().expect("db connection");
+            conn.query_row(
+                "SELECT COUNT(*) FROM reports WHERE post_id = ?1 AND status = 'open'",
+                rusqlite::params![post_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("open report count")
+        };
+        assert_eq!(open_reports, 1);
     }
 
     #[tokio::test]

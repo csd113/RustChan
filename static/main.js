@@ -408,6 +408,47 @@ function parseJsonText(text) {
   }
 }
 
+function absoluteUrl(url) {
+  if (!url) return '';
+  try {
+    return new URL(url, window.location.href).toString();
+  } catch (_err) {
+    return '';
+  }
+}
+
+function isSameDocumentNavigationTarget(url) {
+  var target = absoluteUrl(url);
+  var current = absoluteUrl(window.location.href);
+  if (!target || !current) return false;
+
+  try {
+    var targetUrl = new URL(target);
+    var currentUrl = new URL(current);
+    return (
+      targetUrl.origin === currentUrl.origin &&
+      targetUrl.pathname === currentUrl.pathname &&
+      targetUrl.search === currentUrl.search
+    );
+  } catch (_err) {
+    return false;
+  }
+}
+
+function navigatePostSubmitTarget(url) {
+  if (!url) return false;
+
+  // Upload-backed replies redirect back to the same thread with a fresh #p123
+  // anchor. A plain hash navigation does not fetch the newly-created post, so
+  // force a reload after updating location when the target is the same document.
+  var sameDocument = isSameDocumentNavigationTarget(url);
+  window.location.assign(url);
+  if (sameDocument) {
+    window.location.reload();
+  }
+  return true;
+}
+
 function parseXhrJsonPayload(xhr) {
   if (!xhr || !xhr.responseText) return null;
   var contentType = xhr.getResponseHeader('Content-Type') || '';
@@ -532,16 +573,17 @@ function submitPostFormWithProgress(form) {
     // header keeps reply-draft clearing and "(You)" tracking anchored to the
     // exact new post after upload-backed replies succeed.
     if (explicitRedirect) {
-      window.location.assign(explicitRedirect);
+      navigatePostSubmitTarget(explicitRedirect);
       return;
     }
 
-    var finalUrl = xhr.responseURL || form.action;
+    var finalUrl = absoluteUrl(xhr.responseURL || form.action);
+    var currentUrl = absoluteUrl(window.location.href);
     var contentType = xhr.getResponseHeader('Content-Type') || '';
     var isHtml = contentType.indexOf('text/html') !== -1;
 
-    if (xhr.status >= 200 && xhr.status < 400 && finalUrl && finalUrl !== window.location.href) {
-      window.location.assign(finalUrl);
+    if (xhr.status >= 200 && xhr.status < 400 && finalUrl && finalUrl !== currentUrl) {
+      navigatePostSubmitTarget(finalUrl);
       return;
     }
 
@@ -2564,15 +2606,6 @@ document.addEventListener('click', function (e) {
     if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
   }
 
-  function _absoluteUrl(url) {
-    if (!url) return '';
-    try {
-      return new URL(url, window.location.href).toString();
-    } catch (_err) {
-      return '';
-    }
-  }
-
   function _extractRefreshTarget(refreshValue) {
     if (!refreshValue) return '';
     var match = refreshValue.match(/url\s*=\s*(.+)$/i);
@@ -2600,10 +2633,10 @@ document.addEventListener('click', function (e) {
 
     var refreshTarget = _extractRefreshTarget(xhr.getResponseHeader('refresh') || '');
     var htmlTarget = _extractRedirectTargetFromHtml(xhr.responseText || '');
-    var responseUrl = _absoluteUrl(xhr.responseURL || '');
-    var formAction = _absoluteUrl(form.action || '');
-    var current = _absoluteUrl(window.location.href);
-    var target = _absoluteUrl(refreshTarget || htmlTarget || '');
+    var responseUrl = absoluteUrl(xhr.responseURL || '');
+    var formAction = absoluteUrl(form.action || '');
+    var current = absoluteUrl(window.location.href);
+    var target = absoluteUrl(refreshTarget || htmlTarget || '');
 
     if (target && target !== current) return target;
     if (responseUrl && responseUrl !== current && responseUrl !== formAction) return responseUrl;

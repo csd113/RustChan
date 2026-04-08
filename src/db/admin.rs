@@ -21,6 +21,12 @@ pub enum BanAppealSubmission {
     NotBanned,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportSubmission {
+    Filed,
+    AlreadyFiled,
+}
+
 #[derive(Debug, Clone)]
 pub struct DbHealthReport {
     pub before_check: String,
@@ -331,7 +337,7 @@ fn is_open_report_unique_violation(error: &rusqlite::Error) -> bool {
     }
 }
 
-/// File a new report against a post. Returns the new report id.
+/// File a new report against a post.
 ///
 /// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 /// Duplicate open reports from the same reporter are blocked by the
@@ -344,7 +350,7 @@ pub fn file_report(
     post_id: i64,
     reason: &str,
     reporter_hash: &str,
-) -> Result<i64> {
+) -> Result<ReportSubmission> {
     match conn.query_row(
         "INSERT INTO reports (post_id, thread_id, board_id, reason, reporter_hash)
          SELECT p.id, p.thread_id, p.board_id, ?2, ?3
@@ -352,12 +358,10 @@ pub fn file_report(
          WHERE p.id = ?1
          RETURNING id",
         params![post_id, reason, reporter_hash],
-        |r| r.get(0),
+        |r| r.get::<_, i64>(0),
     ) {
-        Ok(id) => Ok(id),
-        Err(error) if is_open_report_unique_violation(&error) => {
-            anyhow::bail!("Already reported post {post_id}")
-        }
+        Ok(_id) => Ok(ReportSubmission::Filed),
+        Err(error) if is_open_report_unique_violation(&error) => Ok(ReportSubmission::AlreadyFiled),
         Err(rusqlite::Error::QueryReturnedNoRows) => anyhow::bail!("Post id {post_id} not found"),
         Err(error) => Err(error).context("Failed to insert report"),
     }
