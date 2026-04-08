@@ -63,12 +63,12 @@ fn render_thread_nav(reply_count: i64, is_bottom: bool, reply_href: Option<&str>
         r#"<div class="{nav_class}">
   {reply_link}
   <a href="{jump_link}">[ {jump_label} ]</a>
-  <button class="thread-nav-btn" data-action="fetch-updates">[ Update ]</button>
+  <button class="thread-nav-btn" type="button" data-action="fetch-updates" data-busy-label="[ Updating… ]">[ Update ]</button>
   <label class="autoupdate-label">
     <input type="checkbox" data-role="autoupdate-toggle" data-action="autoupdate-toggle">
     Auto
   </label>
-  <span class="autoupdate-status" data-role="autoupdate-status"></span>
+  <span class="autoupdate-status" data-role="autoupdate-status" role="status" aria-live="polite"></span>
   <span class="thread-reply-stat">R: <span data-role="thread-reply-count">{reply_count}</span></span>
 </div>
 "#,

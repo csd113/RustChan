@@ -89,8 +89,30 @@ fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Result<Respon
     Ok(response)
 }
 
+fn xhr_json_error_response(
+    response_status: StatusCode,
+    error_status: StatusCode,
+    message: &str,
+) -> Result<Response> {
+    let mut response = json_response(response_status, &XhrErrorPayload { error: message })?;
+    response.headers_mut().insert(
+        "x-rustchan-error-status",
+        HeaderValue::from_str(error_status.as_str())
+            .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?,
+    );
+    Ok(response)
+}
+
 pub(crate) fn xhr_error_response(status: StatusCode, message: &str) -> Result<Response> {
-    json_response(status, &XhrErrorPayload { error: message })
+    xhr_json_error_response(status, status, message)
+}
+
+// Browsers log `Failed to load resource` for XHR/fetch responses with 4xx/5xx
+// statuses even when the page handles the JSON error inline. For validation
+// errors that the UI already renders in-context, keep the transport successful
+// and expose the original HTTP meaning via `X-Rustchan-Error-Status`.
+pub(crate) fn xhr_handled_error_response(status: StatusCode, message: &str) -> Result<Response> {
+    xhr_json_error_response(StatusCode::OK, status, message)
 }
 
 pub(crate) fn xhr_redirect_response(target: &str) -> Result<Response> {
@@ -114,26 +136,26 @@ fn banned_page_redirect_url(reason: &str) -> String {
 
 pub(crate) fn xhr_post_error_response(error: AppError) -> Result<Response> {
     match error {
-        AppError::NotFound(message) => xhr_error_response(StatusCode::NOT_FOUND, &message),
+        AppError::NotFound(message) => xhr_handled_error_response(StatusCode::NOT_FOUND, &message),
         AppError::BadRequest(message) => {
-            xhr_error_response(StatusCode::UNPROCESSABLE_ENTITY, &message)
+            xhr_handled_error_response(StatusCode::UNPROCESSABLE_ENTITY, &message)
         }
-        AppError::Forbidden(message) => xhr_error_response(StatusCode::FORBIDDEN, &message),
+        AppError::Forbidden(message) => xhr_handled_error_response(StatusCode::FORBIDDEN, &message),
         AppError::BannedUser { reason, .. } => {
             xhr_redirect_response(&banned_page_redirect_url(&reason))
         }
         AppError::UploadTooLarge(message) => {
-            xhr_error_response(StatusCode::PAYLOAD_TOO_LARGE, &message)
+            xhr_handled_error_response(StatusCode::PAYLOAD_TOO_LARGE, &message)
         }
         AppError::InvalidMediaType(message) => {
-            xhr_error_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, &message)
+            xhr_handled_error_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, &message)
         }
-        AppError::Conflict(message) => xhr_error_response(StatusCode::CONFLICT, &message),
-        AppError::RateLimited => xhr_error_response(
+        AppError::Conflict(message) => xhr_handled_error_response(StatusCode::CONFLICT, &message),
+        AppError::RateLimited => xhr_handled_error_response(
             StatusCode::TOO_MANY_REQUESTS,
             "You are posting too fast. Slow down.",
         ),
-        AppError::DbBusy => xhr_error_response(
+        AppError::DbBusy => xhr_handled_error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "The server is temporarily busy. Please try again in a moment.",
         ),
@@ -968,7 +990,7 @@ pub async fn create_thread(
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
             if xhr_request {
-                return xhr_error_response(StatusCode::UNPROCESSABLE_ENTITY, &msg);
+                return xhr_handled_error_response(StatusCode::UNPROCESSABLE_ENTITY, &msg);
             }
             let board_short_render = board_short_err.clone();
             let pool = state.db.clone();
@@ -2655,13 +2677,20 @@ mod tests {
             .await
             .expect("response");
 
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response
                 .headers()
                 .get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
             Some("application/json; charset=utf-8")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-rustchan-error-status")
+                .and_then(|value| value.to_str().ok()),
+            Some(StatusCode::UNPROCESSABLE_ENTITY.as_str())
         );
 
         let body = String::from_utf8(

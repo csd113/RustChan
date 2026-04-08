@@ -388,7 +388,7 @@ pub async fn post_reply(
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
             if xhr_request {
-                return crate::handlers::board::xhr_error_response(
+                return crate::handlers::board::xhr_handled_error_response(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     &msg,
                 );
@@ -1214,13 +1214,20 @@ mod tests {
             .await
             .expect("reply response");
 
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response
                 .headers()
                 .get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
             Some("application/json; charset=utf-8")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-rustchan-error-status")
+                .and_then(|value| value.to_str().ok()),
+            Some(StatusCode::UNPROCESSABLE_ENTITY.as_str())
         );
 
         let body = String::from_utf8(

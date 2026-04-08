@@ -1192,27 +1192,38 @@ pub fn search_page(
     current_theme: Option<&str>,
     collapse_greentext: bool,
 ) -> String {
+    let result_label = if pagination.total == 1 {
+        "1 result".to_string()
+    } else {
+        format!("{} results", pagination.total)
+    };
     let mut body = format!(
         r#"<div class="page-box">
-<h2 style="color:var(--green-pale);font-size:0.9rem;margin-bottom:8px">search: "{}" in /{}/</h2>
-<form method="GET" action="/{}/search">
-  <input type="text" name="q" value="{}" maxlength="{}" style="background:var(--bg-input);border:1px solid var(--border);color:var(--green-pale);padding:4px 8px;font-family:var(--font)">
+<div class="board-search-header">
+  <h2 class="board-search-title">Search /{}/</h2>
+  <p class="board-search-summary">Showing results for "{}".</p>
+</div>
+<form method="GET" action="/{}/search" class="search-form board-search-form">
+  <label class="catalog-sort-label board-search-label" for="board-search-input">Query:</label>
+  <input id="board-search-input" type="text" name="q" value="{}" maxlength="{}">
   <button type="submit">search</button>
 </form>"#,
-        escape_html(query),
         escape_html(&board.short_name),
+        escape_html(query),
         escape_html(&board.short_name),
         escape_html(query),
         SEARCH_QUERY_MAX_CHARS,
     );
 
     if posts.is_empty() {
-        body.push_str(r#"<p style="color:var(--text-dim);margin-top:8px">no results found.</p>"#);
+        body.push_str(
+            r#"<p class="catalog-empty-state board-search-empty">no results found. try a different query.</p>"#,
+        );
     } else {
         let _ = write!(
             body,
-            r#"<p style="color:var(--text-dim);font-size:0.8rem;margin-top:6px">{} result(s)</p>"#,
-            pagination.total
+            r#"<p class="board-search-summary board-search-summary-results">{}</p>"#,
+            escape_html(&result_label)
         );
         for post in posts {
             body.push_str(&super::thread::render_post(

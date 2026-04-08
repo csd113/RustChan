@@ -307,6 +307,21 @@ pub fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> 
     )
 }
 
+#[must_use]
+pub const fn confirmation_modal_script() -> &'static str {
+    r#"
+<div id="confirm-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+  <div class="compress-modal-box confirm-modal-box">
+    <div class="compress-modal-title" id="confirm-modal-title">Confirm action</div>
+    <div class="compress-modal-info confirm-modal-info" id="confirm-modal-message"></div>
+    <div class="compress-modal-actions">
+      <button type="button" class="compress-cancel-btn" id="confirm-modal-cancel">Cancel</button>
+      <button type="button" class="compress-do-btn" id="confirm-modal-continue">Continue</button>
+    </div>
+  </div>
+</div>"#
+}
+
 // ─── Report modal ─────────────────────────────────────────────────────────────
 
 /// Returns the report overlay HTML. Injected once per thread page.
@@ -314,15 +329,15 @@ pub fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> 
 #[must_use]
 pub const fn report_modal_script() -> &'static str {
     r#"
-<div id="report-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true">
+<div id="report-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="report-modal-title">
   <div class="compress-modal-box">
-    <div class="compress-modal-title">&#9873; Report Thread/Post</div>
+    <div class="compress-modal-title" id="report-modal-title">&#9873; Report Thread/Post</div>
     <form method="POST" action="/report" id="report-form">
       <input type="hidden" name="_csrf"     id="report-csrf">
       <input type="hidden" name="post_id"   id="report-post-id">
       <input type="hidden" name="thread_id" id="report-thread-id">
       <input type="hidden" name="board"     id="report-board">
-      <div class="compress-modal-info" id="report-info" style="margin-bottom:0.6rem"></div>
+      <div class="compress-modal-info confirm-modal-info" id="report-info"></div>
       <input type="text" name="reason" id="report-reason"
              placeholder="reason (optional)" maxlength="256"
              style="width:100%;background:var(--bg-input);border:1px solid var(--border);
@@ -596,6 +611,7 @@ pub fn base_layout(
   </div>
 </footer>
 
+{confirmation_modal}
 <input type="hidden" id="csrf_global" value="{csrf_token}">
 <script src="{main_js_src}" defer></script>
 </body>
@@ -610,6 +626,7 @@ pub fn base_layout(
         board_menu = board_menu,
         forum_name = escape_html(&live_site_name()),
         body = body,
+        confirmation_modal = confirmation_modal_script(),
         csrf_token = escape_html(csrf_token),
         main_js_src = main_js_src,
         default_theme_attr = default_theme_attr,

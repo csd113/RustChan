@@ -414,6 +414,43 @@ html:not([data-theme]) .board-nav-link:hover { text-shadow: 0 0 6px var(--green-
 .search-form input:focus,
 .header-search input:focus { border-color: var(--border-glow); }
 
+.board-search-header {
+  margin-bottom: 10px;
+  text-align: center;
+}
+
+.board-search-title {
+  margin: 0 0 6px;
+  color: var(--green-pale);
+  font-size: 0.95rem;
+}
+
+.board-search-summary {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+
+.board-search-summary-results {
+  margin-top: 8px;
+  text-align: center;
+}
+
+.board-search-form {
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.board-search-label {
+  min-width: 0;
+}
+
+.board-search-empty {
+  margin-top: 8px;
+}
+
 /* ── Buttons (shared) ─────────────────────────────────────────────────────── */
 
 button,
@@ -3118,6 +3155,66 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   min-width: 120px;
 }
 
+.admin-quick-form {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.admin-quick-field {
+  display: flex;
+  flex: 1 1 180px;
+  min-width: 160px;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+
+.admin-quick-field input[type="text"],
+.admin-file-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.admin-quick-field-compact {
+  flex: 0 1 140px;
+}
+
+.admin-quick-help {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.admin-inline-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.admin-quick-checkbox {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  align-self: center;
+}
+
+.admin-file-inline-form {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.admin-file-field {
+  flex: 1 1 260px;
+}
+
+.admin-file-input {
+  color: var(--text);
+}
+
 .admin-moderation-card-log {
   display: flex;
   flex-direction: column;
@@ -5178,7 +5275,17 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   padding: 4px 6px;
 }
 
+.poll-option-input {
+  width: 100%;
+}
+
 .poll-option-row input:focus { border-color: var(--border-glow); outline: none; }
+
+.form-field-help {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
 
 .poll-remove-btn {
   background: transparent;
@@ -5191,6 +5298,10 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
 }
 
 .poll-remove-btn:hover { border-color: var(--red); color: var(--red); }
+
+.poll-remove-btn[hidden] {
+  display: none;
+}
 
 .poll-add-btn {
   align-self: flex-start;
@@ -5351,6 +5462,14 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   margin-bottom: 1rem;
   line-height: 1.45;
   word-break: break-word;
+}
+
+.confirm-modal-box {
+  max-width: 460px;
+}
+
+.confirm-modal-info {
+  margin-bottom: 0.75rem;
 }
 
 .nsfw-disclaimer-box {
@@ -5612,6 +5731,12 @@ html:not([data-theme]) .thread-board-banner { text-shadow: 0 0 10px rgba(0,255,6
   text-decoration: underline;
 }
 
+.thread-nav-btn:disabled {
+  cursor: wait;
+  opacity: 0.7;
+  text-decoration: none;
+}
+
 .thread-nav-btn.active {
   color: var(--green-bright);
 }
@@ -5622,6 +5747,18 @@ html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,
   font-size: 0.75rem;
   opacity: 0.8;
   margin-left: 4px;
+}
+
+.autoupdate-status[data-state="working"] {
+  color: var(--text-dim);
+}
+
+.autoupdate-status[data-state="success"] {
+  color: var(--green-bright);
+}
+
+.autoupdate-status[data-state="error"] {
+  color: var(--red, #f55);
 }
 
 @media (max-width: 700px) {

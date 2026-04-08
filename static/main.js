@@ -226,25 +226,62 @@ function clearReplyDraftStorage() {
     if (draftKey) localStorage.removeItem(draftKey);
     if (metaKey) localStorage.removeItem(metaKey);
   } catch (e) {}
+  var ta = getReplyBodyField();
+  if (ta) {
+    ta.dataset.lastPersistedDraft = '';
+    ta.dataset.lastPersistedDraftMode = '';
+  }
 }
 
-function persistReplyDraftStorage() {
+function persistReplyDraftStorage(force) {
   var ta = getReplyBodyField();
   var draftKey = getReplyDraftStorageKey();
   var metaKey = getReplyDraftMetaKey();
   if (!ta || !draftKey) return;
+  var mode = getReplyDraftMode();
+  var value = ta.value || '';
+  if (document.hidden && !force) return;
+  if (ta.dataset.lastPersistedDraft === value && ta.dataset.lastPersistedDraftMode === mode) {
+    return;
+  }
   try {
-    if (ta.value) {
-      localStorage.setItem(draftKey, ta.value);
-      if (getReplyDraftMode()) {
-        localStorage.setItem(metaKey, getReplyDraftMode());
+    if (value) {
+      localStorage.setItem(draftKey, value);
+      if (mode) {
+        localStorage.setItem(metaKey, mode);
       } else {
         localStorage.removeItem(metaKey);
       }
     } else {
       clearReplyDraftStorage();
+      return;
     }
+    ta.dataset.lastPersistedDraft = value;
+    ta.dataset.lastPersistedDraftMode = mode;
   } catch (e) {}
+}
+
+function flushReplyDraftStorage() {
+  var ta = getReplyBodyField();
+  if (!ta) return;
+  if (ta._replyDraftSaveTimer) {
+    window.clearTimeout(ta._replyDraftSaveTimer);
+    ta._replyDraftSaveTimer = null;
+  }
+  persistReplyDraftStorage(true);
+}
+
+function queueReplyDraftSave() {
+  var ta = getReplyBodyField();
+  if (!ta) return;
+  if (ta._replyDraftSaveTimer) {
+    window.clearTimeout(ta._replyDraftSaveTimer);
+  }
+  ta._replyDraftSaveTimer = window.setTimeout(function () {
+    ta._replyDraftSaveTimer = null;
+    if (isReplyDraftSubmitting()) return;
+    persistReplyDraftStorage();
+  }, 500);
 }
 
 function consumeSubmittedReplyDraft() {
@@ -288,6 +325,7 @@ function appendReply(id) {
     ta.value += '>>' + id + '\n';
     ta.dataset.draftRestored = '0';
     setReplyDraftMode(hadManualDraft ? 'manual' : 'auto-quote-only');
+    queueReplyDraftSave();
     if (!isMobileViewport()) ta.focus();
   }
   return false;
@@ -339,15 +377,48 @@ function resetUploadProgress(form) {
   if (text) text.textContent = 'Preparing upload…';
 }
 
-function setSubmittingState(form, submitting) {
-  form.dataset.uploadSubmitting = submitting ? '1' : '';
-  form.querySelectorAll('button[type="submit"]').forEach(function (button) {
-    button.disabled = submitting;
+function getFormSubmitButtons(form) {
+  return Array.prototype.slice.call(form.querySelectorAll('button[type="submit"]'));
+}
 
-    if (!button.dataset.uploadOriginalLabel) {
-      button.dataset.uploadOriginalLabel = button.textContent;
+function rememberButtonLabels(buttons, labelKey) {
+  buttons.forEach(function (button) {
+    if (!button.dataset[labelKey]) {
+      button.dataset[labelKey] = button.textContent;
     }
   });
+}
+
+function restoreButtonLabels(buttons, labelKey) {
+  buttons.forEach(function (button) {
+    if (button.dataset[labelKey]) {
+      button.textContent = button.dataset[labelKey];
+    }
+  });
+}
+
+function setButtonCollectionBusy(buttons, busy, options) {
+  options = options || {};
+  var labelKey = options.labelKey || 'asyncOriginalLabel';
+  rememberButtonLabels(buttons, labelKey);
+
+  buttons.forEach(function (button) {
+    button.disabled = !!busy;
+    if (busy) {
+      if (options.busyLabel) button.textContent = options.busyLabel;
+    } else if (!options.preserveBusyLabel) {
+      restoreButtonLabels([button], labelKey);
+    }
+  });
+}
+
+function setFormSubmitButtonsBusy(form, busy, options) {
+  setButtonCollectionBusy(getFormSubmitButtons(form), busy, options);
+}
+
+function setSubmittingState(form, submitting) {
+  form.dataset.uploadSubmitting = submitting ? '1' : '';
+  setFormSubmitButtonsBusy(form, submitting, { labelKey: 'uploadOriginalLabel' });
 }
 
 function startSubmitButtonAnimation(form) {
@@ -376,11 +447,7 @@ function stopSubmitButtonAnimation(form) {
     form._submitButtonAnimationTimer = null;
   }
 
-  form.querySelectorAll('button[type="submit"]').forEach(function (button) {
-    if (button.dataset.uploadOriginalLabel) {
-      button.textContent = button.dataset.uploadOriginalLabel;
-    }
-  });
+  restoreButtonLabels(getFormSubmitButtons(form), 'uploadOriginalLabel');
 }
 
 function dispatchPostFormEvent(form, name) {
@@ -575,37 +642,46 @@ function submitPostFormWithProgress(form) {
   if (!fileInputsHaveSelection(form)) return false;
 
   var xhr = new XMLHttpRequest();
+  var submitHelper = createAsyncSubmitHelper({
+    form: form,
+    labelKey: 'uploadOriginalLabel',
+    onBusyStart: function () {
+      setSubmittingState(form, true);
+      startSubmitButtonAnimation(form);
+    },
+    onBusyEnd: function () {
+      stopSubmitButtonAnimation(form);
+      setSubmittingState(form, false);
+    },
+    setProgress: function (percent, message) {
+      setUploadProgress(form, percent, message);
+    }
+  });
   xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
   xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
   clearPostFormFeedback(form);
-  setSubmittingState(form, true);
-  startSubmitButtonAnimation(form);
-  setUploadProgress(form, 0, 'Starting upload…');
+  submitHelper.setBusy(true);
+  submitHelper.setProgress(0, 'Starting upload…');
 
   xhr.upload.addEventListener('progress', function (event) {
     if (event.lengthComputable && event.total > 0) {
       var percent = (event.loaded / event.total) * 100;
-      setUploadProgress(
-        form,
+      submitHelper.setProgress(
         percent,
         'Uploading ' + formatBytes(event.loaded) + ' / ' + formatBytes(event.total) + ' (' + Math.round(percent) + '%)'
       );
     } else {
-      setUploadProgress(form, 100, 'Uploading…');
+      submitHelper.setProgress(100, 'Uploading…');
     }
   });
 
   xhr.addEventListener('load', function () {
-    var payload = parseXhrJsonPayload(xhr);
-    var explicitRedirect =
-      xhr.getResponseHeader('X-Rustchan-Redirect') ||
-      (payload && payload.redirect_url) ||
-      '';
+    var payload = submitHelper.parsePayload(xhr);
+    var explicitRedirect = submitHelper.extractRedirect(xhr, payload);
 
-    stopSubmitButtonAnimation(form);
-    setSubmittingState(form, false);
-    setUploadProgress(form, 100, 'Finishing…');
+    submitHelper.setBusy(false);
+    submitHelper.setProgress(100, 'Finishing…');
 
     // XHR follows redirects internally, and some browsers expose the final
     // response URL without the original #p123 fragment. The explicit redirect
@@ -618,8 +694,6 @@ function submitPostFormWithProgress(form) {
 
     var finalUrl = absoluteUrl(xhr.responseURL || form.action);
     var currentUrl = absoluteUrl(window.location.href);
-    var contentType = xhr.getResponseHeader('Content-Type') || '';
-    var isHtml = contentType.indexOf('text/html') !== -1;
 
     if (xhr.status >= 200 && xhr.status < 400 && finalUrl && finalUrl !== currentUrl) {
       navigatePostSubmitTarget(form, finalUrl);
@@ -638,8 +712,7 @@ function submitPostFormWithProgress(form) {
 
     resetPostSubmitFailureState(
       form,
-      extractMessageFromHtmlDocument(isHtml ? xhr.responseText : '') ||
-        'Upload failed. Please try again.'
+      submitHelper.extractError(xhr, payload, 'Upload failed. Please try again.')
     );
   });
 
@@ -850,6 +923,122 @@ function collapseVideoEmbed(btn) {
 // Dynamic limits (MAX_IMAGE / MAX_VIDEO) are read from data-max-image /
 // data-max-video attributes on the #compress-modal element, injected by the
 // Rust template at render time.
+
+function createAsyncSubmitHelper(options) {
+  options = options || {};
+  var form = options.form;
+  var labelKey = options.labelKey || 'asyncOriginalLabel';
+
+  function setBusy(busy, busyLabel) {
+    setFormSubmitButtonsBusy(form, busy, {
+      busyLabel: busyLabel || options.busyLabel || '',
+      labelKey: labelKey
+    });
+    if (busy) {
+      if (options.onBusyStart) options.onBusyStart();
+    } else if (options.onBusyEnd) {
+      options.onBusyEnd();
+    }
+  }
+
+  return {
+    setBusy: setBusy,
+    setProgress: function (percent, message) {
+      if (options.setProgress) options.setProgress(percent, message);
+    },
+    parsePayload: function (xhr) {
+      return parseXhrJsonPayload(xhr);
+    },
+    extractRedirect: function (xhr, payload) {
+      if (options.extractRedirect) return options.extractRedirect(xhr, payload);
+      return (
+        (xhr && xhr.getResponseHeader && xhr.getResponseHeader('X-Rustchan-Redirect')) ||
+        (payload && payload.redirect_url) ||
+        ''
+      );
+    },
+    extractError: function (xhr, payload, fallback) {
+      if (options.extractError) return options.extractError(xhr, payload, fallback);
+      var contentType = (xhr && xhr.getResponseHeader && xhr.getResponseHeader('Content-Type')) || '';
+      var isHtml = contentType.indexOf('text/html') !== -1;
+      return (
+        (payload && payload.error) ||
+        extractMessageFromHtmlDocument(isHtml ? xhr.responseText : '') ||
+        fallback
+      );
+    }
+  };
+}
+
+function requestFormSubmit(form, submitter) {
+  if (typeof form.requestSubmit === 'function') {
+    if (submitter) {
+      form.requestSubmit(submitter);
+    } else {
+      form.requestSubmit();
+    }
+    return;
+  }
+  form.submit();
+}
+
+function isDangerousConfirmationTrigger(trigger, message) {
+  if (trigger && trigger.classList && trigger.classList.contains('btn-danger')) return true;
+  return /warning|delete|restore|vacuum|repair/i.test(message || '');
+}
+
+var _confirmModal = null;
+var _confirmCancelButton = null;
+var _confirmContinueButton = null;
+var _confirmMessageEl = null;
+var _confirmResolve = null;
+var _confirmActiveTrigger = null;
+
+function ensureConfirmModal() {
+  if (_confirmModal) return true;
+  _confirmModal = document.getElementById('confirm-modal');
+  if (!_confirmModal) return false;
+  _confirmCancelButton = document.getElementById('confirm-modal-cancel');
+  _confirmContinueButton = document.getElementById('confirm-modal-continue');
+  _confirmMessageEl = document.getElementById('confirm-modal-message');
+  return !!(_confirmModal && _confirmCancelButton && _confirmContinueButton && _confirmMessageEl);
+}
+
+function closeConfirmModal(confirmed) {
+  if (!ensureConfirmModal() || _confirmModal.style.display === 'none') return;
+  _confirmModal.style.display = 'none';
+  _confirmContinueButton.classList.remove('btn-danger');
+  if (!confirmed && _confirmActiveTrigger && typeof _confirmActiveTrigger.focus === 'function') {
+    _confirmActiveTrigger.focus();
+  }
+  var resolve = _confirmResolve;
+  _confirmResolve = null;
+  _confirmActiveTrigger = null;
+  if (resolve) resolve(!!confirmed);
+}
+
+function requestConfirmation(message, trigger, options) {
+  options = options || {};
+  if (!ensureConfirmModal()) return Promise.resolve(window.confirm(message));
+
+  _confirmActiveTrigger = trigger || document.activeElement;
+  _confirmMessageEl.textContent = message;
+  _confirmContinueButton.classList.toggle(
+    'btn-danger',
+    !!options.dangerous
+  );
+  _confirmModal.style.display = 'flex';
+
+  return new Promise(function (resolve) {
+    _confirmResolve = resolve;
+    window.setTimeout(function () {
+      if (_confirmCancelButton) _confirmCancelButton.focus();
+    }, 0);
+  });
+}
+
+window.createAsyncSubmitHelper = createAsyncSubmitHelper;
+window.requestConfirmation = requestConfirmation;
 
 (function () {
   var _input = null, _file = null, _max = 0, _compressing = false;
@@ -1464,9 +1653,34 @@ function toggleThreadMenu(toggle) {
     if (distFromBottom < 200) hidePill();
   }, { passive: true });
 
-  function setStatus(msg) {
+  var updateButtons = Array.prototype.slice.call(
+    document.querySelectorAll('[data-action="fetch-updates"]')
+  );
+  var statusTimer = null;
+
+  function setStatus(msg, options) {
+    options = options || {};
+    if (statusTimer) {
+      window.clearTimeout(statusTimer);
+      statusTimer = null;
+    }
     statusEls.forEach(function (el) {
       el.textContent = msg;
+      el.dataset.state = options.state || '';
+    });
+    if (msg && !options.persist) {
+      statusTimer = window.setTimeout(function () {
+        setStatus('', { state: '' });
+      }, options.timeoutMs || 2200);
+    }
+  }
+
+  function setUpdateButtonsBusy(busy) {
+    setButtonCollectionBusy(updateButtons, busy, {
+      labelKey: 'threadUpdateOriginalLabel',
+      busyLabel: updateButtons[0]
+        ? (updateButtons[0].dataset.busyLabel || '[ Updating… ]')
+        : '[ Updating… ]'
     });
   }
 
@@ -1491,7 +1705,8 @@ function toggleThreadMenu(toggle) {
   window.fetchUpdates = function () {
     if (updating) return;
     updating = true;
-    setStatus('updating\u2026');
+    setUpdateButtonsBusy(true);
+    setStatus('Updating\u2026', { state: 'working', persist: true });
     fetch('/' + board + '/thread/' + threadId + '/updates?since=' + lastId)
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function (data) {
@@ -1514,12 +1729,18 @@ function toggleThreadMenu(toggle) {
             if (navEl) navEl.innerHTML = data.nav_html;
           }
         }
-        setStatus('updated');
-        setTimeout(function () { setStatus(''); }, 2000);
+        setStatus(
+          data.count > 0
+            ? ('Updated. ' + data.count + ' new repl' + (data.count === 1 ? 'y.' : 'ies.'))
+            : 'Updated.',
+          { state: 'success' }
+        );
+        setUpdateButtonsBusy(false);
         updating = false;
       })
       .catch(function () {
-        setStatus('update failed');
+        setStatus('Update failed.', { state: 'error', persist: true });
+        setUpdateButtonsBusy(false);
         updating = false;
       });
   };
@@ -1530,7 +1751,7 @@ function toggleThreadMenu(toggle) {
     if (autoOn) {
       if (timer) clearInterval(timer);
       timer = setInterval(window.fetchUpdates, 15000);
-      setStatus('auto-update on');
+      setStatus('Auto-update on.', { state: 'working' });
     } else {
       if (timer) { clearInterval(timer); timer = null; }
       setStatus('');
@@ -2021,6 +2242,14 @@ function toggleThreadMenu(toggle) {
 
 // ─── Admin ban+delete ─────────────────────────────────────────────────────────
 
+function clearBanDeletePreparation(form) {
+  if (!form) return;
+  form.dataset.banDeletePrepared = '';
+  if (form.dataset.confirmSubmit && form.dataset.confirmSubmit.indexOf('Ban IP + delete post No.') === 0) {
+    form.dataset.confirmSubmit = '';
+  }
+}
+
 function adminBanDelete(form, pid) {
   var reason = prompt('Ban reason (leave blank for "Rule violation"):');
   if (reason === null) return false;
@@ -2032,10 +2261,24 @@ function adminBanDelete(form, pid) {
   var durEl = document.getElementById('ban-dur-' + pid);
   if (reasonEl) reasonEl.value = reason.trim() || 'Rule violation';
   if (durEl) durEl.value = hours;
-  return confirm('Ban IP + delete post No.' + pid + '?');
+  form.dataset.banDeletePrepared = '1';
+  form.dataset.confirmSubmit = 'Ban IP + delete post No.' + pid + '?';
+  return true;
 }
 
 // ─── Poll management ──────────────────────────────────────────────────────────
+
+function getPollOptionMaxLength(list) {
+  if (!list) return 200;
+  return parseInt(list.dataset.pollOptionMaxlength, 10) || 200;
+}
+
+function buildPollOptionRowHtml(count, maxLength) {
+  return (
+    '<input type="text" class="poll-option-input" name="poll_option" placeholder="Option ' + count + '" maxlength="' + maxLength + '">' +
+    '<button type="button" class="poll-remove-btn" data-action="remove-poll-option" aria-label="Remove poll option" hidden>\u2715</button>'
+  );
+}
 
 function addPollOption() {
   var list = document.getElementById('poll-options-list');
@@ -2044,8 +2287,7 @@ function addPollOption() {
   if (count > 10) return;
   var row = document.createElement('div');
   row.className = 'poll-option-row';
-  row.innerHTML = '<input type="text" name="poll_option" placeholder="Option ' + count + '" maxlength="128">'
-    + '<button type="button" class="poll-remove-btn" data-action="remove-poll-option">\u2715</button>';
+  row.innerHTML = buildPollOptionRowHtml(count, getPollOptionMaxLength(list));
   list.appendChild(row);
   updateRemoveButtons();
 }
@@ -2059,7 +2301,7 @@ function updateRemoveButtons() {
   var rows = document.querySelectorAll('#poll-options-list .poll-option-row');
   rows.forEach(function (r) {
     var btn = r.querySelector('.poll-remove-btn');
-    if (btn) btn.style.display = rows.length > 2 ? 'inline' : 'none';
+    if (btn) btn.hidden = rows.length <= 2;
   });
 }
 
@@ -2242,6 +2484,20 @@ function togglePosterHighlights(threadId, posterId) {
 // Replaces all inline onclick=/onchange=/onsubmit= attribute handlers.
 
 document.addEventListener('click', function (e) {
+  if (
+    e.target === document.getElementById('confirm-modal') ||
+    e.target.id === 'confirm-modal-cancel'
+  ) {
+    e.preventDefault();
+    closeConfirmModal(false);
+    return;
+  }
+  if (e.target.id === 'confirm-modal-continue') {
+    e.preventDefault();
+    closeConfirmModal(true);
+    return;
+  }
+
   // data-action handlers
   var t = e.target.closest('[data-action]');
   if (t) {
@@ -2311,11 +2567,32 @@ document.addEventListener('click', function (e) {
 
   // data-confirm: prompt before allowing click/submit
   var confirmEl = e.target.closest('[data-confirm]');
-  if (confirmEl && !e._rcConfirmDone) {
-    if (!confirm(confirmEl.dataset.confirm)) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
+  if (confirmEl && confirmEl.dataset.rcConfirmBypass !== '1') {
+    e.preventDefault();
+    e.stopPropagation();
+    requestConfirmation(confirmEl.dataset.confirm, confirmEl, {
+      dangerous: isDangerousConfirmationTrigger(confirmEl, confirmEl.dataset.confirm)
+    }).then(function (confirmed) {
+      if (!confirmed) return;
+
+      if (confirmEl.tagName === 'A' && confirmEl.href) {
+        window.location.assign(confirmEl.href);
+        return;
+      }
+
+      if (confirmEl.form && confirmEl.type === 'submit') {
+        confirmEl.form.dataset.rcConfirmSubmitBypass = '1';
+        requestFormSubmit(confirmEl.form, confirmEl);
+        return;
+      }
+
+      confirmEl.dataset.rcConfirmBypass = '1';
+      confirmEl.click();
+    });
+    return;
+  }
+  if (confirmEl && confirmEl.dataset.rcConfirmBypass === '1') {
+    confirmEl.dataset.rcConfirmBypass = '';
   }
 });
 
@@ -2346,30 +2623,53 @@ document.addEventListener('change', function (e) {
 document.addEventListener('submit', function (e) {
   closeThreadMenus();
   var form = e.target;
+  var submitter = e.submitter || null;
   if (form.matches && form.matches('form.post-form')) {
     if (submitPostFormWithProgress(form)) {
       e.preventDefault();
       return;
     }
   }
-  // data-confirm-submit: prompt before form submission
-  if (form.dataset.confirmSubmit) {
-    if (!confirm(form.dataset.confirmSubmit)) {
-      e.preventDefault();
-      return;
-    }
-  }
   // data-ban-delete: admin ban+delete form
-  if (form.dataset.banDeletePid) {
-    var pid = form.dataset.banDeletePid;
-    if (!adminBanDelete(form, pid)) {
-      e.preventDefault();
+  if (form.dataset.banDeletePid && form.dataset.banDeletePrepared !== '1') {
+    e.preventDefault();
+    if (adminBanDelete(form, form.dataset.banDeletePid)) {
+      requestFormSubmit(form, submitter);
+    } else {
+      clearBanDeletePreparation(form);
     }
+    return;
+  }
+  // data-confirm-submit: prompt before form submission
+  if (form.dataset.confirmSubmit && form.dataset.rcConfirmSubmitBypass !== '1') {
+    e.preventDefault();
+    requestConfirmation(form.dataset.confirmSubmit, submitter || form, {
+      dangerous: isDangerousConfirmationTrigger(submitter || form, form.dataset.confirmSubmit)
+    }).then(function (confirmed) {
+      if (!confirmed) {
+        if (form.dataset.banDeletePid) clearBanDeletePreparation(form);
+        return;
+      }
+      form.dataset.rcConfirmSubmitBypass = '1';
+      requestFormSubmit(form, submitter);
+    });
+    return;
+  }
+  if (form.dataset.rcConfirmSubmitBypass === '1') {
+    form.dataset.rcConfirmSubmitBypass = '';
+  }
+  if (form.dataset.banDeletePrepared === '1') {
+    clearBanDeletePreparation(form);
   }
 });
 
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape') {
+    if (ensureConfirmModal() && _confirmModal.style.display !== 'none') {
+      e.preventDefault();
+      closeConfirmModal(false);
+      return;
+    }
     closeThreadMenus();
   }
 });
@@ -2518,6 +2818,8 @@ document.addEventListener('keydown', function (e) {
     if (saved) {
       ta.value = saved;
       ta.dataset.draftRestored = '1';
+      ta.dataset.lastPersistedDraft = saved;
+      ta.dataset.lastPersistedDraftMode = savedMode || '';
       if (savedMode) {
         setReplyDraftMode(savedMode);
       } else if (isQuoteOnlyReplyDraft(saved)) {
@@ -2533,13 +2835,9 @@ document.addEventListener('keydown', function (e) {
     setReplyDraftSubmitting(false);
     clearReplyDraftSubmitState();
     setReplyDraftMode('manual');
+    queueReplyDraftSave();
   });
-
-  // Autosave every 3 seconds while the user types
-  setInterval(function () {
-    if (isReplyDraftSubmitting()) return;
-    persistReplyDraftStorage();
-  }, 3000);
+  window.addEventListener('pagehide', flushReplyDraftStorage);
 
   // Persist the latest draft on submit, then pause autosave until the request
   // either redirects back successfully or the current page resumes editing.
@@ -2547,7 +2845,7 @@ document.addEventListener('keydown', function (e) {
   if (form) {
     form.addEventListener('submit', function () {
       ta.dataset.draftRestored = '0';
-      persistReplyDraftStorage();
+      flushReplyDraftStorage();
       setReplyDraftSubmitting(true);
       markReplyDraftSubmitted();
     });
@@ -2555,7 +2853,7 @@ document.addEventListener('keydown', function (e) {
     form.addEventListener('rustchan:post-submit-reset', function () {
       setReplyDraftSubmitting(false);
       clearReplyDraftSubmitState();
-      persistReplyDraftStorage();
+      flushReplyDraftStorage();
     });
   }
 })();
@@ -2719,16 +3017,25 @@ document.addEventListener('click', function (e) {
     return '';
   }
 
+  function _createBackupSubmitHelper(form, busyLabel) {
+    return createAsyncSubmitHelper({
+      form: form,
+      busyLabel: busyLabel,
+      labelKey: 'backupOriginalLabel',
+      setProgress: function (percent, message) {
+        _setBkProgress(percent, message);
+      }
+    });
+  }
+
   function _submitRestoreUploadForm(form, title) {
     var xhr = null;
+    var submitHelper = _createBackupSubmitHelper(form, 'Uploading…');
     _downloadMode = false;
     _stopPolling();
     showBackupModal(title);
-    _setBkProgress(0, 'Starting upload…');
-
-    form.querySelectorAll('button[type="submit"]').forEach(function (button) {
-      button.disabled = true;
-    });
+    submitHelper.setProgress(0, 'Starting upload…');
+    submitHelper.setBusy(true);
 
     xhr = new XMLHttpRequest();
     xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
@@ -2738,28 +3045,30 @@ document.addEventListener('click', function (e) {
     xhr.upload.addEventListener('progress', function (event) {
       if (event.lengthComputable && event.total > 0) {
         var pct = Math.round((event.loaded / event.total) * 100);
-        _setBkProgress(
+        submitHelper.setProgress(
           pct,
           'Uploading restore file… ' +
           formatBytes(event.loaded) + ' / ' + formatBytes(event.total) +
           ' (' + pct + '%)'
         );
       } else {
-        _setBkProgress(15, 'Uploading restore file…');
+        submitHelper.setProgress(15, 'Uploading restore file…');
       }
     });
 
-    function _restoreFormDone() {
-      form.querySelectorAll('button[type="submit"]').forEach(function (button) {
-        button.disabled = false;
-      });
-    }
-
     xhr.addEventListener('load', function () {
-      _restoreFormDone();
-      var payload = parseXhrJsonPayload(xhr);
+      submitHelper.setBusy(false);
+      var payload = submitHelper.parsePayload(xhr);
+      if (payload && payload.error) {
+        submitHelper.setProgress(
+          0,
+          submitHelper.extractError(xhr, payload, 'Restore upload failed (' + xhr.status + ')')
+        );
+        showDoneButton();
+        return;
+      }
       if (xhr.status >= 200 && xhr.status < 400) {
-        _setBkProgress(100, 'Upload complete. Restoring backup…');
+        submitHelper.setProgress(100, 'Upload complete. Restoring backup…');
         var redirectTarget = _resolveRestoreRedirectTarget(xhr, form);
         if (redirectTarget) {
           window.location.assign(redirectTarget);
@@ -2768,24 +3077,22 @@ document.addEventListener('click', function (e) {
         window.location.reload();
         return;
       }
-      _setBkProgress(
+      submitHelper.setProgress(
         0,
-        (payload && payload.error) ||
-          extractMessageFromHtmlDocument(xhr.responseText || '') ||
-          ('Restore upload failed (' + xhr.status + ')')
+        submitHelper.extractError(xhr, payload, 'Restore upload failed (' + xhr.status + ')')
       );
       showDoneButton();
     });
 
     xhr.addEventListener('error', function () {
-      _restoreFormDone();
-      _setBkProgress(0, 'Restore upload failed. Please try again.');
+      submitHelper.setBusy(false);
+      submitHelper.setProgress(0, 'Restore upload failed. Please try again.');
       showDoneButton();
     });
 
     xhr.addEventListener('abort', function () {
-      _restoreFormDone();
-      _setBkProgress(0, 'Restore upload cancelled.');
+      submitHelper.setBusy(false);
+      submitHelper.setProgress(0, 'Restore upload cancelled.');
       showDoneButton();
     });
 
@@ -2796,9 +3103,14 @@ document.addEventListener('click', function (e) {
 
   function _submitBackupForm(form, title, options) {
     options = options || {};
+    var submitHelper = _createBackupSubmitHelper(
+      form,
+      options.downloadAfterCreate ? 'Preparing…' : 'Saving…'
+    );
     _downloadMode = false;
     showBackupModal(title);
     _startPolling(null);
+    submitHelper.setBusy(true);
 
     // URLSearchParams → application/x-www-form-urlencoded, required by Axum's Form<>.
     var params = new URLSearchParams(new FormData(form));
@@ -2817,7 +3129,8 @@ document.addEventListener('click', function (e) {
       .then(function (resp) {
         _stopPolling();
         if (!resp.ok && !resp.redirected) {
-          _setBkProgress(0, 'Server returned an error (' + resp.status + ')');
+          submitHelper.setBusy(false);
+          submitHelper.setProgress(0, 'Server returned an error (' + resp.status + ')');
           showDoneButton();
           return null;
         }
@@ -2827,14 +3140,16 @@ document.addEventListener('click', function (e) {
           return resp.json();
         }
 
-        _setBkProgress(100, '\u2713 Backup saved to server!');
+        submitHelper.setBusy(false);
+        submitHelper.setProgress(100, '\u2713 Backup saved to server!');
         showDoneButton();
         return null;
       })
       .then(function (data) {
         if (!data) return;
         if (data.download_url) {
-          _setBkProgress(100, '\u2713 Backup ready! Starting download\u2026');
+          submitHelper.setBusy(false);
+          submitHelper.setProgress(100, '\u2713 Backup ready! Starting download\u2026');
           var a = document.createElement('a');
           a.href = data.download_url;
           a.download = '';
@@ -2847,12 +3162,14 @@ document.addEventListener('click', function (e) {
           }, 1500);
           return;
         }
-        _setBkProgress(100, '\u2713 Backup saved to server!');
+        submitHelper.setBusy(false);
+        submitHelper.setProgress(100, '\u2713 Backup saved to server!');
         showDoneButton();
       })
       .catch(function (err) {
         _stopPolling();
-        _setBkProgress(0, 'Error: ' + (err.message || 'backup failed'));
+        submitHelper.setBusy(false);
+        submitHelper.setProgress(0, 'Error: ' + (err.message || 'backup failed'));
         showDoneButton();
       });
   }

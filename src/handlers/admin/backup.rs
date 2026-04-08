@@ -145,30 +145,30 @@ fn is_xml_http_request(headers: &HeaderMap) -> bool {
 }
 
 fn admin_xhr_error_response(error: &AppError) -> Response {
-    let (status, message) = match error {
-        AppError::NotFound(message) => (StatusCode::NOT_FOUND, message.clone()),
-        AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message.clone()),
-        AppError::Forbidden(message) => (StatusCode::FORBIDDEN, message.clone()),
-        AppError::BannedUser { reason, .. } => (
+    let handled = match error {
+        AppError::NotFound(message) => Some((StatusCode::NOT_FOUND, message.clone())),
+        AppError::BadRequest(message) => Some((StatusCode::BAD_REQUEST, message.clone())),
+        AppError::Forbidden(message) => Some((StatusCode::FORBIDDEN, message.clone())),
+        AppError::BannedUser { reason, .. } => Some((
             StatusCode::FORBIDDEN,
             format!("You are banned. Reason: {reason}"),
-        ),
-        AppError::UploadTooLarge(message) => (StatusCode::PAYLOAD_TOO_LARGE, message.clone()),
+        )),
+        AppError::UploadTooLarge(message) => Some((StatusCode::PAYLOAD_TOO_LARGE, message.clone())),
         AppError::InvalidMediaType(message) => {
-            (StatusCode::UNSUPPORTED_MEDIA_TYPE, message.clone())
+            Some((StatusCode::UNSUPPORTED_MEDIA_TYPE, message.clone()))
         }
-        AppError::Conflict(message) => (StatusCode::CONFLICT, message.clone()),
-        AppError::RateLimited => (
+        AppError::Conflict(message) => Some((StatusCode::CONFLICT, message.clone())),
+        AppError::RateLimited => Some((
             StatusCode::TOO_MANY_REQUESTS,
             "You are posting too fast. Slow down.".to_string(),
-        ),
-        AppError::DbBusy => (
+        )),
+        AppError::DbBusy => Some((
             StatusCode::SERVICE_UNAVAILABLE,
             "The server is temporarily busy. Please try again in a moment.".to_string(),
-        ),
+        )),
         AppError::Internal(error) => {
             tracing::error!("Internal admin restore XHR error: {:?}", error);
-            (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+            None
         }
         AppError::Api {
             status,
@@ -180,13 +180,31 @@ fn admin_xhr_error_response(error: &AppError) -> Response {
                 endpoint = endpoint.as_deref().unwrap_or("unknown"),
                 "API error during admin restore XHR request: {detail}",
             );
-            (StatusCode::BAD_GATEWAY, detail.clone())
+            None
         }
+        AppError::Tls(message) => {
+            tracing::error!("TLS admin restore XHR error: {message}");
+            None
+        }
+    };
+
+    if let Some((status, message)) = handled {
+        return crate::handlers::board::xhr_handled_error_response(status, &message)
+            .unwrap_or_else(|response_error| response_error.into_response());
+    }
+
+    let (status, message) = match error {
+        AppError::Internal(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        AppError::Api { detail, .. } => (StatusCode::BAD_GATEWAY, detail.clone()),
         AppError::Tls(message) => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unexpected admin restore error.".to_string(),
+        ),
     };
 
     crate::handlers::board::xhr_error_response(status, &message)
-        .unwrap_or_else(|error| error.into_response())
+        .unwrap_or_else(|response_error| response_error.into_response())
 }
 
 fn validate_board_backup_access_settings(
@@ -250,6 +268,300 @@ fn redirect_page_response(target: &str, message: &str) -> Response {
             .unwrap_or_else(|_| HeaderValue::from_static("0; url=/admin/panel")),
     );
     resp
+}
+
+#[derive(Clone, Copy)]
+enum RestoreKind {
+    Full,
+    Board,
+}
+
+impl RestoreKind {
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Full => "Full restore",
+            Self::Board => "Board restore",
+        }
+    }
+
+    const fn route(self) -> &'static str {
+        match self {
+            Self::Full => "/admin/restore",
+            Self::Board => "/admin/board/restore",
+        }
+    }
+
+    const fn maintenance_label(self) -> &'static str {
+        match self {
+            Self::Full => "Full restore",
+            Self::Board => "Board restore",
+        }
+    }
+
+    const fn start_failure_message(self) -> &'static str {
+        match self {
+            Self::Full => "Restore could not start.",
+            Self::Board => "Board restore could not start.",
+        }
+    }
+
+    const fn upload_failure_message(self) -> &'static str {
+        match self {
+            Self::Full => "Restore upload failed.",
+            Self::Board => "Board restore upload failed.",
+        }
+    }
+
+    const fn failure_message(self) -> &'static str {
+        match self {
+            Self::Full => "Restore failed.",
+            Self::Board => "Board restore failed.",
+        }
+    }
+}
+
+struct StreamedRestoreUpload {
+    temp_file: tempfile::NamedTempFile,
+    form_csrf: Option<String>,
+    uploaded_filename: Option<String>,
+    uploaded_content_type: Option<String>,
+    uploaded_bytes: u64,
+}
+
+fn restore_error_redirect_target(message: &str) -> String {
+    format!("/admin/panel?restore_error={}", encode_q(message))
+}
+
+fn restore_start_response(
+    kind: RestoreKind,
+    xhr_request: bool,
+    error: &impl std::fmt::Display,
+) -> Response {
+    if xhr_request {
+        return crate::handlers::board::xhr_handled_error_response(
+            StatusCode::CONFLICT,
+            &error.to_string(),
+        )
+        .unwrap_or_else(|response_error| response_error.into_response());
+    }
+    redirect_page_response(
+        &restore_error_redirect_target(&error.to_string()),
+        kind.start_failure_message(),
+    )
+}
+
+fn restore_upload_parse_response(
+    kind: RestoreKind,
+    xhr_request: bool,
+    error: &impl std::fmt::Display,
+) -> Response {
+    let message = format!("Upload parsing failed: {error}");
+    if xhr_request {
+        return crate::handlers::board::xhr_handled_error_response(
+            StatusCode::BAD_REQUEST,
+            &message,
+        )
+        .unwrap_or_else(|response_error| response_error.into_response());
+    }
+    redirect_page_response(
+        &restore_error_redirect_target(&message),
+        kind.upload_failure_message(),
+    )
+}
+
+fn restore_failure_response(kind: RestoreKind, xhr_request: bool, error: &AppError) -> Response {
+    if xhr_request {
+        return admin_xhr_error_response(error);
+    }
+    redirect_page_response(
+        &restore_error_redirect_target(&error.to_string()),
+        kind.failure_message(),
+    )
+}
+
+fn log_restore_upload_started(kind: RestoreKind, headers: &HeaderMap, jar: &CookieJar) {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let content_length = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok());
+
+    tracing::info!(
+        target: "admin",
+        route = kind.route(),
+        content_type = content_type.unwrap_or(""),
+        content_length = content_length.unwrap_or(""),
+        has_session_cookie = jar.get(super::SESSION_COOKIE).is_some(),
+        has_csrf_cookie = jar.get("csrf_token").is_some(),
+        "{} upload started",
+        kind.title()
+    );
+}
+
+async fn restore_auth_preflight(
+    state: &AppState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+) -> Result<Option<String>> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    super::require_same_origin_request(headers)?;
+
+    {
+        let pool = state.db.clone();
+        let session_id_for_task = session_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id_for_task.as_deref())?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Admin auth preflight task failed: {error}"))
+        })??;
+    }
+
+    Ok(session_id)
+}
+
+async fn stream_restore_upload_to_tempfile(
+    kind: RestoreKind,
+    multipart: &mut Multipart,
+) -> Result<StreamedRestoreUpload> {
+    let mut temp_file: Option<tempfile::NamedTempFile> = None;
+    let mut form_csrf: Option<String> = None;
+    let mut uploaded_filename: Option<String> = None;
+    let mut uploaded_content_type: Option<String> = None;
+    let mut uploaded_bytes = 0u64;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| AppError::BadRequest(format!("Multipart error: {error}")))?
+    {
+        let field_name = field.name().unwrap_or("<unnamed>").to_string();
+        match field.name() {
+            Some("_csrf") => {
+                tracing::debug!(
+                    target: "admin",
+                    route = kind.route(),
+                    field = "_csrf",
+                    "{} received CSRF field",
+                    kind.title()
+                );
+                form_csrf = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|error| AppError::BadRequest(error.to_string()))?,
+                );
+            }
+            Some("backup_file") => {
+                uploaded_filename = field.file_name().map(str::to_string);
+                uploaded_content_type = field.content_type().map(str::to_string);
+                tracing::info!(
+                    target: "admin",
+                    route = kind.route(),
+                    field = field_name,
+                    filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
+                    mime = uploaded_content_type.as_deref().unwrap_or("<missing>"),
+                    "{} received backup file field",
+                    kind.title()
+                );
+                let tmp = tempfile::NamedTempFile::new()
+                    .map_err(|error| AppError::Internal(anyhow::anyhow!("Tempfile: {error}")))?;
+                let std_clone = tmp
+                    .as_file()
+                    .try_clone()
+                    .map_err(|error| AppError::Internal(anyhow::anyhow!("Clone fd: {error}")))?;
+                let async_file = tokio::fs::File::from_std(std_clone);
+                let mut writer = tokio::io::BufWriter::new(async_file);
+                let mut field = field;
+                while let Some(chunk) = field
+                    .chunk()
+                    .await
+                    .map_err(|error| AppError::BadRequest(error.to_string()))?
+                {
+                    uploaded_bytes = uploaded_bytes
+                        .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                    writer.write_all(&chunk).await.map_err(|error| {
+                        AppError::Internal(anyhow::anyhow!("Write chunk: {error}"))
+                    })?;
+                }
+                writer
+                    .flush()
+                    .await
+                    .map_err(|error| AppError::Internal(anyhow::anyhow!("Flush: {error}")))?;
+                temp_file = Some(tmp);
+            }
+            _ => {
+                tracing::debug!(
+                    target: "admin",
+                    route = kind.route(),
+                    field = field_name,
+                    "{} ignored unexpected multipart field",
+                    kind.title()
+                );
+                let _ = field.bytes().await;
+            }
+        }
+    }
+
+    let temp_file =
+        temp_file.ok_or_else(|| AppError::BadRequest("No backup file uploaded.".into()))?;
+
+    Ok(StreamedRestoreUpload {
+        temp_file,
+        form_csrf,
+        uploaded_filename,
+        uploaded_content_type,
+        uploaded_bytes,
+    })
+}
+
+fn validate_streamed_restore_upload(
+    kind: RestoreKind,
+    jar: &CookieJar,
+    upload: &mut StreamedRestoreUpload,
+) -> Result<u64> {
+    let has_csrf_cookie = jar.get("csrf_token").is_some();
+    if super::check_csrf_jar(jar, upload.form_csrf.as_deref()).is_err() {
+        tracing::warn!(
+            target: "admin",
+            route = kind.route(),
+            has_csrf_cookie,
+            has_form_csrf = upload.form_csrf.is_some(),
+            "{} failed CSRF validation",
+            kind.title()
+        );
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    let file_size = upload
+        .temp_file
+        .as_file()
+        .seek(std::io::SeekFrom::End(0))
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Seek check: {error}")))?;
+    if file_size == 0 {
+        return Err(AppError::BadRequest(
+            "Uploaded backup file is empty.".into(),
+        ));
+    }
+
+    tracing::info!(
+        target: "admin",
+        route = kind.route(),
+        filename = upload.uploaded_filename.as_deref().unwrap_or("<missing>"),
+        mime = upload.uploaded_content_type.as_deref().unwrap_or("<missing>"),
+        streamed_bytes = upload.uploaded_bytes,
+        temp_file_size = file_size,
+        "{} upload streamed to disk",
+        kind.title()
+    );
+
+    Ok(file_size)
 }
 
 fn format_magic_bytes(bytes: &[u8]) -> String {
@@ -1765,195 +2077,36 @@ pub async fn admin_restore(
     request: Request,
 ) -> Response {
     let xhr_request = is_xml_http_request(&headers);
-    let _maintenance_guard = match state.maintenance_gate.try_begin("Full restore") {
+    let _maintenance_guard = match state
+        .maintenance_gate
+        .try_begin(RestoreKind::Full.maintenance_label())
+    {
         Ok(guard) => guard,
-        Err(error) => {
-            if xhr_request {
-                return crate::handlers::board::xhr_error_response(
-                    StatusCode::CONFLICT,
-                    &error.to_string(),
-                )
-                .unwrap_or_else(|error| error.into_response());
-            }
-            return redirect_page_response(
-                &format!(
-                    "/admin/panel?restore_error={}",
-                    encode_q(&error.to_string())
-                ),
-                "Restore could not start.",
-            );
-        }
+        Err(error) => return restore_start_response(RestoreKind::Full, xhr_request, &error),
     };
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok());
-    let content_length = headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok());
-
-    tracing::info!(
-        target: "admin",
-        route = "/admin/restore",
-        content_type = content_type.unwrap_or(""),
-        content_length = content_length.unwrap_or(""),
-        has_session_cookie = jar.get(super::SESSION_COOKIE).is_some(),
-        has_csrf_cookie = jar.get("csrf_token").is_some(),
-        "Full restore upload started"
-    );
+    log_restore_upload_started(RestoreKind::Full, &headers, &jar);
 
     let mut multipart = match Multipart::from_request(request, &state).await {
         Ok(multipart) => multipart,
         Err(error) => {
             tracing::error!(
                 target: "admin",
-                route = "/admin/restore",
+                route = RestoreKind::Full.route(),
                 error = %error,
-                "Full restore multipart parsing failed before handler body"
+                "{} multipart parsing failed before handler body",
+                RestoreKind::Full.title()
             );
-            if xhr_request {
-                return crate::handlers::board::xhr_error_response(
-                    StatusCode::BAD_REQUEST,
-                    &format!("Upload parsing failed: {error}"),
-                )
-                .unwrap_or_else(|error| error.into_response());
-            }
-            let target = format!(
-                "/admin/panel?restore_error={}",
-                encode_q(&format!("Upload parsing failed: {error}"))
-            );
-            return redirect_page_response(&target, "Restore upload failed.");
+            return restore_upload_parse_response(RestoreKind::Full, xhr_request, &error);
         }
     };
 
     let result: Result<String> = async {
-        let session_id = jar
-            .get(super::SESSION_COOKIE)
-            .map(|c| c.value().to_string());
-        super::require_same_origin_request(&headers)?;
-        {
-            let pool = state.db.clone();
-            let session_id = session_id.clone();
-            tokio::task::spawn_blocking(move || -> Result<()> {
-                let conn = pool.get()?;
-                super::require_admin_session_sid(&conn, session_id.as_deref())?;
-                Ok(())
-            })
-            .await
-            .map_err(|error| {
-                AppError::Internal(anyhow::anyhow!("Admin auth preflight task failed: {error}"))
-            })??;
-        }
-
-        let mut zip_tmp: Option<tempfile::NamedTempFile> = None;
-        let mut form_csrf: Option<String> = None;
-        let mut uploaded_filename: Option<String> = None;
-        let mut uploaded_content_type: Option<String> = None;
-        let mut uploaded_bytes = 0u64;
-
-        while let Some(field) = multipart
-            .next_field()
-            .await
-            .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
-        {
-            let field_name = field.name().unwrap_or("<unnamed>").to_string();
-            match field.name() {
-                Some("_csrf") => {
-                    tracing::debug!(
-                        target: "admin",
-                        route = "/admin/restore",
-                        field = "_csrf",
-                        "Full restore received CSRF field"
-                    );
-                    form_csrf = Some(
-                        field
-                            .text()
-                            .await
-                            .map_err(|e| AppError::BadRequest(e.to_string()))?,
-                    );
-                }
-                Some("backup_file") => {
-                    uploaded_filename = field.file_name().map(str::to_string);
-                    uploaded_content_type = field.content_type().map(str::to_string);
-                    tracing::info!(
-                        target: "admin",
-                        route = "/admin/restore",
-                        field = field_name,
-                        filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
-                        mime = uploaded_content_type.as_deref().unwrap_or("<missing>"),
-                        "Full restore received backup file field"
-                    );
-                    let tmp = tempfile::NamedTempFile::new()
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Tempfile: {e}")))?;
-                    let std_clone = tmp
-                        .as_file()
-                        .try_clone()
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Clone fd: {e}")))?;
-                    let async_file = tokio::fs::File::from_std(std_clone);
-                    let mut writer = tokio::io::BufWriter::new(async_file);
-                    let mut field = field;
-                    while let Some(chunk) = field
-                        .chunk()
-                        .await
-                        .map_err(|e| AppError::BadRequest(e.to_string()))?
-                    {
-                        uploaded_bytes = uploaded_bytes
-                            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-                        writer
-                            .write_all(&chunk)
-                            .await
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write chunk: {e}")))?;
-                    }
-                    writer
-                        .flush()
-                        .await
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush: {e}")))?;
-                    zip_tmp = Some(tmp);
-                }
-                _ => {
-                    tracing::debug!(
-                        target: "admin",
-                        route = "/admin/restore",
-                        field = field_name,
-                        "Full restore ignored unexpected multipart field"
-                    );
-                    let _ = field.bytes().await;
-                }
-            }
-        }
-
-        let has_csrf_cookie = jar.get("csrf_token").is_some();
-        if super::check_csrf_jar(&jar, form_csrf.as_deref()).is_err() {
-            tracing::warn!(
-                target: "admin",
-                route = "/admin/restore",
-                has_csrf_cookie = has_csrf_cookie,
-                has_form_csrf = form_csrf.is_some(),
-                "Full restore failed CSRF validation"
-            );
-            return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-        }
-
-        let zip_tmp =
-            zip_tmp.ok_or_else(|| AppError::BadRequest("No backup file uploaded.".into()))?;
-        let zip_size = zip_tmp
-            .as_file()
-            .seek(std::io::SeekFrom::End(0))
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek check: {e}")))?;
-        if zip_size == 0 {
-            return Err(AppError::BadRequest(
-                "Uploaded backup file is empty.".into(),
-            ));
-        }
-
-        tracing::info!(
-            target: "admin",
-            route = "/admin/restore",
-            filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
-            mime = uploaded_content_type.as_deref().unwrap_or("<missing>"),
-            streamed_bytes = uploaded_bytes,
-            temp_file_size = zip_size,
-            "Full restore upload streamed to disk"
-        );
+        let session_id = restore_auth_preflight(&state, &headers, &jar).await?;
+        let mut upload =
+            stream_restore_upload_to_tempfile(RestoreKind::Full, &mut multipart).await?;
+        validate_streamed_restore_upload(RestoreKind::Full, &jar, &mut upload)?;
+        let zip_tmp = upload.temp_file;
+        let uploaded_filename = upload.uploaded_filename;
 
         let upload_dir = CONFIG.upload_dir.clone();
 
@@ -1965,17 +2118,18 @@ pub async fn admin_restore(
 
                 let zip_file = zip_tmp
                     .reopen()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Reopen zip: {e}")))?;
+                    .map_err(|error| AppError::Internal(anyhow::anyhow!("Reopen zip: {error}")))?;
                 let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
-                    .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
+                    .map_err(|error| AppError::BadRequest(format!("Invalid zip: {error}")))?;
 
                 if let Err(error) = validate_full_restore_archive_layout(&mut archive) {
                     tracing::warn!(
                         target: "admin",
-                        route = "/admin/restore",
+                        route = RestoreKind::Full.route(),
                         filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
                         error = %error,
-                        "Full restore archive layout validation failed"
+                        "{} archive layout validation failed",
+                        RestoreKind::Full.title()
                     );
                     return Err(error);
                 }
@@ -2028,17 +2182,12 @@ pub async fn admin_restore(
         Err(e) => {
             tracing::error!(
                 target: "admin",
-                route = "/admin/restore",
+                route = RestoreKind::Full.route(),
                 error = %e,
-                "Full restore failed"
+                "{} failed",
+                RestoreKind::Full.title()
             );
-            if xhr_request {
-                return admin_xhr_error_response(&e);
-            }
-            redirect_page_response(
-                &format!("/admin/panel?restore_error={}", encode_q(&e.to_string())),
-                "Restore failed.",
-            )
+            restore_failure_response(RestoreKind::Full, xhr_request, &e)
         }
     }
 }
@@ -2927,200 +3076,41 @@ pub async fn board_restore(
     request: Request,
 ) -> Response {
     let xhr_request = is_xml_http_request(&headers);
-    let _maintenance_guard = match state.maintenance_gate.try_begin("Board restore") {
+    let _maintenance_guard = match state
+        .maintenance_gate
+        .try_begin(RestoreKind::Board.maintenance_label())
+    {
         Ok(guard) => guard,
-        Err(error) => {
-            if xhr_request {
-                return crate::handlers::board::xhr_error_response(
-                    StatusCode::CONFLICT,
-                    &error.to_string(),
-                )
-                .unwrap_or_else(|error| error.into_response());
-            }
-            return redirect_page_response(
-                &format!(
-                    "/admin/panel?restore_error={}",
-                    encode_q(&error.to_string())
-                ),
-                "Board restore could not start.",
-            );
-        }
+        Err(error) => return restore_start_response(RestoreKind::Board, xhr_request, &error),
     };
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok());
-    let content_length = headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok());
-
-    tracing::info!(
-        target: "admin",
-        route = "/admin/board/restore",
-        content_type = content_type.unwrap_or(""),
-        content_length = content_length.unwrap_or(""),
-        has_session_cookie = jar.get(super::SESSION_COOKIE).is_some(),
-        has_csrf_cookie = jar.get("csrf_token").is_some(),
-        "Board restore upload started"
-    );
+    log_restore_upload_started(RestoreKind::Board, &headers, &jar);
     let mut multipart = match Multipart::from_request(request, &state).await {
         Ok(multipart) => multipart,
         Err(error) => {
             tracing::error!(
                 target: "admin",
-                route = "/admin/board/restore",
+                route = RestoreKind::Board.route(),
                 error = %error,
-                "Board restore multipart parsing failed before handler body"
+                "{} multipart parsing failed before handler body",
+                RestoreKind::Board.title()
             );
-            if xhr_request {
-                return crate::handlers::board::xhr_error_response(
-                    StatusCode::BAD_REQUEST,
-                    &format!("Upload parsing failed: {error}"),
-                )
-                .unwrap_or_else(|error| error.into_response());
-            }
-            let target = format!(
-                "/admin/panel?restore_error={}",
-                encode_q(&format!("Upload parsing failed: {error}"))
-            );
-            return redirect_page_response(&target, "Board restore upload failed.");
+            return restore_upload_parse_response(RestoreKind::Board, xhr_request, &error);
         }
     };
     // Run the whole operation as a fallible async block so any early return
     // with Err(...) is caught below and turned into a redirect.
     let result: Result<String> = async {
-        let session_id = jar
-            .get(super::SESSION_COOKIE)
-            .map(|c| c.value().to_string());
-        super::require_same_origin_request(&headers)?;
-        {
-            let pool = state.db.clone();
-            let session_id = session_id.clone();
-            tokio::task::spawn_blocking(move || -> Result<()> {
-                let conn = pool.get()?;
-                super::require_admin_session_sid(&conn, session_id.as_deref())?;
-                Ok(())
-            })
-            .await
-            .map_err(|error| {
-                AppError::Internal(anyhow::anyhow!("Admin auth preflight task failed: {error}"))
-            })??;
-        }
+        let session_id = restore_auth_preflight(&state, &headers, &jar).await?;
         let upload_dir = CONFIG.upload_dir.clone();
 
         // MEM-FIX: stream the uploaded file to a NamedTempFile on disk instead
         // of buffering the entire zip into a Vec<u8>.  Board backups can be
         // hundreds of MB for active boards with many uploads.
-        let mut zip_tmp: Option<tempfile::NamedTempFile> = None;
-        let mut form_csrf: Option<String> = None;
-        let mut uploaded_filename: Option<String> = None;
-        let mut uploaded_content_type: Option<String> = None;
-        let mut uploaded_bytes = 0u64;
-
-        while let Some(field) = multipart
-            .next_field()
-            .await
-            .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
-        {
-            let field_name = field.name().unwrap_or("<unnamed>").to_string();
-            match field.name() {
-                Some("_csrf") => {
-                    tracing::debug!(
-                        target: "admin",
-                        route = "/admin/board/restore",
-                        field = "_csrf",
-                        "Board restore received CSRF field"
-                    );
-                    form_csrf = Some(
-                        field
-                            .text()
-                            .await
-                            .map_err(|e| AppError::BadRequest(e.to_string()))?,
-                    );
-                }
-                Some("backup_file") => {
-                    uploaded_filename = field.file_name().map(str::to_string);
-                    uploaded_content_type = field.content_type().map(str::to_string);
-                    tracing::info!(
-                        target: "admin",
-                        route = "/admin/board/restore",
-                        field = field_name,
-                        filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
-                        mime = uploaded_content_type.as_deref().unwrap_or("<missing>"),
-                        "Board restore received backup file field"
-                    );
-                    let tmp = tempfile::NamedTempFile::new()
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Tempfile: {e}")))?;
-                    // Clone the underlying fd for async writing; the original
-                    // NamedTempFile retains ownership and the delete-on-drop guard.
-                    let std_clone = tmp
-                        .as_file()
-                        .try_clone()
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Clone fd: {e}")))?;
-                    let async_file = tokio::fs::File::from_std(std_clone);
-                    let mut writer = tokio::io::BufWriter::new(async_file);
-                    let mut field = field;
-                    while let Some(chunk) = field
-                        .chunk()
-                        .await
-                        .map_err(|e| AppError::BadRequest(e.to_string()))?
-                    {
-                        uploaded_bytes = uploaded_bytes
-                            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-                        writer
-                            .write_all(&chunk)
-                            .await
-                            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write chunk: {e}")))?;
-                    }
-                    writer
-                        .flush()
-                        .await
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush: {e}")))?;
-                    zip_tmp = Some(tmp);
-                }
-                _ => {
-                    tracing::debug!(
-                        target: "admin",
-                        route = "/admin/board/restore",
-                        field = field_name,
-                        "Board restore ignored unexpected multipart field"
-                    );
-                }
-            }
-        }
-
-        let has_csrf_cookie = jar.get("csrf_token").is_some();
-        if super::check_csrf_jar(&jar, form_csrf.as_deref()).is_err() {
-            tracing::warn!(
-                target: "admin",
-                route = "/admin/board/restore",
-                has_csrf_cookie = has_csrf_cookie,
-                has_form_csrf = form_csrf.is_some(),
-                "Board restore failed CSRF validation"
-            );
-            return Err(AppError::Forbidden("CSRF token mismatch.".into()));
-        }
-
-        let zip_tmp =
-            zip_tmp.ok_or_else(|| AppError::BadRequest("No backup file uploaded.".into()))?;
-        // Determine size without reading into RAM.
-        let file_size = zip_tmp
-            .as_file()
-            .seek(std::io::SeekFrom::End(0))
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek check: {e}")))?;
-        if file_size == 0 {
-            return Err(AppError::BadRequest(
-                "Uploaded backup file is empty.".into(),
-            ));
-        }
-        tracing::info!(
-            target: "admin",
-            route = "/admin/board/restore",
-            filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
-            mime = uploaded_content_type.as_deref().unwrap_or("<missing>"),
-            streamed_bytes = uploaded_bytes,
-            temp_file_size = file_size,
-            "Board restore upload streamed to disk"
-        );
+        let mut upload =
+            stream_restore_upload_to_tempfile(RestoreKind::Board, &mut multipart).await?;
+        let file_size = validate_streamed_restore_upload(RestoreKind::Board, &jar, &mut upload)?;
+        let zip_tmp = upload.temp_file;
+        let uploaded_filename = upload.uploaded_filename;
 
         tokio::task::spawn_blocking({
             let pool = state.db.clone();
@@ -3152,14 +3142,15 @@ pub async fn board_restore(
                 };
                 tracing::info!(
                     target: "admin",
-                    route = "/admin/board/restore",
+                    route = RestoreKind::Board.route(),
                     filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
                     temp_file_size = file_size,
                     probe_len = n,
                     magic = %format_magic_bytes(magic.get(..n.min(magic.len())).unwrap_or(&[])),
                     is_zip,
                     is_json,
-                    "Board restore detected uploaded file format"
+                    "{} detected uploaded file format",
+                    RestoreKind::Board.title()
                 );
 
                 if !is_zip && !is_json {
@@ -3188,11 +3179,12 @@ pub async fn board_restore(
                         || archive.file_names().any(|name| name == "board.json");
                     tracing::info!(
                         target: "admin",
-                        route = "/admin/board/restore",
+                        route = RestoreKind::Board.route(),
                         filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
                         sample_entries = ?entry_names,
                         has_board_json,
-                        "Board restore inspected zip entries"
+                        "{} inspected zip entries",
+                        RestoreKind::Board.title()
                     );
                     if !has_board_json {
                         return Err(AppError::BadRequest(
@@ -3204,14 +3196,15 @@ pub async fn board_restore(
                     let manifest = parse_board_backup_manifest_from_zip(&mut archive)?;
                     tracing::info!(
                         target: "admin",
-                        route = "/admin/board/restore",
+                        route = RestoreKind::Board.route(),
                         version = manifest.version,
                         board = %manifest.board.short_name,
                         threads = manifest.threads.len(),
                         posts = manifest.posts.len(),
                         polls = manifest.polls.len(),
                         file_hashes = manifest.file_hashes.len(),
-                        "Board restore parsed board backup manifest from zip"
+                        "{} parsed board backup manifest from zip",
+                        RestoreKind::Board.title()
                     );
                     // Re-open a fresh archive for file extraction in the second pass.
                     let f2 = zip_tmp
@@ -3236,14 +3229,15 @@ pub async fn board_restore(
                         })?;
                     tracing::info!(
                         target: "admin",
-                        route = "/admin/board/restore",
+                        route = RestoreKind::Board.route(),
                         version = manifest.version,
                         board = %manifest.board.short_name,
                         threads = manifest.threads.len(),
                         posts = manifest.posts.len(),
                         polls = manifest.polls.len(),
                         file_hashes = manifest.file_hashes.len(),
-                        "Board restore parsed raw board.json manifest"
+                        "{} parsed raw board.json manifest",
+                        RestoreKind::Board.title()
                     );
                     (manifest, None)
                 };
@@ -3283,17 +3277,12 @@ pub async fn board_restore(
         Err(e) => {
             tracing::error!(
                 target: "admin",
-                route = "/admin/board/restore",
+                route = RestoreKind::Board.route(),
                 error = %e,
-                "Board restore failed"
+                "{} failed",
+                RestoreKind::Board.title()
             );
-            if xhr_request {
-                return admin_xhr_error_response(&e);
-            }
-            redirect_page_response(
-                &format!("/admin/panel?restore_error={}", encode_q(&e.to_string())),
-                "Board restore failed.",
-            )
+            restore_failure_response(RestoreKind::Board, xhr_request, &e)
         }
     }
 }
@@ -3305,10 +3294,11 @@ mod tests {
         create_temp_board_backup_from_full_backup_path, execute_board_restore,
         latest_verified_full_backup_modified_time_in_dir, render_restored_body_html,
         should_store_without_recompress, temp_board_download_token_path,
-        validate_full_restore_archive_layout, write_temp_board_download_token,
+        validate_full_restore_archive_layout, write_temp_board_download_token, RestoreKind,
     };
     use crate::error::AppError;
     use crate::models::BackupBoardSummary;
+    use axum::{body::to_bytes, http::StatusCode};
     use rusqlite::params;
     use std::io::{Cursor, Write as _};
     use std::path::Path;
@@ -3351,6 +3341,57 @@ mod tests {
             deletion_token: "token".into(),
             is_op,
         }
+    }
+
+    #[tokio::test]
+    async fn admin_xhr_bad_request_returns_handled_json_error() {
+        let response = super::admin_xhr_error_response(&AppError::BadRequest("bad restore".into()));
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-rustchan-error-status")
+                .and_then(|value| value.to_str().ok()),
+            Some(StatusCode::BAD_REQUEST.as_str())
+        );
+
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains("bad restore"));
+    }
+
+    #[tokio::test]
+    async fn restore_upload_parse_xhr_returns_handled_json_error() {
+        let response = super::restore_upload_parse_response(
+            RestoreKind::Full,
+            true,
+            &"missing multipart field",
+        );
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-rustchan-error-status")
+                .and_then(|value| value.to_str().ok()),
+            Some(StatusCode::BAD_REQUEST.as_str())
+        );
+
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains("Upload parsing failed"));
+        assert!(body.contains("missing multipart field"));
     }
 
     #[test]

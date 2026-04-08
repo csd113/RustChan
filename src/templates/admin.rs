@@ -1039,12 +1039,19 @@ old boards to prevent query performance degradation.
     <h3>// create board</h3>
     <p>Start with the short name and public-facing label, then fine-tune everything else from its board card above.</p>
   </div>
-  <form method="POST" action="/admin/board/create" class="admin-board-create-form">
+  <form method="POST" action="/admin/board/create" class="admin-board-create-form admin-quick-form">
   <input type="hidden" name="_csrf" value="{csrf}">
-  <input type="text" name="short_name" placeholder="short (e.g. tech)" maxlength="8" required>
-  <input type="text" name="name" placeholder="full name" maxlength="64" required>
-  <input type="text" name="description" placeholder="description" maxlength="256">
-  <label style="color:var(--text-dim);font-size:0.8rem"><input type="checkbox" name="nsfw" value="1"> NSFW</label>
+  <label class="admin-quick-field">Short name
+    <input type="text" name="short_name" maxlength="8" required placeholder="tech">
+    <span class="admin-quick-help">Used in the URL, like <code>/tech/</code>.</span>
+  </label>
+  <label class="admin-quick-field">Display name
+    <input type="text" name="name" maxlength="64" required placeholder="Technology">
+  </label>
+  <label class="admin-quick-field">Description
+    <input type="text" name="description" maxlength="256" placeholder="Programming, hardware, and internet culture">
+  </label>
+  <label class="admin-inline-checkbox admin-quick-checkbox"><input type="checkbox" name="nsfw" value="1"> NSFW board</label>
   <button type="submit">create</button>
   </form>
 </div>
@@ -1102,11 +1109,17 @@ old boards to prevent query performance degradation.
       </table>
       </div>
       <h4>add ban</h4>
-      <form method="POST" action="/admin/ban/add" class="admin-moderation-form">
+      <form method="POST" action="/admin/ban/add" class="admin-moderation-form admin-quick-form">
         <input type="hidden" name="_csrf" value="{csrf}">
-        <input type="text" name="ip_hash" placeholder="ip hash" required>
-        <input type="text" name="reason" placeholder="reason">
-        <input type="text" name="duration_hours" placeholder="hours (blank=perm)" style="width:120px">
+        <label class="admin-quick-field">IP hash
+          <input type="text" name="ip_hash" required placeholder="ab12cd34ef56...">
+        </label>
+        <label class="admin-quick-field">Reason
+          <input type="text" name="reason" placeholder="Rule violation">
+        </label>
+        <label class="admin-quick-field admin-quick-field-compact">Duration (hours)
+          <input type="text" name="duration_hours" placeholder="blank = permanent" inputmode="numeric">
+        </label>
         <button type="submit">ban</button>
       </form>
     </div>
@@ -1120,10 +1133,14 @@ old boards to prevent query performance degradation.
       </table>
       </div>
       <h4>add filter</h4>
-      <form method="POST" action="/admin/filter/add" class="admin-moderation-form">
+      <form method="POST" action="/admin/filter/add" class="admin-moderation-form admin-quick-form">
         <input type="hidden" name="_csrf" value="{csrf}">
-        <input type="text" name="pattern" placeholder="pattern to match" required>
-        <input type="text" name="replacement" placeholder="replace with">
+        <label class="admin-quick-field">Pattern
+          <input type="text" name="pattern" required placeholder="old phrase">
+        </label>
+        <label class="admin-quick-field">Replacement
+          <input type="text" name="replacement" placeholder="new phrase">
+        </label>
         <button type="submit">add</button>
       </form>
     </div>
@@ -1293,9 +1310,12 @@ button / button:hover</pre>
   <input type="hidden" name="_csrf" value="{csrf}">
   <button type="submit" id="full-backup-btn">&#128190; save to server</button>
   </form>
-  <form method="POST" action="/admin/restore" enctype="multipart/form-data" class="backup-restore-upload-form" data-restore-label="full backup" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+  <form method="POST" action="/admin/restore" enctype="multipart/form-data" class="backup-restore-upload-form admin-file-inline-form" data-restore-label="full backup">
   <input type="hidden" name="_csrf" value="{csrf}">
-  <input type="file" name="backup_file" accept=".zip" required style="color:var(--text)">
+  <label class="admin-quick-field admin-file-field">Backup archive
+    <input type="file" name="backup_file" accept=".zip" required class="admin-file-input">
+    <span class="admin-quick-help">Upload a saved full-site zip archive.</span>
+  </label>
   <button type="submit" class="btn-danger"
           data-confirm="WARNING: This will overwrite the database and all uploaded files. Cannot be undone. Continue?">&#8635; restore from local file</button>
   </form>
@@ -1327,9 +1347,12 @@ button / button:hover</pre>
     <p>Upload a board backup from your computer to wipe and replace exactly one board.</p>
   </div>
   <div class="admin-inline-actions admin-inline-actions-spaced">
-  <form method="POST" action="/admin/board/restore" enctype="multipart/form-data" class="backup-restore-upload-form" data-restore-label="board backup" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+  <form method="POST" action="/admin/board/restore" enctype="multipart/form-data" class="backup-restore-upload-form admin-file-inline-form" data-restore-label="board backup">
   <input type="hidden" name="_csrf" value="{csrf}">
-  <input type="file" name="backup_file" accept=".zip,.json" required style="color:var(--text)">
+  <label class="admin-quick-field admin-file-field">Board backup
+    <input type="file" name="backup_file" accept=".zip,.json" required class="admin-file-input">
+    <span class="admin-quick-help">Upload a board zip or raw <code>board.json</code> manifest.</span>
+  </label>
   <button type="submit" class="btn-danger"
           data-confirm="WARNING: This will wipe and replace the board from the backup. Other boards are unaffected. Continue?">&#8635; restore board from local file</button>
   </form>
