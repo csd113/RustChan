@@ -34,14 +34,11 @@ Built with Rust, powered by SQLite, and designed for people who want their own c
 </div>
 
 <p align="center">
-  <img width="49%" alt="RustChan desktop home page" src="https://github.com/user-attachments/assets/3993ae93-aa9f-4285-b623-7a8f286b60ae" />
-  <img width="49%" alt="RustChan desktop board view" src="https://github.com/user-attachments/assets/ba89f0e2-0cee-4aa8-a085-4507575c0247" />
+  <img width="100%" alt="RustChan desktop home page" src="https://github.com/user-attachments/assets/3993ae93-aa9f-4285-b623-7a8f286b60ae" />
 </p>
 
 <p align="center">
-  <img width="22%" alt="RustChan desktop admin panel" src="https://github.com/user-attachments/assets/1767d63a-11bd-436e-8511-a59d8547b0b0" />
-  <img width="18%" alt="RustChan mobile home page" src="https://github.com/user-attachments/assets/41931c25-bc7e-43bd-ae84-dbbd38e6daeb" />
-  <img width="18%" alt="RustChan mobile board view" src="https://github.com/user-attachments/assets/67480f86-3bb2-4452-b8c5-6b340c49e306" />
+  <img width="100%" alt="RustChan desktop board view" src="https://github.com/user-attachments/assets/ba89f0e2-0cee-4aa8-a085-4507575c0247" />
 </p>
 
 
