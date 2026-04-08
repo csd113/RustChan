@@ -1,10 +1,11 @@
 // src/server/server/headers.rs
 
+use crate::config::CONFIG;
 use axum::{
     http::{self, header},
     response::IntoResponse,
 };
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      script-src 'self'; \
@@ -28,13 +29,10 @@ pub(super) async fn hsts_middleware_with_mode(
         .extensions()
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
         .map(|connect_info| connect_info.0);
-
-    let is_https = direct_https
-        || req.uri().scheme_str() == Some("https")
-        || crate::middleware::forwarded_proto_is_https(req.headers(), peer, behind_proxy);
+    let emit_hsts = should_emit_hsts(&req, peer, direct_https, behind_proxy);
 
     let mut resp = next.run(req).await;
-    if is_https {
+    if emit_hsts {
         resp.headers_mut().insert(
             header::HeaderName::from_static("strict-transport-security"),
             header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
@@ -78,13 +76,67 @@ pub(super) async fn safe_timeout_middleware(
         })
 }
 
+fn should_emit_hsts(
+    req: &axum::extract::Request,
+    peer: Option<SocketAddr>,
+    direct_https: bool,
+    behind_proxy: bool,
+) -> bool {
+    let is_https = direct_https
+        || req.uri().scheme_str() == Some("https")
+        || crate::middleware::forwarded_proto_is_https(req.headers(), peer, behind_proxy);
+
+    let Some((host, port)) = request_host_parts(req.headers()) else {
+        return false;
+    };
+
+    if !is_https || is_loopback_host(&host) {
+        return false;
+    }
+
+    if port.is_some_and(|port| port != 443) {
+        return false;
+    }
+
+    if behind_proxy {
+        return host_is_configured_public_host(&host);
+    }
+
+    CONFIG.tls.port == 443
+}
+
+fn request_host_parts(headers: &http::HeaderMap) -> Option<(String, Option<u16>)> {
+    headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<http::uri::Authority>().ok())
+        .map(|authority| (authority.host().to_string(), authority.port_u16()))
+}
+
+fn host_is_configured_public_host(host: &str) -> bool {
+    CONFIG
+        .public_hosts
+        .iter()
+        .chain(CONFIG.tls.acme.domains.iter())
+        .filter_map(|candidate| crate::config::normalize_public_host(candidate))
+        .any(|candidate| candidate.eq_ignore_ascii_case(host))
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{hsts_middleware_with_mode, CONTENT_SECURITY_POLICY};
+    use super::{hsts_middleware_with_mode, should_emit_hsts, CONTENT_SECURITY_POLICY};
     use axum::{
         body::Body, http::Request, middleware::from_fn, response::IntoResponse, routing::get,
         Router,
     };
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tower::ServiceExt;
 
     #[test]
@@ -107,7 +159,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hsts_is_added_for_direct_https_without_forwarded_proto() {
+    async fn hsts_is_not_added_for_loopback_direct_https_hosts() {
         let app = Router::new()
             .route("/", get(|| async { "ok".into_response() }))
             .layer(from_fn(|req, next| {
@@ -118,19 +170,43 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/")
+                    .header("host", "localhost:8443")
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
 
-        assert!(response.headers().contains_key("strict-transport-security"));
+        assert!(!response.headers().contains_key("strict-transport-security"));
+    }
+
+    #[test]
+    fn hsts_is_not_added_for_public_nonstandard_https_ports() {
+        let request = Request::builder()
+            .uri("/")
+            .header("host", "example.test:8443")
+            .body(Body::empty())
+            .expect("request");
+
+        assert!(!should_emit_hsts(&request, None, true, false));
+    }
+
+    #[test]
+    fn hsts_is_not_added_for_unconfigured_proxy_tunnel_hosts() {
+        let request = Request::builder()
+            .uri("/")
+            .header("host", "demo.serveo.net")
+            .header("x-forwarded-proto", "https")
+            .body(Body::empty())
+            .expect("request");
+
+        let peer = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080));
+        assert!(!should_emit_hsts(&request, peer, false, true));
     }
 
     #[tokio::test]
     async fn hsts_ignores_spoofed_forwarded_proto_from_public_peer() {
         use axum::extract::ConnectInfo;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
         let app = Router::new()
             .route("/", get(|| async { "ok".into_response() }))

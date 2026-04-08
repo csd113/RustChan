@@ -208,7 +208,7 @@ fn render_board_settings_card(
       </select>
     </label>
     <label>Board password
-      <input type="password" name="access_password" maxlength="256" autocomplete="new-password" placeholder="{access_password_placeholder}">
+      <input type="text" name="access_password" maxlength="256" autocomplete="off" placeholder="{access_password_placeholder}">
       <span style="font-size:0.72rem;color:var(--text-dim)">{access_password_status}</span>
     </label>
     <label title="Minimum seconds a user must wait between posts on this board. 0 = no cooldown.">
@@ -1043,7 +1043,6 @@ old boards to prevent query performance degradation.
   <input type="hidden" name="_csrf" value="{csrf}">
   <label class="admin-quick-field">Short name
     <input type="text" name="short_name" maxlength="8" required placeholder="tech">
-    <span class="admin-quick-help">Used in the URL, like <code>/tech/</code>.</span>
   </label>
   <label class="admin-quick-field">Display name
     <input type="text" name="name" maxlength="64" required placeholder="Technology">
