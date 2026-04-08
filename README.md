@@ -33,19 +33,16 @@ Built with Rust, powered by SQLite, and designed for people who want their own c
 
 </div>
 
-<img width="1498" height="785" alt="Screenshot 2026-04-07 at 7 10 52 PM" src="https://github.com/user-attachments/assets/3993ae93-aa9f-4285-b623-7a8f286b60ae" /> desktop home page
+<p align="center">
+  <img width="49%" alt="RustChan desktop home page" src="https://github.com/user-attachments/assets/3993ae93-aa9f-4285-b623-7a8f286b60ae" />
+  <img width="49%" alt="RustChan desktop board view" src="https://github.com/user-attachments/assets/ba89f0e2-0cee-4aa8-a085-4507575c0247" />
+</p>
 
-<img width="1503" height="783" alt="Screenshot 2026-04-07 at 7 11 38 PM" src="https://github.com/user-attachments/assets/ba89f0e2-0cee-4aa8-a085-4507575c0247" /> desktop in a board
-
-
-
-<img width="372" height="548" alt="Screenshot 2026-04-07 at 7 12 03 PM" src="https://github.com/user-attachments/assets/1767d63a-11bd-436e-8511-a59d8547b0b0" /> desktop admin pannel
-
-
-![IMG_4357](https://github.com/user-attachments/assets/41931c25-bc7e-43bd-ae84-dbbd38e6daeb) mobile home page
-
-
-![IMG_4358](https://github.com/user-attachments/assets/67480f86-3bb2-4452-b8c5-6b340c49e306) mobile in a board
+<p align="center">
+  <img width="22%" alt="RustChan desktop admin panel" src="https://github.com/user-attachments/assets/1767d63a-11bd-436e-8511-a59d8547b0b0" />
+  <img width="18%" alt="RustChan mobile home page" src="https://github.com/user-attachments/assets/41931c25-bc7e-43bd-ae84-dbbd38e6daeb" />
+  <img width="18%" alt="RustChan mobile board view" src="https://github.com/user-attachments/assets/67480f86-3bb2-4452-b8c5-6b340c49e306" />
+</p>
 
 
 
