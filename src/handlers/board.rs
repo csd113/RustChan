@@ -63,6 +63,13 @@ type CatalogRenderData = (
     String,
 );
 
+fn is_xml_http_request(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-requested-with")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
+}
+
 pub fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
     jar.get(USER_THEME_COOKIE)
         .and_then(|cookie| crate::templates::normalize_theme_slug(cookie.value()))
@@ -588,6 +595,7 @@ pub async fn create_thread(
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
+    req_headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
@@ -866,6 +874,17 @@ pub async fn create_thread(
         }
         Err(e) => return Err(e),
     };
+
+    if is_xml_http_request(&req_headers) {
+        let mut resp = Response::new(axum::body::Body::empty());
+        *resp.status_mut() = StatusCode::NO_CONTENT;
+        resp.headers_mut().insert(
+            "x-rustchan-redirect",
+            HeaderValue::from_str(&redirect_url)
+                .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?,
+        );
+        return Ok(resp);
+    }
 
     Ok(Redirect::to(&redirect_url).into_response())
 }
@@ -2435,6 +2454,49 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .expect("location header");
         assert!(location.starts_with("/test/thread/"));
+    }
+
+    #[tokio::test]
+    async fn create_thread_xhr_returns_explicit_redirect_header() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/{board}", post(super::create_thread))
+            .with_state(state);
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "hello xhr")],
+            None,
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/test")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let redirect = response
+            .headers()
+            .get("x-rustchan-redirect")
+            .and_then(|value| value.to_str().ok())
+            .expect("xhr redirect header");
+        assert!(redirect.starts_with("/test/thread/"));
     }
 
     #[tokio::test]

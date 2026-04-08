@@ -418,6 +418,16 @@ function submitPostFormWithProgress(form) {
     setSubmittingState(form, false);
     setUploadProgress(form, 100, 'Finishing…');
 
+    // XHR follows redirects internally, and some browsers expose the final
+    // response URL without the original #p123 fragment. The explicit redirect
+    // header keeps reply-draft clearing and "(You)" tracking anchored to the
+    // exact new post after upload-backed replies succeed.
+    var explicitRedirect = xhr.getResponseHeader('X-Rustchan-Redirect') || '';
+    if (explicitRedirect) {
+      window.location.assign(explicitRedirect);
+      return;
+    }
+
     var finalUrl = xhr.responseURL || form.action;
     var contentType = xhr.getResponseHeader('Content-Type') || '';
     var isHtml = contentType.indexOf('text/html') !== -1;
@@ -1411,6 +1421,10 @@ function toggleThreadMenu(toggle) {
       var hash = window.location.hash;
       var m = hash.match(/^#p(\d+)$/);
       if (m) {
+        // Successful reply redirects land on #p<id>. Clear the saved composer
+        // draft before other startup code strips the fragment for scroll restore.
+        clearReplyDraftStorage();
+        clearReplyDraftSubmitState();
         var newId = parseInt(m[1], 10);
         var existing = JSON.parse(localStorage.getItem(POSTS_KEY) || '[]');
         if (existing.indexOf(newId) === -1) existing.push(newId);

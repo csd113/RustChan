@@ -18,11 +18,18 @@ use crate::{
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
-    http::HeaderMap,
+    http::{header::HeaderValue, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
+
+fn is_xml_http_request(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-requested-with")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
+}
 
 // ─── GET /:board/thread/:id ───────────────────────────────────────────────────
 
@@ -155,6 +162,7 @@ pub async fn post_reply(
     Path((board_short, thread_id)): Path<(String, i64)>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
+    req_headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Response> {
     let admin_session_id = jar
@@ -407,6 +415,17 @@ pub async fn post_reply(
         }
         Err(e) => return Err(e),
     };
+
+    if is_xml_http_request(&req_headers) {
+        let mut resp = Response::new(axum::body::Body::empty());
+        *resp.status_mut() = StatusCode::NO_CONTENT;
+        resp.headers_mut().insert(
+            "x-rustchan-redirect",
+            HeaderValue::from_str(&redirect_url)
+                .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?,
+        );
+        return Ok(resp);
+    }
 
     Ok(Redirect::to(&redirect_url).into_response())
 }
@@ -1038,5 +1057,93 @@ mod tests {
         };
         assert!(reply_html.contains("class=\"quotelink\""));
         assert!(reply_html.contains(&format!("data-pid=\"{op_post_id}\"")));
+    }
+
+    #[tokio::test]
+    async fn xhr_reply_returns_explicit_redirect_header() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/{board}", post(crate::handlers::board::create_thread))
+            .route("/{board}/thread/{id}", post(super::post_reply))
+            .with_state(state.clone());
+
+        let (create_boundary, create_body) =
+            crate::test_support::multipart_body(&[("_csrf", "csrf123"), ("body", "op body")], None);
+        let create_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/test")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={create_boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(create_body))
+                    .expect("create request"),
+            )
+            .await
+            .expect("create response");
+        assert_eq!(create_response.status(), StatusCode::SEE_OTHER);
+
+        let thread_id = {
+            let conn = state.db.get().expect("db connection");
+            conn.query_row("SELECT id FROM threads LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("thread id")
+        };
+
+        let (reply_boundary, reply_body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "xhr reply")],
+            None,
+        );
+        let reply_response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/test/thread/{thread_id}"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={reply_boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(reply_body))
+                    .expect("reply request"),
+            )
+            .await
+            .expect("reply response");
+
+        assert_eq!(reply_response.status(), StatusCode::NO_CONTENT);
+
+        let redirect = reply_response
+            .headers()
+            .get("x-rustchan-redirect")
+            .and_then(|value| value.to_str().ok())
+            .expect("xhr redirect header");
+
+        let reply_post_id = {
+            let conn = state.db.get().expect("db connection");
+            conn.query_row(
+                "SELECT id FROM posts WHERE thread_id = ?1 AND is_op = 0 ORDER BY id DESC LIMIT 1",
+                rusqlite::params![thread_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("reply post id")
+        };
+
+        assert_eq!(
+            redirect,
+            format!("/test/thread/{thread_id}#p{reply_post_id}")
+        );
     }
 }
