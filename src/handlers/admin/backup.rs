@@ -137,6 +137,58 @@ fn encode_q(s: &str) -> String {
     out
 }
 
+fn is_xml_http_request(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-requested-with")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
+}
+
+fn admin_xhr_error_response(error: &AppError) -> Response {
+    let (status, message) = match error {
+        AppError::NotFound(message) => (StatusCode::NOT_FOUND, message.clone()),
+        AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message.clone()),
+        AppError::Forbidden(message) => (StatusCode::FORBIDDEN, message.clone()),
+        AppError::BannedUser { reason, .. } => (
+            StatusCode::FORBIDDEN,
+            format!("You are banned. Reason: {reason}"),
+        ),
+        AppError::UploadTooLarge(message) => (StatusCode::PAYLOAD_TOO_LARGE, message.clone()),
+        AppError::InvalidMediaType(message) => {
+            (StatusCode::UNSUPPORTED_MEDIA_TYPE, message.clone())
+        }
+        AppError::Conflict(message) => (StatusCode::CONFLICT, message.clone()),
+        AppError::RateLimited => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "You are posting too fast. Slow down.".to_string(),
+        ),
+        AppError::DbBusy => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The server is temporarily busy. Please try again in a moment.".to_string(),
+        ),
+        AppError::Internal(error) => {
+            tracing::error!("Internal admin restore XHR error: {:?}", error);
+            (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        }
+        AppError::Api {
+            status,
+            detail,
+            endpoint,
+        } => {
+            tracing::error!(
+                status,
+                endpoint = endpoint.as_deref().unwrap_or("unknown"),
+                "API error during admin restore XHR request: {detail}",
+            );
+            (StatusCode::BAD_GATEWAY, detail.clone())
+        }
+        AppError::Tls(message) => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
+    };
+
+    crate::handlers::board::xhr_error_response(status, &message)
+        .unwrap_or_else(|error| error.into_response())
+}
+
 fn validate_board_backup_access_settings(
     manifest: &mut board_backup_types::BoardBackupManifest,
 ) -> Result<()> {
@@ -1712,9 +1764,17 @@ pub async fn admin_restore(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     request: Request,
 ) -> Response {
+    let xhr_request = is_xml_http_request(&headers);
     let _maintenance_guard = match state.maintenance_gate.try_begin("Full restore") {
         Ok(guard) => guard,
         Err(error) => {
+            if xhr_request {
+                return crate::handlers::board::xhr_error_response(
+                    StatusCode::CONFLICT,
+                    &error.to_string(),
+                )
+                .unwrap_or_else(|error| error.into_response());
+            }
             return redirect_page_response(
                 &format!(
                     "/admin/panel?restore_error={}",
@@ -1750,6 +1810,13 @@ pub async fn admin_restore(
                 error = %error,
                 "Full restore multipart parsing failed before handler body"
             );
+            if xhr_request {
+                return crate::handlers::board::xhr_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Upload parsing failed: {error}"),
+                )
+                .unwrap_or_else(|error| error.into_response());
+            }
             let target = format!(
                 "/admin/panel?restore_error={}",
                 encode_q(&format!("Upload parsing failed: {error}"))
@@ -1934,6 +2001,11 @@ pub async fn admin_restore(
         Ok(fresh_sid) => {
             if fresh_sid.is_empty() {
                 let jar = jar.remove(Cookie::from(super::SESSION_COOKIE));
+                if xhr_request {
+                    let response = crate::handlers::board::xhr_redirect_response("/admin")
+                        .unwrap_or_else(|error| error.into_response());
+                    return (jar, response).into_response();
+                }
                 return (jar, Redirect::to("/admin")).into_response();
             }
 
@@ -1944,6 +2016,13 @@ pub async fn admin_restore(
             new_cookie.set_secure(super::should_set_secure_cookie(&headers, Some(peer)));
             new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
+            if xhr_request {
+                let response =
+                    crate::handlers::board::xhr_redirect_response("/admin/panel?restored=1")
+                        .unwrap_or_else(|error| error.into_response());
+                return (jar.add(new_cookie), response).into_response();
+            }
+
             (jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response()
         }
         Err(e) => {
@@ -1953,6 +2032,9 @@ pub async fn admin_restore(
                 error = %e,
                 "Full restore failed"
             );
+            if xhr_request {
+                return admin_xhr_error_response(&e);
+            }
             redirect_page_response(
                 &format!("/admin/panel?restore_error={}", encode_q(&e.to_string())),
                 "Restore failed.",
@@ -2844,9 +2926,17 @@ pub async fn board_restore(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
+    let xhr_request = is_xml_http_request(&headers);
     let _maintenance_guard = match state.maintenance_gate.try_begin("Board restore") {
         Ok(guard) => guard,
         Err(error) => {
+            if xhr_request {
+                return crate::handlers::board::xhr_error_response(
+                    StatusCode::CONFLICT,
+                    &error.to_string(),
+                )
+                .unwrap_or_else(|error| error.into_response());
+            }
             return redirect_page_response(
                 &format!(
                     "/admin/panel?restore_error={}",
@@ -2881,6 +2971,13 @@ pub async fn board_restore(
                 error = %error,
                 "Board restore multipart parsing failed before handler body"
             );
+            if xhr_request {
+                return crate::handlers::board::xhr_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Upload parsing failed: {error}"),
+                )
+                .unwrap_or_else(|error| error.into_response());
+            }
             let target = format!(
                 "/admin/panel?restore_error={}",
                 encode_q(&format!("Upload parsing failed: {error}"))
@@ -3171,10 +3268,18 @@ pub async fn board_restore(
     .await;
 
     match result {
-        Ok(board_short) => redirect_page_response(
-            &format!("/admin/panel?board_restored={board_short}"),
-            &format!("Board /{board_short}/ restored successfully."),
-        ),
+        Ok(board_short) => {
+            if xhr_request {
+                return crate::handlers::board::xhr_redirect_response(&format!(
+                    "/admin/panel?board_restored={board_short}"
+                ))
+                .unwrap_or_else(|error| error.into_response());
+            }
+            redirect_page_response(
+                &format!("/admin/panel?board_restored={board_short}"),
+                &format!("Board /{board_short}/ restored successfully."),
+            )
+        }
         Err(e) => {
             tracing::error!(
                 target: "admin",
@@ -3182,6 +3287,9 @@ pub async fn board_restore(
                 error = %e,
                 "Board restore failed"
             );
+            if xhr_request {
+                return admin_xhr_error_response(&e);
+            }
             redirect_page_response(
                 &format!("/admin/panel?restore_error={}", encode_q(&e.to_string())),
                 "Board restore failed.",

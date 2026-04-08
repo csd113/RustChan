@@ -24,6 +24,9 @@ All notable changes to RustChan will be documented in this file.
 - Heavy admin maintenance now coordinates through a shared maintenance gate and less aggressive background scheduling, so backups, restores, integrity checks, repair, and scheduled `VACUUM`/WAL work are less likely to pile onto live request traffic or each other.
 - Full backup recovery is now more flexible without adding scheduler clutter: new full backups record the boards they contain, and the admin panel can derive a single-board restore or downloadable board backup directly from a saved full-site archive.
 - Long media filenames now keep post layouts tidier without hiding the real upload name: thread and reply views truncate only the displayed stem, preserve the extension in the visible link text, and still expose the full original filename through the link tooltip.
+- Upload-backed posting and admin restore flows now use explicit XHR redirect/error responses instead of scraping returned HTML, so media uploads fail in-place with clearer feedback and restore uploads stay inside the existing progress modal without fragile document replacement.
+- Thread pages now separate board-level navigation from thread-specific actions more cleanly: board links live in the shared board-nav strip, reply/update controls stay in the thread nav, and the admin toolbar sits under the board context instead of leading the page.
+- Admin board management is now organized around distinct tasks instead of one dense block: each board card separates basic setup, access controls, post features, appearance, backups, and destructive actions, while the full-site and board-backup areas now split scheduling, immediate restore/create actions, and saved archives into clearer sections.
 
 ### Fixed
 
@@ -48,6 +51,7 @@ All notable changes to RustChan will be documented in this file.
 - Mobile thread and archive views now stay readable on narrow screens: reply cards use the full available width again, thread action rows wrap and center cleanly, archive rows break metadata onto separate lines, and two-column board/catalog tiles can shrink without forcing horizontal squeeze.
 - Board restore now preserves original post IDs when they are still available, and when collisions force new IDs RustChan remaps same-board quotelinks in restored post bodies and rendered HTML so restored conversations keep their internal reply links intact.
 - Auto-saved quote-only reply drafts no longer come back as stale `>>123` stubs when you reopen the reply form; only real in-progress text drafts keep persisting between visits.
+- Upload-backed post failures no longer fall back to blocking browser alerts, and media-backed ban hits now redirect to a dedicated ban page so the appeal flow still works without relying on brittle in-place HTML swaps.
 
 ### Validation
 

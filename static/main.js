@@ -382,10 +382,112 @@ function stopSubmitButtonAnimation(form) {
 }
 
 function dispatchPostFormEvent(form, name) {
-  if (!form || !name || !document.createEvent) return;
-  var ev = document.createEvent('Event');
-  ev.initEvent(name, false, false);
+  if (!form || !name) return;
+  var ev = null;
+  if (typeof window.Event === 'function') {
+    ev = new Event(name, { bubbles: false, cancelable: false });
+  } else if (document.createEvent) {
+    ev = document.createEvent('Event');
+    ev.initEvent(name, false, false);
+  }
+  if (!ev) return;
   form.dispatchEvent(ev);
+}
+
+function normalizeInlineMessage(message) {
+  if (!message) return '';
+  return String(message).replace(/\s+/g, ' ').trim();
+}
+
+function parseJsonText(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    return null;
+  }
+}
+
+function parseXhrJsonPayload(xhr) {
+  if (!xhr || !xhr.responseText) return null;
+  var contentType = xhr.getResponseHeader('Content-Type') || '';
+  if (contentType.indexOf('application/json') === -1) return null;
+  return parseJsonText(xhr.responseText);
+}
+
+function extractMessageFromHtmlDocument(html) {
+  if (!html || typeof DOMParser !== 'function') return '';
+  try {
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    if (!doc) return '';
+
+    var banner = doc.querySelector('.post-error-banner');
+    if (banner) return normalizeInlineMessage(banner.textContent);
+
+    var bannedHeading = doc.querySelector('.error-page h1');
+    if (bannedHeading && /you are banned/i.test(bannedHeading.textContent || '')) {
+      var reason = doc.querySelector('.error-page strong');
+      if (reason) {
+        return normalizeInlineMessage('You are banned. Reason: ' + reason.textContent);
+      }
+      return normalizeInlineMessage(bannedHeading.textContent);
+    }
+
+    var errorPage = doc.querySelector('.page-box.error-page p');
+    if (errorPage) return normalizeInlineMessage(errorPage.textContent);
+  } catch (e) {}
+  return '';
+}
+
+function clearPostFormFeedback(form) {
+  var container = form && (form.closest('.post-form-container') || form);
+  if (!container) return;
+  container
+    .querySelectorAll('.post-error-banner[data-post-form-feedback="1"]')
+    .forEach(function (banner) {
+      if (banner.parentNode) banner.parentNode.removeChild(banner);
+    });
+}
+
+function showPostFormFeedback(form, message) {
+  var normalized = normalizeInlineMessage(message);
+  var container = form && (form.closest('.post-form-container') || form);
+  if (!normalized || !container) return;
+
+  clearPostFormFeedback(form);
+
+  var banner = document.createElement('div');
+  banner.className = 'post-error-banner';
+  banner.dataset.postFormFeedback = '1';
+  banner.setAttribute('role', 'alert');
+  banner.setAttribute('tabindex', '-1');
+  banner.textContent = '\u26A0 ' + normalized;
+
+  var title = container.querySelector('.post-form-title');
+  if (title && title.parentNode === container) {
+    title.insertAdjacentElement('afterend', banner);
+  } else if (form && form.parentNode === container) {
+    container.insertBefore(banner, form);
+  } else {
+    container.insertBefore(banner, container.firstChild);
+  }
+
+  try {
+    banner.focus({ preventScroll: true });
+  } catch (e) {
+    banner.focus();
+  }
+  if (typeof banner.scrollIntoView === 'function') {
+    banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+function resetPostSubmitFailureState(form, message) {
+  stopSubmitButtonAnimation(form);
+  setSubmittingState(form, false);
+  resetUploadProgress(form);
+  dispatchPostFormEvent(form, 'rustchan:post-submit-reset');
+  showPostFormFeedback(form, message);
 }
 
 function submitPostFormWithProgress(form) {
@@ -396,6 +498,7 @@ function submitPostFormWithProgress(form) {
   xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
   xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
+  clearPostFormFeedback(form);
   setSubmittingState(form, true);
   startSubmitButtonAnimation(form);
   setUploadProgress(form, 0, 'Starting upload…');
@@ -414,6 +517,12 @@ function submitPostFormWithProgress(form) {
   });
 
   xhr.addEventListener('load', function () {
+    var payload = parseXhrJsonPayload(xhr);
+    var explicitRedirect =
+      xhr.getResponseHeader('X-Rustchan-Redirect') ||
+      (payload && payload.redirect_url) ||
+      '';
+
     stopSubmitButtonAnimation(form);
     setSubmittingState(form, false);
     setUploadProgress(form, 100, 'Finishing…');
@@ -422,7 +531,6 @@ function submitPostFormWithProgress(form) {
     // response URL without the original #p123 fragment. The explicit redirect
     // header keeps reply-draft clearing and "(You)" tracking anchored to the
     // exact new post after upload-backed replies succeed.
-    var explicitRedirect = xhr.getResponseHeader('X-Rustchan-Redirect') || '';
     if (explicitRedirect) {
       window.location.assign(explicitRedirect);
       return;
@@ -437,10 +545,8 @@ function submitPostFormWithProgress(form) {
       return;
     }
 
-    if (isHtml && xhr.responseText) {
-      document.open();
-      document.write(xhr.responseText);
-      document.close();
+    if (payload && payload.error) {
+      resetPostSubmitFailureState(form, payload.error);
       return;
     }
 
@@ -449,17 +555,18 @@ function submitPostFormWithProgress(form) {
       return;
     }
 
-    resetUploadProgress(form);
-    dispatchPostFormEvent(form, 'rustchan:post-submit-reset');
-    alert('Upload failed. Please try again.');
+    resetPostSubmitFailureState(
+      form,
+      extractMessageFromHtmlDocument(isHtml ? xhr.responseText : '') ||
+        'Upload failed. Please try again.'
+    );
   });
 
   xhr.addEventListener('error', function () {
-    stopSubmitButtonAnimation(form);
-    setSubmittingState(form, false);
-    resetUploadProgress(form);
-    dispatchPostFormEvent(form, 'rustchan:post-submit-reset');
-    alert('Connection dropped before the server response arrived. Your post may still have succeeded. Refresh the thread or board before trying again.');
+    resetPostSubmitFailureState(
+      form,
+      'Connection dropped before the server response arrived. Your post may still have succeeded. Refresh the thread or board before trying again.'
+    );
   });
 
   xhr.addEventListener('abort', function () {
@@ -2025,6 +2132,11 @@ document.addEventListener('click', function (e) {
         e.preventDefault();
         togglePostForm();
         break;
+      case 'open-post-form':
+        e.preventDefault();
+        clearRestoredAutoQuoteOnlyDraft();
+        setPostFormOpen(true, { scrollIntoView: true });
+        break;
       case 'dismiss-compress':    dismissCompressModal(); break;
       case 'start-compress':      startCompress(); break;
       case 'close-report':        closeReportModal(); break;
@@ -2481,6 +2593,11 @@ document.addEventListener('click', function (e) {
   }
 
   function _resolveRestoreRedirectTarget(xhr, form) {
+    var payload = parseXhrJsonPayload(xhr);
+    var explicitRedirect = xhr.getResponseHeader('X-Rustchan-Redirect') || '';
+    if (explicitRedirect) return explicitRedirect;
+    if (payload && payload.redirect_url) return payload.redirect_url;
+
     var refreshTarget = _extractRefreshTarget(xhr.getResponseHeader('refresh') || '');
     var htmlTarget = _extractRedirectTargetFromHtml(xhr.responseText || '');
     var responseUrl = _absoluteUrl(xhr.responseURL || '');
@@ -2531,6 +2648,7 @@ document.addEventListener('click', function (e) {
 
     xhr.addEventListener('load', function () {
       _restoreFormDone();
+      var payload = parseXhrJsonPayload(xhr);
       if (xhr.status >= 200 && xhr.status < 400) {
         _setBkProgress(100, 'Upload complete. Restoring backup…');
         var redirectTarget = _resolveRestoreRedirectTarget(xhr, form);
@@ -2538,17 +2656,15 @@ document.addEventListener('click', function (e) {
           window.location.assign(redirectTarget);
           return;
         }
-        var contentType = xhr.getResponseHeader('content-type') || '';
-        if (contentType.indexOf('text/html') !== -1 && xhr.responseText) {
-          document.open();
-          document.write(xhr.responseText);
-          document.close();
-          return;
-        }
         window.location.reload();
         return;
       }
-      _setBkProgress(0, 'Restore upload failed (' + xhr.status + ')');
+      _setBkProgress(
+        0,
+        (payload && payload.error) ||
+          extractMessageFromHtmlDocument(xhr.responseText || '') ||
+          ('Restore upload failed (' + xhr.status + ')')
+      );
       showDoneButton();
     });
 

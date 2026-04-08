@@ -15,7 +15,29 @@ use super::{
     thread_autoupdate_script, TOGGLE_SCRIPT,
 };
 
-fn render_thread_nav(board_short: &str, reply_count: i64, is_bottom: bool) -> String {
+fn render_thread_board_nav(board: &Board) -> String {
+    let archive_link = if board.allow_archive {
+        format!(
+            r#"<a class="board-nav-link" href="/{short}/archive">[Archive]</a>"#,
+            short = escape_html(&board.short_name)
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"<div class="board-nav">
+  <a class="board-nav-link" href="/{short}">[Index]</a>
+  <a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>
+  {archive_link}
+  <span class="board-nav-link active">[Thread]</span>
+</div>"#,
+        short = escape_html(&board.short_name),
+        archive_link = archive_link,
+    )
+}
+
+fn render_thread_nav(reply_count: i64, is_bottom: bool, reply_href: Option<&str>) -> String {
     let jump_link = if is_bottom { "#top" } else { "#bottom" };
     let jump_label = if is_bottom { "Top" } else { "Bottom" };
     let nav_class = if is_bottom {
@@ -23,11 +45,23 @@ fn render_thread_nav(board_short: &str, reply_count: i64, is_bottom: bool) -> St
     } else {
         "board-header thread-nav"
     };
+    let reply_link = reply_href.map_or_else(String::new, |href| {
+        if href == "#post-form-wrap" {
+            format!(
+                r#"<a href="{href}" data-action="open-post-form">[ Reply ]</a>"#,
+                href = escape_html(href)
+            )
+        } else {
+            format!(
+                r#"<a href="{href}">[ Reply ]</a>"#,
+                href = escape_html(href)
+            )
+        }
+    });
 
     format!(
         r#"<div class="{nav_class}">
-  <a href="/{s}">[ Return ]</a>
-  <a href="/{s}/catalog">[ Catalog ]</a>
+  {reply_link}
   <a href="{jump_link}">[ {jump_label} ]</a>
   <button class="thread-nav-btn" data-action="fetch-updates">[ Update ]</button>
   <label class="autoupdate-label">
@@ -39,7 +73,7 @@ fn render_thread_nav(board_short: &str, reply_count: i64, is_bottom: bool) -> St
 </div>
 "#,
         nav_class = nav_class,
-        s = escape_html(board_short),
+        reply_link = reply_link,
         jump_link = jump_link,
         jump_label = jump_label,
         reply_count = reply_count,
@@ -114,16 +148,14 @@ pub fn thread_page(
     can_post: bool,
 ) -> String {
     let mut body = String::new();
-
-    if let Some(msg) = error {
-        let _ = write!(
-            body,
-            r#"<div class="post-error-banner">&#9888; {}</div>"#,
-            escape_html(msg)
-        );
-    }
-
-    if is_admin {
+    let reply_href = if !thread.locked && !thread.archived && can_post {
+        Some("#post-form-wrap")
+    } else if !thread.locked && !thread.archived && board.access_mode.requires_post_password() {
+        Some("#board-access-gate")
+    } else {
+        None
+    };
+    let admin_toolbar = if is_admin {
         let sticky_action = if thread.sticky {
             ("unsticky", "&#128204; Unsticky")
         } else {
@@ -134,8 +166,7 @@ pub fn thread_page(
         } else {
             ("lock", "&#128274; Lock")
         };
-        let _ = write!(
-            body,
+        format!(
             r#"<div class="admin-toolbar">
 <span class="admin-toolbar-label">&#9632; ADMIN</span>
 <form method="POST" action="/admin/thread/action" style="display:inline">
@@ -173,7 +204,6 @@ pub fn thread_page(
             sticky_lbl = sticky_action.1,
             lock_act = lock_action.0,
             lock_lbl = lock_action.1,
-            // Show "Archive Thread" only when the thread is not already archived.
             archive_btn = if thread.archived {
                 String::new()
             } else {
@@ -193,6 +223,16 @@ pub fn thread_page(
                     board = escape_html(&board.short_name),
                 )
             }
+        )
+    } else {
+        String::new()
+    };
+
+    if let Some(msg) = error {
+        let _ = write!(
+            body,
+            r#"<div class="post-error-banner">&#9888; {}</div>"#,
+            escape_html(msg)
         );
     }
 
@@ -208,11 +248,15 @@ pub fn thread_page(
         body,
         r#"<div id="top"></div>
 <div class="thread-board-banner board-thread-header">/{s}/ — {bn}{access_badge}</div>
+{board_nav}
+{admin_toolbar}
 {top_nav}"#,
         s = escape_html(&board.short_name),
         bn = escape_html(&board.name),
         access_badge = super::board::board_access_badge(board),
-        top_nav = render_thread_nav(&board.short_name, thread.reply_count, false)
+        board_nav = render_thread_board_nav(board),
+        admin_toolbar = admin_toolbar,
+        top_nav = render_thread_nav(thread.reply_count, false, reply_href)
     );
     body.push_str(thread_notice);
 
@@ -269,11 +313,7 @@ pub fn thread_page(
         ));
     }
     body.push_str("<div id=\"bottom\"></div>\n");
-    body.push_str(&render_thread_nav(
-        &board.short_name,
-        thread.reply_count,
-        true,
-    ));
+    body.push_str(&render_thread_nav(thread.reply_count, true, reply_href));
 
     body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
@@ -1054,8 +1094,8 @@ pub fn edit_post_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{display_file_name, render_post, RenderPostOpts};
-    use crate::models::{MediaType, Post};
+    use super::{display_file_name, render_post, thread_page, RenderPostOpts};
+    use crate::models::{BoardAccessMode, MediaType, Post, Thread};
 
     fn sample_post() -> Post {
         Post {
@@ -1085,6 +1125,88 @@ mod tests {
             media_processing_state: None,
             media_processing_error: None,
         }
+    }
+
+    fn sample_thread() -> Thread {
+        Thread {
+            id: 87,
+            board_id: 1,
+            subject: Some("Thread subject".into()),
+            created_at: 1_700_000_000,
+            bumped_at: 1_700_000_100,
+            locked: false,
+            sticky: false,
+            archived: false,
+            reply_count: 12,
+            image_count: 3,
+            op_body: Some("Thread body preview".into()),
+            op_file: Some("test/image.webp".into()),
+            op_thumb: Some("test/thumbs/image.webp".into()),
+            op_name: Some("anon".into()),
+            op_tripcode: None,
+            op_id: Some(1),
+        }
+    }
+
+    #[test]
+    fn thread_page_renders_board_nav_and_reply_open_action() {
+        let board = crate::test_fixtures::sample_board();
+        let thread = sample_thread();
+        let posts = vec![Post {
+            is_op: true,
+            ..sample_post()
+        }];
+
+        let html = thread_page(
+            &board,
+            &thread,
+            &posts,
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+        );
+
+        assert!(html.contains(r#"<div class="board-nav">"#));
+        assert!(html.contains(r#"href="/test">[Index]</a>"#));
+        assert!(html.contains(r#"href="/test/catalog">[Catalog]</a>"#));
+        assert!(html.contains(r#"<span class="board-nav-link active">[Thread]</span>"#));
+        assert!(html.contains(r#"data-action="open-post-form""#));
+    }
+
+    #[test]
+    fn thread_page_links_reply_nav_to_access_gate_when_posting_is_locked_behind_password() {
+        let board = crate::models::Board {
+            access_mode: BoardAccessMode::PostPassword,
+            access_password_hash: "hash".into(),
+            ..crate::test_fixtures::sample_board()
+        };
+        let thread = sample_thread();
+        let posts = vec![Post {
+            is_op: true,
+            ..sample_post()
+        }];
+
+        let html = thread_page(
+            &board,
+            &thread,
+            &posts,
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            None,
+            None,
+            false,
+            false,
+        );
+
+        assert!(html.contains(r##"href="#board-access-gate">[ Reply ]</a>"##));
+        assert!(html.contains(r#"id="board-access-gate""#));
     }
 
     #[test]

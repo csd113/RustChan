@@ -18,7 +18,7 @@ use crate::{
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
-    http::{header::HeaderValue, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -165,6 +165,7 @@ pub async fn post_reply(
     req_headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Response> {
+    let xhr_request = is_xml_http_request(&req_headers);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
@@ -386,6 +387,12 @@ pub async fn post_reply(
     let redirect_url = match result {
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
+            if xhr_request {
+                return crate::handlers::board::xhr_error_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &msg,
+                );
+            }
             let db_pool = state.db.clone();
             let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
             let html = tokio::task::spawn_blocking(move || -> Result<String> {
@@ -413,18 +420,16 @@ pub async fn post_reply(
             *resp.status_mut() = axum::http::StatusCode::UNPROCESSABLE_ENTITY;
             return Ok(resp);
         }
-        Err(e) => return Err(e),
+        Err(error) => {
+            if xhr_request {
+                return crate::handlers::board::xhr_post_error_response(error);
+            }
+            return Err(error);
+        }
     };
 
-    if is_xml_http_request(&req_headers) {
-        let mut resp = Response::new(axum::body::Body::empty());
-        *resp.status_mut() = StatusCode::NO_CONTENT;
-        resp.headers_mut().insert(
-            "x-rustchan-redirect",
-            HeaderValue::from_str(&redirect_url)
-                .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?,
-        );
-        return Ok(resp);
+    if xhr_request {
+        return crate::handlers::board::xhr_redirect_response(&redirect_url);
     }
 
     Ok(Redirect::to(&redirect_url).into_response())
@@ -965,7 +970,7 @@ pub async fn thread_updates(
 #[cfg(test)]
 mod tests {
     use axum::{
-        body::Body,
+        body::{to_bytes, Body},
         http::{header, Request, StatusCode},
         routing::post,
         Router,
@@ -1145,5 +1150,86 @@ mod tests {
             redirect,
             format!("/test/thread/{thread_id}#p{reply_post_id}")
         );
+    }
+
+    #[tokio::test]
+    async fn xhr_reply_validation_failure_returns_json_error() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/{board}", post(crate::handlers::board::create_thread))
+            .route("/{board}/thread/{id}", post(super::post_reply))
+            .with_state(state.clone());
+
+        let (create_boundary, create_body) =
+            crate::test_support::multipart_body(&[("_csrf", "csrf123"), ("body", "op body")], None);
+        let create_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/test")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={create_boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(create_body))
+                    .expect("create request"),
+            )
+            .await
+            .expect("create response");
+        assert_eq!(create_response.status(), StatusCode::SEE_OTHER);
+
+        let thread_id = {
+            let conn = state.db.get().expect("db connection");
+            conn.query_row("SELECT id FROM threads LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("thread id")
+        };
+
+        let (reply_boundary, reply_body) =
+            crate::test_support::multipart_body(&[("_csrf", "csrf123"), ("body", "")], None);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/test/thread/{thread_id}"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={reply_boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(reply_body))
+                    .expect("reply request"),
+            )
+            .await
+            .expect("reply response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json; charset=utf-8")
+        );
+
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains("\"error\""));
     }
 }

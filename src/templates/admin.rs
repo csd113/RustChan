@@ -110,6 +110,326 @@ html[data-theme="{slug}"] a:hover {{
     )
 }
 
+fn render_board_settings_card(
+    board: &Board,
+    index: usize,
+    boards: &[Board],
+    csrf_token: &str,
+    themes: &[crate::models::Theme],
+) -> String {
+    let checked = |value: bool| if value { " checked" } else { "" };
+    let prev_same_group = index
+        .checked_sub(1)
+        .and_then(|prev| boards.get(prev))
+        .is_some_and(|prev| prev.nsfw == board.nsfw);
+    let next_same_group = boards
+        .get(index + 1)
+        .is_some_and(|next| next.nsfw == board.nsfw);
+    let board_favicon_exists = crate::favicon::board_has_custom_favicon(&board.short_name);
+    let board_favicon_version =
+        crate::favicon::favicon_version_for_board(Some(&board.short_name)).unwrap_or_default();
+    let board_theme_options = themes
+        .iter()
+        .filter(|theme| theme.enabled)
+        .map(|theme| {
+            format!(
+                r#"<option value="{slug}"{selected}>{label}</option>"#,
+                slug = escape_html(&theme.slug),
+                selected = if theme.slug == board.default_theme {
+                    " selected"
+                } else {
+                    ""
+                },
+                label = escape_html(&theme.display_name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let any_files_toggle = if crate::config::CONFIG.enable_any_file_uploads_feature {
+        format!(
+            r#"<label><input type="checkbox" name="allow_any_files" value="1"{}> Allow any file downloads</label>"#,
+            checked(board.allow_any_files)
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"{group_gap}<details class="board-settings-card" id="board-{short}">
+<summary>/{short}/ — {name} {nsfw_tag}{access_tag}</summary>
+<div class="board-order-toolbar">
+<span>{group_label} order: {display_order}. Homepage and header follow this group ordering.</span>
+<form method="POST" action="/admin/board/reorder">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <input type="hidden" name="direction" value="up">
+  <input type="hidden" name="return_to" value="/admin/panel#board-{short}">
+  <button type="submit"{move_up_disabled}>move up</button>
+</form>
+<form method="POST" action="/admin/board/reorder">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <input type="hidden" name="direction" value="down">
+  <input type="hidden" name="return_to" value="/admin/panel#board-{short}">
+  <button type="submit"{move_down_disabled}>move down</button>
+</form>
+</div>
+<form method="POST" action="/admin/board/settings" class="board-settings-form">
+<input type="hidden" name="_csrf" value="{csrf}">
+<input type="hidden" name="board_id" value="{id}">
+<div class="admin-subsection">
+  <div class="admin-card-header">
+    <h3>// basic setup</h3>
+    <p>Name, board grouping, thread limits, and archival behavior.</p>
+  </div>
+  <div class="board-settings-grid">
+    <label>Name<input type="text" name="name" value="{name_raw}" maxlength="64" required></label>
+    <label>Description<input type="text" name="description" value="{desc_raw}" maxlength="256"></label>
+    <label>Bump limit<input type="number" name="bump_limit" value="{bump}" min="1" max="10000"></label>
+    <label>Max threads<input type="number" name="max_threads" value="{max_threads}" min="1" max="1000"></label>
+    <label>Max archived threads<input type="number" name="max_archived_threads" value="{max_archived_threads}" min="1" max="10000"></label>
+  </div>
+  <div class="board-settings-checks">
+    <label><input type="checkbox" name="nsfw" value="1"{nsfw_checked}> Show this board in the NSFW group</label>
+    <label><input type="checkbox" name="allow_archive" value="1"{archive_checked}> Archive overflow threads instead of deleting them</label>
+  </div>
+</div>
+<div class="admin-subsection">
+  <div class="admin-card-header">
+    <h3>// access &amp; anti-spam</h3>
+    <p>Choose who can read or post here, then set the board-specific friction controls.</p>
+  </div>
+  <div class="board-settings-grid">
+    <label>Access mode
+      <select name="access_mode">
+        <option value="public"{access_public_selected}>Public</option>
+        <option value="view_password"{access_view_selected}>Password required to view board</option>
+        <option value="post_password"{access_post_selected}>Board is viewable, but posting requires a password</option>
+      </select>
+    </label>
+    <label>Board password
+      <input type="password" name="access_password" maxlength="256" autocomplete="new-password" placeholder="{access_password_placeholder}">
+      <span style="font-size:0.72rem;color:var(--text-dim)">{access_password_status}</span>
+    </label>
+    <label title="Minimum seconds a user must wait between posts on this board. 0 = no cooldown.">
+      Post cooldown (s)<input type="number" name="post_cooldown_secs" value="{cooldown}" min="0" max="3600">
+    </label>
+  </div>
+  <div class="board-settings-checks">
+    <label><input type="checkbox" name="clear_access_password" value="1"> Clear saved board password</label>
+    <label><input type="checkbox" name="allow_captcha" value="1"{captcha_checked}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)</label>
+  </div>
+</div>
+<div class="admin-subsection">
+  <div class="admin-card-header">
+    <h3>// uploads &amp; post features</h3>
+    <p>Control accepted media types, poster identity tools, embeds, and editing behavior.</p>
+  </div>
+  <div class="board-settings-checks">
+    <label><input type="checkbox" name="allow_images" value="1"{images_checked}> Allow images</label>
+    <label><input type="checkbox" name="allow_video" value="1"{video_checked}> Allow video</label>
+    <label><input type="checkbox" name="allow_audio" value="1"{audio_checked}> Allow audio</label>
+    {any_files_toggle}
+    <label><input type="checkbox" name="allow_tripcodes" value="1"{tripcodes_checked}> Allow tripcodes</label>
+    <label><input type="checkbox" name="allow_video_embeds" value="1"{video_embeds_checked}> Embed video links (YouTube / Invidious / Streamable)</label>
+    <label><input type="checkbox" name="show_poster_ids" value="1"{poster_ids_checked}> Show thread-local poster IDs</label>
+    <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block for this board. Existing posts are not affected.">
+      <input type="checkbox" name="collapse_greentext" value="1"{collapse_greentext_checked}> Collapse long greentext walls (3+ lines) into expandable blocks
+    </label>
+    <label><input type="checkbox" name="allow_editing" value="1"{allow_editing_checked}> Allow post editing</label>
+  </div>
+  <div class="board-settings-grid edit-window-row" style="margin-top:0.4rem;{edit_window_display}">
+    <label title="How long (seconds) after posting a user may edit. 0 = use default (300 s).">
+      Edit window (s)<input type="number" name="edit_window_secs" value="{edit_window_secs}" min="0" max="86400">
+    </label>
+  </div>
+</div>
+<div class="admin-subsection">
+  <div class="admin-card-header">
+    <h3>// appearance</h3>
+    <p>Pick the default theme for this board. Favicon overrides live just below.</p>
+  </div>
+  <div class="board-settings-grid">
+    <label>Board default theme
+      <select name="default_theme">
+        <option value=""{inherit_theme_selected}>Inherit site default</option>
+        {board_theme_options}
+      </select>
+    </label>
+  </div>
+</div>
+<div class="board-settings-actions">
+  <button type="submit">save settings</button>
+</div>
+</form>
+<p class="favicon-inline-status"><strong>// favicon override</strong> Give /{short}/ its own icon without changing the global site favicon.</p>
+<div class="favicon-inline-row">
+{board_favicon_preview}
+<form method="POST" action="/admin/board/favicon" enctype="multipart/form-data" class="favicon-inline-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <label class="favicon-inline-label">
+    {board_favicon_label}
+    <input type="file" name="favicon" accept="image/png,image/jpeg,image/webp" required class="favicon-inline-input">
+  </label>
+  <button type="submit">{board_favicon_button}</button>
+</form>
+{board_favicon_clear}
+</div>
+<p class="favicon-inline-status">{board_favicon_status}</p>
+<p class="favicon-inline-status"><strong>// board backup tools</strong> Create a fresh board-only package for immediate download or save one to the server for later restores.</p>
+<div class="board-card-footer-actions">
+  <form method="POST" action="/admin/board/backup/create" class="board-backup-download-form" data-board="{short}">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="board_short" value="{short}">
+    <input type="hidden" name="download_after_create" value="1">
+    <button type="submit">&#8659; download to computer /{short}/</button>
+  </form>
+  <form method="POST" action="/admin/board/backup/create" class="board-backup-create-form" data-board="{short}">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="board_short" value="{short}">
+    <button type="submit">&#128190; save to server /{short}/</button>
+  </form>
+</div>
+<p class="favicon-inline-status"><strong>// danger zone</strong> Permanent board deletion stays separate from routine maintenance tools.</p>
+<div class="board-card-footer-actions">
+  <form method="POST" action="/admin/board/delete">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="board_id" value="{id}">
+    <button type="submit" class="btn-danger"
+            data-confirm="Delete /{short}/ and ALL its content?">delete board</button>
+  </form>
+</div>
+</details>"#,
+        short = escape_html(&board.short_name),
+        name = escape_html(&board.name),
+        nsfw_tag = if board.nsfw {
+            r#"<span class="tag nsfw-tag">NSFW</span>"#
+        } else {
+            ""
+        },
+        access_tag = match board.access_mode {
+            crate::models::BoardAccessMode::Public => "",
+            crate::models::BoardAccessMode::ViewPassword => {
+                r#" <span class="tag locked">PASSWORD</span>"#
+            }
+            crate::models::BoardAccessMode::PostPassword => {
+                r#" <span class="tag sticky">POST PASSWORD</span>"#
+            }
+        },
+        group_gap = if index > 0 && board.nsfw && !prev_same_group {
+            "<div class=\"admin-board-group-gap\" aria-hidden=\"true\"></div>"
+        } else {
+            ""
+        },
+        group_label = if board.nsfw { "NSFW" } else { "SFW" },
+        display_order = board.display_order,
+        csrf = escape_html(csrf_token),
+        id = board.id,
+        move_up_disabled = if prev_same_group { "" } else { " disabled" },
+        move_down_disabled = if next_same_group { "" } else { " disabled" },
+        name_raw = escape_html(&board.name),
+        desc_raw = escape_html(&board.description),
+        bump = board.bump_limit,
+        max_threads = board.max_threads,
+        max_archived_threads = board.max_archived_threads,
+        nsfw_checked = checked(board.nsfw),
+        archive_checked = checked(board.allow_archive),
+        access_public_selected =
+            if matches!(board.access_mode, crate::models::BoardAccessMode::Public) {
+                " selected"
+            } else {
+                ""
+            },
+        access_view_selected = if matches!(
+            board.access_mode,
+            crate::models::BoardAccessMode::ViewPassword
+        ) {
+            " selected"
+        } else {
+            ""
+        },
+        access_post_selected = if matches!(
+            board.access_mode,
+            crate::models::BoardAccessMode::PostPassword
+        ) {
+            " selected"
+        } else {
+            ""
+        },
+        access_password_placeholder = if board.access_password_hash.is_empty() {
+            "set a board password"
+        } else {
+            "leave blank to keep current password"
+        },
+        access_password_status = if board.access_password_hash.is_empty() {
+            "No board password is currently saved."
+        } else {
+            "A board password is already saved here."
+        },
+        cooldown = board.post_cooldown_secs,
+        captcha_checked = checked(board.allow_captcha),
+        images_checked = checked(board.allow_images),
+        video_checked = checked(board.allow_video),
+        audio_checked = checked(board.allow_audio),
+        tripcodes_checked = checked(board.allow_tripcodes),
+        video_embeds_checked = checked(board.allow_video_embeds),
+        poster_ids_checked = checked(board.show_poster_ids),
+        collapse_greentext_checked = checked(board.collapse_greentext),
+        allow_editing_checked = checked(board.allow_editing),
+        any_files_toggle = any_files_toggle,
+        edit_window_display = if board.allow_editing {
+            ""
+        } else {
+            "display:none"
+        },
+        edit_window_secs = board.edit_window_secs,
+        inherit_theme_selected = if board.default_theme.is_empty() {
+            " selected"
+        } else {
+            ""
+        },
+        board_theme_options = board_theme_options,
+        board_favicon_preview = if board_favicon_exists {
+            format!(
+                r#"<img class="favicon-inline-preview" src="/boards/{short}/_favicon/favicon-32x32.png?v={version}" alt="/{short}/ favicon">"#,
+                short = escape_html(&board.short_name),
+                version = escape_html(&board_favicon_version)
+            )
+        } else {
+            String::new()
+        },
+        board_favicon_label = if board_favicon_exists {
+            "replace favicon"
+        } else {
+            "board favicon"
+        },
+        board_favicon_button = if board_favicon_exists {
+            "replace"
+        } else {
+            "upload"
+        },
+        board_favicon_status = if board_favicon_exists {
+            "Custom board favicon is active here and overrides the global favicon."
+        } else {
+            "No board-specific favicon set. This board uses the global favicon."
+        },
+        board_favicon_clear = if board_favicon_exists {
+            format!(
+                r#"<form method="POST" action="/admin/board/favicon/clear" class="favicon-inline-clear">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <button type="submit">clear</button>
+</form>"#,
+                csrf = escape_html(csrf_token),
+                id = board.id
+            )
+        } else {
+            String::new()
+        }
+    )
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn admin_panel_page(
     boards: &[Board],
@@ -170,277 +490,10 @@ pub fn admin_panel_page(
     let mut builtin_theme_cards = String::new();
     let mut custom_theme_cards = String::new();
     let mut board_cards = String::new();
-    for (index, b) in boards.iter().enumerate() {
-        let checked = |v: bool| if v { " checked" } else { "" };
-        let prev_same_group = index
-            .checked_sub(1)
-            .and_then(|prev| boards.get(prev))
-            .is_some_and(|prev| prev.nsfw == b.nsfw);
-        let next_same_group = boards
-            .get(index + 1)
-            .is_some_and(|next| next.nsfw == b.nsfw);
-        let board_favicon_exists = crate::favicon::board_has_custom_favicon(&b.short_name);
-        let board_favicon_version =
-            crate::favicon::favicon_version_for_board(Some(&b.short_name)).unwrap_or_default();
-        let _ = write!(
-            board_cards,
-            r#"{group_gap}<details class="board-settings-card" id="board-{short}">
-<summary>/{short}/ — {name} {nsfw_tag}{access_tag}</summary>
-<div class="board-order-toolbar">
-<span>{group_label} order: {display_order}</span>
-<form method="POST" action="/admin/board/reorder">
-  <input type="hidden" name="_csrf" value="{csrf}">
-  <input type="hidden" name="board_id" value="{id}">
-  <input type="hidden" name="direction" value="up">
-  <input type="hidden" name="return_to" value="/admin/panel#board-{short}">
-  <button type="submit"{move_up_disabled}>move up</button>
-</form>
-<form method="POST" action="/admin/board/reorder">
-  <input type="hidden" name="_csrf" value="{csrf}">
-  <input type="hidden" name="board_id" value="{id}">
-  <input type="hidden" name="direction" value="down">
-  <input type="hidden" name="return_to" value="/admin/panel#board-{short}">
-  <button type="submit"{move_down_disabled}>move down</button>
-</form>
-</div>
-<form method="POST" action="/admin/board/settings" class="board-settings-form">
-<input type="hidden" name="_csrf"     value="{csrf}">
-<input type="hidden" name="board_id"  value="{id}">
-<div class="board-settings-grid">
-  <label>Name<input type="text" name="name" value="{name_raw}" maxlength="64" required></label>
-  <label>Description<input type="text" name="description" value="{desc_raw}" maxlength="256"></label>
-  <label>Bump limit<input type="number" name="bump_limit" value="{bump}" min="1" max="10000"></label>
-  <label>Max threads<input type="number" name="max_threads" value="{maxt}" min="1" max="1000"></label>
-  <label>Max archived threads<input type="number" name="max_archived_threads" value="{max_archived}" min="1" max="10000"></label>
-  <label>Board default theme
-    <select name="default_theme">
-      <option value=""{inherit_theme_selected}>Inherit site default</option>
-      {board_theme_options}
-    </select>
-  </label>
-  <label>Access mode
-    <select name="access_mode">
-      <option value="public"{access_public_selected}>Public</option>
-      <option value="view_password"{access_view_selected}>Password required to view board</option>
-      <option value="post_password"{access_post_selected}>Board is viewable, but posting requires a password</option>
-    </select>
-  </label>
-  <label>Board password
-    <input type="password" name="access_password" maxlength="256" autocomplete="new-password" placeholder="{access_password_placeholder}">
-    <span style="font-size:0.72rem;color:var(--text-dim)">{access_password_status}</span>
-  </label>
-</div>
-<div class="board-settings-checks">
-  <label><input type="checkbox" name="nsfw"            value="1"{nsfw_ck}> NSFW</label>
-  <label><input type="checkbox" name="allow_images"    value="1"{img_ck}>  Allow images</label>
-  <label><input type="checkbox" name="allow_video"     value="1"{vid_ck}>  Allow video</label>
-  <label><input type="checkbox" name="allow_audio"     value="1"{aud_ck}>  Allow audio</label>
-  {any_files_toggle}
-  <label><input type="checkbox" name="allow_tripcodes" value="1"{trip_ck}> Allow tripcodes</label>
-  <label><input type="checkbox" name="allow_archive"   value="1"{archive_ck}> Enable archive</label>
-  <label><input type="checkbox" name="allow_video_embeds" value="1"{embeds_ck}> Embed video links (YouTube / Invidious / Streamable)</label>
-  <label><input type="checkbox" name="allow_captcha"      value="1"{captcha_ck}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)</label>
-  <label><input type="checkbox" name="show_poster_ids"    value="1"{poster_ids_ck}> Show thread-local poster IDs</label>
-  <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block for this board. Existing posts are not affected.">
-    <input type="checkbox" name="collapse_greentext" value="1"{collapse_ck}> Collapse long greentext walls (3+ lines) into expandable blocks
-  </label>
-  <label><input type="checkbox" name="clear_access_password" value="1"> Clear saved board password</label>
-  <label><input type="checkbox" name="allow_editing"   value="1"{edit_ck}>
-    Allow post editing</label>
-</div>
-<div class="board-settings-grid edit-window-row" style="margin-top:0.4rem;{edit_win_display}">
-  <label title="How long (seconds) after posting a user may edit. 0 = use default (300 s).">
-    Edit window (s)<input type="number" name="edit_window_secs" value="{edit_win}" min="0" max="86400">
-  </label>
-</div>
-<div class="board-settings-grid" style="margin-top:0.4rem;">
-  <label title="Minimum seconds a user must wait between posts on this board. 0 = no cooldown.">
-    Post cooldown (s)<input type="number" name="post_cooldown_secs" value="{cooldown}" min="0" max="3600">
-  </label>
-</div>
-<div class="board-settings-actions">
-  <button type="submit">save settings</button>
-</div>
-</form>
-<div class="favicon-inline-row">
-{board_favicon_preview}
-<form method="POST" action="/admin/board/favicon" enctype="multipart/form-data" class="favicon-inline-form">
-  <input type="hidden" name="_csrf" value="{csrf}">
-  <input type="hidden" name="board_id" value="{id}">
-  <label class="favicon-inline-label">
-    {board_favicon_label}
-    <input type="file" name="favicon" accept="image/png,image/jpeg,image/webp" required class="favicon-inline-input">
-  </label>
-  <button type="submit">{board_favicon_button}</button>
-</form>
-{board_favicon_clear}
-</div>
-<p class="favicon-inline-status">
-  {board_favicon_status}
-</p>
-<!-- Delete form is now OUTSIDE the settings form. -->
-<div class="board-card-footer-actions">
-  <form method="POST" action="/admin/board/delete">
-    <input type="hidden" name="_csrf"     value="{csrf}">
-    <input type="hidden" name="board_id"  value="{id}">
-    <button type="submit" class="btn-danger"
-            data-confirm="Delete /{short}/ and ALL its content?">delete board</button>
-  </form>
-  <form method="POST" action="/admin/board/backup/create" class="board-backup-download-form" data-board="{short}">
-    <input type="hidden" name="_csrf" value="{csrf}">
-    <input type="hidden" name="board_short" value="{short}">
-    <input type="hidden" name="download_after_create" value="1">
-    <button type="submit">&#8659; download to computer /{short}/</button>
-  </form>
-  <form method="POST" action="/admin/board/backup/create" class="board-backup-create-form" data-board="{short}">
-    <input type="hidden" name="_csrf" value="{csrf}">
-    <input type="hidden" name="board_short" value="{short}">
-    <button type="submit">&#128190; save to server /{short}/</button>
-  </form>
-</div>
-</details>"#,
-            short = escape_html(&b.short_name),
-            name = escape_html(&b.name),
-            nsfw_tag = if b.nsfw {
-                r#"<span class="tag nsfw-tag">NSFW</span>"#
-            } else {
-                ""
-            },
-            access_tag = match b.access_mode {
-                crate::models::BoardAccessMode::Public => "",
-                crate::models::BoardAccessMode::ViewPassword => {
-                    r#" <span class="tag locked">PASSWORD</span>"#
-                }
-                crate::models::BoardAccessMode::PostPassword => {
-                    r#" <span class="tag sticky">POST PASSWORD</span>"#
-                }
-            },
-            csrf = escape_html(csrf_token),
-            id = b.id,
-            group_gap = if index > 0 && b.nsfw && !prev_same_group {
-                "<div class=\"admin-board-group-gap\" aria-hidden=\"true\"></div>"
-            } else {
-                ""
-            },
-            group_label = if b.nsfw { "NSFW" } else { "SFW" },
-            display_order = b.display_order,
-            name_raw = escape_html(&b.name),
-            desc_raw = escape_html(&b.description),
-            bump = b.bump_limit,
-            maxt = b.max_threads,
-            max_archived = b.max_archived_threads,
-            inherit_theme_selected = if b.default_theme.is_empty() {
-                " selected"
-            } else {
-                ""
-            },
-            board_theme_options = themes
-                .iter()
-                .filter(|theme| theme.enabled)
-                .map(|theme| {
-                    format!(
-                        r#"<option value="{slug}"{selected}>{label}</option>"#,
-                        slug = escape_html(&theme.slug),
-                        selected = if theme.slug == b.default_theme {
-                            " selected"
-                        } else {
-                            ""
-                        },
-                        label = escape_html(&theme.display_name)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(""),
-            access_public_selected =
-                if matches!(b.access_mode, crate::models::BoardAccessMode::Public) {
-                    " selected"
-                } else {
-                    ""
-                },
-            access_view_selected =
-                if matches!(b.access_mode, crate::models::BoardAccessMode::ViewPassword) {
-                    " selected"
-                } else {
-                    ""
-                },
-            access_post_selected =
-                if matches!(b.access_mode, crate::models::BoardAccessMode::PostPassword) {
-                    " selected"
-                } else {
-                    ""
-                },
-            access_password_placeholder = if b.access_password_hash.is_empty() {
-                "set a board password"
-            } else {
-                "leave blank to keep current password"
-            },
-            access_password_status = if b.access_password_hash.is_empty() {
-                "No board password is currently saved."
-            } else {
-                "A board password is already saved here."
-            },
-            edit_win = b.edit_window_secs,
-            edit_win_display = if b.allow_editing { "" } else { "display:none" },
-            cooldown = b.post_cooldown_secs,
-            nsfw_ck = checked(b.nsfw),
-            img_ck = checked(b.allow_images),
-            vid_ck = checked(b.allow_video),
-            aud_ck = checked(b.allow_audio),
-            any_files_toggle = if crate::config::CONFIG.enable_any_file_uploads_feature {
-                format!(
-                    r#"<label><input type="checkbox" name="allow_any_files" value="1"{}> Allow any file downloads</label>"#,
-                    checked(b.allow_any_files)
-                )
-            } else {
-                String::new()
-            },
-            trip_ck = checked(b.allow_tripcodes),
-            archive_ck = checked(b.allow_archive),
-            edit_ck = checked(b.allow_editing),
-            embeds_ck = checked(b.allow_video_embeds),
-            captcha_ck = checked(b.allow_captcha),
-            poster_ids_ck = checked(b.show_poster_ids),
-            collapse_ck = checked(b.collapse_greentext),
-            move_up_disabled = if prev_same_group { "" } else { " disabled" },
-            move_down_disabled = if next_same_group { "" } else { " disabled" },
-            board_favicon_preview = if board_favicon_exists {
-                format!(
-                    r#"<img class="favicon-inline-preview" src="/boards/{short}/_favicon/favicon-32x32.png?v={version}" alt="/{short}/ favicon">"#,
-                    short = escape_html(&b.short_name),
-                    version = escape_html(&board_favicon_version)
-                )
-            } else {
-                String::new()
-            },
-            board_favicon_label = if board_favicon_exists {
-                "replace favicon"
-            } else {
-                "board favicon"
-            },
-            board_favicon_button = if board_favicon_exists {
-                "replace"
-            } else {
-                "upload"
-            },
-            board_favicon_status = if board_favicon_exists {
-                "Custom board favicon is active here and overrides the global favicon."
-            } else {
-                "No board-specific favicon set. This board uses the global favicon."
-            },
-            board_favicon_clear = if board_favicon_exists {
-                format!(
-                    r#"<form method="POST" action="/admin/board/favicon/clear" class="favicon-inline-clear">
-  <input type="hidden" name="_csrf" value="{csrf}">
-  <input type="hidden" name="board_id" value="{id}">
-  <button type="submit">clear</button>
-</form>"#,
-                    csrf = escape_html(csrf_token),
-                    id = b.id
-                )
-            } else {
-                String::new()
-            }
-        );
+    for (index, board) in boards.iter().enumerate() {
+        board_cards.push_str(&render_board_settings_card(
+            board, index, boards, csrf_token, themes,
+        ));
     }
 
     let mut ban_rows = String::new();
@@ -576,7 +629,7 @@ pub fn admin_panel_page(
       </form>
     </div>
     <details class="backup-extract-details">
-      <summary>board tools</summary>
+      <summary>single-board tools</summary>
       <form method="POST" action="/admin/backup/extract-board" class="backup-extract-form">
         <input type="hidden" name="_csrf" value="{csrf}">
         <input type="hidden" name="filename" value="{fname}">
@@ -628,6 +681,7 @@ pub fn admin_panel_page(
             r#"<tr>
 <td class="backup-filename-cell">
   <div class="backup-filename">{fname}</div>
+  <div class="backup-submeta">single-board snapshot</div>
 </td>
 <td class="backup-meta-cell">{size}</td>
 <td class="backup-meta-cell">{modified}</td>
@@ -983,17 +1037,28 @@ old boards to prevent query performance degradation.
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section">
 <h2>// boards</h2>
-<p class="admin-order-note">Board order is shared across the homepage, top bar, and this panel, with SFW and NSFW boards each keeping their own separate order.</p>
-<div class="admin-board-cards">{board_cards}</div>
-<h3>create board</h3>
-<form method="POST" action="/admin/board/create" class="admin-board-create-form">
-<input type="hidden" name="_csrf" value="{csrf}">
-<input type="text" name="short_name" placeholder="short (e.g. tech)" maxlength="8" required>
-<input type="text" name="name" placeholder="full name" maxlength="64" required>
-<input type="text" name="description" placeholder="description" maxlength="256">
-<label style="color:var(--text-dim);font-size:0.8rem"><input type="checkbox" name="nsfw" value="1"> NSFW</label>
-<button type="submit">create</button>
-</form>
+<div class="admin-subsection">
+  <div class="admin-card-header">
+    <h3>// board directory</h3>
+    <p>Open a board card to adjust settings, access, appearance, backups, and destructive actions in separate task blocks.</p>
+  </div>
+  <p class="admin-order-note">Board order is shared across the homepage, top bar, and this panel, with SFW and NSFW boards each keeping their own separate order.</p>
+  <div class="admin-board-cards">{board_cards}</div>
+</div>
+<div class="admin-subsection">
+  <div class="admin-card-header">
+    <h3>// create board</h3>
+    <p>Start with the short name and public-facing label, then fine-tune everything else from its board card above.</p>
+  </div>
+  <form method="POST" action="/admin/board/create" class="admin-board-create-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="text" name="short_name" placeholder="short (e.g. tech)" maxlength="8" required>
+  <input type="text" name="name" placeholder="full name" maxlength="64" required>
+  <input type="text" name="description" placeholder="description" maxlength="256">
+  <label style="color:var(--text-dim);font-size:0.8rem"><input type="checkbox" name="nsfw" value="1"> NSFW</label>
+  <button type="submit">create</button>
+  </form>
+</div>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -1204,42 +1269,60 @@ button / button:hover</pre>
 <p class="admin-copy">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/backups/full/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer. Saved full backups can also be used to extract or directly restore a single board without scheduling separate per-board backups.</p>
 {backup_warning_html}
 <p class="admin-copy"><strong>Backup health:</strong> {backup_status_line}</p>
-<form method="POST" action="/admin/backup/settings" class="admin-site-settings-form">
-<input type="hidden" name="_csrf" value="{csrf}">
-<div class="board-settings-grid admin-settings-grid">
-  <label title="0 disables scheduled full backups.">
-    Hours between automated backups
-    <input type="number" name="auto_full_backup_interval_hours" value="{auto_full_backup_interval_hours}" min="0" max="8760" style="font-family:inherit">
-  </label>
-  <label title="When a saved full backup completes, the oldest saved full backups beyond this limit are deleted.">
-    Full backups to keep
-    <input type="number" name="auto_full_backup_copies_to_keep" value="{auto_full_backup_copies_to_keep}" min="1" max="1000" style="font-family:inherit">
-  </label>
+<div class="admin-subsection">
+  <div class="admin-card-header">
+    <h3>// automated full backups</h3>
+    <p>Schedule background full-site snapshots and decide how many recent saved copies the server keeps.</p>
+  </div>
+  <form method="POST" action="/admin/backup/settings" class="admin-site-settings-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <div class="board-settings-grid admin-settings-grid">
+    <label title="0 disables scheduled full backups.">
+      Hours between automated backups
+      <input type="number" name="auto_full_backup_interval_hours" value="{auto_full_backup_interval_hours}" min="0" max="8760" style="font-family:inherit">
+    </label>
+    <label title="When a saved full backup completes, the oldest saved full backups beyond this limit are deleted.">
+      Full backups to keep
+      <input type="number" name="auto_full_backup_copies_to_keep" value="{auto_full_backup_copies_to_keep}" min="1" max="1000" style="font-family:inherit">
+    </label>
+  </div>
+  <div class="board-settings-actions">
+    <button type="submit">save automated backup settings</button>
+  </div>
+  </form>
+  <p class="admin-meta-note admin-meta-note-spaced">
+    Set hours to <code>0</code> to disable automated full backups. Saving a full backup to server, including automated runs, trims the oldest saved full backups beyond the keep limit.
+  </p>
 </div>
-<div class="board-settings-actions">
-  <button type="submit">save automated backup settings</button>
+<div class="admin-subsection">
+  <div class="admin-card-header">
+    <h3>// run or restore now</h3>
+    <p>Create a new full backup on the server or upload a local archive to replace the live site.</p>
+  </div>
+  <div class="admin-inline-actions admin-inline-actions-spaced">
+  <form method="POST" action="/admin/backup/create" id="full-backup-create-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <button type="submit" id="full-backup-btn">&#128190; save to server</button>
+  </form>
+  <form method="POST" action="/admin/restore" enctype="multipart/form-data" class="backup-restore-upload-form" data-restore-label="full backup" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="file" name="backup_file" accept=".zip" required style="color:var(--text)">
+  <button type="submit" class="btn-danger"
+          data-confirm="WARNING: This will overwrite the database and all uploaded files. Cannot be undone. Continue?">&#8635; restore from local file</button>
+  </form>
+  </div>
 </div>
-</form>
-<p class="admin-meta-note admin-meta-note-spaced">
-  Set hours to <code>0</code> to disable automated full backups. Saving a full backup to server, including automated runs, trims the oldest saved full backups beyond the keep limit.
-</p>
-<div class="admin-inline-actions admin-inline-actions-spaced">
-<form method="POST" action="/admin/backup/create" id="full-backup-create-form">
-<input type="hidden" name="_csrf" value="{csrf}">
-<button type="submit" id="full-backup-btn">&#128190; save to server</button>
-</form>
-<form method="POST" action="/admin/restore" enctype="multipart/form-data" class="backup-restore-upload-form" data-restore-label="full backup" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
-<input type="hidden" name="_csrf" value="{csrf}">
-<input type="file" name="backup_file" accept=".zip" required style="color:var(--text)">
-<button type="submit" class="btn-danger"
-        data-confirm="WARNING: This will overwrite the database and all uploaded files. Cannot be undone. Continue?">&#8635; restore from local file</button>
-</form>
-</div>
-<div class="admin-table-wrap">
-<table class="admin-table backup-table" style="width:100%;border-collapse:collapse;font-size:0.85rem">
-<thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th style="text-align:left">status</th><th></th></tr></thead>
-<tbody>{full_backup_rows}</tbody>
-</table>
+<div class="admin-subsection">
+  <div class="admin-card-header">
+    <h3>// saved full backups</h3>
+    <p>Download, restore, delete, or extract a single board from any saved full-site archive.</p>
+  </div>
+  <div class="admin-table-wrap">
+  <table class="admin-table backup-table" style="width:100%;border-collapse:collapse;font-size:0.85rem">
+  <thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th style="text-align:left">status</th><th></th></tr></thead>
+  <tbody>{full_backup_rows}</tbody>
+  </table>
+  </div>
 </div>
 </section>
 
@@ -1249,19 +1332,31 @@ button / button:hover</pre>
 <section class="admin-section">
 <h2>// board backup &amp; restore</h2>
 <p class="admin-copy">Board backups cover a single board. Use <em>save to server</em> on a board card above to store the backup in <code>rustchan-data/backups/boards/</code>, or use the table below to download, restore, or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
-<div class="admin-inline-actions admin-inline-actions-spaced">
-<form method="POST" action="/admin/board/restore" enctype="multipart/form-data" class="backup-restore-upload-form" data-restore-label="board backup" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
-<input type="hidden" name="_csrf" value="{csrf}">
-<input type="file" name="backup_file" accept=".zip,.json" required style="color:var(--text)">
-<button type="submit" class="btn-danger"
-        data-confirm="WARNING: This will wipe and replace the board from the backup. Other boards are unaffected. Continue?">&#8635; restore board from local file</button>
-</form>
+<div class="admin-subsection">
+  <div class="admin-card-header">
+    <h3>// restore from local file</h3>
+    <p>Upload a board backup from your computer to wipe and replace exactly one board.</p>
+  </div>
+  <div class="admin-inline-actions admin-inline-actions-spaced">
+  <form method="POST" action="/admin/board/restore" enctype="multipart/form-data" class="backup-restore-upload-form" data-restore-label="board backup" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="file" name="backup_file" accept=".zip,.json" required style="color:var(--text)">
+  <button type="submit" class="btn-danger"
+          data-confirm="WARNING: This will wipe and replace the board from the backup. Other boards are unaffected. Continue?">&#8635; restore board from local file</button>
+  </form>
+  </div>
 </div>
-<div class="admin-table-wrap">
-<table class="admin-table backup-table" style="width:100%;border-collapse:collapse;font-size:0.85rem">
-<thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th style="text-align:left">status</th><th></th></tr></thead>
-<tbody>{board_backup_rows}</tbody>
-</table>
+<div class="admin-subsection">
+  <div class="admin-card-header">
+    <h3>// saved board backups</h3>
+    <p>Board-level backups are usually created from the board cards above, then downloaded, restored, or deleted here.</p>
+  </div>
+  <div class="admin-table-wrap">
+  <table class="admin-table backup-table" style="width:100%;border-collapse:collapse;font-size:0.85rem">
+  <thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th style="text-align:left">status</th><th></th></tr></thead>
+  <tbody>{board_backup_rows}</tbody>
+  </table>
+  </div>
 </div>
 </section>
 
@@ -1783,4 +1878,141 @@ pub fn admin_ip_history_page(
         false,
         &format!("/admin/ip/{ip_hash}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{admin_panel_page, render_board_settings_card};
+    use crate::models::{BackupBoardSummary, BackupInfo, Board, BoardAccessMode, Theme};
+
+    fn sample_board() -> Board {
+        Board {
+            id: 7,
+            display_order: 2,
+            short_name: "tech".into(),
+            name: "Technology".into(),
+            description: "Computers and code".into(),
+            nsfw: false,
+            max_threads: 120,
+            max_archived_threads: 240,
+            bump_limit: 300,
+            allow_images: true,
+            allow_video: true,
+            allow_audio: true,
+            allow_any_files: false,
+            allow_tripcodes: true,
+            allow_editing: true,
+            edit_window_secs: 900,
+            allow_archive: true,
+            allow_video_embeds: true,
+            allow_captcha: true,
+            show_poster_ids: true,
+            collapse_greentext: true,
+            post_cooldown_secs: 15,
+            default_theme: "terminal".into(),
+            access_mode: BoardAccessMode::PostPassword,
+            access_password_hash: "hashed".into(),
+            created_at: 0,
+        }
+    }
+
+    fn sample_theme() -> Theme {
+        Theme {
+            slug: "terminal".into(),
+            display_name: "Terminal".into(),
+            description: "Classic green glow".into(),
+            swatch_hex: "#7ab84e".into(),
+            enabled: true,
+            sort_order: 1,
+            is_builtin: true,
+            custom_css: String::new(),
+        }
+    }
+
+    fn sample_full_backup() -> BackupInfo {
+        BackupInfo {
+            filename: "full-2026-04-07.zip".into(),
+            size_bytes: 2048,
+            modified: "2026-04-07 10:15 UTC".into(),
+            modified_epoch: Some(1_775_555_700),
+            verified: true,
+            verification_note: "verified".into(),
+            boards: vec![BackupBoardSummary {
+                short_name: "tech".into(),
+                name: "Technology".into(),
+            }],
+        }
+    }
+
+    fn sample_board_backup() -> BackupInfo {
+        BackupInfo {
+            filename: "tech-2026-04-07.zip".into(),
+            size_bytes: 1024,
+            modified: "2026-04-07 11:00 UTC".into(),
+            modified_epoch: Some(1_775_558_400),
+            verified: true,
+            verification_note: "verified".into(),
+            boards: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn board_settings_card_separates_board_management_tasks() {
+        let board = sample_board();
+        let html = render_board_settings_card(
+            &board,
+            0,
+            std::slice::from_ref(&board),
+            "csrf",
+            &[sample_theme()],
+        );
+
+        assert!(html.contains("// basic setup"));
+        assert!(html.contains("// access &amp; anti-spam"));
+        assert!(html.contains("// uploads &amp; post features"));
+        assert!(html.contains("// appearance"));
+        assert!(html.contains("// board backup tools"));
+        assert!(html.contains("// danger zone"));
+        assert!(html.contains("class=\"board-backup-download-form\""));
+        assert!(html.contains("action=\"/admin/board/delete\""));
+    }
+
+    #[test]
+    fn admin_panel_groups_board_and_backup_areas_by_task() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = admin_panel_page(
+            std::slice::from_ref(&board),
+            &[],
+            &[],
+            "csrf",
+            &[sample_full_backup()],
+            &[sample_board_backup()],
+            4096,
+            false,
+            "All saved backups verified.",
+            None,
+            &[],
+            &[],
+            "RustChan",
+            "select board to proceed",
+            "terminal",
+            24,
+            7,
+            &themes,
+            None,
+            None,
+            None,
+        );
+
+        assert!(html.contains("// board directory"));
+        assert!(html.contains("// create board"));
+        assert!(html.contains("// automated full backups"));
+        assert!(html.contains("// run or restore now"));
+        assert!(html.contains("// saved full backups"));
+        assert!(html.contains("single-board tools"));
+        assert!(html.contains("// restore from local file"));
+        assert!(html.contains("// saved board backups"));
+        assert!(html.contains("single-board snapshot"));
+    }
 }

@@ -28,6 +28,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{atomic::AtomicU64, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,6 +45,7 @@ const BOARD_ACCESS_COOKIE_TTL_DAYS: i64 = 30;
 const BOARD_UNLOCK_FAIL_LIMIT: u32 = 5;
 const BOARD_UNLOCK_FAIL_WINDOW_SECS: u64 = 900;
 const HTML_CACHE_CONTROL: &str = "private, no-cache, must-revalidate";
+pub(crate) const X_RUSTCHAN_REDIRECT_HEADER: &str = "x-rustchan-redirect";
 
 static BOARD_UNLOCK_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
 static BOARD_UNLOCK_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
@@ -68,6 +70,108 @@ fn is_xml_http_request(headers: &HeaderMap) -> bool {
         .get("x-requested-with")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
+}
+
+#[derive(Serialize)]
+struct XhrErrorPayload<'a> {
+    error: &'a str,
+}
+
+fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Result<Response> {
+    let body =
+        serde_json::to_vec(payload).map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+    let mut response = Response::new(axum::body::Body::from(body));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    Ok(response)
+}
+
+pub(crate) fn xhr_error_response(status: StatusCode, message: &str) -> Result<Response> {
+    json_response(status, &XhrErrorPayload { error: message })
+}
+
+pub(crate) fn xhr_redirect_response(target: &str) -> Result<Response> {
+    let mut response = Response::new(axum::body::Body::empty());
+    *response.status_mut() = StatusCode::NO_CONTENT;
+    response.headers_mut().insert(
+        X_RUSTCHAN_REDIRECT_HEADER,
+        HeaderValue::from_str(target)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?,
+    );
+    Ok(response)
+}
+
+fn banned_page_redirect_url(reason: &str) -> String {
+    let reason_for_url = reason.chars().take(256).collect::<String>();
+    format!(
+        "/banned?reason={}",
+        crate::templates::urlencoding_simple(&reason_for_url)
+    )
+}
+
+pub(crate) fn xhr_post_error_response(error: AppError) -> Result<Response> {
+    match error {
+        AppError::NotFound(message) => xhr_error_response(StatusCode::NOT_FOUND, &message),
+        AppError::BadRequest(message) => {
+            xhr_error_response(StatusCode::UNPROCESSABLE_ENTITY, &message)
+        }
+        AppError::Forbidden(message) => xhr_error_response(StatusCode::FORBIDDEN, &message),
+        AppError::BannedUser { reason, .. } => {
+            xhr_redirect_response(&banned_page_redirect_url(&reason))
+        }
+        AppError::UploadTooLarge(message) => {
+            xhr_error_response(StatusCode::PAYLOAD_TOO_LARGE, &message)
+        }
+        AppError::InvalidMediaType(message) => {
+            xhr_error_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, &message)
+        }
+        AppError::Conflict(message) => xhr_error_response(StatusCode::CONFLICT, &message),
+        AppError::RateLimited => xhr_error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "You are posting too fast. Slow down.",
+        ),
+        AppError::DbBusy => xhr_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The server is temporarily busy. Please try again in a moment.",
+        ),
+        AppError::Internal(error) => {
+            tracing::error!("Internal error during XHR post submission: {:?}", error);
+            xhr_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "An internal error occurred.",
+            )
+        }
+        AppError::Api {
+            status,
+            detail,
+            endpoint,
+        } => {
+            tracing::error!(
+                status,
+                endpoint = endpoint.as_deref().unwrap_or("unknown"),
+                "API error during XHR post submission: {detail}",
+            );
+            xhr_error_response(
+                StatusCode::BAD_GATEWAY,
+                "An upstream service returned an unexpected response. Please try again later.",
+            )
+        }
+        AppError::Tls(message) => {
+            tracing::error!("TLS error during XHR post submission: {message}");
+            xhr_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "A TLS configuration error occurred.",
+            )
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct BannedPageQuery {
+    pub reason: Option<String>,
 }
 
 pub fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
@@ -184,6 +288,24 @@ pub(crate) fn render_board_unlock_html(
         current_theme,
         board.collapse_greentext,
     )
+}
+
+pub async fn banned_page(Query(query): Query<BannedPageQuery>, jar: CookieJar) -> Response {
+    let (jar, csrf) = ensure_csrf(jar);
+    let reason = query
+        .reason
+        .unwrap_or_else(|| "No reason given".to_string())
+        .trim()
+        .chars()
+        .take(512)
+        .collect::<String>();
+    let reason = if reason.is_empty() {
+        "No reason given".to_string()
+    } else {
+        reason
+    };
+    let html = crate::templates::ban_page(&reason, &csrf);
+    (jar, Html(html)).into_response()
 }
 
 fn board_unlock_now_secs() -> u64 {
@@ -599,6 +721,7 @@ pub async fn create_thread(
     multipart: Multipart,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
+    let xhr_request = is_xml_http_request(&req_headers);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
@@ -844,6 +967,9 @@ pub async fn create_thread(
     let redirect_url = match result {
         Ok(url) => url,
         Err(AppError::BadRequest(msg)) => {
+            if xhr_request {
+                return xhr_error_response(StatusCode::UNPROCESSABLE_ENTITY, &msg);
+            }
             let board_short_render = board_short_err.clone();
             let pool = state.db.clone();
             let current_theme = current_theme.clone();
@@ -872,18 +998,16 @@ pub async fn create_thread(
             *resp.status_mut() = axum::http::StatusCode::UNPROCESSABLE_ENTITY;
             return Ok(resp);
         }
-        Err(e) => return Err(e),
+        Err(error) => {
+            if xhr_request {
+                return xhr_post_error_response(error);
+            }
+            return Err(error);
+        }
     };
 
-    if is_xml_http_request(&req_headers) {
-        let mut resp = Response::new(axum::body::Body::empty());
-        *resp.status_mut() = StatusCode::NO_CONTENT;
-        resp.headers_mut().insert(
-            "x-rustchan-redirect",
-            HeaderValue::from_str(&redirect_url)
-                .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?,
-        );
-        return Ok(resp);
+    if xhr_request {
+        return xhr_redirect_response(&redirect_url);
     }
 
     Ok(Redirect::to(&redirect_url).into_response())
@@ -2497,6 +2621,57 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .expect("xhr redirect header");
         assert!(redirect.starts_with("/test/thread/"));
+    }
+
+    #[tokio::test]
+    async fn create_thread_xhr_validation_failure_returns_json_error() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/{board}", post(super::create_thread))
+            .with_state(state);
+        let (boundary, body) =
+            crate::test_support::multipart_body(&[("_csrf", "csrf123"), ("body", "")], None);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/test")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json; charset=utf-8")
+        );
+
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains("\"error\""));
     }
 
     #[tokio::test]

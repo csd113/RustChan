@@ -175,7 +175,7 @@ pub(crate) fn render_post_access_gate(
 ) -> String {
     let (_, description, button_label) = board_access_copy(board);
     format!(
-        r#"<div class="post-form-container board-access-gate">
+        r#"<div class="post-form-container board-access-gate" id="board-access-gate">
 <div class="post-form-title">[ {title} ]</div>
 <form class="post-form" method="POST" action="/{board}/unlock">
   <input type="hidden" name="_csrf" value="{csrf}">
