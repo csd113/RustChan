@@ -435,13 +435,50 @@ function isSameDocumentNavigationTarget(url) {
   }
 }
 
-function navigatePostSubmitTarget(url) {
+function clearSuccessfulPostFormState(form) {
+  if (!form) return;
+
+  clearPostFormFeedback(form);
+  stopSubmitButtonAnimation(form);
+  setSubmittingState(form, false);
+  resetUploadProgress(form);
+
+  if (typeof form.reset === 'function') {
+    form.reset();
+  }
+
+  form.querySelectorAll('input[type="file"]').forEach(function (input) {
+    try {
+      input.value = '';
+    } catch (e) {}
+  });
+
+  var bodyField = form.querySelector('textarea[name="body"]');
+  if (bodyField) {
+    bodyField.dataset.draftRestored = '0';
+    bodyField.dataset.draftSubmitting = '';
+  }
+
+  setReplyDraftSubmitting(false);
+  clearReplyDraftSubmitState();
+  clearReplyDraftStorage();
+  if (bodyField) {
+    setReplyDraftMode('');
+  }
+}
+
+function navigatePostSubmitTarget(form, url) {
   if (!url) return false;
 
   // Upload-backed replies redirect back to the same thread with a fresh #p123
   // anchor. A plain hash navigation does not fetch the newly-created post, so
   // force a reload after updating location when the target is the same document.
+  // Reset the live form first so browsers do not carry the just-submitted text
+  // or file input selection across that reload.
   var sameDocument = isSameDocumentNavigationTarget(url);
+  if (sameDocument) {
+    clearSuccessfulPostFormState(form);
+  }
   window.location.assign(url);
   if (sameDocument) {
     window.location.reload();
@@ -573,7 +610,7 @@ function submitPostFormWithProgress(form) {
     // header keeps reply-draft clearing and "(You)" tracking anchored to the
     // exact new post after upload-backed replies succeed.
     if (explicitRedirect) {
-      navigatePostSubmitTarget(explicitRedirect);
+      navigatePostSubmitTarget(form, explicitRedirect);
       return;
     }
 
@@ -583,7 +620,7 @@ function submitPostFormWithProgress(form) {
     var isHtml = contentType.indexOf('text/html') !== -1;
 
     if (xhr.status >= 200 && xhr.status < 400 && finalUrl && finalUrl !== currentUrl) {
-      navigatePostSubmitTarget(finalUrl);
+      navigatePostSubmitTarget(form, finalUrl);
       return;
     }
 
