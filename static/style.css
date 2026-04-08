@@ -22,6 +22,8 @@
   --gray-light:  #5a6e5a;
   --text:        #b8d8b8;
   --text-dim:    #6e8a6e;
+  --post-highlight-outline: var(--green);
+  --post-highlight-bg: rgba(0, 200, 64, 0.07);
   --font:        'Courier New', Consolas, 'Lucida Console', monospace;
   --font-display: 'Courier New', Consolas, 'Lucida Console', monospace;
 }
@@ -889,6 +891,10 @@ html.no-js .post-form-wrap {
   padding-bottom: 6px;
 }
 
+.post {
+  scroll-margin-top: calc(var(--header-offset, 58px) + 10px);
+}
+
 .thread-sep {
   border-top: 1px dashed var(--border);
   margin: 10px 0;
@@ -1250,8 +1256,8 @@ html:not([data-theme]) .poster-id-btn {
 
 /* ── Highlighted post ──────────────────────────────────────────────────────── */
 .post-highlighted {
-  outline: 2px solid var(--green, #00c840) !important;
-  background: rgba(0, 200, 64, 0.07) !important;
+  outline: 2px solid var(--post-highlight-outline, var(--green, #00c840)) !important;
+  background: var(--post-highlight-bg, rgba(0, 200, 64, 0.07)) !important;
   transition: background 0.15s, outline 0.15s;
 }
 
@@ -1982,10 +1988,15 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
 }
 
 @media (max-width: 700px) {
-  .admin-toolbar,
-  .post-controls.admin-post-controls {
+  .admin-toolbar {
     min-width: 0;
     align-items: stretch;
+  }
+
+  .post-controls.admin-post-controls {
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
   }
 
   .admin-toolbar {
@@ -1997,16 +2008,22 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
     margin-right: 0;
   }
 
-  .admin-toolbar form,
-  .post-controls.admin-post-controls form {
+  .admin-toolbar form {
     display: block !important;
     width: 100%;
     min-width: 0;
     margin: 0;
   }
 
-  .admin-toolbar-btn,
-  .post-controls.admin-post-controls .admin-del-btn {
+  .post-controls.admin-post-controls form {
+    display: inline-flex !important;
+    width: auto;
+    min-width: 0;
+    margin: 0;
+    flex: 0 0 auto;
+  }
+
+  .admin-toolbar-btn {
     display: block;
     width: 100%;
     max-width: 100%;
@@ -2015,6 +2032,24 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
     white-space: normal;
     overflow-wrap: anywhere;
     text-align: center;
+  }
+
+  .post-controls.admin-post-controls .admin-del-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: auto;
+    max-width: 100%;
+    box-sizing: border-box;
+    min-height: 28px;
+    padding: 2px 7px;
+    white-space: nowrap;
+    overflow-wrap: normal;
+    text-align: center;
+  }
+
+  .post-controls.admin-post-controls .admin-ip-link {
+    margin-left: 0;
   }
 }
 
@@ -4055,7 +4090,10 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
   --forest-danger-hover-bg: #5e2b14;
   --forest-danger-hover-border: #9b5232;
   --forest-input-border: #3f2b14;
+  --forest-pinned-border: #5f7c45;
   --forest-muted: #8a7560;
+  --post-highlight-outline: #93cc65;
+  --post-highlight-bg: rgba(111, 168, 74, 0.14);
   --accept-btn-bg: #3a5c28;
   --accept-btn-accent: #93cc65;
   --accept-btn-fg: #d4e8c0;
@@ -4135,6 +4173,15 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
 [data-theme="forest"] .catalog-item:hover,
 [data-theme="forest"] .board-card:hover {
   border-color: var(--forest-surface-hover-border);
+}
+[data-theme="forest"] .catalog-item.is-pinned:not(.sticky) {
+  border-color: var(--forest-pinned-border);
+}
+[data-theme="forest"] .catalog-item.is-pinned {
+  box-shadow: inset 0 0 0 1px var(--forest-pinned-border);
+}
+[data-theme="forest"] .catalog-item.sticky.is-pinned {
+  border-color: var(--amber);
 }
 [data-theme="forest"] a {
   color: var(--forest-link);
@@ -4425,6 +4472,8 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
   --gray-light:   #ddd0c8;
   --text:         #000000;
   --text-dim:     #707070;
+  --post-highlight-outline: #8f3525;
+  --post-highlight-bg: rgba(128, 0, 0, 0.08);
   --font:         Arial, Helvetica, sans-serif;
   --font-display: Arial, Helvetica, sans-serif;
   --theme-picker-radius: 2px;
@@ -4575,6 +4624,12 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
 [data-theme="chanclassic"] .admin-header-link {
   padding-left: 0;
   padding-right: 0;
+}
+[data-theme="chanclassic"] .site-header .home-btn {
+  color: #f3dfcf !important;
+}
+[data-theme="chanclassic"] .site-header .home-btn:hover {
+  color: #fff8ee !important;
 }
 [data-theme="chanclassic"] button:hover {
   background: #d8c8b0;

@@ -734,8 +734,6 @@ pub fn admin_panel_page(
         let preview = escape_html(rc.post_preview.trim());
         let reason = escape_html(&rc.report.reason);
         let age = fmt_ts(rc.report.created_at);
-        // ip_short was computed here but immediately discarded with
-        // `let _ = ip_short` — dead code from an unfinished refactor.  Removed.
         let _ = write!(
             report_rows,
             r#"<tr>
@@ -749,14 +747,6 @@ pub fn admin_panel_page(
     <input type="hidden" name="report_id"  value="{rid}">
     <button type="submit">&#10003; resolve</button>
   </form>
-  <form method="POST" action="/admin/report/resolve" style="display:inline;margin-left:0.35rem"
-        data-confirm-submit="Resolve report AND permanently ban this IP?">
-    <input type="hidden" name="_csrf"      value="{csrf}">
-    <input type="hidden" name="report_id"  value="{rid}">
-    <input type="hidden" name="ban_ip_hash" value="{ip_hash}">
-    <input type="hidden" name="ban_reason"  value="Reported content">
-    <button type="submit" class="btn-danger">&#10003; resolve + ban</button>
-  </form>
 </td>
 </tr>"#,
             board = escape_html(&rc.board_short),
@@ -766,8 +756,7 @@ pub fn admin_panel_page(
             reason = reason,
             age = escape_html(&age),
             csrf = escape_html(csrf_token),
-            rid = rc.report.id,
-            ip_hash = escape_html(rc.post_ip_hash.as_deref().unwrap_or(""))
+            rid = rc.report.id
         );
     }
 
@@ -1883,7 +1872,9 @@ pub fn admin_ip_history_page(
 #[cfg(test)]
 mod tests {
     use super::{admin_panel_page, render_board_settings_card};
-    use crate::models::{BackupBoardSummary, BackupInfo, Board, BoardAccessMode, Theme};
+    use crate::models::{
+        BackupBoardSummary, BackupInfo, Board, BoardAccessMode, Report, ReportWithContext, Theme,
+    };
 
     fn sample_board() -> Board {
         Board {
@@ -1956,6 +1947,28 @@ mod tests {
         }
     }
 
+    fn sample_report() -> ReportWithContext {
+        ReportWithContext {
+            report: Report {
+                id: 11,
+                post_id: 42,
+                thread_id: 9,
+                board_id: 7,
+                reason: "spam".into(),
+                reporter_hash: "reporter".into(),
+                status: "open".into(),
+                created_at: 1_775_560_000,
+                resolved_at: None,
+                resolved_by: None,
+            },
+            board_short: "tech".into(),
+            post_preview: "Buy my thing".into(),
+            post_ip_hash: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            ),
+        }
+    }
+
     #[test]
     fn board_settings_card_separates_board_management_tasks() {
         let board = sample_board();
@@ -2014,5 +2027,40 @@ mod tests {
         assert!(html.contains("// restore from local file"));
         assert!(html.contains("// saved board backups"));
         assert!(html.contains("single-board snapshot"));
+    }
+
+    #[test]
+    fn admin_panel_reports_only_render_resolve_action() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let report = sample_report();
+        let html = admin_panel_page(
+            std::slice::from_ref(&board),
+            &[],
+            &[],
+            "csrf",
+            &[sample_full_backup()],
+            &[sample_board_backup()],
+            4096,
+            false,
+            "All saved backups verified.",
+            None,
+            std::slice::from_ref(&report),
+            &[],
+            "RustChan",
+            "select board to proceed",
+            "terminal",
+            24,
+            7,
+            &themes,
+            None,
+            None,
+            None,
+        );
+
+        assert!(html.contains("action=\"/admin/report/resolve\""));
+        assert!(html.contains("&#10003; resolve</button>"));
+        assert!(!html.contains("resolve + ban"));
+        assert!(!html.contains("ban_ip_hash"));
     }
 }

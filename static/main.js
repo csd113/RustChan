@@ -28,10 +28,12 @@ function isTouchLikeDevice() {
 function syncMobileHeaderOffset() {
   var header = document.querySelector('.site-header');
   if (!header) return;
+  var headerHeight = Math.ceil(header.getBoundingClientRect().height) + 'px';
   document.documentElement.style.setProperty(
     '--mobile-header-offset',
-    Math.ceil(header.getBoundingClientRect().height) + 'px'
+    headerHeight
   );
+  document.documentElement.style.setProperty('--header-offset', headerHeight);
 }
 
 function syncPostFormState() {
@@ -1687,10 +1689,47 @@ function toggleThreadMenu(toggle) {
     }
   }
 
+  function highlightPostFromHash(scrollBehavior) {
+    var match = window.location.hash.match(/^#p(\d+)$/);
+    if (!match) {
+      clearHighlight();
+      return;
+    }
+    var target = document.getElementById('p' + match[1]);
+    if (!target) return;
+    highlightPost(match[1]);
+    if (scrollBehavior && typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({ behavior: scrollBehavior, block: 'start' });
+    }
+  }
+
   document.addEventListener('click', function (e) {
     if (e.target.classList.contains('quotelink')) return;
     if (e.target.classList.contains('backref')) return;
     clearHighlight();
+  });
+
+  document.addEventListener('DOMContentLoaded', function () {
+    if (!/^#p\d+$/.test(window.location.hash)) return;
+    if (window.requestAnimationFrame) {
+      window.requestAnimationFrame(function () {
+        highlightPostFromHash();
+      });
+    } else {
+      highlightPostFromHash();
+    }
+  });
+
+  window.addEventListener('hashchange', function () {
+    if (!/^#p\d+$/.test(window.location.hash)) {
+      clearHighlight();
+      return;
+    }
+    var behavior = 'smooth';
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      behavior = 'auto';
+    }
+    highlightPostFromHash(behavior);
   });
 
   var popup = document.createElement('div');
