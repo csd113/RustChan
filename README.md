@@ -11,10 +11,10 @@
 
 # RustChan
 
-### A self-hosted imageboard that is easy to run, fun to manage, and surprisingly friendly to normal humans.
+### A self-hosted imageboard that is easy to run, fun to manage, and built for real communities.
 
 One binary. One data folder. Zero required runtime dependencies.  
-Built with Rust, powered by SQLite, and designed so you do not need an ops department to have your own corner of the web.
+Built with Rust, powered by SQLite, and designed for people who want their own corner of the web.
 
 [![Version](https://img.shields.io/badge/Version-1.1.3-0ea5e9?style=for-the-badge)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/Rust-1.90%2B-orange?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -41,16 +41,16 @@ Built with Rust, powered by SQLite, and designed so you do not need an ops depar
 
 ## What Is RustChan?
 
-RustChan is self-hosted imageboard software. In plain English: it lets you run your own site with boards like `/b/`, `/tech/`, or `/music/`, where people can post threads, reply, upload media, vote in polls, and build a community.
+RustChan is self-hosted imageboard software. It lets you run your own site with boards like `/b/`, `/tech/`, or `/music/`, where people can post threads, reply, upload media, vote in polls, and build a community.
 
-It is built for people who want something powerful without something fussy. You do not need Docker, Postgres, Redis, or five sidecars just to get a board online. RustChan keeps the moving parts small:
+RustChan keeps the moving parts small. You do not need Docker, Postgres, Redis, or a stack of extra services to get a board online:
 
 - one Rust binary
 - one SQLite database
 - one `rustchan-data/` folder for the site's state
 - one web admin panel for the day-to-day stuff
 
-That is the heart of the pitch: RustChan feels like old-school software in the best way. You run it, it works, and it does not immediately ask you to become a full-time infrastructure wizard.
+It is a compact, self-contained setup that is easy to host and easy to move.
 
 ## Why People Like It
 
@@ -65,20 +65,20 @@ That is the heart of the pitch: RustChan feels like old-school software in the b
 | Something that works on small machines | Good fit for a VPS, local box, homelab, or Raspberry Pi |
 | Something that still has toys | Polls, spoiler tags, dice, sage, poster IDs, hover previews, mobile reply tools, and more |
 
-If you are not a computer person, the short version is this: RustChan is "run one program, visit a website, click around, and manage your community from the browser" software.
+RustChan runs as a single program and can be managed from the browser.
 
 ## New In 1.1.3
 
-Version `1.1.3` is not just a bugfix bump. It adds genuinely useful quality-of-life upgrades:
+Version `1.1.3` adds several quality-of-life improvements:
 
-- **Per-board passwords**: a board can require a password just to view it, or stay publicly readable while requiring a password for posting.
+- **Per-board passwords**: a board can be password-protected for viewing, or left publicly readable while requiring a password for posting.
 - **Automatic saved full-site backups**: the admin panel and `settings.toml` can now schedule saved backups and keep only the newest `N` copies.
 - **Better backup confidence**: saved backups are verified, backup health is surfaced in the admin UI, and full backups can be used to derive single-board restores and downloads.
 - **Cleaner mobile and admin layouts**: better responsive behavior, cleaner footer/theme controls, and fewer "why is this fighting my phone?" moments.
 - **Stronger networking behavior**: better timeout coverage, safer proxy-aware HTTPS detection, better redirect handling, and more resilient self-signed TLS recovery.
 - **Honest media status and safer posting**: pending and failed media work is surfaced clearly, and duplicate submissions on flaky connections are prevented.
 
-The full release history lives in [CHANGELOG.md](CHANGELOG.md), but `1.1.3` is the release where RustChan feels more polished, more trustworthy, and easier to run for real.
+The full release history lives in [CHANGELOG.md](CHANGELOG.md). This release focuses on polish, reliability, and day-to-day usability.
 
 ## Five-Minute Quick Start
 
@@ -119,9 +119,9 @@ A few helpful notes:
 - Polls, spoiler tags, dice rolls, sage, tripcodes, and user-editable posts.
 - Draft autosave, "(You)" tracking, and cross-board quote links with hover previews.
 - Optional poster IDs, greentext collapsing, video embeds, and PoW CAPTCHA on a per-board basis.
-- Mobile-friendly board, thread, and reply flows instead of a desktop-only layout awkwardly squeezed onto a phone.
+- Mobile-friendly board, thread, and reply flows with layouts that hold up well on phones.
 
-### Media without drama
+### Media
 
 - Images: JPEG, PNG, GIF, WebP, BMP, TIFF, and SVG.
 - Video: MP4 and WebM.
@@ -130,14 +130,14 @@ A few helpful notes:
 - Streaming uploads with in-flight validation so large uploads do not get buffered into RAM.
 - Client-side auto-compression for oversized media before upload.
 - Automatic thumbnails, audio waveforms, and video poster frames when `ffmpeg` is available.
-- Graceful fallback behavior when `ffmpeg` is not available. The site still runs; it just loses the fancy media extras.
+- If `ffmpeg` is unavailable, RustChan still runs and falls back to simpler media handling.
 
-### Admin life is actually nice
+### Admin tools
 
 - Create, delete, and reorder boards from the browser.
 - Set board-level rules for media, editing, archiving, poster IDs, themes, cooldowns, and access protection.
 - Moderate posts, review reports, process ban appeals, ban by post, and inspect IP history.
-- Manage site settings, favicons, built-in themes, and custom themes without digging through templates.
+- Manage site settings, favicons, built-in themes, and custom themes from the admin panel.
 - Run full-site backups and per-board backups from the admin panel.
 - Restore from uploaded backup files or from backup files already on the server.
 - Schedule saved full-site backups automatically and keep only the latest copies you want.
@@ -151,7 +151,7 @@ A few helpful notes:
 - Security headers, no inline JavaScript, and CSP-friendly page behavior.
 - Raw IPs are never stored or logged. RustChan uses an HMAC-keyed hash instead.
 - Rate limiting for reads and writes, plus replay protection for PoW nonces.
-- File validation by content type and magic bytes, not file extensions alone.
+- File validation uses content type and magic bytes rather than extensions alone.
 - Restore protections against zip bombs, oversized uploads, path traversal, and malformed data.
 
 ## Built-In Themes
@@ -172,7 +172,7 @@ Theme selection is user-facing, site defaults are admin-controlled, and boards c
 
 ## Setup And Operations
 
-RustChan is easy to start, but it still has serious operator features when you want them.
+RustChan is straightforward to start and includes the tools needed for longer-term operation.
 
 ### Helpful settings
 
@@ -212,7 +212,7 @@ Some especially useful settings:
 - **HTTPS / TLS**: enabled locally by default with a self-signed dev cert. For production, use a manual cert or build with `--features tls-acme` for Let's Encrypt support. See [SETUP.md#https-and-tls](SETUP.md#https-and-tls).
 - **Linux service deployment**: there is a full service and reverse-proxy walkthrough in [SETUP.md](SETUP.md).
 
-### Commands you will actually use
+### Common commands
 
 ```bash
 # Start the server
@@ -255,11 +255,11 @@ rustchan-data/
 └── boards/
 ```
 
-That tidy data layout is one of RustChan's best qualities. Copy the folder, and you have most of what matters.
+The data layout is compact and easy to back up. Copy the folder, and you have most of what matters.
 
 ## ChanNet And RustWave (Optional)
 
-If you do not know what this section is for, you probably do not need it yet.
+Most installs will not need this section.
 
 RustChan can also expose an optional second listener for text-only federation and RustWave integration. It is **not enabled by default**. Start the server with:
 
@@ -299,7 +299,7 @@ For the technically curious, RustChan currently looks like this:
 | Logging | `tracing` with daily file rotation |
 | Background work | In-process worker queue |
 
-It is still fundamentally a single app, not a distributed systems homework assignment.
+The architecture stays compact and self-contained.
 
 ## Deep Dives
 
@@ -311,6 +311,6 @@ It is still fundamentally a single app, not a distributed systems homework assig
 
 <div align="center">
 
-**RustChan is for people who want their own little corner of the internet without signing up for a second job.**
+**RustChan is for people who want to run their own little corner of the internet with a manageable amount of overhead.**
 
 </div>
