@@ -540,7 +540,7 @@ async fn handle_job(
     }
 }
 
-fn media_job_post_id(job: &Job) -> Option<i64> {
+const fn media_job_post_id(job: &Job) -> Option<i64> {
     match job {
         Job::VideoTranscode { post_id, .. } | Job::AudioWaveform { post_id, .. } => Some(*post_id),
         Job::ThreadPrune { .. } | Job::SpamCheck { .. } => None,

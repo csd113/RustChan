@@ -524,7 +524,7 @@ async fn stream_restore_upload_to_tempfile(
 fn validate_streamed_restore_upload(
     kind: RestoreKind,
     jar: &CookieJar,
-    upload: &mut StreamedRestoreUpload,
+    upload: &StreamedRestoreUpload,
 ) -> Result<u64> {
     let has_csrf_cookie = jar.get("csrf_token").is_some();
     if super::check_csrf_jar(jar, upload.form_csrf.as_deref()).is_err() {
@@ -620,7 +620,7 @@ pub(super) fn parse_board_backup_manifest_from_zip<R: std::io::Read + std::io::S
 }
 
 fn validate_full_restore_archive_layout<R: std::io::Read + std::io::Seek>(
-    archive: &mut zip::ZipArchive<R>,
+    archive: &zip::ZipArchive<R>,
 ) -> Result<()> {
     if archive.file_names().any(|name| name == "chan.db") {
         return Ok(());
@@ -1681,7 +1681,7 @@ fn create_temp_board_backup_from_full_backup_path(
         .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
     let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
         .map_err(|error| AppError::BadRequest(format!("Invalid zip: {error}")))?;
-    validate_full_restore_archive_layout(&mut archive)?;
+    validate_full_restore_archive_layout(&archive)?;
     let _ = common::read_full_backup_manifest_from_archive(&mut archive)?;
 
     let temp_db = std::env::temp_dir().join(format!(
@@ -2102,9 +2102,8 @@ pub async fn admin_restore(
 
     let result: Result<String> = async {
         let session_id = restore_auth_preflight(&state, &headers, &jar).await?;
-        let mut upload =
-            stream_restore_upload_to_tempfile(RestoreKind::Full, &mut multipart).await?;
-        validate_streamed_restore_upload(RestoreKind::Full, &jar, &mut upload)?;
+        let upload = stream_restore_upload_to_tempfile(RestoreKind::Full, &mut multipart).await?;
+        validate_streamed_restore_upload(RestoreKind::Full, &jar, &upload)?;
         let zip_tmp = upload.temp_file;
         let uploaded_filename = upload.uploaded_filename;
 
@@ -2122,7 +2121,7 @@ pub async fn admin_restore(
                 let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
                     .map_err(|error| AppError::BadRequest(format!("Invalid zip: {error}")))?;
 
-                if let Err(error) = validate_full_restore_archive_layout(&mut archive) {
+                if let Err(error) = validate_full_restore_archive_layout(&archive) {
                     tracing::warn!(
                         target: "admin",
                         route = RestoreKind::Full.route(),
@@ -3106,9 +3105,8 @@ pub async fn board_restore(
         // MEM-FIX: stream the uploaded file to a NamedTempFile on disk instead
         // of buffering the entire zip into a Vec<u8>.  Board backups can be
         // hundreds of MB for active boards with many uploads.
-        let mut upload =
-            stream_restore_upload_to_tempfile(RestoreKind::Board, &mut multipart).await?;
-        let file_size = validate_streamed_restore_upload(RestoreKind::Board, &jar, &mut upload)?;
+        let upload = stream_restore_upload_to_tempfile(RestoreKind::Board, &mut multipart).await?;
+        let file_size = validate_streamed_restore_upload(RestoreKind::Board, &jar, &upload)?;
         let zip_tmp = upload.temp_file;
         let uploaded_filename = upload.uploaded_filename;
 
@@ -3457,14 +3455,14 @@ mod tests {
 
     #[test]
     fn full_restore_layout_accepts_full_backup_archive() {
-        let mut archive = zip_with_entries(&[("chan.db", b"SQLite format 3\0stub")]);
-        assert!(validate_full_restore_archive_layout(&mut archive).is_ok());
+        let archive = zip_with_entries(&[("chan.db", b"SQLite format 3\0stub")]);
+        assert!(validate_full_restore_archive_layout(&archive).is_ok());
     }
 
     #[test]
     fn full_restore_layout_rejects_board_backup_archive_with_helpful_hint() {
-        let mut archive = zip_with_entries(&[("board.json", br#"{"version":1}"#)]);
-        let error = validate_full_restore_archive_layout(&mut archive).expect_err("should fail");
+        let archive = zip_with_entries(&[("board.json", br#"{"version":1}"#)]);
+        let error = validate_full_restore_archive_layout(&archive).expect_err("should fail");
         match error {
             AppError::BadRequest(message) => {
                 assert!(message.contains("board backup"));

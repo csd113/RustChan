@@ -115,6 +115,7 @@ pub fn render_board_page(
     data: &BoardPageData,
     csrf_token: &str,
     error: Option<&str>,
+    new_thread_prefill: Option<&templates::forms::PostFormState>,
     current_theme: Option<&str>,
     can_post: bool,
 ) -> String {
@@ -127,6 +128,7 @@ pub fn render_board_page(
         boards.as_slice(),
         data.is_admin,
         error,
+        new_thread_prefill,
         current_theme,
         data.board.collapse_greentext,
         can_post,
@@ -165,6 +167,8 @@ pub fn render_thread_page(
     data: &ThreadPageData,
     csrf_token: &str,
     error: Option<&str>,
+    success: Option<&str>,
+    reply_prefill: Option<&templates::forms::PostFormState>,
     current_theme: Option<&str>,
     can_post: bool,
 ) -> String {
@@ -178,6 +182,8 @@ pub fn render_thread_page(
         data.is_admin,
         data.poll.as_ref(),
         error,
+        success,
+        reply_prefill,
         current_theme,
         data.board.collapse_greentext,
         can_post,

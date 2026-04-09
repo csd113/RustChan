@@ -27,6 +27,7 @@ struct HealthPayload {
 }
 
 #[derive(Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 struct ReadyPayload {
     status: &'static str,
     database_ready: bool,

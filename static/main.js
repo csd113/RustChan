@@ -7,6 +7,7 @@
 'use strict';
 
 var MOBILE_FORM_BREAKPOINT_PX = 700;
+var POST_SUBMIT_ANCHOR_STORAGE_KEY = 'rustchanPostSubmitAnchor';
 
 document.documentElement.classList.remove('no-js');
 document.documentElement.classList.add('js');
@@ -68,6 +69,41 @@ function setPostFormOpen(open, opts) {
   }
 }
 
+function queuePostSubmitAnchor(target) {
+  if (!target || !target.hash) return;
+  try {
+    window.sessionStorage.setItem(
+      POST_SUBMIT_ANCHOR_STORAGE_KEY,
+      JSON.stringify({
+        path: target.pathname + target.search,
+        hash: target.hash
+      })
+    );
+  } catch (e) {}
+}
+
+function applyQueuedPostSubmitAnchor() {
+  var raw = '';
+  try {
+    raw = window.sessionStorage.getItem(POST_SUBMIT_ANCHOR_STORAGE_KEY) || '';
+  } catch (e) {
+    return;
+  }
+  if (!raw) return;
+
+  var payload = parseJsonText(raw);
+  if (!payload || !payload.path || !payload.hash) return;
+  if (payload.path !== window.location.pathname + window.location.search) return;
+
+  try {
+    window.sessionStorage.removeItem(POST_SUBMIT_ANCHOR_STORAGE_KEY);
+  } catch (e) {}
+
+  if (window.location.hash !== payload.hash) {
+    window.location.hash = payload.hash;
+  }
+}
+
 // ─── Localize post timestamps to device timezone ──────────────────────────────
 
 function localizePostTimes(root) {
@@ -106,6 +142,7 @@ function upgradeLegacySpoilers(root) {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
+  applyQueuedPostSubmitAnchor();
   localizePostTimes(document);
   upgradeLegacySpoilers(document);
   wireAudioMiniPlayers(document);
@@ -541,17 +578,18 @@ function navigatePostSubmitTarget(form, url) {
 
   // Upload-backed replies redirect back to the same thread with a fresh #p123
   // anchor. A plain hash navigation does not fetch the newly-created post, so
-  // force a reload after updating location when the target is the same document.
+  // force a full navigation and restore the anchor after load.
   // Reset the live form first so browsers do not carry the just-submitted text
-  // or file input selection across that reload.
+  // or file input selection across that navigation.
   var sameDocument = isSameDocumentNavigationTarget(url);
   if (sameDocument) {
     clearSuccessfulPostFormState(form);
+    var target = new URL(url, window.location.href);
+    queuePostSubmitAnchor(target);
+    window.location.assign(target.pathname + target.search);
+    return true;
   }
   window.location.assign(url);
-  if (sameDocument) {
-    window.location.reload();
-  }
   return true;
 }
 
@@ -732,6 +770,11 @@ function submitPostFormWithProgress(form) {
 
   xhr.send(new FormData(form));
   return true;
+}
+
+function captchaNonceMissing(form) {
+  var nonceField = form && form.querySelector('input[name="pow_nonce"]');
+  return !!(nonceField && !nonceField.value);
 }
 
 // ─── NSFW disclaimer overlay ────────────────────────────────────────────────
@@ -2532,6 +2575,7 @@ function togglePosterHighlights(threadId, posterId) {
     var minute = Math.floor(Date.now() / 1000 / 60);
     var challenge = board + ':' + minute;
     var nonce = 0;
+    if (statusEl) statusEl.textContent = 'solving proof-of-work…';
     while (true) {
       var buf = await sha256(challenge + ':' + nonce);
       if (countLeadingZeroBits(buf) >= difficulty) {
@@ -2704,6 +2748,15 @@ document.addEventListener('submit', function (e) {
   var form = e.target;
   var submitter = e.submitter || null;
   if (form.matches && form.matches('form.post-form')) {
+    if (captchaNonceMissing(form)) {
+      e.preventDefault();
+      showPostFormFeedback(
+        form,
+        'CAPTCHA is still solving. Wait for the checkmark before posting.'
+      );
+      setPostFormOpen(true, { scrollIntoView: true });
+      return;
+    }
     if (submitPostFormWithProgress(form)) {
       e.preventDefault();
       return;

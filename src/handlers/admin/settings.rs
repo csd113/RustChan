@@ -150,9 +150,9 @@ pub async fn update_board_settings(
     }
     let board_id = form.board_id;
 
-    tokio::task::spawn_blocking({
+    let board_short = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<()> {
+        move || -> Result<String> {
             let mut conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             let board_short: String = conn.query_row(
@@ -225,13 +225,19 @@ pub async fn update_board_settings(
                 "Saved board settings"
             );
             crate::templates::set_live_boards(db::get_all_boards(&conn)?);
-            Ok(())
+            Ok(board_short)
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(super::admin_panel_redirect("Board settings saved.").into_response())
+    let board_anchor = format!("board-{board_short}");
+    Ok(super::admin_panel_redirect_anchor_open(
+        "Board settings saved.",
+        &board_anchor,
+        &board_anchor,
+    )
+    .into_response())
 }
 
 #[derive(Deserialize)]

@@ -718,8 +718,14 @@ pub async fn board_index(
         return Ok((jar, resp).into_response());
     }
 
-    let html =
-        render::render_board_page(&page_data, &csrf, None, current_theme.as_deref(), can_post);
+    let html = render::render_board_page(
+        &page_data,
+        &csrf,
+        None,
+        None,
+        current_theme.as_deref(),
+        can_post,
+    );
     let mut resp = Html(html).into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
@@ -778,6 +784,13 @@ pub async fn create_thread(
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
+    let post_form_state = crate::templates::forms::PostFormState {
+        name: form.name.clone(),
+        subject: form.subject.clone(),
+        body: form.body.clone(),
+        deletion_token: form.deletion_token.clone(),
+        sage: form.sage,
+    };
     let raw_body = form.body;
 
     let upload_dir = CONFIG.upload_dir.clone();
@@ -1009,6 +1022,7 @@ pub async fn create_thread(
                     &page_data,
                     &csrf_for_error,
                     Some(&msg),
+                    Some(&post_form_state),
                     current_theme.as_deref(),
                     true,
                 ))
@@ -1987,7 +2001,7 @@ pub async fn file_report(
     // Redirect back to the thread using the DB-resolved IDs.
     // `board_raw` is already sanitised to alphanumeric earlier in this handler.
     Ok(Redirect::to(&format!(
-        "/{board_raw}/thread/{db_thread_id}#p{}",
+        "/{board_raw}/thread/{db_thread_id}?reported=1#p{}",
         form.post_id
     ))
     .into_response())
@@ -2770,7 +2784,10 @@ mod tests {
                 .get(header::LOCATION)
                 .and_then(|value| value.to_str().ok())
                 .expect("location header");
-            assert_eq!(location, format!("/test/thread/{thread_id}#p{post_id}"));
+            assert_eq!(
+                location,
+                format!("/test/thread/{thread_id}?reported=1#p{post_id}")
+            );
         }
 
         let open_reports = {

@@ -110,12 +110,14 @@ html[data-theme="{slug}"] a:hover {{
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_board_settings_card(
     board: &Board,
     index: usize,
     boards: &[Board],
     csrf_token: &str,
     themes: &[crate::models::Theme],
+    open_section: Option<&str>,
 ) -> String {
     let checked = |value: bool| if value { " checked" } else { "" };
     let prev_same_group = index
@@ -128,23 +130,20 @@ fn render_board_settings_card(
     let board_favicon_exists = crate::favicon::board_has_custom_favicon(&board.short_name);
     let board_favicon_version =
         crate::favicon::favicon_version_for_board(Some(&board.short_name)).unwrap_or_default();
-    let board_theme_options = themes
-        .iter()
-        .filter(|theme| theme.enabled)
-        .map(|theme| {
-            format!(
-                r#"<option value="{slug}"{selected}>{label}</option>"#,
-                slug = escape_html(&theme.slug),
-                selected = if theme.slug == board.default_theme {
-                    " selected"
-                } else {
-                    ""
-                },
-                label = escape_html(&theme.display_name)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("");
+    let mut board_theme_options = String::new();
+    for theme in themes.iter().filter(|theme| theme.enabled) {
+        let _ = write!(
+            board_theme_options,
+            r#"<option value="{slug}"{selected}>{label}</option>"#,
+            slug = escape_html(&theme.slug),
+            selected = if theme.slug == board.default_theme {
+                " selected"
+            } else {
+                ""
+            },
+            label = escape_html(&theme.display_name)
+        );
+    }
     let any_files_toggle = if crate::config::CONFIG.enable_any_file_uploads_feature {
         format!(
             r#"<label><input type="checkbox" name="allow_any_files" value="1"{}> Allow any file downloads</label>"#,
@@ -153,9 +152,15 @@ fn render_board_settings_card(
     } else {
         String::new()
     };
+    let board_section = format!("board-{}", board.short_name);
+    let open_attr = if open_section.is_some_and(|section| section == board_section) {
+        " open"
+    } else {
+        ""
+    };
 
     format!(
-        r#"{group_gap}<details class="board-settings-card" id="board-{short}">
+        r#"{group_gap}<details class="board-settings-card" id="board-{short}"{open_attr}>
 <summary>/{short}/ — {name} {nsfw_tag}{access_tag}</summary>
 <div class="board-order-toolbar">
 <span>{group_label} order: {display_order}. Homepage and header follow this group ordering.</span>
@@ -378,6 +383,7 @@ fn render_board_settings_card(
         collapse_greentext_checked = checked(board.collapse_greentext),
         allow_editing_checked = checked(board.allow_editing),
         any_files_toggle = any_files_toggle,
+        open_attr = open_attr,
         edit_window_display = if board.allow_editing {
             ""
         } else {
@@ -470,29 +476,31 @@ pub fn admin_panel_page(
     let global_favicon_exists = crate::favicon::global_has_custom_favicon();
     let global_favicon_version =
         crate::favicon::favicon_version_for_board(None).unwrap_or_default();
-    let enabled_theme_options = themes
-        .iter()
-        .filter(|theme| theme.enabled)
-        .map(|theme| {
-            format!(
-                r#"<option value="{slug}"{selected}>{label}</option>"#,
-                slug = escape_html(&theme.slug),
-                selected = if theme.slug == default_theme {
-                    " selected"
-                } else {
-                    ""
-                },
-                label = escape_html(&theme.display_name)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("");
+    let mut enabled_theme_options = String::new();
+    for theme in themes.iter().filter(|theme| theme.enabled) {
+        let _ = write!(
+            enabled_theme_options,
+            r#"<option value="{slug}"{selected}>{label}</option>"#,
+            slug = escape_html(&theme.slug),
+            selected = if theme.slug == default_theme {
+                " selected"
+            } else {
+                ""
+            },
+            label = escape_html(&theme.display_name)
+        );
+    }
     let mut builtin_theme_cards = String::new();
     let mut custom_theme_cards = String::new();
     let mut board_cards = String::new();
     for (index, board) in boards.iter().enumerate() {
         board_cards.push_str(&render_board_settings_card(
-            board, index, boards, csrf_token, themes,
+            board,
+            index,
+            boards,
+            csrf_token,
+            themes,
+            open_section,
         ));
     }
 
@@ -563,18 +571,15 @@ pub fn admin_panel_page(
                 title = escape_html(&bf.verification_note)
             )
         };
-        let board_options = bf
-            .boards
-            .iter()
-            .map(|board| {
-                format!(
-                    r#"<option value="{short}">/{short}/ — {name}</option>"#,
-                    short = escape_html(&board.short_name),
-                    name = escape_html(&board.name)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        let mut board_options = String::new();
+        for board in &bf.boards {
+            let _ = write!(
+                board_options,
+                r#"<option value="{short}">/{short}/ — {name}</option>"#,
+                short = escape_html(&board.short_name),
+                name = escape_html(&board.name)
+            );
+        }
         let board_picker = if bf.boards.is_empty() {
             r#"<label>
         Board short name
@@ -1642,6 +1647,7 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
     )
 }
 
+#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn admin_db_health_result_page(
     report: &DbHealthReport,
@@ -1691,7 +1697,7 @@ pub fn admin_db_health_result_page(
         for line in &report.repair_summary {
             let _ = write!(
                 repair_summary_html,
-                r#"<li>{line}</li>"#,
+                r"<li>{line}</li>",
                 line = escape_html(line)
             );
         }
@@ -1705,7 +1711,7 @@ pub fn admin_db_health_result_page(
         for step in &report.repair_steps {
             let _ = write!(
                 repair_steps_html,
-                r#"<li>{step}</li>"#,
+                r"<li>{step}</li>",
                 step = escape_html(step)
             );
         }
@@ -1776,6 +1782,7 @@ pub fn admin_db_health_result_page(
 
 // ─── IP history ───────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn admin_ip_history_page(
     ip_hash: &str,
@@ -2008,6 +2015,7 @@ mod tests {
             std::slice::from_ref(&board),
             "csrf",
             &[sample_theme()],
+            None,
         );
 
         assert!(html.contains("// basic setup"));

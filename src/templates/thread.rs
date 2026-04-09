@@ -110,6 +110,8 @@ pub fn thread_page(
     is_admin: bool,
     poll: Option<&crate::models::PollData>,
     error: Option<&str>,
+    success: Option<&str>,
+    reply_prefill: Option<&super::forms::PostFormState>,
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
@@ -188,6 +190,14 @@ pub fn thread_page(
         String::new()
     };
 
+    if let Some(msg) = success {
+        let _ = write!(
+            body,
+            r#"<div class="post-success-banner">{}</div>"#,
+            escape_html(msg)
+        );
+    }
+
     if let Some(msg) = error {
         let _ = write!(
             body,
@@ -252,15 +262,32 @@ pub fn thread_page(
     body.push_str("</div><!-- #thread-posts -->\n");
 
     if !thread.locked && !thread.archived && can_post {
-        let form_html = super::forms::reply_form(&board.short_name, thread.id, csrf_token, board);
+        let form_html = super::forms::reply_form(
+            &board.short_name,
+            thread.id,
+            csrf_token,
+            board,
+            reply_prefill,
+        );
+        let show_post_form = error.is_some() || reply_prefill.is_some();
         let _ = write!(
             body,
             r##"<div class="post-toggle-bar reply">
   <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Reply ]</a>
 </div>
-<div class="post-form-wrap" id="post-form-wrap" style="display:none">
+<div class="{post_form_class}" id="post-form-wrap" style="{post_form_style}">
   {form_html}
-</div>"##
+</div>"##,
+            post_form_class = if show_post_form {
+                "post-form-wrap is-open"
+            } else {
+                "post-form-wrap is-collapsed"
+            },
+            post_form_style = if show_post_form {
+                "display:block"
+            } else {
+                "display:none"
+            },
         );
     } else if !thread.locked && !thread.archived && board.access_mode.requires_post_password() {
         body.push_str(&super::board::render_post_access_gate(
@@ -657,8 +684,10 @@ pub fn render_post(
             let title = post
                 .media_processing_error
                 .as_deref()
-                .map(escape_html)
-                .unwrap_or_else(|| "Background media processing failed.".to_string());
+                .map_or_else(
+                    || "Background media processing failed.".to_string(),
+                    escape_html,
+                );
             format!(
                 r#" <span class="post-edited" title="{title}">(media processing failed)</span>"#
             )
@@ -992,6 +1021,7 @@ pub fn edit_post_page(
     csrf_token: &str,
     boards: &[Board],
     prefill_token: &str,
+    prefill_body: Option<&str>,
     error: Option<&str>,
     current_theme: Option<&str>,
     collapse_greentext: bool,
@@ -1004,6 +1034,7 @@ pub fn edit_post_page(
             )
         })
         .unwrap_or_default();
+    let current_body = prefill_body.unwrap_or(&post.body);
 
     let body = format!(
         r#"{error_html}
@@ -1036,7 +1067,7 @@ pub fn edit_post_page(
         tid = post.thread_id,
         pid = post.id,
         csrf = escape_html(csrf_token),
-        current_body = escape_html(&post.body),
+        current_body = escape_html(current_body),
         token = escape_html(prefill_token),
     );
 
@@ -1058,7 +1089,7 @@ pub fn edit_post_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{display_file_name, render_post, thread_page, RenderPostOpts};
+    use super::{display_file_name, edit_post_page, render_post, thread_page, RenderPostOpts};
     use crate::models::{BoardAccessMode, MediaType, Post, Thread};
 
     fn sample_post() -> Post {
@@ -1131,6 +1162,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             false,
             true,
         );
@@ -1162,6 +1195,8 @@ mod tests {
             "csrf",
             std::slice::from_ref(&board),
             false,
+            None,
+            None,
             None,
             None,
             None,
@@ -1298,5 +1333,61 @@ mod tests {
         assert!(html.contains("media processing failed"));
         assert!(html.contains("Preview generation failed; original file is still available."));
         assert!(html.contains(r#"href="/boards/test/image.webp""#));
+    }
+
+    #[test]
+    fn thread_page_reopens_reply_form_with_prefill_on_error() {
+        let board = crate::test_fixtures::sample_board();
+        let thread = sample_thread();
+        let posts = vec![Post {
+            is_op: true,
+            ..sample_post()
+        }];
+        let reply_prefill = crate::templates::forms::PostFormState {
+            body: "retry reply".into(),
+            sage: true,
+            ..crate::templates::forms::PostFormState::default()
+        };
+
+        let html = thread_page(
+            &board,
+            &thread,
+            &posts,
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            Some("Wait before posting"),
+            None,
+            Some(&reply_prefill),
+            None,
+            false,
+            true,
+        );
+
+        assert!(html.contains(r#"class="post-form-wrap is-open""#));
+        assert!(html.contains(">retry reply</textarea>"));
+        assert!(html.contains(r#"name="sage" value="1" checked"#));
+    }
+
+    #[test]
+    fn edit_post_page_prefers_submitted_body_when_re_rendered() {
+        let board = crate::test_fixtures::sample_board();
+        let post = sample_post();
+
+        let html = edit_post_page(
+            &board,
+            &post,
+            "csrf",
+            std::slice::from_ref(&board),
+            "token",
+            Some("edited draft"),
+            Some("Incorrect edit token."),
+            None,
+            false,
+        );
+
+        assert!(html.contains(">edited draft</textarea>"));
+        assert!(!html.contains(">body</textarea>"));
     }
 }

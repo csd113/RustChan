@@ -8,6 +8,15 @@ use crate::config::CONFIG;
 use crate::models::Board;
 use crate::utils::sanitize::escape_html;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PostFormState {
+    pub name: String,
+    pub subject: String,
+    pub body: String,
+    pub deletion_token: String,
+    pub sage: bool,
+}
+
 struct UploadFormPolicy {
     uploads_enabled: bool,
 }
@@ -45,14 +54,17 @@ fn form_hint(text: &str) -> String {
     format!(r#"<span class="form-field-help">{text}</span>"#)
 }
 
-fn render_uploads_disabled_row() -> &'static str {
+const fn render_uploads_disabled_row() -> &'static str {
     r#"    <tr><td>uploads</td>
         <td><span class="form-field-help">uploads are disabled on this board</span></td></tr>"#
 }
 
-fn render_edit_token_row() -> &'static str {
-    r#"    <tr><td>edit token</td>
-        <td><input type="text" name="deletion_token" placeholder="optional — lets you edit post" maxlength="64"><span class="form-field-help">keep it secret</span></td></tr>"#
+fn render_edit_token_row(value: Option<&str>) -> String {
+    format!(
+        r#"    <tr><td>edit token</td>
+        <td><input type="text" name="deletion_token" value="{value}" placeholder="optional — lets you edit post" maxlength="64"><span class="form-field-help">keep it secret</span></td></tr>"#,
+        value = escape_html(value.unwrap_or("")),
+    )
 }
 
 fn render_captcha_row(board_short: &str, reply_suffix: &str) -> String {
@@ -60,7 +72,8 @@ fn render_captcha_row(board_short: &str, reply_suffix: &str) -> String {
     format!(
         r#"    <tr id="captcha-row-{board}{suffix}"><td>captcha</td>
         <td>
-          <span id="captcha-status-{board}{suffix}" class="form-field-help">solving proof-of-work… (this takes a moment)</span>
+          <span id="captcha-status-{board}{suffix}" class="form-field-help">waiting for the JavaScript proof-of-work solver…</span>
+          <noscript><div class="form-field-help">This board&apos;s CAPTCHA is solved in JavaScript. Enable JavaScript and wait for the checkmark before posting.</div></noscript>
           <input type="hidden" name="pow_nonce" id="pow-nonce-{board}{suffix}" value=""
                  data-pow-board="{board}" data-pow-difficulty="{difficulty}">
         </td></tr>"#,
@@ -164,7 +177,12 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
 
 /// New-thread submission form. Embedded on board index and catalog pages.
 #[allow(clippy::too_many_lines)]
-pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board) -> String {
+pub(super) fn new_thread_form(
+    board_short: &str,
+    csrf_token: &str,
+    board: &Board,
+    prefill: Option<&PostFormState>,
+) -> String {
     let submission_token = new_submission_token();
     let upload_policy = build_upload_form_policy(board);
     let upload_row = if upload_policy.uploads_enabled {
@@ -191,11 +209,14 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
     // captcha JS block removed — logic lives in /static/main.js.
 
     let edit_token_row = if board.allow_editing {
-        render_edit_token_row()
+        render_edit_token_row(prefill.map(|state| state.deletion_token.as_str()))
     } else {
-        ""
+        String::new()
     };
     let poll_option_rows = [render_poll_option_row(1), render_poll_option_row(2)].concat();
+    let name_value = prefill.map_or("", |state| state.name.as_str());
+    let subject_value = prefill.map_or("", |state| state.subject.as_str());
+    let body_value = prefill.map_or("", |state| state.body.as_str());
 
     format!(
         r#"<div class="post-form-container">
@@ -205,12 +226,12 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
   <input type="hidden" name="submission_token" value="{submission_token}">
   <table>
     <tr><td>name</td>
-        <td><input type="text" name="name" placeholder="Anonymous" maxlength="64"></td></tr>
+        <td><input type="text" name="name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
     <tr><td>subject</td>
-        <td><input type="text" name="subject" maxlength="128">
+        <td><input type="text" name="subject" value="{subject_value}" maxlength="128">
             <button type="submit">post thread</button></td></tr>
     <tr><td>body</td>
-        <td><textarea name="body" rows="5" maxlength="4096"></textarea>
+        <td><textarea name="body" rows="5" maxlength="4096">{body_value}</textarea>
             <div class="markup-hint">
               <span title="Greentext">&#62;green</span>
               <span title="Bold">**bold**</span>
@@ -260,6 +281,9 @@ pub(super) fn new_thread_form(board_short: &str, csrf_token: &str, board: &Board
         board = escape_html(board_short),
         csrf = escape_html(csrf_token),
         submission_token = escape_html(&submission_token),
+        name_value = escape_html(name_value),
+        subject_value = escape_html(subject_value),
+        body_value = escape_html(body_value),
         uploads_disabled_row = uploads_disabled_row,
         upload_row = upload_row,
         upload_progress_row = upload_progress_row(),
@@ -276,6 +300,7 @@ pub(super) fn reply_form(
     thread_id: i64,
     csrf_token: &str,
     board: &Board,
+    prefill: Option<&PostFormState>,
 ) -> String {
     let submission_token = new_submission_token();
     let upload_policy = build_upload_form_policy(board);
@@ -292,9 +317,9 @@ pub(super) fn reply_form(
     };
 
     let edit_token_row = if board.allow_editing {
-        render_edit_token_row()
+        render_edit_token_row(prefill.map(|state| state.deletion_token.as_str()))
     } else {
-        ""
+        String::new()
     };
 
     // PoW CAPTCHA block — only rendered when the board has it enabled.
@@ -302,6 +327,13 @@ pub(super) fn reply_form(
         render_captcha_row(board_short, "-reply")
     } else {
         String::new()
+    };
+    let name_value = prefill.map_or("", |state| state.name.as_str());
+    let body_value = prefill.map_or("", |state| state.body.as_str());
+    let sage_checked = if prefill.is_some_and(|state| state.sage) {
+        " checked"
+    } else {
+        ""
     };
 
     format!(
@@ -312,15 +344,15 @@ pub(super) fn reply_form(
   <input type="hidden" name="submission_token" value="{submission_token}">
   <table>
     <tr><td>name</td>
-        <td><input type="text" name="name" placeholder="Anonymous" maxlength="64"></td></tr>
+        <td><input type="text" name="name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
     <tr><td>body</td>
-        <td><textarea id="reply-body" name="body" rows="4" maxlength="4096"></textarea>
+        <td><textarea id="reply-body" name="body" rows="4" maxlength="4096">{body_value}</textarea>
             <button type="submit">post reply</button></td></tr>
     {uploads_disabled_row}
     {upload_row}
     {upload_progress_row}
     <tr><td>options</td>
-        <td><label class="sage-label"><input type="checkbox" name="sage" value="1"> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
+        <td><label class="sage-label"><input type="checkbox" name="sage" value="1"{sage_checked}> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
     {edit_token_row}
     {captcha_row}
   </table>
@@ -330,6 +362,9 @@ pub(super) fn reply_form(
         tid = thread_id,
         csrf = escape_html(csrf_token),
         submission_token = escape_html(&submission_token),
+        name_value = escape_html(name_value),
+        body_value = escape_html(body_value),
+        sage_checked = sage_checked,
         uploads_disabled_row = uploads_disabled_row,
         upload_row = upload_row,
         upload_progress_row = upload_progress_row(),
@@ -342,7 +377,7 @@ pub(super) fn reply_form(
 mod tests {
     use super::{
         build_upload_form_policy, new_thread_form, render_poll_option_row, reply_form,
-        POLL_OPTION_MAX_LENGTH,
+        PostFormState, POLL_OPTION_MAX_LENGTH,
     };
 
     fn uploads_disabled_board() -> crate::models::Board {
@@ -370,7 +405,7 @@ mod tests {
 
     #[test]
     fn new_thread_form_hides_file_input_when_uploads_disabled() {
-        let html = new_thread_form("test", "csrf", &uploads_disabled_board());
+        let html = new_thread_form("test", "csrf", &uploads_disabled_board(), None);
         assert!(!html.contains("type=\"file\" name=\"file\""));
         assert!(!html.contains("name=\"image_file\""));
         assert!(!html.contains("name=\"audio_file\""));
@@ -379,7 +414,7 @@ mod tests {
 
     #[test]
     fn reply_form_hides_file_input_when_uploads_disabled() {
-        let html = reply_form("test", 42, "csrf", &uploads_disabled_board());
+        let html = reply_form("test", 42, "csrf", &uploads_disabled_board(), None);
         assert!(!html.contains("type=\"file\" name=\"file\""));
         assert!(!html.contains("name=\"image_file\""));
         assert!(!html.contains("name=\"audio_file\""));
@@ -388,7 +423,7 @@ mod tests {
 
     #[test]
     fn audio_image_form_is_audio_first_and_cover_image_second() {
-        let html = new_thread_form("test", "csrf", &audio_image_board());
+        let html = new_thread_form("test", "csrf", &audio_image_board(), None);
         let audio_pos = html.find("name=\"audio_file\"").expect("audio row");
         let image_pos = html.find("name=\"image_file\"").expect("image row");
         assert!(audio_pos < image_pos);
@@ -413,6 +448,7 @@ mod tests {
                 allow_audio: true,
                 ..uploads_disabled_board()
             },
+            None,
         );
         assert!(html.contains("<td>upload</td>"));
         assert!(html.contains("name=\"file\""));
@@ -423,8 +459,8 @@ mod tests {
     #[test]
     fn post_forms_include_submission_token() {
         let board = uploads_disabled_board();
-        let thread_html = new_thread_form("test", "csrf", &board);
-        let reply_html = reply_form("test", 42, "csrf", &board);
+        let thread_html = new_thread_form("test", "csrf", &board, None);
+        let reply_html = reply_form("test", 42, "csrf", &board, None);
 
         assert!(thread_html.contains("name=\"submission_token\""));
         assert!(reply_html.contains("name=\"submission_token\""));
@@ -435,10 +471,53 @@ mod tests {
         let initial_row = render_poll_option_row(1);
         assert!(initial_row.contains(&format!(r#"maxlength="{POLL_OPTION_MAX_LENGTH}""#)));
 
-        let html = new_thread_form("test", "csrf", &uploads_disabled_board());
+        let html = new_thread_form("test", "csrf", &uploads_disabled_board(), None);
         assert!(html.contains(&format!(
             r#"data-poll-option-maxlength="{POLL_OPTION_MAX_LENGTH}""#
         )));
         assert_eq!(html.matches(r#"class="poll-option-input""#).count(), 2);
+    }
+
+    #[test]
+    fn post_forms_preserve_submitted_text_state() {
+        let board = crate::models::Board {
+            allow_editing: true,
+            ..uploads_disabled_board()
+        };
+        let state = PostFormState {
+            name: "anon".into(),
+            subject: "subject".into(),
+            body: "draft body".into(),
+            deletion_token: "secret".into(),
+            sage: true,
+        };
+        let thread_html = new_thread_form("test", "csrf", &board, Some(&state));
+        let reply_html = reply_form("test", 42, "csrf", &board, Some(&state));
+
+        assert!(thread_html.contains(r#"name="name" value="anon""#));
+        assert!(thread_html.contains(r#"name="subject" value="subject""#));
+        assert!(thread_html.contains(">draft body</textarea>"));
+        assert!(thread_html.contains(r#"name="deletion_token" value="secret""#));
+
+        assert!(reply_html.contains(r#"name="name" value="anon""#));
+        assert!(reply_html.contains(">draft body</textarea>"));
+        assert!(reply_html.contains(r#"name="deletion_token" value="secret""#));
+        assert!(reply_html.contains(r#"name="sage" value="1" checked"#));
+    }
+
+    #[test]
+    fn captcha_row_includes_noscript_guidance() {
+        let html = new_thread_form(
+            "test",
+            "csrf",
+            &crate::models::Board {
+                allow_captcha: true,
+                ..uploads_disabled_board()
+            },
+            None,
+        );
+
+        assert!(html.contains("waiting for the JavaScript proof-of-work solver"));
+        assert!(html.contains("Enable JavaScript and wait for the checkmark before posting"));
     }
 }

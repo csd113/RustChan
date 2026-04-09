@@ -37,6 +37,7 @@ fn is_xml_http_request(headers: &HeaderMap) -> bool {
 pub async fn view_thread(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
+    Query(params): Query<ThreadPageQuery>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
@@ -141,8 +142,20 @@ pub async fn view_thread(
         return Ok((jar, resp).into_response());
     }
 
-    let html =
-        render::render_thread_page(&page_data, &csrf, None, current_theme.as_deref(), can_post);
+    let success_message = params
+        .reported
+        .as_deref()
+        .filter(|value| *value == "1")
+        .map(|_| "Report submitted. Thank you.");
+    let html = render::render_thread_page(
+        &page_data,
+        &csrf,
+        None,
+        success_message,
+        None,
+        current_theme.as_deref(),
+        can_post,
+    );
     let mut resp = Html(html).into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
@@ -204,6 +217,13 @@ pub async fn post_reply(
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
+    let post_form_state = crate::templates::forms::PostFormState {
+        name: form.name.clone(),
+        subject: String::new(),
+        body: form.body.clone(),
+        deletion_token: form.deletion_token.clone(),
+        sage: form.sage,
+    };
     let raw_body = form.body;
 
     let upload_dir = CONFIG.upload_dir.clone();
@@ -409,6 +429,8 @@ pub async fn post_reply(
                     &page_data,
                     &csrf_for_error,
                     Some(&msg),
+                    None,
+                    Some(&post_form_state),
                     current_theme.as_deref(),
                     true,
                 ))
@@ -440,6 +462,11 @@ pub async fn post_reply(
 #[derive(Deserialize)]
 pub struct EditQuery {
     pub token: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ThreadPageQuery {
+    pub reported: Option<String>,
 }
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -535,6 +562,7 @@ pub async fn edit_post_get(
                 &csrf,
                 all_boards.as_slice(),
                 &prefill_token,
+                None,
                 None,
                 current_theme.as_deref(),
                 board.collapse_greentext,
@@ -634,10 +662,24 @@ pub async fn edit_post_post(
                 ));
             }
 
-            // Validate body text length / content before attempting the edit
-            let body_text = crate::utils::sanitize::validate_body(&raw_body)
-                .map_err(AppError::BadRequest)?
-                .to_string();
+            let body_text = match crate::utils::sanitize::validate_body(&raw_body) {
+                Ok(body_text) => body_text.to_string(),
+                Err(message) => {
+                    let all_boards = crate::templates::live_boards();
+                    let html = crate::templates::edit_post_page(
+                        &board,
+                        &post,
+                        &csrf_clone,
+                        all_boards.as_slice(),
+                        &token,
+                        Some(&raw_body),
+                        Some(&message),
+                        current_theme.as_deref(),
+                        board.collapse_greentext,
+                    );
+                    return Ok(EditOutcome::ErrorPage(html));
+                }
+            };
 
             let filters: Vec<(String, String)> = db::get_word_filters(&conn)?
                 .into_iter()
@@ -679,6 +721,7 @@ pub async fn edit_post_post(
                     &csrf_clone,
                     all_boards.as_slice(),
                     &token,
+                    Some(&raw_body),
                     Some(err_msg),
                     current_theme.as_deref(),
                     board.collapse_greentext,
@@ -698,7 +741,11 @@ pub async fn edit_post_post(
 
     match outcome {
         EditOutcome::Redirect(url) => Ok(Redirect::to(&url).into_response()),
-        EditOutcome::ErrorPage(html) => Ok(Html(html).into_response()),
+        EditOutcome::ErrorPage(html) => {
+            let mut response = Html(html).into_response();
+            *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+            Ok(response)
+        }
     }
 }
 

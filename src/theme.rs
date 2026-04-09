@@ -62,16 +62,19 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
     },
 ];
 
+#[must_use]
 pub fn builtin_theme(slug: &str) -> Option<&'static BuiltinTheme> {
     BUILTIN_THEMES
         .iter()
         .find(|theme| theme.slug.eq_ignore_ascii_case(slug.trim()))
 }
 
+#[must_use]
 pub fn builtin_theme_slugs() -> Vec<&'static str> {
     BUILTIN_THEMES.iter().map(|theme| theme.slug).collect()
 }
 
+#[must_use]
 pub fn builtin_theme_rows(enabled_slugs: &[String]) -> Vec<Theme> {
     BUILTIN_THEMES
         .iter()

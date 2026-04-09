@@ -56,6 +56,7 @@ fn board_reorder_controls(
     )
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 fn render_board_card(
     stats: &crate::models::BoardStats,
     nsfw_consent: bool,
@@ -147,7 +148,7 @@ pub(crate) fn board_access_badge(board: &Board) -> String {
     }
 }
 
-fn board_access_copy(board: &Board) -> (&'static str, &'static str, &'static str) {
+const fn board_access_copy(board: &Board) -> (&'static str, &'static str, &'static str) {
     match board.access_mode {
         crate::models::BoardAccessMode::Public => (
             "public board",
@@ -677,6 +678,7 @@ pub fn board_page(
     boards: &[Board],
     is_admin: bool,
     error: Option<&str>,
+    new_thread_prefill: Option<&super::forms::PostFormState>,
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
@@ -725,15 +727,26 @@ pub fn board_page(
     }
 
     if can_post {
+        let show_post_form = error.is_some() || new_thread_prefill.is_some();
         let _ = write!(
             body,
             r##"<div class="post-toggle-bar centered catalog-toggle-bar">
   <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Post a New Thread ]</a>
 </div>
-<div class="post-form-wrap" id="post-form-wrap" style="display:none">
+<div class="{post_form_class}" id="post-form-wrap" style="{post_form_style}">
   {}
 </div>"##,
-            super::forms::new_thread_form(&board.short_name, csrf_token, board)
+            super::forms::new_thread_form(&board.short_name, csrf_token, board, new_thread_prefill,),
+            post_form_class = if show_post_form {
+                "post-form-wrap is-open"
+            } else {
+                "post-form-wrap is-collapsed"
+            },
+            post_form_style = if show_post_form {
+                "display:block"
+            } else {
+                "display:none"
+            },
         );
     } else if board.access_mode.requires_post_password() {
         body.push_str(&render_post_access_gate(
@@ -982,6 +995,7 @@ fn render_thread_summary(
 
 #[must_use]
 #[allow(
+    clippy::fn_params_excessive_bools,
     clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::implicit_hasher
@@ -1043,7 +1057,7 @@ pub fn catalog_page(
 
     let _ = write!(
         body,
-        r##"<div class="board-header catalog-header-row">
+        r#"<div class="board-header catalog-header-row">
   <div class="catalog-header-left board-catalog-header">
     <h1>/{bs}/  — {bn}{access_badge}{title_suffix}</h1>
     <p class="board-desc">{desc}</p>
@@ -1067,7 +1081,7 @@ pub fn catalog_page(
     </div>
   </div>
 </div>
-<div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link{catalog_active}" href="/{bs}/catalog">[Catalog]</a>{nav_archive}{hidden_nav}</div>"##,
+<div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link{catalog_active}" href="/{bs}/catalog">[Catalog]</a>{nav_archive}{hidden_nav}</div>"#,
         bs = bs,
         bn = bn,
         access_badge = access_badge,
@@ -1086,7 +1100,7 @@ pub fn catalog_page(
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {form}
 </div>"##,
-            form = super::forms::new_thread_form(&board.short_name, csrf_token, board)
+            form = super::forms::new_thread_form(&board.short_name, csrf_token, board, None)
         );
     } else if board.access_mode.requires_post_password() {
         body.push_str(&render_post_access_gate(
@@ -1333,8 +1347,9 @@ pub fn archive_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_page, board_cards, catalog_page, render_catalog_card};
+    use super::{archive_page, board_cards, board_page, catalog_page, render_catalog_card};
     use crate::models::{Board, BoardStats, Thread};
+    use crate::templates::forms::PostFormState;
     use std::collections::HashSet;
 
     fn sample_board() -> Board {
@@ -1492,5 +1507,32 @@ mod tests {
         assert!(html.contains("thread-state-badge-archive"));
         assert!(!html.contains("thread-state-badge-lock"));
         assert!(html.contains("archive-meta"));
+    }
+
+    #[test]
+    fn board_page_reopens_new_thread_form_when_error_state_exists() {
+        let board = sample_board();
+        let state = PostFormState {
+            body: "retry".into(),
+            ..PostFormState::default()
+        };
+
+        let html = board_page(
+            &board,
+            &[],
+            &crate::models::Pagination::new(1, 10, 0),
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            Some("Post must include either text or an attached file."),
+            Some(&state),
+            None,
+            false,
+            true,
+        );
+
+        assert!(html.contains(r#"class="post-form-wrap is-open""#));
+        assert!(html.contains(r#"style="display:block""#));
+        assert!(html.contains(">retry</textarea>"));
     }
 }

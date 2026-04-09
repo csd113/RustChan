@@ -181,6 +181,7 @@ pub fn delete_custom_theme(conn: &rusqlite::Connection, slug: &str) -> Result<()
     Ok(())
 }
 
+#[must_use]
 pub fn sanitize_theme_slug(slug: &str) -> String {
     slug.trim()
         .chars()
@@ -190,6 +191,7 @@ pub fn sanitize_theme_slug(slug: &str) -> String {
         .to_ascii_lowercase()
 }
 
+#[must_use]
 pub fn sanitize_theme_name(name: &str) -> String {
     let value = name.trim().chars().take(64).collect::<String>();
     if value.is_empty() {
@@ -199,14 +201,17 @@ pub fn sanitize_theme_name(name: &str) -> String {
     }
 }
 
+#[must_use]
 pub fn sanitize_theme_description(description: &str) -> String {
     description.trim().chars().take(256).collect()
 }
 
+#[must_use]
 pub fn sanitize_theme_css(css: &str) -> String {
     css.trim().chars().take(32_000).collect()
 }
 
+#[must_use]
 pub fn sanitize_theme_swatch(swatch: &str) -> String {
     let trimmed = swatch.trim();
     if trimmed.len() == 7
@@ -240,6 +245,7 @@ pub fn theme_css_response(conn: &rusqlite::Connection, slug: &str) -> Result<Opt
     Ok(Some(css))
 }
 
+#[must_use]
 pub fn is_builtin_slug(slug: &str) -> bool {
     builtin_theme(slug).is_some()
 }

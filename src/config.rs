@@ -228,10 +228,10 @@ struct SettingsFile {
     /// run before it is killed. Default: 120.
     ffmpeg_timeout_secs: Option<u64>,
     /// Explicit proxy CIDR allowlist for trusted forwarding headers.
-    /// Examples: ["127.0.0.1/32", "::1/128", "10.0.0.0/8"]
+    /// Examples include `127.0.0.1/32`, `::1/128`, and `10.0.0.0/8`.
     trusted_proxy_cidrs: Option<Vec<String>>,
     /// Public hostnames accepted by the HTTP→HTTPS redirect listener.
-    /// Needed when RustChan binds to a wildcard address but serves a manual-cert
+    /// Needed when `RustChan` binds to a wildcard address but serves a manual-cert
     /// public domain.
     public_hosts: Option<Vec<String>>,
     /// When true, overflow threads are always archived rather than hard-deleted,
@@ -909,7 +909,7 @@ fn rewrite_settings_file_lines(
 
     let trailing_newline = content.ends_with('\n');
     let mut seen_keys = BTreeSet::new();
-    let mut updated: Vec<String> = content
+    let mut updated_lines: Vec<String> = content
         .lines()
         .map(|line| {
             let trimmed = line.trim_start();
@@ -931,31 +931,31 @@ fn rewrite_settings_file_lines(
     if !missing.is_empty() {
         let insert_idx = insert_missing_before
             .and_then(|anchor| {
-                updated
+                updated_lines
                     .iter()
                     .position(|line| line.trim_start().starts_with(anchor))
             })
             .or_else(|| {
-                updated
+                updated_lines
                     .iter()
                     .position(|line| line.trim_start().starts_with('['))
             })
-            .unwrap_or(updated.len());
+            .unwrap_or(updated_lines.len());
         let mut insertion_block = missing;
         let previous_line = insert_idx
             .checked_sub(1)
-            .and_then(|index| updated.get(index));
+            .and_then(|index| updated_lines.get(index));
         if previous_line.is_some_and(|line| !line.trim().is_empty()) {
             insertion_block.insert(0, String::new());
         }
-        let next_line = updated.get(insert_idx);
+        let next_line = updated_lines.get(insert_idx);
         if next_line.is_some_and(|line| !line.trim().is_empty()) {
             insertion_block.push(String::new());
         }
-        updated.splice(insert_idx..insert_idx, insertion_block);
+        updated_lines.splice(insert_idx..insert_idx, insertion_block);
     }
 
-    let mut out = updated.join("\n");
+    let mut out = updated_lines.join("\n");
     if trailing_newline {
         out.push('\n');
     }
