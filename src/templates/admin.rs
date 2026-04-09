@@ -1275,7 +1275,7 @@ button / button:hover</pre>
      // full site backup & restore
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section admin-section-collapsible" id="full-backup-restore">
-<details class="admin-dropdown" data-admin-dropdown-key="full-backup-restore" open>
+<details class="admin-dropdown" data-admin-dropdown-key="full-backup-restore">
 <summary><span>// full site backup &amp; restore</span></summary>
 <div class="admin-dropdown-content">
 <p class="admin-copy">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/backups/full/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer. Saved full backups can also be used to extract or directly restore a single board without scheduling separate per-board backups.</p>
@@ -1347,7 +1347,7 @@ button / button:hover</pre>
      // board backup & restore
      ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section admin-section-collapsible" id="board-backup-restore">
-<details class="admin-dropdown" data-admin-dropdown-key="board-backup-restore" open>
+<details class="admin-dropdown" data-admin-dropdown-key="board-backup-restore">
 <summary><span>// board backup &amp; restore</span></summary>
 <div class="admin-dropdown-content">
 <p class="admin-copy">Board backups cover a single board. Use <em>save to server</em> on a board card above to store the backup in <code>rustchan-data/backups/boards/</code>, or use the table below to download, restore, or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>

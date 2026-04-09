@@ -478,6 +478,14 @@ function startSubmitButtonAnimation(form) {
   form._submitButtonAnimationTimer = window.setInterval(render, 900);
 }
 
+function setSubmitButtonsWaitingForServer(form) {
+  stopSubmitButtonAnimation(form);
+  setFormSubmitButtonsBusy(form, true, {
+    labelKey: 'uploadOriginalLabel',
+    busyLabel: 'Upload sent, waiting for server'
+  });
+}
+
 function stopSubmitButtonAnimation(form) {
   if (form._submitButtonAnimationTimer) {
     window.clearInterval(form._submitButtonAnimationTimer);
@@ -705,6 +713,9 @@ function submitPostFormWithProgress(form) {
   xhr.upload.addEventListener('progress', function (event) {
     if (event.lengthComputable && event.total > 0) {
       var percent = (event.loaded / event.total) * 100;
+      if (event.loaded >= event.total) {
+        setSubmitButtonsWaitingForServer(form);
+      }
       submitHelper.setProgress(
         percent,
         'Uploading ' + formatBytes(event.loaded) + ' / ' + formatBytes(event.total) + ' (' + Math.round(percent) + '%)'

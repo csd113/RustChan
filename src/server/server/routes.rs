@@ -11,6 +11,15 @@ use crate::config::CONFIG;
 use crate::middleware::AppState;
 use crate::server::server::observability;
 
+const POST_MULTIPART_HEADROOM_BYTES: usize = 1024 * 1024;
+
+fn post_upload_body_limit() -> usize {
+    CONFIG
+        .max_video_size
+        .max(CONFIG.max_audio_size)
+        .saturating_add(POST_MULTIPART_HEADROOM_BYTES)
+}
+
 pub(super) fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(observability::healthz))
@@ -51,9 +60,8 @@ pub(super) fn public_routes() -> Router<AppState> {
         .route("/{board}", get(crate::handlers::board::board_index))
         .route(
             "/{board}",
-            post(crate::handlers::board::create_thread).layer(DefaultBodyLimit::max(
-                CONFIG.max_video_size.max(CONFIG.max_audio_size),
-            )),
+            post(crate::handlers::board::create_thread)
+                .layer(DefaultBodyLimit::max(post_upload_body_limit())),
         )
         .route(
             "/{board}/unlock",
@@ -81,9 +89,8 @@ pub(super) fn public_routes() -> Router<AppState> {
         )
         .route(
             "/{board}/thread/{id}",
-            post(crate::handlers::thread::post_reply).layer(DefaultBodyLimit::max(
-                CONFIG.max_video_size.max(CONFIG.max_audio_size),
-            )),
+            post(crate::handlers::thread::post_reply)
+                .layer(DefaultBodyLimit::max(post_upload_body_limit())),
         )
         .route(
             "/{board}/post/{id}/edit",

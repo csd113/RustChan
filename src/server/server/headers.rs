@@ -46,6 +46,8 @@ pub(super) async fn safe_timeout_middleware(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let path = req.uri().path();
+    let is_post_upload_route =
+        matches!(*req.method(), http::Method::POST) && is_post_upload_path(path);
     let bypass_timeout = path.starts_with("/admin/backup/download/")
         || matches!(
             path,
@@ -64,9 +66,13 @@ pub(super) async fn safe_timeout_middleware(
         return next.run(req).await;
     }
 
-    let timeout = match *req.method() {
-        http::Method::GET | http::Method::HEAD => std::time::Duration::from_secs(30),
-        _ => std::time::Duration::from_secs(300),
+    let timeout = if is_post_upload_route {
+        std::time::Duration::from_secs(900)
+    } else {
+        match *req.method() {
+            http::Method::GET | http::Method::HEAD => std::time::Duration::from_secs(30),
+            _ => std::time::Duration::from_secs(300),
+        }
     };
 
     tokio::time::timeout(timeout, next.run(req))
@@ -74,6 +80,24 @@ pub(super) async fn safe_timeout_middleware(
         .unwrap_or_else(|_| {
             (http::StatusCode::REQUEST_TIMEOUT, "Request timed out").into_response()
         })
+}
+
+fn is_post_upload_path(path: &str) -> bool {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let mut segments = trimmed.split('/');
+    matches!(
+        (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+        ),
+        (Some(_), None, None, None) | (Some(_), Some("thread"), Some(_), None)
+    )
 }
 
 fn should_emit_hsts(
