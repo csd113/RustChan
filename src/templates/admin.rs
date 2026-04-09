@@ -195,8 +195,8 @@ fn render_board_settings_card(
     <label>Max archived threads<input type="number" name="max_archived_threads" value="{max_archived_threads}" min="1" max="10000"></label>
   </div>
   <div class="board-settings-checks">
-    <label><input type="checkbox" name="nsfw" value="1"{nsfw_checked}> Show this board in the NSFW group</label>
-    <label><input type="checkbox" name="allow_archive" value="1"{archive_checked}> Archive overflow threads instead of deleting them</label>
+    <label><input type="checkbox" name="nsfw" value="1"{nsfw_checked}> NSFW</label>
+    <label><input type="checkbox" name="allow_archive" value="1"{archive_checked}> Archive overflow threads</label>
   </div>
 </div>
 <div class="admin-subsection">
@@ -221,7 +221,7 @@ fn render_board_settings_card(
     </label>
   </div>
   <div class="board-settings-checks">
-    <label><input type="checkbox" name="clear_access_password" value="1"> Clear saved board password</label>
+    <label><input type="checkbox" name="clear_access_password" value="1"> Remove saved password</label>
     <label><input type="checkbox" name="allow_captcha" value="1"{captcha_checked}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)</label>
   </div>
 </div>
@@ -236,10 +236,10 @@ fn render_board_settings_card(
     <label><input type="checkbox" name="allow_audio" value="1"{audio_checked}> Allow audio</label>
     {any_files_toggle}
     <label><input type="checkbox" name="allow_tripcodes" value="1"{tripcodes_checked}> Allow tripcodes</label>
-    <label><input type="checkbox" name="allow_video_embeds" value="1"{video_embeds_checked}> Embed video links (YouTube / Invidious / Streamable)</label>
+    <label><input type="checkbox" name="allow_video_embeds" value="1"{video_embeds_checked}> Embed video links (YouTube)</label>
     <label><input type="checkbox" name="show_poster_ids" value="1"{poster_ids_checked}> Show thread-local poster IDs</label>
     <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block for this board. Existing posts are not affected.">
-      <input type="checkbox" name="collapse_greentext" value="1"{collapse_greentext_checked}> Collapse long greentext walls (3+ lines) into expandable blocks
+      <input type="checkbox" name="collapse_greentext" value="1"{collapse_greentext_checked}> Collapse long greentext
     </label>
     <label><input type="checkbox" name="allow_editing" value="1"{allow_editing_checked}> Allow post editing</label>
   </div>
@@ -370,7 +370,7 @@ fn render_board_settings_card(
         access_password_status = if board.access_password_hash.is_empty() {
             "No board password is currently saved."
         } else {
-            "A board password is already saved here."
+            "A password is saved. Leave blank to keep it."
         },
         cooldown = board.post_cooldown_secs,
         captcha_checked = checked(board.allow_captcha),
@@ -1034,15 +1034,15 @@ old boards to prevent query performance degradation.
 <div class="admin-subsection">
   <div class="admin-card-header">
     <h3>// board directory</h3>
-    <p>Open a board card to adjust settings, access, appearance, backups, and destructive actions in separate task blocks.</p>
+  <p>Open a board to edit its settings.</p>
   </div>
-  <p class="admin-order-note">Board order is shared across the homepage, top bar, and this panel, with SFW and NSFW boards each keeping their own separate order.</p>
+  <p class="admin-order-note">Board order is shared across the homepage, top bar, and this panel. SFW and NSFW boards each keep their own order.</p>
   <div class="admin-board-cards">{board_cards}</div>
 </div>
 <div class="admin-subsection">
   <div class="admin-card-header">
     <h3>// create board</h3>
-    <p>Start with the short name and public-facing label, then fine-tune everything else from its board card above.</p>
+    <p>Start with the short name and label, then edit the rest in its board card above.</p>
   </div>
   <form method="POST" action="/admin/board/create" class="admin-board-create-form admin-quick-form">
   <input type="hidden" name="_csrf" value="{csrf}">
@@ -1069,13 +1069,13 @@ old boards to prevent query performance degradation.
 <summary><span>// moderation</span><span class="admin-dropdown-badges admin-dropdown-counter-label">{moderation_summary_counter}</span></summary>
 <div class="admin-dropdown-content">
 <p class="admin-moderation-intro">
-  Live queues come first, policy controls come second, and the log stays available for historical review.
+  Review queues first. Policy tools and the log are below.
 </p>
 <div class="admin-moderation-grid">
   <section class="admin-moderation-card admin-moderation-card-review">
     <div class="admin-card-header">
       <h3>// review queue</h3>
-      <p>Handle open reports and ban appeals before changing policy.</p>
+      <p>Handle open reports and ban appeals first.</p>
     </div>
     <div class="admin-subsection admin-subsection-tight">
       <h4>// report inbox{report_badge}</h4>
@@ -1113,7 +1113,7 @@ old boards to prevent query performance degradation.
       </table>
       </div>
       <h4>add ban</h4>
-      <form method="POST" action="/admin/ban/add" class="admin-moderation-form admin-quick-form">
+      <form method="POST" action="/admin/ban/add" class="admin-moderation-form admin-quick-form admin-moderation-compact-form">
         <input type="hidden" name="_csrf" value="{csrf}">
         <label class="admin-quick-field">IP hash
           <input type="text" name="ip_hash" required placeholder="ab12cd34ef56...">
@@ -1137,7 +1137,7 @@ old boards to prevent query performance degradation.
       </table>
       </div>
       <h4>add filter</h4>
-      <form method="POST" action="/admin/filter/add" class="admin-moderation-form admin-quick-form">
+      <form method="POST" action="/admin/filter/add" class="admin-moderation-form admin-quick-form admin-moderation-compact-form">
         <input type="hidden" name="_csrf" value="{csrf}">
         <label class="admin-quick-field">Pattern
           <input type="text" name="pattern" required placeholder="old phrase">
@@ -1233,7 +1233,7 @@ button / button:hover</pre>
         <label>Description<input type="text" name="description" maxlength="256" placeholder="What makes this theme distinct?"></label>
       </div>
       <div class="board-settings-checks">
-        <label><input type="checkbox" name="enabled" value="1" checked> Enabled in theme picker</label>
+        <label><input type="checkbox" name="enabled" value="1" checked> Shown in theme picker</label>
       </div>
       <div class="theme-editor-css-panel">
         <div class="theme-editor-panel-header">
@@ -1309,7 +1309,7 @@ button / button:hover</pre>
 <div class="admin-subsection">
   <div class="admin-card-header">
     <h3>// run or restore now</h3>
-    <p>Create a new full backup on the server or upload a local archive to replace the live site.</p>
+    <p>Create a full backup on the server or upload one to replace the live site.</p>
   </div>
   <div class="admin-inline-actions admin-inline-actions-spaced">
   <form method="POST" action="/admin/backup/create" id="full-backup-create-form">
@@ -1320,7 +1320,7 @@ button / button:hover</pre>
   <input type="hidden" name="_csrf" value="{csrf}">
   <label class="admin-quick-field admin-file-field">Backup archive
     <input type="file" name="backup_file" accept=".zip" required class="admin-file-input">
-    <span class="admin-quick-help">Upload a saved full-site zip archive.</span>
+    <span class="admin-quick-help">Upload a full-site zip backup.</span>
   </label>
   <button type="submit" class="btn-danger"
           data-confirm="WARNING: This will overwrite the database and all uploaded files. Cannot be undone. Continue?">&#8635; restore from local file</button>

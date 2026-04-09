@@ -3194,6 +3194,20 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   flex: 0 1 140px;
 }
 
+.admin-moderation-compact-form .admin-quick-field {
+  flex: 0 1 14rem;
+  min-width: 11rem;
+}
+
+.admin-moderation-compact-form .admin-quick-field-compact {
+  flex-basis: 9rem;
+  min-width: 8rem;
+}
+
+.admin-moderation-compact-form button {
+  width: auto;
+}
+
 .admin-quick-help {
   color: var(--text-dim);
   font-size: 0.72rem;
