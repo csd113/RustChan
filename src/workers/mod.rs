@@ -7,7 +7,7 @@
 //   • Jobs are claimed atomically via UPDATE … RETURNING so multiple workers
 //     never process the same job even under concurrent access in WAL mode.
 //   • Workers sleep until a Notify fires or a 5-second poll timeout elapses.
-//   • Failed jobs are retried up to MAX_ATTEMPTS times; then marked "failed"
+//   • Failed jobs are retried up to the shared job retry budget; then marked "failed"
 //     with the last error message recorded for inspection.
 //   • A CancellationToken is threaded through every worker so that a graceful
 //     shutdown drains in-progress jobs before exiting (#7).
@@ -46,9 +46,6 @@ fn ffmpeg_command() -> TokioCommand {
     TokioCommand::new(&CONFIG.ffmpeg_path)
 }
 
-// How many times a job may be attempted before being permanently failed.
-#[allow(dead_code)]
-const MAX_ATTEMPTS: i64 = 3;
 // How long a worker sleeps when the queue is empty.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 

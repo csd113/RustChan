@@ -359,31 +359,6 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
     Ok(())
 }
 
-/// Added rows-affected check — silently succeeding when the board
-/// id doesn't exist made update errors invisible.
-///
-/// # Errors
-/// Returns an error if the database operation fails or the board id is not found.
-#[allow(dead_code)]
-pub fn update_board(
-    conn: &rusqlite::Connection,
-    id: i64,
-    name: &str,
-    description: &str,
-    nsfw: bool,
-) -> Result<()> {
-    let n = conn
-        .execute(
-            "UPDATE boards SET name=?1, description=?2, nsfw=?3 WHERE id=?4",
-            params![name, description, i32::from(nsfw), id],
-        )
-        .context("Failed to update board")?;
-    if n == 0 {
-        anyhow::bail!("Board id {id} not found");
-    }
-    Ok(())
-}
-
 /// Update all per-board settings from the admin panel.
 ///
 /// Added rows-affected check.

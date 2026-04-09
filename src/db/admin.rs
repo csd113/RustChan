@@ -432,19 +432,6 @@ pub fn resolve_report(conn: &rusqlite::Connection, report_id: i64, admin_id: i64
     Ok(())
 }
 
-/// Count of currently open (unresolved) reports.
-///
-/// # Errors
-/// Returns an error if the database operation fails.
-#[allow(dead_code)]
-pub fn open_report_count(conn: &rusqlite::Connection) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*) FROM reports WHERE status='open'",
-        [],
-        |r| r.get(0),
-    )?)
-}
-
 // ─── Moderation log ───────────────────────────────────────────────────────────
 
 /// Append one entry to the moderation action log.
@@ -647,19 +634,6 @@ pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64, ip_hash: &
             Err(e)
         }
     }
-}
-
-/// Count of currently open ban appeals.
-///
-/// # Errors
-/// Returns an error if the database operation fails.
-#[allow(dead_code)]
-pub fn open_appeal_count(conn: &rusqlite::Connection) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*) FROM ban_appeals WHERE status='open'",
-        [],
-        |r| r.get(0),
-    )?)
 }
 
 /// Check if an appeal has already been filed from this `ip_hash` (any status)

@@ -532,35 +532,6 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
     }
 }
 
-/// Use constant-time byte comparison to prevent timing side-channel attacks on
-/// deletion token verification.
-///
-/// Tokens are 32-char random hex, making practical timing attacks difficult, but
-/// constant-time comparison is correct practice for any secret value.
-///
-/// Note: `edit_post` inlines its own transactional token check, so this helper
-/// is not currently called there. Kept for future handlers (e.g. user-facing
-/// post deletion) that need standalone token verification.
-///
-/// # Errors
-/// Returns an error if the database operation fails.
-#[allow(dead_code)]
-pub fn verify_deletion_token(
-    conn: &rusqlite::Connection,
-    post_id: i64,
-    token: &str,
-) -> Result<bool> {
-    let stored: Option<String> = conn
-        .query_row(
-            "SELECT deletion_token FROM posts WHERE id = ?1",
-            params![post_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-
-    Ok(stored.is_some_and(|s| constant_time_eq(s.as_bytes(), token.as_bytes())))
-}
-
 /// Edit a post's body, verified against the deletion token and a per-board edit window.
 ///
 /// `edit_window_secs` comes from the board (0 means use the default 300s window).

@@ -134,27 +134,6 @@ pub fn prune_login_fails() {
         .retain(|_, (_, window_start)| now.saturating_sub(*window_start) <= LOGIN_FAIL_WINDOW);
 }
 
-fn require_admin_sync(jar: &CookieJar, pool: &crate::db::DbPool) -> Result<i64> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
-
-    let conn = pool.get()?;
-    let session = db::get_session(&conn, &session_id)?
-        .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
-
-    Ok(session.admin_id)
-}
-
-/// Public helper — returns true if the jar contains a valid admin session.
-/// Used by other handlers to conditionally show admin controls.
-/// /[]: Callers must invoke this from inside `spawn_blocking`.
-#[allow(dead_code)]
-pub fn is_admin_session(jar: &CookieJar, pool: &crate::db::DbPool) -> bool {
-    require_admin_sync(jar, pool).is_ok()
-}
-
 fn ensure_admin_login_csrf(
     jar: CookieJar,
     headers: &HeaderMap,

@@ -292,43 +292,6 @@ pub struct ThreadSummary {
     pub omitted: i64,
 }
 
-/// Form data for posting a new thread or reply (parsed from multipart)
-#[derive(Debug, Default, Deserialize)]
-#[allow(dead_code)]
-pub struct PostForm {
-    pub name: String,
-    pub subject: String,
-    pub body: String,
-    pub deletion_token: String,
-    // File fields are handled separately in multipart parsing
-}
-
-/// Form data for deleting a post
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct DeleteForm {
-    pub post_id: i64,
-    pub deletion_token: String,
-    pub board: String,
-}
-
-/// Admin ban form
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct BanForm {
-    pub ip_hash: String,
-    pub reason: String,
-    pub duration_hours: Option<i64>,
-}
-
-/// Admin login form
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct LoginForm {
-    pub username: String,
-    pub password: String,
-}
-
 /// A poll attached to a thread's OP
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
