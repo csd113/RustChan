@@ -121,6 +121,7 @@ pub struct JobQueue {
     pub in_progress: Arc<DashMap<String, bool>>,
     pending_jobs: Arc<AtomicU64>,
     dropped_jobs: Arc<AtomicU64>,
+    active_video_jobs: Arc<AtomicU64>,
 }
 
 impl JobQueue {
@@ -138,6 +139,7 @@ impl JobQueue {
             in_progress: Arc::new(DashMap::new()),
             pending_jobs: Arc::new(AtomicU64::new(pending_jobs)),
             dropped_jobs: Arc::new(AtomicU64::new(0)),
+            active_video_jobs: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -186,6 +188,11 @@ impl JobQueue {
     #[allow(dead_code)]
     pub fn dropped_count(&self) -> u64 {
         self.dropped_jobs.load(Ordering::Relaxed)
+    }
+
+    #[allow(dead_code)]
+    pub fn active_video_count(&self) -> u64 {
+        self.active_video_jobs.load(Ordering::Relaxed)
     }
 
     fn reserve_pending_slot(&self, job_type: &str) -> bool {
@@ -325,6 +332,7 @@ async fn worker_loop(
                     ffmpeg_vp9_available,
                     queue.pool.clone(),
                     queue.in_progress.clone(),
+                    queue.active_video_jobs.clone(),
                 )
                 .await;
                 // Previously pool_done.get() failures were
@@ -451,6 +459,7 @@ async fn handle_job(
     ffmpeg_vp9_available: bool,
     pool: DbPool,
     in_progress: Arc<DashMap<String, bool>>,
+    active_video_jobs: Arc<AtomicU64>,
 ) -> Result<()> {
     debug!("Dispatching {} job", job.type_str());
 
@@ -469,6 +478,7 @@ async fn handle_job(
                 return Ok(());
             }
             in_progress.insert(file_path.clone(), true);
+            active_video_jobs.fetch_add(1, Ordering::Relaxed);
             let result = transcode_video(
                 post_id,
                 file_path.clone(),
@@ -478,6 +488,7 @@ async fn handle_job(
                 pool,
             )
             .await;
+            active_video_jobs.fetch_sub(1, Ordering::Relaxed);
             in_progress.remove(&file_path);
             result
         }

@@ -707,6 +707,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     let force_reload_notify = std::sync::Arc::new(tokio::sync::Notify::new());
     {
         let pool_stats = pool.clone();
+        let worker_queue_stats = state.job_queue.clone();
         let stats_w = shared_stats.clone();
         let cancel_stats = worker_cancel.clone();
         let onion_addr = state.onion_address.clone();
@@ -732,6 +733,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 let snap = tokio::task::block_in_place(|| {
                     super::console::collect_stats(
                         &pool_stats,
+                        &worker_queue_stats,
                         start_time,
                         &mut prev_req,
                         &mut prev_tick,

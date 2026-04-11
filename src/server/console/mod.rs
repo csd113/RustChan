@@ -78,6 +78,7 @@ pub struct ChanStats {
     pub mem_bytes: i64,
     pub board_rows: Vec<(String, i64, i64)>, // (short, threads, posts)
     pub active_uploads: u64,
+    pub active_ffmpeg_videos: u64,
     pub spinner_tick: u8,
     /// Live onion address once Tor has bootstrapped, None while bootstrapping.
     pub onion_address: Option<String>,
@@ -99,6 +100,7 @@ impl Default for ChanStats {
             mem_bytes: 0,
             board_rows: vec![],
             active_uploads: 0,
+            active_ffmpeg_videos: 0,
             spinner_tick: 0,
             onion_address: None,
         }
@@ -240,6 +242,7 @@ pub fn start(
 #[allow(clippy::too_many_arguments)]
 pub fn collect_stats(
     pool: &crate::db::DbPool,
+    job_queue: &crate::workers::JobQueue,
     start: Instant,
     prev_req: &mut u64,
     prev_tick: &mut Instant,
@@ -265,6 +268,7 @@ pub fn collect_stats(
 
     let in_flight = crate::server::IN_FLIGHT.load(Ordering::Relaxed);
     let active_uploads = crate::server::ACTIVE_UPLOADS.load(Ordering::Relaxed);
+    let active_ffmpeg_videos = job_queue.active_video_count();
     let online = crate::server::ACTIVE_IPS.len();
     let spinner_tick = (crate::server::SPINNER_TICK.fetch_add(1, Ordering::Relaxed) % 10) as u8;
 
@@ -316,6 +320,7 @@ pub fn collect_stats(
         mem_bytes,
         board_rows,
         active_uploads,
+        active_ffmpeg_videos,
         spinner_tick,
         onion_address,
     }
