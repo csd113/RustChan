@@ -14,6 +14,7 @@
 //     operators can diagnose codec or format issues without reading raw logs.
 
 use anyhow::{Context, Result};
+use std::borrow::Cow;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
@@ -32,6 +33,15 @@ fn ffprobe_command() -> Command {
 pub enum StreamKind {
     AudioOnly,
     Video,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Vp9EncodingProfile {
+    pub cpu_used: u8,
+    pub tile_columns: u8,
+    pub threads: usize,
+    pub row_mt: bool,
+    pub label: Cow<'static, str>,
 }
 
 static ENCODER_LIST: LazyLock<Option<String>> = LazyLock::new(|| {
@@ -254,7 +264,157 @@ pub fn probe_video_codec(path: &str) -> Result<String> {
 
     Ok(codec)
 }
+
+#[must_use]
+pub fn vp9_encoding_profile() -> &'static Vp9EncodingProfile {
+    static PROFILE: LazyLock<Vp9EncodingProfile> = LazyLock::new(detect_vp9_encoding_profile);
+    &PROFILE
+}
+
+#[must_use]
+pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
+    let profile = vp9_encoding_profile();
+    let cpu_used = profile.cpu_used.to_string();
+    let tile_columns = profile.tile_columns.to_string();
+    let threads = profile.threads.to_string();
+    let mut args = Vec::with_capacity(28);
+    args.extend(
+        [
+            "-loglevel",
+            "error",
+            "-i",
+            input,
+            "-c:v",
+            "libvpx-vp9",
+            "-deadline",
+            "good",
+            "-cpu-used",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    args.push(cpu_used);
+    args.extend(
+        [
+            "-row-mt",
+            if profile.row_mt { "1" } else { "0" },
+            "-tile-columns",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    args.push(tile_columns);
+    args.extend(
+        [
+            "-threads",
+            &threads,
+            "-crf",
+            "30",
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "128k",
+            "-map_metadata",
+            "-1",
+            "-y",
+            output,
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    args
+}
 // ─── Internal helpers ──────────────────────────────────────────────────────────
+
+fn detect_vp9_encoding_profile() -> Vp9EncodingProfile {
+    let threads = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .clamp(1, 16);
+
+    let tile_columns = match threads {
+        0..=2 => 0,
+        3..=4 => 1,
+        _ => 2,
+    };
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if std::arch::is_x86_feature_detected!("avx512f") {
+            return Vp9EncodingProfile {
+                cpu_used: 1,
+                tile_columns,
+                threads,
+                row_mt: true,
+                label: Cow::Borrowed("x86-avx512"),
+            };
+        }
+        if std::arch::is_x86_feature_detected!("avx2") {
+            return Vp9EncodingProfile {
+                cpu_used: 2,
+                tile_columns,
+                threads,
+                row_mt: true,
+                label: Cow::Borrowed("x86-avx2"),
+            };
+        }
+        if std::arch::is_x86_feature_detected!("avx") {
+            return Vp9EncodingProfile {
+                cpu_used: 3,
+                tile_columns: tile_columns.min(1),
+                threads,
+                row_mt: true,
+                label: Cow::Borrowed("x86-avx"),
+            };
+        }
+        if std::arch::is_x86_feature_detected!("sse4.1") {
+            return Vp9EncodingProfile {
+                cpu_used: 4,
+                tile_columns: tile_columns.min(1),
+                threads: threads.min(8),
+                row_mt: true,
+                label: Cow::Borrowed("x86-sse4.1"),
+            };
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        return Vp9EncodingProfile {
+            cpu_used: 3,
+            tile_columns: tile_columns.min(1),
+            threads,
+            row_mt: true,
+            label: Cow::Borrowed("aarch64-neon"),
+        };
+    }
+
+    #[cfg(target_arch = "arm")]
+    {
+        return Vp9EncodingProfile {
+            cpu_used: 4,
+            tile_columns: 0,
+            threads: threads.min(4),
+            row_mt: true,
+            label: Cow::Borrowed("arm"),
+        };
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
+    {
+        Vp9EncodingProfile {
+            cpu_used: 4,
+            tile_columns: 0,
+            threads: threads.min(4),
+            row_mt: false,
+            label: Cow::Owned(format!("generic-{}", std::env::consts::ARCH)),
+        }
+    }
+}
 
 /// Convert a `Path` to a UTF-8 `&str`, returning a descriptive error if the
 /// path contains non-UTF-8 bytes (rare on all supported platforms).
@@ -337,4 +497,23 @@ pub fn check_opus_encoder() -> bool {
     ENCODER_LIST
         .as_deref()
         .is_some_and(|stdout| stdout.lines().any(|line| line.contains("libopus")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_vp9_transcode_args;
+
+    #[test]
+    fn vp9_transcode_args_include_platform_tuning_flags() {
+        let args = build_vp9_transcode_args("input.mp4", "output.webm");
+        assert!(args.windows(2).any(|w| w == ["-c:v", "libvpx-vp9"]));
+        assert!(args.windows(2).any(|w| w == ["-deadline", "good"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["-row-mt", "1"] || w == ["-row-mt", "0"]));
+        assert!(args.windows(2).any(|w| w[0] == "-cpu-used"));
+        assert!(args.windows(2).any(|w| w[0] == "-tile-columns"));
+        assert!(args.windows(2).any(|w| w[0] == "-threads"));
+        assert!(args.windows(2).any(|w| w == ["-pix_fmt", "yuv420p"]));
+    }
 }

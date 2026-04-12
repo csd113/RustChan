@@ -189,16 +189,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
 ];
 
 pub(super) fn apply_migrations(conn: &rusqlite::Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_version (
-            version    INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(version)
-         );
-         INSERT INTO schema_version (version)
-         SELECT 0
-         WHERE NOT EXISTS (SELECT 1 FROM schema_version);",
-    )
-    .context("Failed to create schema_version table")?;
+    ensure_schema_version_table(conn)?;
 
     let current_version: i64 = conn
         .query_row(
@@ -223,6 +214,31 @@ pub(super) fn apply_migrations(conn: &rusqlite::Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub(super) fn set_schema_version(conn: &rusqlite::Connection, version: i64) -> Result<()> {
+    ensure_schema_version_table(conn)?;
+    conn.execute("DELETE FROM schema_version", [])
+        .context("Failed to clear schema_version table")?;
+    conn.execute(
+        "INSERT INTO schema_version (version) VALUES (?1)",
+        rusqlite::params![version],
+    )
+    .with_context(|| format!("Failed to set schema_version to v{version}"))?;
+    Ok(())
+}
+
+fn ensure_schema_version_table(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_version (
+            version    INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(version)
+         );
+         INSERT INTO schema_version (version)
+         SELECT 0
+         WHERE NOT EXISTS (SELECT 1 FROM schema_version);",
+    )
+    .context("Failed to create schema_version table")
 }
 
 fn apply_migration(conn: &rusqlite::Connection, version: i64, sql: &str) -> Result<()> {

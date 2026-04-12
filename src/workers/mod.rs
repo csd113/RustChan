@@ -761,29 +761,7 @@ fn transcode_video_prepare(
 
     // Build the ffmpeg argument list as owned strings so it can cross the
     // async boundary without lifetime issues.
-    let args: Vec<String> = [
-        "-loglevel",
-        "error",
-        "-i",
-        &src_path_str,
-        "-c:v",
-        "libvpx-vp9",
-        "-crf",
-        "30",
-        "-b:v",
-        "0",
-        "-c:a",
-        "libopus",
-        "-b:a",
-        "128k",
-        "-map_metadata",
-        "-1",
-        "-y",
-        &tmp_path_str,
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect();
+    let args = crate::media::ffmpeg::build_vp9_transcode_args(&src_path_str, &tmp_path_str);
 
     Ok(Some((args, src, webm_abs, webm_rel, webm_name, tmp)))
 }

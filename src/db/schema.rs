@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-use super::migrations::{apply_migrations, CURRENT_MAX_MIGRATION};
+use super::migrations::{apply_migrations, set_schema_version, CURRENT_MAX_MIGRATION};
 
 const BASE_SCHEMA_SQL: &str = "
     CREATE TABLE IF NOT EXISTS boards (
@@ -284,10 +284,15 @@ const INDEX_SCHEMA_SQL: &str = "
 ";
 
 pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
+    let fresh_database = is_fresh_database(conn)?;
+
     create_base_schema(conn)?;
 
-    let _ = CURRENT_MAX_MIGRATION;
-    apply_migrations(conn)?;
+    if fresh_database {
+        set_schema_version(conn, CURRENT_MAX_MIGRATION)?;
+    } else {
+        apply_migrations(conn)?;
+    }
     create_indexes(conn)?;
     ensure_reports_table_integrity(conn)?;
     ensure_posts_search_index(conn)?;
@@ -301,6 +306,18 @@ pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 fn create_base_schema(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(BASE_SCHEMA_SQL)
         .context("Schema table creation failed")
+}
+
+fn is_fresh_database(conn: &rusqlite::Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT COUNT(*) = 0
+         FROM sqlite_master
+         WHERE type IN ('table', 'view', 'index', 'trigger')
+           AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )
+    .context("Failed to detect whether database is fresh")
 }
 
 fn create_indexes(conn: &rusqlite::Connection) -> Result<()> {
@@ -639,4 +656,22 @@ fn backfill_media_type(conn: &rusqlite::Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_schema;
+    use crate::db::migrations::CURRENT_MAX_MIGRATION;
+
+    #[test]
+    fn fresh_database_is_stamped_to_current_schema_version() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+        create_schema(&conn).expect("create schema");
+
+        let version: i64 = conn
+            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .expect("read schema_version");
+
+        assert_eq!(version, CURRENT_MAX_MIGRATION);
+    }
 }
