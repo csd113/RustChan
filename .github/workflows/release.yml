@@ -30,22 +30,27 @@ jobs:
           - target: x86_64-apple-darwin
             runner: macos-latest
             binary_suffix: ""
+            asset_suffix: macos-x86_64
             use_cross: false
           - target: aarch64-apple-darwin
             runner: macos-latest
             binary_suffix: ""
+            asset_suffix: macos-arm64
             use_cross: false
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             binary_suffix: ""
+            asset_suffix: linux-x86_64
             use_cross: false
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
             binary_suffix: ""
+            asset_suffix: linux-arm64
             use_cross: true
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             binary_suffix: ".exe"
+            asset_suffix: windows-x86_64
             use_cross: false
 
     steps:
@@ -72,19 +77,34 @@ jobs:
             cargo build --locked --release --target "${{ matrix.target }}"
           fi
 
-      - name: Prepare artifact
+      - name: Prepare release archive
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
+          mkdir -p dist/package
+          asset_basename="rustchan-cli-${{ github.ref_name }}-${{ matrix.asset_suffix }}"
+          package_root="dist/package/${asset_basename}"
+
+          mkdir -p "${package_root}"
           cp "target/${{ matrix.target }}/release/rustchan-cli${{ matrix.binary_suffix }}" \
-             "dist/rustchan-cli-${{ matrix.target }}${{ matrix.binary_suffix }}"
+             "${package_root}/rustchan-cli${{ matrix.binary_suffix }}"
+          cp README.md LICENSE "${package_root}/"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            pwsh -NoLogo -NoProfile -Command \
+              "Compress-Archive -Path '${package_root}/*' -DestinationPath 'dist/${asset_basename}.zip' -CompressionLevel Optimal"
+          else
+            (
+              cd "dist/package"
+              zip -r -9 "../${asset_basename}.zip" "${asset_basename}"
+            )
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rustchan-cli-${{ matrix.target }}
-          path: dist/rustchan-cli-${{ matrix.target }}${{ matrix.binary_suffix }}
+          name: rustchan-cli-${{ matrix.asset_suffix }}
+          path: dist/*.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -101,6 +121,20 @@ jobs:
           pattern: rustchan-cli-*
           path: release-assets
           merge-multiple: true
+
+      - name: Generate checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum ./*.zip | sed 's| \*\./|  |; s| \./|  |' > SHA256SUMS.txt
+
+      - name: Verify checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum --check SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
