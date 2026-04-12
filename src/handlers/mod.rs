@@ -731,6 +731,8 @@ mod tests {
         let board = sample_board();
         let audio = temp_upload("track.flac", b"fLaC\x00\x00\x00\x22test");
         let other = temp_upload("clip.webm", b"\x1a\x45\xdf\xa3webm");
+        let boards_dir = tempfile::tempdir().expect("boards dir");
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
 
         let result = process_audio_first_uploads(
             Some(audio),
@@ -738,8 +740,8 @@ mod tests {
             Some(other),
             &board,
             &conn,
-            "/tmp",
-            "/tmp",
+            boards_dir.path().to_str().expect("boards dir path"),
+            uploads_dir.path().to_str().expect("uploads dir path"),
             150,
             1024 * 1024,
             1024 * 1024,
