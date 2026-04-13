@@ -384,13 +384,13 @@ fn detect_vp9_encoding_profile() -> Vp9EncodingProfile {
 
     #[cfg(target_arch = "aarch64")]
     {
-        return Vp9EncodingProfile {
+        Vp9EncodingProfile {
             cpu_used: 3,
             tile_columns: tile_columns.min(1),
             threads,
             row_mt: true,
             label: Cow::Borrowed("aarch64-neon"),
-        };
+        }
     }
 
     #[cfg(target_arch = "arm")]
@@ -511,9 +511,15 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|w| w == ["-row-mt", "1"] || w == ["-row-mt", "0"]));
-        assert!(args.windows(2).any(|w| w[0] == "-cpu-used"));
-        assert!(args.windows(2).any(|w| w[0] == "-tile-columns"));
-        assert!(args.windows(2).any(|w| w[0] == "-threads"));
+        assert!(args
+            .windows(2)
+            .any(|w| w.first().is_some_and(|flag| flag == "-cpu-used")));
+        assert!(args
+            .windows(2)
+            .any(|w| w.first().is_some_and(|flag| flag == "-tile-columns")));
+        assert!(args
+            .windows(2)
+            .any(|w| w.first().is_some_and(|flag| flag == "-threads")));
         assert!(args.windows(2).any(|w| w == ["-pix_fmt", "yuv420p"]));
     }
 }
