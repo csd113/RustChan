@@ -106,6 +106,18 @@ pub fn runtime_favicon_dir() -> PathBuf {
     runtime_dir().join("favicon")
 }
 
+type RuntimeDirMigration = (&'static str, fn() -> PathBuf);
+
+const RUNTIME_LAYOUT_MIGRATIONS: &[RuntimeDirMigration] = &[
+    ("full-backups", full_backups_dir),
+    ("board-backups", board_backups_dir),
+    ("tmp-board-downloads", runtime_temp_board_downloads_dir),
+    ("arti_state", runtime_tor_state_dir),
+    ("arti_cache", runtime_tor_cache_dir),
+    ("tls", runtime_tls_dir),
+    ("favicon", runtime_favicon_dir),
+];
+
 fn migrate_dir_if_present(old_path: &Path, new_path: &Path) -> anyhow::Result<()> {
     if !old_path.exists() {
         return Ok(());
@@ -143,16 +155,9 @@ pub fn migrate_runtime_layout_if_needed() -> anyhow::Result<()> {
     let data_dir = data_dir();
     std::fs::create_dir_all(&data_dir)?;
 
-    migrate_dir_if_present(&data_dir.join("full-backups"), &full_backups_dir())?;
-    migrate_dir_if_present(&data_dir.join("board-backups"), &board_backups_dir())?;
-    migrate_dir_if_present(
-        &data_dir.join("tmp-board-downloads"),
-        &runtime_temp_board_downloads_dir(),
-    )?;
-    migrate_dir_if_present(&data_dir.join("arti_state"), &runtime_tor_state_dir())?;
-    migrate_dir_if_present(&data_dir.join("arti_cache"), &runtime_tor_cache_dir())?;
-    migrate_dir_if_present(&data_dir.join("tls"), &runtime_tls_dir())?;
-    migrate_dir_if_present(&data_dir.join("favicon"), &runtime_favicon_dir())?;
+    for &(legacy_name, destination) in RUNTIME_LAYOUT_MIGRATIONS {
+        migrate_dir_if_present(&data_dir.join(legacy_name), &destination())?;
+    }
 
     Ok(())
 }
@@ -203,6 +208,12 @@ struct SettingsFile {
     /// How often to run VACUUM to reclaim disk space, in hours.
     /// Set to 0 to disable. Default: 24 (daily).
     auto_vacuum_interval_hours: Option<u64>,
+    /// How often to create a saved full-site backup automatically, in hours.
+    /// Set to 0 to disable. Default: 24 (daily).
+    auto_full_backup_interval_hours: Option<u64>,
+    /// How many saved full-site backups to keep on disk after a new saved
+    /// backup completes. Minimum 1. Default: 1.
+    auto_full_backup_copies_to_keep: Option<u64>,
     /// How often to purge vote records for expired polls, in hours.
     /// Set to 0 to disable. Default: 72 (every 3 days).
     poll_cleanup_interval_hours: Option<u64>,
@@ -216,6 +227,13 @@ struct SettingsFile {
     /// Maximum seconds to allow a single `FFmpeg` transcode or waveform job to
     /// run before it is killed. Default: 120.
     ffmpeg_timeout_secs: Option<u64>,
+    /// Explicit proxy CIDR allowlist for trusted forwarding headers.
+    /// Examples include `127.0.0.1/32`, `::1/128`, and `10.0.0.0/8`.
+    trusted_proxy_cidrs: Option<Vec<String>>,
+    /// Public hostnames accepted by the HTTP→HTTPS redirect listener.
+    /// Needed when `RustChan` binds to a wildcard address but serves a manual-cert
+    /// public domain.
+    public_hosts: Option<Vec<String>>,
     /// When true, overflow threads are always archived rather than hard-deleted,
     /// even on boards with `allow_archive` = false. Default: true.
     archive_before_prune: Option<bool>,
@@ -407,11 +425,20 @@ pub struct Config {
     pub cookie_secret: String,
     pub session_duration: i64,
     pub behind_proxy: bool,
+    /// Trusted proxy CIDR allowlist for forwarding headers.
+    pub trusted_proxy_cidrs: Vec<String>,
     pub https_cookies: bool,
+    /// Public hostnames accepted by the HTTP→HTTPS redirect listener.
+    pub public_hosts: Vec<String>,
     /// Interval in seconds between WAL checkpoint runs. 0 = disabled.
     pub wal_checkpoint_interval: u64,
     /// Interval in hours between automatic VACUUM runs. 0 = disabled.
     pub auto_vacuum_interval_hours: u64,
+    /// Interval in hours between automatic saved full backups. 0 = disabled.
+    pub auto_full_backup_interval_hours: u64,
+    /// Maximum number of saved full backups kept on disk after each new saved
+    /// full backup completes. Minimum 1.
+    pub auto_full_backup_copies_to_keep: u64,
     /// Interval in hours between expired poll vote cleanup runs. 0 = disabled.
     pub poll_cleanup_interval_hours: u64,
     /// DB file size threshold in bytes above which admin panel shows a warning.
@@ -504,6 +531,12 @@ impl Config {
         };
         let behind_proxy = env_bool("CHAN_BEHIND_PROXY", false);
         let https_cookies_default = behind_proxy || tls.enabled;
+        let trusted_proxy_cidrs = env_list(
+            "CHAN_TRUSTED_PROXY_CIDRS",
+            s.trusted_proxy_cidrs,
+            &["127.0.0.1/32", "::1/128"],
+        );
+        let public_hosts = env_list("CHAN_PUBLIC_HOSTS", s.public_hosts, &[]);
         // Resolve cookie_secret from env > settings.toml.
         // generate_settings_file_if_missing() ensures settings.toml always has
         // a generated secret, so this fallback should only fire in abnormal cases.
@@ -598,7 +631,9 @@ impl Config {
             cookie_secret,
             session_duration: env_parse("CHAN_SESSION_SECS", 8 * 3600),
             behind_proxy,
+            trusted_proxy_cidrs,
             https_cookies: env_bool("CHAN_HTTPS_COOKIES", https_cookies_default),
+            public_hosts,
             wal_checkpoint_interval: env_parse(
                 "CHAN_WAL_CHECKPOINT_SECS",
                 s.wal_checkpoint_interval_secs.unwrap_or(3600),
@@ -607,6 +642,15 @@ impl Config {
                 "CHAN_AUTO_VACUUM_HOURS",
                 s.auto_vacuum_interval_hours.unwrap_or(24),
             ),
+            auto_full_backup_interval_hours: env_parse(
+                "CHAN_AUTO_FULL_BACKUP_HOURS",
+                s.auto_full_backup_interval_hours.unwrap_or(24),
+            ),
+            auto_full_backup_copies_to_keep: env_parse::<u64>(
+                "CHAN_AUTO_FULL_BACKUP_COPIES",
+                s.auto_full_backup_copies_to_keep.unwrap_or(1),
+            )
+            .max(1),
             poll_cleanup_interval_hours: env_parse(
                 "CHAN_POLL_CLEANUP_HOURS",
                 s.poll_cleanup_interval_hours.unwrap_or(72),
@@ -734,6 +778,23 @@ impl Config {
                 self.bind_addr
             );
         }
+        for cidr in &self.trusted_proxy_cidrs {
+            cidr.parse::<ipnet::IpNet>().map_err(|error| {
+                anyhow::anyhow!(
+                    "CONFIG ERROR: trusted_proxy_cidrs entry '{}' is not valid CIDR: {}",
+                    cidr,
+                    error
+                )
+            })?;
+        }
+        for host in &self.public_hosts {
+            normalize_public_host(host).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "CONFIG ERROR: public_hosts entry '{}' must be a bare hostname or IP literal.",
+                    host
+                )
+            })?;
+        }
         // Verify the upload directory is writable.
         let upload_path = std::path::Path::new(&self.upload_dir);
         if upload_path.exists() {
@@ -834,12 +895,75 @@ impl Config {
 /// key (it won't append new lines — the file is only updated if the key already
 /// exists). On a fresh install `generate_settings_file_if_missing` always
 /// writes both keys, so this is only a concern for manually-crafted files.
-pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
-    // Escape backslash and double-quote, then wrap in double quotes.
-    fn toml_quote(s: &str) -> String {
-        let inner = s.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\"{inner}\"")
+fn toml_quote(s: &str) -> String {
+    let inner = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{inner}\"")
+}
+
+fn rewrite_settings_file_lines(
+    content: &str,
+    updates: &[(&str, String)],
+    insert_missing_before: Option<&str>,
+) -> String {
+    use std::collections::BTreeSet;
+
+    let trailing_newline = content.ends_with('\n');
+    let mut seen_keys = BTreeSet::new();
+    let mut updated_lines: Vec<String> = content
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            for (key, value) in updates {
+                if trimmed.starts_with(key) && line.contains('=') {
+                    seen_keys.insert(*key);
+                    return format!("{key} = {value}");
+                }
+            }
+            line.to_string()
+        })
+        .collect();
+
+    let missing = updates
+        .iter()
+        .filter(|(key, _)| !seen_keys.contains(key))
+        .map(|(key, value)| format!("{key} = {value}"))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        let insert_idx = insert_missing_before
+            .and_then(|anchor| {
+                updated_lines
+                    .iter()
+                    .position(|line| line.trim_start().starts_with(anchor))
+            })
+            .or_else(|| {
+                updated_lines
+                    .iter()
+                    .position(|line| line.trim_start().starts_with('['))
+            })
+            .unwrap_or(updated_lines.len());
+        let mut insertion_block = missing;
+        let previous_line = insert_idx
+            .checked_sub(1)
+            .and_then(|index| updated_lines.get(index));
+        if previous_line.is_some_and(|line| !line.trim().is_empty()) {
+            insertion_block.insert(0, String::new());
+        }
+        let next_line = updated_lines.get(insert_idx);
+        if next_line.is_some_and(|line| !line.trim().is_empty()) {
+            insertion_block.push(String::new());
+        }
+        updated_lines.splice(insert_idx..insert_idx, insertion_block);
     }
+
+    let mut out = updated_lines.join("\n");
+    if trailing_newline {
+        out.push('\n');
+    }
+    out
+}
+
+fn update_settings_file_entries(updates: &[(&str, String)], insert_missing_before: Option<&str>) {
+    // Escape backslash and double-quote, then wrap in double quotes.
     let path = settings_file_path();
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -853,27 +977,9 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
             return;
         }
     };
-    // Replace the value portion of `key = "..."` lines while preserving
-    // indentation, comments on the same line, and surrounding whitespace.
-    // We use a simple line-by-line scan so that file comments are untouched.
-    let trailing_newline = content.ends_with('\n');
-    let updated: Vec<String> = content
-        .lines()
-        .map(|line| {
-            // Match `forum_name = ...` (possibly with surrounding spaces).
-            if line.trim_start().starts_with("forum_name") && line.contains('=') {
-                return format!("forum_name = {}", toml_quote(forum_name));
-            }
-            if line.trim_start().starts_with("site_subtitle") && line.contains('=') {
-                return format!("site_subtitle = {}", toml_quote(site_subtitle));
-            }
-            line.to_string()
-        })
-        .collect();
-    let mut out = updated.join("\n");
-    if trailing_newline {
-        out.push('\n');
-    }
+    // Replace the value portion of `key = ...` lines while preserving file
+    // order and unrelated comments.
+    let out = rewrite_settings_file_lines(&content, updates, insert_missing_before);
     // Atomic write: write to a temp file in the same directory, then rename
     // over the target. This prevents a partial write from corrupting settings.toml
     // if the process is killed mid-write (rename(2) is atomic on POSIX).
@@ -913,6 +1019,32 @@ pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
             }
         }
     }
+}
+
+pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
+    update_settings_file_entries(
+        &[
+            ("forum_name", toml_quote(forum_name)),
+            ("site_subtitle", toml_quote(site_subtitle)),
+        ],
+        Some("# ── Network / web server"),
+    );
+}
+
+pub fn update_settings_file_auto_full_backup(interval_hours: u64, copies_to_keep: u64) {
+    update_settings_file_entries(
+        &[
+            (
+                "auto_full_backup_interval_hours",
+                interval_hours.to_string(),
+            ),
+            (
+                "auto_full_backup_copies_to_keep",
+                copies_to_keep.max(1).to_string(),
+            ),
+        ],
+        Some("# ── Federation / ChanNet gateway"),
+    );
 }
 
 // ─── Cookie secret rotation check ────────────────────────────────────────────
@@ -975,6 +1107,44 @@ fn env_bool(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+fn env_list(key: &str, file_value: Option<Vec<String>>, default: &[&str]) -> Vec<String> {
+    env::var(key)
+        .ok()
+        .map(|value| split_list(&value))
+        .or(file_value)
+        .unwrap_or_else(|| default.iter().map(|value| (*value).to_string()).collect())
+}
+
+fn split_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+pub fn normalize_public_host(host: &str) -> Option<String> {
+    let trimmed = host.trim();
+    if trimmed.is_empty() || trimmed.contains('/') || trimmed.contains('@') {
+        return None;
+    }
+
+    let unbracketed = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(trimmed);
+
+    if unbracketed.parse::<std::net::IpAddr>().is_ok() {
+        return Some(unbracketed.to_string());
+    }
+
+    if unbracketed.contains(':') || unbracketed.contains(char::is_whitespace) {
+        return None;
+    }
+
+    Some(unbracketed.to_string())
+}
+
 fn split_bind_addr(addr: &str) -> Option<(&str, &str)> {
     if let Some(rest) = addr.strip_prefix('[') {
         let (host, port) = rest.split_once("]:")?;
@@ -1015,4 +1185,71 @@ fn loopback_addr_for_family(addr: &str, port: u16) -> String {
 
 fn port_from_bind_addr(addr: &str) -> Option<u16> {
     split_bind_addr(addr).and_then(|(_, port)| port.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_settings_file_lines;
+
+    #[test]
+    fn rewrite_settings_file_lines_updates_requested_keys_and_preserves_comments() {
+        let input = r#"# RustChan settings.toml
+forum_name = "RustChan"
+site_subtitle = "select board to proceed"
+auto_full_backup_interval_hours = 24
+auto_full_backup_copies_to_keep = 1
+"#;
+
+        let output = rewrite_settings_file_lines(
+            input,
+            &[
+                ("forum_name", "\"BackupChan\"".to_string()),
+                ("auto_full_backup_interval_hours", "12".to_string()),
+                ("auto_full_backup_copies_to_keep", "3".to_string()),
+            ],
+            None,
+        );
+
+        assert!(output.starts_with("# RustChan settings.toml\n"));
+        assert!(output.contains("forum_name = \"BackupChan\"\n"));
+        assert!(output.contains("site_subtitle = \"select board to proceed\"\n"));
+        assert!(output.contains("auto_full_backup_interval_hours = 12\n"));
+        assert!(output.contains("auto_full_backup_copies_to_keep = 3\n"));
+        assert!(output.ends_with('\n'));
+    }
+
+    #[test]
+    fn rewrite_settings_file_lines_inserts_missing_root_keys_before_anchor_section() {
+        let input = r#"# RustChan settings.toml
+forum_name = "RustChan"
+
+# ── Federation / ChanNet gateway ──────────────────────────────────────────────
+[tls]
+enabled = true
+"#;
+
+        let output = rewrite_settings_file_lines(
+            input,
+            &[
+                ("auto_full_backup_interval_hours", "24".to_string()),
+                ("auto_full_backup_copies_to_keep", "1".to_string()),
+            ],
+            Some("# ── Federation / ChanNet gateway"),
+        );
+
+        let backup_hours_idx = output
+            .find("auto_full_backup_interval_hours = 24")
+            .expect("backup hours key inserted");
+        let backup_copies_idx = output
+            .find("auto_full_backup_copies_to_keep = 1")
+            .expect("backup copies key inserted");
+        let anchor_idx = output
+            .find("# ── Federation / ChanNet gateway")
+            .expect("anchor comment present");
+        let tls_idx = output.find("[tls]").expect("tls section present");
+
+        assert!(backup_hours_idx < anchor_idx);
+        assert!(backup_copies_idx < anchor_idx);
+        assert!(anchor_idx < tls_idx);
+    }
 }

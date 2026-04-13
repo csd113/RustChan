@@ -2,6 +2,82 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.1.3]
+
+### Added
+
+- Automated saved full-site backups with admin-configurable cadence and retention: the full backup panel and `settings.toml` now expose how many hours to wait between runs and how many saved full backups to keep, with automated runs pruning the oldest saved full backups after each new server-side full backup completes.
+- Per-board password protection with two modes: boards can now require a password to view the board at all or stay publicly readable while requiring the board password for posting, with admin controls for saving/clearing board passwords, unlock flows for users, and server-side enforcement across board pages, thread views, replies, edits, votes, media, and post-preview endpoints.
+
+### Improved
+
+- Homepage board cards and board catalog thread cards now keep a more consistent square visual rhythm: the main content rail is wider on desktop, homepage NSFW badges sit beside board IDs for faster scanning, and catalog size toggles once again distinguish compact and large thread cards while preserving more uniform tile heights.
+- HTTP timeout handling is now more robust across the full request pipeline: `GET` and `HEAD` requests keep the fast 30-second cutoff, while slower write paths such as uploads, restores, and admin `POST`s are now covered by a longer request timeout instead of bypassing timeout protection entirely.
+- Proxy-aware HTTPS detection is now stricter and operator-configurable: `X-Forwarded-*` headers are trusted only from explicitly allowed proxy CIDRs, with loopback remaining the safe default.
+- Admin session cookie issuance is now wired through real connection metadata on login and restore flows, eliminating header-only protocol trust and keeping direct-access and proxied deployments aligned.
+- HTTP to HTTPS redirects are now more robust on manual-certificate deployments bound to wildcard addresses, with explicit public-host configuration for production domains that are not discoverable from the local bind address.
+- The shared site footer now stays pinned to the bottom of the viewport through a dedicated fixed-footer layout, while preserving the original homepage card grid and overall 1.1.2-style page flow.
+- Theme CSS internals are cleaner and safer to maintain: the fixed footer now uses one shared height variable with safe-area-aware body padding, Frutiger Aero and NeonCubicle now share one glass-pill navigation implementation, and the Forest theme now centralizes repeated surface, link, button, and input colors behind theme-scoped variables.
+- Mobile header polish is tighter on board pages: the search bar now stretches to the same visual rails as the Home and Boards controls instead of ending short on narrow screens.
+- The theme picker now lives in a footer-docked control bar on both desktop and mobile, giving theme switching one consistent home and keeping it from floating over page content.
+- Backup and media-processing observability are stronger: posts now expose pending and failed async media state, `/readyz` and `/metrics` report media backlog, backup freshness, and maintenance activity, and the admin panel surfaces backup verification health instead of assuming saved ZIPs are restorable.
+- Heavy admin maintenance now coordinates through a shared maintenance gate and less aggressive background scheduling, so backups, restores, integrity checks, repair, and scheduled `VACUUM`/WAL work are less likely to pile onto live request traffic or each other.
+- Full backup recovery is now more flexible without adding scheduler clutter: new full backups record the boards they contain, and the admin panel can derive a single-board restore or downloadable board backup directly from a saved full-site archive.
+- Long media filenames now keep post layouts tidier without hiding the real upload name: thread and reply views truncate only the displayed stem, preserve the extension in the visible link text, and still expose the full original filename through the link tooltip.
+- Upload-backed posting and admin restore flows now use explicit XHR redirect/error responses instead of scraping returned HTML, so media uploads fail in-place with clearer feedback and restore uploads stay inside the existing progress modal without fragile document replacement.
+- Thread pages now separate board-level navigation from thread-specific actions more cleanly: board links live in the shared board-nav strip, reply/update controls stay in the thread nav, and the admin toolbar sits under the board context instead of leading the page.
+- Admin board management is now organized around distinct tasks instead of one dense block: each board card separates basic setup, access controls, post features, appearance, backups, and destructive actions, while the full-site and board-backup areas now split scheduling, immediate restore/create actions, and saved archives into clearer sections.
+- Handled XHR validation and restore failures are now transported without browser-level network noise: inline upload and restore errors return structured JSON that preserves the original semantic status in `X-Rustchan-Error-Status`, letting RustChan keep the same in-place error UX without Chromium surfacing expected invalid-request checks as console `Failed to load resource` errors.
+- The admin panel now better preserves operator context during repeated maintenance work: backup/archive dropdowns remember their open state, board/settings forms restore more of their previous inputs after validation failures, and moderation copy/actions are more compact and easier to scan.
+- The terminal dashboard now surfaces active FFmpeg video jobs directly in the TUI, making it easier to spot live transcode backlog without leaving the server console.
+- VP9 transcode settings are now auto-tuned per host architecture and CPU capability: RustChan picks more appropriate `libvpx-vp9` threading, tiling, and `cpu-used` settings on AVX512, AVX2, AVX, SSE4.1, ARM, and generic targets instead of using one static profile everywhere.
+- Release engineering is more automated and portable: tagged builds now publish GitHub Releases through Actions, attach per-platform ZIP archives with bundled `README`/`LICENSE`, and generate verified `SHA256SUMS` manifests for release downloads.
+- CI and release automation now track newer dependency and action versions, including the move to `reqwest 0.13`, newer `rustls-acme`, refreshed Windows support crates, and updated GitHub Actions checkout/artifact/release steps.
+
+### Fixed
+
+- Per-board password protection now fails closed more reliably: invalid or partial access-mode data from backups is rejected or forced into a locked state instead of silently becoming public, password-gated pages now return consistent `403`/`429` responses with no-cache headers, and repeated board-unlock failures are temporarily throttled to make online guessing harder.
+- Requests coming directly from untrusted public peers can no longer spoof `X-Forwarded-Proto` to make the app believe they arrived over HTTPS.
+- Built-in self-signed TLS recovery is now resilient to partially missing or corrupted dev-cert files: if the stored cert/key pair cannot be reused, RustChan regenerates a fresh pair instead of failing startup outright.
+- Timeout coverage no longer leaves upload-heavy and admin mutation endpoints outside the request-timeout middleware.
+- Mobile layout resilience is stronger across the updated style system: the header board menu now follows the real wrapped header height instead of a fixed offset, admin board-settings forms collapse cleanly to one column on narrow screens, and wide admin tables stay usable on phones through horizontal scrolling.
+- The admin panel is now substantially more mobile-friendly: dropdown headings wrap instead of running offscreen, board action controls stack cleanly on narrow screens, create-board and moderation forms fit the viewport, and the heaviest admin tables no longer force excessive horizontal overflow.
+- Admin login is now more robust on plain `http://` deployments and local-network mobile access: insecure login redirects can recover through a short-lived bootstrap handoff instead of failing when the browser drops the freshly issued admin session cookie before `/admin/panel` loads.
+- Admin login no longer fails with a `403` after the CSS refactor on plain `http://` deployments: the login page now reissues its CSRF cookie using the real request scheme so browsers do not drop the cookie before `/admin/login` is processed.
+- Mobile media expansion behaves more predictably: tapping a video thumbnail now keeps playback inline on the page instead of collapsing back or jumping toward fullscreen, the filename remains the explicit open-in-new-tab path for fullscreen viewing, and image/video close buttons now use a smaller control footprint.
+- Mobile image and video viewing now matches desktop more closely: the old floating media viewer has been removed, images and videos expand inline on the page with the same close-button flow as desktop, and the blue double-arrow/expand overlay is no longer shown over media on touch layouts.
+- Desktop and mobile audio MiniPlayers now use the attached post image as album art for image+audio combo posts, while audio-only posts continue falling back to the current favicon artwork.
+- Duplicate threads and replies are now prevented on unstable connections: post forms carry a per-render submission token, successful submissions are recorded server-side, and a retried POST now redirects back to the already-created post instead of inserting a second copy when the first response was lost in transit.
+- Board search no longer fails when the FTS join exposes duplicate column names, and search queries are now normalized consistently so lowercase searches such as `ai` also match uppercase post text like `AI`.
+- Background media processing now degrades more honestly under pressure: queue-capacity drops and permanent worker failures are persisted onto the post, failed previews fall back to the original file link, and operators can see pending and failed media work instead of silently missing thumbnails or waveforms.
+- Saved backups are now verified before they are exposed as healthy: full backups include a manifest and SQLite-header checks, board backups are validated before save and in the admin listing, and backup freshness/verification status is now visible in both the admin UI and readiness metrics.
+- Admin backup progress polling no longer conflicts with the maintenance lock during an active backup or restore, and failed backup builds now clean up temporary artifacts instead of leaving behind stale `.tmp` ZIPs or database snapshots.
+- Saved full backups are now easier to work with on desktop and mobile: backup table actions stack more cleanly, per-row board extraction stays collapsed until needed, and older full backups without the new board index can still be extracted by entering a board short name manually.
+- Startup schema housekeeping no longer runs indexes ahead of pending migrations, and the legacy `posts.ip_hash` table rebuild now preserves `media_processing_state` and `media_processing_error` so upgraded installs keep async media-status data intact instead of silently dropping those columns.
+- Mobile thread and archive views now stay readable on narrow screens: reply cards use the full available width again, thread action rows wrap and center cleanly, archive rows break metadata onto separate lines, and two-column board/catalog tiles can shrink without forcing horizontal squeeze.
+- Board restore now preserves original post IDs when they are still available, and when collisions force new IDs RustChan remaps same-board quotelinks in restored post bodies and rendered HTML so restored conversations keep their internal reply links intact.
+- Auto-saved quote-only reply drafts no longer come back as stale `>>123` stubs when you reopen the reply form; only real in-progress text drafts keep persisting between visits.
+- Upload-backed post failures no longer fall back to blocking browser alerts, and media-backed ban hits now redirect to a dedicated ban page so the appeal flow still works without relying on brittle in-place HTML swaps.
+- The recent admin and thread polish pass no longer strands shared JavaScript helpers inside the media auto-compress scope: `createAsyncSubmitHelper`, `requestConfirmation`, and the shared confirmation-submit helpers are once again available to reply uploads, full backup creation, restore uploads, and `data-confirm` actions, restoring inline `.post-error-banner` feedback, confirmation-modal focus/escape/backdrop behavior, the full backup/restore progress flows on live pages, and the compact `[ Return ] [ Catalog ] [ Top/Bottom ] [ Update ] [ Auto ]` thread navigation bars.
+- HSTS emission is now correct for trusted proxy hosts as well as direct connections, avoiding missing strict-transport headers on deployments that terminate TLS upstream.
+- Media post refreshes and moderation report actions now stay in sync on live pages: freshly processed media state is re-rendered more reliably, duplicate report submissions are blocked, and same-thread upload redirects reset reply form state before repopulating it.
+
+### Documentation
+
+- The `README` was refreshed for the `1.1.3` release with clearer wording and updated screenshots/layout so new installs and release downloads better match the current UI.
+
+### Internal
+
+- Upload-flow tests now use temporary directories for better isolation, the FFmpeg VP9 test coverage stays Clippy-clean, and several unused helpers/duplicate form structs were removed to keep the `1.1.3` codebase leaner.
+
+### Validation
+
+- `node --check static/main.js`
+- `cargo fmt --all`
+- `cargo check --quiet`
+- `cargo test --quiet`
+- Live Chromium verification against `http://127.0.0.1:8080`: confirmed poll option maxlength behavior, photo and video thread creation, reply draft restore, upload-backed reply clear/update flows, inline invalid-upload error banners, search empty-state copy, admin login, filter add/remove, shared confirmation modal behavior, full backup creation, invalid full restore handling, invalid board restore handling, and no pageerrors, console errors, or HTTP `5xx` responses. No live `data-confirm-submit` control was present on `/admin/panel` during the run, so that specific variant could not be exercised end to end.
+
 ## [1.1.2]
 
 ### Added

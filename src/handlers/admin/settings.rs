@@ -9,6 +9,8 @@ use crate::{
     error::{AppError, Result},
     handlers::board::ensure_csrf,
     middleware::AppState,
+    models::BoardAccessMode,
+    utils::crypto::hash_password,
 };
 use axum::{
     extract::{Form, Multipart, State},
@@ -82,6 +84,9 @@ pub struct BoardSettingsForm {
     show_poster_ids: Option<String>,
     collapse_greentext: Option<String>,
     post_cooldown_secs: Option<String>,
+    access_mode: Option<String>,
+    access_password: Option<String>,
+    clear_access_password: Option<String>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
@@ -135,15 +140,28 @@ pub async fn update_board_settings(
         .chars()
         .take(256)
         .collect::<String>();
+    let access_mode = BoardAccessMode::from_db_str(form.access_mode.as_deref().unwrap_or("public"))
+        .ok_or_else(|| AppError::BadRequest("Invalid board access mode.".into()))?;
+    let access_password = form.access_password.clone().unwrap_or_default();
+    if access_password.chars().count() > 256 {
+        return Err(AppError::BadRequest(
+            "Board password must be 256 characters or fewer.".into(),
+        ));
+    }
     let board_id = form.board_id;
 
-    tokio::task::spawn_blocking({
+    let board_short = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<()> {
+        move || -> Result<String> {
             let mut conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             let board_short: String = conn.query_row(
                 "SELECT short_name FROM boards WHERE id = ?1",
+                rusqlite::params![board_id],
+                |row| row.get(0),
+            )?;
+            let existing_password_hash: String = conn.query_row(
+                "SELECT access_password_hash FROM boards WHERE id = ?1",
                 rusqlite::params![board_id],
                 |row| row.get(0),
             )?;
@@ -159,6 +177,20 @@ pub async fn update_board_settings(
                             .is_some_and(|theme| theme.enabled)
                 })
                 .unwrap_or_default();
+            let access_password_hash = if access_password.is_empty() {
+                if form.clear_access_password.as_deref() == Some("1") {
+                    String::new()
+                } else {
+                    existing_password_hash
+                }
+            } else {
+                hash_password(&access_password)?
+            };
+            if access_mode.requires_post_password() && access_password_hash.is_empty() {
+                return Err(AppError::BadRequest(
+                    "Protected boards require a password before they can be saved.".into(),
+                ));
+            }
             db::update_board_settings(
                 &mut conn,
                 board_id,
@@ -183,6 +215,8 @@ pub async fn update_board_settings(
                 form.collapse_greentext.as_deref() == Some("1"),
                 post_cooldown_secs,
                 &resolved_default_theme,
+                access_mode,
+                &access_password_hash,
             )?;
             tracing::info!(
                 target: "admin",
@@ -191,13 +225,19 @@ pub async fn update_board_settings(
                 "Saved board settings"
             );
             crate::templates::set_live_boards(db::get_all_boards(&conn)?);
-            Ok(())
+            Ok(board_short)
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(super::admin_panel_redirect("Board settings saved.").into_response())
+    let board_anchor = format!("board-{board_short}");
+    Ok(super::admin_panel_redirect_anchor_open(
+        "Board settings saved.",
+        &board_anchor,
+        &board_anchor,
+    )
+    .into_response())
 }
 
 #[derive(Deserialize)]
@@ -395,6 +435,14 @@ pub struct SiteSettingsForm {
     pub default_theme: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct FullBackupSettingsForm {
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+    pub auto_full_backup_interval_hours: Option<String>,
+    pub auto_full_backup_copies_to_keep: Option<String>,
+}
+
 pub async fn update_site_settings(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -467,6 +515,56 @@ pub async fn update_site_settings(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(Redirect::to("/admin/panel?settings_saved=1").into_response())
+}
+
+pub async fn update_full_backup_settings(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<FullBackupSettingsForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+
+    let interval_hours = form
+        .auto_full_backup_interval_hours
+        .as_deref()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(CONFIG.auto_full_backup_interval_hours)
+        .min(8_760);
+    let copies_to_keep = form
+        .auto_full_backup_copies_to_keep
+        .as_deref()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(CONFIG.auto_full_backup_copies_to_keep)
+        .clamp(1, 1_000);
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let auto_backup_settings = state.auto_full_backup_settings.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            auto_backup_settings.update(interval_hours, copies_to_keep);
+            crate::config::update_settings_file_auto_full_backup(interval_hours, copies_to_keep);
+            tracing::info!(
+                target: "admin",
+                interval_hours,
+                copies_to_keep,
+                "Automatic full-backup settings updated"
+            );
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+
+    Ok(super::admin_panel_redirect_anchor(
+        "Automatic full-backup settings saved.",
+        "full-backup-restore",
+    )
+    .into_response())
 }
 
 #[derive(Deserialize)]

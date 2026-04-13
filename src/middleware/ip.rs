@@ -2,17 +2,45 @@
 
 use crate::config::CONFIG;
 use axum::extract::Request;
-use std::net::{IpAddr, SocketAddr};
+use ipnet::IpNet;
+use std::net::SocketAddr;
 
 fn forwarded_client_ip(value: &str) -> Option<&str> {
     value.split(',').map(str::trim).find(|ip| !ip.is_empty())
 }
 
-fn trusted_proxy_peer(peer: Option<SocketAddr>) -> bool {
-    peer.is_some_and(|addr| match addr.ip() {
-        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
-        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+pub(crate) fn trusted_proxy_peer(peer: Option<SocketAddr>) -> bool {
+    trusted_proxy_peer_with(peer, &CONFIG.trusted_proxy_cidrs)
+}
+
+fn trusted_proxy_peer_with(peer: Option<SocketAddr>, trusted_proxy_cidrs: &[String]) -> bool {
+    peer.is_some_and(|addr| {
+        trusted_proxy_cidrs.iter().any(|cidr| {
+            cidr.parse::<IpNet>()
+                .ok()
+                .is_some_and(|network| network.contains(&addr.ip()))
+        })
     })
+}
+
+pub(crate) fn forwarded_proto_is_https(
+    headers: &axum::http::HeaderMap,
+    peer: Option<SocketAddr>,
+    behind_proxy: bool,
+) -> bool {
+    if !behind_proxy || !trusted_proxy_peer(peer) {
+        return false;
+    }
+
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .next()
+                .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
+        })
 }
 
 fn forwarded_ip_from_headers(
@@ -102,7 +130,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{forwarded_client_ip, trusted_proxy_peer};
+    use super::{forwarded_client_ip, trusted_proxy_peer_with};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     #[test]
@@ -123,26 +151,50 @@ mod tests {
 
     #[test]
     fn trusted_proxy_accepts_loopback_and_private_networks() {
-        assert!(trusted_proxy_peer(Some(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            8080,
-        ))));
-        assert!(trusted_proxy_peer(Some(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            8080,
-        ))));
-        assert!(trusted_proxy_peer(Some(SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::LOCALHOST),
-            8080,
-        ))));
+        let trusted = vec![
+            "127.0.0.1/32".to_string(),
+            "::1/128".to_string(),
+            "10.0.0.0/8".to_string(),
+        ];
+        assert!(trusted_proxy_peer_with(
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080,)),
+            &trusted
+        ));
+        assert!(trusted_proxy_peer_with(
+            Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                8080,
+            )),
+            &trusted
+        ));
+        assert!(trusted_proxy_peer_with(
+            Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080,)),
+            &trusted
+        ));
     }
 
     #[test]
     fn trusted_proxy_rejects_public_internet_peers() {
-        assert!(!trusted_proxy_peer(Some(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)),
-            8080,
-        ))));
-        assert!(!trusted_proxy_peer(None));
+        let trusted = vec!["127.0.0.1/32".to_string(), "::1/128".to_string()];
+        assert!(!trusted_proxy_peer_with(
+            Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)),
+                8080,
+            )),
+            &trusted
+        ));
+        assert!(!trusted_proxy_peer_with(None, &trusted));
+    }
+
+    #[test]
+    fn trusted_proxy_rejects_private_peers_not_in_allowlist() {
+        let trusted = vec!["127.0.0.1/32".to_string(), "::1/128".to_string()];
+        assert!(!trusted_proxy_peer_with(
+            Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                8080,
+            )),
+            &trusted
+        ));
     }
 }

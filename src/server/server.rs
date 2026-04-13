@@ -21,7 +21,7 @@ use dashmap::DashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::{
     check_cookie_secret_rotation, data_dir, generate_settings_file_if_missing,
@@ -37,6 +37,29 @@ mod router;
 
 use lifecycle::shutdown_signal;
 use router::build_router;
+
+fn should_run_background_maintenance(state: &AppState, max_in_flight: u64) -> bool {
+    !state.maintenance_gate.is_active()
+        && ACTIVE_UPLOADS.load(Ordering::Relaxed) == 0
+        && IN_FLIGHT.load(Ordering::Relaxed) <= max_in_flight
+}
+
+const SCHEDULED_FULL_BACKUP_RETRY_BASE_SECS: u64 = 15 * 60;
+const SCHEDULED_FULL_BACKUP_RETRY_MAX_SECS: u64 = 6 * 60 * 60;
+
+fn scheduled_full_backup_failure_retry_delay(
+    backup_interval: Duration,
+    failure_streak: u32,
+) -> Duration {
+    let attempt_shift = failure_streak.saturating_sub(1).min(16);
+    let multiplier = 1u64.checked_shl(attempt_shift).unwrap_or(u64::MAX);
+    let attempt_secs = SCHEDULED_FULL_BACKUP_RETRY_BASE_SECS.saturating_mul(multiplier);
+    let capped_secs = backup_interval.as_secs().clamp(
+        SCHEDULED_FULL_BACKUP_RETRY_BASE_SECS,
+        SCHEDULED_FULL_BACKUP_RETRY_MAX_SECS,
+    );
+    Duration::from_secs(attempt_secs.min(capped_secs))
+}
 
 // ─── Global terminal state ─────────────────────────────────────────────────────
 /// Total HTTP requests handled since startup.
@@ -250,6 +273,11 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         ffmpeg_webp_available,
         job_queue: worker_queue,
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
+        auto_full_backup_settings: crate::middleware::AutoFullBackupSettings::new(
+            CONFIG.auto_full_backup_interval_hours,
+            CONFIG.auto_full_backup_copies_to_keep,
+        ),
+        maintenance_gate: crate::middleware::MaintenanceGate::new(),
         chan_ledger,
         onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
     };
@@ -293,6 +321,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // PRAGMA optimize to keep query-planner statistics current (#18).
     if CONFIG.wal_checkpoint_interval > 0 {
         let bg = pool.clone();
+        let maintenance_state = state.clone();
         let interval_secs = CONFIG.wal_checkpoint_interval;
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
@@ -306,6 +335,16 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
+                        if !should_run_background_maintenance(&maintenance_state, 3) {
+                            tracing::debug!(
+                                target: "db",
+                                in_flight = IN_FLIGHT.load(Ordering::Relaxed),
+                                active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed),
+                                maintenance_active = maintenance_state.maintenance_gate.is_active(),
+                                "Skipping WAL checkpoint while server is busy"
+                            );
+                            continue;
+                        }
                         if let Ok(conn) = bg.get() {
                             match crate::db::run_wal_checkpoint(&conn) {
                                 Ok((pages, moved, backfill)) => {
@@ -376,6 +415,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // and threads without requiring manual admin intervention.
     if CONFIG.auto_vacuum_interval_hours > 0 {
         let bg = pool.clone();
+        let maintenance_state = state.clone();
         let interval_secs = CONFIG.auto_vacuum_interval_hours * 3600;
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
@@ -389,6 +429,20 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
+                        if !should_run_background_maintenance(&maintenance_state, 0) {
+                            tracing::info!(
+                                target: "db",
+                                in_flight = IN_FLIGHT.load(Ordering::Relaxed),
+                                active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed),
+                                maintenance_active = maintenance_state.maintenance_gate.is_active(),
+                                "Skipping scheduled VACUUM because the server is busy"
+                            );
+                            continue;
+                        }
+                        let Ok(_guard) = maintenance_state.maintenance_gate.try_begin("Scheduled VACUUM") else {
+                            tracing::debug!(target: "db", "Skipping scheduled VACUUM because maintenance is already running");
+                            continue;
+                        };
                         let bg2 = bg.clone();
                         tokio::task::spawn_blocking(move || {
                             if let Ok(conn) = bg2.get() {
@@ -414,6 +468,123 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     }
                     () = cancel_clone.cancelled() => {
                         tracing::debug!("VACUUM task shutting down");
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    // Automatic saved full backups — creates a server-side full backup on the
+    // configured cadence and trims older saved full backups to the configured
+    // retention limit after each successful save.
+    {
+        let bg = pool.clone();
+        let maintenance_state = state.clone();
+        let cancel_clone = worker_cancel.clone();
+        tokio::spawn(async move {
+            let scheduler_started_at = SystemTime::now();
+            let mut failure_streak = 0u32;
+            let mut retry_not_before: Option<SystemTime> = None;
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(60)) => {}
+                () = cancel_clone.cancelled() => { return; }
+            }
+            let mut iv = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = iv.tick() => {
+                        let settings = maintenance_state.auto_full_backup_settings.snapshot();
+                        if settings.interval_hours == 0 {
+                            failure_streak = 0;
+                            retry_not_before = None;
+                            continue;
+                        }
+
+                        let interval = Duration::from_secs(settings.interval_hours.saturating_mul(3600));
+                        let last_saved_at = crate::handlers::admin::latest_verified_full_backup_modified_time()
+                            .unwrap_or(scheduler_started_at);
+                        let due = SystemTime::now()
+                            .duration_since(last_saved_at)
+                            .is_ok_and(|elapsed| elapsed >= interval);
+                        if !due {
+                            failure_streak = 0;
+                            retry_not_before = None;
+                            continue;
+                        }
+                        if retry_not_before.is_some_and(|not_before| SystemTime::now() < not_before) {
+                            continue;
+                        }
+                        if !should_run_background_maintenance(&maintenance_state, 0) {
+                            tracing::info!(
+                                target: "admin",
+                                in_flight = IN_FLIGHT.load(Ordering::Relaxed),
+                                active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed),
+                                maintenance_active = maintenance_state.maintenance_gate.is_active(),
+                                "Skipping scheduled full backup because the server is busy"
+                            );
+                            continue;
+                        }
+                        let Ok(_guard) = maintenance_state.maintenance_gate.try_begin("Scheduled full backup") else {
+                            tracing::debug!(target: "admin", "Skipping scheduled full backup because maintenance is already running");
+                            continue;
+                        };
+
+                        let bg2 = bg.clone();
+                        let progress = maintenance_state.backup_progress.clone();
+                        let attempt_result = tokio::task::spawn_blocking(move || {
+                            crate::handlers::admin::create_full_backup_to_server(
+                                &bg2,
+                                None,
+                                &progress,
+                                settings.copies_to_keep,
+                            )
+                        })
+                        .await;
+                        match attempt_result {
+                            Ok(Ok(filename)) => {
+                                failure_streak = 0;
+                                retry_not_before = None;
+                                tracing::info!(
+                                    target: "admin",
+                                    filename = %filename,
+                                    interval_hours = settings.interval_hours,
+                                    copies_to_keep = settings.copies_to_keep,
+                                    "Scheduled full backup completed"
+                                );
+                            }
+                            Ok(Err(error)) => {
+                                failure_streak = failure_streak.saturating_add(1);
+                                let retry_delay =
+                                    scheduled_full_backup_failure_retry_delay(interval, failure_streak);
+                                retry_not_before = SystemTime::now().checked_add(retry_delay);
+                                tracing::warn!(
+                                    target: "admin",
+                                    error = %error,
+                                    interval_hours = settings.interval_hours,
+                                    copies_to_keep = settings.copies_to_keep,
+                                    failure_streak,
+                                    retry_delay_secs = retry_delay.as_secs(),
+                                    "Scheduled full backup failed"
+                                );
+                            }
+                            Err(error) => {
+                                failure_streak = failure_streak.saturating_add(1);
+                                let retry_delay =
+                                    scheduled_full_backup_failure_retry_delay(interval, failure_streak);
+                                retry_not_before = SystemTime::now().checked_add(retry_delay);
+                                tracing::warn!(
+                                    target: "admin",
+                                    error = %error,
+                                    failure_streak,
+                                    retry_delay_secs = retry_delay.as_secs(),
+                                    "Scheduled full backup task join failed"
+                                );
+                            }
+                        }
+                    }
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!("Scheduled full-backup task shutting down");
                         return;
                     }
                 }
@@ -536,6 +707,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     let force_reload_notify = std::sync::Arc::new(tokio::sync::Notify::new());
     {
         let pool_stats = pool.clone();
+        let worker_queue_stats = state.job_queue.clone();
         let stats_w = shared_stats.clone();
         let cancel_stats = worker_cancel.clone();
         let onion_addr = state.onion_address.clone();
@@ -561,6 +733,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 let snap = tokio::task::block_in_place(|| {
                     super::console::collect_stats(
                         &pool_stats,
+                        &worker_queue_stats,
                         start_time,
                         &mut prev_req,
                         &mut prev_tick,
@@ -1107,22 +1280,38 @@ fn redirect_host(req: &axum::extract::Request) -> Option<String> {
 }
 
 fn redirect_trusted_hosts() -> Vec<String> {
+    redirect_trusted_hosts_with(
+        &CONFIG.public_hosts,
+        CONFIG.tls.acme.enabled,
+        &CONFIG.tls.acme.domains,
+        &CONFIG.bind_addr,
+    )
+}
+
+fn redirect_trusted_hosts_with(
+    public_hosts: &[String],
+    acme_enabled: bool,
+    acme_domains: &[String],
+    bind_addr: &str,
+) -> Vec<String> {
     let mut hosts = Vec::new();
 
-    if CONFIG.tls.acme.enabled {
+    hosts.extend(
+        public_hosts
+            .iter()
+            .filter_map(|host| crate::config::normalize_public_host(host)),
+    );
+
+    if acme_enabled {
         hosts.extend(
-            CONFIG
-                .tls
-                .acme
-                .domains
+            acme_domains
                 .iter()
-                .filter(|domain| !domain.trim().is_empty())
-                .map(|domain| domain.trim().to_string()),
+                .filter_map(|domain| crate::config::normalize_public_host(domain)),
         );
     }
 
     if let Some(bind_host) =
-        parse_bind_host(&CONFIG.bind_addr).filter(|host| !matches!(host.as_str(), "0.0.0.0" | "::"))
+        parse_bind_host(bind_addr).filter(|host| !matches!(host.as_str(), "0.0.0.0" | "::"))
     {
         hosts.push(bind_host);
     }
@@ -1222,8 +1411,12 @@ async fn onion_location_middleware(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_redirect_response, format_redirect_authority, redirect_host};
+    use super::{
+        build_redirect_response, format_redirect_authority, redirect_host,
+        redirect_trusted_hosts_with, scheduled_full_backup_failure_retry_delay,
+    };
     use axum::{body::Body, extract::Request, http::header};
+    use std::time::Duration;
 
     fn request_with_host(host: &str) -> Request {
         Request::builder()
@@ -1249,5 +1442,43 @@ mod tests {
     #[test]
     fn redirect_formats_ipv6_authorities_with_brackets() {
         assert_eq!(format_redirect_authority("::1", 8443), "[::1]:8443");
+    }
+
+    #[test]
+    fn redirect_trusted_hosts_include_configured_public_hosts_for_manual_cert_setups() {
+        let hosts = redirect_trusted_hosts_with(
+            &["example.com".to_string(), "www.example.com".to_string()],
+            false,
+            &[],
+            "0.0.0.0:8080",
+        );
+        assert!(hosts.iter().any(|host| host == "example.com"));
+        assert!(hosts.iter().any(|host| host == "www.example.com"));
+    }
+
+    #[test]
+    fn scheduled_full_backup_retry_delay_uses_exponential_backoff() {
+        let interval = Duration::from_secs(24 * 3600);
+        assert_eq!(
+            scheduled_full_backup_failure_retry_delay(interval, 1),
+            Duration::from_secs(15 * 60)
+        );
+        assert_eq!(
+            scheduled_full_backup_failure_retry_delay(interval, 2),
+            Duration::from_secs(30 * 60)
+        );
+        assert_eq!(
+            scheduled_full_backup_failure_retry_delay(interval, 3),
+            Duration::from_secs(60 * 60)
+        );
+    }
+
+    #[test]
+    fn scheduled_full_backup_retry_delay_caps_at_backup_interval() {
+        let interval = Duration::from_secs(3600);
+        assert_eq!(
+            scheduled_full_backup_failure_retry_delay(interval, 10),
+            interval
+        );
     }
 }

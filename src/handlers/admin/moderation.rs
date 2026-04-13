@@ -467,9 +467,6 @@ pub async fn admin_ip_history(
 #[derive(Deserialize)]
 pub struct ResolveReportForm {
     report_id: i64,
-    /// Optional: also ban the reported post's author
-    ban_ip_hash: Option<String>,
-    ban_reason: Option<String>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
@@ -492,30 +489,6 @@ pub async fn resolve_report(
                 super::require_admin_session_with_name(&conn, session_id.as_deref())?;
 
             db::resolve_report(&conn, form.report_id, admin_id)?;
-
-            // Optionally ban the reporter's target while resolving.
-            if let Some(ref ip) = form.ban_ip_hash {
-                let ip = ip.trim();
-                if !ip.is_empty() {
-                    // Validate the ip_hash is a well-formed SHA-256 hex string
-                    // (64 hex chars) before inserting — guards against form tampering.
-                    if ip.len() != 64 || !ip.chars().all(|c| c.is_ascii_hexdigit()) {
-                        return Err(AppError::BadRequest("Invalid IP hash format.".into()));
-                    }
-                    let reason = form.ban_reason.as_deref().unwrap_or("Reported content");
-                    db::add_ban(&conn, ip, reason, None)?; // permanent ban
-                    let _ = db::log_mod_action(
-                        &conn,
-                        admin_id,
-                        &admin_name,
-                        "ban",
-                        "ban",
-                        None,
-                        "",
-                        &format!("via report {} — {reason}", form.report_id),
-                    );
-                }
-            }
 
             let _ = db::log_mod_action(
                 &conn,

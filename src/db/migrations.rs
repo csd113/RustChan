@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 35;
+pub(super) const CURRENT_MAX_MIGRATION: i64 = 39;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
@@ -157,19 +157,39 @@ const MIGRATIONS: &[(i64, &str)] = &[
         35,
         "CREATE INDEX IF NOT EXISTS idx_themes_enabled_sort ON themes(enabled, sort_order, slug)",
     ),
+    (
+        36,
+        r"CREATE TABLE IF NOT EXISTS post_submissions (
+            submission_token TEXT PRIMARY KEY,
+            ip_hash          TEXT NOT NULL,
+            board_id         INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            thread_id        INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+            post_id          INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+            is_thread        INTEGER NOT NULL DEFAULT 0,
+            created_at       INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE INDEX IF NOT EXISTS idx_post_submissions_created_at
+            ON post_submissions(created_at ASC)",
+    ),
+    (
+        37,
+        r"ALTER TABLE posts ADD COLUMN media_processing_state TEXT NOT NULL DEFAULT '';
+        ALTER TABLE posts ADD COLUMN media_processing_error TEXT;
+        CREATE INDEX IF NOT EXISTS idx_posts_media_processing_state
+            ON posts(media_processing_state)",
+    ),
+    (
+        38,
+        "ALTER TABLE boards ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'public'",
+    ),
+    (
+        39,
+        "ALTER TABLE boards ADD COLUMN access_password_hash TEXT NOT NULL DEFAULT ''",
+    ),
 ];
 
 pub(super) fn apply_migrations(conn: &rusqlite::Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_version (
-            version    INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(version)
-         );
-         INSERT INTO schema_version (version)
-         SELECT 0
-         WHERE NOT EXISTS (SELECT 1 FROM schema_version);",
-    )
-    .context("Failed to create schema_version table")?;
+    ensure_schema_version_table(conn)?;
 
     let current_version: i64 = conn
         .query_row(
@@ -184,25 +204,7 @@ pub(super) fn apply_migrations(conn: &rusqlite::Connection) -> Result<()> {
             continue;
         }
 
-        match conn.execute_batch(sql) {
-            Ok(()) => {
-                tracing::debug!("Applied migration v{version}");
-            }
-            Err(rusqlite::Error::SqliteFailure(ref error, ref msg))
-                if error.code == rusqlite::ErrorCode::Unknown
-                    && msg.as_deref().is_some_and(|message| {
-                        message.contains("duplicate column name")
-                            || message.contains("already exists")
-                    }) =>
-            {
-                tracing::warn!("Migration v{version} already applied (idempotent), skipping");
-            }
-            Err(error) => {
-                return Err(anyhow::anyhow!(
-                    "Migration v{version} failed: {error} — SQL: {sql}"
-                ));
-            }
-        }
+        apply_migration(conn, version, sql)?;
 
         conn.execute(
             "UPDATE schema_version SET version = ?1",
@@ -212,4 +214,50 @@ pub(super) fn apply_migrations(conn: &rusqlite::Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub(super) fn set_schema_version(conn: &rusqlite::Connection, version: i64) -> Result<()> {
+    ensure_schema_version_table(conn)?;
+    conn.execute("DELETE FROM schema_version", [])
+        .context("Failed to clear schema_version table")?;
+    conn.execute(
+        "INSERT INTO schema_version (version) VALUES (?1)",
+        rusqlite::params![version],
+    )
+    .with_context(|| format!("Failed to set schema_version to v{version}"))?;
+    Ok(())
+}
+
+fn ensure_schema_version_table(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_version (
+            version    INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(version)
+         );
+         INSERT INTO schema_version (version)
+         SELECT 0
+         WHERE NOT EXISTS (SELECT 1 FROM schema_version);",
+    )
+    .context("Failed to create schema_version table")
+}
+
+fn apply_migration(conn: &rusqlite::Connection, version: i64, sql: &str) -> Result<()> {
+    match conn.execute_batch(sql) {
+        Ok(()) => {
+            tracing::debug!("Applied migration v{version}");
+            Ok(())
+        }
+        Err(rusqlite::Error::SqliteFailure(ref error, ref msg))
+            if error.code == rusqlite::ErrorCode::Unknown
+                && msg.as_deref().is_some_and(|message| {
+                    message.contains("duplicate column name") || message.contains("already exists")
+                }) =>
+        {
+            tracing::warn!("Migration v{version} already applied (idempotent), skipping");
+            Ok(())
+        }
+        Err(error) => Err(anyhow::anyhow!(
+            "Migration v{version} failed: {error} — SQL: {sql}"
+        )),
+    }
 }

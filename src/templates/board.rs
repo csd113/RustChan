@@ -7,7 +7,7 @@
 //   archive_page     — archived threads list
 //   search_page      — search results
 
-use crate::models::{Board, Pagination, Post, Thread, ThreadSummary};
+use crate::models::{Board, Pagination, Post, Thread, ThreadSummary, SEARCH_QUERY_MAX_CHARS};
 use crate::utils::sanitize::escape_html;
 use std::collections::HashSet;
 use std::fmt::Write;
@@ -56,6 +56,7 @@ fn board_reorder_controls(
     )
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 fn render_board_card(
     stats: &crate::models::BoardStats,
     nsfw_consent: bool,
@@ -65,15 +66,21 @@ fn render_board_card(
     is_last: bool,
 ) -> String {
     let board = &stats.board;
+    let description_preview = preview_text(&board.description, 88);
     let nsfw_badge = if board.nsfw {
         r#"<span class="nsfw-badge">NSFW</span>"#
     } else {
         ""
     };
+    let board_href = if board.access_mode.requires_view_password() {
+        format!("/{}/unlock", escape_html(&board.short_name))
+    } else {
+        format!("/{}/catalog", escape_html(&board.short_name))
+    };
     let href = if board.nsfw && !nsfw_consent {
         format!("/?nsfw={}", urlencoding_simple(&board.short_name))
     } else {
-        format!("/{}/catalog", escape_html(&board.short_name))
+        board_href
     };
     let action_attr = if board.nsfw && !nsfw_consent {
         " data-action=\"open-nsfw-disclaimer\""
@@ -82,8 +89,12 @@ fn render_board_card(
     };
     let return_to_attr = if board.nsfw {
         format!(
-            r#" data-return-to="/{}/catalog" data-board-label="/{}/""#,
-            escape_html(&board.short_name),
+            r#" data-return-to="/{}" data-board-label="/{}/""#,
+            if board.access_mode.requires_view_password() {
+                format!("{}/unlock", escape_html(&board.short_name))
+            } else {
+                format!("{}/catalog", escape_html(&board.short_name))
+            },
             escape_html(&board.short_name)
         )
     } else {
@@ -99,13 +110,14 @@ fn render_board_card(
     } else {
         String::new()
     };
+    let access_badge = board_access_badge(board);
 
     format!(
         r#"<div class="board-card">
   {reorder_controls}
   <a class="board-card-link" href="{href}"{action_attr}{return_to_attr}>
-    <div class="board-card-short">/{sh}/</div>
-    <div class="board-card-name">{name}{nsfw}</div>
+    <div class="board-card-short">/{sh}/{nsfw}{access_badge}</div>
+    <div class="board-card-name">{name}</div>
     <div class="board-card-desc">{description}</div>
     <div class="board-card-stats">{thread_count} {thread_word}</div>
   </a>
@@ -117,10 +129,155 @@ fn render_board_card(
         sh = escape_html(&board.short_name),
         name = escape_html(&board.name),
         nsfw = nsfw_badge,
-        description = escape_html(&board.description),
+        access_badge = access_badge,
+        description = escape_html(&description_preview),
         thread_count = stats.thread_count,
         thread_word = thread_word,
     )
+}
+
+pub(crate) fn board_access_badge(board: &Board) -> String {
+    match board.access_mode {
+        crate::models::BoardAccessMode::Public => String::new(),
+        crate::models::BoardAccessMode::ViewPassword => {
+            r#" <span class="tag locked">PASSWORD</span>"#.to_string()
+        }
+        crate::models::BoardAccessMode::PostPassword => {
+            r#" <span class="tag sticky">POST PASSWORD</span>"#.to_string()
+        }
+    }
+}
+
+const fn board_access_copy(board: &Board) -> (&'static str, &'static str, &'static str) {
+    match board.access_mode {
+        crate::models::BoardAccessMode::Public => (
+            "public board",
+            "This board does not require a password.",
+            "continue",
+        ),
+        crate::models::BoardAccessMode::ViewPassword => (
+            "password protected board",
+            "You need the board password to view this board, its threads, search, archive, and media.",
+            "unlock board",
+        ),
+        crate::models::BoardAccessMode::PostPassword => (
+            "posting is password protected",
+            "Viewing is public, but creating threads and replies on this board requires the board password.",
+            "unlock posting",
+        ),
+    }
+}
+
+pub(crate) fn render_post_access_gate(
+    board: &Board,
+    csrf_token: &str,
+    return_to: &str,
+    title: &str,
+) -> String {
+    let (_, description, button_label) = board_access_copy(board);
+    format!(
+        r#"<div class="post-form-container board-access-gate" id="board-access-gate">
+<div class="post-form-title">[ {title} ]</div>
+<form class="post-form" method="POST" action="/{board}/unlock">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="return_to" value="{return_to}">
+  <table>
+    <tr><td>status</td>
+        <td><span style="font-size:0.8rem;color:var(--text-dim)">{description}</span></td></tr>
+    <tr><td>password</td>
+        <td><input type="password" name="password" maxlength="256" autocomplete="current-password">
+            <button type="submit">{button_label}</button></td></tr>
+  </table>
+</form>
+</div>"#,
+        title = escape_html(title),
+        board = escape_html(&board.short_name),
+        csrf = escape_html(csrf_token),
+        return_to = escape_html(return_to),
+        description = escape_html(description),
+        button_label = escape_html(button_label),
+    )
+}
+
+#[must_use]
+pub fn board_access_page(
+    board: &Board,
+    csrf_token: &str,
+    boards: &[Board],
+    return_to: &str,
+    error: Option<&str>,
+    current_theme: Option<&str>,
+    collapse_greentext: bool,
+) -> String {
+    let (eyebrow, description, button_label) = board_access_copy(board);
+    let error_html = error.map_or_else(String::new, |message| {
+        format!(
+            r#"<div class="post-error-banner">&#9888; {}</div>"#,
+            escape_html(message)
+        )
+    });
+    let board_description = if board.description.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<p class="board-desc" style="margin-top:0.75rem">{}</p>"#,
+            escape_html(&board.description)
+        )
+    };
+    let body = format!(
+        r#"{error_html}<div class="page-box board-access-page">
+<h1>/{short}/ — {name}{badge}</h1>
+<p style="color:var(--text-dim)">{eyebrow}</p>
+<p>{description}</p>
+{board_description}
+<form method="POST" action="/{short}/unlock" class="board-access-form" style="margin-top:1rem">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="return_to" value="{return_to}">
+  <table class="admin-login-table">
+    <tr><td>password</td><td><input type="password" name="password" maxlength="256" autocomplete="current-password" autofocus required></td></tr>
+    <tr><td></td><td><button type="submit">{button_label}</button></td></tr>
+  </table>
+</form>
+<p style="margin-top:1rem"><a href="/">return home</a></p>
+</div>"#,
+        error_html = error_html,
+        short = escape_html(&board.short_name),
+        name = escape_html(&board.name),
+        badge = board_access_badge(board),
+        eyebrow = escape_html(eyebrow),
+        description = escape_html(description),
+        board_description = board_description,
+        csrf = escape_html(csrf_token),
+        return_to = escape_html(return_to),
+        button_label = escape_html(button_label),
+    );
+
+    base_layout(
+        &format!("/{}/ access", board.short_name),
+        None,
+        &body,
+        csrf_token,
+        boards,
+        current_theme,
+        Some(&board.default_theme),
+        collapse_greentext,
+        &format!("/{}/unlock", board.short_name),
+    )
+}
+
+fn preview_text(input: &str, max_chars: usize) -> String {
+    let mut preview = String::new();
+    let mut chars = input.chars();
+
+    for ch in chars.by_ref().take(max_chars) {
+        preview.push(ch);
+    }
+
+    if chars.next().is_some() {
+        preview.push_str("...");
+    }
+
+    preview
 }
 
 fn render_catalog_thumb(thread: &Thread) -> String {
@@ -213,17 +370,11 @@ fn render_catalog_card(
     let subject_preview: String = thread
         .subject
         .as_deref()
-        .unwrap_or("")
-        .chars()
-        .take(80)
-        .collect();
+        .map_or_else(String::new, |subject| preview_text(subject, 44));
     let comment_preview: String = thread
         .op_body
         .as_deref()
-        .unwrap_or("")
-        .chars()
-        .take(140)
-        .collect();
+        .map_or_else(String::new, |body| preview_text(body, 88));
     let subject_html = if subject_preview.is_empty() {
         String::new()
     } else {
@@ -446,7 +597,13 @@ pub fn index_page(
             .map(|b| format!("/{}/", escape_html(&b.short_name)))
             .unwrap_or_default();
         let return_to = nsfw_prompt_board
-            .map(|b| format!("/{}/catalog", escape_html(&b.short_name)))
+            .map(|b| {
+                if b.access_mode.requires_view_password() {
+                    format!("/{}/unlock", escape_html(&b.short_name))
+                } else {
+                    format!("/{}/catalog", escape_html(&b.short_name))
+                }
+            })
             .unwrap_or_default();
         format!(
             r#"<div id="nsfw-disclaimer-overlay" class="compress-modal nsfw-disclaimer-overlay{open_class}"{hidden_attr}>
@@ -521,8 +678,10 @@ pub fn board_page(
     boards: &[Board],
     is_admin: bool,
     error: Option<&str>,
+    new_thread_prefill: Option<&super::forms::PostFormState>,
     current_theme: Option<&str>,
     collapse_greentext: bool,
+    can_post: bool,
 ) -> String {
     let mut body = String::new();
 
@@ -554,6 +713,7 @@ pub fn board_page(
         let short = escape_html(&board.short_name);
         let name = escape_html(&board.name);
         let desc = escape_html(&board.description);
+        let access_badge = board_access_badge(board);
         let nav_archive = if board.allow_archive {
             format!(r#"<a class="board-nav-link" href="/{short}/archive">[Archive]</a>"#)
         } else {
@@ -561,21 +721,41 @@ pub fn board_page(
         };
         let _ = write!(
             body,
-            r#"<div class="board-header board-index-header"><h1>/{short}/  — {name}</h1><p class="board-desc">{desc}</p></div>
+            r#"<div class="board-header board-index-header"><h1>/{short}/  — {name}{access_badge}</h1><p class="board-desc">{desc}</p></div>
 <div class="board-nav"><a class="board-nav-link active" href="/{short}">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}</div>"#
         );
     }
 
-    let _ = write!(
-        body,
-        r##"<div class="post-toggle-bar centered catalog-toggle-bar">
+    if can_post {
+        let show_post_form = error.is_some() || new_thread_prefill.is_some();
+        let _ = write!(
+            body,
+            r##"<div class="post-toggle-bar centered catalog-toggle-bar">
   <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Post a New Thread ]</a>
 </div>
-<div class="post-form-wrap" id="post-form-wrap" style="display:none">
+<div class="{post_form_class}" id="post-form-wrap" style="{post_form_style}">
   {}
 </div>"##,
-        super::forms::new_thread_form(&board.short_name, csrf_token, board)
-    );
+            super::forms::new_thread_form(&board.short_name, csrf_token, board, new_thread_prefill,),
+            post_form_class = if show_post_form {
+                "post-form-wrap is-open"
+            } else {
+                "post-form-wrap is-collapsed"
+            },
+            post_form_style = if show_post_form {
+                "display:block"
+            } else {
+                "display:none"
+            },
+        );
+    } else if board.access_mode.requires_post_password() {
+        body.push_str(&render_post_access_gate(
+            board,
+            csrf_token,
+            &format!("/{}", board.short_name),
+            "unlock posting",
+        ));
+    }
 
     for summary in summaries {
         body.push_str(&render_thread_summary(
@@ -651,7 +831,7 @@ fn render_thread_summary(
     if let (Some(_file), Some(thumb)) = (&t.op_file, &t.op_thumb) {
         let _ = write!(
             html,
-            r#"<div class="file-container catalog-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image"></a>{badges}</div>"#,
+            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image"></a>{badges}</div>"#,
             board = escape_html(board_short),
             tid = t.id,
             th = escape_html(thumb),
@@ -660,7 +840,7 @@ fn render_thread_summary(
     } else if let Some(embed_thumb) = t.op_body.as_deref().and_then(embed_thumb_from_body) {
         let _ = write!(
             html,
-            r#"<div class="file-container catalog-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" alt="video thumbnail"></a>{badges}</div>"#,
+            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" alt="video thumbnail"></a>{badges}</div>"#,
             board = escape_html(board_short),
             tid = t.id,
             src = escape_html(&embed_thumb),
@@ -815,6 +995,7 @@ fn render_thread_summary(
 
 #[must_use]
 #[allow(
+    clippy::fn_params_excessive_bools,
     clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::implicit_hasher
@@ -830,6 +1011,7 @@ pub fn catalog_page(
     is_admin: bool,
     current_theme: Option<&str>,
     collapse_greentext: bool,
+    can_post: bool,
 ) -> String {
     let bs = escape_html(&board.short_name);
     let bn = escape_html(&board.name);
@@ -871,12 +1053,13 @@ pub fn catalog_page(
     } else {
         "No threads yet."
     };
+    let access_badge = board_access_badge(board);
 
     let _ = write!(
         body,
-        r##"<div class="board-header catalog-header-row">
+        r#"<div class="board-header catalog-header-row">
   <div class="catalog-header-left board-catalog-header">
-    <h1>/{bs}/  — {bn}{title_suffix}</h1>
+    <h1>/{bs}/  — {bn}{access_badge}{title_suffix}</h1>
     <p class="board-desc">{desc}</p>
   </div>
   <div class="catalog-controls">
@@ -890,13 +1073,6 @@ pub fn catalog_page(
       </select>
     </div>
     <div class="catalog-control-group">
-      <label class="catalog-sort-label" for="catalog-image-size">Image Size:</label>
-      <select id="catalog-image-size" class="catalog-sort-select" data-action="catalog-image-size">
-        <option value="small" selected>Small</option>
-        <option value="large">Large</option>
-      </select>
-    </div>
-    <div class="catalog-control-group">
       <label class="catalog-sort-label" for="catalog-show-comment">Show OP Comment:</label>
       <select id="catalog-show-comment" class="catalog-sort-select" data-action="catalog-show-comment">
         <option value="on">On</option>
@@ -905,23 +1081,40 @@ pub fn catalog_page(
     </div>
   </div>
 </div>
-<div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link{catalog_active}" href="/{bs}/catalog">[Catalog]</a>{nav_archive}{hidden_nav}</div>
-<div class="post-toggle-bar centered catalog-toggle-bar">
-  <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Start a New Thread ]</a>
-</div>
-<div class="post-form-wrap" id="post-form-wrap" style="display:none">
-  {form}
-</div>
-<div class="catalog-grid" id="catalog-grid">"##,
+<div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link{catalog_active}" href="/{bs}/catalog">[Catalog]</a>{nav_archive}{hidden_nav}</div>"#,
         bs = bs,
         bn = bn,
+        access_badge = access_badge,
         title_suffix = title_suffix,
         desc = escape_html(&board.description),
         catalog_active = if hidden_view { "" } else { " active" },
         nav_archive = nav_archive,
         hidden_nav = hidden_nav,
-        form = super::forms::new_thread_form(&board.short_name, csrf_token, board)
     );
+    if can_post {
+        let _ = write!(
+            body,
+            r##"<div class="post-toggle-bar centered catalog-toggle-bar">
+  <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Start a New Thread ]</a>
+</div>
+<div class="post-form-wrap" id="post-form-wrap" style="display:none">
+  {form}
+</div>"##,
+            form = super::forms::new_thread_form(&board.short_name, csrf_token, board, None)
+        );
+    } else if board.access_mode.requires_post_password() {
+        body.push_str(&render_post_access_gate(
+            board,
+            csrf_token,
+            &if hidden_view {
+                format!("/{}/hidden", board.short_name)
+            } else {
+                format!("/{}/catalog", board.short_name)
+            },
+            "unlock posting",
+        ));
+    }
+    body.push_str(r#"<div class="catalog-grid" id="catalog-grid">"#);
 
     for t in threads {
         let is_pinned = pinned_ids.contains(&t.id);
@@ -1013,26 +1206,38 @@ pub fn search_page(
     current_theme: Option<&str>,
     collapse_greentext: bool,
 ) -> String {
+    let result_label = if pagination.total == 1 {
+        "1 result".to_string()
+    } else {
+        format!("{} results", pagination.total)
+    };
     let mut body = format!(
         r#"<div class="page-box">
-<h2 style="color:var(--green-pale);font-size:0.9rem;margin-bottom:8px">search: "{}" in /{}/</h2>
-<form method="GET" action="/{}/search">
-  <input type="text" name="q" value="{}" maxlength="64" style="background:var(--bg-input);border:1px solid var(--border);color:var(--green-pale);padding:4px 8px;font-family:var(--font)">
+<div class="board-search-header">
+  <h2 class="board-search-title">Search /{}/</h2>
+  <p class="board-search-summary">Showing results for "{}".</p>
+</div>
+<form method="GET" action="/{}/search" class="search-form board-search-form">
+  <label class="catalog-sort-label board-search-label" for="board-search-input">Query:</label>
+  <input id="board-search-input" type="text" name="q" value="{}" maxlength="{}">
   <button type="submit">search</button>
 </form>"#,
-        escape_html(query),
-        escape_html(&board.short_name),
         escape_html(&board.short_name),
         escape_html(query),
+        escape_html(&board.short_name),
+        escape_html(query),
+        SEARCH_QUERY_MAX_CHARS,
     );
 
     if posts.is_empty() {
-        body.push_str(r#"<p style="color:var(--text-dim);margin-top:8px">no results found.</p>"#);
+        body.push_str(
+            r#"<p class="catalog-empty-state board-search-empty">no results found. try a different query.</p>"#,
+        );
     } else {
         let _ = write!(
             body,
-            r#"<p style="color:var(--text-dim);font-size:0.8rem;margin-top:6px">{} result(s)</p>"#,
-            pagination.total
+            r#"<p class="board-search-summary board-search-summary-results">{}</p>"#,
+            escape_html(&result_label)
         );
         for post in posts {
             body.push_str(&super::thread::render_post(
@@ -1142,8 +1347,9 @@ pub fn archive_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_page, board_cards, catalog_page, render_catalog_card};
+    use super::{archive_page, board_cards, board_page, catalog_page, render_catalog_card};
     use crate::models::{Board, BoardStats, Thread};
+    use crate::templates::forms::PostFormState;
     use std::collections::HashSet;
 
     fn sample_board() -> Board {
@@ -1213,6 +1419,7 @@ mod tests {
             false,
             None,
             false,
+            true,
         );
 
         assert!(html.contains("catalog-card-link"));
@@ -1300,5 +1507,32 @@ mod tests {
         assert!(html.contains("thread-state-badge-archive"));
         assert!(!html.contains("thread-state-badge-lock"));
         assert!(html.contains("archive-meta"));
+    }
+
+    #[test]
+    fn board_page_reopens_new_thread_form_when_error_state_exists() {
+        let board = sample_board();
+        let state = PostFormState {
+            body: "retry".into(),
+            ..PostFormState::default()
+        };
+
+        let html = board_page(
+            &board,
+            &[],
+            &crate::models::Pagination::new(1, 10, 0),
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            Some("Post must include either text or an attached file."),
+            Some(&state),
+            None,
+            false,
+            true,
+        );
+
+        assert!(html.contains(r#"class="post-form-wrap is-open""#));
+        assert!(html.contains(r#"style="display:block""#));
+        assert!(html.contains(">retry</textarea>"));
     }
 }

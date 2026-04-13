@@ -7,7 +7,7 @@
 //   • Jobs are claimed atomically via UPDATE … RETURNING so multiple workers
 //     never process the same job even under concurrent access in WAL mode.
 //   • Workers sleep until a Notify fires or a 5-second poll timeout elapses.
-//   • Failed jobs are retried up to MAX_ATTEMPTS times; then marked "failed"
+//   • Failed jobs are retried up to the shared job retry budget; then marked "failed"
 //     with the last error message recorded for inspection.
 //   • A CancellationToken is threaded through every worker so that a graceful
 //     shutdown drains in-progress jobs before exiting (#7).
@@ -46,9 +46,6 @@ fn ffmpeg_command() -> TokioCommand {
     TokioCommand::new(&CONFIG.ffmpeg_path)
 }
 
-// How many times a job may be attempted before being permanently failed.
-#[allow(dead_code)]
-const MAX_ATTEMPTS: i64 = 3;
 // How long a worker sleeps when the queue is empty.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -101,6 +98,12 @@ impl Job {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueOutcome {
+    Enqueued(i64),
+    DroppedAtCapacity,
+}
+
 // ─── Job queue ────────────────────────────────────────────────────────────────
 
 /// Cheaply-cloneable handle to the shared job queue.
@@ -117,6 +120,8 @@ pub struct JobQueue {
     /// `FFmpeg` invocations on client retries or server-restart re-queues.
     pub in_progress: Arc<DashMap<String, bool>>,
     pending_jobs: Arc<AtomicU64>,
+    dropped_jobs: Arc<AtomicU64>,
+    active_video_jobs: Arc<AtomicU64>,
 }
 
 impl JobQueue {
@@ -133,6 +138,8 @@ impl JobQueue {
             cancel: CancellationToken::new(),
             in_progress: Arc::new(DashMap::new()),
             pending_jobs: Arc::new(AtomicU64::new(pending_jobs)),
+            dropped_jobs: Arc::new(AtomicU64::new(0)),
+            active_video_jobs: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -143,7 +150,7 @@ impl JobQueue {
     /// `CONFIG.job_queue_capacity`, the job is dropped with a warning log
     /// rather than accepted. This prevents the queue table growing without
     /// bound under a post flood.
-    pub fn enqueue(&self, job: &Job) -> Result<i64> {
+    pub fn enqueue(&self, job: &Job) -> Result<EnqueueOutcome> {
         let payload = serde_json::to_string(job)?;
 
         // Back-pressure: check pending count before inserting.
@@ -158,7 +165,7 @@ impl JobQueue {
             match crate::db::enqueue_job(&conn, job.type_str(), &payload) {
                 Ok(id) => {
                     self.notify.notify_one();
-                    Ok(id)
+                    Ok(EnqueueOutcome::Enqueued(id))
                 }
                 Err(error) => {
                     self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
@@ -166,7 +173,8 @@ impl JobQueue {
                 }
             }
         } else {
-            Ok(-1)
+            self.dropped_jobs.fetch_add(1, Ordering::Relaxed);
+            Ok(EnqueueOutcome::DroppedAtCapacity)
         }
     }
 
@@ -175,6 +183,16 @@ impl JobQueue {
     #[allow(dead_code)]
     pub fn pending_count(&self) -> i64 {
         i64::try_from(self.pending_jobs.load(Ordering::Relaxed)).unwrap_or(i64::MAX)
+    }
+
+    #[allow(dead_code)]
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped_jobs.load(Ordering::Relaxed)
+    }
+
+    #[allow(dead_code)]
+    pub fn active_video_count(&self) -> u64 {
+        self.active_video_jobs.load(Ordering::Relaxed)
     }
 
     fn reserve_pending_slot(&self, job_type: &str) -> bool {
@@ -288,14 +306,33 @@ async fn worker_loop(
                 queue.mark_job_claimed();
                 consecutive_errors = 0; // reset back-off on any successful claim
                 debug!("Worker {id}: picked up job #{job_id}");
+                let job: Job = match serde_json::from_str(&payload) {
+                    Ok(job) => job,
+                    Err(error) => {
+                        error!("Worker {id}: cannot deserialize job #{job_id}: {error}");
+                        let pool_done = queue.pool.clone();
+                        let err_msg = format!("Cannot deserialize job payload: {error}");
+                        let db_result = tokio::task::spawn_blocking(move || -> Result<()> {
+                            let c = pool_done.get().map_err(anyhow::Error::from)?;
+                            let _ = crate::db::fail_job(&c, job_id, &err_msg)?;
+                            Ok(())
+                        })
+                        .await;
+                        if let Ok(Err(db_error)) = db_result {
+                            error!("Worker {id}: failed to mark broken job #{job_id} as failed: {db_error}");
+                        }
+                        continue;
+                    }
+                };
                 let pool_done = queue.pool.clone();
+                let media_post_id = media_job_post_id(&job);
                 let result = handle_job(
-                    job_id,
-                    &payload,
+                    job,
                     ffmpeg_available,
                     ffmpeg_vp9_available,
                     queue.pool.clone(),
                     queue.in_progress.clone(),
+                    queue.active_video_jobs.clone(),
                 )
                 .await;
                 // Previously pool_done.get() failures were
@@ -310,10 +347,35 @@ async fn worker_loop(
                     match result {
                         Ok(()) => {
                             crate::db::complete_job(&c, job_id)?;
+                            if let Some(post_id) = media_post_id {
+                                crate::db::set_post_media_processing_state(
+                                    &c, post_id, None, None,
+                                )?;
+                            }
                         }
                         Err(ref e) => {
                             warn!("Worker {id}: job #{job_id} failed — {e}");
-                            crate::db::fail_job(&c, job_id, &e.to_string())?;
+                            let failure_state = crate::db::fail_job(&c, job_id, &e.to_string())?;
+                            if let Some(post_id) = media_post_id {
+                                match failure_state {
+                                    crate::db::JobFailureState::Retrying => {
+                                        crate::db::set_post_media_processing_state(
+                                            &c,
+                                            post_id,
+                                            Some(crate::db::MEDIA_PROCESSING_PENDING),
+                                            None,
+                                        )?;
+                                    }
+                                    crate::db::JobFailureState::PermanentlyFailed => {
+                                        crate::db::set_post_media_processing_state(
+                                            &c,
+                                            post_id,
+                                            Some(crate::db::MEDIA_PROCESSING_FAILED),
+                                            Some(&e.to_string()),
+                                        )?;
+                                    }
+                                }
+                            }
                         }
                     }
                     Ok(())
@@ -392,17 +454,14 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
 
 #[allow(clippy::too_many_lines)]
 async fn handle_job(
-    job_id: i64,
-    payload: &str,
+    job: Job,
     ffmpeg_available: bool,
     ffmpeg_vp9_available: bool,
     pool: DbPool,
     in_progress: Arc<DashMap<String, bool>>,
+    active_video_jobs: Arc<AtomicU64>,
 ) -> Result<()> {
-    let job: Job = serde_json::from_str(payload)
-        .map_err(|e| anyhow::anyhow!("Cannot deserialise job #{job_id}: {e}"))?;
-
-    debug!("Job #{job_id} type={}", job.type_str());
+    debug!("Dispatching {} job", job.type_str());
 
     match job {
         Job::VideoTranscode {
@@ -419,6 +478,7 @@ async fn handle_job(
                 return Ok(());
             }
             in_progress.insert(file_path.clone(), true);
+            active_video_jobs.fetch_add(1, Ordering::Relaxed);
             let result = transcode_video(
                 post_id,
                 file_path.clone(),
@@ -428,6 +488,7 @@ async fn handle_job(
                 pool,
             )
             .await;
+            active_video_jobs.fetch_sub(1, Ordering::Relaxed);
             in_progress.remove(&file_path);
             result
         }
@@ -484,6 +545,13 @@ async fn handle_job(
             run_spam_check(post_id, &ip_hash, body_len);
             Ok(())
         }
+    }
+}
+
+const fn media_job_post_id(job: &Job) -> Option<i64> {
+    match job {
+        Job::VideoTranscode { post_id, .. } | Job::AudioWaveform { post_id, .. } => Some(*post_id),
+        Job::ThreadPrune { .. } | Job::SpamCheck { .. } => None,
     }
 }
 
@@ -693,29 +761,7 @@ fn transcode_video_prepare(
 
     // Build the ffmpeg argument list as owned strings so it can cross the
     // async boundary without lifetime issues.
-    let args: Vec<String> = [
-        "-loglevel",
-        "error",
-        "-i",
-        &src_path_str,
-        "-c:v",
-        "libvpx-vp9",
-        "-crf",
-        "30",
-        "-b:v",
-        "0",
-        "-c:a",
-        "libopus",
-        "-b:a",
-        "128k",
-        "-map_metadata",
-        "-1",
-        "-y",
-        &tmp_path_str,
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect();
+    let args = crate::media::ffmpeg::build_vp9_transcode_args(&src_path_str, &tmp_path_str);
 
     Ok(Some((args, src, webm_abs, webm_rel, webm_name, tmp)))
 }

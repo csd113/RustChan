@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.1.2"
+version = "1.1.3"
 edition = "2021"
 # axum 0.8 requires Rust 1.75; arti-client 0.40 bumps the effective floor to
 # 1.90 — keep both fields in sync.
@@ -75,6 +75,7 @@ parking_lot  = "0.12"
 anyhow       = "1"
 once_cell    = "1"
 regex     = "1"
+ipnet     = "2"
 
 # zip 8: SimpleFileOptions and core ZipWriter/ZipArchive API unchanged.
 # by_index(), start_file(), add_directory(), finish() all stable.
@@ -86,12 +87,10 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # reqwest for federation push (chan_refresh) and pull (chan_poll).
 # default-features = false  →  prevents the default "native-tls" backend from
 #                               being compiled in.
-# rustls-tls-webpki-roots   →  bundles the Mozilla root store; avoids any
-#                               dependency on the OS certificate store at
-#                               compile time or runtime — required for
-#                               aarch64-unknown-linux-gnu cross-compilation.
+# rustls-no-provider keeps the build on the pure-Rust TLS stack and avoids
+# pulling in native-tls/OpenSSL.
 # Verify: cargo tree --edges features | grep -iE "openssl|native.tls"
-reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "rustls-tls-webpki-roots"] }
+reqwest = { version = "0.13", default-features = false, features = ["multipart", "json", "rustls-no-provider"] }
 
 # Pin to patched version — fixes RUSTSEC-2026-0049 (CRL distribution point
 # matching bug). Transitive dep via reqwest / arti-client.
@@ -140,7 +139,7 @@ tokio-rustls   = "0.26"
 rustls         = { version = "0.23", features = ["ring"] }
 
 # Optional — gated by Cargo features
-rustls-acme    = { version = "0.12", features = ["tokio"], optional = true }
+rustls-acme    = { version = "0.15", features = ["tokio"], optional = true }
 rcgen          = { version = "0.13", optional = true }
 pem-rfc7468    = { version = "0.7",  optional = true }
 x509-cert      = { version = "0.2",  optional = true }
@@ -163,7 +162,7 @@ tls-acme        = ["dep:rustls-acme"]
 [target.'cfg(windows)'.dependencies]
 # AllocConsole — used by the double-click / no-TTY re-launch guard in main.rs
 # to attach a visible console window when the binary is started from Explorer.
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 
 # ── Safety net ────────────────────────────────────────────────────────────────
 # If a future dependency version change re-introduces openssl-sys as a

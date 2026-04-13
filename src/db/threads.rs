@@ -188,6 +188,7 @@ pub fn create_thread_with_optional_poll(
     board_id: i64,
     subject: Option<&str>,
     post: &super::NewPost,
+    submission_token: &str,
     poll: Option<&PollInsert<'_>>,
     pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
 ) -> Result<(i64, i64, Option<i64>)> {
@@ -228,6 +229,17 @@ pub fn create_thread_with_optional_poll(
         if let Some(op) = pending_fs_op {
             super::insert_pending_fs_op(conn, op)?;
         }
+        if let Some(ip_hash) = post.ip_hash.as_deref() {
+            super::posts::record_post_submission(
+                conn,
+                submission_token,
+                ip_hash,
+                board_id,
+                thread_id,
+                post_id,
+                true,
+            )?;
+        }
 
         Ok((thread_id, post_id, poll_id))
     })();
@@ -254,6 +266,7 @@ pub fn create_thread_with_optional_poll(
 pub fn create_reply_with_thread_update(
     conn: &rusqlite::Connection,
     post: &super::NewPost,
+    submission_token: &str,
     should_bump: bool,
     pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
 ) -> Result<i64> {
@@ -284,6 +297,17 @@ pub fn create_reply_with_thread_update(
         }
         if let Some(op) = pending_fs_op {
             super::insert_pending_fs_op(conn, op)?;
+        }
+        if let Some(ip_hash) = post.ip_hash.as_deref() {
+            super::posts::record_post_submission(
+                conn,
+                submission_token,
+                ip_hash,
+                post.board_id,
+                post.thread_id,
+                post_id,
+                false,
+            )?;
         }
         Ok(post_id)
     })();

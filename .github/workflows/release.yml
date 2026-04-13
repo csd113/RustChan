@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            binary_suffix: ""
+            asset_suffix: macos-x86_64
+            use_cross: false
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            binary_suffix: ""
+            asset_suffix: macos-arm64
+            use_cross: false
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            binary_suffix: ""
+            asset_suffix: linux-x86_64
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            binary_suffix: ""
+            asset_suffix: linux-arm64
+            use_cross: true
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            binary_suffix: ".exe"
+            asset_suffix: windows-x86_64
+            use_cross: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --locked --release --target "${{ matrix.target }}"
+          else
+            cargo build --locked --release --target "${{ matrix.target }}"
+          fi
+
+      - name: Prepare release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/package
+          asset_basename="rustchan-cli-${{ github.ref_name }}-${{ matrix.asset_suffix }}"
+          package_root="dist/package/${asset_basename}"
+
+          mkdir -p "${package_root}"
+          cp "target/${{ matrix.target }}/release/rustchan-cli${{ matrix.binary_suffix }}" \
+             "${package_root}/rustchan-cli${{ matrix.binary_suffix }}"
+          cp README.md LICENSE "${package_root}/"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            pwsh -NoLogo -NoProfile -Command \
+              "Compress-Archive -Path '${package_root}/*' -DestinationPath 'dist/${asset_basename}.zip' -CompressionLevel Optimal"
+          else
+            (
+              cd "dist/package"
+              zip -r -9 "../${asset_basename}.zip" "${asset_basename}"
+            )
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: rustchan-cli-${{ matrix.asset_suffix }}
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: rustchan-cli-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum ./*.zip | sed 's| \*\./|  |; s| \./|  |' > SHA256SUMS.txt
+
+      - name: Verify checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum --check SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2.5.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          files: release-assets/*

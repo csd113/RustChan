@@ -7,6 +7,7 @@
 'use strict';
 
 var MOBILE_FORM_BREAKPOINT_PX = 700;
+var POST_SUBMIT_ANCHOR_STORAGE_KEY = 'rustchanPostSubmitAnchor';
 
 document.documentElement.classList.remove('no-js');
 document.documentElement.classList.add('js');
@@ -23,6 +24,17 @@ function isTouchLikeDevice() {
     (window.matchMedia && window.matchMedia('(hover: none), (pointer: coarse)').matches) ||
     (navigator.maxTouchPoints || 0) > 0
   );
+}
+
+function syncMobileHeaderOffset() {
+  var header = document.querySelector('.site-header');
+  if (!header) return;
+  var headerHeight = Math.ceil(header.getBoundingClientRect().height) + 'px';
+  document.documentElement.style.setProperty(
+    '--mobile-header-offset',
+    headerHeight
+  );
+  document.documentElement.style.setProperty('--header-offset', headerHeight);
 }
 
 function syncPostFormState() {
@@ -54,6 +66,41 @@ function setPostFormOpen(open, opts) {
         wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 40);
     }
+  }
+}
+
+function queuePostSubmitAnchor(target) {
+  if (!target || !target.hash) return;
+  try {
+    window.sessionStorage.setItem(
+      POST_SUBMIT_ANCHOR_STORAGE_KEY,
+      JSON.stringify({
+        path: target.pathname + target.search,
+        hash: target.hash
+      })
+    );
+  } catch (e) {}
+}
+
+function applyQueuedPostSubmitAnchor() {
+  var raw = '';
+  try {
+    raw = window.sessionStorage.getItem(POST_SUBMIT_ANCHOR_STORAGE_KEY) || '';
+  } catch (e) {
+    return;
+  }
+  if (!raw) return;
+
+  var payload = parseJsonText(raw);
+  if (!payload || !payload.path || !payload.hash) return;
+  if (payload.path !== window.location.pathname + window.location.search) return;
+
+  try {
+    window.sessionStorage.removeItem(POST_SUBMIT_ANCHOR_STORAGE_KEY);
+  } catch (e) {}
+
+  if (window.location.hash !== payload.hash) {
+    window.location.hash = payload.hash;
   }
 }
 
@@ -95,9 +142,22 @@ function upgradeLegacySpoilers(root) {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
+  applyQueuedPostSubmitAnchor();
   localizePostTimes(document);
   upgradeLegacySpoilers(document);
+  wireAudioMiniPlayers(document);
+  syncMobileHeaderOffset();
+
+  if (window.ResizeObserver) {
+    var header = document.querySelector('.site-header');
+    if (header) {
+      var observer = new ResizeObserver(syncMobileHeaderOffset);
+      observer.observe(header);
+    }
+  }
 });
+
+window.addEventListener('resize', syncMobileHeaderOffset);
 
 // Hook into new-post insertions (thread auto-update, quote popups, etc.)
 (function () {
@@ -105,6 +165,7 @@ document.addEventListener('DOMContentLoaded', function () {
   window._onNewPostsInserted = function (container) {
     localizePostTimes(container);
     upgradeLegacySpoilers(container);
+    wireAudioMiniPlayers(container);
     if (_origLocalize) _origLocalize(container);
   };
 }());
@@ -115,7 +176,174 @@ function togglePostForm() {
   var wrap = document.getElementById('post-form-wrap');
   if (!wrap) return;
   var opening = wrap.hidden || wrap.style.display === 'none' || wrap.classList.contains('is-collapsed');
+  if (opening) {
+    clearRestoredAutoQuoteOnlyDraft();
+  }
   setPostFormOpen(opening);
+}
+
+function getReplyBodyField() {
+  return document.getElementById('reply-body');
+}
+
+function getReplyDraftStorageKey() {
+  var cfg = document.getElementById('thread-config');
+  if (!cfg) return '';
+  return cfg.dataset.draftKey || '';
+}
+
+function getReplyDraftMetaKey() {
+  var draftKey = getReplyDraftStorageKey();
+  return draftKey ? draftKey + ':mode' : '';
+}
+
+function getReplyDraftSubmitStateKey() {
+  var draftKey = getReplyDraftStorageKey();
+  return draftKey ? draftKey + ':submitted' : '';
+}
+
+function isQuoteOnlyReplyDraft(value) {
+  if (!value) return false;
+  var trimmed = value.trim();
+  if (!trimmed) return false;
+  return trimmed.split('\n').every(function (line) {
+    var candidate = line.trim();
+    return (
+      !candidate ||
+      /^>>\d+$/.test(candidate) ||
+      /^>>>\/[a-z0-9]+\/\d+$/.test(candidate)
+    );
+  });
+}
+
+function getReplyDraftMode() {
+  var ta = getReplyBodyField();
+  if (!ta) return '';
+  return ta.dataset.draftMode || '';
+}
+
+function setReplyDraftMode(mode) {
+  var ta = getReplyBodyField();
+  if (!ta) return;
+  ta.dataset.draftMode = mode || '';
+}
+
+function isReplyDraftSubmitting() {
+  var ta = getReplyBodyField();
+  if (!ta) return false;
+  return ta.dataset.draftSubmitting === '1';
+}
+
+function setReplyDraftSubmitting(submitting) {
+  var ta = getReplyBodyField();
+  if (!ta) return;
+  ta.dataset.draftSubmitting = submitting ? '1' : '';
+}
+
+function markReplyDraftSubmitted() {
+  var submitKey = getReplyDraftSubmitStateKey();
+  if (!submitKey) return;
+  try {
+    sessionStorage.setItem(submitKey, '1');
+  } catch (e) {}
+}
+
+function clearReplyDraftSubmitState() {
+  var submitKey = getReplyDraftSubmitStateKey();
+  if (!submitKey) return;
+  try {
+    sessionStorage.removeItem(submitKey);
+  } catch (e) {}
+}
+
+function clearReplyDraftStorage() {
+  var draftKey = getReplyDraftStorageKey();
+  var metaKey = getReplyDraftMetaKey();
+  try {
+    if (draftKey) localStorage.removeItem(draftKey);
+    if (metaKey) localStorage.removeItem(metaKey);
+  } catch (e) {}
+  var ta = getReplyBodyField();
+  if (ta) {
+    ta.dataset.lastPersistedDraft = '';
+    ta.dataset.lastPersistedDraftMode = '';
+  }
+}
+
+function persistReplyDraftStorage(force) {
+  var ta = getReplyBodyField();
+  var draftKey = getReplyDraftStorageKey();
+  var metaKey = getReplyDraftMetaKey();
+  if (!ta || !draftKey) return;
+  var mode = getReplyDraftMode();
+  var value = ta.value || '';
+  if (document.hidden && !force) return;
+  if (ta.dataset.lastPersistedDraft === value && ta.dataset.lastPersistedDraftMode === mode) {
+    return;
+  }
+  try {
+    if (value) {
+      localStorage.setItem(draftKey, value);
+      if (mode) {
+        localStorage.setItem(metaKey, mode);
+      } else {
+        localStorage.removeItem(metaKey);
+      }
+    } else {
+      clearReplyDraftStorage();
+      return;
+    }
+    ta.dataset.lastPersistedDraft = value;
+    ta.dataset.lastPersistedDraftMode = mode;
+  } catch (e) {}
+}
+
+function flushReplyDraftStorage() {
+  var ta = getReplyBodyField();
+  if (!ta) return;
+  if (ta._replyDraftSaveTimer) {
+    window.clearTimeout(ta._replyDraftSaveTimer);
+    ta._replyDraftSaveTimer = null;
+  }
+  persistReplyDraftStorage(true);
+}
+
+function queueReplyDraftSave() {
+  var ta = getReplyBodyField();
+  if (!ta) return;
+  if (ta._replyDraftSaveTimer) {
+    window.clearTimeout(ta._replyDraftSaveTimer);
+  }
+  ta._replyDraftSaveTimer = window.setTimeout(function () {
+    ta._replyDraftSaveTimer = null;
+    if (isReplyDraftSubmitting()) return;
+    persistReplyDraftStorage();
+  }, 500);
+}
+
+function consumeSubmittedReplyDraft() {
+  var submitKey = getReplyDraftSubmitStateKey();
+  var submitted = '';
+  if (!submitKey) return;
+  try {
+    submitted = sessionStorage.getItem(submitKey) || '';
+  } catch (e) {}
+  if (submitted !== '1') return;
+  clearReplyDraftSubmitState();
+  if (/^#p\d+$/.test(window.location.hash)) {
+    clearReplyDraftStorage();
+  }
+}
+
+function clearRestoredAutoQuoteOnlyDraft() {
+  var ta = getReplyBodyField();
+  if (!ta) return;
+  if (ta.dataset.draftRestored !== '1') return;
+  if (getReplyDraftMode() !== 'auto-quote-only') return;
+  ta.value = '';
+  ta.dataset.draftRestored = '0';
+  setReplyDraftMode('');
+  clearReplyDraftStorage();
 }
 
 function appendReply(id) {
@@ -123,9 +351,18 @@ function appendReply(id) {
   if (wrap && (wrap.hidden || wrap.style.display === 'none' || wrap.classList.contains('is-collapsed'))) {
     setPostFormOpen(true, { scrollIntoView: true });
   }
-  var ta = document.getElementById('reply-body');
+  var ta = getReplyBodyField();
   if (ta) {
+    var hadManualDraft =
+      getReplyDraftMode() === 'manual' ||
+      (!!ta.value && !isQuoteOnlyReplyDraft(ta.value));
+    if (ta.value && !/\n$/.test(ta.value)) {
+      ta.value += '\n';
+    }
     ta.value += '>>' + id + '\n';
+    ta.dataset.draftRestored = '0';
+    setReplyDraftMode(hadManualDraft ? 'manual' : 'auto-quote-only');
+    queueReplyDraftSave();
     if (!isMobileViewport()) ta.focus();
   }
   return false;
@@ -177,15 +414,48 @@ function resetUploadProgress(form) {
   if (text) text.textContent = 'Preparing upload…';
 }
 
-function setSubmittingState(form, submitting) {
-  form.dataset.uploadSubmitting = submitting ? '1' : '';
-  form.querySelectorAll('button[type="submit"]').forEach(function (button) {
-    button.disabled = submitting;
+function getFormSubmitButtons(form) {
+  return Array.prototype.slice.call(form.querySelectorAll('button[type="submit"]'));
+}
 
-    if (!button.dataset.uploadOriginalLabel) {
-      button.dataset.uploadOriginalLabel = button.textContent;
+function rememberButtonLabels(buttons, labelKey) {
+  buttons.forEach(function (button) {
+    if (!button.dataset[labelKey]) {
+      button.dataset[labelKey] = button.textContent;
     }
   });
+}
+
+function restoreButtonLabels(buttons, labelKey) {
+  buttons.forEach(function (button) {
+    if (button.dataset[labelKey]) {
+      button.textContent = button.dataset[labelKey];
+    }
+  });
+}
+
+function setButtonCollectionBusy(buttons, busy, options) {
+  options = options || {};
+  var labelKey = options.labelKey || 'asyncOriginalLabel';
+  rememberButtonLabels(buttons, labelKey);
+
+  buttons.forEach(function (button) {
+    button.disabled = !!busy;
+    if (busy) {
+      if (options.busyLabel) button.textContent = options.busyLabel;
+    } else if (!options.preserveBusyLabel) {
+      restoreButtonLabels([button], labelKey);
+    }
+  });
+}
+
+function setFormSubmitButtonsBusy(form, busy, options) {
+  setButtonCollectionBusy(getFormSubmitButtons(form), busy, options);
+}
+
+function setSubmittingState(form, submitting) {
+  form.dataset.uploadSubmitting = submitting ? '1' : '';
+  setFormSubmitButtonsBusy(form, submitting, { labelKey: 'uploadOriginalLabel' });
 }
 
 function startSubmitButtonAnimation(form) {
@@ -208,17 +478,209 @@ function startSubmitButtonAnimation(form) {
   form._submitButtonAnimationTimer = window.setInterval(render, 900);
 }
 
+function setSubmitButtonsWaitingForServer(form) {
+  stopSubmitButtonAnimation(form);
+  setFormSubmitButtonsBusy(form, true, {
+    labelKey: 'uploadOriginalLabel',
+    busyLabel: 'Upload sent, waiting for server'
+  });
+}
+
 function stopSubmitButtonAnimation(form) {
   if (form._submitButtonAnimationTimer) {
     window.clearInterval(form._submitButtonAnimationTimer);
     form._submitButtonAnimationTimer = null;
   }
 
-  form.querySelectorAll('button[type="submit"]').forEach(function (button) {
-    if (button.dataset.uploadOriginalLabel) {
-      button.textContent = button.dataset.uploadOriginalLabel;
-    }
+  restoreButtonLabels(getFormSubmitButtons(form), 'uploadOriginalLabel');
+}
+
+function dispatchPostFormEvent(form, name) {
+  if (!form || !name) return;
+  var ev = null;
+  if (typeof window.Event === 'function') {
+    ev = new Event(name, { bubbles: false, cancelable: false });
+  } else if (document.createEvent) {
+    ev = document.createEvent('Event');
+    ev.initEvent(name, false, false);
+  }
+  if (!ev) return;
+  form.dispatchEvent(ev);
+}
+
+function normalizeInlineMessage(message) {
+  if (!message) return '';
+  return String(message).replace(/\s+/g, ' ').trim();
+}
+
+function parseJsonText(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    return null;
+  }
+}
+
+function absoluteUrl(url) {
+  if (!url) return '';
+  try {
+    return new URL(url, window.location.href).toString();
+  } catch (_err) {
+    return '';
+  }
+}
+
+function isSameDocumentNavigationTarget(url) {
+  var target = absoluteUrl(url);
+  var current = absoluteUrl(window.location.href);
+  if (!target || !current) return false;
+
+  try {
+    var targetUrl = new URL(target);
+    var currentUrl = new URL(current);
+    return (
+      targetUrl.origin === currentUrl.origin &&
+      targetUrl.pathname === currentUrl.pathname &&
+      targetUrl.search === currentUrl.search
+    );
+  } catch (_err) {
+    return false;
+  }
+}
+
+function clearSuccessfulPostFormState(form) {
+  if (!form) return;
+
+  clearPostFormFeedback(form);
+  stopSubmitButtonAnimation(form);
+  setSubmittingState(form, false);
+  resetUploadProgress(form);
+
+  if (typeof form.reset === 'function') {
+    form.reset();
+  }
+
+  form.querySelectorAll('input[type="file"]').forEach(function (input) {
+    try {
+      input.value = '';
+    } catch (e) {}
   });
+
+  var bodyField = form.querySelector('textarea[name="body"]');
+  if (bodyField) {
+    bodyField.dataset.draftRestored = '0';
+    bodyField.dataset.draftSubmitting = '';
+  }
+
+  setReplyDraftSubmitting(false);
+  clearReplyDraftSubmitState();
+  clearReplyDraftStorage();
+  if (bodyField) {
+    setReplyDraftMode('');
+  }
+}
+
+function navigatePostSubmitTarget(form, url) {
+  if (!url) return false;
+
+  // Upload-backed replies redirect back to the same thread with a fresh #p123
+  // anchor. A plain hash navigation does not fetch the newly-created post, so
+  // force a full navigation and restore the anchor after load.
+  // Reset the live form first so browsers do not carry the just-submitted text
+  // or file input selection across that navigation.
+  var sameDocument = isSameDocumentNavigationTarget(url);
+  if (sameDocument) {
+    clearSuccessfulPostFormState(form);
+    var target = new URL(url, window.location.href);
+    queuePostSubmitAnchor(target);
+    window.location.assign(target.pathname + target.search);
+    return true;
+  }
+  window.location.assign(url);
+  return true;
+}
+
+function parseXhrJsonPayload(xhr) {
+  if (!xhr || !xhr.responseText) return null;
+  var contentType = xhr.getResponseHeader('Content-Type') || '';
+  if (contentType.indexOf('application/json') === -1) return null;
+  return parseJsonText(xhr.responseText);
+}
+
+function extractMessageFromHtmlDocument(html) {
+  if (!html || typeof DOMParser !== 'function') return '';
+  try {
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    if (!doc) return '';
+
+    var banner = doc.querySelector('.post-error-banner');
+    if (banner) return normalizeInlineMessage(banner.textContent);
+
+    var bannedHeading = doc.querySelector('.error-page h1');
+    if (bannedHeading && /you are banned/i.test(bannedHeading.textContent || '')) {
+      var reason = doc.querySelector('.error-page strong');
+      if (reason) {
+        return normalizeInlineMessage('You are banned. Reason: ' + reason.textContent);
+      }
+      return normalizeInlineMessage(bannedHeading.textContent);
+    }
+
+    var errorPage = doc.querySelector('.page-box.error-page p');
+    if (errorPage) return normalizeInlineMessage(errorPage.textContent);
+  } catch (e) {}
+  return '';
+}
+
+function clearPostFormFeedback(form) {
+  var container = form && (form.closest('.post-form-container') || form);
+  if (!container) return;
+  container
+    .querySelectorAll('.post-error-banner[data-post-form-feedback="1"]')
+    .forEach(function (banner) {
+      if (banner.parentNode) banner.parentNode.removeChild(banner);
+    });
+}
+
+function showPostFormFeedback(form, message) {
+  var normalized = normalizeInlineMessage(message);
+  var container = form && (form.closest('.post-form-container') || form);
+  if (!normalized || !container) return;
+
+  clearPostFormFeedback(form);
+
+  var banner = document.createElement('div');
+  banner.className = 'post-error-banner';
+  banner.dataset.postFormFeedback = '1';
+  banner.setAttribute('role', 'alert');
+  banner.setAttribute('tabindex', '-1');
+  banner.textContent = '\u26A0 ' + normalized;
+
+  var title = container.querySelector('.post-form-title');
+  if (title && title.parentNode === container) {
+    title.insertAdjacentElement('afterend', banner);
+  } else if (form && form.parentNode === container) {
+    container.insertBefore(banner, form);
+  } else {
+    container.insertBefore(banner, container.firstChild);
+  }
+
+  try {
+    banner.focus({ preventScroll: true });
+  } catch (e) {
+    banner.focus();
+  }
+  if (typeof banner.scrollIntoView === 'function') {
+    banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+function resetPostSubmitFailureState(form, message) {
+  stopSubmitButtonAnimation(form);
+  setSubmittingState(form, false);
+  resetUploadProgress(form);
+  dispatchPostFormEvent(form, 'rustchan:post-submit-reset');
+  showPostFormFeedback(form, message);
 }
 
 function submitPostFormWithProgress(form) {
@@ -226,44 +688,69 @@ function submitPostFormWithProgress(form) {
   if (!fileInputsHaveSelection(form)) return false;
 
   var xhr = new XMLHttpRequest();
+  var submitHelper = createAsyncSubmitHelper({
+    form: form,
+    labelKey: 'uploadOriginalLabel',
+    onBusyStart: function () {
+      setSubmittingState(form, true);
+      startSubmitButtonAnimation(form);
+    },
+    onBusyEnd: function () {
+      stopSubmitButtonAnimation(form);
+      setSubmittingState(form, false);
+    },
+    setProgress: function (percent, message) {
+      setUploadProgress(form, percent, message);
+    }
+  });
   xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
   xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
-  setSubmittingState(form, true);
-  startSubmitButtonAnimation(form);
-  setUploadProgress(form, 0, 'Starting upload…');
+  clearPostFormFeedback(form);
+  submitHelper.setBusy(true);
+  submitHelper.setProgress(0, 'Starting upload…');
 
   xhr.upload.addEventListener('progress', function (event) {
     if (event.lengthComputable && event.total > 0) {
       var percent = (event.loaded / event.total) * 100;
-      setUploadProgress(
-        form,
+      if (event.loaded >= event.total) {
+        setSubmitButtonsWaitingForServer(form);
+      }
+      submitHelper.setProgress(
         percent,
         'Uploading ' + formatBytes(event.loaded) + ' / ' + formatBytes(event.total) + ' (' + Math.round(percent) + '%)'
       );
     } else {
-      setUploadProgress(form, 100, 'Uploading…');
+      submitHelper.setProgress(100, 'Uploading…');
     }
   });
 
   xhr.addEventListener('load', function () {
-    stopSubmitButtonAnimation(form);
-    setSubmittingState(form, false);
-    setUploadProgress(form, 100, 'Finishing…');
+    var payload = submitHelper.parsePayload(xhr);
+    var explicitRedirect = submitHelper.extractRedirect(xhr, payload);
 
-    var finalUrl = xhr.responseURL || form.action;
-    var contentType = xhr.getResponseHeader('Content-Type') || '';
-    var isHtml = contentType.indexOf('text/html') !== -1;
+    submitHelper.setBusy(false);
+    submitHelper.setProgress(100, 'Finishing…');
 
-    if (xhr.status >= 200 && xhr.status < 400 && finalUrl && finalUrl !== window.location.href) {
-      window.location.assign(finalUrl);
+    // XHR follows redirects internally, and some browsers expose the final
+    // response URL without the original #p123 fragment. The explicit redirect
+    // header keeps reply-draft clearing and "(You)" tracking anchored to the
+    // exact new post after upload-backed replies succeed.
+    if (explicitRedirect) {
+      navigatePostSubmitTarget(form, explicitRedirect);
       return;
     }
 
-    if (isHtml && xhr.responseText) {
-      document.open();
-      document.write(xhr.responseText);
-      document.close();
+    var finalUrl = absoluteUrl(xhr.responseURL || form.action);
+    var currentUrl = absoluteUrl(window.location.href);
+
+    if (xhr.status >= 200 && xhr.status < 400 && finalUrl && finalUrl !== currentUrl) {
+      navigatePostSubmitTarget(form, finalUrl);
+      return;
+    }
+
+    if (payload && payload.error) {
+      resetPostSubmitFailureState(form, payload.error);
       return;
     }
 
@@ -272,25 +759,33 @@ function submitPostFormWithProgress(form) {
       return;
     }
 
-    resetUploadProgress(form);
-    alert('Upload failed. Please try again.');
+    resetPostSubmitFailureState(
+      form,
+      submitHelper.extractError(xhr, payload, 'Upload failed. Please try again.')
+    );
   });
 
   xhr.addEventListener('error', function () {
-    stopSubmitButtonAnimation(form);
-    setSubmittingState(form, false);
-    resetUploadProgress(form);
-    alert('Upload failed. Please check your connection and try again.');
+    resetPostSubmitFailureState(
+      form,
+      'Connection dropped before the server response arrived. Your post may still have succeeded. Refresh the thread or board before trying again.'
+    );
   });
 
   xhr.addEventListener('abort', function () {
     stopSubmitButtonAnimation(form);
     setSubmittingState(form, false);
     resetUploadProgress(form);
+    dispatchPostFormEvent(form, 'rustchan:post-submit-reset');
   });
 
   xhr.send(new FormData(form));
   return true;
+}
+
+function captchaNonceMissing(form) {
+  var nonceField = form && form.querySelector('input[name="pow_nonce"]');
+  return !!(nonceField && !nonceField.value);
 }
 
 // ─── NSFW disclaimer overlay ────────────────────────────────────────────────
@@ -327,122 +822,10 @@ document.addEventListener('DOMContentLoaded', function () {
 
 // ─── Media expand / collapse ─────────────────────────────────────────────────
 
-var mobileMediaViewer = (function () {
-  var overlay = null;
-  var stage = null;
-  var closeBtn = null;
-  var activeContainer = null;
-
-  function ensure() {
-    if (overlay) return;
-    overlay = document.createElement('div');
-    overlay.className = 'mobile-media-viewer';
-    overlay.hidden = true;
-    overlay.innerHTML =
-      '<div class="mobile-media-viewer__backdrop" data-action="close-mobile-media-viewer"></div>' +
-      '<div class="mobile-media-viewer__dialog" role="dialog" aria-modal="true" aria-label="Expanded media">' +
-      '<button type="button" class="mobile-media-viewer__close" data-action="close-mobile-media-viewer" aria-label="Close media viewer">&#x2715;</button>' +
-      '<div class="mobile-media-viewer__stage"></div>' +
-      '</div>';
-    document.body.appendChild(overlay);
-    stage = overlay.querySelector('.mobile-media-viewer__stage');
-    closeBtn = overlay.querySelector('.mobile-media-viewer__close');
-
-    overlay.addEventListener('click', function (e) {
-      if (e.target.closest('[data-action="close-mobile-media-viewer"]')) {
-        close();
-      }
-    });
-
-    document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && overlay && !overlay.hidden) close();
-    });
-  }
-
-  function fill(node) {
-    ensure();
-    stage.innerHTML = '';
-    stage.appendChild(node);
-  }
-
-  function open(node) {
-    fill(node);
-    overlay.hidden = false;
-    document.body.classList.add('mobile-overlay-open');
-    if (closeBtn) closeBtn.focus();
-  }
-
-  function close() {
-    if (!overlay) return;
-    syncComboAudio(activeContainer, false);
-    activeContainer = null;
-    stage.innerHTML = '';
-    overlay.hidden = true;
-    document.body.classList.remove('mobile-overlay-open');
-  }
-
-  return {
-    openImage: function (src, alt, container) {
-      activeContainer = container || null;
-      var img = document.createElement('img');
-      img.className = 'mobile-media-viewer__media mobile-media-viewer__image';
-      img.src = src;
-      img.alt = alt || 'image';
-      open(img);
-    },
-    openVideo: function (src, type, container) {
-      activeContainer = container || null;
-      var video = document.createElement('video');
-      video.className = 'mobile-media-viewer__media mobile-media-viewer__video';
-      video.controls = true;
-      video.autoplay = true;
-      video.playsInline = true;
-      video.preload = 'metadata';
-      if (type) {
-        var source = document.createElement('source');
-        source.src = src;
-        source.type = type;
-        video.appendChild(source);
-      } else {
-        video.src = src;
-      }
-      open(video);
-    },
-    openEmbed: function (src, title) {
-      var iframe = document.createElement('iframe');
-      iframe.className = 'mobile-media-viewer__media mobile-media-viewer__embed';
-      iframe.src = src;
-      iframe.title = title || 'Embedded video';
-      iframe.setAttribute('frameborder', '0');
-      iframe.setAttribute('allowfullscreen', '');
-      iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen');
-      iframe.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
-      open(iframe);
-    },
-    close: close
-  };
-}());
-
 function expandMedia(preview) {
   var container = preview.closest('.file-container');
   var expanded = container.querySelector('.media-expanded');
   var closeBtn = container.querySelector('.media-close-btn');
-  if (isMobileViewport()) {
-    if (expanded.tagName === 'IMG') {
-      syncComboAudio(container, true);
-      mobileMediaViewer.openImage(expanded.dataset.src || expanded.src, expanded.alt, container);
-      return;
-    }
-    if (expanded.tagName === 'VIDEO') {
-      var source = expanded.querySelector('source');
-      mobileMediaViewer.openVideo(
-        source ? source.src : expanded.currentSrc || expanded.src,
-        source ? source.type : '',
-        container
-      );
-      return;
-    }
-  }
   if (expanded.tagName === 'IMG' && expanded.dataset.src) {
     expanded.src = expanded.dataset.src;
     delete expanded.dataset.src;
@@ -454,6 +837,8 @@ function expandMedia(preview) {
   // widening the float and shoving text off to the right.
   container.classList.add('media-is-expanded');
   if (expanded.tagName === 'VIDEO') {
+    expanded.setAttribute('playsinline', '');
+    expanded.setAttribute('webkit-playsinline', '');
     expanded.play().catch(function () {});
   }
   syncComboAudio(container, true);
@@ -466,17 +851,6 @@ function expandMedia(preview) {
       expanded.addEventListener('click', function () {
         var btn = expanded.closest('.file-container').querySelector('.media-close-btn');
         if (btn) collapseMedia(btn);
-      });
-    } else if (expanded.tagName === 'VIDEO') {
-      // Clicking the video *outside* the native controls bar collapses it.
-      // The controls bar is roughly the bottom 40px of the element.
-      expanded.addEventListener('click', function (e) {
-        var rect = expanded.getBoundingClientRect();
-        var controlsHeight = 40;
-        if (e.clientY < rect.bottom - controlsHeight) {
-          var btn = expanded.closest('.file-container').querySelector('.media-close-btn');
-          if (btn) collapseMedia(btn);
-        }
       });
     }
   }
@@ -510,6 +884,53 @@ function syncComboAudio(container, shouldPlay) {
   }
 }
 
+function preferredMiniPlayerArtwork() {
+  var audioArtworkLink = document.querySelector(
+    'link[rel="apple-touch-icon"], link[rel="icon"][sizes="192x192"], link[rel="icon"][sizes="512x512"], link[rel="icon"][sizes="32x32"], link[rel="icon"]'
+  );
+  if (!audioArtworkLink || !audioArtworkLink.href) return [];
+  var artwork = { src: audioArtworkLink.href };
+  if (audioArtworkLink.sizes && audioArtworkLink.sizes.value) {
+    artwork.sizes = audioArtworkLink.sizes.value;
+  }
+  if (audioArtworkLink.type) {
+    artwork.type = audioArtworkLink.type;
+  }
+  return [artwork];
+}
+
+function audioMiniPlayerArtwork(audio) {
+  var artworkSrc = audio.dataset.artworkSrc;
+  if (!artworkSrc) return preferredMiniPlayerArtwork();
+  return [{ src: new URL(artworkSrc, window.location.href).href }];
+}
+
+function updateAudioMiniPlayer(audio) {
+  if (!audio || !('mediaSession' in navigator) || typeof window.MediaMetadata !== 'function') {
+    return;
+  }
+  var source = audio.querySelector('source');
+  var sourcePath = source && source.getAttribute('src');
+  var title = audio.dataset.audioTitle || (sourcePath ? sourcePath.split('/').pop() : document.title);
+  var metadata = {
+    title: title,
+    album: document.title
+  };
+  var artwork = audioMiniPlayerArtwork(audio);
+  if (artwork.length) metadata.artwork = artwork;
+  navigator.mediaSession.metadata = new MediaMetadata(metadata);
+}
+
+function wireAudioMiniPlayers(root) {
+  (root || document).querySelectorAll('audio.audio-player').forEach(function (audio) {
+    if (audio.dataset.miniplayerWired === '1') return;
+    audio.dataset.miniplayerWired = '1';
+    audio.addEventListener('play', function () {
+      updateAudioMiniPlayer(audio);
+    });
+  });
+}
+
 function expandVideoEmbed(preview, type, id, container) {
   var src = '';
   var title = '';
@@ -519,10 +940,6 @@ function expandVideoEmbed(preview, type, id, container) {
   } else if (type === 'streamable') {
     src = 'https://streamable.com/e/' + id + '?autoplay=1';
     title = 'Streamable player';
-  }
-  if (isMobileViewport()) {
-    mobileMediaViewer.openEmbed(src, title);
-    return;
   }
 
   var iframe = document.createElement('iframe');
@@ -541,6 +958,7 @@ function expandVideoEmbed(preview, type, id, container) {
   preview.style.display = 'none';
   var closeBtn = container.querySelector('.media-close-btn');
   if (closeBtn) closeBtn.style.display = 'inline-flex';
+  container.classList.add('media-is-expanded');
   container.appendChild(iframe);
 }
 
@@ -551,6 +969,7 @@ function collapseVideoEmbed(btn) {
   var preview = container.querySelector('.media-preview');
   if (iframe) { iframe.src = ''; iframe.remove(); }
   if (preview) preview.style.display = '';
+  container.classList.remove('media-is-expanded');
   btn.style.display = 'none';
 }
 
@@ -558,6 +977,122 @@ function collapseVideoEmbed(btn) {
 // Dynamic limits (MAX_IMAGE / MAX_VIDEO) are read from data-max-image /
 // data-max-video attributes on the #compress-modal element, injected by the
 // Rust template at render time.
+
+function createAsyncSubmitHelper(options) {
+  options = options || {};
+  var form = options.form;
+  var labelKey = options.labelKey || 'asyncOriginalLabel';
+
+  function setBusy(busy, busyLabel) {
+    setFormSubmitButtonsBusy(form, busy, {
+      busyLabel: busyLabel || options.busyLabel || '',
+      labelKey: labelKey
+    });
+    if (busy) {
+      if (options.onBusyStart) options.onBusyStart();
+    } else if (options.onBusyEnd) {
+      options.onBusyEnd();
+    }
+  }
+
+  return {
+    setBusy: setBusy,
+    setProgress: function (percent, message) {
+      if (options.setProgress) options.setProgress(percent, message);
+    },
+    parsePayload: function (xhr) {
+      return parseXhrJsonPayload(xhr);
+    },
+    extractRedirect: function (xhr, payload) {
+      if (options.extractRedirect) return options.extractRedirect(xhr, payload);
+      return (
+        (xhr && xhr.getResponseHeader && xhr.getResponseHeader('X-Rustchan-Redirect')) ||
+        (payload && payload.redirect_url) ||
+        ''
+      );
+    },
+    extractError: function (xhr, payload, fallback) {
+      if (options.extractError) return options.extractError(xhr, payload, fallback);
+      var contentType = (xhr && xhr.getResponseHeader && xhr.getResponseHeader('Content-Type')) || '';
+      var isHtml = contentType.indexOf('text/html') !== -1;
+      return (
+        (payload && payload.error) ||
+        extractMessageFromHtmlDocument(isHtml ? xhr.responseText : '') ||
+        fallback
+      );
+    }
+  };
+}
+
+function requestFormSubmit(form, submitter) {
+  if (typeof form.requestSubmit === 'function') {
+    if (submitter) {
+      form.requestSubmit(submitter);
+    } else {
+      form.requestSubmit();
+    }
+    return;
+  }
+  form.submit();
+}
+
+function isDangerousConfirmationTrigger(trigger, message) {
+  if (trigger && trigger.classList && trigger.classList.contains('btn-danger')) return true;
+  return /warning|delete|restore|vacuum|repair/i.test(message || '');
+}
+
+var _confirmModal = null;
+var _confirmCancelButton = null;
+var _confirmContinueButton = null;
+var _confirmMessageEl = null;
+var _confirmResolve = null;
+var _confirmActiveTrigger = null;
+
+function ensureConfirmModal() {
+  if (_confirmModal) return true;
+  _confirmModal = document.getElementById('confirm-modal');
+  if (!_confirmModal) return false;
+  _confirmCancelButton = document.getElementById('confirm-modal-cancel');
+  _confirmContinueButton = document.getElementById('confirm-modal-continue');
+  _confirmMessageEl = document.getElementById('confirm-modal-message');
+  return !!(_confirmModal && _confirmCancelButton && _confirmContinueButton && _confirmMessageEl);
+}
+
+function closeConfirmModal(confirmed) {
+  if (!ensureConfirmModal() || _confirmModal.style.display === 'none') return;
+  _confirmModal.style.display = 'none';
+  _confirmContinueButton.classList.remove('btn-danger');
+  if (!confirmed && _confirmActiveTrigger && typeof _confirmActiveTrigger.focus === 'function') {
+    _confirmActiveTrigger.focus();
+  }
+  var resolve = _confirmResolve;
+  _confirmResolve = null;
+  _confirmActiveTrigger = null;
+  if (resolve) resolve(!!confirmed);
+}
+
+function requestConfirmation(message, trigger, options) {
+  options = options || {};
+  if (!ensureConfirmModal()) return Promise.resolve(window.confirm(message));
+
+  _confirmActiveTrigger = trigger || document.activeElement;
+  _confirmMessageEl.textContent = message;
+  _confirmContinueButton.classList.toggle(
+    'btn-danger',
+    !!options.dangerous
+  );
+  _confirmModal.style.display = 'flex';
+
+  return new Promise(function (resolve) {
+    _confirmResolve = resolve;
+    window.setTimeout(function () {
+      if (_confirmCancelButton) _confirmCancelButton.focus();
+    }, 0);
+  });
+}
+
+window.createAsyncSubmitHelper = createAsyncSubmitHelper;
+window.requestConfirmation = requestConfirmation;
 
 (function () {
   var _input = null, _file = null, _max = 0, _compressing = false;
@@ -897,6 +1432,44 @@ function collapseVideoEmbed(btn) {
 })();
 
 (function () {
+  var ADMIN_DROPDOWN_STORAGE_PREFIX = 'rustchan_admin_dropdown:';
+
+  function readAdminDropdownState(key) {
+    try {
+      return localStorage.getItem(ADMIN_DROPDOWN_STORAGE_PREFIX + key);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeAdminDropdownState(key, isOpen) {
+    try {
+      localStorage.setItem(ADMIN_DROPDOWN_STORAGE_PREFIX + key, isOpen ? '1' : '0');
+    } catch (e) {}
+  }
+
+  function initPersistentAdminDropdowns() {
+    document.querySelectorAll('details.admin-dropdown[data-admin-dropdown-key]').forEach(function (details) {
+      var key = details.dataset.adminDropdownKey;
+      if (!key) return;
+
+      var stored = readAdminDropdownState(key);
+      if (stored === '1') {
+        details.open = true;
+      } else if (stored === '0') {
+        details.open = false;
+      }
+
+      details.addEventListener('toggle', function () {
+        writeAdminDropdownState(key, details.open);
+      });
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', initPersistentAdminDropdowns);
+})();
+
+(function () {
   function initAdminLiveLog() {
     var output = document.getElementById('admin-live-log-output');
     var fileLabel = document.getElementById('admin-live-log-file');
@@ -1172,9 +1745,34 @@ function toggleThreadMenu(toggle) {
     if (distFromBottom < 200) hidePill();
   }, { passive: true });
 
-  function setStatus(msg) {
+  var updateButtons = Array.prototype.slice.call(
+    document.querySelectorAll('[data-action="fetch-updates"]')
+  );
+  var statusTimer = null;
+
+  function setStatus(msg, options) {
+    options = options || {};
+    if (statusTimer) {
+      window.clearTimeout(statusTimer);
+      statusTimer = null;
+    }
     statusEls.forEach(function (el) {
       el.textContent = msg;
+      el.dataset.state = options.state || '';
+    });
+    if (msg && !options.persist) {
+      statusTimer = window.setTimeout(function () {
+        setStatus('', { state: '' });
+      }, options.timeoutMs || 2200);
+    }
+  }
+
+  function setUpdateButtonsBusy(busy) {
+    setButtonCollectionBusy(updateButtons, busy, {
+      labelKey: 'threadUpdateOriginalLabel',
+      busyLabel: updateButtons[0]
+        ? (updateButtons[0].dataset.busyLabel || '[ Updating… ]')
+        : '[ Updating… ]'
     });
   }
 
@@ -1196,21 +1794,56 @@ function toggleThreadMenu(toggle) {
     if (stickyEl && data.sticky !== undefined) stickyEl.style.display = data.sticky ? '' : 'none';
   }
 
+  function collectRefreshPostIds() {
+    var ids = [];
+    container.querySelectorAll('.post[data-media-processing-state="pending"]').forEach(function (postEl) {
+      var id = parseInt((postEl.id || '').replace(/^p/, ''), 10);
+      if (!isNaN(id) && ids.indexOf(id) === -1) ids.push(id);
+    });
+    return ids;
+  }
+
+  function applyRefreshedPosts(posts) {
+    if (!Array.isArray(posts) || !posts.length) return false;
+    var changed = false;
+    posts.forEach(function (post) {
+      if (!post || typeof post.id !== 'number' || typeof post.html !== 'string') return;
+      var current = document.getElementById('p' + post.id);
+      if (!current) return;
+      var wrapper = document.createElement('div');
+      wrapper.innerHTML = post.html;
+      var replacement = wrapper.firstElementChild;
+      if (!replacement) return;
+      current.replaceWith(replacement);
+      changed = true;
+    });
+    return changed;
+  }
+
   window.fetchUpdates = function () {
     if (updating) return;
     updating = true;
-    setStatus('updating\u2026');
-    fetch('/' + board + '/thread/' + threadId + '/updates?since=' + lastId)
+    setUpdateButtonsBusy(true);
+    setStatus('Updating\u2026', { state: 'working', persist: true });
+    var url = '/' + board + '/thread/' + threadId + '/updates?since=' + lastId;
+    var refreshIds = collectRefreshPostIds();
+    if (refreshIds.length) {
+      url += '&refresh=' + encodeURIComponent(refreshIds.join(','));
+    }
+    fetch(url)
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function (data) {
         applyDeltaState(data);
+        var refreshedChanged = applyRefreshedPosts(data.refreshed_posts);
         if (data.count > 0) {
           var frag = document.createElement('div');
           frag.innerHTML = data.html;
           while (frag.firstChild) container.appendChild(frag.firstChild);
           lastId = data.last_id;
-          if (window._onNewPostsInserted) window._onNewPostsInserted(container);
           showPill(data.count);
+        }
+        if ((refreshedChanged || data.count > 0) && window._onNewPostsInserted) {
+          window._onNewPostsInserted(container);
         }
         // Refresh nav bar if the board list changed since last poll.
         // boards_version is a monotonic counter incremented server-side
@@ -1222,12 +1855,18 @@ function toggleThreadMenu(toggle) {
             if (navEl) navEl.innerHTML = data.nav_html;
           }
         }
-        setStatus('updated');
-        setTimeout(function () { setStatus(''); }, 2000);
+        setStatus(
+          data.count > 0
+            ? ('Updated. ' + data.count + ' new repl' + (data.count === 1 ? 'y.' : 'ies.'))
+            : 'Updated.',
+          { state: 'success' }
+        );
+        setUpdateButtonsBusy(false);
         updating = false;
       })
       .catch(function () {
-        setStatus('update failed');
+        setStatus('Update failed.', { state: 'error', persist: true });
+        setUpdateButtonsBusy(false);
         updating = false;
       });
   };
@@ -1238,7 +1877,7 @@ function toggleThreadMenu(toggle) {
     if (autoOn) {
       if (timer) clearInterval(timer);
       timer = setInterval(window.fetchUpdates, 15000);
-      setStatus('auto-update on');
+      setStatus('Auto-update on.', { state: 'working' });
     } else {
       if (timer) { clearInterval(timer); timer = null; }
       setStatus('');
@@ -1260,6 +1899,55 @@ function toggleThreadMenu(toggle) {
 
   var POSTS_KEY = 'rustchan_my_posts_' + board + '_' + threadId;
   var PENDING_KEY = 'rustchan_you_pending_' + board + '_' + threadId;
+  var SCROLL_KEY = 'rustchan_reply_scroll_' + board + '_' + threadId;
+
+  function saveReplyScrollPosition() {
+    try {
+      sessionStorage.setItem(
+        SCROLL_KEY,
+        JSON.stringify({
+          path: window.location.pathname,
+          x: window.pageXOffset || window.scrollX || 0,
+          y: window.pageYOffset || window.scrollY || 0,
+          ts: Date.now()
+        })
+      );
+    } catch (e) {}
+  }
+
+  function restoreReplyScrollPosition() {
+    var raw = null;
+    try {
+      raw = sessionStorage.getItem(SCROLL_KEY);
+    } catch (e) {}
+    if (!raw) return;
+
+    var saved = null;
+    try {
+      saved = JSON.parse(raw);
+    } catch (e) {}
+    try {
+      sessionStorage.removeItem(SCROLL_KEY);
+    } catch (e) {}
+
+    if (!saved || saved.path !== window.location.pathname) return;
+    if (saved.ts && Date.now() - saved.ts > 2 * 60 * 1000) return;
+
+    function restore() {
+      window.scrollTo(saved.x || 0, saved.y || 0);
+    }
+
+    // Successful reply redirects include #p<id>; once we've recorded "(You)",
+    // drop the fragment so the browser doesn't yank the viewport away again.
+    if (/^#p\d+$/.test(window.location.hash) && window.history && window.history.replaceState) {
+      window.history.replaceState({}, document.title, window.location.pathname + window.location.search);
+    }
+
+    restore();
+    if (window.requestAnimationFrame) window.requestAnimationFrame(restore);
+    window.setTimeout(restore, 0);
+    window.addEventListener('load', restore, { once: true });
+  }
 
   try {
     var pending = localStorage.getItem(PENDING_KEY);
@@ -1268,6 +1956,10 @@ function toggleThreadMenu(toggle) {
       var hash = window.location.hash;
       var m = hash.match(/^#p(\d+)$/);
       if (m) {
+        // Successful reply redirects land on #p<id>. Clear the saved composer
+        // draft before other startup code strips the fragment for scroll restore.
+        clearReplyDraftStorage();
+        clearReplyDraftSubmitState();
         var newId = parseInt(m[1], 10);
         var existing = JSON.parse(localStorage.getItem(POSTS_KEY) || '[]');
         if (existing.indexOf(newId) === -1) existing.push(newId);
@@ -1275,6 +1967,8 @@ function toggleThreadMenu(toggle) {
       }
     }
   } catch (e) {}
+
+  restoreReplyScrollPosition();
 
   window._applyYouBadges = function () {
     try {
@@ -1308,6 +2002,7 @@ function toggleThreadMenu(toggle) {
       if (form.dataset.youWired) return;
       form.dataset.youWired = '1';
       form.addEventListener('submit', function () {
+        saveReplyScrollPosition();
         try { localStorage.setItem(PENDING_KEY, '1'); } catch (e) {}
       });
     });
@@ -1341,10 +2036,47 @@ function toggleThreadMenu(toggle) {
     }
   }
 
+  function highlightPostFromHash(scrollBehavior) {
+    var match = window.location.hash.match(/^#p(\d+)$/);
+    if (!match) {
+      clearHighlight();
+      return;
+    }
+    var target = document.getElementById('p' + match[1]);
+    if (!target) return;
+    highlightPost(match[1]);
+    if (scrollBehavior && typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({ behavior: scrollBehavior, block: 'start' });
+    }
+  }
+
   document.addEventListener('click', function (e) {
     if (e.target.classList.contains('quotelink')) return;
     if (e.target.classList.contains('backref')) return;
     clearHighlight();
+  });
+
+  document.addEventListener('DOMContentLoaded', function () {
+    if (!/^#p\d+$/.test(window.location.hash)) return;
+    if (window.requestAnimationFrame) {
+      window.requestAnimationFrame(function () {
+        highlightPostFromHash();
+      });
+    } else {
+      highlightPostFromHash();
+    }
+  });
+
+  window.addEventListener('hashchange', function () {
+    if (!/^#p\d+$/.test(window.location.hash)) {
+      clearHighlight();
+      return;
+    }
+    var behavior = 'smooth';
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      behavior = 'auto';
+    }
+    highlightPostFromHash(behavior);
   });
 
   var popup = document.createElement('div');
@@ -1414,6 +2146,8 @@ function toggleThreadMenu(toggle) {
 
   function wireQuotelinks(root) {
     root.querySelectorAll('a.quotelink[data-pid]').forEach(function (link) {
+      if (link.dataset.quotelinkWired === '1') return;
+      link.dataset.quotelinkWired = '1';
       var pid = link.getAttribute('data-pid');
       link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); showPopup(link, pid); });
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
@@ -1441,6 +2175,8 @@ function toggleThreadMenu(toggle) {
 
   function wireBackrefs(root) {
     root.querySelectorAll('a.backref[data-pid]').forEach(function (link) {
+      if (link.dataset.backrefWired === '1') return;
+      link.dataset.backrefWired = '1';
       var pid = link.getAttribute('data-pid');
       link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); showPopup(link, pid); });
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
@@ -1463,6 +2199,9 @@ function toggleThreadMenu(toggle) {
 
   function buildBackrefs() {
     var refs = {};
+    document.querySelectorAll('#thread-posts .backrefs').forEach(function (span) {
+      span.innerHTML = '';
+    });
     document.querySelectorAll('#thread-posts a.quotelink[data-pid]').forEach(function (link) {
       var citedPid = link.getAttribute('data-pid');
       var postEl = link.closest('.post');
@@ -1636,6 +2375,14 @@ function toggleThreadMenu(toggle) {
 
 // ─── Admin ban+delete ─────────────────────────────────────────────────────────
 
+function clearBanDeletePreparation(form) {
+  if (!form) return;
+  form.dataset.banDeletePrepared = '';
+  if (form.dataset.confirmSubmit && form.dataset.confirmSubmit.indexOf('Ban IP + delete post No.') === 0) {
+    form.dataset.confirmSubmit = '';
+  }
+}
+
 function adminBanDelete(form, pid) {
   var reason = prompt('Ban reason (leave blank for "Rule violation"):');
   if (reason === null) return false;
@@ -1647,10 +2394,24 @@ function adminBanDelete(form, pid) {
   var durEl = document.getElementById('ban-dur-' + pid);
   if (reasonEl) reasonEl.value = reason.trim() || 'Rule violation';
   if (durEl) durEl.value = hours;
-  return confirm('Ban IP + delete post No.' + pid + '?');
+  form.dataset.banDeletePrepared = '1';
+  form.dataset.confirmSubmit = 'Ban IP + delete post No.' + pid + '?';
+  return true;
 }
 
 // ─── Poll management ──────────────────────────────────────────────────────────
+
+function getPollOptionMaxLength(list) {
+  if (!list) return 200;
+  return parseInt(list.dataset.pollOptionMaxlength, 10) || 200;
+}
+
+function buildPollOptionRowHtml(count, maxLength) {
+  return (
+    '<input type="text" class="poll-option-input" name="poll_option" placeholder="Option ' + count + '" maxlength="' + maxLength + '">' +
+    '<button type="button" class="poll-remove-btn" data-action="remove-poll-option" aria-label="Remove poll option" hidden>\u2715</button>'
+  );
+}
 
 function addPollOption() {
   var list = document.getElementById('poll-options-list');
@@ -1659,8 +2420,7 @@ function addPollOption() {
   if (count > 10) return;
   var row = document.createElement('div');
   row.className = 'poll-option-row';
-  row.innerHTML = '<input type="text" name="poll_option" placeholder="Option ' + count + '" maxlength="128">'
-    + '<button type="button" class="poll-remove-btn" data-action="remove-poll-option">\u2715</button>';
+  row.innerHTML = buildPollOptionRowHtml(count, getPollOptionMaxLength(list));
   list.appendChild(row);
   updateRemoveButtons();
 }
@@ -1674,7 +2434,7 @@ function updateRemoveButtons() {
   var rows = document.querySelectorAll('#poll-options-list .poll-option-row');
   rows.forEach(function (r) {
     var btn = r.querySelector('.poll-remove-btn');
-    if (btn) btn.style.display = rows.length > 2 ? 'inline' : 'none';
+    if (btn) btn.hidden = rows.length <= 2;
   });
 }
 
@@ -1703,13 +2463,6 @@ function sortCatalog(mode) {
   var frag = document.createDocumentFragment();
   items.forEach(function (item) { frag.appendChild(item); });
   grid.appendChild(frag);
-}
-
-function setCatalogImageSize(size) {
-  try { sessionStorage.setItem('catalog_image_size', size); } catch (e) {}
-  var grid = document.getElementById('catalog-grid');
-  if (!grid) return;
-  grid.classList.toggle('catalog-large', size === 'large');
 }
 
 function setCatalogCommentVisibility(mode) {
@@ -1749,13 +2502,6 @@ function togglePosterHighlights(threadId, posterId) {
     if (sortSelect) {
       sortSelect.value = sortValue;
       sortCatalog(sortValue);
-    }
-
-    var imageSize = sessionStorage.getItem('catalog_image_size') || 'small';
-    var imageSizeSelect = document.getElementById('catalog-image-size');
-    if (imageSizeSelect) {
-      imageSizeSelect.value = imageSize;
-      setCatalogImageSize(imageSize);
     }
 
     var showComment = sessionStorage.getItem('catalog_show_comment') || 'off';
@@ -1840,6 +2586,7 @@ function togglePosterHighlights(threadId, posterId) {
     var minute = Math.floor(Date.now() / 1000 / 60);
     var challenge = board + ':' + minute;
     var nonce = 0;
+    if (statusEl) statusEl.textContent = 'solving proof-of-work…';
     while (true) {
       var buf = await sha256(challenge + ':' + nonce);
       if (countLeadingZeroBits(buf) >= difficulty) {
@@ -1871,6 +2618,20 @@ function togglePosterHighlights(threadId, posterId) {
 // Replaces all inline onclick=/onchange=/onsubmit= attribute handlers.
 
 document.addEventListener('click', function (e) {
+  if (
+    e.target === document.getElementById('confirm-modal') ||
+    e.target.id === 'confirm-modal-cancel'
+  ) {
+    e.preventDefault();
+    closeConfirmModal(false);
+    return;
+  }
+  if (e.target.id === 'confirm-modal-continue') {
+    e.preventDefault();
+    closeConfirmModal(true);
+    return;
+  }
+
   // data-action handlers
   var t = e.target.closest('[data-action]');
   if (t) {
@@ -1878,6 +2639,11 @@ document.addEventListener('click', function (e) {
       case 'toggle-post-form':
         e.preventDefault();
         togglePostForm();
+        break;
+      case 'open-post-form':
+        e.preventDefault();
+        clearRestoredAutoQuoteOnlyDraft();
+        setPostFormOpen(true, { scrollIntoView: true });
         break;
       case 'dismiss-compress':    dismissCompressModal(); break;
       case 'start-compress':      startCompress(); break;
@@ -1935,11 +2701,32 @@ document.addEventListener('click', function (e) {
 
   // data-confirm: prompt before allowing click/submit
   var confirmEl = e.target.closest('[data-confirm]');
-  if (confirmEl && !e._rcConfirmDone) {
-    if (!confirm(confirmEl.dataset.confirm)) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
+  if (confirmEl && confirmEl.dataset.rcConfirmBypass !== '1') {
+    e.preventDefault();
+    e.stopPropagation();
+    requestConfirmation(confirmEl.dataset.confirm, confirmEl, {
+      dangerous: isDangerousConfirmationTrigger(confirmEl, confirmEl.dataset.confirm)
+    }).then(function (confirmed) {
+      if (!confirmed) return;
+
+      if (confirmEl.tagName === 'A' && confirmEl.href) {
+        window.location.assign(confirmEl.href);
+        return;
+      }
+
+      if (confirmEl.form && confirmEl.type === 'submit') {
+        confirmEl.form.dataset.rcConfirmSubmitBypass = '1';
+        requestFormSubmit(confirmEl.form, confirmEl);
+        return;
+      }
+
+      confirmEl.dataset.rcConfirmBypass = '1';
+      confirmEl.click();
+    });
+    return;
+  }
+  if (confirmEl && confirmEl.dataset.rcConfirmBypass === '1') {
+    confirmEl.dataset.rcConfirmBypass = '';
   }
 });
 
@@ -1957,9 +2744,6 @@ document.addEventListener('change', function (e) {
   if (target.id === 'catalog-sort') {
     sortCatalog(target.value);
   }
-  if (target.id === 'catalog-image-size') {
-    setCatalogImageSize(target.value);
-  }
   if (target.id === 'catalog-show-comment') {
     setCatalogCommentVisibility(target.value);
   }
@@ -1973,30 +2757,62 @@ document.addEventListener('change', function (e) {
 document.addEventListener('submit', function (e) {
   closeThreadMenus();
   var form = e.target;
+  var submitter = e.submitter || null;
   if (form.matches && form.matches('form.post-form')) {
+    if (captchaNonceMissing(form)) {
+      e.preventDefault();
+      showPostFormFeedback(
+        form,
+        'CAPTCHA is still solving. Wait for the checkmark before posting.'
+      );
+      setPostFormOpen(true, { scrollIntoView: true });
+      return;
+    }
     if (submitPostFormWithProgress(form)) {
       e.preventDefault();
       return;
     }
   }
-  // data-confirm-submit: prompt before form submission
-  if (form.dataset.confirmSubmit) {
-    if (!confirm(form.dataset.confirmSubmit)) {
-      e.preventDefault();
-      return;
-    }
-  }
   // data-ban-delete: admin ban+delete form
-  if (form.dataset.banDeletePid) {
-    var pid = form.dataset.banDeletePid;
-    if (!adminBanDelete(form, pid)) {
-      e.preventDefault();
+  if (form.dataset.banDeletePid && form.dataset.banDeletePrepared !== '1') {
+    e.preventDefault();
+    if (adminBanDelete(form, form.dataset.banDeletePid)) {
+      requestFormSubmit(form, submitter);
+    } else {
+      clearBanDeletePreparation(form);
     }
+    return;
+  }
+  // data-confirm-submit: prompt before form submission
+  if (form.dataset.confirmSubmit && form.dataset.rcConfirmSubmitBypass !== '1') {
+    e.preventDefault();
+    requestConfirmation(form.dataset.confirmSubmit, submitter || form, {
+      dangerous: isDangerousConfirmationTrigger(submitter || form, form.dataset.confirmSubmit)
+    }).then(function (confirmed) {
+      if (!confirmed) {
+        if (form.dataset.banDeletePid) clearBanDeletePreparation(form);
+        return;
+      }
+      form.dataset.rcConfirmSubmitBypass = '1';
+      requestFormSubmit(form, submitter);
+    });
+    return;
+  }
+  if (form.dataset.rcConfirmSubmitBypass === '1') {
+    form.dataset.rcConfirmSubmitBypass = '';
+  }
+  if (form.dataset.banDeletePrepared === '1') {
+    clearBanDeletePreparation(form);
   }
 });
 
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape') {
+    if (ensureConfirmModal() && _confirmModal.style.display !== 'none') {
+      e.preventDefault();
+      closeConfirmModal(false);
+      return;
+    }
     closeThreadMenus();
   }
 });
@@ -2128,26 +2944,59 @@ document.addEventListener('keydown', function (e) {
   if (!cfg) return;
   var DRAFT_KEY = cfg.dataset.draftKey;
   if (!DRAFT_KEY) return;
+  var DRAFT_META_KEY = DRAFT_KEY + ':mode';
 
-  var ta = document.getElementById('reply-body');
+  var ta = getReplyBodyField();
   if (!ta) return;
+
+  // If the last submit landed back on this thread with a post anchor, the
+  // redirect was successful and any saved draft should be discarded before
+  // restore runs.
+  consumeSubmittedReplyDraft();
 
   // Restore saved draft on page load
   try {
     var saved = localStorage.getItem(DRAFT_KEY);
-    if (saved) { ta.value = saved; }
+    var savedMode = localStorage.getItem(DRAFT_META_KEY);
+    if (saved) {
+      ta.value = saved;
+      ta.dataset.draftRestored = '1';
+      ta.dataset.lastPersistedDraft = saved;
+      ta.dataset.lastPersistedDraftMode = savedMode || '';
+      if (savedMode) {
+        setReplyDraftMode(savedMode);
+      } else if (isQuoteOnlyReplyDraft(saved)) {
+        setReplyDraftMode('auto-quote-only');
+      } else {
+        setReplyDraftMode('manual');
+      }
+    }
   } catch (e) {}
 
-  // Autosave every 3 seconds while the user types
-  setInterval(function () {
-    try { localStorage.setItem(DRAFT_KEY, ta.value); } catch (e) {}
-  }, 3000);
+  ta.addEventListener('input', function () {
+    ta.dataset.draftRestored = '0';
+    setReplyDraftSubmitting(false);
+    clearReplyDraftSubmitState();
+    setReplyDraftMode('manual');
+    queueReplyDraftSave();
+  });
+  window.addEventListener('pagehide', flushReplyDraftStorage);
 
-  // Clear draft when the reply form is submitted
+  // Persist the latest draft on submit, then pause autosave until the request
+  // either redirects back successfully or the current page resumes editing.
   var form = ta.closest('form');
   if (form) {
     form.addEventListener('submit', function () {
-      try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+      ta.dataset.draftRestored = '0';
+      flushReplyDraftStorage();
+      setReplyDraftSubmitting(true);
+      markReplyDraftSubmitted();
+    });
+
+    form.addEventListener('rustchan:post-submit-reset', function () {
+      setReplyDraftSubmitting(false);
+      clearReplyDraftSubmitState();
+      flushReplyDraftStorage();
     });
   }
 })();
@@ -2274,15 +3123,6 @@ document.addEventListener('click', function (e) {
     if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
   }
 
-  function _absoluteUrl(url) {
-    if (!url) return '';
-    try {
-      return new URL(url, window.location.href).toString();
-    } catch (_err) {
-      return '';
-    }
-  }
-
   function _extractRefreshTarget(refreshValue) {
     if (!refreshValue) return '';
     var match = refreshValue.match(/url\s*=\s*(.+)$/i);
@@ -2303,28 +3143,42 @@ document.addEventListener('click', function (e) {
   }
 
   function _resolveRestoreRedirectTarget(xhr, form) {
+    var payload = parseXhrJsonPayload(xhr);
+    var explicitRedirect = xhr.getResponseHeader('X-Rustchan-Redirect') || '';
+    if (explicitRedirect) return explicitRedirect;
+    if (payload && payload.redirect_url) return payload.redirect_url;
+
     var refreshTarget = _extractRefreshTarget(xhr.getResponseHeader('refresh') || '');
     var htmlTarget = _extractRedirectTargetFromHtml(xhr.responseText || '');
-    var responseUrl = _absoluteUrl(xhr.responseURL || '');
-    var formAction = _absoluteUrl(form.action || '');
-    var current = _absoluteUrl(window.location.href);
-    var target = _absoluteUrl(refreshTarget || htmlTarget || '');
+    var responseUrl = absoluteUrl(xhr.responseURL || '');
+    var formAction = absoluteUrl(form.action || '');
+    var current = absoluteUrl(window.location.href);
+    var target = absoluteUrl(refreshTarget || htmlTarget || '');
 
     if (target && target !== current) return target;
     if (responseUrl && responseUrl !== current && responseUrl !== formAction) return responseUrl;
     return '';
   }
 
+  function _createBackupSubmitHelper(form, busyLabel) {
+    return createAsyncSubmitHelper({
+      form: form,
+      busyLabel: busyLabel,
+      labelKey: 'backupOriginalLabel',
+      setProgress: function (percent, message) {
+        _setBkProgress(percent, message);
+      }
+    });
+  }
+
   function _submitRestoreUploadForm(form, title) {
     var xhr = null;
+    var submitHelper = _createBackupSubmitHelper(form, 'Uploading…');
     _downloadMode = false;
     _stopPolling();
     showBackupModal(title);
-    _setBkProgress(0, 'Starting upload…');
-
-    form.querySelectorAll('button[type="submit"]').forEach(function (button) {
-      button.disabled = true;
-    });
+    submitHelper.setProgress(0, 'Starting upload…');
+    submitHelper.setBusy(true);
 
     xhr = new XMLHttpRequest();
     xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
@@ -2334,55 +3188,54 @@ document.addEventListener('click', function (e) {
     xhr.upload.addEventListener('progress', function (event) {
       if (event.lengthComputable && event.total > 0) {
         var pct = Math.round((event.loaded / event.total) * 100);
-        _setBkProgress(
+        submitHelper.setProgress(
           pct,
           'Uploading restore file… ' +
           formatBytes(event.loaded) + ' / ' + formatBytes(event.total) +
           ' (' + pct + '%)'
         );
       } else {
-        _setBkProgress(15, 'Uploading restore file…');
+        submitHelper.setProgress(15, 'Uploading restore file…');
       }
     });
 
-    function _restoreFormDone() {
-      form.querySelectorAll('button[type="submit"]').forEach(function (button) {
-        button.disabled = false;
-      });
-    }
-
     xhr.addEventListener('load', function () {
-      _restoreFormDone();
+      submitHelper.setBusy(false);
+      var payload = submitHelper.parsePayload(xhr);
+      if (payload && payload.error) {
+        submitHelper.setProgress(
+          0,
+          submitHelper.extractError(xhr, payload, 'Restore upload failed (' + xhr.status + ')')
+        );
+        showDoneButton();
+        return;
+      }
       if (xhr.status >= 200 && xhr.status < 400) {
-        _setBkProgress(100, 'Upload complete. Restoring backup…');
+        submitHelper.setProgress(100, 'Upload complete. Restoring backup…');
         var redirectTarget = _resolveRestoreRedirectTarget(xhr, form);
         if (redirectTarget) {
           window.location.assign(redirectTarget);
           return;
         }
-        var contentType = xhr.getResponseHeader('content-type') || '';
-        if (contentType.indexOf('text/html') !== -1 && xhr.responseText) {
-          document.open();
-          document.write(xhr.responseText);
-          document.close();
-          return;
-        }
         window.location.reload();
         return;
       }
-      _setBkProgress(0, 'Restore upload failed (' + xhr.status + ')');
+      submitHelper.setProgress(
+        0,
+        submitHelper.extractError(xhr, payload, 'Restore upload failed (' + xhr.status + ')')
+      );
       showDoneButton();
     });
 
     xhr.addEventListener('error', function () {
-      _restoreFormDone();
-      _setBkProgress(0, 'Restore upload failed. Please try again.');
+      submitHelper.setBusy(false);
+      submitHelper.setProgress(0, 'Restore upload failed. Please try again.');
       showDoneButton();
     });
 
     xhr.addEventListener('abort', function () {
-      _restoreFormDone();
-      _setBkProgress(0, 'Restore upload cancelled.');
+      submitHelper.setBusy(false);
+      submitHelper.setProgress(0, 'Restore upload cancelled.');
       showDoneButton();
     });
 
@@ -2393,9 +3246,14 @@ document.addEventListener('click', function (e) {
 
   function _submitBackupForm(form, title, options) {
     options = options || {};
+    var submitHelper = _createBackupSubmitHelper(
+      form,
+      options.downloadAfterCreate ? 'Preparing…' : 'Saving…'
+    );
     _downloadMode = false;
     showBackupModal(title);
     _startPolling(null);
+    submitHelper.setBusy(true);
 
     // URLSearchParams → application/x-www-form-urlencoded, required by Axum's Form<>.
     var params = new URLSearchParams(new FormData(form));
@@ -2414,7 +3272,8 @@ document.addEventListener('click', function (e) {
       .then(function (resp) {
         _stopPolling();
         if (!resp.ok && !resp.redirected) {
-          _setBkProgress(0, 'Server returned an error (' + resp.status + ')');
+          submitHelper.setBusy(false);
+          submitHelper.setProgress(0, 'Server returned an error (' + resp.status + ')');
           showDoneButton();
           return null;
         }
@@ -2424,14 +3283,16 @@ document.addEventListener('click', function (e) {
           return resp.json();
         }
 
-        _setBkProgress(100, '\u2713 Backup saved to server!');
+        submitHelper.setBusy(false);
+        submitHelper.setProgress(100, '\u2713 Backup saved to server!');
         showDoneButton();
         return null;
       })
       .then(function (data) {
         if (!data) return;
         if (data.download_url) {
-          _setBkProgress(100, '\u2713 Backup ready! Starting download\u2026');
+          submitHelper.setBusy(false);
+          submitHelper.setProgress(100, '\u2713 Backup ready! Starting download\u2026');
           var a = document.createElement('a');
           a.href = data.download_url;
           a.download = '';
@@ -2444,12 +3305,14 @@ document.addEventListener('click', function (e) {
           }, 1500);
           return;
         }
-        _setBkProgress(100, '\u2713 Backup saved to server!');
+        submitHelper.setBusy(false);
+        submitHelper.setProgress(100, '\u2713 Backup saved to server!');
         showDoneButton();
       })
       .catch(function (err) {
         _stopPolling();
-        _setBkProgress(0, 'Error: ' + (err.message || 'backup failed'));
+        submitHelper.setBusy(false);
+        submitHelper.setProgress(0, 'Error: ' + (err.message || 'backup failed'));
         showDoneButton();
       });
   }

@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-use super::migrations::{apply_migrations, CURRENT_MAX_MIGRATION};
+use super::migrations::{apply_migrations, set_schema_version, CURRENT_MAX_MIGRATION};
 
 const BASE_SCHEMA_SQL: &str = "
     CREATE TABLE IF NOT EXISTS boards (
@@ -29,6 +29,9 @@ const BASE_SCHEMA_SQL: &str = "
         collapse_greentext  INTEGER NOT NULL DEFAULT 0,
         post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
         default_theme       TEXT NOT NULL DEFAULT '',
+        access_mode         TEXT NOT NULL DEFAULT 'public'
+                                CHECK (access_mode IN ('public', 'view_password', 'post_password')),
+        access_password_hash TEXT NOT NULL DEFAULT '',
         created_at      INTEGER NOT NULL DEFAULT (unixepoch())
     );
 
@@ -67,7 +70,9 @@ const BASE_SCHEMA_SQL: &str = "
         audio_file_name  TEXT,
         audio_file_size  INTEGER,
         audio_mime_type  TEXT,
-        edited_at        INTEGER
+        edited_at        INTEGER,
+        media_processing_state TEXT NOT NULL DEFAULT '',
+        media_processing_error TEXT
     );
 
     CREATE TABLE IF NOT EXISTS file_hashes (
@@ -221,6 +226,16 @@ const BASE_SCHEMA_SQL: &str = "
         updated_at  INTEGER NOT NULL DEFAULT (unixepoch()),
         PRIMARY KEY(user_hash, thread_id)
     );
+
+    CREATE TABLE IF NOT EXISTS post_submissions (
+        submission_token TEXT PRIMARY KEY,
+        ip_hash          TEXT NOT NULL,
+        board_id         INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+        thread_id        INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        post_id          INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+        is_thread        INTEGER NOT NULL DEFAULT 0,
+        created_at       INTEGER NOT NULL DEFAULT (unixepoch())
+    );
 ";
 
 const INDEX_SCHEMA_SQL: &str = "
@@ -249,6 +264,8 @@ const INDEX_SCHEMA_SQL: &str = "
         ON mod_log(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posts_thread_id
         ON posts(thread_id);
+    CREATE INDEX IF NOT EXISTS idx_posts_media_processing_state
+        ON posts(media_processing_state);
     CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
         ON posts(ip_hash);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_one_op_per_thread
@@ -262,17 +279,25 @@ const INDEX_SCHEMA_SQL: &str = "
         ON user_thread_preferences(user_hash, hidden);
     CREATE INDEX IF NOT EXISTS idx_user_thread_preferences_thread
         ON user_thread_preferences(thread_id);
+    CREATE INDEX IF NOT EXISTS idx_post_submissions_created_at
+        ON post_submissions(created_at ASC);
 ";
 
 pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
-    create_base_schema(conn)?;
-    create_indexes(conn)?;
+    let fresh_database = is_fresh_database(conn)?;
 
-    let _ = CURRENT_MAX_MIGRATION;
-    apply_migrations(conn)?;
+    create_base_schema(conn)?;
+
+    if fresh_database {
+        set_schema_version(conn, CURRENT_MAX_MIGRATION)?;
+    } else {
+        apply_migrations(conn)?;
+    }
+    create_indexes(conn)?;
     ensure_reports_table_integrity(conn)?;
     ensure_posts_search_index(conn)?;
     ensure_post_invariants(conn)?;
+    ensure_board_access_invariants(conn)?;
     relax_posts_ip_hash(conn)?;
     backfill_media_type(conn)?;
     Ok(())
@@ -281,6 +306,18 @@ pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
 fn create_base_schema(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(BASE_SCHEMA_SQL)
         .context("Schema table creation failed")
+}
+
+fn is_fresh_database(conn: &rusqlite::Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT COUNT(*) = 0
+         FROM sqlite_master
+         WHERE type IN ('table', 'view', 'index', 'trigger')
+           AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )
+    .context("Failed to detect whether database is fresh")
 }
 
 fn create_indexes(conn: &rusqlite::Connection) -> Result<()> {
@@ -350,6 +387,85 @@ fn ensure_post_invariants(conn: &rusqlite::Connection) -> Result<()> {
     .context("Post invariant creation failed")
 }
 
+fn ensure_board_access_invariants(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(
+        r"
+        UPDATE boards
+        SET access_mode = 'view_password'
+        WHERE access_mode NOT IN ('public', 'view_password', 'post_password');
+
+        CREATE TRIGGER IF NOT EXISTS boards_access_mode_insert
+        BEFORE INSERT ON boards
+        FOR EACH ROW
+        WHEN NEW.access_mode NOT IN ('public', 'view_password', 'post_password')
+        BEGIN
+            SELECT RAISE(ABORT, 'boards.access_mode must be public, view_password, or post_password');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS boards_access_mode_update
+        BEFORE UPDATE OF access_mode ON boards
+        FOR EACH ROW
+        WHEN NEW.access_mode NOT IN ('public', 'view_password', 'post_password')
+        BEGIN
+            SELECT RAISE(ABORT, 'boards.access_mode must be public, view_password, or post_password');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS boards_access_password_insert
+        BEFORE INSERT ON boards
+        FOR EACH ROW
+        WHEN NEW.access_mode IN ('view_password', 'post_password') AND NEW.access_password_hash = ''
+        BEGIN
+            SELECT RAISE(ABORT, 'protected boards require access_password_hash');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS boards_access_password_update
+        BEFORE UPDATE OF access_mode, access_password_hash ON boards
+        FOR EACH ROW
+        WHEN NEW.access_mode IN ('view_password', 'post_password') AND NEW.access_password_hash = ''
+        BEGIN
+            SELECT RAISE(ABORT, 'protected boards require access_password_hash');
+        END;
+        ",
+    )
+    .context("Board access invariant creation failed")
+}
+
+fn read_column_notnull(conn: &rusqlite::Connection, table: &str, column: &str) -> Result<bool> {
+    let query = format!("SELECT \"notnull\" FROM pragma_table_info('{table}') WHERE name = ?1");
+    let notnull: i64 = conn
+        .query_row(&query, [column], |row| row.get(0))
+        .with_context(|| format!("Failed to read {table}.{column} nullability"))?;
+    Ok(notnull == 1)
+}
+
+fn run_structural_migration(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    failure_context: &str,
+    success_log: &str,
+) -> Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .with_context(|| format!("Disable foreign keys for {failure_context}"))?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .with_context(|| format!("Begin transaction for {failure_context}"))?;
+
+    match conn.execute_batch(sql) {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .with_context(|| format!("Commit {failure_context}"))?;
+            conn.execute_batch("PRAGMA foreign_keys = ON;")
+                .with_context(|| format!("Re-enable foreign keys after {failure_context}"))?;
+            tracing::info!(target: "db", "{success_log}");
+            Ok(())
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
+            Err(error).context(failure_context.to_owned())
+        }
+    }
+}
+
 fn reports_has_full_foreign_keys(conn: &rusqlite::Connection) -> Result<bool> {
     let mut stmt = conn
         .prepare("SELECT \"from\", \"table\", on_delete FROM pragma_foreign_key_list('reports')")
@@ -390,12 +506,8 @@ fn ensure_reports_table_integrity(conn: &rusqlite::Connection) -> Result<()> {
         return Ok(());
     }
 
-    conn.execute_batch("PRAGMA foreign_keys = OFF;")
-        .context("Disable foreign keys for reports rebuild failed")?;
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .context("Begin reports rebuild transaction failed")?;
-
-    let result = conn.execute_batch(
+    run_structural_migration(
+        conn,
         r"
         CREATE TABLE reports_new (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -442,44 +554,15 @@ fn ensure_reports_table_integrity(conn: &rusqlite::Connection) -> Result<()> {
             ON reports(post_id, reporter_hash)
             WHERE status = 'open';
         ",
-    );
-
-    match result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")
-                .context("Commit reports rebuild transaction failed")?;
-            conn.execute_batch("PRAGMA foreign_keys = ON;")
-                .context("Re-enable foreign keys after reports rebuild failed")?;
-        }
-        Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
-            return Err(error).context(
-                "Structural migration: rebuild reports table with full foreign keys failed",
-            );
-        }
-    }
-
-    tracing::info!(target: "db", "Applied structural migration: reports table integrity hardened");
-    Ok(())
+        "Structural migration: rebuild reports table with full foreign keys failed",
+        "Applied structural migration: reports table integrity hardened",
+    )
 }
 
 fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {
-    let ip_hash_notnull: i64 = conn
-        .query_row(
-            "SELECT \"notnull\" FROM pragma_table_info('posts') WHERE name = 'ip_hash'",
-            [],
-            |r| r.get(0),
-        )
-        .context("Failed to read ip_hash nullability from pragma_table_info")?;
-
-    if ip_hash_notnull == 1 {
-        conn.execute_batch("PRAGMA foreign_keys = OFF;")
-            .context("Disable foreign keys for posts.ip_hash rebuild failed")?;
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .context("Begin posts.ip_hash rebuild transaction failed")?;
-
-        let result = conn.execute_batch(
+    if read_column_notnull(conn, "posts", "ip_hash")? {
+        run_structural_migration(
+            conn,
             "CREATE TABLE posts_new (
                  id               INTEGER PRIMARY KEY AUTOINCREMENT,
                  thread_id        INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
@@ -503,10 +586,26 @@ fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {
                  audio_file_name  TEXT,
                  audio_file_size  INTEGER,
                  audio_mime_type  TEXT,
-                 edited_at        INTEGER
+                 edited_at        INTEGER,
+                 media_processing_state TEXT NOT NULL DEFAULT '',
+                 media_processing_error TEXT
              );
 
-             INSERT INTO posts_new SELECT * FROM posts;
+             INSERT INTO posts_new (
+                 id, thread_id, board_id, name, tripcode, subject, body, body_html,
+                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
+                 created_at, deletion_token, is_op, media_type, audio_file_path,
+                 audio_file_name, audio_file_size, audio_mime_type, edited_at,
+                 media_processing_state, media_processing_error
+             )
+             SELECT
+                 id, thread_id, board_id, name, tripcode, subject, body, body_html,
+                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
+                 created_at, deletion_token, is_op, media_type, audio_file_path,
+                 audio_file_name, audio_file_size, audio_mime_type, edited_at,
+                 '' AS media_processing_state,
+                 NULL AS media_processing_error
+             FROM posts;
              DROP TABLE posts;
              ALTER TABLE posts_new RENAME TO posts;
 
@@ -516,26 +615,13 @@ fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {
                  ON posts(board_id, created_at DESC);
              CREATE INDEX IF NOT EXISTS idx_posts_thread_id
                  ON posts(thread_id);
+             CREATE INDEX IF NOT EXISTS idx_posts_media_processing_state
+                 ON posts(media_processing_state);
              CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
                  ON posts(ip_hash);",
-        );
-
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")
-                    .context("Commit posts.ip_hash rebuild transaction failed")?;
-                conn.execute_batch("PRAGMA foreign_keys = ON;")
-                    .context("Re-enable foreign keys after posts.ip_hash rebuild failed")?;
-            }
-            Err(error) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
-                return Err(error)
-                    .context("Structural migration: make posts.ip_hash nullable failed");
-            }
-        }
-
-        tracing::info!(target: "db", "Applied structural migration: posts.ip_hash is now nullable");
+            "Structural migration: make posts.ip_hash nullable failed",
+            "Applied structural migration: posts.ip_hash is now nullable",
+        )?;
     }
 
     Ok(())
@@ -570,4 +656,22 @@ fn backfill_media_type(conn: &rusqlite::Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_schema;
+    use crate::db::migrations::CURRENT_MAX_MIGRATION;
+
+    #[test]
+    fn fresh_database_is_stamped_to_current_schema_version() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+        create_schema(&conn).expect("create schema");
+
+        let version: i64 = conn
+            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .expect("read schema_version");
+
+        assert_eq!(version, CURRENT_MAX_MIGRATION);
+    }
 }

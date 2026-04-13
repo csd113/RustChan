@@ -477,6 +477,7 @@ If you put nginx or Caddy in front of RustChan:
 
 - point the proxy at the RustChan HTTP listener
 - set `CHAN_BEHIND_PROXY=true` if you want proxy headers trusted
+- set `CHAN_TRUSTED_PROXY_CIDRS` to the proxy's loopback or private CIDR when the proxy is not on localhost
 - decide whether TLS terminates at the proxy or inside RustChan
 
 Typical loopback setup:

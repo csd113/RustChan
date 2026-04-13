@@ -82,6 +82,55 @@ impl std::fmt::Display for MediaType {
     }
 }
 
+/// Board-level access control mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardAccessMode {
+    #[default]
+    Public,
+    ViewPassword,
+    PostPassword,
+}
+
+impl BoardAccessMode {
+    /// Serialise to the TEXT value stored in the database.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::ViewPassword => "view_password",
+            Self::PostPassword => "post_password",
+        }
+    }
+
+    /// Deserialise from the TEXT value stored in the database.
+    #[must_use]
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "public" => Some(Self::Public),
+            "view_password" => Some(Self::ViewPassword),
+            "post_password" => Some(Self::PostPassword),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn requires_view_password(self) -> bool {
+        matches!(self, Self::ViewPassword)
+    }
+
+    #[must_use]
+    pub const fn requires_post_password(self) -> bool {
+        matches!(self, Self::ViewPassword | Self::PostPassword)
+    }
+}
+
+impl std::fmt::Display for BoardAccessMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A board, e.g. /tech/ — Technology
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
@@ -109,7 +158,9 @@ pub struct Board {
     pub collapse_greentext: bool, // per-board long greentext auto-collapse toggle
     pub post_cooldown_secs: i64,  // seconds a user must wait between posts (0 = disabled)
     pub default_theme: String,    // blank = inherit site default
-    pub created_at: i64,          // Unix timestamp
+    pub access_mode: BoardAccessMode,
+    pub access_password_hash: String,
+    pub created_at: i64, // Unix timestamp
 }
 
 /// A configurable UI theme that may be built-in or admin-defined.
@@ -178,6 +229,10 @@ pub struct Post {
     pub is_op: bool,
     /// Set when the post body has been edited; None means never edited.
     pub edited_at: Option<i64>,
+    /// Present while async media work is queued/running, or after it has failed.
+    pub media_processing_state: Option<String>,
+    /// Human-readable detail for failed async media processing.
+    pub media_processing_error: Option<String>,
 }
 
 /// Admin user record
@@ -237,43 +292,6 @@ pub struct ThreadSummary {
     pub omitted: i64,
 }
 
-/// Form data for posting a new thread or reply (parsed from multipart)
-#[derive(Debug, Default, Deserialize)]
-#[allow(dead_code)]
-pub struct PostForm {
-    pub name: String,
-    pub subject: String,
-    pub body: String,
-    pub deletion_token: String,
-    // File fields are handled separately in multipart parsing
-}
-
-/// Form data for deleting a post
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct DeleteForm {
-    pub post_id: i64,
-    pub deletion_token: String,
-    pub board: String,
-}
-
-/// Admin ban form
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct BanForm {
-    pub ip_hash: String,
-    pub reason: String,
-    pub duration_hours: Option<i64>,
-}
-
-/// Admin login form
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct LoginForm {
-    pub username: String,
-    pub password: String,
-}
-
 /// A poll attached to a thread's OP
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
@@ -309,8 +327,11 @@ pub struct PollData {
 }
 
 /// Search query
+pub const SEARCH_QUERY_MAX_CHARS: usize = 256;
+
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
+    #[serde(default)]
     pub q: String,
     #[serde(default = "default_page")]
     pub page: i64,
@@ -436,6 +457,13 @@ pub struct ModLogEntry {
 }
 
 /// Represents a saved backup file on disk (shown in admin panel).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupBoardSummary {
+    pub short_name: String,
+    pub name: String,
+}
+
+/// Represents a saved backup file on disk (shown in admin panel).
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupInfo {
     /// Filename only (no directory path).
@@ -444,6 +472,14 @@ pub struct BackupInfo {
     pub size_bytes: u64,
     /// Human-readable last-modified timestamp (UTC).
     pub modified: String,
+    /// Last-modified timestamp as a Unix epoch second when available.
+    pub modified_epoch: Option<i64>,
+    /// Whether the backup passed the app's structural verification.
+    pub verified: bool,
+    /// Short note describing verification status or the detected problem.
+    pub verification_note: String,
+    /// Boards indexed inside the backup when available.
+    pub boards: Vec<BackupBoardSummary>,
 }
 
 /// A user-submitted ban appeal
@@ -561,6 +597,30 @@ mod tests {
         assert_eq!(MediaType::from_ext("mp4"), MediaType::Video);
         assert_eq!(MediaType::from_ext("flac"), MediaType::Audio);
         assert_eq!(MediaType::from_ext("exe"), MediaType::Other);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn board_access_mode_serde_matches_db_str() {
+        for access_mode in [
+            BoardAccessMode::Public,
+            BoardAccessMode::ViewPassword,
+            BoardAccessMode::PostPassword,
+        ] {
+            let json = serde_json::to_string(&access_mode)
+                .expect("BoardAccessMode always serialises to a JSON string");
+            let json_str = json.trim_matches('"');
+            assert_eq!(
+                access_mode.as_str(),
+                json_str,
+                "as_str() and serde disagree for {access_mode:?}"
+            );
+            assert_eq!(
+                BoardAccessMode::from_db_str(json_str),
+                Some(access_mode),
+                "from_db_str() round-trip failed for {access_mode:?}"
+            );
+        }
     }
 
     // ── Pagination ────────────────────────────────────────────────────────

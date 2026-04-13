@@ -248,7 +248,7 @@ pub fn insert_reply_into_thread(
         is_op: false,
     };
 
-    crate::db::threads::create_reply_with_thread_update(conn, &gateway_post, true, None)
+    crate::db::threads::create_reply_with_thread_update(conn, &gateway_post, "", true, None)
 }
 
 #[cfg(test)]

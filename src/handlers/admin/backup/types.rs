@@ -41,6 +41,10 @@ pub(super) mod board_backup_types {
         pub collapse_greentext: bool,
         #[serde(default)]
         pub post_cooldown_secs: i64,
+        #[serde(default = "default_access_mode")]
+        pub access_mode: String,
+        #[serde(default)]
+        pub access_password_hash: String,
         pub created_at: i64,
     }
 
@@ -54,6 +58,10 @@ pub(super) mod board_backup_types {
 
     const fn default_max_archived_threads() -> i64 {
         150
+    }
+
+    fn default_access_mode() -> String {
+        "public".to_string()
     }
 
     #[derive(Serialize, Deserialize)]
@@ -90,6 +98,8 @@ pub(super) mod board_backup_types {
         pub created_at: i64,
         pub deletion_token: String,
         pub is_op: bool,
+        pub media_processing_state: Option<String>,
+        pub media_processing_error: Option<String>,
     }
 
     #[derive(Serialize, Deserialize)]

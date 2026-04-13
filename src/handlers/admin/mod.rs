@@ -35,6 +35,7 @@ use crate::{
     error::{AppError, Result},
     handlers::board::ensure_csrf,
     middleware::AppState,
+    models::BackupInfo,
 };
 use axum::{
     extract::{Query, State},
@@ -42,15 +43,25 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
+use axum_extra::extract::cookie::SameSite;
+use dashmap::DashMap;
 use serde::Deserialize;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::IpAddr;
+use std::net::SocketAddr;
+use std::sync::LazyLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) use crate::handlers::board::check_csrf_jar;
 
 // ─── Shared constant ──────────────────────────────────────────────────────────
 
 const SESSION_COOKIE: &str = "chan_admin_session";
+const ADMIN_COOKIE_SAME_SITE: SameSite = SameSite::Lax;
+const ADMIN_BOOTSTRAP_TTL_SECS: u64 = 120;
+
+static ADMIN_SESSION_BOOTSTRAPS: LazyLock<DashMap<String, (String, u64)>> =
+    LazyLock::new(DashMap::new);
 
 // ─── Shared form type used by auth and backup ─────────────────────────────────
 
@@ -164,24 +175,70 @@ fn encode_query_component(input: &str) -> String {
     encoded
 }
 
-pub(super) fn should_set_secure_cookie(headers: &HeaderMap) -> bool {
+pub(super) fn should_set_secure_cookie(headers: &HeaderMap, peer: Option<SocketAddr>) -> bool {
     if !CONFIG.https_cookies {
         return false;
     }
 
-    if CONFIG.tls.enabled {
+    if crate::middleware::forwarded_proto_is_https(headers, peer, CONFIG.behind_proxy) {
         return true;
     }
 
-    headers
-        .get("x-forwarded-proto")
+    if !CONFIG.tls.enabled {
+        return request_origin_uses_https(headers);
+    }
+
+    host_header_uses_https_port(headers) || request_origin_uses_https(headers)
+}
+
+fn host_header_uses_https_port(headers: &HeaderMap) -> bool {
+    let Some(host) = headers
+        .get(header::HOST)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .next()
-                .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
-        })
+    else {
+        return false;
+    };
+
+    let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+
+    match authority.port_u16() {
+        Some(port) => port == CONFIG.tls.port,
+        None => CONFIG.tls.port == 443,
+    }
+}
+
+fn request_origin_uses_https(headers: &HeaderMap) -> bool {
+    let request_host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+        .map(|authority| authority.host().to_string());
+
+    let Some(source) = headers
+        .get(header::ORIGIN)
+        .or_else(|| headers.get(header::REFERER))
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+
+    let Ok(source_uri) = source.parse::<Uri>() else {
+        return false;
+    };
+
+    if source_uri.scheme_str() != Some("https") {
+        return false;
+    }
+
+    let Some(source_host) = source_uri.authority().map(axum::http::uri::Authority::host) else {
+        return false;
+    };
+
+    request_host
+        .as_deref()
+        .is_some_and(|request_host| hosts_match_for_same_origin(source_host, request_host))
 }
 
 fn admin_panel_redirect_with_status(
@@ -232,6 +289,7 @@ pub struct AdminPanelQuery {
     pub flash: Option<String>,
     pub flash_error: Option<String>,
     pub open: Option<String>,
+    pub bootstrap: Option<String>,
     pub backup_created: Option<String>,
     pub backup_deleted: Option<String>,
     pub restored: Option<String>,
@@ -257,16 +315,26 @@ struct AdminPanelSnapshot {
     site_name: String,
     site_subtitle: String,
     default_theme: String,
+    auto_full_backup_interval_hours: u64,
+    auto_full_backup_copies_to_keep: u64,
     themes: Vec<crate::models::Theme>,
     full_backups: Vec<crate::models::BackupInfo>,
     board_backups: Vec<crate::models::BackupInfo>,
     db_size_bytes: i64,
     db_size_warning: bool,
+    backup_summary: BackupSummary,
+}
+
+#[derive(Clone)]
+struct BackupSummary {
+    warning: Option<String>,
+    status_line: String,
 }
 
 fn load_admin_panel_snapshot(
     conn: &rusqlite::Connection,
     onion_address_val: Option<String>,
+    auto_full_backup_settings: crate::middleware::AutoFullBackupSettingsSnapshot,
 ) -> Result<(AdminPanelSnapshot, Option<String>)> {
     let boards = db::get_all_boards(conn)?;
     let bans = db::list_bans(conn)?;
@@ -277,8 +345,9 @@ fn load_admin_panel_snapshot(
     let site_subtitle = db::get_site_subtitle(conn);
     let default_theme = db::get_default_user_theme(conn);
     let themes = db::load_themes(conn)?;
-    let full_backups = list_backup_files(&full_backup_dir());
-    let board_backups = list_backup_files(&board_backup_dir());
+    let full_backups = list_backup_files(&full_backup_dir(), BackupListKind::Full);
+    let board_backups = list_backup_files(&board_backup_dir(), BackupListKind::Board);
+    let backup_summary = build_backup_summary(&full_backups);
     let db_size_bytes = db::get_db_size_bytes(conn).unwrap_or(0);
     let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
         let file_size = std::fs::metadata(&CONFIG.database_path)
@@ -297,14 +366,62 @@ fn load_admin_panel_snapshot(
             site_name,
             site_subtitle,
             default_theme,
+            auto_full_backup_interval_hours: auto_full_backup_settings.interval_hours,
+            auto_full_backup_copies_to_keep: auto_full_backup_settings.copies_to_keep,
             themes,
             full_backups,
             board_backups,
             db_size_bytes,
             db_size_warning,
+            backup_summary,
         },
         onion_address_val,
     ))
+}
+
+fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
+    const BACKUP_WARN_AFTER_HOURS: i64 = 72;
+
+    let Some(latest) = full_backups.first() else {
+        return BackupSummary {
+            warning: Some(
+                "No saved full backup found. Create and download a verified full backup before relying on this node."
+                    .to_string(),
+            ),
+            status_line: "Latest full backup: none saved.".to_string(),
+        };
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    let age_hours = latest
+        .modified_epoch
+        .map(|ts| now.saturating_sub(ts).max(0) / 3600);
+    let age_text = age_hours
+        .map(|hours| format!("{hours}h ago"))
+        .unwrap_or_else(|| "unknown age".to_string());
+    let status_line = format!(
+        "Latest full backup: {} ({age_text}) — {}.",
+        latest.filename, latest.verification_note
+    );
+
+    let warning = if !latest.verified {
+        Some(format!(
+            "Latest full backup '{}' failed verification: {}",
+            latest.filename, latest.verification_note
+        ))
+    } else if age_hours.is_some_and(|hours| hours >= BACKUP_WARN_AFTER_HOURS) {
+        Some(format!(
+            "Latest verified full backup '{}' is older than {BACKUP_WARN_AFTER_HOURS} hours ({age_text}).",
+            latest.filename
+        ))
+    } else {
+        None
+    };
+
+    BackupSummary {
+        warning,
+        status_line,
+    }
 }
 
 fn render_admin_panel_from_snapshot(
@@ -324,11 +441,15 @@ fn render_admin_panel_from_snapshot(
         &snapshot.board_backups,
         snapshot.db_size_bytes,
         snapshot.db_size_warning,
+        &snapshot.backup_summary.status_line,
+        snapshot.backup_summary.warning.as_deref(),
         &snapshot.reports,
         &snapshot.appeals,
         &snapshot.site_name,
         &snapshot.site_subtitle,
         &snapshot.default_theme,
+        snapshot.auto_full_backup_interval_hours,
+        snapshot.auto_full_backup_copies_to_keep,
         &snapshot.themes,
         tor_address.as_deref(),
         flash_ref,
@@ -339,10 +460,32 @@ fn render_admin_panel_from_snapshot(
 pub async fn admin_panel(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Query(params): Query<AdminPanelQuery>,
 ) -> Result<(CookieJar, Html<String>)> {
     // Move auth check and all DB calls into spawn_blocking.
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let cookie_secure = should_set_secure_cookie(&headers, Some(peer));
+    let mut session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let mut jar = jar;
+    if session_id.is_none() {
+        if let Some(bootstrap_token) = params.bootstrap.as_deref() {
+            if let Some(bootstrapped_session_id) = consume_admin_session_bootstrap(bootstrap_token)
+            {
+                let mut cookie = axum_extra::extract::cookie::Cookie::new(
+                    SESSION_COOKIE,
+                    bootstrapped_session_id.clone(),
+                );
+                cookie.set_http_only(true);
+                cookie.set_same_site(ADMIN_COOKIE_SAME_SITE);
+                cookie.set_path("/");
+                cookie.set_secure(cookie_secure);
+                cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
+                jar = jar.add(cookie);
+                session_id = Some(bootstrapped_session_id);
+            }
+        }
+    }
     let (jar, csrf) = ensure_csrf(jar);
     let csrf_clone = csrf.clone();
 
@@ -374,6 +517,7 @@ pub async fn admin_panel(
     } else {
         None
     };
+    let auto_full_backup_settings = state.auto_full_backup_settings.snapshot();
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let open_section = params.open.clone();
@@ -385,7 +529,8 @@ pub async fn admin_panel(
             db::get_session(&conn, &sid)?
                 .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
 
-            let (snapshot, tor_address) = load_admin_panel_snapshot(&conn, onion_address_val)?;
+            let (snapshot, tor_address) =
+                load_admin_panel_snapshot(&conn, onion_address_val, auto_full_backup_settings)?;
             Ok(render_admin_panel_from_snapshot(
                 snapshot,
                 &csrf_clone,
@@ -488,9 +633,36 @@ fn read_log_tail(path: &std::path::Path, max_bytes: usize) -> Result<(String, bo
     Ok((content, truncated))
 }
 
+fn admin_bootstrap_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+pub(super) fn create_admin_session_bootstrap(session_id: &str) -> String {
+    let token = crate::utils::crypto::new_session_id();
+    let expires_at = admin_bootstrap_now_secs().saturating_add(ADMIN_BOOTSTRAP_TTL_SECS);
+    ADMIN_SESSION_BOOTSTRAPS.insert(token.clone(), (session_id.to_string(), expires_at));
+    token
+}
+
+pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
+    let now = admin_bootstrap_now_secs();
+    ADMIN_SESSION_BOOTSTRAPS.retain(|_, (_, expires_at)| *expires_at > now);
+
+    let (session_id, expires_at) = ADMIN_SESSION_BOOTSTRAPS.remove(token)?.1;
+    (expires_at > now).then_some(session_id)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{hosts_match_for_same_origin, latest_log_file, read_log_tail};
+    use super::{
+        consume_admin_session_bootstrap, create_admin_session_bootstrap,
+        host_header_uses_https_port, hosts_match_for_same_origin, latest_log_file, read_log_tail,
+        request_origin_uses_https,
+    };
+    use axum::http::{header, HeaderMap, HeaderValue};
 
     #[test]
     fn same_origin_accepts_exact_host_match() {
@@ -514,6 +686,56 @@ mod tests {
     #[test]
     fn null_origin_is_handled_by_caller_fallback() {
         assert!(!hosts_match_for_same_origin("null", "localhost"));
+    }
+
+    #[test]
+    fn https_host_port_marks_request_secure() {
+        let mut headers = HeaderMap::new();
+        let host = format!("example.test:{}", crate::config::CONFIG.tls.port);
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_str(&host).expect("host header"),
+        );
+        assert!(host_header_uses_https_port(&headers));
+    }
+
+    #[test]
+    fn http_host_port_does_not_mark_request_secure() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("example.test:8080"));
+        assert!(!host_header_uses_https_port(&headers));
+    }
+
+    #[test]
+    fn https_origin_marks_tunneled_request_secure() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("demo.serveo.net"));
+        headers.insert(
+            header::REFERER,
+            HeaderValue::from_static("https://demo.serveo.net/admin"),
+        );
+        assert!(request_origin_uses_https(&headers));
+    }
+
+    #[test]
+    fn mismatched_https_origin_does_not_mark_request_secure() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("demo.serveo.net"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        assert!(!request_origin_uses_https(&headers));
+    }
+
+    #[test]
+    fn admin_session_bootstrap_is_one_time() {
+        let token = create_admin_session_bootstrap("session-123");
+        assert_eq!(
+            consume_admin_session_bootstrap(&token).as_deref(),
+            Some("session-123")
+        );
+        assert!(consume_admin_session_bootstrap(&token).is_none());
     }
 
     #[test]

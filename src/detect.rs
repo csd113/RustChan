@@ -140,10 +140,17 @@ pub fn detect_webm_encoder(ffmpeg_ok: bool) -> bool {
     let has_webm = has_vp9 && has_opus;
 
     if has_webm {
+        let profile = crate::media::ffmpeg::vp9_encoding_profile();
         tracing::info!(
             target: "rustchan::detect",
-            vp9 = true, opus = true,
-            "ffmpeg VP9 + Opus encoders available — MP4 to WebM transcoding enabled"
+            vp9 = true,
+            opus = true,
+            profile = %profile.label,
+            cpu_used = profile.cpu_used,
+            tile_columns = profile.tile_columns,
+            threads = profile.threads,
+            row_mt = profile.row_mt,
+            "ffmpeg VP9 + Opus encoders available — MP4 to WebM transcoding enabled with platform-tuned settings"
         );
     } else {
         tracing::warn!(

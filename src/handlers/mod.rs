@@ -101,6 +101,7 @@ pub struct TempUpload {
 /// Parsed fields from a post/thread creation multipart form.
 pub struct PostFormData {
     pub csrf_verified: bool,
+    pub submission_token: String,
     pub name: String,
     pub subject: String,
     pub body: String,
@@ -130,6 +131,7 @@ pub async fn parse_post_multipart(
     csrf_cookie: Option<&str>,
 ) -> Result<PostFormData> {
     let mut csrf_verified = false;
+    let mut submission_token = String::new();
     let mut name = String::new();
     let mut subject = String::new();
     let mut body = String::new();
@@ -156,6 +158,7 @@ pub async fn parse_post_multipart(
                     csrf_verified = true;
                 }
             }
+            Some("submission_token") => submission_token = read_text_field(field).await?,
             Some("name") => name = read_text_field(field).await?,
             Some("subject") => subject = read_text_field(field).await?,
             Some("body") => body = read_text_field(field).await?,
@@ -251,6 +254,7 @@ pub async fn parse_post_multipart(
 
     Ok(PostFormData {
         csrf_verified,
+        submission_token,
         name,
         subject,
         body,
@@ -611,6 +615,7 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
 /// post.  Shared by `create_thread` and `post_reply`.
 pub fn enqueue_post_jobs(
     job_queue: &JobQueue,
+    conn: &rusqlite::Connection,
     post_id: i64,
     ip_hash: &str,
     body_len: usize,
@@ -634,8 +639,52 @@ pub fn enqueue_post_jobs(
                 crate::models::MediaType::Image | crate::models::MediaType::Other => None,
             };
             if let Some(j) = job {
-                if let Err(e) = job_queue.enqueue(&j) {
-                    tracing::warn!("Failed to enqueue media job: {e}");
+                match job_queue.enqueue(&j) {
+                    Ok(crate::workers::EnqueueOutcome::Enqueued(_)) => {
+                        if let Err(error) = crate::db::set_post_media_processing_state(
+                            conn,
+                            post_id,
+                            Some(crate::db::MEDIA_PROCESSING_PENDING),
+                            None,
+                        ) {
+                            tracing::warn!(
+                                post_id,
+                                error = %error,
+                                "Failed to mark post media processing as pending"
+                            );
+                        }
+                    }
+                    Ok(crate::workers::EnqueueOutcome::DroppedAtCapacity) => {
+                        let detail = "Background media queue is full; upload kept original file but deferred processing was skipped.";
+                        tracing::warn!(post_id, "Media job dropped at queue capacity");
+                        if let Err(error) = crate::db::set_post_media_processing_state(
+                            conn,
+                            post_id,
+                            Some(crate::db::MEDIA_PROCESSING_FAILED),
+                            Some(detail),
+                        ) {
+                            tracing::warn!(
+                                post_id,
+                                error = %error,
+                                "Failed to persist queue-capacity media failure"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to enqueue media job: {e}");
+                        if let Err(error) = crate::db::set_post_media_processing_state(
+                            conn,
+                            post_id,
+                            Some(crate::db::MEDIA_PROCESSING_FAILED),
+                            Some(&format!("Could not enqueue background media job: {e}")),
+                        ) {
+                            tracing::warn!(
+                                post_id,
+                                error = %error,
+                                "Failed to persist media enqueue failure"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -682,6 +731,8 @@ mod tests {
         let board = sample_board();
         let audio = temp_upload("track.flac", b"fLaC\x00\x00\x00\x22test");
         let other = temp_upload("clip.webm", b"\x1a\x45\xdf\xa3webm");
+        let boards_dir = tempfile::tempdir().expect("boards dir");
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
 
         let result = process_audio_first_uploads(
             Some(audio),
@@ -689,8 +740,8 @@ mod tests {
             Some(other),
             &board,
             &conn,
-            "/tmp",
-            "/tmp",
+            boards_dir.path().to_str().expect("boards dir path"),
+            uploads_dir.path().to_str().expect("uploads dir path"),
             150,
             1024 * 1024,
             1024 * 1024,

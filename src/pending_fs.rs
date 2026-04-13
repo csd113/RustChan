@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 pub const UPLOAD_FINALIZE_KIND: &str = "upload_finalize";
 pub const FULL_RESTORE_SWAP_KIND: &str = "full_restore_swap";
@@ -86,21 +87,8 @@ fn cleanup_path_if_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn finalize_swap(staged: &Path, live: &Path, previous: &Path) -> Result<()> {
-    if staged.exists() {
-        if live.exists() {
-            if previous.exists() {
-                cleanup_path_if_exists(previous)?;
-            }
-            std::fs::rename(live, previous)
-                .with_context(|| format!("Move live path {} aside", live.display()))?;
-        }
-        std::fs::rename(staged, live)
-            .with_context(|| format!("Move staged path {} into place", live.display()))?;
-    }
-
-    cleanup_path_if_exists(previous)?;
-    if let Some(parent) = staged.parent() {
+fn cleanup_empty_parent_dir(path: &Path, live: &Path) {
+    if let Some(parent) = path.parent() {
         if parent != live
             && parent.exists()
             && parent
@@ -110,6 +98,53 @@ fn finalize_swap(staged: &Path, live: &Path, previous: &Path) -> Result<()> {
             let _ = std::fs::remove_dir(parent);
         }
     }
+}
+
+fn finalize_swap(staged: &Path, live: &Path, previous: &Path) -> Result<()> {
+    let staged_exists = staged.exists();
+    let live_exists = live.exists();
+    let previous_exists = previous.exists();
+
+    if staged_exists && live_exists {
+        if previous_exists {
+            cleanup_path_if_exists(previous)?;
+        }
+        std::fs::rename(live, previous)
+            .with_context(|| format!("Move live path {} aside", live.display()))?;
+        ensure_parent_dir(live)?;
+        if let Err(error) = std::fs::rename(staged, live) {
+            let move_error =
+                anyhow::anyhow!("Move staged path {} into place: {error}", live.display());
+            if previous.exists() && !live.exists() {
+                ensure_parent_dir(live)?;
+                std::fs::rename(previous, live).with_context(|| {
+                    format!(
+                        "{move_error}; rollback live path {} from {}",
+                        live.display(),
+                        previous.display()
+                    )
+                })?;
+            }
+            return Err(move_error);
+        }
+    } else if staged_exists && !live_exists {
+        ensure_parent_dir(live)?;
+        std::fs::rename(staged, live)
+            .with_context(|| format!("Move staged path {} into place", live.display()))?;
+    }
+
+    if previous.exists() {
+        if let Err(error) = cleanup_path_if_exists(previous) {
+            warn!(
+                live = %live.display(),
+                previous = %previous.display(),
+                error = %error,
+                "Restore swap completed but could not remove previous path"
+            );
+        }
+    }
+
+    cleanup_empty_parent_dir(staged, live);
     Ok(())
 }
 
@@ -244,4 +279,85 @@ pub fn reconcile_pending_fs_ops(pool: &crate::db::DbPool, upload_dir: &str) -> R
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{finalize_board_restore_payload, BoardRestoreSwapPayload};
+
+    fn create_dir_with_file(path: &std::path::Path, file_name: &str, contents: &str) {
+        std::fs::create_dir_all(path).expect("create dir");
+        std::fs::write(path.join(file_name), contents).expect("write file");
+    }
+
+    #[test]
+    fn finalize_board_restore_payload_recovers_interrupted_swap() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let live = temp_dir.path().join("uploads").join("tech");
+        let staged = temp_dir.path().join(".pending").join("tech-stage");
+        let previous = temp_dir.path().join(".tech.restore-old");
+        create_dir_with_file(&staged, "new.txt", "new");
+        create_dir_with_file(&previous, "old.txt", "old");
+
+        finalize_board_restore_payload(&BoardRestoreSwapPayload {
+            staged: staged.display().to_string(),
+            live: live.display().to_string(),
+            previous: previous.display().to_string(),
+        })
+        .expect("finalize interrupted swap");
+
+        assert_eq!(
+            std::fs::read_to_string(live.join("new.txt")).expect("read live"),
+            "new"
+        );
+        assert!(!previous.exists());
+    }
+
+    #[test]
+    fn finalize_board_restore_payload_cleans_leftover_previous_path() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let live = temp_dir.path().join("uploads").join("tech");
+        let staged = temp_dir.path().join(".pending").join("tech-stage");
+        let previous = temp_dir.path().join(".tech.restore-old");
+        create_dir_with_file(&live, "new.txt", "new");
+        create_dir_with_file(&previous, "old.txt", "old");
+
+        finalize_board_restore_payload(&BoardRestoreSwapPayload {
+            staged: staged.display().to_string(),
+            live: live.display().to_string(),
+            previous: previous.display().to_string(),
+        })
+        .expect("cleanup completed swap");
+
+        assert_eq!(
+            std::fs::read_to_string(live.join("new.txt")).expect("read live"),
+            "new"
+        );
+        assert!(!previous.exists());
+        assert!(!staged.exists());
+    }
+
+    #[test]
+    fn finalize_board_restore_payload_swaps_live_and_stage() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let live = temp_dir.path().join("uploads").join("tech");
+        let staged = temp_dir.path().join(".pending").join("tech-stage");
+        let previous = temp_dir.path().join(".tech.restore-old");
+        create_dir_with_file(&live, "old.txt", "old");
+        create_dir_with_file(&staged, "new.txt", "new");
+
+        finalize_board_restore_payload(&BoardRestoreSwapPayload {
+            staged: staged.display().to_string(),
+            live: live.display().to_string(),
+            previous: previous.display().to_string(),
+        })
+        .expect("swap live and stage");
+
+        assert_eq!(
+            std::fs::read_to_string(live.join("new.txt")).expect("read live"),
+            "new"
+        );
+        assert!(!staged.exists());
+        assert!(!previous.exists());
+    }
 }

@@ -6,6 +6,7 @@ use crate::{
     templates,
     utils::crypto::hash_ip,
 };
+use sha2::{Digest, Sha256};
 
 pub struct BoardPageData {
     pub board: Board,
@@ -24,48 +25,53 @@ pub struct ThreadPageData {
 
 #[must_use]
 pub fn board_page_etag_signature(data: &BoardPageData) -> String {
-    data.summaries
-        .iter()
-        .map(|summary| {
-            let preview_sig = summary
-                .preview_posts
-                .iter()
-                .map(|post| format!("{}:{}", post.id, post.edited_at.unwrap_or(0)))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                "{}:{}:{}:{}:{}:{}:{}",
-                summary.thread.id,
-                summary.thread.bumped_at,
-                i32::from(summary.thread.sticky),
-                i32::from(summary.thread.archived),
-                summary.thread.reply_count,
-                summary.omitted,
-                preview_sig
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("|")
+    let mut hasher = Sha256::new();
+    for summary in &data.summaries {
+        update_thread_signature(&mut hasher, &summary.thread);
+        update_sig_field(&mut hasher, &summary.omitted.to_string());
+        for post in &summary.preview_posts {
+            update_post_signature(&mut hasher, post);
+        }
+    }
+    hex::encode(hasher.finalize())
 }
 
 #[must_use]
 pub fn thread_page_etag_signature(data: &ThreadPageData) -> String {
-    let post_sig = data
-        .posts
-        .iter()
-        .map(|post| format!("{}:{}", post.id, post.edited_at.unwrap_or(0)))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "{}:{}:{}:{}:{}:{}:{}",
-        data.thread.id,
-        data.thread.bumped_at,
-        i32::from(data.thread.locked),
-        i32::from(data.thread.sticky),
-        i32::from(data.thread.archived),
-        data.thread.reply_count,
-        post_sig
-    )
+    let mut hasher = Sha256::new();
+    update_thread_signature(&mut hasher, &data.thread);
+    for post in &data.posts {
+        update_post_signature(&mut hasher, post);
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn update_sig_field(hasher: &mut Sha256, value: &str) {
+    hasher.update(value.as_bytes());
+    hasher.update([0]);
+}
+
+fn update_thread_signature(hasher: &mut Sha256, thread: &Thread) {
+    update_sig_field(hasher, &thread.id.to_string());
+    update_sig_field(hasher, &thread.bumped_at.to_string());
+    update_sig_field(hasher, if thread.locked { "1" } else { "0" });
+    update_sig_field(hasher, if thread.sticky { "1" } else { "0" });
+    update_sig_field(hasher, if thread.archived { "1" } else { "0" });
+    update_sig_field(hasher, &thread.reply_count.to_string());
+    update_sig_field(hasher, thread.op_file.as_deref().unwrap_or(""));
+    update_sig_field(hasher, thread.op_thumb.as_deref().unwrap_or(""));
+}
+
+fn update_post_signature(hasher: &mut Sha256, post: &crate::models::Post) {
+    update_sig_field(hasher, &post.id.to_string());
+    update_sig_field(hasher, &post.edited_at.unwrap_or(0).to_string());
+    update_sig_field(hasher, post.file_path.as_deref().unwrap_or(""));
+    update_sig_field(hasher, post.thumb_path.as_deref().unwrap_or(""));
+    update_sig_field(hasher, post.mime_type.as_deref().unwrap_or(""));
+    update_sig_field(hasher, post.audio_file_path.as_deref().unwrap_or(""));
+    update_sig_field(hasher, post.audio_mime_type.as_deref().unwrap_or(""));
+    update_sig_field(hasher, post.media_processing_state.as_deref().unwrap_or(""));
+    update_sig_field(hasher, post.media_processing_error.as_deref().unwrap_or(""));
 }
 
 pub fn load_board_page_data(
@@ -109,7 +115,9 @@ pub fn render_board_page(
     data: &BoardPageData,
     csrf_token: &str,
     error: Option<&str>,
+    new_thread_prefill: Option<&templates::forms::PostFormState>,
     current_theme: Option<&str>,
+    can_post: bool,
 ) -> String {
     let boards = templates::live_boards();
     templates::board_page(
@@ -120,8 +128,10 @@ pub fn render_board_page(
         boards.as_slice(),
         data.is_admin,
         error,
+        new_thread_prefill,
         current_theme,
         data.board.collapse_greentext,
+        can_post,
     )
 }
 
@@ -157,7 +167,10 @@ pub fn render_thread_page(
     data: &ThreadPageData,
     csrf_token: &str,
     error: Option<&str>,
+    success: Option<&str>,
+    reply_prefill: Option<&templates::forms::PostFormState>,
     current_theme: Option<&str>,
+    can_post: bool,
 ) -> String {
     let boards = templates::live_boards();
     templates::thread_page(
@@ -169,8 +182,11 @@ pub fn render_thread_page(
         data.is_admin,
         data.poll.as_ref(),
         error,
+        success,
+        reply_prefill,
         current_theme,
         data.board.collapse_greentext,
+        can_post,
     )
 }
 
@@ -242,6 +258,8 @@ mod tests {
             deletion_token: "token".into(),
             is_op: id == 1,
             edited_at: None,
+            media_processing_state: None,
+            media_processing_error: None,
         }
     }
 
@@ -259,6 +277,41 @@ mod tests {
             board,
             thread: sample_thread(1),
             posts: vec![sample_post(1), sample_post(3)],
+            poll: None,
+            is_admin: false,
+        };
+
+        assert_ne!(
+            thread_page_etag_signature(&before),
+            thread_page_etag_signature(&after)
+        );
+    }
+
+    #[test]
+    fn thread_page_etag_changes_when_media_processing_state_changes() {
+        let board = sample_board();
+        let mut pending_post = sample_post(2);
+        pending_post.file_path = Some("test/clip.mp4".into());
+        pending_post.thumb_path = Some("test/thumbs/clip.webp".into());
+        pending_post.mime_type = Some("video/mp4".into());
+        pending_post.media_processing_state = Some("pending".into());
+
+        let before = ThreadPageData {
+            board: board.clone(),
+            thread: sample_thread(1),
+            posts: vec![sample_post(1), pending_post.clone()],
+            poll: None,
+            is_admin: false,
+        };
+
+        pending_post.file_path = Some("test/clip.webm".into());
+        pending_post.mime_type = Some("video/webm".into());
+        pending_post.media_processing_state = None;
+
+        let after = ThreadPageData {
+            board,
+            thread: sample_thread(1),
+            posts: vec![sample_post(1), pending_post],
             poll: None,
             is_admin: false,
         };
@@ -288,6 +341,43 @@ mod tests {
             summaries: vec![ThreadSummary {
                 thread: sample_thread(1),
                 preview_posts: vec![sample_post(3)],
+                omitted: 0,
+            }],
+            is_admin: false,
+        };
+
+        assert_ne!(
+            board_page_etag_signature(&before),
+            board_page_etag_signature(&after)
+        );
+    }
+
+    #[test]
+    fn board_page_etag_changes_when_op_media_changes() {
+        let board = sample_board();
+        let mut before_thread = sample_thread(0);
+        before_thread.op_file = Some("test/op.mp4".into());
+        before_thread.op_thumb = Some("test/thumbs/op.webp".into());
+
+        let mut after_thread = before_thread.clone();
+        after_thread.op_file = Some("test/op.webm".into());
+
+        let before = BoardPageData {
+            board: board.clone(),
+            pagination: Pagination::new(1, 10, 1),
+            summaries: vec![ThreadSummary {
+                thread: before_thread,
+                preview_posts: Vec::new(),
+                omitted: 0,
+            }],
+            is_admin: false,
+        };
+        let after = BoardPageData {
+            board,
+            pagination: Pagination::new(1, 10, 1),
+            summaries: vec![ThreadSummary {
+                thread: after_thread,
+                preview_posts: Vec::new(),
                 omitted: 0,
             }],
             is_admin: false,

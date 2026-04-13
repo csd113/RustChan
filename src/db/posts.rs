@@ -25,9 +25,15 @@ use std::collections::HashMap;
 /// and `fail_job` (CASE WHEN attempts >= 3), with no guarantee they would stay in sync.
 const MAX_JOB_ATTEMPTS: i64 = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobFailureState {
+    Retrying,
+    PermanentlyFailed,
+}
+
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
-/// Map a full post row (23 columns, selected in the canonical order used
+/// Map a full post row (25 columns, selected in the canonical order used
 /// throughout this module) into a Post struct.
 ///
 /// The expected column count is asserted here so any future change
@@ -42,7 +48,8 @@ const MAX_JOB_ATTEMPTS: i64 = 3;
 ///   4  tripcode      12 `thumb_path`     20 `audio_file_size`
 ///   5  subject       13 `mime_type`      21 `audio_mime_type`
 ///   6  body          14 `created_at`     22 `edited_at`
-///   7  `body_html`     15 `deletion_token`
+///   7  `body_html`     15 `deletion_token` 23 `media_processing_state`
+///                                           24 `media_processing_error`
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -51,6 +58,12 @@ pub(super) fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
     let media_type = media_type_str
         .as_deref()
         .and_then(crate::models::MediaType::from_db_str);
+    let media_processing_state = row
+        .get::<_, Option<String>>(23)?
+        .filter(|state| !state.trim().is_empty());
+    let media_processing_error = row
+        .get::<_, Option<String>>(24)?
+        .filter(|error| !error.trim().is_empty());
 
     Ok(Post {
         id: row.get(0)?,
@@ -76,6 +89,8 @@ pub(super) fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
         audio_file_size: row.get(20)?,
         audio_mime_type: row.get(21)?,
         edited_at: row.get(22)?,
+        media_processing_state,
+        media_processing_error,
     })
 }
 
@@ -89,7 +104,7 @@ pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Resu
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at
+                edited_at, media_processing_state, media_processing_error
          FROM posts WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
     )?;
     let posts = stmt
@@ -118,13 +133,51 @@ pub fn get_new_posts_since(
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at
+                edited_at, media_processing_state, media_processing_error
          FROM posts WHERE thread_id = ?1 AND id > ?2
          ORDER BY id ASC
          LIMIT ?3",
     )?;
     let posts = stmt
         .query_map(params![thread_id, since_id, max_results], map_post)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(posts)
+}
+
+/// Fetch specific posts in a thread by id, ordered oldest-first.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn get_posts_by_ids_in_thread(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+    post_ids: &[i64],
+) -> Result<Vec<Post>> {
+    if post_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = post_ids
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("?{}", index + 2))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
+                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
+                created_at, deletion_token, is_op, media_type,
+                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
+                edited_at, media_processing_state, media_processing_error
+         FROM posts
+         WHERE thread_id = ?1 AND id IN ({placeholders})
+         ORDER BY created_at ASC, id ASC"
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let params =
+        rusqlite::params_from_iter(std::iter::once(thread_id).chain(post_ids.iter().copied()));
+    let posts = stmt
+        .query_map(params, map_post)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(posts)
 }
@@ -157,13 +210,13 @@ pub fn get_preview_posts_for_threads(
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at
+                edited_at, media_processing_state, media_processing_error
          FROM (
              SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
                     ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                     created_at, deletion_token, is_op, media_type,
                     audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                    edited_at,
+                    edited_at, media_processing_state, media_processing_error,
                     ROW_NUMBER() OVER (
                         PARTITION BY thread_id
                         ORDER BY created_at DESC, id DESC
@@ -232,6 +285,80 @@ pub(super) fn create_post_inner(conn: &rusqlite::Connection, p: &super::NewPost)
     Ok(post_id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostSubmissionRecord {
+    pub thread_id: i64,
+    pub post_id: i64,
+    pub is_thread: bool,
+}
+
+pub fn get_post_submission(
+    conn: &rusqlite::Connection,
+    submission_token: &str,
+    ip_hash: &str,
+    board_id: i64,
+) -> Result<Option<PostSubmissionRecord>> {
+    if submission_token.trim().is_empty() {
+        return Ok(None);
+    }
+
+    Ok(conn
+        .query_row(
+            "SELECT thread_id, post_id, is_thread
+             FROM post_submissions
+             WHERE submission_token = ?1
+               AND ip_hash = ?2
+               AND board_id = ?3
+             LIMIT 1",
+            params![submission_token, ip_hash, board_id],
+            |row| {
+                Ok(PostSubmissionRecord {
+                    thread_id: row.get(0)?,
+                    post_id: row.get(1)?,
+                    is_thread: row.get::<_, i32>(2)? != 0,
+                })
+            },
+        )
+        .optional()?)
+}
+
+pub fn record_post_submission(
+    conn: &rusqlite::Connection,
+    submission_token: &str,
+    ip_hash: &str,
+    board_id: i64,
+    thread_id: i64,
+    post_id: i64,
+    is_thread: bool,
+) -> Result<()> {
+    if submission_token.trim().is_empty() {
+        return Ok(());
+    }
+
+    conn.execute(
+        "INSERT OR IGNORE INTO post_submissions
+         (submission_token, ip_hash, board_id, thread_id, post_id, is_thread)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            submission_token,
+            ip_hash,
+            board_id,
+            thread_id,
+            post_id,
+            i32::from(is_thread)
+        ],
+    )
+    .context("Failed to record post submission token")?;
+
+    conn.execute(
+        "DELETE FROM post_submissions WHERE created_at < unixepoch() - 604800",
+        [],
+    )
+    .context("Failed to prune expired post submission tokens")?;
+
+    Ok(())
+}
+
 /// Insert a poll row and its options using the caller's existing transaction.
 ///
 /// # Errors
@@ -275,7 +402,7 @@ pub fn get_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<Post
                 ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
                 created_at, deletion_token, is_op, media_type,
                 audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at
+                edited_at, media_processing_state, media_processing_error
          FROM posts WHERE id = ?1",
     )?;
     Ok(stmt.query_row(params![post_id], map_post).optional()?)
@@ -295,7 +422,7 @@ pub fn get_post_on_board(
                 p.body, p.body_html, p.ip_hash, p.file_path, p.file_name, p.file_size,
                 p.thumb_path, p.mime_type, p.created_at, p.deletion_token, p.is_op,
                 p.media_type, p.audio_file_path, p.audio_file_name, p.audio_file_size,
-                p.audio_mime_type, p.edited_at
+                p.audio_mime_type, p.edited_at, p.media_processing_state, p.media_processing_error
          FROM posts p
          JOIN boards b ON b.id = p.board_id
          WHERE p.id = ?1 AND b.short_name = ?2
@@ -403,35 +530,6 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
             Err(e)
         }
     }
-}
-
-/// Use constant-time byte comparison to prevent timing side-channel attacks on
-/// deletion token verification.
-///
-/// Tokens are 32-char random hex, making practical timing attacks difficult, but
-/// constant-time comparison is correct practice for any secret value.
-///
-/// Note: `edit_post` inlines its own transactional token check, so this helper
-/// is not currently called there. Kept for future handlers (e.g. user-facing
-/// post deletion) that need standalone token verification.
-///
-/// # Errors
-/// Returns an error if the database operation fails.
-#[allow(dead_code)]
-pub fn verify_deletion_token(
-    conn: &rusqlite::Connection,
-    post_id: i64,
-    token: &str,
-) -> Result<bool> {
-    let stored: Option<String> = conn
-        .query_row(
-            "SELECT deletion_token FROM posts WHERE id = ?1",
-            params![post_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-
-    Ok(stored.is_some_and(|s| constant_time_eq(s.as_bytes(), token.as_bytes())))
 }
 
 /// Edit a post's body, verified against the deletion token and a per-board edit window.
@@ -549,7 +647,9 @@ fn search_terms(query: &str) -> Vec<String> {
 
     for ch in query.chars() {
         if ch.is_alphanumeric() {
-            current.push(ch);
+            for lower in ch.to_lowercase() {
+                current.push(lower);
+            }
             continue;
         }
 
@@ -597,11 +697,13 @@ pub fn search_posts(
         return Ok(Vec::new());
     };
     let mut stmt = conn.prepare_cached(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at
+        "SELECT posts.id, posts.thread_id, posts.board_id, posts.name, posts.tripcode,
+                posts.subject, posts.body, posts.body_html, posts.ip_hash,
+                posts.file_path, posts.file_name, posts.file_size, posts.thumb_path,
+                posts.mime_type, posts.created_at, posts.deletion_token, posts.is_op,
+                posts.media_type, posts.audio_file_path, posts.audio_file_name,
+                posts.audio_file_size, posts.audio_mime_type, posts.edited_at,
+                posts.media_processing_state, posts.media_processing_error
          FROM posts
          JOIN posts_fts ON posts_fts.rowid = posts.id
          WHERE posts.board_id = ?1 AND posts_fts MATCH ?2
@@ -932,8 +1034,22 @@ pub fn complete_job(conn: &rusqlite::Connection, id: i64) -> Result<()> {
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-pub fn fail_job(conn: &rusqlite::Connection, id: i64, error: &str) -> Result<()> {
+pub fn fail_job(conn: &rusqlite::Connection, id: i64, error: &str) -> Result<JobFailureState> {
     let err_trunc: String = error.chars().take(512).collect();
+    let failure_state = conn.query_row(
+        "SELECT CASE WHEN attempts >= ?2 THEN 'failed' ELSE 'pending' END
+         FROM background_jobs
+         WHERE id = ?1 AND status = 'running'",
+        params![id, MAX_JOB_ATTEMPTS],
+        |r| {
+            let state: String = r.get(0)?;
+            Ok(if state == "failed" {
+                JobFailureState::PermanentlyFailed
+            } else {
+                JobFailureState::Retrying
+            })
+        },
+    )?;
     let n = conn.execute(
         "UPDATE background_jobs
          SET status = CASE WHEN attempts >= ?3 THEN 'failed' ELSE 'pending' END,
@@ -945,7 +1061,7 @@ pub fn fail_job(conn: &rusqlite::Connection, id: i64, error: &str) -> Result<()>
     if n == 0 {
         anyhow::bail!("Job {id} not found or not in 'running' state");
     }
-    Ok(())
+    Ok(failure_state)
 }
 
 /// Count jobs currently in the 'pending' state (used for monitoring).
@@ -957,6 +1073,56 @@ pub fn pending_job_count(conn: &rusqlite::Connection) -> Result<i64> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM background_jobs WHERE status = 'pending'",
         [],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
+pub const MEDIA_PROCESSING_PENDING: &str = "pending";
+pub const MEDIA_PROCESSING_FAILED: &str = "failed";
+
+/// Update a post's async media-processing state.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn set_post_media_processing_state(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    state: Option<&str>,
+    error: Option<&str>,
+) -> Result<()> {
+    let state = state.unwrap_or("").trim();
+    let normalized_state = if state.is_empty() { "" } else { state };
+    let normalized_error = error.and_then(|detail| {
+        let trimmed = detail.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.chars().take(512).collect::<String>())
+        }
+    });
+
+    conn.execute(
+        "UPDATE posts
+         SET media_processing_state = ?1,
+             media_processing_error = ?2
+         WHERE id = ?3",
+        params![normalized_state, normalized_error, post_id],
+    )?;
+    Ok(())
+}
+
+/// Count posts currently in a given async media-processing state.
+///
+/// # Errors
+/// Returns an error if the database query fails.
+pub fn count_posts_by_media_processing_state(
+    conn: &rusqlite::Connection,
+    state: &str,
+) -> Result<i64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM posts WHERE media_processing_state = ?1",
+        params![state],
         |r| r.get(0),
     )?;
     Ok(n)
@@ -1060,7 +1226,53 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{search_terms, to_fts_query};
+    use super::{
+        count_posts_by_media_processing_state, count_search_results, get_post_submission,
+        get_posts_for_thread, record_post_submission, search_posts, search_terms,
+        set_post_media_processing_state, to_fts_query, MEDIA_PROCESSING_FAILED,
+    };
+    use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
+    use rusqlite::Connection;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        super::super::schema::create_schema(&conn).expect("create schema");
+        conn
+    }
+
+    fn seed_search_post(conn: &Connection, board_short: &str, body: &str) -> i64 {
+        create_board(conn, board_short, board_short, "", false).expect("create board");
+        let board = get_board_by_short(conn, board_short)
+            .expect("load board")
+            .expect("board exists");
+        let post = NewPost {
+            thread_id: 0,
+            board_id: board.id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some(format!("{board_short} subject")),
+            body: body.to_string(),
+            body_html: body.to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: true,
+        };
+        let (thread_id, post_id, _) =
+            create_thread_with_optional_poll(conn, board.id, None, &post, "", None, None)
+                .expect("create thread");
+        assert!(thread_id > 0);
+        post_id
+    }
 
     #[test]
     fn search_query_ignores_punctuation_only_input() {
@@ -1080,11 +1292,141 @@ mod tests {
     fn search_query_keeps_text_terms_usable() {
         assert_eq!(
             search_terms("rock'n'roll C++ anime"),
-            vec!["rock", "n", "roll", "C", "anime"]
+            vec!["rock", "n", "roll", "c", "anime"]
         );
         assert_eq!(
             to_fts_query("hello world"),
             Some("\"hello\"* AND \"world\"*".to_string())
+        );
+    }
+
+    #[test]
+    fn search_query_lowercases_even_when_token_cap_is_hit() {
+        assert_eq!(
+            search_terms("A B C D E F G H I J K L M"),
+            vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
+        );
+    }
+
+    #[test]
+    fn search_posts_reads_joined_fts_rows_without_ambiguous_columns() {
+        let conn = test_conn();
+        seed_search_post(&conn, "tech", "rust search body");
+        let board = get_board_by_short(&conn, "tech")
+            .expect("load board")
+            .expect("board exists");
+
+        let posts = search_posts(&conn, board.id, "rust", 20, 0).expect("search posts");
+
+        assert_eq!(posts.len(), 1);
+        assert_eq!(
+            posts.first().map(|post| post.body.as_str()),
+            Some("rust search body")
+        );
+    }
+
+    #[test]
+    fn search_posts_stays_scoped_to_board() {
+        let conn = test_conn();
+        seed_search_post(&conn, "tech", "shared rust term");
+        seed_search_post(&conn, "meta", "shared rust term");
+        let tech = get_board_by_short(&conn, "tech")
+            .expect("load tech board")
+            .expect("tech board exists");
+
+        let posts = search_posts(&conn, tech.id, "rust", 20, 0).expect("search posts");
+        let total = count_search_results(&conn, tech.id, "rust").expect("count search results");
+
+        assert_eq!(posts.len(), 1);
+        assert_eq!(total, 1);
+        assert_eq!(posts.first().map(|post| post.board_id), Some(tech.id));
+    }
+
+    #[test]
+    fn search_posts_matches_case_insensitively() {
+        let conn = test_conn();
+        seed_search_post(&conn, "tech", "AI will find this");
+        let board = get_board_by_short(&conn, "tech")
+            .expect("load board")
+            .expect("board exists");
+
+        let posts = search_posts(&conn, board.id, "ai", 20, 0).expect("search posts");
+        let total = count_search_results(&conn, board.id, "ai").expect("count search results");
+
+        assert_eq!(posts.len(), 1);
+        assert_eq!(total, 1);
+        assert_eq!(
+            posts.first().map(|post| post.body.as_str()),
+            Some("AI will find this")
+        );
+    }
+
+    #[test]
+    fn search_posts_ignores_punctuation_only_queries_without_error() {
+        let conn = test_conn();
+        let total = count_search_results(&conn, 1, ">>1 ' \" %").expect("count search results");
+        let posts = search_posts(&conn, 1, ">>1 ' \" %", 20, 0).expect("search posts");
+
+        assert_eq!(total, 0);
+        assert!(posts.is_empty());
+    }
+
+    #[test]
+    fn post_submission_token_resolves_existing_post() {
+        let conn = test_conn();
+        let post_id = seed_search_post(&conn, "dup", "hello");
+        let board = get_board_by_short(&conn, "dup")
+            .expect("load board")
+            .expect("board exists");
+
+        record_post_submission(&conn, "token-1", "iphash", board.id, 1, post_id, true)
+            .expect("record submission token");
+
+        let record = get_post_submission(&conn, "token-1", "iphash", board.id)
+            .expect("lookup token")
+            .expect("record should exist");
+        assert_eq!(record.thread_id, 1);
+        assert_eq!(record.post_id, post_id);
+        assert!(record.is_thread);
+    }
+
+    #[test]
+    fn media_processing_state_round_trips_and_counts() {
+        let conn = test_conn();
+        let post_id = seed_search_post(&conn, "media", "hello");
+
+        set_post_media_processing_state(
+            &conn,
+            post_id,
+            Some(MEDIA_PROCESSING_FAILED),
+            Some("ffmpeg timed out"),
+        )
+        .expect("set failed state");
+
+        let posts = get_posts_for_thread(&conn, 1).expect("load posts");
+        let post = posts
+            .into_iter()
+            .find(|post| post.id == post_id)
+            .expect("post exists");
+        assert_eq!(
+            post.media_processing_state.as_deref(),
+            Some(MEDIA_PROCESSING_FAILED)
+        );
+        assert_eq!(
+            post.media_processing_error.as_deref(),
+            Some("ffmpeg timed out")
+        );
+        assert_eq!(
+            count_posts_by_media_processing_state(&conn, MEDIA_PROCESSING_FAILED)
+                .expect("count failed"),
+            1
+        );
+
+        set_post_media_processing_state(&conn, post_id, None, None).expect("clear state");
+        assert_eq!(
+            count_posts_by_media_processing_state(&conn, MEDIA_PROCESSING_FAILED)
+                .expect("count failed after clear"),
+            0
         );
     }
 }

@@ -16,6 +16,8 @@ use super::{
 use routes::{admin_routes, public_routes};
 
 pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
+    let behind_proxy = crate::config::CONFIG.behind_proxy;
+
     Router::new()
         .route("/static/style.css", get(serve_css))
         .route("/static/main.js", get(serve_main_js))
@@ -53,7 +55,7 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
             ),
         ))
         .layer(axum_middleware::from_fn(move |req, next| {
-            hsts_middleware_with_mode(req, next, direct_https)
+            hsts_middleware_with_mode(req, next, direct_https, behind_proxy)
         }))
         .layer(axum_middleware::from_fn(safe_timeout_middleware))
         .layer(

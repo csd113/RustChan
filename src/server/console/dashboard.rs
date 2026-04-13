@@ -210,6 +210,16 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
     row(&mut out, "Online", &stats.online.to_string());
     row(&mut out, "Uptime", &fmt_uptime(stats.uptime_secs));
     row(&mut out, "Memory", &fmt_bytes(stats.mem_bytes));
+    let ffmpeg_videos = if stats.active_ffmpeg_videos > 0 {
+        yellow(&stats.active_ffmpeg_videos.to_string())
+    } else {
+        dim(&stats.active_ffmpeg_videos.to_string())
+    };
+    row(
+        &mut out,
+        "FFmpeg",
+        &format!("{ffmpeg_videos} videos processing"),
+    );
     writeln!(out).ok();
 
     // ── Content ───────────────────────────────────────────────────────────────
@@ -455,4 +465,24 @@ pub fn render_confirm_quit() -> String {
     writeln!(out).ok();
     writeln!(out, "{RULE}").ok();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_dashboard;
+    use crate::server::console::ChanStats;
+
+    #[test]
+    fn dashboard_shows_active_ffmpeg_video_count() {
+        let stats = ChanStats {
+            active_ffmpeg_videos: 3,
+            ..ChanStats::default()
+        };
+
+        let rendered = render_dashboard(&stats);
+
+        assert!(rendered.contains("FFmpeg"));
+        assert!(rendered.contains("videos processing"));
+        assert!(rendered.contains("3"));
+    }
 }

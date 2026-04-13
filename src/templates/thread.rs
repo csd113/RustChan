@@ -15,7 +15,7 @@ use super::{
     thread_autoupdate_script, TOGGLE_SCRIPT,
 };
 
-fn render_thread_nav(board_short: &str, reply_count: i64, is_bottom: bool) -> String {
+fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String {
     let jump_link = if is_bottom { "#top" } else { "#bottom" };
     let jump_label = if is_bottom { "Top" } else { "Bottom" };
     let nav_class = if is_bottom {
@@ -23,23 +23,24 @@ fn render_thread_nav(board_short: &str, reply_count: i64, is_bottom: bool) -> St
     } else {
         "board-header thread-nav"
     };
+    let board_short = escape_html(&board.short_name);
 
     format!(
         r#"<div class="{nav_class}">
-  <a href="/{s}">[ Return ]</a>
-  <a href="/{s}/catalog">[ Catalog ]</a>
+  <a href="/{board_short}">[ Return ]</a>
+  <a href="/{board_short}/catalog">[ Catalog ]</a>
   <a href="{jump_link}">[ {jump_label} ]</a>
-  <button class="thread-nav-btn" data-action="fetch-updates">[ Update ]</button>
+  <button class="thread-nav-btn" type="button" data-action="fetch-updates" data-busy-label="[ Updating… ]">[ Update ]</button>
   <label class="autoupdate-label">
     <input type="checkbox" data-role="autoupdate-toggle" data-action="autoupdate-toggle">
     Auto
   </label>
-  <span class="autoupdate-status" data-role="autoupdate-status"></span>
+  <span class="autoupdate-status" data-role="autoupdate-status" role="status" aria-live="polite"></span>
   <span class="thread-reply-stat">R: <span data-role="thread-reply-count">{reply_count}</span></span>
 </div>
 "#,
         nav_class = nav_class,
-        s = escape_html(board_short),
+        board_short = board_short,
         jump_link = jump_link,
         jump_label = jump_label,
         reply_count = reply_count,
@@ -109,20 +110,14 @@ pub fn thread_page(
     is_admin: bool,
     poll: Option<&crate::models::PollData>,
     error: Option<&str>,
+    success: Option<&str>,
+    reply_prefill: Option<&super::forms::PostFormState>,
     current_theme: Option<&str>,
     collapse_greentext: bool,
+    can_post: bool,
 ) -> String {
     let mut body = String::new();
-
-    if let Some(msg) = error {
-        let _ = write!(
-            body,
-            r#"<div class="post-error-banner">&#9888; {}</div>"#,
-            escape_html(msg)
-        );
-    }
-
-    if is_admin {
+    let admin_toolbar = if is_admin {
         let sticky_action = if thread.sticky {
             ("unsticky", "&#128204; Unsticky")
         } else {
@@ -133,8 +128,7 @@ pub fn thread_page(
         } else {
             ("lock", "&#128274; Lock")
         };
-        let _ = write!(
-            body,
+        format!(
             r#"<div class="admin-toolbar">
 <span class="admin-toolbar-label">&#9632; ADMIN</span>
 <form method="POST" action="/admin/thread/action" style="display:inline">
@@ -172,7 +166,6 @@ pub fn thread_page(
             sticky_lbl = sticky_action.1,
             lock_act = lock_action.0,
             lock_lbl = lock_action.1,
-            // Show "Archive Thread" only when the thread is not already archived.
             archive_btn = if thread.archived {
                 String::new()
             } else {
@@ -192,6 +185,24 @@ pub fn thread_page(
                     board = escape_html(&board.short_name),
                 )
             }
+        )
+    } else {
+        String::new()
+    };
+
+    if let Some(msg) = success {
+        let _ = write!(
+            body,
+            r#"<div class="post-success-banner">{}</div>"#,
+            escape_html(msg)
+        );
+    }
+
+    if let Some(msg) = error {
+        let _ = write!(
+            body,
+            r#"<div class="post-error-banner">&#9888; {}</div>"#,
+            escape_html(msg)
         );
     }
 
@@ -206,11 +217,14 @@ pub fn thread_page(
     let _ = write!(
         body,
         r#"<div id="top"></div>
-<div class="thread-board-banner board-thread-header">/{s}/ — {bn}</div>
+<div class="thread-board-banner board-thread-header">/{s}/ — {bn}{access_badge}</div>
+{admin_toolbar}
 {top_nav}"#,
         s = escape_html(&board.short_name),
         bn = escape_html(&board.name),
-        top_nav = render_thread_nav(&board.short_name, thread.reply_count, false)
+        access_badge = super::board::board_access_badge(board),
+        admin_toolbar = admin_toolbar,
+        top_nav = render_thread_nav(board, thread.reply_count, false)
     );
     body.push_str(thread_notice);
 
@@ -247,24 +261,44 @@ pub fn thread_page(
 
     body.push_str("</div><!-- #thread-posts -->\n");
 
-    if !thread.locked && !thread.archived {
-        let form_html = super::forms::reply_form(&board.short_name, thread.id, csrf_token, board);
+    if !thread.locked && !thread.archived && can_post {
+        let form_html = super::forms::reply_form(
+            &board.short_name,
+            thread.id,
+            csrf_token,
+            board,
+            reply_prefill,
+        );
+        let show_post_form = error.is_some() || reply_prefill.is_some();
         let _ = write!(
             body,
             r##"<div class="post-toggle-bar reply">
   <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Reply ]</a>
 </div>
-<div class="post-form-wrap" id="post-form-wrap" style="display:none">
+<div class="{post_form_class}" id="post-form-wrap" style="{post_form_style}">
   {form_html}
-</div>"##
+</div>"##,
+            post_form_class = if show_post_form {
+                "post-form-wrap is-open"
+            } else {
+                "post-form-wrap is-collapsed"
+            },
+            post_form_style = if show_post_form {
+                "display:block"
+            } else {
+                "display:none"
+            },
         );
+    } else if !thread.locked && !thread.archived && board.access_mode.requires_post_password() {
+        body.push_str(&super::board::render_post_access_gate(
+            board,
+            csrf_token,
+            &format!("/{}/thread/{}", board.short_name, thread.id),
+            "unlock posting",
+        ));
     }
     body.push_str("<div id=\"bottom\"></div>\n");
-    body.push_str(&render_thread_nav(
-        &board.short_name,
-        thread.reply_count,
-        true,
-    ));
+    body.push_str(&render_thread_nav(board, thread.reply_count, true));
 
     body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
@@ -525,6 +559,45 @@ fn annotate_op_quotelinks(body_html: &str, thread_op_id: Option<i64>) -> String 
     body_html.replace(&target, &replacement)
 }
 
+const FILE_NAME_STEM_PREFIX_DISPLAY_CHARS: usize = 20;
+const FILE_NAME_TRUNCATION_MARKER: &str = "(...)";
+
+fn truncate_file_name_stem(input: &str) -> String {
+    if input.chars().count() <= FILE_NAME_STEM_PREFIX_DISPLAY_CHARS {
+        return input.to_string();
+    }
+
+    let prefix: String = input
+        .chars()
+        .take(FILE_NAME_STEM_PREFIX_DISPLAY_CHARS)
+        .collect();
+    format!("{prefix}{FILE_NAME_TRUNCATION_MARKER}")
+}
+
+fn display_file_name(name: &str) -> String {
+    match name.rfind('.') {
+        Some(dot_idx) if dot_idx > 0 => {
+            let (stem, ext) = name.split_at(dot_idx);
+            if stem.chars().count() > FILE_NAME_STEM_PREFIX_DISPLAY_CHARS {
+                format!("{}{}", truncate_file_name_stem(stem), ext)
+            } else {
+                name.to_string()
+            }
+        }
+        _ => truncate_file_name_stem(name),
+    }
+}
+
+fn render_file_link(file_path: &str, file_name: &str) -> String {
+    let display_name = display_file_name(file_name);
+    format!(
+        r#"<a href="/boards/{file_path}" target="_blank" rel="noreferrer" title="{full_name}">{display_name}</a>"#,
+        file_path = escape_html(file_path),
+        full_name = escape_html(file_name),
+        display_name = escape_html(&display_name),
+    )
+}
+
 /// Render a single post as HTML.
 /// `pub` because board.rs uses this for thread-summary preview posts and
 /// search results; all other call-sites are within this module.
@@ -602,19 +675,44 @@ pub fn render_post(
     } else {
         String::new()
     };
+    let media_processing_badge = match post.media_processing_state.as_deref() {
+        Some("pending") => {
+            r#" <span class="post-edited" title="Background media processing is still running.">(processing media)</span>"#
+                .to_string()
+        }
+        Some("failed") => {
+            let title = post
+                .media_processing_error
+                .as_deref()
+                .map_or_else(
+                    || "Background media processing failed.".to_string(),
+                    escape_html,
+                );
+            format!(
+                r#" <span class="post-edited" title="{title}">(media processing failed)</span>"#
+            )
+        }
+        _ => String::new(),
+    };
+    let media_processing_state_attr = post
+        .media_processing_state
+        .as_deref()
+        .map(|state| format!(r#" data-media-processing-state="{}""#, escape_html(state)))
+        .unwrap_or_default();
 
     let mut html = format!(
-        r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}>
+        r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}{media_processing_state_attr}>
 <div class="post-meta">
 {subject_html}<strong class="name">{name}</strong>{tripcode}{poster_id_html}
 <span class="post-time" data-utc="{ts}">{time}</span>{edited}
-<a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>{post_state_badges}
+<a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>{post_state_badges}{media_processing_badge}
 <span class="backrefs" id="backrefs-{id}"></span>
 </div>"##,
         op_class = op_class,
         id = post.id,
         thread_id = post.thread_id,
         poster_attr = poster_attr,
+        media_processing_state_attr = media_processing_state_attr,
         subject_html = subject_html,
         name = escape_html(&post.name),
         tripcode = tripcode_html,
@@ -623,6 +721,7 @@ pub fn render_post(
         time = fmt_ts_short(post.created_at),
         edited = edited_html,
         post_state_badges = post_state_badges,
+        media_processing_badge = media_processing_badge,
     );
 
     // Image / Video / Audio
@@ -630,6 +729,7 @@ pub fn render_post(
         if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
             let size_str = post.file_size.map(format_file_size).unwrap_or_default();
             let name_str = post.file_name.as_deref().unwrap_or("file");
+            let file_link = render_file_link(file, name_str);
             let mime = post
                 .mime_type
                 .as_deref()
@@ -667,16 +767,17 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container audio-container">
 <div class="file-info">
-  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: {file_link} ({sz})
 </div>
 <div class="audio-thumb">
-  <img class="thumb" src="/boards/{th}" loading="lazy" alt="audio">
+  <img class="thumb" src="/boards/{th}" loading="eager" alt="audio">
 </div>
-<audio controls preload="none" class="audio-player">
+<audio controls preload="none" class="audio-player" data-audio-title="{orig}">
   <source src="/boards/{f}" type="{mime}">
   Your browser does not support the audio element.
 </audio>
 </div>"#,
+                    file_link = file_link,
                     f = escape_html(file),
                     th = escape_html(thumb),
                     orig = escape_html(name_str),
@@ -688,37 +789,40 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container">
 <div class="file-info">
-  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: {file_link} ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<a class="media-preview" data-action="expand-media" href="/boards/{f}" target="_blank" rel="noreferrer" title="click to play">
-  <img class="thumb" src="/boards/{th}" loading="lazy" alt="video thumbnail">
+<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to play">
+  <img class="thumb" src="/boards/{th}" loading="eager" alt="video thumbnail">
   <div class="media-expand-overlay">&#9654;</div>
 </a>
-<video class="media-expanded" controls preload="none" style="display:none">
+<video class="media-expanded media-expanded-video" controls preload="none" playsinline webkit-playsinline style="display:none">
   <source src="/boards/{f}" type="{mime}">
 </video>
 </div>"#,
+                    file_link = file_link,
                     f = escape_html(file),
                     th = escape_html(thumb),
-                    orig = escape_html(name_str),
                     sz = escape_html(&size_str),
                     mime = escape_html(mime)
                 );
             } else {
                 // Image
+                // Keep the preview as an inline expansion control rather than
+                // a new tab so a slow JS load or missed handler does not
+                // strand the user in a raw-file window.
                 let _ = write!(
                     html,
                     r#"<div class="file-container{combo_class}">
 <div class="file-info">
-  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: {file_link} ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<a class="media-preview" data-action="expand-media" href="/boards/{f}" target="_blank" rel="noreferrer" title="click to expand">
-  <img class="thumb" src="/boards/{th}" loading="lazy" alt="image">
+<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
+  <img class="thumb" src="/boards/{th}" loading="eager" alt="image">
   <div class="media-expand-overlay">&#x2922;</div>
 </a>
-<img class="media-expanded" src="" data-src="/boards/{f}" style="display:none"
+<img class="media-expanded media-expanded-image" src="" data-src="/boards/{f}" style="display:none"
      alt="image" draggable="false">
 {audio_combo_html}
 </div>"#,
@@ -727,24 +831,27 @@ pub fn render_post(
                     } else {
                         ""
                     },
+                    file_link = file_link,
                     f = escape_html(file),
                     th = escape_html(thumb),
-                    orig = escape_html(name_str),
                     sz = escape_html(&size_str),
                     audio_combo_html = combo_audio.map_or_else(
                         String::new,
                         |(aud_file, aud_mime, aud_name, aud_size)| {
+                            let audio_link = render_file_link(aud_file, aud_name);
                             format!(
                                 r#"<div class="audio-combo audio-combo-inline">
 <div class="file-info">
-  Audio: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  Audio: {audio_link} ({sz})
 </div>
-<audio controls preload="none" class="audio-player audio-player-combo">
+<audio controls preload="none" class="audio-player audio-player-combo" data-audio-title="{orig}" data-artwork-src="/boards/{th}">
   <source src="/boards/{f}" type="{mime}">
   Your browser does not support the audio element.
 </audio>
 </div>"#,
+                                audio_link = audio_link,
                                 f = escape_html(aud_file),
+                                th = escape_html(thumb),
                                 orig = escape_html(aud_name),
                                 sz = escape_html(&aud_size),
                                 mime = escape_html(aud_mime)
@@ -753,6 +860,27 @@ pub fn render_post(
                     )
                 );
             }
+        } else if let Some(file) = &post.file_path {
+            let size_str = post.file_size.map(format_file_size).unwrap_or_default();
+            let name_str = post.file_name.as_deref().unwrap_or("file");
+            let file_link = render_file_link(file, name_str);
+            let status_note = match post.media_processing_state.as_deref() {
+                Some("pending") => "Preview still processing.",
+                Some("failed") => "Preview generation failed; original file is still available.",
+                _ => "Preview unavailable.",
+            };
+            let _ = write!(
+                html,
+                r#"<div class="file-container">
+<div class="file-info">
+  File: {file_link} ({sz})
+  <span class="post-edited" title="{status}">{status}</span>
+</div>
+</div>"#,
+                file_link = file_link,
+                sz = escape_html(&size_str),
+                status = escape_html(status_note),
+            );
         }
     }
 
@@ -760,15 +888,15 @@ pub fn render_post(
         if let Some(file) = &post.file_path {
             let size_str = post.file_size.map(format_file_size).unwrap_or_default();
             let name_str = post.file_name.as_deref().unwrap_or("download");
+            let file_link = render_file_link(file, name_str);
             let _ = write!(
                 html,
                 r#"<div class="file-container file-download">
 <div class="file-info">
-  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: {file_link} ({sz})
 </div>
 </div>"#,
-                f = escape_html(file),
-                orig = escape_html(name_str),
+                file_link = file_link,
                 sz = escape_html(&size_str)
             );
         }
@@ -782,17 +910,19 @@ pub fn render_post(
                 .audio_file_size
                 .map(format_file_size)
                 .unwrap_or_default();
+            let audio_link = render_file_link(aud_file, aud_name);
             let _ = write!(
                 html,
                 r#"<div class="file-container audio-container audio-combo">
 <div class="file-info">
-  File: <a href="/boards/{f}" target="_blank" rel="noreferrer">{orig}</a> ({sz})
+  File: {audio_link} ({sz})
 </div>
-<audio controls preload="none" class="audio-player">
+<audio controls preload="none" class="audio-player" data-audio-title="{orig}">
   <source src="/boards/{f}" type="{mime}">
   Your browser does not support the audio element.
 </audio>
 </div>"#,
+                audio_link = audio_link,
                 f = escape_html(aud_file),
                 orig = escape_html(aud_name),
                 sz = escape_html(&aud_size),
@@ -891,6 +1021,7 @@ pub fn edit_post_page(
     csrf_token: &str,
     boards: &[Board],
     prefill_token: &str,
+    prefill_body: Option<&str>,
     error: Option<&str>,
     current_theme: Option<&str>,
     collapse_greentext: bool,
@@ -903,6 +1034,7 @@ pub fn edit_post_page(
             )
         })
         .unwrap_or_default();
+    let current_body = prefill_body.unwrap_or(&post.body);
 
     let body = format!(
         r#"{error_html}
@@ -935,7 +1067,7 @@ pub fn edit_post_page(
         tid = post.thread_id,
         pid = post.id,
         csrf = escape_html(csrf_token),
-        current_body = escape_html(&post.body),
+        current_body = escape_html(current_body),
         token = escape_html(prefill_token),
     );
 
@@ -957,8 +1089,8 @@ pub fn edit_post_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{render_post, RenderPostOpts};
-    use crate::models::{MediaType, Post};
+    use super::{display_file_name, edit_post_page, render_post, thread_page, RenderPostOpts};
+    use crate::models::{BoardAccessMode, MediaType, Post, Thread};
 
     fn sample_post() -> Post {
         Post {
@@ -985,7 +1117,96 @@ mod tests {
             deletion_token: "token".into(),
             is_op: false,
             edited_at: None,
+            media_processing_state: None,
+            media_processing_error: None,
         }
+    }
+
+    fn sample_thread() -> Thread {
+        Thread {
+            id: 87,
+            board_id: 1,
+            subject: Some("Thread subject".into()),
+            created_at: 1_700_000_000,
+            bumped_at: 1_700_000_100,
+            locked: false,
+            sticky: false,
+            archived: false,
+            reply_count: 12,
+            image_count: 3,
+            op_body: Some("Thread body preview".into()),
+            op_file: Some("test/image.webp".into()),
+            op_thumb: Some("test/thumbs/image.webp".into()),
+            op_name: Some("anon".into()),
+            op_tripcode: None,
+            op_id: Some(1),
+        }
+    }
+
+    #[test]
+    fn thread_page_renders_thread_nav_links_and_reply_open_action() {
+        let board = crate::test_fixtures::sample_board();
+        let thread = sample_thread();
+        let posts = vec![Post {
+            is_op: true,
+            ..sample_post()
+        }];
+
+        let html = thread_page(
+            &board,
+            &thread,
+            &posts,
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+        );
+
+        assert!(html.contains(r#"href="/test">[ Return ]</a>"#));
+        assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
+        assert!(html.contains(r##"href="#bottom">[ Bottom ]</a>"##));
+        assert!(html.contains(r##"href="#top">[ Top ]</a>"##));
+        assert!(html.contains(r#"data-action="toggle-post-form""#));
+    }
+
+    #[test]
+    fn thread_page_renders_access_gate_when_posting_is_locked_behind_password() {
+        let board = crate::models::Board {
+            access_mode: BoardAccessMode::PostPassword,
+            access_password_hash: "hash".into(),
+            ..crate::test_fixtures::sample_board()
+        };
+        let thread = sample_thread();
+        let posts = vec![Post {
+            is_op: true,
+            ..sample_post()
+        }];
+
+        let html = thread_page(
+            &board,
+            &thread,
+            &posts,
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+        );
+
+        assert!(html.contains(r#"href="/test">[ Return ]</a>"#));
+        assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
+        assert!(html.contains(r#"id="board-access-gate""#));
     }
 
     #[test]
@@ -1015,7 +1236,47 @@ mod tests {
 
         assert!(html.contains("file-container image-audio-combo"));
         assert!(html.contains(r#"Audio: <a href="/boards/test/song.flac""#));
+        assert!(html.contains(r#"data-artwork-src="/boards/test/thumbs/image.webp""#));
         assert!(!html.contains("file-container audio-container audio-combo"));
+    }
+
+    #[test]
+    fn display_file_name_truncates_long_stems_and_keeps_extension() {
+        assert_eq!(
+            display_file_name("A412BB86-098B-48D1-7DG12GNY78KS.jpg"),
+            "A412BB86-098B-48D1-7(...).jpg"
+        );
+        assert_eq!(display_file_name("short.webp"), "short.webp");
+        assert_eq!(
+            display_file_name("1234567890123456789012345"),
+            "12345678901234567890(...)"
+        );
+    }
+
+    #[test]
+    fn render_post_uses_truncated_filename_with_full_title() {
+        let mut post = sample_post();
+        post.file_name = Some("supercalifragilisticx.webp".into());
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: true,
+                allow_editing: false,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html
+            .contains(r#"title="supercalifragilisticx.webp">supercalifragilistic(...).webp</a>"#));
     }
 
     #[test]
@@ -1043,5 +1304,90 @@ mod tests {
         assert!(html.contains("thread-state-badge-pin"));
         assert!(html.contains("thread-state-badge-archive"));
         assert!(!html.contains("thread-state-badge-lock"));
+    }
+
+    #[test]
+    fn media_processing_failure_renders_fallback_when_thumb_is_missing() {
+        let mut post = sample_post();
+        post.thumb_path = None;
+        post.media_processing_state = Some("failed".into());
+        post.media_processing_error = Some("Queue exhausted retries".into());
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: true,
+                allow_editing: false,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html.contains("media processing failed"));
+        assert!(html.contains("Preview generation failed; original file is still available."));
+        assert!(html.contains(r#"href="/boards/test/image.webp""#));
+    }
+
+    #[test]
+    fn thread_page_reopens_reply_form_with_prefill_on_error() {
+        let board = crate::test_fixtures::sample_board();
+        let thread = sample_thread();
+        let posts = vec![Post {
+            is_op: true,
+            ..sample_post()
+        }];
+        let reply_prefill = crate::templates::forms::PostFormState {
+            body: "retry reply".into(),
+            sage: true,
+            ..crate::templates::forms::PostFormState::default()
+        };
+
+        let html = thread_page(
+            &board,
+            &thread,
+            &posts,
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            Some("Wait before posting"),
+            None,
+            Some(&reply_prefill),
+            None,
+            false,
+            true,
+        );
+
+        assert!(html.contains(r#"class="post-form-wrap is-open""#));
+        assert!(html.contains(">retry reply</textarea>"));
+        assert!(html.contains(r#"name="sage" value="1" checked"#));
+    }
+
+    #[test]
+    fn edit_post_page_prefers_submitted_body_when_re_rendered() {
+        let board = crate::test_fixtures::sample_board();
+        let post = sample_post();
+
+        let html = edit_post_page(
+            &board,
+            &post,
+            "csrf",
+            std::slice::from_ref(&board),
+            "token",
+            Some("edited draft"),
+            Some("Incorrect edit token."),
+            None,
+            false,
+        );
+
+        assert!(html.contains(">edited draft</textarea>"));
+        assert!(!html.contains(">body</textarea>"));
     }
 }

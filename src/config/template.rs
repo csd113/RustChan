@@ -118,6 +118,16 @@ wal_checkpoint_interval_secs = 3600
 # freed by deleted posts and threads. Set to 0 to disable. Default: 24.
 auto_vacuum_interval_hours = 24
 
+# How often (in hours) to create a saved full-site backup automatically.
+# These backups are stored in rustchan-data/backups/full/. Set to 0 to disable.
+# Default: 24.
+auto_full_backup_interval_hours = 24
+
+# How many saved full-site backups to keep on disk after a new saved full
+# backup completes. Older saved full backups beyond this limit are deleted.
+# Minimum: 1. Default: 1.
+auto_full_backup_copies_to_keep = 1
+
 # How often (in hours) to purge vote records for polls that have expired.
 # The poll question and options are kept for display; only per-IP vote rows
 # are deleted. Set to 0 to disable. Default: 72.
@@ -169,6 +179,10 @@ port = 8443
 # Redirect plain HTTP → HTTPS (binds an extra listener on http_port).
 # redirect_http = true
 # http_port = 8080
+#
+# When binding to 0.0.0.0/:: with a manual certificate, set the public host(s)
+# accepted by the redirect listener:
+# public_hosts = ["example.com", "www.example.com"]
 
 # Let's Encrypt via ACME (requires the tls-acme Cargo feature):
 # [tls.acme]
