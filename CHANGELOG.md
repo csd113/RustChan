@@ -28,6 +28,11 @@ All notable changes to RustChan will be documented in this file.
 - Thread pages now separate board-level navigation from thread-specific actions more cleanly: board links live in the shared board-nav strip, reply/update controls stay in the thread nav, and the admin toolbar sits under the board context instead of leading the page.
 - Admin board management is now organized around distinct tasks instead of one dense block: each board card separates basic setup, access controls, post features, appearance, backups, and destructive actions, while the full-site and board-backup areas now split scheduling, immediate restore/create actions, and saved archives into clearer sections.
 - Handled XHR validation and restore failures are now transported without browser-level network noise: inline upload and restore errors return structured JSON that preserves the original semantic status in `X-Rustchan-Error-Status`, letting RustChan keep the same in-place error UX without Chromium surfacing expected invalid-request checks as console `Failed to load resource` errors.
+- The admin panel now better preserves operator context during repeated maintenance work: backup/archive dropdowns remember their open state, board/settings forms restore more of their previous inputs after validation failures, and moderation copy/actions are more compact and easier to scan.
+- The terminal dashboard now surfaces active FFmpeg video jobs directly in the TUI, making it easier to spot live transcode backlog without leaving the server console.
+- VP9 transcode settings are now auto-tuned per host architecture and CPU capability: RustChan picks more appropriate `libvpx-vp9` threading, tiling, and `cpu-used` settings on AVX512, AVX2, AVX, SSE4.1, ARM, and generic targets instead of using one static profile everywhere.
+- Release engineering is more automated and portable: tagged builds now publish GitHub Releases through Actions, attach per-platform ZIP archives with bundled `README`/`LICENSE`, and generate verified `SHA256SUMS` manifests for release downloads.
+- CI and release automation now track newer dependency and action versions, including the move to `reqwest 0.13`, newer `rustls-acme`, refreshed Windows support crates, and updated GitHub Actions checkout/artifact/release steps.
 
 ### Fixed
 
@@ -54,6 +59,16 @@ All notable changes to RustChan will be documented in this file.
 - Auto-saved quote-only reply drafts no longer come back as stale `>>123` stubs when you reopen the reply form; only real in-progress text drafts keep persisting between visits.
 - Upload-backed post failures no longer fall back to blocking browser alerts, and media-backed ban hits now redirect to a dedicated ban page so the appeal flow still works without relying on brittle in-place HTML swaps.
 - The recent admin and thread polish pass no longer strands shared JavaScript helpers inside the media auto-compress scope: `createAsyncSubmitHelper`, `requestConfirmation`, and the shared confirmation-submit helpers are once again available to reply uploads, full backup creation, restore uploads, and `data-confirm` actions, restoring inline `.post-error-banner` feedback, confirmation-modal focus/escape/backdrop behavior, the full backup/restore progress flows on live pages, and the compact `[ Return ] [ Catalog ] [ Top/Bottom ] [ Update ] [ Auto ]` thread navigation bars.
+- HSTS emission is now correct for trusted proxy hosts as well as direct connections, avoiding missing strict-transport headers on deployments that terminate TLS upstream.
+- Media post refreshes and moderation report actions now stay in sync on live pages: freshly processed media state is re-rendered more reliably, duplicate report submissions are blocked, and same-thread upload redirects reset reply form state before repopulating it.
+
+### Documentation
+
+- The `README` was refreshed for the `1.1.3` release with clearer wording and updated screenshots/layout so new installs and release downloads better match the current UI.
+
+### Internal
+
+- Upload-flow tests now use temporary directories for better isolation, the FFmpeg VP9 test coverage stays Clippy-clean, and several unused helpers/duplicate form structs were removed to keep the `1.1.3` codebase leaner.
 
 ### Validation
 

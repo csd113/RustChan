@@ -1,7 +1,7 @@
 <div align="center">
 
 <p align="center">
-  <img width="1024" height="1105" alt="rustchan-mascot" src="https://github.com/user-attachments/assets/c22e3e72-c2f5-4932-8565-72839b67bce3" />
+  <img width="320" alt="rustchan-mascot" src="https://github.com/user-attachments/assets/c22e3e72-c2f5-4932-8565-72839b67bce3" />
 </p>
 
 # RustChan
