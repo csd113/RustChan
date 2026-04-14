@@ -404,7 +404,7 @@ async fn run_arti(
 
     tracing::info!(target: "rustchan::detect", "Tor: connected to the Tor network");
 
-    // Security hardening options available in OnionServiceConfigBuilder (Arti 0.40):
+    // Security hardening options available in OnionServiceConfigBuilder (Arti 0.41):
     //   .pow_resistance(...)          — proof-of-work DoS resistance
     //   .rate_limit_num_intro_points  — cap introduction point abuse
     // Currently left at defaults. Consider exposing these in settings.toml (F-18).
@@ -420,7 +420,7 @@ async fn run_arti(
         .launch_onion_service(svc_config)?
         .ok_or("launch_onion_service returned None — unexpected with code-only config")?;
 
-    // F-03: onion_address() can return None during early bringup in Arti 0.40;
+    // F-03: onion_address() can return None during early bringup in Arti 0.41;
     // key material is not guaranteed to be readable synchronously at launch time.
     // Retry up to 10 times at 500 ms intervals (5 s total) before failing.
     let hsid = {
@@ -585,7 +585,7 @@ async fn proxy_tor_stream(
 
 /// Encode an [`HsId`] (Ed25519 public key) as a v3 `.onion` address string.
 ///
-/// [`HsId`] does not implement `std::fmt::Display` in arti-client 0.40.
+/// [`HsId`] does not implement `std::fmt::Display` in arti-client 0.41.
 /// Encoded manually using `HsId: AsRef<[u8; 32]>`.
 ///
 /// Format: `base32( pubkey || sha3_256(".onion checksum" || pubkey || version)[..2] || version )`
