@@ -1368,6 +1368,14 @@ fn restore_db_from_snapshot(
     Ok(())
 }
 
+fn refresh_live_site_state_from_db(conn: &rusqlite::Connection) -> Result<()> {
+    crate::templates::set_live_site_name(&db::get_site_name(conn));
+    crate::templates::set_live_site_subtitle(&db::get_site_subtitle(conn));
+    crate::templates::set_live_boards(db::get_all_boards(conn)?);
+    db::sync_live_theme_state(conn)?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     live_conn: &mut rusqlite::Connection,
@@ -1597,8 +1605,12 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     match db::create_session(live_conn, &fresh_sid, admin_id, expires_at) {
         Ok(()) => {
             tracing::info!(target: "admin", admin_id = admin_id, "{completion_log}");
-            if let Ok(boards) = db::get_all_boards(live_conn) {
-                crate::templates::set_live_boards(boards);
+            if let Err(error) = refresh_live_site_state_from_db(live_conn) {
+                tracing::warn!(
+                    target: "admin",
+                    %error,
+                    "Full restore completed but in-memory site state refresh failed"
+                );
             }
             Ok(fresh_sid)
         }
@@ -3290,8 +3302,8 @@ mod tests {
     use super::{
         build_board_backup_manifest, consume_temp_board_download_token,
         create_temp_board_backup_from_full_backup_path, execute_board_restore,
-        latest_verified_full_backup_modified_time_in_dir, render_restored_body_html,
-        should_store_without_recompress, temp_board_download_token_path,
+        latest_verified_full_backup_modified_time_in_dir, refresh_live_site_state_from_db,
+        render_restored_body_html, should_store_without_recompress, temp_board_download_token_path,
         validate_full_restore_archive_layout, write_temp_board_download_token, RestoreKind,
     };
     use crate::error::AppError;
@@ -3470,6 +3482,26 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn refresh_live_site_state_from_db_updates_banner_caches() {
+        crate::templates::set_live_site_name("Before restore");
+        crate::templates::set_live_site_subtitle("before subtitle");
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db conn");
+        crate::db::set_site_setting(&conn, "site_name", "RestoredChan").expect("set site name");
+        crate::db::set_site_setting(&conn, "site_subtitle", "restored subtitle")
+            .expect("set subtitle");
+
+        refresh_live_site_state_from_db(&conn).expect("refresh live site state");
+
+        assert_eq!(&*crate::templates::live_site_name(), "RestoredChan");
+        assert_eq!(
+            &*crate::templates::live_site_subtitle(),
+            "restored subtitle"
+        );
     }
 
     #[test]

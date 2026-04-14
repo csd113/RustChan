@@ -636,7 +636,14 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
              COUNT(*)                                                           AS total_posts,
              SUM(CASE WHEN media_type = 'image' THEN 1 ELSE 0 END)             AS total_images,
              SUM(CASE WHEN media_type = 'video' THEN 1 ELSE 0 END)             AS total_videos,
-             SUM(CASE WHEN media_type = 'audio' THEN 1 ELSE 0 END)             AS total_audio,
+             SUM(
+                 CASE
+                     WHEN media_type = 'audio'
+                       OR audio_file_path IS NOT NULL
+                       OR mime_type LIKE 'audio/%'
+                     THEN 1 ELSE 0
+                 END
+             )                                                                 AS total_audio,
              COALESCE(
                  SUM(CASE WHEN file_path IS NOT NULL AND file_size IS NOT NULL
                           THEN file_size ELSE 0 END)
@@ -656,4 +663,52 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
         },
     )
     .context("Failed to query site stats")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_site_stats;
+
+    #[test]
+    fn site_stats_count_audio_primary_and_combo_uploads() {
+        let pool = crate::db::init_test_pool().expect("init test pool");
+        let conn = pool.get().expect("get test connection");
+
+        conn.execute(
+            "INSERT INTO boards (id, short_name, name) VALUES (1, 'test', 'Test')",
+            [],
+        )
+        .expect("insert board");
+        conn.execute(
+            "INSERT INTO threads (id, board_id, subject) VALUES (1, 1, 'test thread')",
+            [],
+        )
+        .expect("insert thread");
+
+        conn.execute(
+            "INSERT INTO posts (
+                 id, thread_id, board_id, body, body_html, deletion_token, is_op,
+                 file_path, file_name, file_size, mime_type, media_type
+             ) VALUES
+             (1, 1, 1, 'audio post', '<p>audio</p>', 'tok1', 0,
+              'test/track.mp3', 'track.mp3', 1234, 'audio/mpeg', 'audio'),
+             (2, 1, 1, 'combo post', '<p>combo</p>', 'tok2', 0,
+              'test/cover.png', 'cover.png', 4321, 'image/png', 'image')",
+            [],
+        )
+        .expect("insert primary posts");
+        conn.execute(
+            "UPDATE posts
+             SET audio_file_path = 'test/track.flac',
+                 audio_file_name = 'track.flac',
+                 audio_file_size = 5678,
+                 audio_mime_type = 'audio/flac'
+             WHERE id = 2",
+            [],
+        )
+        .expect("add combo audio");
+
+        let stats = get_site_stats(&conn).expect("load stats");
+        assert_eq!(stats.total_audio, 2);
+    }
 }

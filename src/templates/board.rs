@@ -503,7 +503,7 @@ fn board_cards(
 #[allow(clippy::too_many_lines)]
 pub fn index_page(
     board_stats: &[crate::models::BoardStats],
-    site_stats: &crate::models::SiteStats,
+    site_stats: Option<&crate::models::SiteStats>,
     csrf_token: &str,
     onion_address: Option<&str>,
     current_theme: Option<&str>,
@@ -542,10 +542,11 @@ pub fn index_page(
         ""
     };
 
-    #[allow(clippy::cast_precision_loss)]
-    let active_gb = site_stats.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-    let stats_sec = format!(
-        r#"<div class="index-section index-stats-section">
+    let stats_sec = if let Some(site_stats) = site_stats {
+        #[allow(clippy::cast_precision_loss)]
+        let active_gb = site_stats.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        format!(
+            r#"<div class="index-section index-stats-section">
 <h2 class="index-section-title">// Stats</h2>
 <div class="index-stats-grid">
   <div class="index-stat"><span class="index-stat-value">{tp}</span><span class="index-stat-label">total posts</span></div>
@@ -555,12 +556,19 @@ pub fn index_page(
   <div class="index-stat"><span class="index-stat-value">{gb:.2} GB</span><span class="index-stat-label">active content</span></div>
 </div>
 </div>"#,
-        tp = site_stats.total_posts,
-        ti = site_stats.total_images,
-        tv = site_stats.total_videos,
-        ta = site_stats.total_audio,
-        gb = active_gb,
-    );
+            tp = site_stats.total_posts,
+            ti = site_stats.total_images,
+            tv = site_stats.total_videos,
+            ta = site_stats.total_audio,
+            gb = active_gb,
+        )
+    } else {
+        r#"<div class="index-section index-stats-section">
+<h2 class="index-section-title">// Stats</h2>
+<p class="index-stats-unavailable">site statistics are temporarily unavailable.</p>
+</div>"#
+            .to_string()
+    };
 
     let mut access_links = String::new();
     if let Some(addr) = onion_address {
@@ -1347,8 +1355,10 @@ pub fn archive_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_page, board_cards, board_page, catalog_page, render_catalog_card};
-    use crate::models::{Board, BoardStats, Thread};
+    use super::{
+        archive_page, board_cards, board_page, catalog_page, index_page, render_catalog_card,
+    };
+    use crate::models::{Board, BoardStats, SiteStats, Thread};
     use crate::templates::forms::PostFormState;
     use std::collections::HashSet;
 
@@ -1399,6 +1409,38 @@ mod tests {
 
         let html_with_controls = board_cards(&[&stats], true, "csrf", true);
         assert!(html_with_controls.contains("board-reorder-menu"));
+    }
+
+    #[test]
+    fn index_page_surfaces_unavailable_stats_without_fake_zeroes() {
+        crate::templates::set_live_site_name("TestChan");
+        crate::templates::set_live_site_subtitle("banner subtitle");
+
+        let html = index_page(&[], None, "csrf", None, None, None, true, false);
+
+        assert!(html.contains("site statistics are temporarily unavailable."));
+        assert!(!html.contains("0.00 GB"));
+        assert!(!html.contains("audio files uploaded</span></div>"));
+    }
+
+    #[test]
+    fn index_page_renders_stats_when_available() {
+        crate::templates::set_live_site_name("TestChan");
+        crate::templates::set_live_site_subtitle("banner subtitle");
+
+        let stats = SiteStats {
+            total_posts: 12,
+            total_images: 8,
+            total_videos: 2,
+            total_audio: 3,
+            active_bytes: 2 * 1024 * 1024 * 1024,
+        };
+
+        let html = index_page(&[], Some(&stats), "csrf", None, None, None, true, false);
+
+        assert!(html.contains("audio files uploaded"));
+        assert!(html.contains(">3</span><span class=\"index-stat-label\">audio files uploaded"));
+        assert!(html.contains("2.00 GB"));
     }
 
     #[test]

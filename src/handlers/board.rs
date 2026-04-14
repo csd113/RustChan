@@ -552,10 +552,16 @@ pub async fn index(
         .map(|cookie| cookie.value().to_string());
     let (board_stats, site_data, is_admin) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<(Vec<crate::models::BoardStats>, crate::models::SiteStats, bool)> {
+        move || -> Result<(Vec<crate::models::BoardStats>, Option<crate::models::SiteStats>, bool)> {
             let conn = pool.get()?;
             let boards = db::get_all_boards_with_stats(&conn)?;
-            let site_data = db::get_site_stats(&conn).unwrap_or_default();
+            let site_data = match db::get_site_stats(&conn) {
+                Ok(stats) => Some(stats),
+                Err(error) => {
+                    tracing::warn!(target: "db", %error, "Failed to load home page site stats");
+                    None
+                }
+            };
             let is_admin = admin_session
                 .as_deref()
                 .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
@@ -591,7 +597,7 @@ pub async fn index(
         jar,
         Html(templates::index_page(
             &board_stats,
-            &site_data,
+            site_data.as_ref(),
             &csrf,
             onion_address.as_deref(),
             current_theme.as_deref(),

@@ -2283,6 +2283,12 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   margin-top: 4px;
 }
 
+.index-stats-unavailable {
+  margin: 12px 0 0;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
 /* ── Inline post error banner ────────────────────────────────────────────── */
 
 .post-error-banner {
