@@ -315,9 +315,14 @@ struct AdminPanelSnapshot {
     site_name: String,
     site_subtitle: String,
     default_theme: String,
+    banner_rotation_interval_minutes: i64,
+    banner_external_links_enabled: bool,
     auto_full_backup_interval_hours: u64,
     auto_full_backup_copies_to_keep: u64,
     themes: Vec<crate::models::Theme>,
+    global_banners: Vec<crate::models::BannerAsset>,
+    home_banners: Vec<crate::models::BannerAsset>,
+    board_banners: Vec<crate::models::BannerAsset>,
     full_backups: Vec<crate::models::BackupInfo>,
     board_backups: Vec<crate::models::BackupInfo>,
     db_size_bytes: i64,
@@ -344,7 +349,16 @@ fn load_admin_panel_snapshot(
     let site_name = db::get_site_name(conn);
     let site_subtitle = db::get_site_subtitle(conn);
     let default_theme = db::get_default_user_theme(conn);
+    let banner_rotation_interval_minutes = db::get_banner_rotation_interval_minutes(conn);
+    let banner_external_links_enabled = db::get_banner_external_links_enabled(conn);
     let themes = db::load_themes(conn)?;
+    let global_banners =
+        db::list_banner_assets_for_scope(conn, crate::models::BannerScope::Global)?;
+    let home_banners = db::list_banner_assets_for_scope(conn, crate::models::BannerScope::Home)?;
+    let mut board_banners = Vec::new();
+    for board in &boards {
+        board_banners.extend(db::list_banner_assets_for_board(conn, board.id)?);
+    }
     let full_backups = list_backup_files(&full_backup_dir(), BackupListKind::Full);
     let board_backups = list_backup_files(&board_backup_dir(), BackupListKind::Board);
     let backup_summary = build_backup_summary(&full_backups);
@@ -366,9 +380,14 @@ fn load_admin_panel_snapshot(
             site_name,
             site_subtitle,
             default_theme,
+            banner_rotation_interval_minutes,
+            banner_external_links_enabled,
             auto_full_backup_interval_hours: auto_full_backup_settings.interval_hours,
             auto_full_backup_copies_to_keep: auto_full_backup_settings.copies_to_keep,
             themes,
+            global_banners,
+            home_banners,
+            board_banners,
             full_backups,
             board_backups,
             db_size_bytes,
@@ -448,9 +467,14 @@ fn render_admin_panel_from_snapshot(
         &snapshot.site_name,
         &snapshot.site_subtitle,
         &snapshot.default_theme,
+        snapshot.banner_rotation_interval_minutes,
+        snapshot.banner_external_links_enabled,
         snapshot.auto_full_backup_interval_hours,
         snapshot.auto_full_backup_copies_to_keep,
         &snapshot.themes,
+        &snapshot.global_banners,
+        &snapshot.home_banners,
+        &snapshot.board_banners,
         tor_address.as_deref(),
         flash_ref,
         open_section,

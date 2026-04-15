@@ -8,7 +8,9 @@
 //   admin_ip_history_page   — posts by IP hash
 
 use crate::db::DbHealthReport;
-use crate::models::{BackupInfo, Ban, Board, WordFilter};
+use crate::models::{
+    BackupInfo, Ban, BannerAsset, BannerScope, BannerTargetType, Board, BoardBannerMode, WordFilter,
+};
 use crate::utils::{files::format_file_size, sanitize::escape_html};
 use std::fmt::Write;
 
@@ -110,6 +112,123 @@ html[data-theme="{slug}"] a:hover {{
     )
 }
 
+fn banner_target_type_options(selected: BannerTargetType) -> String {
+    let options = [
+        (BannerTargetType::None, "No link"),
+        (BannerTargetType::InternalBoard, "Internal board"),
+        (BannerTargetType::InternalPath, "Internal path"),
+        (BannerTargetType::ExternalUrl, "External URL"),
+    ];
+    let mut out = String::new();
+    for (value, label) in options {
+        let _ = write!(
+            out,
+            r#"<option value="{value}"{selected}>{label}</option>"#,
+            value = value.as_str(),
+            selected = if value == selected { " selected" } else { "" },
+            label = label,
+        );
+    }
+    out
+}
+
+fn banner_preview_html(asset: &BannerAsset, alt: &str) -> String {
+    format!(
+        r#"<img class="board-banner-preview-image" src="{src}" alt="{alt}" width="{width}" height="{height}">"#,
+        src = escape_html(&crate::banner::banner_asset_url(asset)),
+        alt = escape_html(alt),
+        width = crate::banner::DISPLAY_WIDTH,
+        height = crate::banner::DISPLAY_HEIGHT,
+    )
+}
+
+fn render_banner_asset_row(asset: &BannerAsset, csrf_token: &str, show_placements: bool) -> String {
+    let placement_controls = if show_placements {
+        format!(
+            r#"<label class="admin-inline-checkbox"><input type="checkbox" name="show_on_index" value="1"{}> index</label>
+<label class="admin-inline-checkbox"><input type="checkbox" name="show_on_catalog" value="1"{}> catalog</label>"#,
+            if asset.show_on_index { " checked" } else { "" },
+            if asset.show_on_catalog {
+                " checked"
+            } else {
+                ""
+            },
+        )
+    } else {
+        String::new()
+    };
+    let move_controls = if asset.scope == BannerScope::Board {
+        String::new()
+    } else {
+        format!(
+            r#"<form method="POST" action="/admin/banner/move" class="admin-inline-actions">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="banner_id" value="{id}">
+  <input type="hidden" name="direction" value="up">
+  <button type="submit">up</button>
+</form>
+<form method="POST" action="/admin/banner/move" class="admin-inline-actions">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="banner_id" value="{id}">
+  <input type="hidden" name="direction" value="down">
+  <button type="submit">down</button>
+</form>"#,
+            csrf = escape_html(csrf_token),
+            id = asset.id,
+        )
+    };
+    format!(
+        r#"<div class="admin-banner-row">
+  <div class="admin-banner-thumb">{preview}</div>
+  <form method="POST" action="/admin/banner/update" class="admin-banner-meta-form">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="banner_id" value="{id}">
+    <label>Target
+      <select name="target_type">{target_options}</select>
+    </label>
+    <label>Value
+      <input type="text" name="target_value" value="{target_value}" maxlength="512" placeholder="/out/ or https://example.com">
+    </label>
+    <label class="admin-inline-checkbox"><input type="checkbox" name="enabled" value="1"{enabled}> enabled</label>
+    {placement_controls}
+    <button type="submit">save</button>
+  </form>
+  <div class="admin-inline-actions admin-inline-actions-spaced">
+    {move_controls}
+    <form method="POST" action="/admin/banner/delete" class="admin-inline-actions">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <input type="hidden" name="banner_id" value="{id}">
+      <button type="submit" class="btn-danger">delete</button>
+    </form>
+  </div>
+</div>"#,
+        preview = banner_preview_html(asset, "banner preview"),
+        csrf = escape_html(csrf_token),
+        id = asset.id,
+        target_options = banner_target_type_options(asset.target_type),
+        target_value = escape_html(&asset.target_value),
+        enabled = if asset.enabled { " checked" } else { "" },
+        placement_controls = placement_controls,
+        move_controls = move_controls,
+    )
+}
+
+fn render_banner_asset_list(
+    assets: &[BannerAsset],
+    csrf_token: &str,
+    show_placements: bool,
+    empty_message: &str,
+) -> String {
+    if assets.is_empty() {
+        return format!(r#"<p class="admin-meta-note">{empty_message}</p>"#);
+    }
+    assets
+        .iter()
+        .map(|asset| render_banner_asset_row(asset, csrf_token, show_placements))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 #[allow(clippy::too_many_lines)]
 fn render_board_settings_card(
     board: &Board,
@@ -117,6 +236,7 @@ fn render_board_settings_card(
     boards: &[Board],
     csrf_token: &str,
     themes: &[crate::models::Theme],
+    board_banner: Option<&BannerAsset>,
     open_section: Option<&str>,
 ) -> String {
     let checked = |value: bool| if value { " checked" } else { "" };
@@ -157,6 +277,91 @@ fn render_board_settings_card(
         " open"
     } else {
         ""
+    };
+    let board_banner_section = {
+        let preview = board_banner
+            .map(|asset| banner_preview_html(asset, &format!("/{}/ banner", board.short_name)))
+            .unwrap_or_else(|| {
+                "<p class=\"admin-meta-note\">No board-specific banner uploaded.</p>".to_string()
+            });
+        let existing = board_banner
+            .map(|asset| render_banner_asset_row(asset, csrf_token, true))
+            .unwrap_or_default();
+        format!(
+            r#"<div class="admin-subsection admin-subsection-tight">
+  <div class="admin-card-header">
+    <h3>// board banner override</h3>
+    <p>Upload one fixed override banner for /{short}/. It appears under the board description and can show on index, catalog, or both.</p>
+  </div>
+  <div class="admin-banner-thumb-row">{preview}</div>
+  <form method="POST" action="/admin/board/banner" enctype="multipart/form-data" class="admin-banner-upload-form">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <input type="hidden" name="board_id" value="{id}">
+    <label>Target
+      <select name="target_type">{target_options}</select>
+    </label>
+    <label>Value
+      <input type="text" name="target_value" value="{target_value}" maxlength="512" placeholder="/out/ or https://example.com">
+    </label>
+    <label class="admin-inline-checkbox"><input type="checkbox" name="enabled" value="1"{enabled}> enabled</label>
+    <label class="admin-inline-checkbox"><input type="checkbox" name="show_on_index" value="1"{show_on_index}> index</label>
+    <label class="admin-inline-checkbox"><input type="checkbox" name="show_on_catalog" value="1"{show_on_catalog}> catalog</label>
+    <label class="admin-file-field">Banner image
+      <input type="file" name="banner" accept="image/png,image/jpeg,image/webp" required class="admin-file-input">
+    </label>
+    <button type="submit">{button_label}</button>
+  </form>
+  <p class="admin-meta-note">Exact 468x60 aspect ratio required. Minimum 468x60, recommended 936x120. Uploads are converted to WebP.</p>
+  {existing}
+  {clear_form}
+</div>"#,
+            short = escape_html(&board.short_name),
+            preview = preview,
+            csrf = escape_html(csrf_token),
+            id = board.id,
+            target_options = banner_target_type_options(
+                board_banner
+                    .map(|asset| asset.target_type)
+                    .unwrap_or(BannerTargetType::None),
+            ),
+            target_value = board_banner
+                .map(|asset| escape_html(&asset.target_value))
+                .unwrap_or_default(),
+            enabled = if board_banner.is_some_and(|asset| asset.enabled) {
+                " checked"
+            } else {
+                ""
+            },
+            show_on_index = if board_banner.is_none_or(|asset| asset.show_on_index) {
+                " checked"
+            } else {
+                ""
+            },
+            show_on_catalog = if board_banner.is_none_or(|asset| asset.show_on_catalog) {
+                " checked"
+            } else {
+                ""
+            },
+            button_label = if board_banner.is_some() {
+                "replace banner"
+            } else {
+                "upload banner"
+            },
+            existing = existing,
+            clear_form = if board_banner.is_some() {
+                format!(
+                    r#"<form method="POST" action="/admin/board/banner/clear" class="admin-inline-actions admin-inline-actions-spaced">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="board_id" value="{id}">
+  <button type="submit">clear override image</button>
+</form>"#,
+                    csrf = escape_html(csrf_token),
+                    id = board.id
+                )
+            } else {
+                String::new()
+            },
+        )
     };
 
     format!(
@@ -261,6 +466,13 @@ fn render_board_settings_card(
         {board_theme_options}
       </select>
     </label>
+    <label>Board banner mode
+      <select name="banner_mode">
+        <option value="inherit"{banner_inherit_selected}>Inherit global banners</option>
+        <option value="none"{banner_none_selected}>No banner</option>
+        <option value="override"{banner_override_selected}>Use board override</option>
+      </select>
+    </label>
   </div>
 </div>
 <div class="board-settings-actions">
@@ -282,6 +494,7 @@ fn render_board_settings_card(
 {board_favicon_clear}
 </div>
 <p class="favicon-inline-status">{board_favicon_status}</p>
+{board_banner_section}
 <p class="favicon-inline-status"><strong>// board backup tools</strong> Create a fresh board-only package for immediate download or save one to the server for later restores.</p>
 <div class="board-card-footer-actions">
   <form method="POST" action="/admin/board/backup/create" class="board-backup-download-form" data-board="{short}">
@@ -395,6 +608,21 @@ fn render_board_settings_card(
         } else {
             ""
         },
+        banner_inherit_selected = if matches!(board.banner_mode, BoardBannerMode::Inherit) {
+            " selected"
+        } else {
+            ""
+        },
+        banner_none_selected = if matches!(board.banner_mode, BoardBannerMode::None) {
+            " selected"
+        } else {
+            ""
+        },
+        banner_override_selected = if matches!(board.banner_mode, BoardBannerMode::Override) {
+            " selected"
+        } else {
+            ""
+        },
         board_theme_options = board_theme_options,
         board_favicon_preview = if board_favicon_exists {
             format!(
@@ -432,7 +660,8 @@ fn render_board_settings_card(
             )
         } else {
             String::new()
-        }
+        },
+        board_banner_section = board_banner_section,
     )
 }
 
@@ -453,9 +682,14 @@ pub fn admin_panel_page(
     site_name: &str,
     site_subtitle: &str,
     default_theme: &str,
+    banner_rotation_interval_minutes: i64,
+    banner_external_links_enabled: bool,
     auto_full_backup_interval_hours: u64,
     auto_full_backup_copies_to_keep: u64,
     themes: &[crate::models::Theme],
+    global_banners: &[BannerAsset],
+    home_banners: &[BannerAsset],
+    board_banners: &[BannerAsset],
     tor_address: Option<&str>,
     // Optional one-time flash message shown at the top of the panel.
     // (is_error, message) — is_error=true → red, false → green.
@@ -500,6 +734,9 @@ pub fn admin_panel_page(
             boards,
             csrf_token,
             themes,
+            board_banners.iter().find(|asset| {
+                asset.scope == BannerScope::Board && asset.board_id == Some(board.id)
+            }),
             open_section,
         ));
     }
@@ -1005,6 +1242,11 @@ old boards to prevent query performance degradation.
       {enabled_theme_options}
     </select>
   </label>
+  <label title="0 means pick a new banner on each refresh. Values above 0 enforce timed rotation.">Banner rotate every (minutes)
+    <input type="number" name="banner_rotation_interval_minutes" value="{banner_rotation_interval_minutes}" min="0" max="43200"
+           style="font-family:inherit">
+  </label>
+  <label class="admin-inline-checkbox"><input type="checkbox" name="banner_external_links_enabled" value="1"{banner_external_links_enabled_checked}> Allow external banner links with warning page</label>
 </div>
 <div class="board-settings-actions">
   <button type="submit">save settings</button>
@@ -1024,6 +1266,48 @@ old boards to prevent query performance degradation.
 <p class="admin-meta-note admin-meta-note-spaced">
   {global_favicon_status}
 </p>
+</section>
+
+<section class="admin-section" id="global-banners">
+<h2>// global board banners</h2>
+<p class="admin-meta-note">These banners rotate on board index/catalog pages unless a board override is enabled. Exact 468x60 aspect ratio required. Minimum 468x60, recommended 936x120. Uploads are converted to WebP.</p>
+<form method="POST" action="/admin/site/banner" enctype="multipart/form-data" class="admin-banner-upload-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <label>Target
+    <select name="target_type">{global_banner_target_options}</select>
+  </label>
+  <label>Value
+    <input type="text" name="target_value" maxlength="512" placeholder="/out/ or https://example.com">
+  </label>
+  <label class="admin-inline-checkbox"><input type="checkbox" name="enabled" value="1" checked> enabled</label>
+  <label class="admin-inline-checkbox"><input type="checkbox" name="show_on_index" value="1" checked> index</label>
+  <label class="admin-inline-checkbox"><input type="checkbox" name="show_on_catalog" value="1" checked> catalog</label>
+  <label class="admin-file-field">Banner image
+    <input type="file" name="banner" accept="image/png,image/jpeg,image/webp" required class="admin-file-input">
+  </label>
+  <button type="submit">upload global banner</button>
+</form>
+<div class="admin-banner-list">{global_banner_rows}</div>
+</section>
+
+<section class="admin-section" id="home-banners">
+<h2>// home page banner</h2>
+<p class="admin-meta-note">Separate MOTD/news banner box for the home page only. Exact 468x60 aspect ratio required. Minimum 468x60, recommended 936x120. Uploads are converted to WebP.</p>
+<form method="POST" action="/admin/home/banner" enctype="multipart/form-data" class="admin-banner-upload-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <label>Target
+    <select name="target_type">{home_banner_target_options}</select>
+  </label>
+  <label>Value
+    <input type="text" name="target_value" maxlength="512" placeholder="/rules or https://example.com">
+  </label>
+  <label class="admin-inline-checkbox"><input type="checkbox" name="enabled" value="1" checked> enabled</label>
+  <label class="admin-file-field">Banner image
+    <input type="file" name="banner" accept="image/png,image/jpeg,image/webp" required class="admin-file-input">
+  </label>
+  <button type="submit">upload home banner</button>
+</form>
+<div class="admin-banner-list">{home_banner_rows}</div>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -1464,6 +1748,12 @@ button / button:hover</pre>
         site_name_val = escape_html(site_name),
         site_subtitle_val = escape_html(site_subtitle),
         enabled_theme_options = enabled_theme_options,
+        banner_rotation_interval_minutes = banner_rotation_interval_minutes,
+        banner_external_links_enabled_checked = if banner_external_links_enabled {
+            " checked"
+        } else {
+            ""
+        },
         auto_full_backup_interval_hours = auto_full_backup_interval_hours,
         auto_full_backup_copies_to_keep = auto_full_backup_copies_to_keep,
         builtin_theme_cards = builtin_theme_cards,
@@ -1478,6 +1768,20 @@ button / button:hover</pre>
         } else {
             "No custom global favicon uploaded yet."
         },
+        global_banner_target_options = banner_target_type_options(BannerTargetType::None),
+        home_banner_target_options = banner_target_type_options(BannerTargetType::None),
+        global_banner_rows = render_banner_asset_list(
+            global_banners,
+            csrf_token,
+            true,
+            "No global board banners uploaded yet."
+        ),
+        home_banner_rows = render_banner_asset_list(
+            home_banners,
+            csrf_token,
+            false,
+            "No home page banners uploaded yet."
+        ),
         tor_section = if tor_address.is_none() {
             String::new()
         } else {
@@ -1910,7 +2214,8 @@ pub fn admin_ip_history_page(
 mod tests {
     use super::{admin_panel_page, render_board_settings_card};
     use crate::models::{
-        BackupBoardSummary, BackupInfo, Board, BoardAccessMode, Report, ReportWithContext, Theme,
+        BackupBoardSummary, BackupInfo, Board, BoardAccessMode, BoardBannerMode, Report,
+        ReportWithContext, Theme,
     };
 
     fn sample_board() -> Board {
@@ -1938,6 +2243,7 @@ mod tests {
             collapse_greentext: true,
             post_cooldown_secs: 15,
             default_theme: "terminal".into(),
+            banner_mode: BoardBannerMode::Inherit,
             access_mode: BoardAccessMode::PostPassword,
             access_password_hash: "hashed".into(),
             created_at: 0,
@@ -2016,6 +2322,7 @@ mod tests {
             "csrf",
             &[sample_theme()],
             None,
+            None,
         );
 
         assert!(html.contains("// basic setup"));
@@ -2048,9 +2355,14 @@ mod tests {
             "RustChan",
             "select board to proceed",
             "terminal",
+            0,
+            false,
             24,
             7,
             &themes,
+            &[],
+            &[],
+            &[],
             None,
             None,
             None,
@@ -2090,9 +2402,14 @@ mod tests {
             "RustChan",
             "select board to proceed",
             "terminal",
+            0,
+            false,
             24,
             7,
             &themes,
+            &[],
+            &[],
+            &[],
             None,
             None,
             None,

@@ -24,6 +24,8 @@ pub(super) struct FullBackupManifest {
     pub upload_file_count: u64,
     pub favicon_file_count: u64,
     #[serde(default)]
+    pub banner_file_count: u64,
+    #[serde(default)]
     pub boards: Vec<BackupBoardSummary>,
 }
 
@@ -298,6 +300,7 @@ pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> 
 
     let mut upload_file_count = 0u64;
     let mut favicon_file_count = 0u64;
+    let mut banner_file_count = 0u64;
     for idx in 0..archive.len() {
         let entry = archive.by_index(idx).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Read backup entry #{idx}: {error}"))
@@ -311,6 +314,8 @@ pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> 
             upload_file_count = upload_file_count.saturating_add(1);
         } else if name.starts_with("favicon/") {
             favicon_file_count = favicon_file_count.saturating_add(1);
+        } else if name.starts_with("banner/") {
+            banner_file_count = banner_file_count.saturating_add(1);
         }
     }
 
@@ -324,6 +329,12 @@ pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> 
         return Err(AppError::BadRequest(format!(
             "Invalid full backup: manifest favicon count {} does not match archive count {}.",
             manifest.favicon_file_count, favicon_file_count
+        )));
+    }
+    if banner_file_count != manifest.banner_file_count {
+        return Err(AppError::BadRequest(format!(
+            "Invalid full backup: manifest banner count {} does not match archive count {}.",
+            manifest.banner_file_count, banner_file_count
         )));
     }
 
@@ -464,6 +475,7 @@ mod tests {
             db_bytes: 4096,
             upload_file_count: 1,
             favicon_file_count: 1,
+            banner_file_count: 0,
             boards: vec![crate::models::BackupBoardSummary {
                 short_name: "b".into(),
                 name: "Random".into(),

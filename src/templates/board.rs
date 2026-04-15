@@ -506,6 +506,7 @@ pub fn index_page(
     site_stats: Option<&crate::models::SiteStats>,
     csrf_token: &str,
     onion_address: Option<&str>,
+    home_banner_html: &str,
     current_theme: Option<&str>,
     nsfw_prompt_board: Option<&Board>,
     nsfw_consent: bool,
@@ -649,9 +650,11 @@ pub fn index_page(
 <h1 class="index-title">[ {name} ]</h1>
 <p class="index-subtitle">{subtitle}</p>
 </div>
+{home_banner_html}
 {sfw}{nsfw}{empty}{stats}{onion}{nsfw_overlay}"#,
         name = escape_html(&live_site_name()),
         subtitle = escape_html(&live_site_subtitle()),
+        home_banner_html = home_banner_html,
         sfw = sfw_sec,
         nsfw = nsfw_sec,
         empty = empty,
@@ -687,6 +690,7 @@ pub fn board_page(
     is_admin: bool,
     error: Option<&str>,
     new_thread_prefill: Option<&super::forms::PostFormState>,
+    board_banner_html: &str,
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
@@ -730,6 +734,7 @@ pub fn board_page(
         let _ = write!(
             body,
             r#"<div class="board-header board-index-header"><h1>/{short}/  — {name}{access_badge}</h1><p class="board-desc">{desc}</p></div>
+{board_banner_html}
 <div class="board-nav"><a class="board-nav-link active" href="/{short}">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}</div>"#
         );
     }
@@ -1017,6 +1022,7 @@ pub fn catalog_page(
     csrf_token: &str,
     boards: &[Board],
     is_admin: bool,
+    board_banner_html: &str,
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
@@ -1065,28 +1071,29 @@ pub fn catalog_page(
 
     let _ = write!(
         body,
-        r#"<div class="board-header catalog-header-row">
+        r#"<div class="board-header board-catalog-header">
   <div class="catalog-header-left board-catalog-header">
     <h1>/{bs}/  — {bn}{access_badge}{title_suffix}</h1>
     <p class="board-desc">{desc}</p>
   </div>
-  <div class="catalog-controls">
-    <div class="catalog-control-group">
-      <label class="catalog-sort-label" for="catalog-sort">Sort By:</label>
-      <select id="catalog-sort" class="catalog-sort-select" data-action="sort-catalog">
-      <option value="bump" selected>bump order</option>
-      <option value="replies">reply count</option>
-      <option value="created">creation date</option>
-      <option value="last_reply">last reply</option>
-      </select>
-    </div>
-    <div class="catalog-control-group">
-      <label class="catalog-sort-label" for="catalog-show-comment">Show OP Comment:</label>
-      <select id="catalog-show-comment" class="catalog-sort-select" data-action="catalog-show-comment">
-        <option value="on">On</option>
-        <option value="off" selected>Off</option>
-      </select>
-    </div>
+</div>
+{board_banner_html}
+<div class="catalog-controls">
+  <div class="catalog-control-group">
+    <label class="catalog-sort-label" for="catalog-sort">Sort By:</label>
+    <select id="catalog-sort" class="catalog-sort-select" data-action="sort-catalog">
+    <option value="bump" selected>bump order</option>
+    <option value="replies">reply count</option>
+    <option value="created">creation date</option>
+    <option value="last_reply">last reply</option>
+    </select>
+  </div>
+  <div class="catalog-control-group">
+    <label class="catalog-sort-label" for="catalog-show-comment">Show OP Comment:</label>
+    <select id="catalog-show-comment" class="catalog-sort-select" data-action="catalog-show-comment">
+      <option value="on">On</option>
+      <option value="off" selected>Off</option>
+    </select>
   </div>
 </div>
 <div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link{catalog_active}" href="/{bs}/catalog">[Catalog]</a>{nav_archive}{hidden_nav}</div>"#,
@@ -1095,6 +1102,7 @@ pub fn catalog_page(
         access_badge = access_badge,
         title_suffix = title_suffix,
         desc = escape_html(&board.description),
+        board_banner_html = board_banner_html,
         catalog_active = if hidden_view { "" } else { " active" },
         nav_archive = nav_archive,
         hidden_nav = hidden_nav,
@@ -1416,7 +1424,7 @@ mod tests {
         crate::templates::set_live_site_name("TestChan");
         crate::templates::set_live_site_subtitle("banner subtitle");
 
-        let html = index_page(&[], None, "csrf", None, None, None, true, false);
+        let html = index_page(&[], None, "csrf", None, "", None, None, true, false);
 
         assert!(html.contains("site statistics are temporarily unavailable."));
         assert!(!html.contains("0.00 GB"));
@@ -1436,7 +1444,7 @@ mod tests {
             active_bytes: 2 * 1024 * 1024 * 1024,
         };
 
-        let html = index_page(&[], Some(&stats), "csrf", None, None, None, true, false);
+        let html = index_page(&[], Some(&stats), "csrf", None, "", None, None, true, false);
 
         assert!(html.contains("audio files uploaded"));
         assert!(html.contains(">3</span><span class=\"index-stat-label\">audio files uploaded"));
@@ -1459,6 +1467,7 @@ mod tests {
             "csrf",
             std::slice::from_ref(&board),
             false,
+            "",
             None,
             false,
             true,
@@ -1568,6 +1577,7 @@ mod tests {
             false,
             Some("Post must include either text or an attached file."),
             Some(&state),
+            "",
             None,
             false,
             true,

@@ -11,7 +11,7 @@
 One binary. One data folder. Zero required runtime dependencies.  
 Built with Rust, powered by SQLite, and designed for people who want their own corner of the web.
 
-[![Version](https://img.shields.io/badge/Version-1.1.3-0ea5e9?style=for-the-badge)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-1.1.4-0ea5e9?style=for-the-badge)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/Rust-1.90%2B-orange?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![SQLite](https://img.shields.io/badge/SQLite-Bundled-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Axum](https://img.shields.io/badge/Axum-0.8-16a34a?style=for-the-badge)](https://github.com/tokio-rs/axum)
@@ -19,7 +19,7 @@ Built with Rust, powered by SQLite, and designed for people who want their own c
 
 [What Is RustChan?](#what-is-rustchan) ·
 [Why People Like It](#why-people-like-it) ·
-[New In 1.1.3](#new-in-113) ·
+[New In 1.1.4](#new-in-114) ·
 [Quick Start](#five-minute-quick-start) ·
 [Feature Tour](#feature-tour) ·
 [Setup](#setup-and-operations) ·
@@ -66,16 +66,15 @@ It is a compact, self-contained setup that is easy to host and easy to move.
 
 RustChan runs as a single program and can be managed from the browser.
 
-## New In 1.1.3
+## New In 1.1.4
 
-Version `1.1.3` adds several quality-of-life improvements:
+Version `1.1.4` adds a full banner system:
 
-- **Per-board passwords**: a board can be password-protected for viewing, or left publicly readable while requiring a password for posting.
-- **Automatic saved full-site backups**: the admin panel and `settings.toml` can now schedule saved backups and keep only the newest `N` copies.
-- **Better backup confidence**: saved backups are verified, backup health is surfaced in the admin UI, and full backups can be used to derive single-board restores and downloads.
-- **Cleaner mobile and admin layouts**: better responsive behavior, cleaner footer/theme controls, and fewer "why is this fighting my phone?" moments.
-- **Stronger networking behavior**: better timeout coverage, safer proxy-aware HTTPS detection, better redirect handling, and more resilient self-signed TLS recovery.
-- **Honest media status and safer posting**: pending and failed media work is surfaced clearly, and duplicate submissions on flaky connections are prevented.
+- **Global rotating board banners**: upload multiple board-header banners from the admin panel, rotate them on each refresh by default, or enforce a time-based rotation interval.
+- **Per-board banner overrides**: each board can inherit the global pool, disable banners entirely, or use one fixed board-specific override.
+- **Clickable banner destinations**: banners can point at internal boards or internal paths directly, and optional external links are gated behind an on-site warning page.
+- **Home page MOTD/news banner**: the home page now has its own separate banner box for announcements or important updates.
+- **Clean media handling**: uploaded banner art is validated to the exact `468x60` aspect ratio, converted to WebP, and documented with a minimum `468x60` / recommended `936x120` workflow.
 
 The full release history lives in [CHANGELOG.md](CHANGELOG.md). This release focuses on polish, reliability, and day-to-day usability.
 
@@ -135,6 +134,7 @@ A few helpful notes:
 
 - Create, delete, and reorder boards from the browser.
 - Set board-level rules for media, editing, archiving, poster IDs, themes, cooldowns, and access protection.
+- Upload and manage global rotating board banners, per-board banner overrides, and a dedicated home-page MOTD/news banner.
 - Moderate posts, review reports, process ban appeals, ban by post, and inspect IP history.
 - Manage site settings, favicons, built-in themes, and custom themes from the admin panel.
 - Run full-site backups and per-board backups from the admin panel.
@@ -152,6 +152,31 @@ A few helpful notes:
 - Rate limiting for reads and writes, plus replay protection for PoW nonces.
 - File validation uses content type and magic bytes rather than extensions alone.
 - Restore protections against zip bombs, oversized uploads, path traversal, and malformed data.
+
+## Banner Artwork
+
+RustChan `1.1.4` includes banner slots for board pages and the home page.
+
+- Board banners render centered under the board name/description.
+- On board index pages, the banner sits above `[Index] [Catalog] [Archive]`.
+- On catalog pages, the banner sits above `Sort By:` and `Show OP Comment:`.
+- Board banners never render on thread pages, archive pages, or search pages.
+- The home page has its own separate banner box for MOTD/news-style announcements.
+
+Banner upload rules:
+
+- exact `468x60` aspect ratio
+- minimum size: `468x60`
+- recommended size: `936x120`
+- uploaded banner images are converted to WebP automatically
+
+Banner links can point to:
+
+- internal boards such as `/out/`
+- internal paths such as `/tech/catalog`
+- external URLs, if enabled in site settings
+
+When external banner links are enabled, RustChan routes users through a warning page before sending them off-site.
 
 ## Built-In Themes
 

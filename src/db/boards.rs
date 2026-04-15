@@ -8,7 +8,7 @@
 //              single aggregate query pass
 //              INSERT … RETURNING id replaces execute + last_insert_rowid()
 
-use crate::models::{Board, BoardAccessMode};
+use crate::models::{Board, BoardAccessMode, BoardBannerMode};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 
@@ -18,19 +18,29 @@ const BOARD_SELECT_COLUMNS: &str = "id, display_order, short_name, name, descrip
     max_threads, max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, \
     allow_any_files, allow_tripcodes, edit_window_secs, allow_editing, allow_archive, \
     allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext, \
-    post_cooldown_secs, default_theme, access_mode, access_password_hash, created_at";
+    post_cooldown_secs, default_theme, banner_mode, access_mode, access_password_hash, created_at";
 const BOARD_SELECT_COLUMNS_WITH_ALIAS: &str = "b.id, b.display_order, b.short_name, b.name, \
     b.description, b.nsfw, b.max_threads, b.max_archived_threads, b.bump_limit, \
     b.allow_images, b.allow_video, b.allow_audio, b.allow_any_files, b.allow_tripcodes, \
     b.edit_window_secs, b.allow_editing, b.allow_archive, b.allow_video_embeds, \
     b.allow_captcha, b.show_poster_ids, b.collapse_greentext, b.post_cooldown_secs, \
-    b.default_theme, b.access_mode, b.access_password_hash, b.created_at";
+    b.default_theme, b.banner_mode, b.access_mode, b.access_password_hash, b.created_at";
 
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
 pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
     let short_name: String = row.get(2)?;
-    let access_mode_raw: String = row.get(23)?;
+    let banner_mode_raw: String = row.get(23)?;
+    let access_mode_raw: String = row.get(24)?;
+    let banner_mode = BoardBannerMode::from_db_str(&banner_mode_raw).unwrap_or_else(|| {
+        tracing::warn!(
+            target: "db",
+            board = %short_name,
+            banner_mode = %banner_mode_raw,
+            "Invalid boards.banner_mode value; falling back to inherit"
+        );
+        BoardBannerMode::Inherit
+    });
     let access_mode = BoardAccessMode::from_db_str(&access_mode_raw).unwrap_or_else(|| {
         tracing::warn!(
             target: "db",
@@ -64,9 +74,10 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         collapse_greentext: row.get::<_, i32>(20)? != 0,
         post_cooldown_secs: row.get(21)?,
         default_theme: row.get(22)?,
+        banner_mode,
         access_mode,
-        access_password_hash: row.get(24)?,
-        created_at: row.get(25)?,
+        access_password_hash: row.get(25)?,
+        created_at: row.get(26)?,
     })
 }
 
@@ -230,7 +241,7 @@ pub fn get_all_boards_with_stats(
     let out = stmt
         .query_map([], |row| {
             let board = map_board(row)?;
-            let thread_count: i64 = row.get(26)?;
+            let thread_count: i64 = row.get(27)?;
             Ok(crate::models::BoardStats {
                 board,
                 thread_count,
@@ -389,6 +400,7 @@ pub fn update_board_settings(
     collapse_greentext: bool,
     post_cooldown_secs: i64,
     default_theme: &str,
+    banner_mode: BoardBannerMode,
     access_mode: BoardAccessMode,
     access_password_hash: &str,
 ) -> Result<()> {
@@ -407,8 +419,8 @@ pub fn update_board_settings(
             allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13,
              allow_archive=?14, allow_video_embeds=?15, allow_captcha=?16,
              show_poster_ids=?17, collapse_greentext=?18, post_cooldown_secs=?19,
-             default_theme=?20, access_mode=?21, access_password_hash=?22
-             WHERE id=?23",
+             default_theme=?20, banner_mode=?21, access_mode=?22, access_password_hash=?23
+             WHERE id=?24",
             params![
                 name,
                 description,
@@ -430,6 +442,7 @@ pub fn update_board_settings(
                 i32::from(collapse_greentext),
                 post_cooldown_secs,
                 default_theme,
+                banner_mode.as_str(),
                 access_mode.as_str(),
                 access_password_hash,
                 id,
@@ -444,8 +457,8 @@ pub fn update_board_settings(
              allow_tripcodes=?12, edit_window_secs=?13, allow_editing=?14,
              allow_archive=?15, allow_video_embeds=?16, allow_captcha=?17,
              show_poster_ids=?18, collapse_greentext=?19, post_cooldown_secs=?20,
-             default_theme=?21, access_mode=?22, access_password_hash=?23
-             WHERE id=?24",
+             default_theme=?21, banner_mode=?22, access_mode=?23, access_password_hash=?24
+             WHERE id=?25",
             params![
                 name,
                 description,
@@ -468,6 +481,7 @@ pub fn update_board_settings(
                 i32::from(collapse_greentext),
                 post_cooldown_secs,
                 default_theme,
+                banner_mode.as_str(),
                 access_mode.as_str(),
                 access_password_hash,
                 id,

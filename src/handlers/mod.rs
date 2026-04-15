@@ -1,6 +1,7 @@
 // src/handlers/mod.rs
 
 pub mod admin;
+pub mod banner;
 pub mod board;
 pub mod favicon;
 pub mod posting;

@@ -29,16 +29,23 @@ pub(crate) fn create_full_backup_to_server(
 
     progress.reset(crate::middleware::backup_phase::COUNT_FILES);
     log_backup_phase(crate::middleware::backup_phase::COUNT_FILES);
+    let global_banner_dir = crate::banner::backup_source_dir();
     let favicon_file_count = super::count_files_in_dir(&global_favicon_dir);
-    let file_count = super::count_files_in_dir(uploads_base).saturating_add(favicon_file_count);
+    let banner_file_count = super::count_files_in_dir(&global_banner_dir);
+    let file_count = super::count_files_in_dir(uploads_base)
+        .saturating_add(favicon_file_count)
+        .saturating_add(banner_file_count);
     let db_snapshot_size = std::fs::metadata(&temp_db)
         .map(|metadata| metadata.len())
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;
     let manifest = build_full_backup_manifest(
         &conn,
         db_snapshot_size,
-        file_count.saturating_sub(favicon_file_count),
+        file_count
+            .saturating_sub(favicon_file_count)
+            .saturating_sub(banner_file_count),
         favicon_file_count,
+        banner_file_count,
     )?;
     drop(conn);
     progress
@@ -98,6 +105,16 @@ pub(crate) fn create_full_backup_to_server(
                 &global_favicon_dir,
                 &global_favicon_dir,
                 "favicon",
+                opts,
+                progress,
+            )?;
+        }
+        if global_banner_dir.exists() {
+            super::add_dir_to_zip_with_prefix(
+                &mut zip,
+                &global_banner_dir,
+                &global_banner_dir,
+                "banner",
                 opts,
                 progress,
             )?;
@@ -384,6 +401,7 @@ pub(super) fn build_full_backup_manifest(
     db_bytes: u64,
     upload_file_count: u64,
     favicon_file_count: u64,
+    banner_file_count: u64,
 ) -> Result<super::common::FullBackupManifest> {
     let boards = collect_all_rows(
         conn,
@@ -401,6 +419,7 @@ pub(super) fn build_full_backup_manifest(
         db_bytes,
         upload_file_count,
         favicon_file_count,
+        banner_file_count,
         boards,
     })
 }
@@ -410,8 +429,8 @@ pub(super) fn build_board_backup_manifest(
     board_short: &str,
 ) -> Result<board_backup_types::BoardBackupManifest> {
     use board_backup_types::{
-        BoardBackupManifest, BoardRow, FileHashRow, PollOptionRow, PollRow, PollVoteRow, PostRow,
-        ThreadRow,
+        BannerRow, BoardBackupManifest, BoardRow, FileHashRow, PollOptionRow, PollRow, PollVoteRow,
+        PostRow, ThreadRow,
     };
 
     let board: BoardRow = conn
@@ -420,7 +439,7 @@ pub(super) fn build_board_backup_manifest(
                      allow_images, allow_video, allow_audio, allow_any_files, allow_tripcodes,
                      edit_window_secs, allow_editing, allow_archive, allow_video_embeds,
                      allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs,
-                     access_mode, access_password_hash, created_at
+                     banner_mode, access_mode, access_password_hash, created_at
               FROM boards WHERE short_name = ?1",
             params![board_short],
             |row| {
@@ -446,9 +465,10 @@ pub(super) fn build_board_backup_manifest(
                     show_poster_ids: row.get::<_, i64>(18)? != 0,
                     collapse_greentext: row.get::<_, i64>(19)? != 0,
                     post_cooldown_secs: row.get(20)?,
-                    access_mode: row.get(21)?,
-                    access_password_hash: row.get(22)?,
-                    created_at: row.get(23)?,
+                    banner_mode: row.get(21)?,
+                    access_mode: row.get(22)?,
+                    access_password_hash: row.get(23)?,
+                    created_at: row.get(24)?,
                 })
             },
         )
@@ -574,6 +594,30 @@ pub(super) fn build_board_backup_manifest(
             })
         },
     )?;
+    let banners = collect_rows(
+        conn,
+        board_id,
+        "SELECT storage_key, width, height, file_size, enabled, sort_order,
+                target_type, target_value, show_on_index, show_on_catalog, created_at
+         FROM banner_assets
+         WHERE scope_type = 'board' AND board_id = ?1
+         ORDER BY sort_order ASC, id ASC",
+        |row| {
+            Ok(BannerRow {
+                storage_key: row.get(0)?,
+                width: row.get(1)?,
+                height: row.get(2)?,
+                file_size: row.get(3)?,
+                enabled: row.get::<_, i64>(4)? != 0,
+                sort_order: row.get(5)?,
+                target_type: row.get(6)?,
+                target_value: row.get(7)?,
+                show_on_index: row.get::<_, i64>(8)? != 0,
+                show_on_catalog: row.get::<_, i64>(9)? != 0,
+                created_at: row.get(10)?,
+            })
+        },
+    )?;
 
     Ok(BoardBackupManifest {
         version: 2,
@@ -584,6 +628,7 @@ pub(super) fn build_board_backup_manifest(
         poll_options,
         poll_votes,
         file_hashes,
+        banners,
     })
 }
 

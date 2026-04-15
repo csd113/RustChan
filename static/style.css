@@ -548,6 +548,36 @@ html:not([data-theme]) .board-header h1 { text-shadow: 0 0 10px rgba(0,255,65,0.
 
 .board-desc { color: var(--text-dim); font-size: 0.92rem; margin-top: 4px; }
 
+.board-banner-slot,
+.home-banner-box {
+  display: flex;
+  justify-content: center;
+  margin: 10px 0 12px;
+}
+
+.home-banner-box {
+  padding: 12px 0 2px;
+}
+
+.banner-link {
+  display: inline-flex;
+  justify-content: center;
+}
+
+.board-banner-image {
+  width: min(100%, 468px);
+  height: auto;
+  aspect-ratio: 468 / 60;
+  display: block;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.16);
+}
+
+.banner-link:hover .board-banner-image {
+  border-color: var(--border-glow);
+}
+
 /* Thread title banner */
 .board-thread-header {
   font-size: 2rem;
@@ -581,6 +611,7 @@ html:not([data-theme]) .board-thread-header { text-shadow: 0 0 10px rgba(0,255,6
   width: 100%;
   max-width: none;
   padding-top: 0;
+  margin-bottom: 10px;
 }
 
 .catalog-control-group {
@@ -3252,6 +3283,55 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   color: var(--text);
 }
 
+.admin-banner-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.admin-banner-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-post);
+}
+
+.admin-banner-thumb,
+.admin-banner-thumb-row {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.board-banner-preview-image {
+  width: min(100%, 468px);
+  height: auto;
+  aspect-ratio: 468 / 60;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+}
+
+.admin-banner-meta-form,
+.admin-banner-upload-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.admin-banner-meta-form label,
+.admin-banner-upload-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+
 .admin-moderation-card-log {
   display: flex;
   flex-direction: column;
@@ -3270,6 +3350,10 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 @media (max-width: 900px) {
   .theme-manager-shell,
   .theme-guide-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-banner-row {
     grid-template-columns: 1fr;
   }
 

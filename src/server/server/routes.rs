@@ -56,6 +56,18 @@ pub(super) fn public_routes() -> Router<AppState> {
             "/theme-css/{theme}",
             get(crate::handlers::board::serve_theme_css),
         )
+        .route(
+            "/banner/assets/{id}",
+            get(crate::handlers::banner::serve_banner_asset),
+        )
+        .route(
+            "/banner/external/{id}",
+            get(crate::handlers::banner::external_banner_warning_page),
+        )
+        .route(
+            "/banner/external/{id}/continue",
+            get(crate::handlers::banner::external_banner_continue),
+        )
         .route("/", get(crate::handlers::board::index))
         .route("/{board}", get(crate::handlers::board::board_index))
         .route(
@@ -184,6 +196,37 @@ fn admin_board_routes() -> Router<AppState> {
         .route(
             "/admin/board/favicon/clear",
             post(crate::handlers::admin::clear_board_favicon_override),
+        )
+        .route(
+            "/admin/site/banner",
+            post(crate::handlers::admin::upload_global_banner)
+                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/admin/home/banner",
+            post(crate::handlers::admin::upload_home_banner)
+                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/admin/board/banner",
+            post(crate::handlers::admin::upload_board_banner)
+                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/admin/board/banner/clear",
+            post(crate::handlers::admin::clear_board_banner_override),
+        )
+        .route(
+            "/admin/banner/update",
+            post(crate::handlers::admin::update_banner_meta),
+        )
+        .route(
+            "/admin/banner/delete",
+            post(crate::handlers::admin::delete_banner),
+        )
+        .route(
+            "/admin/banner/move",
+            post(crate::handlers::admin::move_banner),
         )
 }
 

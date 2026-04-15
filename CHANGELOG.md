@@ -2,6 +2,34 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.1.4]
+
+### Added
+
+- Full banner management in the admin panel: operators can upload, preview, reorder, edit, and delete global board banners, per-board banner overrides, and a separate home-page MOTD/news banner.
+- Global board-banner rotation with two modes: rotate on each refresh by default, or enforce a site-wide time-based rotation interval in minutes.
+- Per-board banner behavior modes that mirror the favicon-style override model: each board can inherit the global banner pool, disable banners entirely, or use one fixed board-specific override.
+- Clickable banner destinations for internal boards and internal paths, plus optional external banner links guarded by an on-site warning/interstitial page before redirecting users away from RustChan.
+
+### Improved
+
+- Board-page presentation is more intentional: centered banners now render under the board title/description, above the board nav on index pages, and above catalog controls on catalog pages.
+- Home page announcement tooling is stronger through a dedicated banner box that is separate from board-header banners and suitable for MOTD, maintenance, or news updates.
+- Banner uploads now follow RustChan's media pipeline expectations by validating the exact `468x60` aspect ratio, documenting a minimum `468x60` / recommended `936x120` workflow, and normalizing uploads to WebP.
+- Full-site and board-level restore compatibility now covers the new banner metadata and asset layout so banner configuration survives backup workflows.
+
+### Documentation
+
+- `README.md` and `SETUP.md` now document the new banner system, placement rules, link behavior, and the exact artwork requirements for banner uploads.
+
+### Validation
+
+- `cargo fmt --all`
+- `cargo test --quiet`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo build --quiet`
+- Live local smoke test against `http://127.0.0.1:18080`: verified admin login, global banner uploads, home-page banner upload, refresh-based global rotation, enforced time-based rotation, board override upload and enablement, internal board-link banners, external-link warning/continue flow, correct banner placement on board index and catalog, and absence of board banners on thread, archive, and search pages.
+
 ## [1.1.3]
 
 ### Added

@@ -29,6 +29,8 @@ const BASE_SCHEMA_SQL: &str = "
         collapse_greentext  INTEGER NOT NULL DEFAULT 0,
         post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
         default_theme       TEXT NOT NULL DEFAULT '',
+        banner_mode         TEXT NOT NULL DEFAULT 'inherit'
+                                CHECK (banner_mode IN ('inherit', 'none', 'override')),
         access_mode         TEXT NOT NULL DEFAULT 'public'
                                 CHECK (access_mode IN ('public', 'view_password', 'post_password')),
         access_password_hash TEXT NOT NULL DEFAULT '',
@@ -153,6 +155,25 @@ const BASE_SCHEMA_SQL: &str = "
         key        TEXT PRIMARY KEY,
         value      TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS banner_assets (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope_type      TEXT NOT NULL,
+        board_id        INTEGER REFERENCES boards(id) ON DELETE CASCADE,
+        storage_key     TEXT NOT NULL UNIQUE,
+        width           INTEGER NOT NULL,
+        height          INTEGER NOT NULL,
+        file_size       INTEGER NOT NULL,
+        enabled         INTEGER NOT NULL DEFAULT 1,
+        sort_order      INTEGER NOT NULL DEFAULT 0,
+        target_type     TEXT NOT NULL DEFAULT 'none',
+        target_value    TEXT NOT NULL DEFAULT '',
+        show_on_index   INTEGER NOT NULL DEFAULT 1,
+        show_on_catalog INTEGER NOT NULL DEFAULT 1,
+        created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_banner_assets_scope_sort
+        ON banner_assets(scope_type, board_id, sort_order, id);
 
     CREATE TABLE IF NOT EXISTS themes (
         slug         TEXT PRIMARY KEY,

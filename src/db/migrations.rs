@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 39;
+pub(super) const CURRENT_MAX_MIGRATION: i64 = 41;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
@@ -185,6 +185,31 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         39,
         "ALTER TABLE boards ADD COLUMN access_password_hash TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        40,
+        "ALTER TABLE boards ADD COLUMN banner_mode TEXT NOT NULL DEFAULT 'inherit'",
+    ),
+    (
+        41,
+        r"CREATE TABLE IF NOT EXISTS banner_assets (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type      TEXT NOT NULL,
+            board_id        INTEGER REFERENCES boards(id) ON DELETE CASCADE,
+            storage_key     TEXT NOT NULL UNIQUE,
+            width           INTEGER NOT NULL,
+            height          INTEGER NOT NULL,
+            file_size       INTEGER NOT NULL,
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            sort_order      INTEGER NOT NULL DEFAULT 0,
+            target_type     TEXT NOT NULL DEFAULT 'none',
+            target_value    TEXT NOT NULL DEFAULT '',
+            show_on_index   INTEGER NOT NULL DEFAULT 1,
+            show_on_catalog INTEGER NOT NULL DEFAULT 1,
+            created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE INDEX IF NOT EXISTS idx_banner_assets_scope_sort
+            ON banner_assets(scope_type, board_id, sort_order, id)",
     ),
 ];
 
