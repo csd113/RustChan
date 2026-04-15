@@ -22,14 +22,6 @@ All notable changes to RustChan will be documented in this file.
 
 - `README.md` and `SETUP.md` now document the new banner system, placement rules, link behavior, and the exact artwork requirements for banner uploads.
 
-### Validation
-
-- `cargo fmt --all`
-- `cargo test --quiet`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo build --quiet`
-- Live local smoke test against `http://127.0.0.1:18080`: verified admin login, global banner uploads, home-page banner upload, refresh-based global rotation, enforced time-based rotation, board override upload and enablement, internal board-link banners, external-link warning/continue flow, correct banner placement on board index and catalog, and absence of board banners on thread, archive, and search pages.
-
 ## [1.1.3]
 
 ### Added
@@ -97,14 +89,6 @@ All notable changes to RustChan will be documented in this file.
 ### Internal
 
 - Upload-flow tests now use temporary directories for better isolation, the FFmpeg VP9 test coverage stays Clippy-clean, and several unused helpers/duplicate form structs were removed to keep the `1.1.3` codebase leaner.
-
-### Validation
-
-- `node --check static/main.js`
-- `cargo fmt --all`
-- `cargo check --quiet`
-- `cargo test --quiet`
-- Live Chromium verification against `http://127.0.0.1:8080`: confirmed poll option maxlength behavior, photo and video thread creation, reply draft restore, upload-backed reply clear/update flows, inline invalid-upload error banners, search empty-state copy, admin login, filter add/remove, shared confirmation modal behavior, full backup creation, invalid full restore handling, invalid board restore handling, and no pageerrors, console errors, or HTTP `5xx` responses. No live `data-confirm-submit` control was present on `/admin/panel` during the run, so that specific variant could not be exercised end to end.
 
 ## [1.1.2]
 
@@ -179,12 +163,6 @@ All notable changes to RustChan will be documented in this file.
 - Backup/restore logging now respects the app’s actual tracing targets instead of being silently filtered out.
 - Board index, catalog, and thread tab titles now use clearer board-aware formatting, and full-site restore no longer wipes the current global favicon when restoring an older backup that did not include favicon data.
 
-### Validation
-
-- `cargo fmt --all`
-- `cargo clippy --all-targets --all-features -- -D warnings -W clippy::all -W clippy::pedantic -W clippy::nursery`
-- `env -u RUSTC_WRAPPER cargo test --quiet`
-
 ## [1.1.0]
 
 ### Added
@@ -218,13 +196,6 @@ All notable changes to RustChan will be documented in this file.
 ### Breaking Changes
 
 - HTTP to HTTPS redirects now use configured and trusted hosts instead of echoing arbitrary `Host` headers.
-
-### Validation
-
-- `cargo fmt --all`
-- `cargo clippy --all-targets --all-features -- -D warnings -W clippy::all -W clippy::pedantic -W clippy::nursery`
-- `cargo test`
-
 
 ## [1.0.13] — 2026-03-08
 
