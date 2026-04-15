@@ -1512,14 +1512,14 @@ old boards to prevent query performance degradation.
       <h4>add ban</h4>
       <form method="POST" action="/admin/ban/add" class="admin-moderation-form admin-quick-form admin-moderation-compact-form">
         <input type="hidden" name="_csrf" value="{csrf}">
-        <label class="admin-quick-field">IP hash
-          <input type="text" name="ip_hash" required placeholder="ab12cd34ef56...">
+        <label class="admin-quick-field admin-moderation-field">IP hash
+          <input class="admin-moderation-input" type="text" name="ip_hash" required placeholder="ab12cd34ef56...">
         </label>
-        <label class="admin-quick-field">Reason
-          <input type="text" name="reason" placeholder="Rule violation">
+        <label class="admin-quick-field admin-moderation-field">Reason
+          <input class="admin-moderation-input" type="text" name="reason" placeholder="Rule violation">
         </label>
-        <label class="admin-quick-field admin-quick-field-compact">Duration (hours)
-          <input type="text" name="duration_hours" placeholder="blank = permanent" inputmode="numeric">
+        <label class="admin-quick-field admin-quick-field-compact admin-moderation-field">Duration (hours)
+          <input class="admin-moderation-input" type="text" name="duration_hours" placeholder="blank = permanent" inputmode="numeric">
         </label>
         <button type="submit">ban</button>
       </form>
@@ -1536,11 +1536,11 @@ old boards to prevent query performance degradation.
       <h4>add filter</h4>
       <form method="POST" action="/admin/filter/add" class="admin-moderation-form admin-quick-form admin-moderation-compact-form">
         <input type="hidden" name="_csrf" value="{csrf}">
-        <label class="admin-quick-field">Pattern
-          <input type="text" name="pattern" required placeholder="old phrase">
+        <label class="admin-quick-field admin-moderation-field">Pattern
+          <input class="admin-moderation-input" type="text" name="pattern" required placeholder="old phrase">
         </label>
-        <label class="admin-quick-field">Replacement
-          <input type="text" name="replacement" placeholder="new phrase">
+        <label class="admin-quick-field admin-moderation-field">Replacement
+          <input class="admin-moderation-input" type="text" name="replacement" placeholder="new phrase">
         </label>
         <button type="submit">add</button>
       </form>

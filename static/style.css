@@ -3204,14 +3204,19 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   min-width: 120px;
 }
 
-.admin-moderation-compact-form input[type="text"],
-.admin-moderation-compact-form input[type="number"] {
-  min-height: 2rem;
-  padding: 0.32rem 0.5rem;
+.admin-moderation-compact-form .admin-moderation-field {
+  gap: 2px;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
 }
 
-.admin-moderation-compact-form .admin-quick-field {
-  gap: 3px;
+.admin-moderation-compact-form .admin-moderation-input {
+  box-sizing: border-box;
+  height: 1.9rem;
+  min-height: 1.9rem;
+  max-height: 1.9rem;
+  padding: 0 0.5rem;
+  line-height: 1.2;
 }
 
 .admin-quick-form {
