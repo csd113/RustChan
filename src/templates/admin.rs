@@ -1426,6 +1426,7 @@ old boards to prevent query performance degradation.
     <input type="text" name="description" maxlength="256" placeholder="Programming, hardware, and internet culture">
   </label>
   <label class="admin-inline-checkbox admin-quick-checkbox"><input type="checkbox" name="nsfw" value="1"> NSFW board</label>
+  <label class="admin-inline-checkbox admin-quick-checkbox"><input type="checkbox" name="allow_audio" value="1"> Enable audio uploads</label>
   <button type="submit">create</button>
   </form>
 </div>
@@ -2473,6 +2474,7 @@ mod tests {
 
         assert!(html.contains("// board directory"));
         assert!(html.contains("// create board"));
+        assert!(html.contains(r#"name="allow_audio" value="1"> Enable audio uploads"#));
         assert!(html.contains("// automated full backups"));
         assert!(html.contains("// run or restore now"));
         assert!(html.contains("// saved full backups"));

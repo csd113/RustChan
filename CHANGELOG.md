@@ -10,6 +10,7 @@ All notable changes to RustChan will be documented in this file.
 - Global board-banner rotation with two modes: rotate on each refresh by default, or enforce a site-wide time-based rotation interval in minutes.
 - Per-board banner behavior modes that mirror the favicon-style override model: each board can inherit the global banner pool, disable banners entirely, or use one fixed board-specific override.
 - Clickable banner destinations for internal boards and internal paths, plus optional external banner links guarded by an on-site warning/interstitial page before redirecting users away from RustChan.
+- The admin quick-create board form now includes an audio-upload toggle, so new boards can be created with audio enabled directly from the UI instead of only through later edits or the CLI.
 
 ### Improved
 

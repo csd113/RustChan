@@ -265,6 +265,7 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
+#[allow(dead_code)]
 pub fn create_board(
     conn: &rusqlite::Connection,
     short: &str,
@@ -731,7 +732,7 @@ fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::get_site_stats;
+    use super::{create_board_with_media_flags, get_board_by_short, get_site_stats};
     use rusqlite::Connection;
 
     #[test]
@@ -799,5 +800,30 @@ mod tests {
         assert_eq!(stats.total_videos, 0);
         assert_eq!(stats.total_audio, 1);
         assert_eq!(stats.active_bytes, 579);
+    }
+
+    #[test]
+    fn create_board_with_media_flags_persists_audio_toggle() {
+        let pool = crate::db::init_test_pool().expect("init test pool");
+        let conn = pool.get().expect("get test connection");
+
+        create_board_with_media_flags(
+            &conn,
+            "audio",
+            "Audio",
+            "Audio uploads",
+            false,
+            true,
+            true,
+            true,
+        )
+        .expect("create board");
+
+        let board = get_board_by_short(&conn, "audio")
+            .expect("load board")
+            .expect("board exists");
+        assert!(board.allow_images);
+        assert!(board.allow_video);
+        assert!(board.allow_audio);
     }
 }

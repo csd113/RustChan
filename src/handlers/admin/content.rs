@@ -25,6 +25,7 @@ pub struct CreateBoardForm {
     name: String,
     description: String,
     nsfw: Option<String>,
+    allow_audio: Option<String>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
@@ -55,6 +56,7 @@ pub async fn create_board(
     let short_for_flash = short.clone();
 
     let nsfw = form.nsfw.as_deref() == Some("1");
+    let allow_audio = form.allow_audio.as_deref() == Some("1");
     let name = form.name.trim().chars().take(64).collect::<String>();
     let description = form
         .description
@@ -68,7 +70,16 @@ pub async fn create_board(
         move || -> Result<()> {
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            db::create_board(&conn, &short, &name, &description, nsfw)?;
+            db::create_board_with_media_flags(
+                &conn,
+                &short,
+                &name,
+                &description,
+                nsfw,
+                true,
+                true,
+                allow_audio,
+            )?;
             tracing::info!(target: "admin", board = %short, "Created board");
             // Refresh live board list so the top bar on any subsequent error
             // page includes the newly created board.
