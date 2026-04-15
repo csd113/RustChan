@@ -3307,7 +3307,7 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
 .admin-banner-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 468px) minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
   padding: 10px;
@@ -3320,10 +3320,15 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   display: flex;
   justify-content: center;
   align-items: center;
+  width: 100%;
+  max-width: 468px;
+  min-width: 0;
 }
 
 .board-banner-preview-image {
-  width: min(100%, 468px);
+  display: block;
+  width: 100%;
+  max-width: 468px;
   height: auto;
   aspect-ratio: 468 / 60;
   border: 1px solid var(--border);
