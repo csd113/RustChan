@@ -1,4 +1,7 @@
-use crate::models::{BannerAsset, BannerScope, BannerTargetType};
+use crate::{
+    banner,
+    models::{BannerAsset, BannerScope, BannerTargetType},
+};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 
@@ -28,6 +31,10 @@ fn map_banner_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<BannerAsset> {
     })
 }
 
+/// Load a banner asset by id.
+///
+/// # Errors
+/// Returns an error if the query fails.
 pub fn get_banner_asset(
     conn: &rusqlite::Connection,
     banner_id: i64,
@@ -43,6 +50,10 @@ pub fn get_banner_asset(
         .optional()?)
 }
 
+/// List all banner assets for a scope.
+///
+/// # Errors
+/// Returns an error if the query fails.
 pub fn list_banner_assets_for_scope(
     conn: &rusqlite::Connection,
     scope: BannerScope,
@@ -60,6 +71,10 @@ pub fn list_banner_assets_for_scope(
     Ok(assets)
 }
 
+/// List all banner assets for a board.
+///
+/// # Errors
+/// Returns an error if the query fails.
 pub fn list_banner_assets_for_board(
     conn: &rusqlite::Connection,
     board_id: i64,
@@ -77,6 +92,10 @@ pub fn list_banner_assets_for_board(
     Ok(assets)
 }
 
+/// Compute the next banner sort order for a scope.
+///
+/// # Errors
+/// Returns an error if the query fails.
 pub fn next_banner_sort_order(
     conn: &rusqlite::Connection,
     scope: BannerScope,
@@ -102,6 +121,10 @@ pub fn next_banner_sort_order(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Insert a banner asset row.
+///
+/// # Errors
+/// Returns an error if the storage key is invalid or the insert fails.
 pub fn insert_banner_asset(
     conn: &rusqlite::Connection,
     scope: BannerScope,
@@ -117,6 +140,7 @@ pub fn insert_banner_asset(
     show_on_index: bool,
     show_on_catalog: bool,
 ) -> Result<i64> {
+    banner::validate_banner_storage_key(storage_key)?;
     let id = conn
         .query_row(
             "INSERT INTO banner_assets
@@ -144,6 +168,10 @@ pub fn insert_banner_asset(
     Ok(id)
 }
 
+/// Update the mutable metadata for a banner asset.
+///
+/// # Errors
+/// Returns an error if the banner is missing or the update fails.
 pub fn update_banner_asset_meta(
     conn: &rusqlite::Connection,
     banner_id: i64,
@@ -176,6 +204,10 @@ pub fn update_banner_asset_meta(
     Ok(())
 }
 
+/// Delete a banner asset and return the removed row.
+///
+/// # Errors
+/// Returns an error if the banner does not exist or the delete fails.
 pub fn delete_banner_asset(conn: &rusqlite::Connection, banner_id: i64) -> Result<BannerAsset> {
     let asset = get_banner_asset(conn, banner_id)?
         .ok_or_else(|| anyhow::anyhow!("Banner id {banner_id} not found"))?;
@@ -186,6 +218,10 @@ pub fn delete_banner_asset(conn: &rusqlite::Connection, banner_id: i64) -> Resul
     Ok(asset)
 }
 
+/// Delete all banner assets attached to a board.
+///
+/// # Errors
+/// Returns an error if the query fails.
 pub fn delete_board_banner_assets(
     conn: &rusqlite::Connection,
     board_id: i64,
@@ -198,6 +234,10 @@ pub fn delete_board_banner_assets(
     Ok(assets)
 }
 
+/// Reorder banner assets within a scope.
+///
+/// # Errors
+/// Returns an error if the banner is missing or the transaction fails.
 pub fn move_banner_asset(
     conn: &mut rusqlite::Connection,
     banner_id: i64,

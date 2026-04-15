@@ -1,8 +1,11 @@
+#![allow(clippy::redundant_pub_crate)]
+
 // src/middleware/ip.rs
 
 use crate::config::CONFIG;
 use axum::extract::Request;
 use ipnet::IpNet;
+
 use std::net::SocketAddr;
 
 fn forwarded_client_ip(value: &str) -> Option<&str> {

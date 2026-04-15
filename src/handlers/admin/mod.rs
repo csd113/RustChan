@@ -1,3 +1,11 @@
+#![allow(
+    clippy::option_if_let_else,
+    clippy::map_unwrap_or,
+    clippy::needless_pass_by_value,
+    clippy::assigning_clones,
+    clippy::useless_let_if_seq
+)]
+
 // handlers/admin/mod.rs
 //
 // Admin panel. All routes require a valid session cookie.

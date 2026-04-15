@@ -787,17 +787,14 @@ impl Config {
         for cidr in &self.trusted_proxy_cidrs {
             cidr.parse::<ipnet::IpNet>().map_err(|error| {
                 anyhow::anyhow!(
-                    "CONFIG ERROR: trusted_proxy_cidrs entry '{}' is not valid CIDR: {}",
-                    cidr,
-                    error
+                    "CONFIG ERROR: trusted_proxy_cidrs entry '{cidr}' is not valid CIDR: {error}"
                 )
             })?;
         }
         for host in &self.public_hosts {
             normalize_public_host(host).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "CONFIG ERROR: public_hosts entry '{}' must be a bare hostname or IP literal.",
-                    host
+                    "CONFIG ERROR: public_hosts entry '{host}' must be a bare hostname or IP literal."
                 )
             })?;
         }

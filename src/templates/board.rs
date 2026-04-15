@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_pub_crate)]
+
 // templates/board.rs
 //
 // Page templates for board-level views:
@@ -543,11 +545,19 @@ pub fn index_page(
         ""
     };
 
-    let stats_sec = if let Some(site_stats) = site_stats {
-        #[allow(clippy::cast_precision_loss)]
-        let active_gb = site_stats.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-        format!(
+    let stats_sec = site_stats.map_or_else(
+        || {
             r#"<div class="index-section index-stats-section">
+<h2 class="index-section-title">// Stats</h2>
+<p class="index-stats-unavailable">site statistics are temporarily unavailable.</p>
+</div>"#
+                .to_string()
+        },
+        |site_stats| {
+            #[allow(clippy::cast_precision_loss)]
+            let active_gb = site_stats.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            format!(
+                r#"<div class="index-section index-stats-section">
 <h2 class="index-section-title">// Stats</h2>
 <div class="index-stats-grid">
   <div class="index-stat"><span class="index-stat-value">{tp}</span><span class="index-stat-label">total posts</span></div>
@@ -557,19 +567,14 @@ pub fn index_page(
   <div class="index-stat"><span class="index-stat-value">{gb:.2} GB</span><span class="index-stat-label">active content</span></div>
 </div>
 </div>"#,
-            tp = site_stats.total_posts,
-            ti = site_stats.total_images,
-            tv = site_stats.total_videos,
-            ta = site_stats.total_audio,
-            gb = active_gb,
-        )
-    } else {
-        r#"<div class="index-section index-stats-section">
-<h2 class="index-section-title">// Stats</h2>
-<p class="index-stats-unavailable">site statistics are temporarily unavailable.</p>
-</div>"#
-            .to_string()
-    };
+                tp = site_stats.total_posts,
+                ti = site_stats.total_images,
+                tv = site_stats.total_videos,
+                ta = site_stats.total_audio,
+                gb = active_gb,
+            )
+        },
+    );
 
     let mut access_links = String::new();
     if let Some(addr) = onion_address {

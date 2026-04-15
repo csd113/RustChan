@@ -1,3 +1,9 @@
+#![allow(
+    clippy::too_many_lines,
+    clippy::option_if_let_else,
+    clippy::uninlined_format_args
+)]
+
 // handlers/thread.rs
 //
 // Handles:

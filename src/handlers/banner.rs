@@ -71,10 +71,9 @@ pub async fn serve_banner_asset(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let path = banner::banner_asset_path(&asset);
-    if !path.exists() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
+    let Ok(path) = banner::banner_asset_path(&asset) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
 
     let req = req.map(|_| axum::body::Body::empty());
     ServeFile::new(path).oneshot(req).await.map_or_else(

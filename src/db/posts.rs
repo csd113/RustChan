@@ -292,6 +292,10 @@ pub struct PostSubmissionRecord {
     pub is_thread: bool,
 }
 
+/// Look up an existing post submission token.
+///
+/// # Errors
+/// Returns an error if the database query fails.
 pub fn get_post_submission(
     conn: &rusqlite::Connection,
     submission_token: &str,
@@ -322,6 +326,10 @@ pub fn get_post_submission(
         .optional()?)
 }
 
+/// Store a post submission token and prune expired rows.
+///
+/// # Errors
+/// Returns an error if either database write fails.
 pub fn record_post_submission(
     conn: &rusqlite::Connection,
     submission_token: &str,

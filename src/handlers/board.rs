@@ -1,3 +1,16 @@
+#![allow(
+    clippy::similar_names,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::redundant_pub_crate,
+    clippy::significant_drop_tightening,
+    clippy::format_push_string,
+    clippy::redundant_clone,
+    clippy::implicit_clone,
+    clippy::map_unwrap_or,
+    clippy::equatable_if_let
+)]
+
 // handlers/board.rs
 //
 // Handles:

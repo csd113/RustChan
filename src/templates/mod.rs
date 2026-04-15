@@ -542,8 +542,7 @@ pub fn base_layout(
         String::new()
     } else {
         format!(
-            r#"<link rel="stylesheet" id="active-theme-stylesheet" href="{}">"#,
-            theme_stylesheet_href
+            r#"<link rel="stylesheet" id="active-theme-stylesheet" href="{theme_stylesheet_href}">"#
         )
     };
     let mut theme_picker_fallback = String::new();

@@ -7,6 +7,9 @@ edition = "2021"
 rust-version = "1.90"
 license = "MIT"
 description = "Self-contained imageboard — single binary, zero runtime dependencies"
+repository = "https://github.com/csd113/RustChan"
+keywords = ["imageboard", "forum", "rust"]
+categories = ["web-programming", "multimedia::images"]
 
 # cargo-msrv <0.16 reads package.metadata.msrv instead of the Cargo-standard
 # rust-version field; keep both in sync so `cargo msrv verify` works regardless

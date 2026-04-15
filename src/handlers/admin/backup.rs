@@ -1,3 +1,12 @@
+#![allow(
+    clippy::redundant_closure_for_method_calls,
+    clippy::needless_pass_by_value,
+    clippy::significant_drop_in_scrutinee,
+    clippy::redundant_pub_crate,
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines
+)]
+
 // handlers/admin/backup.rs
 //
 // Backup and restore subsystem for the admin panel.
@@ -5,6 +14,7 @@
 // saved-backup restoration, and live board.json restore.
 
 use crate::{
+    banner,
     config::CONFIG,
     db,
     error::{AppError, Result},
@@ -44,8 +54,8 @@ mod types;
 use common::{
     copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
     log_backup_progress, read_limited_bytes, remap_body_quotelinks, remove_path_if_exists,
-    render_restored_body_html, validate_board_short_name, BOARD_MANIFEST_MAX_BYTES,
-    ZIP_ENTRY_MAX_BYTES,
+    render_restored_body_html, validate_board_short_name, BANNER_RESTORE_ENTRY_MAX_BYTES,
+    BANNER_RESTORE_TOTAL_MAX_BYTES, BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
 };
 pub use create::*;
 use types::board_backup_types;
@@ -999,6 +1009,11 @@ where
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Insert board: {error}")))?
         };
         for banner in &manifest.banners {
+            banner::validate_banner_storage_key(&banner.storage_key).map_err(|error| {
+                AppError::BadRequest(format!(
+                    "Invalid banner storage key in backup manifest: {error}"
+                ))
+            })?;
             conn.execute(
                 "INSERT INTO banner_assets
                  (scope_type, board_id, storage_key, width, height, file_size, enabled, sort_order,
@@ -1547,33 +1562,30 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             if rel.is_empty() {
                 continue;
             }
-            let rel_path = Path::new(rel);
-            if rel_path
-                .components()
-                .any(|component| component == std::path::Component::ParentDir)
-            {
-                warn!("{suspicious_entry_log}: skipping suspicious entry '{name}'");
+            let rel_name = match banner::validate_banner_restore_entry_name(rel) {
+                Ok(value) => value,
+                Err(error) => {
+                    warn!("{suspicious_entry_log}: skipping suspicious entry '{name}': {error}");
+                    continue;
+                }
+            };
+            if entry.is_dir() {
+                warn!("{suspicious_entry_log}: skipping banner directory entry '{name}'");
                 continue;
             }
             banner_extracted = true;
-            let target = staged_global_banner_dir.join(rel_path);
-            if entry.is_dir() {
-                std::fs::create_dir_all(&target).map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!("mkdir {}: {error}", target.display()))
-                })?;
-            } else {
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent).map_err(|error| {
-                        AppError::Internal(anyhow::anyhow!("mkdir parent: {error}"))
-                    })?;
-                }
-                let mut out = std::fs::File::create(&target).map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!("Create {}: {error}", target.display()))
-                })?;
-                copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
+            let target = staged_global_banner_dir.join(&rel_name);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("mkdir parent: {error}"))
                 })?;
             }
+            let mut out = std::fs::File::create(&target).map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Create {}: {error}", target.display()))
+            })?;
+            copy_limited(&mut entry, &mut out, BANNER_RESTORE_ENTRY_MAX_BYTES).map_err(
+                |error| AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display())),
+            )?;
         }
     }
 
@@ -1590,6 +1602,10 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     live_conn
         .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {error}")))?;
+
+    if banner_extracted {
+        canonicalize_restored_banner_dir(&staged_global_banner_dir)?;
+    }
 
     let pending_restore_id = uuid::Uuid::new_v4().to_string();
     let pending_restore_payload = crate::pending_fs::FullRestoreSwapPayload {
@@ -1720,6 +1736,64 @@ fn extract_sqlite_db_from_full_backup_archive<R: std::io::Read + std::io::Seek>(
         return Err(AppError::BadRequest(
             "Invalid full backup: chan.db does not look like a SQLite database.".into(),
         ));
+    }
+    Ok(())
+}
+
+fn canonicalize_restored_banner_dir(root: &Path) -> Result<()> {
+    let mut total_bytes = 0u64;
+    canonicalize_restored_banner_dir_inner(root, root, &mut total_bytes)
+}
+
+fn canonicalize_restored_banner_dir_inner(
+    root: &Path,
+    current: &Path,
+    total_bytes: &mut u64,
+) -> Result<()> {
+    for entry in std::fs::read_dir(current).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Read restored banner directory {}: {error}",
+            current.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Read restored banner directory entry {}: {error}",
+                current.display()
+            ))
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Inspect restored banner entry {}: {error}",
+                entry.path().display()
+            ))
+        })?;
+        let path = entry.path();
+        let rel = path.strip_prefix(root).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Resolve restored banner path {}: {error}",
+                path.display()
+            ))
+        })?;
+        if file_type.is_dir() {
+            canonicalize_restored_banner_dir_inner(root, &path, total_bytes)?;
+            continue;
+        }
+        let rel_name = rel.to_string_lossy();
+        banner::validate_banner_restore_entry_name(&rel_name)?;
+        let bytes = std::fs::read(&path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Read restored banner file {}: {error}",
+                path.display()
+            ))
+        })?;
+        let (_, _, file_size) = banner::canonicalize_banner_bytes(&bytes, &path)?;
+        *total_bytes = total_bytes.saturating_add(file_size);
+        if *total_bytes > BANNER_RESTORE_TOTAL_MAX_BYTES {
+            return Err(AppError::BadRequest(
+                "Restored banner files exceed the safe total size limit.".into(),
+            ));
+        }
     }
     Ok(())
 }

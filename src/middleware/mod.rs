@@ -9,6 +9,8 @@ mod state;
 
 pub use backup_progress::{backup_phase, BackupProgress};
 pub use csrf::validate_csrf;
+
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) use ip::forwarded_proto_is_https;
 pub use ip::{extract_ip, ClientIp};
 pub use normalize::normalize_trailing_slash;

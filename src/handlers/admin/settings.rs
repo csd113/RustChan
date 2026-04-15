@@ -1,3 +1,12 @@
+#![allow(
+    clippy::too_many_lines,
+    clippy::semicolon_if_nothing_returned,
+    clippy::option_if_let_else,
+    clippy::uninlined_format_args,
+    clippy::useless_let_if_seq,
+    clippy::assigning_clones
+)]
+
 // handlers/admin/settings.rs
 //
 // Board settings, site settings, and maintenance (vacuum) handlers.
@@ -10,7 +19,7 @@ use crate::{
     error::{AppError, Result},
     handlers::board::ensure_csrf,
     middleware::AppState,
-    models::{BannerScope, BannerTargetType, BoardAccessMode, BoardBannerMode},
+    models::{BannerScope, BoardAccessMode, BoardBannerMode},
     utils::crypto::hash_password,
 };
 use axum::{
@@ -46,74 +55,6 @@ fn checkbox_is_on(value: Option<&str>) -> bool {
     value == Some("1")
         || value.is_some_and(|item| item.eq_ignore_ascii_case("on"))
         || value.is_some_and(|item| item.eq_ignore_ascii_case("true"))
-}
-
-fn parse_banner_target(
-    target_type_raw: &str,
-    target_value_raw: &str,
-    allow_external_links: bool,
-) -> Result<(BannerTargetType, String)> {
-    let target_type = BannerTargetType::from_db_str(target_type_raw.trim())
-        .ok_or_else(|| AppError::BadRequest("Invalid banner target type.".into()))?;
-    let target_value = target_value_raw.trim();
-    match target_type {
-        BannerTargetType::None => Ok((BannerTargetType::None, String::new())),
-        BannerTargetType::InternalBoard => {
-            let board_path =
-                banner::normalize_internal_board_path(target_value).ok_or_else(|| {
-                    AppError::BadRequest(
-                        "Internal board link must be a valid board short name.".into(),
-                    )
-                })?;
-            Ok((
-                BannerTargetType::InternalBoard,
-                board_path.trim_matches('/').to_string(),
-            ))
-        }
-        BannerTargetType::InternalPath => {
-            let path = banner::normalize_internal_path(target_value).ok_or_else(|| {
-                AppError::BadRequest("Internal path must begin with a single '/'.".into())
-            })?;
-            Ok((BannerTargetType::InternalPath, path))
-        }
-        BannerTargetType::ExternalUrl => {
-            if !allow_external_links {
-                return Err(AppError::BadRequest(
-                    "External banner links are disabled in site settings.".into(),
-                ));
-            }
-            let url = banner::normalize_external_url(target_value).ok_or_else(|| {
-                AppError::BadRequest(
-                    "External banner links must use a valid http/https URL.".into(),
-                )
-            })?;
-            Ok((BannerTargetType::ExternalUrl, url))
-        }
-    }
-}
-
-fn select_banner_target_value(
-    target_type_raw: &str,
-    target_value_raw: Option<&str>,
-    target_board_value_raw: Option<&str>,
-    target_thread_value_raw: Option<&str>,
-    target_external_url_raw: Option<&str>,
-) -> String {
-    match BannerTargetType::from_db_str(target_type_raw.trim()).unwrap_or(BannerTargetType::None) {
-        BannerTargetType::None => String::new(),
-        BannerTargetType::InternalBoard => target_board_value_raw
-            .unwrap_or(target_value_raw.unwrap_or_default())
-            .trim()
-            .to_string(),
-        BannerTargetType::InternalPath => target_thread_value_raw
-            .unwrap_or(target_value_raw.unwrap_or_default())
-            .trim()
-            .to_string(),
-        BannerTargetType::ExternalUrl => target_external_url_raw
-            .unwrap_or(target_value_raw.unwrap_or_default())
-            .trim()
-            .to_string(),
-    }
 }
 
 async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String> {
@@ -753,13 +694,6 @@ pub struct ClearBoardBannerForm {
     pub csrf: Option<String>,
 }
 
-fn banner_open_section(anchor: &str) -> &str {
-    match anchor {
-        "global-banners" | "home-banners" => "board-banners",
-        _ => anchor,
-    }
-}
-
 async fn board_anchor_from_id(state: &AppState, board_id: i64) -> Result<String> {
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -788,14 +722,14 @@ async fn upload_banner_for_scope(
         let conn = state.db.get()?;
         super::require_admin_session_sid(&conn, session_id.as_deref())?;
         let allow_external_links = db::get_banner_external_links_enabled(&conn);
-        let selected_target_value = select_banner_target_value(
+        let selected_target_value = banner::select_banner_target_value(
             &parsed.target_type,
             parsed.target_value.as_deref(),
             parsed.target_board_value.as_deref(),
             parsed.target_thread_value.as_deref(),
             parsed.target_external_url.as_deref(),
         );
-        let (target_type, target_value) = parse_banner_target(
+        let (target_type, target_value) = banner::parse_banner_target(
             &parsed.target_type,
             &selected_target_value,
             allow_external_links,
@@ -908,7 +842,7 @@ pub async fn upload_global_banner(
         Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
             "Global banner uploaded.",
             &anchor,
-            banner_open_section(&anchor),
+            banner::banner_open_section(&anchor),
         )
         .into_response()),
         Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
@@ -943,7 +877,7 @@ pub async fn upload_home_banner(
         Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
             "Home page banner uploaded.",
             &anchor,
-            banner_open_section(&anchor),
+            banner::banner_open_section(&anchor),
         )
         .into_response()),
         Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
@@ -990,7 +924,7 @@ pub async fn upload_board_banner(
         Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
             "Board banner saved.",
             &anchor,
-            banner_open_section(&anchor),
+            banner::banner_open_section(&anchor),
         )
         .into_response()),
         Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
@@ -1025,14 +959,14 @@ pub async fn update_banner_meta(
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             let asset = db::get_banner_asset(&conn, form.banner_id)?
                 .ok_or_else(|| AppError::BadRequest("Banner not found.".into()))?;
-            let selected_target_value = select_banner_target_value(
+            let selected_target_value = banner::select_banner_target_value(
                 &form.target_type,
                 form.target_value.as_deref(),
                 form.target_board_value.as_deref(),
                 form.target_thread_value.as_deref(),
                 form.target_external_url.as_deref(),
             );
-            let (target_type, target_value) = parse_banner_target(
+            let (target_type, target_value) = banner::parse_banner_target(
                 &form.target_type,
                 &selected_target_value,
                 db::get_banner_external_links_enabled(&conn),
@@ -1067,7 +1001,7 @@ pub async fn update_banner_meta(
         Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
             "Banner settings saved.",
             &anchor,
-            banner_open_section(&anchor),
+            banner::banner_open_section(&anchor),
         )
         .into_response()),
         Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
@@ -1108,7 +1042,7 @@ pub async fn delete_banner(
     Ok(super::admin_panel_redirect_anchor_open(
         "Banner deleted.",
         &anchor,
-        banner_open_section(&anchor),
+        banner::banner_open_section(&anchor),
     )
     .into_response())
 }
@@ -1151,7 +1085,7 @@ pub async fn move_banner(
     Ok(super::admin_panel_redirect_anchor_open(
         "Banner order updated.",
         &anchor,
-        banner_open_section(&anchor),
+        banner::banner_open_section(&anchor),
     )
     .into_response())
 }

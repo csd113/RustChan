@@ -1,3 +1,5 @@
+#![allow(clippy::single_match_else, clippy::option_if_let_else)]
+
 // src/middleware/state.rs
 
 use std::sync::atomic::{AtomicU64, Ordering};

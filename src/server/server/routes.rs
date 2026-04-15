@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_lines)]
+
 // src/server/server/routes.rs
 
 use axum::{

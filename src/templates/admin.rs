@@ -142,32 +142,6 @@ fn banner_preview_html(asset: &BannerAsset, alt: &str) -> String {
     )
 }
 
-struct BannerTargetDraft {
-    board_value: String,
-    thread_value: String,
-    external_url: String,
-}
-
-fn banner_target_draft(target_type: BannerTargetType, target_value: &str) -> BannerTargetDraft {
-    BannerTargetDraft {
-        board_value: if matches!(target_type, BannerTargetType::InternalBoard) {
-            target_value.to_string()
-        } else {
-            String::new()
-        },
-        thread_value: if matches!(target_type, BannerTargetType::InternalPath) {
-            target_value.to_string()
-        } else {
-            String::new()
-        },
-        external_url: if matches!(target_type, BannerTargetType::ExternalUrl) {
-            target_value.to_string()
-        } else {
-            String::new()
-        },
-    }
-}
-
 fn banner_board_options(boards: &[Board], selected_value: &str) -> String {
     let trimmed_selected = selected_value.trim().trim_matches('/');
     let mut out = String::new();
@@ -211,7 +185,7 @@ fn render_banner_target_picker(
     selected: BannerTargetType,
     target_value: &str,
 ) -> String {
-    let draft = banner_target_draft(selected, target_value);
+    let draft = crate::banner::banner_target_draft(selected, target_value);
     format!(
         r#"<div class="admin-banner-target-picker" data-banner-target-picker>
   <label class="admin-banner-field admin-banner-field-wide admin-banner-field-select">When someone clicks the banner
@@ -364,8 +338,7 @@ fn render_banner_asset_list(
     assets
         .iter()
         .map(|asset| render_banner_asset_row(asset, csrf_token, boards, show_placements))
-        .collect::<Vec<_>>()
-        .join("")
+        .collect::<String>()
 }
 
 #[allow(clippy::too_many_lines)]

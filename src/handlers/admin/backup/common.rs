@@ -12,6 +12,8 @@ use tracing::warn;
 
 pub(super) const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub(super) const BOARD_MANIFEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
+pub(super) const BANNER_RESTORE_ENTRY_MAX_BYTES: u64 = 8 * 1024 * 1024;
+pub(super) const BANNER_RESTORE_TOTAL_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const FULL_BACKUP_MANIFEST_NAME: &str = "backup.json";
 const SQLITE_HEADER: &[u8] = b"SQLite format 3\0";
 

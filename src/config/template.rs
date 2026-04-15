@@ -1,3 +1,4 @@
+#[allow(clippy::too_many_lines)]
 pub(super) fn settings_template(secret: &str) -> String {
     format!(
         r#"# RustChan settings.toml

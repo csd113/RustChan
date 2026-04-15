@@ -1,3 +1,9 @@
+#![allow(
+    clippy::too_many_lines,
+    clippy::option_if_let_else,
+    clippy::map_unwrap_or
+)]
+
 use std::sync::atomic::Ordering;
 use std::sync::LazyLock;
 use std::time::Instant;
