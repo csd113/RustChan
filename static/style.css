@@ -3204,6 +3204,16 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   min-width: 120px;
 }
 
+.admin-moderation-compact-form input[type="text"],
+.admin-moderation-compact-form input[type="number"] {
+  min-height: 2rem;
+  padding: 0.32rem 0.5rem;
+}
+
+.admin-moderation-compact-form .admin-quick-field {
+  gap: 3px;
+}
+
 .admin-quick-form {
   display: flex;
   gap: 8px;
@@ -3323,6 +3333,10 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   align-items: flex-start;
 }
 
+.admin-banner-editor {
+  align-items: flex-end;
+}
+
 .admin-banner-meta-form label,
 .admin-banner-upload-form label {
   display: flex;
@@ -3346,6 +3360,7 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   width: 100%;
+  align-items: end;
 }
 
 .admin-banner-field {
@@ -3354,6 +3369,10 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
 .admin-banner-field-wide {
   grid-column: 1 / -1;
+}
+
+.admin-banner-field-select {
+  max-width: 19rem;
 }
 
 .admin-banner-target-field[hidden] {
@@ -3373,12 +3392,17 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   flex-wrap: wrap;
   gap: 10px;
   width: 100%;
+  align-items: center;
+  align-self: end;
+  flex: 0 1 auto;
 }
 
 .admin-banner-form-actions {
   display: flex;
   align-items: center;
   gap: 10px;
+  align-self: end;
+  flex: 0 0 auto;
 }
 
 .admin-banner-inline-warning {
@@ -3388,11 +3412,42 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
 .admin-banner-settings-toggle {
   min-height: 2.4rem;
+  max-width: 28rem;
 }
 
 .board-banner-settings-subsection {
   padding-left: 1rem;
   padding-right: 1rem;
+}
+
+.admin-banner-editor .admin-file-field {
+  flex: 0 1 24rem;
+  min-width: 0;
+}
+
+.admin-banner-file-field,
+.admin-banner-file-field input[type="file"] {
+  max-width: 24rem;
+}
+
+.board-settings-field-compact {
+  max-width: 18rem;
+}
+
+.admin-banner-settings-form .board-settings-grid {
+  align-items: end;
+}
+
+.board-card-edge-header {
+  justify-content: flex-start;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0 1rem;
+}
+
+.board-card-edge-header p {
+  max-width: 100%;
 }
 
 .admin-moderation-card-log {
@@ -3422,6 +3477,13 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
   .admin-banner-target-picker {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-banner-field-select,
+  .admin-banner-file-field,
+  .board-settings-field-compact,
+  .admin-banner-settings-toggle {
+    max-width: 100%;
   }
 
   .theme-editor-panel-header {

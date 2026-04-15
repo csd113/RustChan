@@ -214,7 +214,7 @@ fn render_banner_target_picker(
     let draft = banner_target_draft(selected, target_value);
     format!(
         r#"<div class="admin-banner-target-picker" data-banner-target-picker>
-  <label class="admin-banner-field admin-banner-field-wide">When someone clicks the banner
+  <label class="admin-banner-field admin-banner-field-wide admin-banner-field-select">When someone clicks the banner
     <select name="target_type" data-banner-target-select>{target_options}</select>
   </label>
   <label class="admin-banner-field admin-banner-target-field" data-banner-target-field="internal_board">Open board
@@ -261,7 +261,7 @@ fn render_banner_upload_form(
   {board_id_input}
   {target_picker}
   {placement_controls}
-  <label class="admin-file-field admin-banner-field-wide">Banner image
+  <label class="admin-file-field admin-banner-field-wide admin-banner-file-field">Banner image
     <input type="file" name="banner" accept="image/png,image/jpeg,image/gif,image/webp" required class="admin-file-input">
   </label>
   <div class="admin-banner-form-actions">
@@ -544,13 +544,13 @@ fn render_board_settings_card(
     <p>Pick the default theme for this board. Favicon overrides live just below.</p>
   </div>
   <div class="board-settings-grid">
-    <label>Board default theme
+    <label class="board-settings-field-compact">Board default theme
       <select name="default_theme">
         <option value=""{inherit_theme_selected}>Inherit site default</option>
         {board_theme_options}
       </select>
     </label>
-    <label>Board banner mode
+    <label class="board-settings-field-compact">Board banner mode
       <select name="banner_mode">
         <option value="inherit"{banner_inherit_selected}>Rotate site-wide board banners</option>
         <option value="none"{banner_none_selected}>Hide banners on this board</option>
@@ -564,7 +564,7 @@ fn render_board_settings_card(
 </div>
 </form>
 <div class="admin-subsection">
-  <div class="admin-card-header">
+  <div class="admin-card-header board-card-edge-header">
     <h3>// favicon override</h3>
     <p>Give /{short}/ its own icon without changing the global site favicon.</p>
   </div>
@@ -585,7 +585,7 @@ fn render_board_settings_card(
 </div>
 {board_banner_section}
 <div class="admin-subsection">
-  <div class="admin-card-header">
+  <div class="admin-card-header board-card-edge-header">
     <h3>// board backup tools</h3>
     <p>Create a fresh board-only package for immediate download or save one to the server for later restores.</p>
   </div>
@@ -604,7 +604,7 @@ fn render_board_settings_card(
 </div>
 </div>
 <div class="admin-subsection">
-  <div class="admin-card-header">
+  <div class="admin-card-header board-card-edge-header">
     <h3>// danger zone</h3>
     <p>Permanent board deletion stays separate from routine maintenance tools.</p>
   </div>
@@ -1385,7 +1385,7 @@ old boards to prevent query performance degradation.
   <form method="POST" action="/admin/site/settings" class="admin-site-settings-form admin-banner-settings-form">
     <input type="hidden" name="_csrf" value="{csrf}">
     <div class="board-settings-grid admin-settings-grid">
-      <label title="0 means pick a new banner on each refresh. Values above 0 enforce timed rotation.">Rotate banners every (minutes)
+      <label class="board-settings-field-compact" title="0 means pick a new banner on each refresh. Values above 0 enforce timed rotation.">Rotate banners every (minutes)
         <input type="number" name="banner_rotation_interval_minutes" value="{banner_rotation_interval_minutes}" min="0" max="43200"
                style="font-family:inherit">
       </label>
