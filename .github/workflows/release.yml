@@ -127,14 +127,26 @@ jobs:
         run: |
           set -euo pipefail
           cd release-assets
-          sha256sum ./*.zip | sed 's| \*\./|  |; s| \./|  |' > SHA256SUMS.txt
+          shopt -s nullglob
+          archives=( *.zip )
+
+          if [ "${#archives[@]}" -eq 0 ]; then
+            echo "No release archives were downloaded" >&2
+            exit 1
+          fi
+
+          LC_ALL=C printf '%s\n' "${archives[@]}" \
+            | sort \
+            | while IFS= read -r archive; do
+                sha256sum --binary "$archive"
+              done > SHA256SUMS.txt
 
       - name: Verify checksum manifest
         shell: bash
         run: |
           set -euo pipefail
           cd release-assets
-          sha256sum --check SHA256SUMS.txt
+          sha256sum --check --strict SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2.5.0
