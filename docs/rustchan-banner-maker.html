@@ -428,6 +428,7 @@
   }
   #previewImg {
     display: block;
+    border: 2px solid var(--border-bright);
     border-radius: 2px;
     box-shadow: 0 2px 12px rgba(0,0,0,0.4);
   }
@@ -862,6 +863,25 @@ function clearImage() {
   draw();
 }
 
+// ── CLAMP BACKGROUND IN COVER MODE (prevents blank sections) ──
+// The image is now forced to always reach every border of the banner box.
+// Dragging can never create empty/transparent areas — the cover option
+// fully covers the canvas at all times while still letting you pan the crop window.
+function clampImageOffset() {
+  if (!bgImage || document.getElementById('imgFit').value !== 'cover') return;
+  const ratio = Math.max(W / bgImage.width, H / bgImage.height);
+  const dw = bgImage.width * ratio;
+  const dh = bgImage.height * ratio;
+  const centerX = (W - dw) / 2;
+  const centerY = (H - dh) / 2;
+  const minOffsetX = centerX;
+  const maxOffsetX = -centerX;
+  const minOffsetY = centerY;
+  const maxOffsetY = -centerY;
+  imgOffsetX = Math.max(minOffsetX, Math.min(maxOffsetX, imgOffsetX));
+  imgOffsetY = Math.max(minOffsetY, Math.min(maxOffsetY, imgOffsetY));
+}
+
 // ── DRAG LOGIC (Background + Text) ──
 canvas.addEventListener('mousedown', e => {
   if (dragMode === 'bg' && bgImage) {
@@ -891,6 +911,7 @@ window.addEventListener('mousemove', e => {
     const dy = (e.clientY - dragStartY) / getScale();
     imgOffsetX = dragBaseX + dx;
     imgOffsetY = dragBaseY + dy;
+    clampImageOffset();               // ← ensures no blank sections
     info.textContent = `BG  x:${Math.round(imgOffsetX)}  y:${Math.round(imgOffsetY)}`;
     info.classList.add('visible');
     draw();
@@ -941,6 +962,7 @@ window.addEventListener('touchmove', e => {
     const dy = (e.touches[0].clientY - dragStartY) / getScale();
     imgOffsetX = dragBaseX + dx;
     imgOffsetY = dragBaseY + dy;
+    clampImageOffset();               // ← ensures no blank sections
     draw();
   } else if (isDraggingText) {
     const dx = (e.touches[0].clientX - dragStartX) / getScale();
