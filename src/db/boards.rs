@@ -11,6 +11,7 @@
 use crate::models::{Board, BoardAccessMode, BoardBannerMode};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
+use std::collections::HashSet;
 
 const BOARD_ORDER_SQL: &str = "nsfw ASC, display_order ASC, id ASC";
 const BOARD_GROUP_ORDER_SQL: &str = "display_order ASC, id ASC";
@@ -645,43 +646,93 @@ pub fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::SiteStats> {
-    conn.query_row(
+    let columns = post_table_columns(conn)?;
+    let has_media_type = columns.contains("media_type");
+    let has_audio_file_path = columns.contains("audio_file_path");
+    let has_audio_file_size = columns.contains("audio_file_size");
+    let has_mime_type = columns.contains("mime_type");
+
+    let total_images_expr = if has_media_type {
+        "SUM(CASE WHEN media_type = 'image' THEN 1 ELSE 0 END)"
+    } else {
+        "0"
+    };
+    let total_videos_expr = if has_media_type {
+        "SUM(CASE WHEN media_type = 'video' THEN 1 ELSE 0 END)"
+    } else {
+        "0"
+    };
+
+    let mut total_audio_checks = Vec::new();
+    if has_media_type {
+        total_audio_checks.push("media_type = 'audio'");
+    }
+    if has_audio_file_path {
+        total_audio_checks.push("audio_file_path IS NOT NULL");
+    }
+    if has_mime_type {
+        total_audio_checks.push("mime_type LIKE 'audio/%'");
+    }
+    let total_audio_expr = if total_audio_checks.is_empty() {
+        "0".to_string()
+    } else {
+        format!(
+            "SUM(CASE WHEN {} THEN 1 ELSE 0 END)",
+            total_audio_checks.join(" OR ")
+        )
+    };
+
+    let active_audio_bytes_expr = if has_audio_file_path && has_audio_file_size {
+        "SUM(CASE WHEN audio_file_path IS NOT NULL AND audio_file_size IS NOT NULL
+                  THEN audio_file_size ELSE 0 END)"
+    } else {
+        "0"
+    };
+
+    let query = format!(
         "SELECT
              COUNT(*)                                                           AS total_posts,
-             SUM(CASE WHEN media_type = 'image' THEN 1 ELSE 0 END)             AS total_images,
-             SUM(CASE WHEN media_type = 'video' THEN 1 ELSE 0 END)             AS total_videos,
-             SUM(
-                 CASE
-                     WHEN media_type = 'audio'
-                       OR audio_file_path IS NOT NULL
-                       OR mime_type LIKE 'audio/%'
-                     THEN 1 ELSE 0
-                 END
-             )                                                                 AS total_audio,
+             {total_images_expr}                                                AS total_images,
+             {total_videos_expr}                                                AS total_videos,
+             {total_audio_expr}                                                 AS total_audio,
              COALESCE(
                  SUM(CASE WHEN file_path IS NOT NULL AND file_size IS NOT NULL
-                          THEN file_size ELSE 0 END)
-               + SUM(CASE WHEN audio_file_path IS NOT NULL AND audio_file_size IS NOT NULL
-                          THEN audio_file_size ELSE 0 END),
-             0)                                                                 AS active_bytes
-         FROM posts",
-        [],
-        |r| {
-            Ok(crate::models::SiteStats {
-                total_posts: r.get(0)?,
-                total_images: r.get(1)?,
-                total_videos: r.get(2)?,
-                total_audio: r.get(3)?,
-                active_bytes: r.get(4)?,
-            })
-        },
-    )
+                          THEN file_size ELSE 0 END),
+                 0
+             ) + COALESCE(
+                 {active_audio_bytes_expr},
+                 0
+             )                                                                  AS active_bytes
+         FROM posts"
+    );
+
+    conn.query_row(&query, [], |r| {
+        Ok(crate::models::SiteStats {
+            total_posts: r.get(0)?,
+            total_images: r.get(1)?,
+            total_videos: r.get(2)?,
+            total_audio: r.get(3)?,
+            active_bytes: r.get(4)?,
+        })
+    })
     .context("Failed to query site stats")
+}
+
+fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn
+        .prepare_cached("PRAGMA table_info(posts)")
+        .context("Prepare posts table info query")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<HashSet<_>>>()
+        .context("Read posts table columns")?;
+    Ok(columns)
 }
 
 #[cfg(test)]
 mod tests {
     use super::get_site_stats;
+    use rusqlite::Connection;
 
     #[test]
     fn site_stats_count_audio_primary_and_combo_uploads() {
@@ -724,5 +775,29 @@ mod tests {
 
         let stats = get_site_stats(&conn).expect("load stats");
         assert_eq!(stats.total_audio, 2);
+    }
+
+    #[test]
+    fn site_stats_fall_back_when_audio_columns_are_missing() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE posts (
+                id INTEGER PRIMARY KEY,
+                file_path TEXT,
+                file_size INTEGER,
+                mime_type TEXT
+            );
+            INSERT INTO posts (id, file_path, file_size, mime_type) VALUES
+                (1, 'a.webp', 123, 'image/webp'),
+                (2, 'b.mp3', 456, 'audio/mpeg');",
+        )
+        .expect("seed posts");
+
+        let stats = get_site_stats(&conn).expect("load stats");
+        assert_eq!(stats.total_posts, 2);
+        assert_eq!(stats.total_images, 0);
+        assert_eq!(stats.total_videos, 0);
+        assert_eq!(stats.total_audio, 1);
+        assert_eq!(stats.active_bytes, 579);
     }
 }

@@ -92,6 +92,30 @@ fn parse_banner_target(
     }
 }
 
+fn select_banner_target_value(
+    target_type_raw: &str,
+    target_value_raw: Option<&str>,
+    target_board_value_raw: Option<&str>,
+    target_thread_value_raw: Option<&str>,
+    target_external_url_raw: Option<&str>,
+) -> String {
+    match BannerTargetType::from_db_str(target_type_raw.trim()).unwrap_or(BannerTargetType::None) {
+        BannerTargetType::None => String::new(),
+        BannerTargetType::InternalBoard => target_board_value_raw
+            .unwrap_or(target_value_raw.unwrap_or_default())
+            .trim()
+            .to_string(),
+        BannerTargetType::InternalPath => target_thread_value_raw
+            .unwrap_or(target_value_raw.unwrap_or_default())
+            .trim()
+            .to_string(),
+        BannerTargetType::ExternalUrl => target_external_url_raw
+            .unwrap_or(target_value_raw.unwrap_or_default())
+            .trim()
+            .to_string(),
+    }
+}
+
 async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String> {
     field
         .text()
@@ -520,6 +544,11 @@ pub async fn update_site_settings(
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
     super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    let is_banner_settings_only = form.site_name.is_none()
+        && form.site_subtitle.is_none()
+        && form.default_theme.is_none()
+        && (form.banner_rotation_interval_minutes.is_some()
+            || form.banner_external_links_enabled.is_some());
     let banner_rotation_interval_minutes = form
         .banner_rotation_interval_minutes
         .as_deref()
@@ -536,28 +565,20 @@ pub async fn update_site_settings(
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
             // Save the custom site name (trimmed, max 64 chars).
-            let new_name = form
-                .site_name
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .chars()
-                .take(64)
-                .collect::<String>();
+            let new_name = form.site_name.as_deref().map_or_else(
+                || db::get_site_name(&conn),
+                |value| value.trim().chars().take(64).collect::<String>(),
+            );
             db::set_site_setting(&conn, "site_name", &new_name)?;
             // Update the in-memory live name so all pages reflect it immediately.
             crate::templates::set_live_site_name(&new_name);
             tracing::info!(target: "admin", "Site name updated");
 
             // Save the custom subtitle.
-            let new_subtitle = form
-                .site_subtitle
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .chars()
-                .take(128)
-                .collect::<String>();
+            let new_subtitle = form.site_subtitle.as_deref().map_or_else(
+                || db::get_site_subtitle(&conn),
+                |value| value.trim().chars().take(128).collect::<String>(),
+            );
             db::set_site_setting(&conn, "site_subtitle", &new_subtitle)?;
             crate::templates::set_live_site_subtitle(&new_subtitle);
             tracing::info!(target: "admin", "Site subtitle updated");
@@ -568,17 +589,17 @@ pub async fn update_site_settings(
             tracing::info!(target: "admin", "settings.toml updated");
 
             // Save the default theme slug (validated against allowed values).
-            let new_theme = form
-                .default_theme
-                .as_deref()
-                .map(db::sanitize_theme_slug)
-                .unwrap_or_default();
-            let new_theme = if new_theme.is_empty() {
-                crate::theme::HARD_DEFAULT_THEME.to_string()
-            } else if db::get_theme(&conn, &new_theme)?.is_some_and(|theme| theme.enabled) {
-                new_theme
+            let new_theme = if let Some(value) = form.default_theme.as_deref() {
+                let candidate = db::sanitize_theme_slug(value);
+                if candidate.is_empty() {
+                    crate::theme::HARD_DEFAULT_THEME.to_string()
+                } else if db::get_theme(&conn, &candidate)?.is_some_and(|theme| theme.enabled) {
+                    candidate
+                } else {
+                    crate::theme::HARD_DEFAULT_THEME.to_string()
+                }
             } else {
-                crate::theme::HARD_DEFAULT_THEME.to_string()
+                db::get_default_user_theme(&conn)
             };
             db::set_site_setting(&conn, "default_theme", &new_theme)?;
             db::sync_live_theme_state(&conn)?;
@@ -606,14 +627,26 @@ pub async fn update_site_settings(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(Redirect::to("/admin/panel?settings_saved=1").into_response())
+    if is_banner_settings_only {
+        Ok(super::admin_panel_redirect_anchor_open(
+            "Banner settings saved.",
+            "board-banners",
+            "board-banners",
+        )
+        .into_response())
+    } else {
+        Ok(Redirect::to("/admin/panel?settings_saved=1").into_response())
+    }
 }
 
 struct ParsedBannerUpload {
     csrf: Option<String>,
     board_id: Option<i64>,
     target_type: String,
-    target_value: String,
+    target_value: Option<String>,
+    target_board_value: Option<String>,
+    target_thread_value: Option<String>,
+    target_external_url: Option<String>,
     show_on_index: bool,
     show_on_catalog: bool,
     enabled: bool,
@@ -624,7 +657,10 @@ async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpl
     let mut csrf = None;
     let mut board_id = None;
     let mut target_type = String::from("none");
-    let mut target_value = String::new();
+    let mut target_value = None;
+    let mut target_board_value = None;
+    let mut target_thread_value = None;
+    let mut target_external_url = None;
     let mut show_on_index = true;
     let mut show_on_catalog = true;
     let mut enabled = true;
@@ -639,7 +675,14 @@ async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpl
             Some("_csrf") => csrf = Some(read_text_field(field).await?),
             Some("board_id") => board_id = read_text_field(field).await?.trim().parse::<i64>().ok(),
             Some("target_type") => target_type = read_text_field(field).await?,
-            Some("target_value") => target_value = read_text_field(field).await?,
+            Some("target_value") => target_value = Some(read_text_field(field).await?),
+            Some("target_board_value") => target_board_value = Some(read_text_field(field).await?),
+            Some("target_thread_value") => {
+                target_thread_value = Some(read_text_field(field).await?)
+            }
+            Some("target_external_url") => {
+                target_external_url = Some(read_text_field(field).await?)
+            }
             Some("show_on_index") => {
                 show_on_index = checkbox_is_on(Some(&read_text_field(field).await?))
             }
@@ -662,6 +705,9 @@ async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpl
         board_id,
         target_type,
         target_value,
+        target_board_value,
+        target_thread_value,
+        target_external_url,
         show_on_index,
         show_on_catalog,
         enabled,
@@ -675,6 +721,9 @@ pub struct BannerMetaForm {
     pub banner_id: i64,
     pub target_type: String,
     pub target_value: Option<String>,
+    pub target_board_value: Option<String>,
+    pub target_thread_value: Option<String>,
+    pub target_external_url: Option<String>,
     pub enabled: Option<String>,
     pub show_on_index: Option<String>,
     pub show_on_catalog: Option<String>,
@@ -704,6 +753,30 @@ pub struct ClearBoardBannerForm {
     pub csrf: Option<String>,
 }
 
+fn banner_open_section(anchor: &str) -> &str {
+    match anchor {
+        "global-banners" | "home-banners" => "board-banners",
+        _ => anchor,
+    }
+}
+
+async fn board_anchor_from_id(state: &AppState, board_id: i64) -> Result<String> {
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            let board_short = conn.query_row(
+                "SELECT short_name FROM boards WHERE id = ?1",
+                rusqlite::params![board_id],
+                |row| row.get::<_, String>(0),
+            )?;
+            Ok(format!("board-{board_short}"))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
+}
+
 async fn upload_banner_for_scope(
     state: AppState,
     session_id: Option<String>,
@@ -715,9 +788,16 @@ async fn upload_banner_for_scope(
         let conn = state.db.get()?;
         super::require_admin_session_sid(&conn, session_id.as_deref())?;
         let allow_external_links = db::get_banner_external_links_enabled(&conn);
+        let selected_target_value = select_banner_target_value(
+            &parsed.target_type,
+            parsed.target_value.as_deref(),
+            parsed.target_board_value.as_deref(),
+            parsed.target_thread_value.as_deref(),
+            parsed.target_external_url.as_deref(),
+        );
         let (target_type, target_value) = parse_banner_target(
             &parsed.target_type,
-            &parsed.target_value,
+            &selected_target_value,
             allow_external_links,
         )?;
 
@@ -754,20 +834,7 @@ async fn upload_banner_for_scope(
             banner::write_banner_asset(&draft_asset, &parsed.banner_bytes)?;
 
         let result = (|| -> Result<String> {
-            if scope == BannerScope::Board {
-                let existing = db::delete_board_banner_assets(
-                    &conn,
-                    board_id.ok_or_else(|| AppError::BadRequest("Missing board id.".into()))?,
-                )?;
-                for asset in &existing {
-                    banner::delete_banner_asset_file(asset)?;
-                }
-            }
-            let sort_order = if scope == BannerScope::Board {
-                1
-            } else {
-                db::next_banner_sort_order(&conn, scope, board_id)?
-            };
+            let sort_order = db::next_banner_sort_order(&conn, scope, board_id)?;
             let banner_id = db::insert_banner_asset(
                 &conn,
                 scope,
@@ -792,6 +859,14 @@ async fn upload_banner_for_scope(
                     parsed.show_on_catalog
                 },
             )?;
+            if scope == BannerScope::Board {
+                let board_id =
+                    board_id.ok_or_else(|| AppError::BadRequest("Missing board id.".into()))?;
+                conn.execute(
+                    "UPDATE boards SET banner_mode = 'override' WHERE id = ?1",
+                    rusqlite::params![board_id],
+                )?;
+            }
             let anchor = match scope {
                 BannerScope::Global => "global-banners".to_string(),
                 BannerScope::Home => "home-banners".to_string(),
@@ -830,12 +905,22 @@ pub async fn upload_global_banner(
     let parsed = parse_banner_upload(multipart).await?;
     super::check_csrf_jar(&jar, parsed.csrf.as_deref())?;
     match upload_banner_for_scope(state, session_id, BannerScope::Global, None, parsed).await {
-        Ok(anchor) => Ok(
-            super::admin_panel_redirect_anchor("Global banner uploaded.", &anchor).into_response(),
-        ),
-        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor(
+        Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
+            "Global banner uploaded.",
+            &anchor,
+            banner_open_section(&anchor),
+        )
+        .into_response()),
+        Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
+            &message,
+            "global-banners",
+            "board-banners",
+        )
+        .into_response()),
+        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor_open(
             &format_banner_upload_error(&error),
             "global-banners",
+            "board-banners",
         )
         .into_response()),
         Err(error) => Err(error),
@@ -855,13 +940,22 @@ pub async fn upload_home_banner(
     let parsed = parse_banner_upload(multipart).await?;
     super::check_csrf_jar(&jar, parsed.csrf.as_deref())?;
     match upload_banner_for_scope(state, session_id, BannerScope::Home, None, parsed).await {
-        Ok(anchor) => Ok(
-            super::admin_panel_redirect_anchor("Home page banner uploaded.", &anchor)
-                .into_response(),
-        ),
-        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor(
+        Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
+            "Home page banner uploaded.",
+            &anchor,
+            banner_open_section(&anchor),
+        )
+        .into_response()),
+        Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
+            &message,
+            "home-banners",
+            "board-banners",
+        )
+        .into_response()),
+        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor_open(
             &format_banner_upload_error(&error),
             "home-banners",
+            "board-banners",
         )
         .into_response()),
         Err(error) => Err(error),
@@ -883,6 +977,7 @@ pub async fn upload_board_banner(
     let board_id = parsed
         .board_id
         .ok_or_else(|| AppError::BadRequest("Missing board id.".into()))?;
+    let board_anchor = board_anchor_from_id(&state, board_id).await?;
     match upload_banner_for_scope(
         state,
         session_id,
@@ -892,14 +987,22 @@ pub async fn upload_board_banner(
     )
     .await
     {
-        Ok(anchor) => Ok(super::admin_panel_redirect_anchor(
-            "Board banner override uploaded.",
+        Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
+            "Board banner saved.",
             &anchor,
+            banner_open_section(&anchor),
         )
         .into_response()),
-        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor(
+        Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
+            &message,
+            &board_anchor,
+            &board_anchor,
+        )
+        .into_response()),
+        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor_open(
             &format_banner_upload_error(&error),
-            "site-settings",
+            &board_anchor,
+            &board_anchor,
         )
         .into_response()),
         Err(error) => Err(error),
@@ -915,16 +1018,23 @@ pub async fn update_banner_meta(
         .get(super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
     super::check_csrf_jar(&jar, form.csrf.as_deref())?;
-    let anchor = tokio::task::spawn_blocking({
+    let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             let asset = db::get_banner_asset(&conn, form.banner_id)?
                 .ok_or_else(|| AppError::BadRequest("Banner not found.".into()))?;
+            let selected_target_value = select_banner_target_value(
+                &form.target_type,
+                form.target_value.as_deref(),
+                form.target_board_value.as_deref(),
+                form.target_thread_value.as_deref(),
+                form.target_external_url.as_deref(),
+            );
             let (target_type, target_value) = parse_banner_target(
                 &form.target_type,
-                form.target_value.as_deref().unwrap_or(""),
+                &selected_target_value,
                 db::get_banner_external_links_enabled(&conn),
             )?;
             db::update_banner_asset_meta(
@@ -952,8 +1062,22 @@ pub async fn update_banner_meta(
         }
     })
     .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    Ok(super::admin_panel_redirect_anchor("Banner settings saved.", &anchor).into_response())
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+    match result {
+        Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
+            "Banner settings saved.",
+            &anchor,
+            banner_open_section(&anchor),
+        )
+        .into_response()),
+        Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
+            &message,
+            "board-banners",
+            "board-banners",
+        )
+        .into_response()),
+        Err(error) => Err(error),
+    }
 }
 
 pub async fn delete_banner(
@@ -981,7 +1105,12 @@ pub async fn delete_banner(
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    Ok(super::admin_panel_redirect_anchor("Banner deleted.", &anchor).into_response())
+    Ok(super::admin_panel_redirect_anchor_open(
+        "Banner deleted.",
+        &anchor,
+        banner_open_section(&anchor),
+    )
+    .into_response())
 }
 
 pub async fn move_banner(
@@ -1019,7 +1148,12 @@ pub async fn move_banner(
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    Ok(super::admin_panel_redirect_anchor("Banner order updated.", &anchor).into_response())
+    Ok(super::admin_panel_redirect_anchor_open(
+        "Banner order updated.",
+        &anchor,
+        banner_open_section(&anchor),
+    )
+    .into_response())
 }
 
 pub async fn clear_board_banner_override(

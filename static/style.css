@@ -3320,7 +3320,7 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  align-items: flex-end;
+  align-items: flex-start;
 }
 
 .admin-banner-meta-form label,
@@ -3330,6 +3330,69 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
   gap: 4px;
   color: var(--text-dim);
   font-size: 0.78rem;
+}
+
+.admin-banner-meta-form label.admin-inline-checkbox,
+.admin-banner-upload-form label.admin-inline-checkbox,
+.admin-banner-settings-form label.admin-inline-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+.admin-banner-target-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+.admin-banner-field {
+  min-width: 0;
+}
+
+.admin-banner-field-wide {
+  grid-column: 1 / -1;
+}
+
+.admin-banner-target-field[hidden] {
+  display: none !important;
+}
+
+.admin-banner-target-picker input[type="text"],
+.admin-banner-target-picker input[type="url"],
+.admin-banner-target-picker select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.admin-banner-toggle-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  width: 100%;
+}
+
+.admin-banner-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.admin-banner-inline-warning {
+  width: 100%;
+  margin-bottom: 0;
+}
+
+.admin-banner-settings-toggle {
+  min-height: 2.4rem;
+}
+
+.board-banner-settings-subsection {
+  padding-left: 1rem;
+  padding-right: 1rem;
 }
 
 .admin-moderation-card-log {
@@ -3355,6 +3418,10 @@ html:not([data-theme]) .admin-panel h1 { text-shadow: 0 0 10px rgba(0,255,65,0.4
 
   .admin-banner-row {
     grid-template-columns: 1fr;
+  }
+
+  .admin-banner-target-picker {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .theme-editor-panel-header {

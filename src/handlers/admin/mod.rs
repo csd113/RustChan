@@ -280,6 +280,14 @@ pub(super) fn admin_panel_error_redirect_anchor(message: &str, anchor: &str) -> 
     admin_panel_redirect_with_status(message, true, Some(anchor), None)
 }
 
+pub(super) fn admin_panel_error_redirect_anchor_open(
+    message: &str,
+    anchor: &str,
+    open_section: &str,
+) -> Redirect {
+    admin_panel_redirect_with_status(message, true, Some(anchor), Some(open_section))
+}
+
 // ─── GET /admin/panel ─────────────────────────────────────────────────────────
 
 /// Query params accepted by GET /admin/panel.

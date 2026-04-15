@@ -5,7 +5,7 @@ use crate::models::{
 };
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageFormat};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const DISPLAY_WIDTH: u32 = 468;
 pub const DISPLAY_HEIGHT: u32 = 60;
@@ -79,18 +79,30 @@ pub fn banner_asset_url(asset: &BannerAsset) -> String {
 
 pub fn write_banner_asset(asset: &BannerAsset, bytes: &[u8]) -> Result<(u32, u32, u64)> {
     let img = decode_uploaded_banner(bytes)?;
-    let processed = normalize_banner_image(&img);
     let target_path = banner_asset_path(asset);
     if let Some(parent) = target_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create banner directory {}", parent.display()))?;
     }
-    processed
-        .save_with_format(&target_path, ImageFormat::WebP)
-        .with_context(|| format!("write {}", target_path.display()))?;
+
+    let stored_dimensions = if is_animated_gif(bytes) {
+        (img.width(), img.height())
+    } else {
+        let processed = normalize_banner_image(&img);
+        let dimensions = (processed.width(), processed.height());
+        processed
+            .save_with_format(&target_path, ImageFormat::WebP)
+            .with_context(|| format!("write {}", target_path.display()))?;
+        dimensions
+    };
+
+    if is_animated_gif(bytes) {
+        write_animated_gif_banner_asset(bytes, &target_path)?;
+    }
+
     let metadata = std::fs::metadata(&target_path)
         .with_context(|| format!("stat {}", target_path.display()))?;
-    Ok((processed.width(), processed.height(), metadata.len()))
+    Ok((stored_dimensions.0, stored_dimensions.1, metadata.len()))
 }
 
 pub fn delete_banner_asset_file(asset: &BannerAsset) -> Result<()> {
@@ -240,10 +252,22 @@ pub fn resolve_board_banner(
     current_path: &str,
 ) -> Result<BannerSelection> {
     let settings = load_site_banner_settings(conn);
+    let board_assets = db::list_banner_assets_for_board(conn, board.id)?;
     let candidates = match board.banner_mode {
         BoardBannerMode::None => Vec::new(),
-        BoardBannerMode::Override => db::list_banner_assets_for_board(conn, board.id)?,
-        BoardBannerMode::Inherit => db::list_banner_assets_for_scope(conn, BannerScope::Global)?,
+        BoardBannerMode::Override => board_assets,
+        BoardBannerMode::Inherit => {
+            if board_assets.is_empty() {
+                db::list_banner_assets_for_scope(conn, BannerScope::Global)?
+            } else {
+                tracing::info!(
+                    target: "banner",
+                    board = %board.short_name,
+                    "Board has uploaded banners while still set to inherit; using board banners"
+                );
+                board_assets
+            }
+        }
     }
     .into_iter()
     .filter(|asset| asset.enabled && should_show_on_placement(asset, placement))
@@ -308,6 +332,36 @@ fn resolve_from_candidates(
     }
 }
 
+fn write_animated_gif_banner_asset(bytes: &[u8], target_path: &Path) -> Result<()> {
+    if !crate::media::ffmpeg::detect_ffmpeg() {
+        anyhow::bail!(
+            "Animated GIF banners require ffmpeg so they can be converted to animated WebP."
+        );
+    }
+    if !crate::media::ffmpeg::check_webp_encoder() {
+        anyhow::bail!("Animated GIF banners require an ffmpeg build with libwebp support.");
+    }
+
+    let input_path = animated_gif_temp_path(target_path);
+    std::fs::write(&input_path, bytes)
+        .with_context(|| format!("write {}", input_path.display()))?;
+
+    let conversion = crate::media::ffmpeg::ffmpeg_image_to_webp(&input_path, target_path)
+        .with_context(|| format!("convert animated gif banner {}", input_path.display()));
+    let _ = std::fs::remove_file(&input_path);
+    conversion
+}
+
+fn animated_gif_temp_path(target_path: &Path) -> PathBuf {
+    let parent = target_path
+        .parent()
+        .map_or_else(runtime_banner_dir, Path::to_path_buf);
+    parent.join(format!(
+        "{}-animated-input.gif",
+        uuid::Uuid::new_v4().simple()
+    ))
+}
+
 fn decode_uploaded_banner(bytes: &[u8]) -> Result<DynamicImage> {
     let img = image::load_from_memory(bytes).context("decode banner image")?;
     let (width, height) = img.dimensions();
@@ -337,8 +391,40 @@ fn normalize_banner_image(img: &DynamicImage) -> DynamicImage {
     }
 }
 
+fn is_animated_gif(bytes: &[u8]) -> bool {
+    image::guess_format(bytes).ok() == Some(ImageFormat::Gif) && has_multiple_gif_frames(bytes)
+}
+
+fn has_multiple_gif_frames(bytes: &[u8]) -> bool {
+    let mut frame_markers = 0usize;
+    for window in bytes.windows(2) {
+        if window == [0x21, 0xF9] {
+            frame_markers += 1;
+            if frame_markers > 1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{has_multiple_gif_frames, is_animated_gif};
+
+    #[test]
+    fn detects_multiple_gif_frames() {
+        let bytes = b"GIF89a\x21\xF9\x04\x00\x00\x00\x00\x00\x21\xF9\x04\x00\x00\x00\x00\x00";
+        assert!(has_multiple_gif_frames(bytes));
+        assert!(is_animated_gif(bytes));
+    }
+
+    #[test]
+    fn ignores_single_frame_gifs() {
+        let bytes = b"GIF89a\x21\xF9\x04\x00\x00\x00\x00\x00";
+        assert!(!has_multiple_gif_frames(bytes));
+        assert!(!is_animated_gif(bytes));
+    }
     use super::{normalize_external_url, normalize_internal_board_path, normalize_internal_path};
 
     #[test]
