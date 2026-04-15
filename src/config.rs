@@ -106,6 +106,11 @@ pub fn runtime_favicon_dir() -> PathBuf {
     runtime_dir().join("favicon")
 }
 
+#[must_use]
+pub fn runtime_banner_dir() -> PathBuf {
+    runtime_dir().join("banner")
+}
+
 type RuntimeDirMigration = (&'static str, fn() -> PathBuf);
 
 const RUNTIME_LAYOUT_MIGRATIONS: &[RuntimeDirMigration] = &[
@@ -116,6 +121,7 @@ const RUNTIME_LAYOUT_MIGRATIONS: &[RuntimeDirMigration] = &[
     ("arti_cache", runtime_tor_cache_dir),
     ("tls", runtime_tls_dir),
     ("favicon", runtime_favicon_dir),
+    ("banner", runtime_banner_dir),
 ];
 
 fn migrate_dir_if_present(old_path: &Path, new_path: &Path) -> anyhow::Result<()> {
@@ -781,17 +787,14 @@ impl Config {
         for cidr in &self.trusted_proxy_cidrs {
             cidr.parse::<ipnet::IpNet>().map_err(|error| {
                 anyhow::anyhow!(
-                    "CONFIG ERROR: trusted_proxy_cidrs entry '{}' is not valid CIDR: {}",
-                    cidr,
-                    error
+                    "CONFIG ERROR: trusted_proxy_cidrs entry '{cidr}' is not valid CIDR: {error}"
                 )
             })?;
         }
         for host in &self.public_hosts {
             normalize_public_host(host).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "CONFIG ERROR: public_hosts entry '{}' must be a bare hostname or IP literal.",
-                    host
+                    "CONFIG ERROR: public_hosts entry '{host}' must be a bare hostname or IP literal."
                 )
             })?;
         }

@@ -116,6 +116,7 @@ pub fn render_board_page(
     csrf_token: &str,
     error: Option<&str>,
     new_thread_prefill: Option<&templates::forms::PostFormState>,
+    board_banner_html: &str,
     current_theme: Option<&str>,
     can_post: bool,
 ) -> String {
@@ -129,6 +130,7 @@ pub fn render_board_page(
         data.is_admin,
         error,
         new_thread_prefill,
+        board_banner_html,
         current_theme,
         data.board.collapse_greentext,
         can_post,

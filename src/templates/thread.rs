@@ -23,8 +23,6 @@ fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String
     } else {
         "board-header thread-nav"
     };
-    let board_short = escape_html(&board.short_name);
-
     format!(
         r#"<div class="{nav_class}">
   <a href="/{board_short}">[ Return ]</a>
@@ -40,7 +38,7 @@ fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String
 </div>
 "#,
         nav_class = nav_class,
-        board_short = board_short,
+        board_short = escape_html(&board.short_name),
         jump_link = jump_link,
         jump_label = jump_label,
         reply_count = reply_count,

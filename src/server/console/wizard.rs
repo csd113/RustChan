@@ -3,10 +3,10 @@
 // These wizards need read_line() for interactive input and cannot run inside
 // crossterm raw mode. Pattern:
 //
-//   1. Disable raw mode, leave alternate screen  → terminal looks normal
+//   1. Disable raw mode and clear the alternate screen for prompt mode
 //   2. Run the blocking wizard (prompts + read_line)
 //   3. Wait for Enter so the operator can read the result
-//   4. Re-enable raw mode, re-enter alternate screen, clear for a fresh frame
+//   4. Re-enable raw mode and clear for a fresh dashboard frame
 //   5. Set ConsoleMode back to Dashboard so the render task resumes
 //
 // run_wizard() must be called from tokio::task::spawn_blocking so it does not
@@ -22,9 +22,16 @@ use std::io::{stdout, BufRead, BufReader};
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
-    // 1. Exit raw mode.
+    // 1. Exit raw mode and reuse the existing alternate screen. Staying in the
+    // same full-screen buffer avoids terminal-specific redraw glitches where
+    // the dashboard appears to overlap the wizard prompts on the primary screen.
     let _ = terminal::disable_raw_mode();
-    let _ = execute!(stdout(), terminal::LeaveAlternateScreen, cursor::Show);
+    let _ = execute!(
+        stdout(),
+        terminal::Clear(terminal::ClearType::All),
+        cursor::MoveTo(0, 0),
+        cursor::Show,
+    );
 
     // 2. Run the wizard, then consume the "press Enter" prompt — all within
     //    a single scope so the StdinLock (significant Drop) is released before
@@ -49,11 +56,10 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
         let _ = reader.read_line(&mut buf);
     } // StdinLock dropped here, before raw mode is re-entered.
 
-    // 4. Re-enter raw mode and alternate screen.
+    // 4. Re-enter raw mode and clear for a fresh dashboard frame.
     let _ = terminal::enable_raw_mode();
     let _ = execute!(
         stdout(),
-        terminal::EnterAlternateScreen,
         terminal::Clear(terminal::ClearType::All),
         cursor::Hide,
         cursor::MoveTo(0, 0),

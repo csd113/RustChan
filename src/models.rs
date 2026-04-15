@@ -131,6 +131,121 @@ impl std::fmt::Display for BoardAccessMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardBannerMode {
+    #[default]
+    Inherit,
+    None,
+    Override,
+}
+
+impl BoardBannerMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::None => "none",
+            Self::Override => "override",
+        }
+    }
+
+    #[must_use]
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "inherit" => Some(Self::Inherit),
+            "none" => Some(Self::None),
+            "override" => Some(Self::Override),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for BoardBannerMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BannerScope {
+    Global,
+    Board,
+    Home,
+}
+
+impl BannerScope {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Board => "board",
+            Self::Home => "home",
+        }
+    }
+
+    #[must_use]
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "global" => Some(Self::Global),
+            "board" => Some(Self::Board),
+            "home" => Some(Self::Home),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for BannerScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BannerTargetType {
+    None,
+    InternalBoard,
+    InternalPath,
+    ExternalUrl,
+}
+
+impl BannerTargetType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::InternalBoard => "internal_board",
+            Self::InternalPath => "internal_path",
+            Self::ExternalUrl => "external_url",
+        }
+    }
+
+    #[must_use]
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "internal_board" => Some(Self::InternalBoard),
+            "internal_path" => Some(Self::InternalPath),
+            "external_url" => Some(Self::ExternalUrl),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for BannerTargetType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BannerPlacement {
+    Index,
+    Catalog,
+}
+
 /// A board, e.g. /tech/ — Technology
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
@@ -158,9 +273,29 @@ pub struct Board {
     pub collapse_greentext: bool, // per-board long greentext auto-collapse toggle
     pub post_cooldown_secs: i64,  // seconds a user must wait between posts (0 = disabled)
     pub default_theme: String,    // blank = inherit site default
+    pub banner_mode: BoardBannerMode,
     pub access_mode: BoardAccessMode,
     pub access_password_hash: String,
     pub created_at: i64, // Unix timestamp
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BannerAsset {
+    pub id: i64,
+    pub scope: BannerScope,
+    pub board_id: Option<i64>,
+    pub board_short: Option<String>,
+    pub storage_key: String,
+    pub width: i64,
+    pub height: i64,
+    pub file_size: i64,
+    pub enabled: bool,
+    pub sort_order: i64,
+    pub target_type: BannerTargetType,
+    pub target_value: String,
+    pub show_on_index: bool,
+    pub show_on_catalog: bool,
+    pub created_at: i64,
 }
 
 /// A configurable UI theme that may be built-in or admin-defined.
@@ -339,6 +474,15 @@ pub struct SearchQuery {
 
 const fn default_page() -> i64 {
     1
+}
+
+impl Default for SearchQuery {
+    fn default() -> Self {
+        Self {
+            q: String::new(),
+            page: default_page(),
+        }
+    }
 }
 
 /// Pagination helper
@@ -621,6 +765,78 @@ mod tests {
                 "from_db_str() round-trip failed for {access_mode:?}"
             );
         }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn board_banner_mode_serde_matches_db_str() {
+        for banner_mode in [
+            BoardBannerMode::Inherit,
+            BoardBannerMode::None,
+            BoardBannerMode::Override,
+        ] {
+            let json = serde_json::to_string(&banner_mode)
+                .expect("BoardBannerMode always serialises to a JSON string");
+            let json_str = json.trim_matches('"');
+            assert_eq!(
+                banner_mode.as_str(),
+                json_str,
+                "as_str() and serde disagree for {banner_mode:?}"
+            );
+            assert_eq!(
+                BoardBannerMode::from_db_str(json_str),
+                Some(banner_mode),
+                "from_db_str() round-trip failed for {banner_mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn banner_scope_serde_matches_db_str() {
+        for scope in [BannerScope::Global, BannerScope::Board, BannerScope::Home] {
+            let json =
+                serde_json::to_string(&scope).expect("BannerScope always serialises to JSON");
+            let json_str = json.trim_matches('"');
+            assert_eq!(scope.as_str(), json_str, "serde disagrees for {scope:?}");
+            assert_eq!(
+                BannerScope::from_db_str(json_str),
+                Some(scope),
+                "from_db_str() round-trip failed for {scope:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn banner_target_type_serde_matches_db_str() {
+        for target_type in [
+            BannerTargetType::None,
+            BannerTargetType::InternalBoard,
+            BannerTargetType::InternalPath,
+            BannerTargetType::ExternalUrl,
+        ] {
+            let json = serde_json::to_string(&target_type)
+                .expect("BannerTargetType always serialises to JSON");
+            let json_str = json.trim_matches('"');
+            assert_eq!(
+                target_type.as_str(),
+                json_str,
+                "serde disagrees for {target_type:?}"
+            );
+            assert_eq!(
+                BannerTargetType::from_db_str(json_str),
+                Some(target_type),
+                "from_db_str() round-trip failed for {target_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_query_default_matches_serde_defaults() {
+        let query = SearchQuery::default();
+        assert!(query.q.is_empty());
+        assert_eq!(query.page, 1);
     }
 
     // ── Pagination ────────────────────────────────────────────────────────

@@ -1,4 +1,3 @@
-#[cfg(test)]
 #[must_use]
 pub fn sample_board() -> crate::models::Board {
     crate::models::Board {
@@ -25,6 +24,7 @@ pub fn sample_board() -> crate::models::Board {
         collapse_greentext: false,
         post_cooldown_secs: 0,
         default_theme: String::new(),
+        banner_mode: crate::models::BoardBannerMode::Inherit,
         access_mode: crate::models::BoardAccessMode::Public,
         access_password_hash: String::new(),
         created_at: 0,

@@ -5,7 +5,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 
 pub type DbPool = Pool<SqliteConnectionManager>;
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewPost {
     pub thread_id: i64,
     pub board_id: i64,
@@ -29,6 +29,7 @@ pub struct NewPost {
     pub is_op: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachedFile {
     pub file_path: String,
     pub thumb_path: String,

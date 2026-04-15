@@ -1,3 +1,5 @@
+#![allow(clippy::single_char_pattern)]
+
 // server/console/dashboard.rs — Pure render functions for each ConsoleMode.
 //
 // Layout matches the RustHost reference style:

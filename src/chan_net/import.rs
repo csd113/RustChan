@@ -27,6 +27,10 @@ use tokio_util::bytes;
 use super::snapshot::unpack_snapshot;
 use crate::{error::AppError, middleware::AppState};
 
+fn chan_ledger_not_initialised() -> AppError {
+    AppError::Internal(anyhow::anyhow!("ChanNet ledger not initialised"))
+}
+
 // ── do_import ─────────────────────────────────────────────────────────────────
 
 /// Core import logic shared by `chan_import` (POST /chan/import) and
@@ -65,7 +69,7 @@ pub async fn do_import(state: &AppState, bytes: bytes::Bytes) -> Result<usize, A
         let ledger_arc = state
             .chan_ledger
             .as_ref()
-            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("ChanNet ledger not initialised")))?;
+            .ok_or_else(chan_ledger_not_initialised)?;
 
         // parking_lot::Mutex::lock() never poisons — no unwrap needed.
         let ledger = ledger_arc.lock();
@@ -110,7 +114,7 @@ pub async fn do_import(state: &AppState, bytes: bytes::Bytes) -> Result<usize, A
         Ok(())
     })
     .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("spawn_blocking panic: {e}")))?
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("ChanNet import task failed: {e}")))?
     .map_err(AppError::Internal)?;
 
     // ── 6. Record tx_id in ledger after confirmed successful write ───────────
@@ -118,7 +122,7 @@ pub async fn do_import(state: &AppState, bytes: bytes::Bytes) -> Result<usize, A
         let ledger_arc = state
             .chan_ledger
             .as_ref()
-            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("ChanNet ledger not initialised")))?;
+            .ok_or_else(chan_ledger_not_initialised)?;
 
         ledger_arc.lock().insert(tx_id);
     }
@@ -141,8 +145,6 @@ pub async fn chan_import(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> Result<impl IntoResponse, super::ChanError> {
-    let imported = do_import(&state, body)
-        .await
-        .map_err(super::ChanError::from)?;
+    let imported = do_import(&state, body).await?;
     Ok((StatusCode::OK, Json(json!({ "imported": imported }))))
 }

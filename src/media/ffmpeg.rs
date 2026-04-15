@@ -137,6 +137,45 @@ pub fn ffmpeg_image_to_webp(input: &Path, output: &Path) -> Result<()> {
     .with_context(|| format!("image→webp conversion failed for {in_str}"))
 }
 
+/// Convert an animated image file to WebP while scaling to fit within the
+/// supplied banner bounds.
+/// Convert an input image to animated WebP while scaling to fit a max box.
+///
+/// # Errors
+/// Returns an error if ffmpeg is unavailable or the conversion fails.
+pub fn ffmpeg_image_to_webp_scaled(
+    input: &Path,
+    output: &Path,
+    max_width: u32,
+    max_height: u32,
+) -> Result<()> {
+    let in_str = path_to_str(input)?;
+    let out_str = path_to_str(output)?;
+    let scale = format!(
+        "scale='if(gt(iw,ih),min(iw,{max_width}),-2)':'if(gt(iw,ih),-2,min(ih,{max_height}))'"
+    );
+
+    run_ffmpeg(&[
+        "-loglevel",
+        "error",
+        "-i",
+        in_str,
+        "-vf",
+        &scale,
+        "-c:v",
+        "libwebp",
+        "-quality",
+        "85",
+        "-loop",
+        "0",
+        "-map_metadata",
+        "-1",
+        "-y",
+        out_str,
+    ])
+    .with_context(|| format!("image→webp conversion failed for {in_str}"))
+}
+
 /// Generate a WebP thumbnail from an image or video by extracting the first
 /// frame and scaling to fit within `max_dim × max_dim`.
 ///

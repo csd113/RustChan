@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_lines)]
+
 // workers/mod.rs — Background job queue and worker pool.
 //
 // Architecture:

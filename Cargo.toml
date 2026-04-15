@@ -1,12 +1,15 @@
 [package]
 name = "rustchan"
-version = "1.1.3"
+version = "1.1.4"
 edition = "2021"
-# axum 0.8 requires Rust 1.75; arti-client 0.40 bumps the effective floor to
+# axum 0.8 requires Rust 1.75; arti-client 0.41 bumps the effective floor to
 # 1.90 — keep both fields in sync.
 rust-version = "1.90"
 license = "MIT"
 description = "Self-contained imageboard — single binary, zero runtime dependencies"
+repository = "https://github.com/csd113/RustChan"
+keywords = ["imageboard", "forum", "rust"]
+categories = ["web-programming", "multimedia::images"]
 
 # cargo-msrv <0.16 reads package.metadata.msrv instead of the Cargo-standard
 # rust-version field; keep both in sync so `cargo msrv verify` works regardless
@@ -118,14 +121,14 @@ libc      = "0.2"
 # Post-change verification:
 #   cargo tree --edges features | grep -iE "openssl|native.tls"   # expect nothing
 #   cargo tree -i openssl-sys                                       # expect error: not found
-arti-client = { version = "0.40", default-features = false, features = ["tokio", "rustls", "onion-service-service"] }
+arti-client = { version = "0.41", default-features = false, features = ["tokio", "rustls", "onion-service-service"] }
 
 # tor-hsservice / tor-cell: also part of the arti workspace.  Their `full`
 # default feature bundle can activate the native-tls TLS backend through
 # tor-rtcompat.  Disable defaults; add back only what the build requires.
 # If compilation fails with "feature X not found", re-add that feature here.
-tor-hsservice = { version = "0.40", default-features = false }
-tor-cell      = { version = "0.40", default-features = false }
+tor-hsservice = { version = "0.41", default-features = false }
+tor-cell      = { version = "0.41", default-features = false }
 
 futures       = "0.3"
 sha3          = "0.10"

@@ -285,6 +285,9 @@ pub fn build_new_post(
     deletion_token: String,
     is_op: bool,
 ) -> NewPost {
+    let primary = uploads.primary.as_ref();
+    let audio = uploads.audio.as_ref();
+
     NewPost {
         thread_id,
         board_id,
@@ -294,22 +297,16 @@ pub fn build_new_post(
         body,
         body_html,
         ip_hash: Some(ip_hash),
-        file_path: uploads.primary.as_ref().map(|u| u.file_path.clone()),
-        file_name: uploads.primary.as_ref().map(|u| u.original_name.clone()),
-        file_size: uploads.primary.as_ref().map(|u| u.file_size),
-        thumb_path: uploads
-            .primary
-            .as_ref()
-            .and_then(|u| (!u.thumb_path.is_empty()).then(|| u.thumb_path.clone())),
-        mime_type: uploads.primary.as_ref().map(|u| u.mime_type.clone()),
-        media_type: uploads
-            .primary
-            .as_ref()
-            .map(|u| u.media_type.as_str().to_string()),
-        audio_file_path: uploads.audio.as_ref().map(|u| u.file_path.clone()),
-        audio_file_name: uploads.audio.as_ref().map(|u| u.original_name.clone()),
-        audio_file_size: uploads.audio.as_ref().map(|u| u.file_size),
-        audio_mime_type: uploads.audio.as_ref().map(|u| u.mime_type.clone()),
+        file_path: primary.map(|u| u.file_path.clone()),
+        file_name: primary.map(|u| u.original_name.clone()),
+        file_size: primary.map(|u| u.file_size),
+        thumb_path: primary.and_then(|u| (!u.thumb_path.is_empty()).then(|| u.thumb_path.clone())),
+        mime_type: primary.map(|u| u.mime_type.clone()),
+        media_type: primary.map(|u| u.media_type.as_str().to_string()),
+        audio_file_path: audio.map(|u| u.file_path.clone()),
+        audio_file_name: audio.map(|u| u.original_name.clone()),
+        audio_file_size: audio.map(|u| u.file_size),
+        audio_mime_type: audio.map(|u| u.mime_type.clone()),
         deletion_token,
         is_op,
     }

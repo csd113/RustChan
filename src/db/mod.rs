@@ -6,6 +6,7 @@ use rusqlite::OptionalExtension;
 use std::collections::HashSet;
 
 pub mod admin;
+pub mod banners;
 pub mod boards;
 pub mod chan_net;
 mod fs_ops;
@@ -25,6 +26,7 @@ pub use types::{CachedFile, DbPool, NewPost};
 pub use pool::init_test_pool;
 
 pub use admin::*;
+pub use banners::*;
 pub use boards::*;
 pub use fs_ops::*;
 pub use posts::*;

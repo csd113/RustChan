@@ -183,13 +183,13 @@ pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
 /// from any existing greentext blocks while keeping the quote lines intact.
 #[must_use]
 pub fn normalize_greentext_blocks(body_html: &str, collapse_greentext: bool) -> String {
-    if collapse_greentext {
-        return body_html.to_string();
-    }
-
     const OPEN_TAG: &str = "<details open class=\"greentext-block\">";
     const SUMMARY_SUFFIX: &str = "</summary>";
     const CLOSE_TAG: &str = "</details>";
+
+    if collapse_greentext {
+        return body_html.to_string();
+    }
 
     let mut out = String::with_capacity(body_html.len());
     let mut rest = body_html;

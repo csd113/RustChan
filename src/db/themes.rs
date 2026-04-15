@@ -19,6 +19,10 @@ fn map_theme(row: &rusqlite::Row<'_>) -> rusqlite::Result<Theme> {
     })
 }
 
+/// Load all themes in display order.
+///
+/// # Errors
+/// Returns an error if the query fails.
 pub fn load_themes(conn: &rusqlite::Connection) -> Result<Vec<Theme>> {
     let mut stmt = conn.prepare_cached(
         "SELECT slug, display_name, description, swatch_hex, enabled, sort_order, is_builtin, custom_css
@@ -31,12 +35,20 @@ pub fn load_themes(conn: &rusqlite::Connection) -> Result<Vec<Theme>> {
     Ok(themes)
 }
 
+/// Sync the in-memory theme cache from the database.
+///
+/// # Errors
+/// Returns an error if theme loading fails.
 pub fn sync_live_theme_state(conn: &rusqlite::Connection) -> Result<()> {
     crate::templates::set_live_default_theme(&crate::db::get_default_user_theme(conn));
     crate::templates::set_live_themes(load_themes(conn)?);
     Ok(())
 }
 
+/// Load a theme by slug, case-insensitively.
+///
+/// # Errors
+/// Returns an error if the query fails.
 pub fn get_theme(conn: &rusqlite::Connection, slug: &str) -> Result<Option<Theme>> {
     let mut stmt = conn.prepare_cached(
         "SELECT slug, display_name, description, swatch_hex, enabled, sort_order, is_builtin, custom_css
@@ -48,6 +60,10 @@ pub fn get_theme(conn: &rusqlite::Connection, slug: &str) -> Result<Option<Theme
         .map_err(Into::into)
 }
 
+/// Insert or update the built-in theme rows.
+///
+/// # Errors
+/// Returns an error if any database write fails.
 pub fn upsert_builtin_themes(conn: &rusqlite::Connection) -> Result<()> {
     let enabled_builtin_slugs = CONFIG
         .initial_enabled_builtin_themes
@@ -78,6 +94,10 @@ pub fn upsert_builtin_themes(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+/// Create a custom theme row.
+///
+/// # Errors
+/// Returns an error if the insert fails.
 pub fn create_custom_theme(
     conn: &rusqlite::Connection,
     slug: &str,
@@ -110,6 +130,10 @@ pub fn create_custom_theme(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Update a theme and migrate any references if the slug changes.
+///
+/// # Errors
+/// Returns an error if the theme is missing or the update fails.
 pub fn update_theme(
     conn: &rusqlite::Connection,
     existing_slug: &str,
@@ -163,6 +187,10 @@ pub fn update_theme(
     Ok(())
 }
 
+/// Delete a non-built-in theme.
+///
+/// # Errors
+/// Returns an error if the theme is missing or cannot be deleted.
 pub fn delete_custom_theme(conn: &rusqlite::Connection, slug: &str) -> Result<()> {
     let theme = get_theme(conn, slug)?.ok_or_else(|| anyhow::anyhow!("Theme not found"))?;
     if theme.is_builtin {
@@ -224,6 +252,10 @@ pub fn sanitize_theme_swatch(swatch: &str) -> String {
     }
 }
 
+/// Render the stylesheet body for a theme, if it is enabled.
+///
+/// # Errors
+/// Returns an error if the query fails.
 pub fn theme_css_response(conn: &rusqlite::Connection, slug: &str) -> Result<Option<String>> {
     let Some(theme) = get_theme(conn, slug)? else {
         return Ok(None);

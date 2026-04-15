@@ -22,8 +22,9 @@ This guide reflects the current RustChan architecture:
 11. [Linux Service Setup](#linux-service-setup)
 12. [Reverse Proxy Notes](#reverse-proxy-notes)
 13. [Admin Bootstrapping](#admin-bootstrapping)
-14. [Updating](#updating)
-15. [Troubleshooting](#troubleshooting)
+14. [Banner Artwork Requirements](#banner-artwork-requirements)
+15. [Updating](#updating)
+16. [Troubleshooting](#troubleshooting)
 
 ## What RustChan Needs
 
@@ -258,6 +259,37 @@ rustchan-data/
 │   ├── favicon/
 │   └── tmp/
 └── boards/
+
+## Banner Artwork Requirements
+
+RustChan `1.1.4` adds board banners plus a separate home-page announcement banner.
+
+Banner upload requirements:
+
+- exact `468x60` aspect ratio
+- minimum size `468x60`
+- recommended size `936x120`
+- input can be PNG, JPEG, or WebP
+- RustChan converts uploaded banner images to WebP automatically
+
+Board banner placement:
+
+- board index: under the board name/description, above `[Index] [Catalog] [Archive]`
+- catalog: under the board name/description, above `Sort By:` and `Show OP Comment:`
+- no banner on thread pages
+- no banner on archive pages
+- no banner on search pages
+
+Home page banner placement:
+
+- separate centered banner box on the home page
+- intended for MOTD/news/announcement use
+
+Banner link behavior:
+
+- internal board and internal-path links work directly
+- external links can be enabled in the admin panel
+- when enabled, external banner clicks go through an on-site warning page before redirecting
 ```
 
 Important notes:

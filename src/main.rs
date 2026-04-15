@@ -23,6 +23,7 @@
 
 use clap::Parser;
 
+mod banner;
 mod chan_net;
 mod config;
 mod db;

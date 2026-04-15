@@ -1,3 +1,12 @@
+#![allow(
+    clippy::redundant_closure_for_method_calls,
+    clippy::needless_pass_by_value,
+    clippy::significant_drop_in_scrutinee,
+    clippy::redundant_pub_crate,
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines
+)]
+
 // handlers/admin/backup.rs
 //
 // Backup and restore subsystem for the admin panel.
@@ -5,6 +14,7 @@
 // saved-backup restoration, and live board.json restore.
 
 use crate::{
+    banner,
     config::CONFIG,
     db,
     error::{AppError, Result},
@@ -44,8 +54,8 @@ mod types;
 use common::{
     copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
     log_backup_progress, read_limited_bytes, remap_body_quotelinks, remove_path_if_exists,
-    render_restored_body_html, validate_board_short_name, BOARD_MANIFEST_MAX_BYTES,
-    ZIP_ENTRY_MAX_BYTES,
+    render_restored_body_html, validate_board_short_name, BANNER_RESTORE_ENTRY_MAX_BYTES,
+    BANNER_RESTORE_TOTAL_MAX_BYTES, BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
 };
 pub use create::*;
 use types::board_backup_types;
@@ -924,8 +934,8 @@ where
                 allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13,
                  allow_archive=?14, allow_video_embeds=?15, allow_captcha=?16,
                  show_poster_ids=?17, collapse_greentext=?18, post_cooldown_secs=?19,
-                 access_mode=?20, access_password_hash=?21
-                 WHERE id=?22",
+                 banner_mode=?20, access_mode=?21, access_password_hash=?22
+                 WHERE id=?23",
                 params![
                     manifest.board.name,
                     manifest.board.description,
@@ -946,12 +956,18 @@ where
                     i64::from(manifest.board.show_poster_ids),
                     i64::from(manifest.board.collapse_greentext),
                     manifest.board.post_cooldown_secs,
+                    manifest.board.banner_mode,
                     manifest.board.access_mode,
                     manifest.board.access_password_hash,
                     existing_id,
                 ],
             )
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Update board: {error}")))?;
+            conn.execute(
+                "DELETE FROM banner_assets WHERE scope_type = 'board' AND board_id = ?1",
+                params![existing_id],
+            )
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Clear board banners: {error}")))?;
             existing_id
         } else {
             insert_returning_id(
@@ -960,8 +976,8 @@ where
                  max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
                  allow_tripcodes, edit_window_secs, allow_editing, allow_archive,
                  allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext,
-                 post_cooldown_secs, access_mode, access_password_hash, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
+                 post_cooldown_secs, banner_mode, access_mode, access_password_hash, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
                  RETURNING id",
                 params![
                     manifest.board.short_name,
@@ -984,6 +1000,7 @@ where
                     i64::from(manifest.board.show_poster_ids),
                     i64::from(manifest.board.collapse_greentext),
                     manifest.board.post_cooldown_secs,
+                    manifest.board.banner_mode,
                     manifest.board.access_mode,
                     manifest.board.access_password_hash,
                     manifest.board.created_at,
@@ -991,6 +1008,34 @@ where
             )
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Insert board: {error}")))?
         };
+        for banner in &manifest.banners {
+            banner::validate_banner_storage_key(&banner.storage_key).map_err(|error| {
+                AppError::BadRequest(format!(
+                    "Invalid banner storage key in backup manifest: {error}"
+                ))
+            })?;
+            conn.execute(
+                "INSERT INTO banner_assets
+                 (scope_type, board_id, storage_key, width, height, file_size, enabled, sort_order,
+                  target_type, target_value, show_on_index, show_on_catalog, created_at)
+                 VALUES ('board', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    live_board_id,
+                    banner.storage_key,
+                    banner.width,
+                    banner.height,
+                    banner.file_size,
+                    i64::from(banner.enabled),
+                    banner.sort_order,
+                    banner.target_type,
+                    banner.target_value,
+                    i64::from(banner.show_on_index),
+                    i64::from(banner.show_on_catalog),
+                    banner.created_at,
+                ],
+            )
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Insert board banner: {error}")))?;
+        }
 
         let preserve_thread_ids = can_reuse_row_ids(
             conn,
@@ -1368,6 +1413,14 @@ fn restore_db_from_snapshot(
     Ok(())
 }
 
+fn refresh_live_site_state_from_db(conn: &rusqlite::Connection) -> Result<()> {
+    crate::templates::set_live_site_name(&db::get_site_name(conn));
+    crate::templates::set_live_site_subtitle(&db::get_site_subtitle(conn));
+    crate::templates::set_live_boards(db::get_all_boards(conn)?);
+    db::sync_live_theme_state(conn)?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     live_conn: &mut rusqlite::Connection,
@@ -1388,7 +1441,10 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     let staged_upload_root = create_staging_dir(&upload_root, "restore-stage")?;
     let live_global_favicon_dir = crate::favicon::global_backup_source_dir();
     let staged_global_favicon_dir = create_staging_dir(&live_global_favicon_dir, "restore-stage")?;
+    let live_global_banner_dir = crate::banner::backup_source_dir();
+    let staged_global_banner_dir = create_staging_dir(&live_global_banner_dir, "restore-stage")?;
     let mut favicon_extracted = false;
+    let mut banner_extracted = false;
     let previous_upload_root = upload_root.parent().map_or_else(
         || PathBuf::from(format!("{}.restore-old", upload_root.display())),
         |parent| {
@@ -1502,6 +1558,34 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
                     AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
                 })?;
             }
+        } else if let Some(rel) = name.strip_prefix("banner/") {
+            if rel.is_empty() {
+                continue;
+            }
+            let rel_name = match banner::validate_banner_restore_entry_name(rel) {
+                Ok(value) => value,
+                Err(error) => {
+                    warn!("{suspicious_entry_log}: skipping suspicious entry '{name}': {error}");
+                    continue;
+                }
+            };
+            if entry.is_dir() {
+                warn!("{suspicious_entry_log}: skipping banner directory entry '{name}'");
+                continue;
+            }
+            banner_extracted = true;
+            let target = staged_global_banner_dir.join(&rel_name);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("mkdir parent: {error}"))
+                })?;
+            }
+            let mut out = std::fs::File::create(&target).map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Create {}: {error}", target.display()))
+            })?;
+            copy_limited(&mut entry, &mut out, BANNER_RESTORE_ENTRY_MAX_BYTES).map_err(
+                |error| AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display())),
+            )?;
         }
     }
 
@@ -1518,6 +1602,10 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     live_conn
         .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {error}")))?;
+
+    if banner_extracted {
+        canonicalize_restored_banner_dir(&staged_global_banner_dir)?;
+    }
 
     let pending_restore_id = uuid::Uuid::new_v4().to_string();
     let pending_restore_payload = crate::pending_fs::FullRestoreSwapPayload {
@@ -1554,6 +1642,7 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         let _ = std::fs::remove_file(&db_snapshot);
         let _ = remove_path_if_exists(&staged_upload_root);
         let _ = remove_path_if_exists(&staged_global_favicon_dir);
+        let _ = remove_path_if_exists(&staged_global_banner_dir);
         if let Err(restore_err) = restore_db_result {
             return Err(AppError::Internal(anyhow::anyhow!(
                 "{restore_label} failed and rollback failed: {error}; rollback error: {restore_err}"
@@ -1567,6 +1656,7 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         let _ = std::fs::remove_file(&temp_db);
         let _ = std::fs::remove_file(&db_snapshot);
         let _ = remove_path_if_exists(&staged_global_favicon_dir);
+        let _ = remove_path_if_exists(&staged_global_banner_dir);
         if let Err(restore_err) = restore_db_result {
             return Err(AppError::Internal(anyhow::anyhow!(
                 "{restore_label} filesystem swap failed: {error}; DB rollback error: {restore_err}"
@@ -1588,6 +1678,16 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     } else {
         let _ = remove_path_if_exists(&staged_global_favicon_dir);
     }
+    if banner_extracted {
+        remove_path_if_exists(&live_global_banner_dir)?;
+        std::fs::rename(&staged_global_banner_dir, &live_global_banner_dir).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "{restore_label} global banner swap failed: {error}"
+            ))
+        })?;
+    } else {
+        let _ = remove_path_if_exists(&staged_global_banner_dir);
+    }
 
     let _ = std::fs::remove_file(&temp_db);
     let _ = std::fs::remove_file(&db_snapshot);
@@ -1597,8 +1697,12 @@ fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     match db::create_session(live_conn, &fresh_sid, admin_id, expires_at) {
         Ok(()) => {
             tracing::info!(target: "admin", admin_id = admin_id, "{completion_log}");
-            if let Ok(boards) = db::get_all_boards(live_conn) {
-                crate::templates::set_live_boards(boards);
+            if let Err(error) = refresh_live_site_state_from_db(live_conn) {
+                tracing::warn!(
+                    target: "admin",
+                    %error,
+                    "Full restore completed but in-memory site state refresh failed"
+                );
             }
             Ok(fresh_sid)
         }
@@ -1632,6 +1736,64 @@ fn extract_sqlite_db_from_full_backup_archive<R: std::io::Read + std::io::Seek>(
         return Err(AppError::BadRequest(
             "Invalid full backup: chan.db does not look like a SQLite database.".into(),
         ));
+    }
+    Ok(())
+}
+
+fn canonicalize_restored_banner_dir(root: &Path) -> Result<()> {
+    let mut total_bytes = 0u64;
+    canonicalize_restored_banner_dir_inner(root, root, &mut total_bytes)
+}
+
+fn canonicalize_restored_banner_dir_inner(
+    root: &Path,
+    current: &Path,
+    total_bytes: &mut u64,
+) -> Result<()> {
+    for entry in std::fs::read_dir(current).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Read restored banner directory {}: {error}",
+            current.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Read restored banner directory entry {}: {error}",
+                current.display()
+            ))
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Inspect restored banner entry {}: {error}",
+                entry.path().display()
+            ))
+        })?;
+        let path = entry.path();
+        let rel = path.strip_prefix(root).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Resolve restored banner path {}: {error}",
+                path.display()
+            ))
+        })?;
+        if file_type.is_dir() {
+            canonicalize_restored_banner_dir_inner(root, &path, total_bytes)?;
+            continue;
+        }
+        let rel_name = rel.to_string_lossy();
+        banner::validate_banner_restore_entry_name(&rel_name)?;
+        let bytes = std::fs::read(&path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Read restored banner file {}: {error}",
+                path.display()
+            ))
+        })?;
+        let (_, _, file_size) = banner::canonicalize_banner_bytes(&bytes, &path)?;
+        *total_bytes = total_bytes.saturating_add(file_size);
+        if *total_bytes > BANNER_RESTORE_TOTAL_MAX_BYTES {
+            return Err(AppError::BadRequest(
+                "Restored banner files exceed the safe total size limit.".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -1741,6 +1903,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
         .map(|c| c.value().to_string());
     let upload_dir = CONFIG.upload_dir.clone();
     let global_favicon_dir = crate::favicon::global_backup_source_dir();
+    let global_banner_dir = crate::banner::backup_source_dir();
     let progress = state.backup_progress.clone();
 
     let (tmp_path, filename, file_size) = tokio::task::spawn_blocking({
@@ -1768,15 +1931,21 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             progress.reset(crate::middleware::backup_phase::COUNT_FILES);
             log_backup_phase(crate::middleware::backup_phase::COUNT_FILES);
             let favicon_file_count = count_files_in_dir(&global_favicon_dir);
-            let file_count = count_files_in_dir(uploads_base).saturating_add(favicon_file_count);
+            let banner_file_count = count_files_in_dir(&global_banner_dir);
+            let file_count = count_files_in_dir(uploads_base)
+                .saturating_add(favicon_file_count)
+                .saturating_add(banner_file_count);
             let db_snapshot_size = std::fs::metadata(&temp_db)
                 .map(|metadata| metadata.len())
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {e}")))?;
             let manifest = create::build_full_backup_manifest(
                 &conn,
                 db_snapshot_size,
-                file_count.saturating_sub(favicon_file_count),
+                file_count
+                    .saturating_sub(favicon_file_count)
+                    .saturating_sub(banner_file_count),
                 favicon_file_count,
+                banner_file_count,
             )?;
             drop(conn);
             // +2 for backup.json and chan.db
@@ -1834,6 +2003,16 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                         &global_favicon_dir,
                         &global_favicon_dir,
                         "favicon",
+                        opts,
+                        &progress,
+                    )?;
+                }
+                if global_banner_dir.exists() {
+                    add_dir_to_zip_with_prefix(
+                        &mut zip,
+                        &global_banner_dir,
+                        &global_banner_dir,
+                        "banner",
                         opts,
                         &progress,
                     )?;
@@ -3290,8 +3469,8 @@ mod tests {
     use super::{
         build_board_backup_manifest, consume_temp_board_download_token,
         create_temp_board_backup_from_full_backup_path, execute_board_restore,
-        latest_verified_full_backup_modified_time_in_dir, render_restored_body_html,
-        should_store_without_recompress, temp_board_download_token_path,
+        latest_verified_full_backup_modified_time_in_dir, refresh_live_site_state_from_db,
+        render_restored_body_html, should_store_without_recompress, temp_board_download_token_path,
         validate_full_restore_archive_layout, write_temp_board_download_token, RestoreKind,
     };
     use crate::error::AppError;
@@ -3473,6 +3652,26 @@ mod tests {
     }
 
     #[test]
+    fn refresh_live_site_state_from_db_updates_banner_caches() {
+        crate::templates::set_live_site_name("Before restore");
+        crate::templates::set_live_site_subtitle("before subtitle");
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db conn");
+        crate::db::set_site_setting(&conn, "site_name", "RestoredChan").expect("set site name");
+        crate::db::set_site_setting(&conn, "site_subtitle", "restored subtitle")
+            .expect("set subtitle");
+
+        refresh_live_site_state_from_db(&conn).expect("refresh live site state");
+
+        assert_eq!(&*crate::templates::live_site_name(), "RestoredChan");
+        assert_eq!(
+            &*crate::templates::live_site_subtitle(),
+            "restored subtitle"
+        );
+    }
+
+    #[test]
     fn temp_board_download_token_is_one_time_use() {
         let filename = "rustchan-board-test-20990101_000000.zip";
         let token = "token-123";
@@ -3557,6 +3756,7 @@ mod tests {
             db_bytes: std::fs::metadata(&db_path).expect("db meta").len(),
             upload_file_count: 1,
             favicon_file_count: 0,
+            banner_file_count: 0,
             boards: if indexed_boards {
                 vec![BackupBoardSummary {
                     short_name: "tech".into(),

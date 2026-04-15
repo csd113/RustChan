@@ -34,8 +34,8 @@ pub enum AppError {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
-    /// 403 — user is banned; carries the ban reason and their CSRF token so the
-    /// appeal form can be rendered with a valid token (fixes ).
+    /// 403 — user is banned; carries the ban reason and CSRF token so the
+    /// appeal form can be rendered with a valid token.
     #[error("You are banned. Reason: {reason}")]
     BannedUser { reason: String, csrf_token: String },
 
@@ -92,7 +92,7 @@ impl From<rusqlite::Error> for AppError {
                 return Self::DbBusy;
             }
         }
-        Self::Internal(anyhow::Error::new(e))
+        Self::Internal(e.into())
     }
 }
 
@@ -108,7 +108,7 @@ impl From<r2d2::Error> for AppError {
         if msg.contains("timed out") || msg.contains("Timeout") {
             Self::DbBusy
         } else {
-            Self::Internal(anyhow::Error::new(e))
+            Self::Internal(e.into())
         }
     }
 }

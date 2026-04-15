@@ -1,3 +1,16 @@
+#![allow(
+    clippy::similar_names,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::redundant_pub_crate,
+    clippy::significant_drop_tightening,
+    clippy::format_push_string,
+    clippy::redundant_clone,
+    clippy::implicit_clone,
+    clippy::map_unwrap_or,
+    clippy::equatable_if_let
+)]
+
 // handlers/board.rs
 //
 // Handles:
@@ -550,16 +563,30 @@ pub async fn index(
     let admin_session = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    let (board_stats, site_data, is_admin) = tokio::task::spawn_blocking({
+    let (board_stats, site_data, is_admin, home_banner_html) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<(Vec<crate::models::BoardStats>, crate::models::SiteStats, bool)> {
+        move || -> Result<(
+            Vec<crate::models::BoardStats>,
+            Option<crate::models::SiteStats>,
+            bool,
+            String,
+        )> {
             let conn = pool.get()?;
             let boards = db::get_all_boards_with_stats(&conn)?;
-            let site_data = db::get_site_stats(&conn).unwrap_or_default();
+            let site_data = match db::get_site_stats(&conn) {
+                Ok(stats) => Some(stats),
+                Err(error) => {
+                    tracing::warn!(target: "db", %error, "Failed to load home page site stats");
+                    None
+                }
+            };
             let is_admin = admin_session
                 .as_deref()
                 .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
-            Ok((boards, site_data, is_admin))
+            let home_banner = crate::banner::resolve_home_banner(&conn, "/")?;
+            let home_banner_html =
+                crate::banner::render_banner_html(&home_banner, "home-banner-box", "board-banner-image");
+            Ok((boards, site_data, is_admin, home_banner_html))
         }
     })
     .await
@@ -591,9 +618,10 @@ pub async fn index(
         jar,
         Html(templates::index_page(
             &board_stats,
-            &site_data,
+            site_data.as_ref(),
             &csrf,
             onion_address.as_deref(),
+            &home_banner_html,
             current_theme.as_deref(),
             nsfw_prompt_board,
             nsfw_consent,
@@ -664,7 +692,8 @@ pub async fn board_index(
         let pool = state.db.clone();
         let board_short = board_short.clone();
         let admin_session_id = admin_session_id.clone();
-        move || -> Result<(String, render::BoardPageData)> {
+        let current_path = return_to.clone();
+        move || -> Result<(String, render::BoardPageData, crate::banner::BannerSelection)> {
             let conn = pool.get()?;
             let page_data = render::load_board_page_data(
                 &conn,
@@ -674,14 +703,24 @@ pub async fn board_index(
                 PREVIEW_REPLIES,
                 admin_session_id.as_deref(),
             )?;
-            Ok((render::board_page_etag_signature(&page_data), page_data))
+            let banner_selection = crate::banner::resolve_board_banner(
+                &conn,
+                &page_data.board,
+                crate::models::BannerPlacement::Index,
+                &current_path,
+            )?;
+            Ok((
+                render::board_page_etag_signature(&page_data),
+                page_data,
+                banner_selection,
+            ))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     let can_post = access_context.can_post;
-    let (page_sig, page_data) = page_data;
+    let (page_sig, page_data, banner_selection) = page_data;
     let admin_tag = if page_data.is_admin { "-a" } else { "" };
     let post_tag = if can_post { "-p1" } else { "-p0" };
     let greentext_tag = if page_data.board.collapse_greentext {
@@ -689,8 +728,9 @@ pub async fn board_index(
     } else {
         "-cg0"
     };
+    let banner_tag = format!("-b{}", banner_selection.etag_fragment);
     let etag = format!(
-        "\"{}-{}-{page}{admin_tag}{post_tag}{greentext_tag}\"",
+        "\"{}-{}-{page}{admin_tag}{post_tag}{greentext_tag}{banner_tag}\"",
         page_data.pagination.total, page_sig
     );
 
@@ -699,7 +739,7 @@ pub async fn board_index(
         .get("if-none-match")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if client_etag == etag {
+    if client_etag == etag && !banner_selection.disable_not_modified_short_circuit {
         // StatusCode::NOT_MODIFIED and Body::empty() are always valid constants;
         // this builder call is infallible.
         let mut resp = axum::http::Response::builder()
@@ -718,11 +758,17 @@ pub async fn board_index(
         return Ok((jar, resp).into_response());
     }
 
+    let banner_html = crate::banner::render_banner_html(
+        &banner_selection,
+        "board-banner-slot",
+        "board-banner-image",
+    );
     let html = render::render_board_page(
         &page_data,
         &csrf,
         None,
         None,
+        &banner_html,
         current_theme.as_deref(),
         can_post,
     );
@@ -1018,11 +1064,23 @@ pub async fn create_thread(
                     PREVIEW_REPLIES,
                     admin_session_err.as_deref(),
                 )?;
+                let banner_selection = crate::banner::resolve_board_banner(
+                    &conn,
+                    &page_data.board,
+                    crate::models::BannerPlacement::Index,
+                    &format!("/{}", board_short_render),
+                )?;
+                let banner_html = crate::banner::render_banner_html(
+                    &banner_selection,
+                    "board-banner-slot",
+                    "board-banner-image",
+                );
                 Ok(render::render_board_page(
                     &page_data,
                     &csrf_for_error,
                     Some(&msg),
                     Some(&post_form_state),
+                    &banner_html,
                     current_theme.as_deref(),
                     true,
                 ))
@@ -1103,7 +1161,7 @@ pub async fn catalog(
         let board_short = board_short.clone();
         let admin_session_id = admin_session_id.clone();
         let viewer_key = viewer_key.clone();
-        move || -> Result<CatalogRenderData> {
+        move || -> Result<(CatalogRenderData, crate::banner::BannerSelection)> {
             let conn = pool.get()?;
             let access_context =
                 load_board_access_context(&conn, &board_short, admin_session_id.as_deref(), None)?;
@@ -1137,12 +1195,21 @@ pub async fn catalog(
             pref_sig_parts.sort();
             let pref_sig = pref_sig_parts.join("|");
             let etag_signature = format!("{catalog_sig}-{pref_sig}");
+            let banner_selection = crate::banner::resolve_board_banner(
+                &conn,
+                &board,
+                crate::models::BannerPlacement::Catalog,
+                &format!("/{board_short}/catalog"),
+            )?;
             Ok((
-                board,
-                threads,
-                pinned_ids,
-                hidden_threads.len(),
-                etag_signature,
+                (
+                    board,
+                    threads,
+                    pinned_ids,
+                    hidden_threads.len(),
+                    etag_signature,
+                ),
+                banner_selection,
             ))
         }
     })
@@ -1150,7 +1217,8 @@ pub async fn catalog(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     let can_post = access_context.can_post;
-    let (board, threads, pinned_ids, hidden_count, etag_signature) = catalog_data;
+    let ((board, threads, pinned_ids, hidden_count, etag_signature), banner_selection) =
+        catalog_data;
     let admin_tag = if access_context.is_admin { "-a" } else { "" };
     let post_tag = if can_post { "-p1" } else { "-p0" };
     let greentext_tag = if board.collapse_greentext {
@@ -1158,13 +1226,16 @@ pub async fn catalog(
     } else {
         "-cg0"
     };
-    let etag = format!("\"{etag_signature}-catalog{admin_tag}{post_tag}{greentext_tag}\"");
+    let etag = format!(
+        "\"{etag_signature}-catalog{admin_tag}{post_tag}{greentext_tag}-b{}\"",
+        banner_selection.etag_fragment
+    );
 
     let client_etag = req_headers
         .get("if-none-match")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if client_etag == etag {
+    if client_etag == etag && !banner_selection.disable_not_modified_short_circuit {
         // StatusCode::NOT_MODIFIED and Body::empty() are always valid constants;
         // this builder call is infallible.
         let mut resp = axum::http::Response::builder()
@@ -1183,6 +1254,11 @@ pub async fn catalog(
         return Ok((jar, resp).into_response());
     }
 
+    let banner_html = crate::banner::render_banner_html(
+        &banner_selection,
+        "board-banner-slot",
+        "board-banner-image",
+    );
     let all_boards = crate::templates::live_boards();
     let html = templates::catalog_page(
         &board,
@@ -1193,6 +1269,7 @@ pub async fn catalog(
         &csrf,
         all_boards.as_slice(),
         access_context.is_admin,
+        &banner_html,
         current_theme.as_deref(),
         board.collapse_greentext,
         can_post,
@@ -1271,6 +1348,7 @@ pub async fn hidden_threads(
                 &csrf,
                 all_boards.as_slice(),
                 access_context.is_admin,
+                "",
                 current_theme.as_deref(),
                 board.collapse_greentext,
                 access_context.can_post,
@@ -2831,6 +2909,7 @@ mod tests {
                 false,
                 0,
                 "",
+                crate::models::BoardBannerMode::Inherit,
                 crate::models::BoardAccessMode::Public,
                 "",
             )

@@ -8,9 +8,10 @@
 //              single aggregate query pass
 //              INSERT … RETURNING id replaces execute + last_insert_rowid()
 
-use crate::models::{Board, BoardAccessMode};
+use crate::models::{Board, BoardAccessMode, BoardBannerMode};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
+use std::collections::HashSet;
 
 const BOARD_ORDER_SQL: &str = "nsfw ASC, display_order ASC, id ASC";
 const BOARD_GROUP_ORDER_SQL: &str = "display_order ASC, id ASC";
@@ -18,19 +19,29 @@ const BOARD_SELECT_COLUMNS: &str = "id, display_order, short_name, name, descrip
     max_threads, max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, \
     allow_any_files, allow_tripcodes, edit_window_secs, allow_editing, allow_archive, \
     allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext, \
-    post_cooldown_secs, default_theme, access_mode, access_password_hash, created_at";
+    post_cooldown_secs, default_theme, banner_mode, access_mode, access_password_hash, created_at";
 const BOARD_SELECT_COLUMNS_WITH_ALIAS: &str = "b.id, b.display_order, b.short_name, b.name, \
     b.description, b.nsfw, b.max_threads, b.max_archived_threads, b.bump_limit, \
     b.allow_images, b.allow_video, b.allow_audio, b.allow_any_files, b.allow_tripcodes, \
     b.edit_window_secs, b.allow_editing, b.allow_archive, b.allow_video_embeds, \
     b.allow_captcha, b.show_poster_ids, b.collapse_greentext, b.post_cooldown_secs, \
-    b.default_theme, b.access_mode, b.access_password_hash, b.created_at";
+    b.default_theme, b.banner_mode, b.access_mode, b.access_password_hash, b.created_at";
 
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
 pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
     let short_name: String = row.get(2)?;
-    let access_mode_raw: String = row.get(23)?;
+    let banner_mode_raw: String = row.get(23)?;
+    let access_mode_raw: String = row.get(24)?;
+    let banner_mode = BoardBannerMode::from_db_str(&banner_mode_raw).unwrap_or_else(|| {
+        tracing::warn!(
+            target: "db",
+            board = %short_name,
+            banner_mode = %banner_mode_raw,
+            "Invalid boards.banner_mode value; falling back to inherit"
+        );
+        BoardBannerMode::Inherit
+    });
     let access_mode = BoardAccessMode::from_db_str(&access_mode_raw).unwrap_or_else(|| {
         tracing::warn!(
             target: "db",
@@ -64,9 +75,10 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         collapse_greentext: row.get::<_, i32>(20)? != 0,
         post_cooldown_secs: row.get(21)?,
         default_theme: row.get(22)?,
+        banner_mode,
         access_mode,
-        access_password_hash: row.get(24)?,
-        created_at: row.get(25)?,
+        access_password_hash: row.get(25)?,
+        created_at: row.get(26)?,
     })
 }
 
@@ -230,7 +242,7 @@ pub fn get_all_boards_with_stats(
     let out = stmt
         .query_map([], |row| {
             let board = map_board(row)?;
-            let thread_count: i64 = row.get(26)?;
+            let thread_count: i64 = row.get(27)?;
             Ok(crate::models::BoardStats {
                 board,
                 thread_count,
@@ -253,6 +265,7 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
+#[allow(dead_code)]
 pub fn create_board(
     conn: &rusqlite::Connection,
     short: &str,
@@ -389,6 +402,7 @@ pub fn update_board_settings(
     collapse_greentext: bool,
     post_cooldown_secs: i64,
     default_theme: &str,
+    banner_mode: BoardBannerMode,
     access_mode: BoardAccessMode,
     access_password_hash: &str,
 ) -> Result<()> {
@@ -407,8 +421,8 @@ pub fn update_board_settings(
             allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13,
              allow_archive=?14, allow_video_embeds=?15, allow_captcha=?16,
              show_poster_ids=?17, collapse_greentext=?18, post_cooldown_secs=?19,
-             default_theme=?20, access_mode=?21, access_password_hash=?22
-             WHERE id=?23",
+             default_theme=?20, banner_mode=?21, access_mode=?22, access_password_hash=?23
+             WHERE id=?24",
             params![
                 name,
                 description,
@@ -430,6 +444,7 @@ pub fn update_board_settings(
                 i32::from(collapse_greentext),
                 post_cooldown_secs,
                 default_theme,
+                banner_mode.as_str(),
                 access_mode.as_str(),
                 access_password_hash,
                 id,
@@ -444,8 +459,8 @@ pub fn update_board_settings(
              allow_tripcodes=?12, edit_window_secs=?13, allow_editing=?14,
              allow_archive=?15, allow_video_embeds=?16, allow_captcha=?17,
              show_poster_ids=?18, collapse_greentext=?19, post_cooldown_secs=?20,
-             default_theme=?21, access_mode=?22, access_password_hash=?23
-             WHERE id=?24",
+             default_theme=?21, banner_mode=?22, access_mode=?23, access_password_hash=?24
+             WHERE id=?25",
             params![
                 name,
                 description,
@@ -468,6 +483,7 @@ pub fn update_board_settings(
                 i32::from(collapse_greentext),
                 post_cooldown_secs,
                 default_theme,
+                banner_mode.as_str(),
                 access_mode.as_str(),
                 access_password_hash,
                 id,
@@ -631,29 +647,183 @@ pub fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::SiteStats> {
-    conn.query_row(
+    let columns = post_table_columns(conn)?;
+    let has_media_type = columns.contains("media_type");
+    let has_audio_file_path = columns.contains("audio_file_path");
+    let has_audio_file_size = columns.contains("audio_file_size");
+    let has_mime_type = columns.contains("mime_type");
+
+    let total_images_expr = if has_media_type {
+        "SUM(CASE WHEN media_type = 'image' THEN 1 ELSE 0 END)"
+    } else {
+        "0"
+    };
+    let total_videos_expr = if has_media_type {
+        "SUM(CASE WHEN media_type = 'video' THEN 1 ELSE 0 END)"
+    } else {
+        "0"
+    };
+
+    let mut total_audio_checks = Vec::new();
+    if has_media_type {
+        total_audio_checks.push("media_type = 'audio'");
+    }
+    if has_audio_file_path {
+        total_audio_checks.push("audio_file_path IS NOT NULL");
+    }
+    if has_mime_type {
+        total_audio_checks.push("mime_type LIKE 'audio/%'");
+    }
+    let total_audio_expr = if total_audio_checks.is_empty() {
+        "0".to_string()
+    } else {
+        format!(
+            "SUM(CASE WHEN {} THEN 1 ELSE 0 END)",
+            total_audio_checks.join(" OR ")
+        )
+    };
+
+    let active_audio_bytes_expr = if has_audio_file_path && has_audio_file_size {
+        "SUM(CASE WHEN audio_file_path IS NOT NULL AND audio_file_size IS NOT NULL
+                  THEN audio_file_size ELSE 0 END)"
+    } else {
+        "0"
+    };
+
+    let query = format!(
         "SELECT
              COUNT(*)                                                           AS total_posts,
-             SUM(CASE WHEN media_type = 'image' THEN 1 ELSE 0 END)             AS total_images,
-             SUM(CASE WHEN media_type = 'video' THEN 1 ELSE 0 END)             AS total_videos,
-             SUM(CASE WHEN media_type = 'audio' THEN 1 ELSE 0 END)             AS total_audio,
+             {total_images_expr}                                                AS total_images,
+             {total_videos_expr}                                                AS total_videos,
+             {total_audio_expr}                                                 AS total_audio,
              COALESCE(
                  SUM(CASE WHEN file_path IS NOT NULL AND file_size IS NOT NULL
-                          THEN file_size ELSE 0 END)
-               + SUM(CASE WHEN audio_file_path IS NOT NULL AND audio_file_size IS NOT NULL
-                          THEN audio_file_size ELSE 0 END),
-             0)                                                                 AS active_bytes
-         FROM posts",
-        [],
-        |r| {
-            Ok(crate::models::SiteStats {
-                total_posts: r.get(0)?,
-                total_images: r.get(1)?,
-                total_videos: r.get(2)?,
-                total_audio: r.get(3)?,
-                active_bytes: r.get(4)?,
-            })
-        },
-    )
+                          THEN file_size ELSE 0 END),
+                 0
+             ) + COALESCE(
+                 {active_audio_bytes_expr},
+                 0
+             )                                                                  AS active_bytes
+         FROM posts"
+    );
+
+    conn.query_row(&query, [], |r| {
+        Ok(crate::models::SiteStats {
+            total_posts: r.get(0)?,
+            total_images: r.get(1)?,
+            total_videos: r.get(2)?,
+            total_audio: r.get(3)?,
+            active_bytes: r.get(4)?,
+        })
+    })
     .context("Failed to query site stats")
+}
+
+fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn
+        .prepare_cached("PRAGMA table_info(posts)")
+        .context("Prepare posts table info query")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<HashSet<_>>>()
+        .context("Read posts table columns")?;
+    Ok(columns)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{create_board_with_media_flags, get_board_by_short, get_site_stats};
+    use rusqlite::Connection;
+
+    #[test]
+    fn site_stats_count_audio_primary_and_combo_uploads() {
+        let pool = crate::db::init_test_pool().expect("init test pool");
+        let conn = pool.get().expect("get test connection");
+
+        conn.execute(
+            "INSERT INTO boards (id, short_name, name) VALUES (1, 'test', 'Test')",
+            [],
+        )
+        .expect("insert board");
+        conn.execute(
+            "INSERT INTO threads (id, board_id, subject) VALUES (1, 1, 'test thread')",
+            [],
+        )
+        .expect("insert thread");
+
+        conn.execute(
+            "INSERT INTO posts (
+                 id, thread_id, board_id, body, body_html, deletion_token, is_op,
+                 file_path, file_name, file_size, mime_type, media_type
+             ) VALUES
+             (1, 1, 1, 'audio post', '<p>audio</p>', 'tok1', 0,
+              'test/track.mp3', 'track.mp3', 1234, 'audio/mpeg', 'audio'),
+             (2, 1, 1, 'combo post', '<p>combo</p>', 'tok2', 0,
+              'test/cover.png', 'cover.png', 4321, 'image/png', 'image')",
+            [],
+        )
+        .expect("insert primary posts");
+        conn.execute(
+            "UPDATE posts
+             SET audio_file_path = 'test/track.flac',
+                 audio_file_name = 'track.flac',
+                 audio_file_size = 5678,
+                 audio_mime_type = 'audio/flac'
+             WHERE id = 2",
+            [],
+        )
+        .expect("add combo audio");
+
+        let stats = get_site_stats(&conn).expect("load stats");
+        assert_eq!(stats.total_audio, 2);
+    }
+
+    #[test]
+    fn site_stats_fall_back_when_audio_columns_are_missing() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE posts (
+                id INTEGER PRIMARY KEY,
+                file_path TEXT,
+                file_size INTEGER,
+                mime_type TEXT
+            );
+            INSERT INTO posts (id, file_path, file_size, mime_type) VALUES
+                (1, 'a.webp', 123, 'image/webp'),
+                (2, 'b.mp3', 456, 'audio/mpeg');",
+        )
+        .expect("seed posts");
+
+        let stats = get_site_stats(&conn).expect("load stats");
+        assert_eq!(stats.total_posts, 2);
+        assert_eq!(stats.total_images, 0);
+        assert_eq!(stats.total_videos, 0);
+        assert_eq!(stats.total_audio, 1);
+        assert_eq!(stats.active_bytes, 579);
+    }
+
+    #[test]
+    fn create_board_with_media_flags_persists_audio_toggle() {
+        let pool = crate::db::init_test_pool().expect("init test pool");
+        let conn = pool.get().expect("get test connection");
+
+        create_board_with_media_flags(
+            &conn,
+            "audio",
+            "Audio",
+            "Audio uploads",
+            false,
+            true,
+            true,
+            true,
+        )
+        .expect("create board");
+
+        let board = get_board_by_short(&conn, "audio")
+            .expect("load board")
+            .expect("board exists");
+        assert!(board.allow_images);
+        assert!(board.allow_video);
+        assert!(board.allow_audio);
+    }
 }

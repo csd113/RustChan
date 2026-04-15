@@ -1470,6 +1470,101 @@ window.requestConfirmation = requestConfirmation;
 })();
 
 (function () {
+  function syncBannerTargetPicker(picker) {
+    if (!picker) return;
+    var select = picker.querySelector('[data-banner-target-select]');
+    if (!select) return;
+    var selected = select.value || 'none';
+    picker.querySelectorAll('[data-banner-target-field]').forEach(function (field) {
+      var matches = field.dataset.bannerTargetField === selected;
+      field.hidden = !matches;
+      field.querySelectorAll('input, select, textarea').forEach(function (input) {
+        input.disabled = !matches;
+      });
+    });
+  }
+
+  function bannerWarningNode(form) {
+    if (!form) return null;
+    var warning = form.querySelector('[data-banner-warning]');
+    if (warning) return warning;
+    warning = document.createElement('div');
+    warning.className = 'admin-flash flash-error admin-banner-inline-warning';
+    warning.dataset.bannerWarning = '1';
+    warning.hidden = true;
+    form.appendChild(warning);
+    return warning;
+  }
+
+  function clearBannerWarning(form) {
+    var warning = bannerWarningNode(form);
+    if (!warning) return;
+    warning.hidden = true;
+    warning.textContent = '';
+  }
+
+  function showBannerWarning(form, message) {
+    var warning = bannerWarningNode(form);
+    if (!warning) return;
+    warning.hidden = false;
+    warning.textContent = message;
+  }
+
+  function externalBannerLinksEnabled() {
+    var toggle = document.querySelector('[data-banner-external-toggle]');
+    return !!(toggle && toggle.checked);
+  }
+
+  function initBannerEditors(root) {
+    (root || document).querySelectorAll('[data-banner-target-picker]').forEach(function (picker) {
+      syncBannerTargetPicker(picker);
+    });
+
+    (root || document).querySelectorAll('form[data-banner-editor="1"]').forEach(function (form) {
+      if (form.dataset.bannerEditorWired === '1') return;
+      form.dataset.bannerEditorWired = '1';
+
+      form.addEventListener('submit', function (event) {
+        var select = form.querySelector('[data-banner-target-select]');
+        if (!select) return;
+        if (select.value !== 'external_url' || externalBannerLinksEnabled()) {
+          clearBannerWarning(form);
+          return;
+        }
+        event.preventDefault();
+        showBannerWarning(
+          form,
+          'Enable external banner links in Global board banner settings before saving a banner that opens another website.'
+        );
+        var warning = bannerWarningNode(form);
+        if (warning && typeof warning.scrollIntoView === 'function') {
+          warning.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      });
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    initBannerEditors(document);
+  });
+
+  document.addEventListener('change', function (event) {
+    var target = event.target;
+    if (target.matches && target.matches('[data-banner-target-select]')) {
+      var picker = target.closest('[data-banner-target-picker]');
+      syncBannerTargetPicker(picker);
+      clearBannerWarning(target.closest('form'));
+      return;
+    }
+    if (target.matches && target.matches('[data-banner-external-toggle]')) {
+      document.querySelectorAll('form[data-banner-editor="1"]').forEach(function (form) {
+        clearBannerWarning(form);
+      });
+    }
+  });
+})();
+
+(function () {
   function initAdminLiveLog() {
     var output = document.getElementById('admin-live-log-output');
     var fileLabel = document.getElementById('admin-live-log-file');

@@ -41,6 +41,8 @@ pub(super) mod board_backup_types {
         pub collapse_greentext: bool,
         #[serde(default)]
         pub post_cooldown_secs: i64,
+        #[serde(default = "default_banner_mode")]
+        pub banner_mode: String,
         #[serde(default = "default_access_mode")]
         pub access_mode: String,
         #[serde(default)]
@@ -62,6 +64,10 @@ pub(super) mod board_backup_types {
 
     fn default_access_mode() -> String {
         "public".to_string()
+    }
+
+    fn default_banner_mode() -> String {
+        "inherit".to_string()
     }
 
     #[derive(Serialize, Deserialize)]
@@ -137,6 +143,21 @@ pub(super) mod board_backup_types {
     }
 
     #[derive(Serialize, Deserialize)]
+    pub struct BannerRow {
+        pub storage_key: String,
+        pub width: i64,
+        pub height: i64,
+        pub file_size: i64,
+        pub enabled: bool,
+        pub sort_order: i64,
+        pub target_type: String,
+        pub target_value: String,
+        pub show_on_index: bool,
+        pub show_on_catalog: bool,
+        pub created_at: i64,
+    }
+
+    #[derive(Serialize, Deserialize)]
     pub struct BoardBackupManifest {
         pub version: u32,
         pub board: BoardRow,
@@ -146,5 +167,7 @@ pub(super) mod board_backup_types {
         pub poll_options: Vec<PollOptionRow>,
         pub poll_votes: Vec<PollVoteRow>,
         pub file_hashes: Vec<FileHashRow>,
+        #[serde(default)]
+        pub banners: Vec<BannerRow>,
     }
 }

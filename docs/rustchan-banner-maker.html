@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>468×60 Banner Creator</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700&family=Syne+Mono&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0e0e10;
+    --surface: #17171a;
+    --surface2: #1f1f24;
+    --border: #2c2c33;
+    --border-bright: #3d3d48;
+    --accent: #e8d06b;
+    --accent-dim: rgba(232,208,107,0.12);
+    --text: #e8e8ec;
+    --text-2: #8888a0;
+    --text-3: #55556a;
+    --radius: 8px;
+    --font: 'Syne', sans-serif;
+    --mono: 'Syne Mono', monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 40px 20px 60px;
+  }
+
+  .app {
+    width: 100%;
+    max-width: 680px;
+  }
+
+  .header {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin-bottom: 20px;
+  }
+
+  .header h1 {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+  }
+
+  .chip {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    background: var(--accent-dim);
+    border: 1px solid rgba(232,208,107,0.25);
+    padding: 3px 9px;
+    border-radius: 99px;
+    letter-spacing: 0.04em;
+  }
+
+  /* ── SIZE TOGGLE (restricted to your two exact sizes) ── */
+  .size-toggle {
+    display: flex;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 3px;
+    gap: 3px;
+    margin-left: auto;
+  }
+  .size-btn {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 5px 12px;
+    border-radius: 5px;
+    border: none;
+    background: none;
+    color: var(--text-2);
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+    letter-spacing: 0.03em;
+  }
+  .size-btn:hover { color: var(--text); }
+  .size-btn.active {
+    background: var(--accent);
+    color: #0e0e10;
+    font-weight: 600;
+  }
+
+  /* ── CANVAS PREVIEW ── */
+  .canvas-section {
+    margin-bottom: 28px;
+  }
+
+  .canvas-toolbar {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .canvas-outer {
+    background: repeating-conic-gradient(#1a1a1f 0% 25%, #222228 0% 50%) 0 0 / 20px 20px;
+    border: 1px solid var(--border-bright);
+    border-radius: var(--radius);
+    padding: 20px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  #c {
+    display: block;
+    border-radius: 3px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+    cursor: default;
+  }
+
+  #c.dragging { cursor: grabbing; }
+  #c.draggable { cursor: grab; }
+
+  .drag-hint {
+    position: absolute;
+    bottom: 8px;
+    right: 10px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-3);
+    display: none;
+    gap: 4px;
+    align-items: center;
+  }
+  .drag-hint.visible { display: flex; }
+  .drag-hint svg { opacity: 0.5; }
+
+  /* ── PANELS ── */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-bottom: 10px;
+  }
+
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    cursor: pointer;
+    user-select: none;
+    border-bottom: 1px solid transparent;
+    transition: background 0.15s;
+  }
+  .panel-head:hover { background: var(--surface2); }
+  .panel-head.open { border-bottom-color: var(--border); }
+
+  .panel-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-2);
+  }
+  .panel-head.open .panel-title { color: var(--accent); }
+
+  .panel-chevron {
+    color: var(--text-3);
+    transition: transform 0.2s;
+    flex-shrink: 0;
+  }
+  .panel-head.open .panel-chevron { transform: rotate(180deg); }
+
+  .panel-body {
+    padding: 16px;
+    display: none;
+  }
+  .panel-body.open { display: block; }
+
+  /* ── GRID ── */
+  .grid { display: grid; gap: 12px; }
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+  .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .span2 { grid-column: 1 / -1; }
+
+  .field { display: flex; flex-direction: column; gap: 5px; }
+
+  label {
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-2);
+    font-family: var(--mono);
+  }
+
+  input[type=text], input[type=number], select {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 14px;
+    padding: 8px 10px;
+    outline: none;
+    width: 100%;
+    transition: border-color 0.15s;
+  }
+  input[type=text]:focus, input[type=number]:focus, select:focus {
+    border-color: var(--accent);
+  }
+  select { cursor: pointer; }
+  select option { background: var(--surface2); }
+
+  /* ── COLOR SWATCH ── */
+  .color-field { display: flex; flex-direction: column; gap: 5px; }
+  .color-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .color-row:hover { border-color: var(--border-bright); }
+  .color-swatch {
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    border: 1px solid rgba(255,255,255,0.1);
+    flex-shrink: 0;
+  }
+  .color-hex {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+    flex: 1;
+    text-transform: uppercase;
+  }
+  input[type=color] {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+    width: 0;
+    height: 0;
+  }
+
+  /* ── UPLOAD ── */
+  .upload-zone {
+    border: 1.5px dashed var(--border-bright);
+    border-radius: var(--radius);
+    padding: 20px 16px;
+    text-align: center;
+    cursor: pointer;
+    position: relative;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  .upload-zone:hover, .upload-zone.drag-over {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+  }
+  .upload-zone input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+    width: 100%;
+    height: 100%;
+  }
+  .upload-icon { color: var(--text-3); margin-bottom: 8px; }
+  .upload-main { font-size: 14px; color: var(--text); font-weight: 500; }
+  .upload-sub { font-size: 12px; color: var(--text-2); margin-top: 3px; }
+
+  .img-loaded-row {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+  }
+  .img-loaded-row.visible { display: flex; }
+  .img-thumb { width: 40px; height: 24px; object-fit: cover; border-radius: 3px; border: 1px solid var(--border-bright); }
+  .img-name { font-size: 13px; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btn-ghost {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text-2);
+    font-size: 12px;
+    font-family: var(--font);
+    padding: 4px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .btn-ghost:hover { border-color: #e87070; color: #e87070; }
+
+  .divider { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+
+  /* ── RANGE ── */
+  .range-wrap { display: flex; align-items: center; gap: 10px; }
+  input[type=range] {
+    flex: 1;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .range-val {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    width: 36px;
+    text-align: right;
+  }
+
+  /* ── TOGGLE BUTTONS ── */
+  .btn-group { display: flex; gap: 4px; }
+  .btn-tog {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-2);
+    font-family: var(--font);
+    font-size: 13px;
+    padding: 7px 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: center;
+  }
+  .btn-tog:hover { border-color: var(--border-bright); color: var(--text); }
+  .btn-tog.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+
+  /* ── SHADOW ── */
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .toggle-label { font-size: 13px; color: var(--text-2); }
+  .toggle-switch {
+    width: 36px; height: 20px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    position: relative;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+  }
+  .toggle-switch.on { background: var(--accent); border-color: var(--accent); }
+  .toggle-switch::after {
+    content: '';
+    position: absolute;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    top: 2px; left: 2px;
+    transition: transform 0.2s;
+  }
+  .toggle-switch.on::after { transform: translateX(16px); }
+
+  /* ── EXPORT ── */
+  .export-section { margin-top: 20px; }
+
+  #exportBtn, .download-btn {
+    width: 100%;
+    padding: 14px;
+    background: var(--accent);
+    color: #0e0e10;
+    border: none;
+    border-radius: var(--radius);
+    font-family: var(--font);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+  }
+  #exportBtn:hover, .download-btn:hover { opacity: 0.9; }
+  #exportBtn:active, .download-btn:active { transform: scale(0.99); }
+
+  .preview-wrap {
+    display: none;
+    margin-top: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .preview-wrap.visible { display: block; }
+  .preview-head {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-2);
+    font-family: var(--mono);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .preview-tag {
+    font-size: 10px;
+    background: rgba(100,220,100,0.1);
+    color: #7adf7a;
+    border: 1px solid rgba(100,220,100,0.2);
+    padding: 2px 8px;
+    border-radius: 99px;
+    letter-spacing: 0.05em;
+  }
+  .preview-body {
+    padding: 16px;
+    background: repeating-conic-gradient(#1a1a1f 0% 25%, #222228 0% 50%) 0 0 / 16px 16px;
+    display: flex;
+    justify-content: center;
+  }
+  #previewImg {
+    display: block;
+    border: 2px solid var(--border-bright);
+    border-radius: 2px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+  }
+  .save-hint {
+    padding: 8px 14px;
+    font-size: 12px;
+    color: var(--text-3);
+    font-family: var(--mono);
+  }
+
+  /* ── OPACITY BADGE ON CANVAS ── */
+  .canvas-overlay-info {
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: var(--mono);
+    font-size: 10px;
+    color: rgba(255,255,255,0.5);
+    background: rgba(0,0,0,0.4);
+    padding: 2px 8px;
+    border-radius: 99px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s;
+    white-space: nowrap;
+  }
+  .canvas-outer:hover .canvas-overlay-info.visible {
+    opacity: 1;
+  }
+
+  .note {
+    font-size: 11px;
+    color: var(--text-3);
+    font-family: var(--mono);
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <h1>Banner Creator <span class="chip">ROBUST</span></h1>
+    <!-- ONLY your two exact sizes – as requested -->
+    <div class="size-toggle">
+      <button class="size-btn active" data-w="468" data-h="60" onclick="setSize(this)">468 × 60</button>
+      <button class="size-btn" data-w="936" data-h="120" onclick="setSize(this)">936 × 120</button>
+    </div>
+  </div>
+
+  <!-- CANVAS PREVIEW -->
+  <div class="canvas-section">
+    <div class="canvas-toolbar">
+      <button id="dragBgBtn" onclick="setDragMode('bg')" class="size-btn active">🖼️ Background</button>
+      <button id="dragTextBtn" onclick="setDragMode('text')" class="size-btn">✍️ Text</button>
+    </div>
+
+    <div class="canvas-outer" id="canvasOuter">
+      <canvas id="c"></canvas>
+      <div class="drag-hint" id="dragHint">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
+        drag to reposition
+      </div>
+      <div class="canvas-overlay-info" id="overlayInfo"></div>
+      <div style="position:absolute;top:8px;left:10px;font-family:var(--mono);font-size:10px;color:rgba(255,255,255,0.3);pointer-events:none;" id="dimLabel">468 × 60</div>
+    </div>
+  </div>
+
+  <!-- BACKGROUND PANEL -->
+  <div class="panel" id="panelBg">
+    <div class="panel-head open" onclick="togglePanel('panelBg')">
+      <span class="panel-title">Background</span>
+      <svg class="panel-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+    </div>
+    <div class="panel-body open">
+      <div class="upload-zone" id="uploadZone">
+        <input type="file" id="imgUpload" accept="image/*">
+        <div class="upload-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </div>
+        <div class="upload-main">Drop an image or click to browse</div>
+        <div class="upload-sub">PNG, JPG, GIF, WebP — any size • Drag on canvas to reposition</div>
+      </div>
+
+      <div class="img-loaded-row" id="imgLoadedRow">
+        <img id="imgThumb" class="img-thumb" src="" alt="">
+        <span class="img-name" id="imgName"></span>
+        <button class="btn-ghost" onclick="clearImage()">Remove</button>
+      </div>
+
+      <div id="imgControls" style="display:none; margin-top: 14px;">
+        <div class="grid grid-3">
+          <div class="field span2">
+            <label>Image Fit</label>
+            <select id="imgFit">
+              <option value="cover">Cover (crop to fill)</option>
+              <option value="contain">Contain (letterbox)</option>
+              <option value="stretch">Stretch to fill</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Opacity %</label>
+            <input type="number" id="imgOpacity" value="100" min="0" max="100">
+          </div>
+        </div>
+        <div class="note">↖ Use “Drag Background” mode above to reposition</div>
+      </div>
+
+      <div id="colorControls" style="margin-top:14px;">
+        <div class="grid grid-2">
+          <div class="color-field">
+            <label>Color</label>
+            <div class="color-row" onclick="document.getElementById('bgColor').click()">
+              <div class="color-swatch" id="bgSwatch1"></div>
+              <span class="color-hex" id="bgHex1">#1A1A2E</span>
+            </div>
+            <input type="color" id="bgColor" value="#1a1a2e">
+          </div>
+          <div class="color-field">
+            <label>Gradient end</label>
+            <div class="color-row" onclick="document.getElementById('bgColor2').click()">
+              <div class="color-swatch" id="bgSwatch2"></div>
+              <span class="color-hex" id="bgHex2">#16213E</span>
+            </div>
+            <input type="color" id="bgColor2" value="#16213e">
+          </div>
+        </div>
+        <div class="grid" style="margin-top:12px;">
+          <div class="field">
+            <label>Gradient Direction</label>
+            <div class="btn-group" id="gradDirGroup">
+              <button class="btn-tog active" data-val="none">None</button>
+              <button class="btn-tog" data-val="lr">→</button>
+              <button class="btn-tog" data-val="rl">←</button>
+              <button class="btn-tog" data-val="tb">↓</button>
+              <button class="btn-tog" data-val="bt">↑</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TEXT PANEL -->
+  <div class="panel" id="panelText">
+    <div class="panel-head open" onclick="togglePanel('panelText')">
+      <span class="panel-title">Text (multi-line supported)</span>
+      <svg class="panel-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+    </div>
+    <div class="panel-body open">
+      <div class="grid">
+        <div class="field span2">
+          <label>Content</label>
+          <input type="text" id="textInput" placeholder="Your banner text&#10;New line with Enter" value="">
+          <div class="note">Drag in “Text” mode to reposition • Use Enter for new lines</div>
+        </div>
+      </div>
+      <div class="grid grid-2" style="margin-top:12px;">
+        <div class="color-field">
+          <label>Text Color</label>
+          <div class="color-row" onclick="document.getElementById('textColor').click()">
+            <div class="color-swatch" id="textSwatch"></div>
+            <span class="color-hex" id="textHex">#FFFFFF</span>
+          </div>
+          <input type="color" id="textColor" value="#ffffff">
+        </div>
+        <div class="field">
+          <label>Font Size</label>
+          <div class="range-wrap">
+            <input type="range" id="fontSize" min="8" max="68" value="24">
+            <span class="range-val" id="fontSizeVal">24px</span>
+          </div>
+        </div>
+      </div>
+      <div class="grid grid-2" style="margin-top:12px;">
+        <div class="field">
+          <label>Weight / Style</label>
+          <select id="fontStyle">
+            <option value="normal">Normal</option>
+            <option value="bold" selected>Bold</option>
+            <option value="italic">Italic</option>
+            <option value="bold italic">Bold Italic</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Font</label>
+          <select id="fontFace">
+            <option value="'Syne', sans-serif" selected>Syne (Modern)</option>
+            <option value="sans-serif">System Sans</option>
+            <option value="'Arial Black', sans-serif">Arial Black</option>
+            <option value="Impact, sans-serif">Impact</option>
+            <option value="'Georgia', serif">Georgia</option>
+            <option value="'Courier New', monospace">Courier New</option>
+          </select>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="toggle-row" style="margin-bottom:10px;">
+        <span class="toggle-label">Text shadow</span>
+        <div class="toggle-switch" id="shadowToggle" onclick="toggleShadow()"></div>
+      </div>
+      <div id="shadowControls" style="display:none;">
+        <div class="grid grid-2">
+          <div class="color-field">
+            <label>Shadow Color</label>
+            <div class="color-row" onclick="document.getElementById('shadowColor').click()">
+              <div class="color-swatch" id="shadowSwatch"></div>
+              <span class="color-hex" id="shadowHex">#000000</span>
+            </div>
+            <input type="color" id="shadowColor" value="#000000">
+          </div>
+          <div class="field">
+            <label>Shadow Blur</label>
+            <div class="range-wrap">
+              <input type="range" id="shadowBlur" min="0" max="30" value="6">
+              <span class="range-val" id="shadowBlurVal">6px</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- EXPORT -->
+  <div class="export-section">
+    <button id="exportBtn" onclick="exportPNG()">
+      Preview &amp; Export PNG ↓
+    </button>
+    <div class="preview-wrap" id="previewWrap">
+      <div class="preview-head">
+        <span id="previewDims">preview · 468 × 60</span>
+        <span class="preview-tag">READY</span>
+      </div>
+      <div class="preview-body">
+        <img id="previewImg" alt="banner preview">
+      </div>
+      <div style="padding:12px 14px;display:flex;gap:8px;">
+        <button onclick="downloadBanner()" class="download-btn" style="flex:1;background:#7adf7a;color:#0e0e10;">⬇️ Download PNG</button>
+        <button onclick="hidePreview()" class="btn-ghost" style="flex:1;">Close Preview</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let W = 468, H = 60;
+const maxDisplay = 640;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: true });
+
+let bgImage = null;
+let imgOffsetX = 0, imgOffsetY = 0;
+let gradDir = 'none';
+let hAlign = 'center', vAlign = 'middle';
+let shadowOn = false;
+let dragMode = 'bg';
+let textX = 234;   // initial center for 468×60
+let textY = 30;    // initial middle for 468×60
+let isDragging = false;
+let isDraggingText = false;
+let dragStartX = 0, dragStartY = 0;
+let dragBaseX = 0, dragBaseY = 0;
+let dragBaseTextX = 0, dragBaseTextY = 0;
+
+// Canvas setup
+function applyCanvasSize() {
+  canvas.width = W;
+  canvas.height = H;
+  const scale = Math.min(1, maxDisplay / Math.max(W, 100));
+  canvas.style.width = Math.round(W * scale) + 'px';
+  canvas.style.height = Math.round(H * scale) + 'px';
+  document.getElementById('dimLabel').textContent = `${W} × ${H}`;
+  draw();
+}
+applyCanvasSize();
+
+// ── SIZE SWITCH (only the two sizes you requested) ──
+function setSize(btn) {
+  document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+
+  const oldW = W;
+  const oldH = H;
+
+  W = parseInt(btn.dataset.w);
+  H = parseInt(btn.dataset.h);
+
+  // Scale everything proportionally so nothing jumps when switching between your two sizes
+  const ratioW = W / oldW;
+  const ratioH = H / oldH;
+
+  imgOffsetX *= ratioW;
+  imgOffsetY *= ratioH;
+  textX *= ratioW;
+  textY *= ratioH;
+
+  applyCanvasSize();
+}
+
+// Scale getter
+function getScale() {
+  return Math.min(1, maxDisplay / Math.max(W, 100));
+}
+
+// ── PANEL TOGGLE ──
+function togglePanel(id) {
+  const panel = document.getElementById(id);
+  const head = panel.querySelector('.panel-head');
+  const body = panel.querySelector('.panel-body');
+  head.classList.toggle('open');
+  body.classList.toggle('open');
+}
+
+// ── COLOR PICKERS ──
+function bindColor(inputId, swatchId, hexId) {
+  const inp = document.getElementById(inputId);
+  const swatch = document.getElementById(swatchId);
+  const hex = document.getElementById(hexId);
+  const update = () => {
+    swatch.style.background = inp.value;
+    hex.textContent = inp.value.toUpperCase();
+    draw();
+  };
+  inp.addEventListener('input', update);
+  update();
+}
+bindColor('bgColor', 'bgSwatch1', 'bgHex1');
+bindColor('bgColor2', 'bgSwatch2', 'bgHex2');
+bindColor('textColor', 'textSwatch', 'textHex');
+bindColor('shadowColor', 'shadowSwatch', 'shadowHex');
+
+// ── GRADIENT & ALIGN BUTTONS ──
+document.getElementById('gradDirGroup').addEventListener('click', e => {
+  const btn = e.target.closest('.btn-tog');
+  if (!btn) return;
+  document.querySelectorAll('#gradDirGroup .btn-tog').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  gradDir = btn.dataset.val;
+  draw();
+});
+
+// ── RANGES ──
+document.getElementById('fontSize').addEventListener('input', function() {
+  document.getElementById('fontSizeVal').textContent = this.value + 'px';
+  draw();
+});
+document.getElementById('shadowBlur').addEventListener('input', function() {
+  document.getElementById('shadowBlurVal').textContent = this.value + 'px';
+  draw();
+});
+
+// ── SHADOW TOGGLE ──
+function toggleShadow() {
+  shadowOn = !shadowOn;
+  document.getElementById('shadowToggle').classList.toggle('on', shadowOn);
+  document.getElementById('shadowControls').style.display = shadowOn ? 'block' : 'none';
+  draw();
+}
+
+// ── INPUT LISTENERS ──
+document.getElementById('textInput').addEventListener('input', draw);
+document.getElementById('fontStyle').addEventListener('change', draw);
+document.getElementById('fontFace').addEventListener('change', draw);
+document.getElementById('imgFit').addEventListener('change', draw);
+document.getElementById('imgOpacity').addEventListener('input', draw);
+
+// ── DRAG MODE (Background OR Text) ──
+function setDragMode(mode) {
+  dragMode = mode;
+  document.getElementById('dragBgBtn').classList.toggle('active', mode === 'bg');
+  document.getElementById('dragTextBtn').classList.toggle('active', mode === 'text');
+  document.getElementById('dragHint').classList.add('visible');
+}
+
+function updateDragModeUI() {
+  const bgBtn = document.getElementById('dragBgBtn');
+  if (!bgImage) {
+    bgBtn.disabled = true;
+    if (dragMode === 'bg') setDragMode('text');
+  } else {
+    bgBtn.disabled = false;
+  }
+}
+
+// ── IMAGE UPLOAD ──
+const uploadZone = document.getElementById('uploadZone');
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault();
+  uploadZone.classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file && file.type.startsWith('image/')) loadImageFile(file);
+});
+document.getElementById('imgUpload').addEventListener('change', function() {
+  if (this.files[0]) loadImageFile(this.files[0]);
+});
+
+function loadImageFile(file) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const img = new Image();
+    img.onload = () => {
+      bgImage = img;
+      imgOffsetX = 0;
+      imgOffsetY = 0;
+      document.getElementById('imgName').textContent = file.name.length > 22 ? file.name.substring(0,19)+'…' : file.name;
+      document.getElementById('imgThumb').src = ev.target.result;
+      document.getElementById('uploadZone').style.display = 'none';
+      document.getElementById('imgLoadedRow').classList.add('visible');
+      document.getElementById('imgControls').style.display = 'block';
+      document.getElementById('colorControls').style.display = 'none';
+      canvas.classList.add('draggable');
+      updateDragModeUI();
+      draw();
+    };
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearImage() {
+  bgImage = null;
+  imgOffsetX = 0; imgOffsetY = 0;
+  document.getElementById('imgUpload').value = '';
+  document.getElementById('uploadZone').style.display = 'block';
+  document.getElementById('imgLoadedRow').classList.remove('visible');
+  document.getElementById('imgControls').style.display = 'none';
+  document.getElementById('colorControls').style.display = 'block';
+  canvas.classList.remove('draggable');
+  updateDragModeUI();
+  draw();
+}
+
+// ── CLAMP BACKGROUND IN COVER MODE (prevents blank sections) ──
+// The image is now forced to always reach every border of the banner box.
+// Dragging can never create empty/transparent areas — the cover option
+// fully covers the canvas at all times while still letting you pan the crop window.
+function clampImageOffset() {
+  if (!bgImage || document.getElementById('imgFit').value !== 'cover') return;
+  const ratio = Math.max(W / bgImage.width, H / bgImage.height);
+  const dw = bgImage.width * ratio;
+  const dh = bgImage.height * ratio;
+  const centerX = (W - dw) / 2;
+  const centerY = (H - dh) / 2;
+  const minOffsetX = centerX;
+  const maxOffsetX = -centerX;
+  const minOffsetY = centerY;
+  const maxOffsetY = -centerY;
+  imgOffsetX = Math.max(minOffsetX, Math.min(maxOffsetX, imgOffsetX));
+  imgOffsetY = Math.max(minOffsetY, Math.min(maxOffsetY, imgOffsetY));
+}
+
+// ── DRAG LOGIC (Background + Text) ──
+canvas.addEventListener('mousedown', e => {
+  if (dragMode === 'bg' && bgImage) {
+    isDragging = true;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    dragBaseX = imgOffsetX;
+    dragBaseY = imgOffsetY;
+    canvas.classList.add('dragging');
+    canvas.classList.remove('draggable');
+    e.preventDefault();
+  } else if (dragMode === 'text') {
+    isDraggingText = true;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    dragBaseTextX = textX;
+    dragBaseTextY = textY;
+    canvas.classList.add('dragging');
+    e.preventDefault();
+  }
+});
+
+window.addEventListener('mousemove', e => {
+  const info = document.getElementById('overlayInfo');
+  if (isDragging && bgImage) {
+    const dx = (e.clientX - dragStartX) / getScale();
+    const dy = (e.clientY - dragStartY) / getScale();
+    imgOffsetX = dragBaseX + dx;
+    imgOffsetY = dragBaseY + dy;
+    clampImageOffset();               // ← ensures no blank sections
+    info.textContent = `BG  x:${Math.round(imgOffsetX)}  y:${Math.round(imgOffsetY)}`;
+    info.classList.add('visible');
+    draw();
+  } else if (isDraggingText) {
+    const dx = (e.clientX - dragStartX) / getScale();
+    const dy = (e.clientY - dragStartY) / getScale();
+    textX = dragBaseTextX + dx;
+    textY = dragBaseTextY + dy;
+    info.textContent = `TEXT x:${Math.round(textX)}  y:${Math.round(textY)}`;
+    info.classList.add('visible');
+    draw();
+  }
+});
+
+window.addEventListener('mouseup', () => {
+  const info = document.getElementById('overlayInfo');
+  if (isDragging) {
+    isDragging = false;
+    canvas.classList.remove('dragging');
+    if (bgImage) canvas.classList.add('draggable');
+  }
+  if (isDraggingText) isDraggingText = false;
+  setTimeout(() => info.classList.remove('visible'), 1200);
+});
+
+// Touch support
+canvas.addEventListener('touchstart', e => {
+  if (dragMode === 'bg' && bgImage) {
+    isDragging = true;
+    dragStartX = e.touches[0].clientX;
+    dragStartY = e.touches[0].clientY;
+    dragBaseX = imgOffsetX;
+    dragBaseY = imgOffsetY;
+    e.preventDefault();
+  } else if (dragMode === 'text') {
+    isDraggingText = true;
+    dragStartX = e.touches[0].clientX;
+    dragStartY = e.touches[0].clientY;
+    dragBaseTextX = textX;
+    dragBaseTextY = textY;
+    e.preventDefault();
+  }
+}, { passive: false });
+
+window.addEventListener('touchmove', e => {
+  if (isDragging && bgImage) {
+    const dx = (e.touches[0].clientX - dragStartX) / getScale();
+    const dy = (e.touches[0].clientY - dragStartY) / getScale();
+    imgOffsetX = dragBaseX + dx;
+    imgOffsetY = dragBaseY + dy;
+    clampImageOffset();               // ← ensures no blank sections
+    draw();
+  } else if (isDraggingText) {
+    const dx = (e.touches[0].clientX - dragStartX) / getScale();
+    const dy = (e.touches[0].clientY - dragStartY) / getScale();
+    textX = dragBaseTextX + dx;
+    textY = dragBaseTextY + dy;
+    draw();
+  }
+}, { passive: false });
+
+window.addEventListener('touchend', () => {
+  isDragging = false;
+  isDraggingText = false;
+});
+
+// ── DRAW (core rendering) ──
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // Background
+  if (bgImage) {
+    const fit = document.getElementById('imgFit').value;
+    const opacity = parseInt(document.getElementById('imgOpacity').value) / 100 || 1;
+    ctx.save();
+    ctx.globalAlpha = opacity;
+
+    if (fit === 'stretch') {
+      ctx.drawImage(bgImage, 0, 0, W, H);
+    } else if (fit === 'contain') {
+      const ratio = Math.min(W / bgImage.width, H / bgImage.height);
+      const dw = bgImage.width * ratio;
+      const dh = bgImage.height * ratio;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, W, H);
+      ctx.drawImage(bgImage, (W - dw) / 2 + imgOffsetX, (H - dh) / 2 + imgOffsetY, dw, dh);
+    } else { // cover
+      const ratio = Math.max(W / bgImage.width, H / bgImage.height);
+      const dw = bgImage.width * ratio;
+      const dh = bgImage.height * ratio;
+      ctx.drawImage(bgImage, (W - dw) / 2 + imgOffsetX, (H - dh) / 2 + imgOffsetY, dw, dh);
+    }
+    ctx.restore();
+  } else {
+    const bg1 = document.getElementById('bgColor').value;
+    const bg2 = document.getElementById('bgColor2').value;
+    if (gradDir === 'none') {
+      ctx.fillStyle = bg1;
+    } else {
+      let grd;
+      if (gradDir === 'lr') grd = ctx.createLinearGradient(0, 0, W, 0);
+      else if (gradDir === 'rl') grd = ctx.createLinearGradient(W, 0, 0, 0);
+      else if (gradDir === 'tb') grd = ctx.createLinearGradient(0, 0, 0, H);
+      else grd = ctx.createLinearGradient(0, H, 0, 0);
+      grd.addColorStop(0, bg1);
+      grd.addColorStop(1, bg2);
+      ctx.fillStyle = grd;
+    }
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // Text (multi-line + draggable anchor)
+  const rawText = document.getElementById('textInput').value.trim();
+  if (rawText) {
+    const tc = document.getElementById('textColor').value;
+    const fs = parseInt(document.getElementById('fontSize').value) || 24;
+    const fw = document.getElementById('fontStyle').value;
+    const ff = document.getElementById('fontFace').value;
+
+    ctx.save();
+    ctx.font = `${fw} ${fs}px ${ff}`;
+    ctx.textAlign = hAlign;
+    ctx.textBaseline = vAlign === 'top' ? 'top' : vAlign === 'bottom' ? 'bottom' : 'middle';
+
+    if (shadowOn) {
+      ctx.shadowColor = document.getElementById('shadowColor').value;
+      ctx.shadowBlur = parseInt(document.getElementById('shadowBlur').value) || 0;
+      ctx.shadowOffsetX = 2;
+      ctx.shadowOffsetY = 2;
+    }
+
+    ctx.fillStyle = tc;
+
+    const lines = rawText.split('\n');
+    const lineHeight = fs * 1.25;
+
+    let startY = textY;
+    if (vAlign === 'middle') startY -= (lines.length - 1) * lineHeight / 2;
+    else if (vAlign === 'bottom') startY -= (lines.length - 1) * lineHeight;
+
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], textX, startY + i * lineHeight);
+    }
+
+    ctx.restore();
+  }
+}
+
+// ── EXPORT ──
+function exportPNG() {
+  draw();
+  const img = document.getElementById('previewImg');
+  img.src = canvas.toDataURL('image/png', 1.0);
+  const wrap = document.getElementById('previewWrap');
+  document.getElementById('previewDims').textContent = `preview · ${W} × ${H}`;
+  wrap.classList.add('visible');
+  wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function downloadBanner() {
+  draw();
+  const link = document.createElement('a');
+  link.download = `banner-${W}x${H}.png`;
+  link.href = canvas.toDataURL('image/png', 1.0);
+  link.click();
+}
+
+function hidePreview() {
+  document.getElementById('previewWrap').classList.remove('visible');
+}
+
+// Init
+draw();
+updateDragModeUI();
+document.getElementById('dragHint').classList.add('visible');
+
+// Keyboard shortcut: Ctrl/Cmd + K = export
+window.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    e.preventDefault();
+    exportPNG();
+  }
+});
+</script>
+</body>
+</html>
