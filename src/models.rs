@@ -476,6 +476,15 @@ const fn default_page() -> i64 {
     1
 }
 
+impl Default for SearchQuery {
+    fn default() -> Self {
+        Self {
+            q: String::new(),
+            page: default_page(),
+        }
+    }
+}
+
 /// Pagination helper
 #[derive(Debug, Clone, Serialize)]
 pub struct Pagination {
@@ -756,6 +765,78 @@ mod tests {
                 "from_db_str() round-trip failed for {access_mode:?}"
             );
         }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn board_banner_mode_serde_matches_db_str() {
+        for banner_mode in [
+            BoardBannerMode::Inherit,
+            BoardBannerMode::None,
+            BoardBannerMode::Override,
+        ] {
+            let json = serde_json::to_string(&banner_mode)
+                .expect("BoardBannerMode always serialises to a JSON string");
+            let json_str = json.trim_matches('"');
+            assert_eq!(
+                banner_mode.as_str(),
+                json_str,
+                "as_str() and serde disagree for {banner_mode:?}"
+            );
+            assert_eq!(
+                BoardBannerMode::from_db_str(json_str),
+                Some(banner_mode),
+                "from_db_str() round-trip failed for {banner_mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn banner_scope_serde_matches_db_str() {
+        for scope in [BannerScope::Global, BannerScope::Board, BannerScope::Home] {
+            let json =
+                serde_json::to_string(&scope).expect("BannerScope always serialises to JSON");
+            let json_str = json.trim_matches('"');
+            assert_eq!(scope.as_str(), json_str, "serde disagrees for {scope:?}");
+            assert_eq!(
+                BannerScope::from_db_str(json_str),
+                Some(scope),
+                "from_db_str() round-trip failed for {scope:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn banner_target_type_serde_matches_db_str() {
+        for target_type in [
+            BannerTargetType::None,
+            BannerTargetType::InternalBoard,
+            BannerTargetType::InternalPath,
+            BannerTargetType::ExternalUrl,
+        ] {
+            let json = serde_json::to_string(&target_type)
+                .expect("BannerTargetType always serialises to JSON");
+            let json_str = json.trim_matches('"');
+            assert_eq!(
+                target_type.as_str(),
+                json_str,
+                "serde disagrees for {target_type:?}"
+            );
+            assert_eq!(
+                BannerTargetType::from_db_str(json_str),
+                Some(target_type),
+                "from_db_str() round-trip failed for {target_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_query_default_matches_serde_defaults() {
+        let query = SearchQuery::default();
+        assert!(query.q.is_empty());
+        assert_eq!(query.page, 1);
     }
 
     // ── Pagination ────────────────────────────────────────────────────────

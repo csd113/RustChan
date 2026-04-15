@@ -1,4 +1,3 @@
-#[cfg(test)]
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub fn app_state() -> crate::middleware::AppState {
@@ -21,12 +20,10 @@ pub fn app_state() -> crate::middleware::AppState {
     }
 }
 
-#[cfg(test)]
 pub fn connect_info() -> axum::extract::ConnectInfo<SocketAddr> {
     axum::extract::ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000))
 }
 
-#[cfg(test)]
 pub fn multipart_body(
     fields: &[(&str, &str)],
     file: Option<(&str, &str, &[u8], &str)>,

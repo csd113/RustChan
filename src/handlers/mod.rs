@@ -93,6 +93,16 @@ async fn stream_field_to_temp_file(
     })
 }
 
+async fn read_upload_field(
+    field: axum::extract::multipart::Field<'_>,
+    max_bytes: usize,
+    default_name: &str,
+) -> Result<Option<(TempUpload, String)>> {
+    let fname = field.file_name().unwrap_or(default_name).to_string();
+    let upload = stream_field_to_temp_file(field, max_bytes).await?;
+    Ok((upload.size_bytes > 0).then_some((upload, fname)))
+}
+
 pub struct TempUpload {
     pub temp_file: tempfile::NamedTempFile,
     pub sniff_bytes: Vec<u8>,
@@ -203,26 +213,14 @@ pub async fn parse_post_multipart(
                 poll_duration_unit = read_text_field(field).await?;
             }
             Some("file") => {
-                let fname = field.file_name().unwrap_or("upload").to_string();
                 let max = CONFIG.max_video_size.max(CONFIG.max_audio_size);
-                let upload = stream_field_to_temp_file(field, max).await?;
-                if upload.size_bytes > 0 {
-                    file = Some((upload, fname));
-                }
+                file = read_upload_field(field, max, "upload").await?;
             }
             Some("audio_file") => {
-                let fname = field.file_name().unwrap_or("audio").to_string();
-                let upload = stream_field_to_temp_file(field, CONFIG.max_audio_size).await?;
-                if upload.size_bytes > 0 {
-                    audio_file = Some((upload, fname));
-                }
+                audio_file = read_upload_field(field, CONFIG.max_audio_size, "audio").await?;
             }
             Some("image_file") => {
-                let fname = field.file_name().unwrap_or("image").to_string();
-                let upload = stream_field_to_temp_file(field, CONFIG.max_image_size).await?;
-                if upload.size_bytes > 0 {
-                    image_file = Some((upload, fname));
-                }
+                image_file = read_upload_field(field, CONFIG.max_image_size, "image").await?;
             }
             _ => {
                 let _ = field.bytes().await;
@@ -516,18 +514,10 @@ pub fn process_audio_first_uploads(
 )> {
     let allow_any_files =
         crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
-    let has_audio_first_upload = audio_file_data.is_some() || image_file_data.is_some();
-
-    if has_audio_first_upload && fallback_file_data.is_some() {
-        return Err(AppError::BadRequest(
-            "Use either the audio/image upload flow or the other-file slot, not both in the same post."
-                .into(),
-        ));
-    }
-
-    if let Some((image_upload, image_name)) = image_file_data {
-        let (primary, primary_hash) = process_primary_upload(
-            Some((image_upload, image_name)),
+    let has_audio_or_image_upload = audio_file_data.is_some() || image_file_data.is_some();
+    let save_primary = |file_data| {
+        process_primary_upload(
+            file_data,
             board,
             conn,
             upload_dir,
@@ -538,7 +528,18 @@ pub fn process_audio_first_uploads(
             max_audio_size,
             ffmpeg_available,
             ffmpeg_webp_available,
-        )?;
+        )
+    };
+
+    if has_audio_or_image_upload && fallback_file_data.is_some() {
+        return Err(AppError::BadRequest(
+            "Use either the audio/image upload flow or the other-file slot, not both in the same post."
+                .into(),
+        ));
+    }
+
+    if let Some((image_upload, image_name)) = image_file_data {
+        let (primary, primary_hash) = save_primary(Some((image_upload, image_name)))?;
 
         let audio = process_audio_combo(
             audio_file_data,
@@ -559,36 +560,12 @@ pub fn process_audio_first_uploads(
             ));
         }
 
-        let (primary, primary_hash) = process_primary_upload(
-            Some((audio_upload, audio_name)),
-            board,
-            conn,
-            upload_dir,
-            save_root_str,
-            thumb_size,
-            max_image_size,
-            max_video_size,
-            max_audio_size,
-            ffmpeg_available,
-            ffmpeg_webp_available,
-        )?;
+        let (primary, primary_hash) = save_primary(Some((audio_upload, audio_name)))?;
 
         return Ok((primary, None, primary_hash));
     }
 
-    let (primary, primary_hash) = process_primary_upload(
-        fallback_file_data,
-        board,
-        conn,
-        upload_dir,
-        save_root_str,
-        thumb_size,
-        max_image_size,
-        max_video_size,
-        max_audio_size,
-        ffmpeg_available,
-        ffmpeg_webp_available,
-    )?;
+    let (primary, primary_hash) = save_primary(fallback_file_data)?;
 
     Ok((primary, None, primary_hash))
 }

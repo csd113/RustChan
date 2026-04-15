@@ -1,4 +1,3 @@
-#[cfg(test)]
 #[must_use]
 pub fn sample_board() -> crate::models::Board {
     crate::models::Board {
