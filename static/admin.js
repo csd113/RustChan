@@ -43,6 +43,34 @@
 })();
 
 (function () {
+  function openDetailsAncestors(node) {
+    var current = node;
+    while (current) {
+      if (current.tagName && current.tagName.toLowerCase() === 'details') {
+        current.open = true;
+      }
+      current = current.parentElement;
+    }
+  }
+
+  function openHashTargetDetails() {
+    if (!window.location.hash || window.location.hash.length < 2) return;
+    var id = decodeURIComponent(window.location.hash.slice(1));
+    if (!id) return;
+    var target = document.getElementById(id);
+    if (!target) return;
+    openDetailsAncestors(target);
+    if (typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({ block: 'start' });
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', openHashTargetDetails);
+  window.addEventListener('hashchange', openHashTargetDetails);
+  openHashTargetDetails();
+})();
+
+(function () {
   function syncBannerTargetPicker(picker) {
     if (!picker) return;
     var select = picker.querySelector('[data-banner-target-select]');

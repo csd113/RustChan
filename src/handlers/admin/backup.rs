@@ -3116,7 +3116,12 @@ pub async fn extract_board_from_full_backup(
             .into_response())
         }
         ExtractBoardFromFullBackupOutcome::Restore { board_short } => {
-            Ok(Redirect::to(&format!("/admin/panel?board_restored={board_short}")).into_response())
+            Ok(super::admin_panel_redirect_anchor_open(
+                &format!("Board /{board_short}/ restored."),
+                &format!("board-backup-{board_short}"),
+                "board-backup-restore",
+            )
+            .into_response())
         }
     }
 }
@@ -3176,7 +3181,12 @@ pub async fn restore_saved_board_backup(
 
     match board_short_result {
         Ok(Ok(board_short)) => {
-            Ok(Redirect::to(&format!("/admin/panel?board_restored={board_short}")).into_response())
+            Ok(super::admin_panel_redirect_anchor_open(
+                &format!("Board /{board_short}/ restored."),
+                &format!("board-backup-{board_short}"),
+                "board-backup-restore",
+            )
+            .into_response())
         }
         Ok(Err(app_err)) => {
             let msg = encode_q(&app_err.to_string());
@@ -3440,16 +3450,15 @@ pub async fn board_restore(
 
     match result {
         Ok(board_short) => {
+            let redirect_url = format!(
+                "/admin/panel?flash={}&open=board-backup-restore#board-backup-{board_short}",
+                encode_q(&format!("Board /{board_short}/ restored."))
+            );
             if xhr_request {
-                return crate::handlers::board::xhr_redirect_response(&format!(
-                    "/admin/panel?board_restored={board_short}"
-                ))
+                return crate::handlers::board::xhr_redirect_response(&redirect_url)
                 .unwrap_or_else(|error| error.into_response());
             }
-            redirect_page_response(
-                &format!("/admin/panel?board_restored={board_short}"),
-                &format!("Board /{board_short}/ restored successfully."),
-            )
+            redirect_page_response(&redirect_url, &format!("Board /{board_short}/ restored."))
         }
         Err(e) => {
             tracing::error!(
