@@ -90,6 +90,7 @@ pub fn backup_source_dir() -> PathBuf {
 pub fn banner_open_section(anchor: &str) -> &str {
     match anchor {
         "global-banners" | "home-banners" => "board-banners",
+        _ if anchor.starts_with("board-appearance-") => "board-banners",
         _ => anchor,
     }
 }

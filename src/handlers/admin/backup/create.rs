@@ -392,9 +392,11 @@ pub async fn create_board_backup(
         .into_response());
     }
 
-    Ok(super::super::admin_panel_redirect(&format!(
-        "Board /{board_short_for_flash}/ backup saved on the server."
-    ))
+    Ok(super::super::admin_panel_redirect_anchor_open(
+        &format!("Board /{board_short_for_flash}/ backup saved on the server."),
+        &format!("board-backup-{board_short_for_flash}"),
+        "board-backup-restore",
+    )
     .into_response())
 }
 

@@ -531,8 +531,11 @@ pub fn base_layout(
         )
     };
     let stylesheet_href = static_asset_url("/static/style.css");
+    let admin_stylesheet_href = static_asset_url("/static/admin.css");
     let theme_init_src = static_asset_url("/static/theme-init.js");
     let main_js_src = static_asset_url("/static/main.js");
+    let admin_js_src = static_asset_url("/static/admin.js");
+    let is_admin_page = current_path.starts_with("/admin");
     let theme_stylesheet_href = if active_theme == "terminal" {
         String::new()
     } else {
@@ -544,6 +547,16 @@ pub fn base_layout(
         format!(
             r#"<link rel="stylesheet" id="active-theme-stylesheet" href="{theme_stylesheet_href}">"#
         )
+    };
+    let admin_stylesheet_link = if is_admin_page {
+        format!(r#"<link rel="stylesheet" href="{admin_stylesheet_href}">"#)
+    } else {
+        String::new()
+    };
+    let admin_script_tag = if is_admin_page {
+        format!(r#"<script src="{admin_js_src}" defer></script>"#)
+    } else {
+        String::new()
     };
     let mut theme_picker_fallback = String::new();
     let mut theme_picker_panel = String::new();
@@ -578,6 +591,7 @@ pub fn base_layout(
 <title>{title}</title>
 {favicon_head}
 <link rel="stylesheet" href="{stylesheet_href}">
+{admin_stylesheet_link}
 {theme_stylesheet_link}
 <script src="{theme_init_src}"></script>
 </head>
@@ -613,11 +627,13 @@ pub fn base_layout(
 {confirmation_modal}
 <input type="hidden" id="csrf_global" value="{csrf_token}">
 <script src="{main_js_src}" defer></script>
+{admin_script_tag}
 </body>
 </html>"#,
         title = escape_html(title),
         favicon_head = crate::favicon::favicon_head_html(board_short),
         stylesheet_href = stylesheet_href,
+        admin_stylesheet_link = admin_stylesheet_link,
         theme_stylesheet_link = theme_stylesheet_link,
         theme_init_src = theme_init_src,
         board_links = board_links,
@@ -628,6 +644,7 @@ pub fn base_layout(
         confirmation_modal = confirmation_modal_script(),
         csrf_token = escape_html(csrf_token),
         main_js_src = main_js_src,
+        admin_script_tag = admin_script_tag,
         default_theme_attr = default_theme_attr,
         theme_slugs_attr = theme_slugs_attr,
         active_theme_attr = active_theme_attr,

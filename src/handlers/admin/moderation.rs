@@ -271,7 +271,10 @@ pub async fn dismiss_appeal(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(super::admin_panel_redirect_anchor("Appeal dismissed.", "appeals").into_response())
+    Ok(
+        super::admin_panel_redirect_anchor_open("Appeal dismissed.", "appeals", "reports")
+            .into_response(),
+    )
 }
 
 // ─── POST /admin/appeal/accept ────────────────────────────────────────────────
@@ -311,8 +314,12 @@ pub async fn accept_appeal(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(
-        super::admin_panel_redirect_anchor("Appeal accepted and ban lifted.", "appeals")
-            .into_response(),
+        super::admin_panel_redirect_anchor_open(
+            "Appeal accepted and ban lifted.",
+            "appeals",
+            "reports",
+        )
+        .into_response(),
     )
 }
 
@@ -507,7 +514,31 @@ pub async fn resolve_report(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(super::admin_panel_redirect_anchor("Report resolved.", "reports").into_response())
+    Ok(
+        super::admin_panel_redirect_anchor_open("Report resolved.", "reports", "reports")
+            .into_response(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::admin_panel_redirect_anchor_open;
+    use axum::response::IntoResponse;
+
+    #[test]
+    fn resolve_report_redirect_reopens_moderation_section() {
+        let response =
+            admin_panel_redirect_anchor_open("Report resolved.", "reports", "reports")
+                .into_response();
+        let location = response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("location header");
+
+        assert!(location.ends_with("#reports"));
+        assert!(location.contains("open=reports"));
+    }
 }
 
 // ─── GET /admin/mod-log ───────────────────────────────────────────────────────

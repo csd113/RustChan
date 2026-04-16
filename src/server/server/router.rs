@@ -8,7 +8,7 @@ use crate::middleware::AppState;
 mod routes;
 
 use super::{
-    assets::{serve_css, serve_main_js, serve_theme_init_js},
+    assets::{serve_admin_css, serve_admin_js, serve_css, serve_main_js, serve_theme_init_js},
     headers::{hsts_middleware_with_mode, safe_timeout_middleware, CONTENT_SECURITY_POLICY},
     lifecycle::track_requests,
     onion_location_middleware,
@@ -21,6 +21,8 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
     Router::new()
         .route("/static/style.css", get(serve_css))
         .route("/static/main.js", get(serve_main_js))
+        .route("/static/admin.css", get(serve_admin_css))
+        .route("/static/admin.js", get(serve_admin_js))
         .route("/static/theme-init.js", get(serve_theme_init_js))
         .merge(public_routes())
         .merge(admin_routes())

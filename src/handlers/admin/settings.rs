@@ -305,9 +305,10 @@ pub async fn clear_board_favicon_override(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(super::admin_panel_redirect_anchor(
+    Ok(super::admin_panel_redirect_anchor_open(
         &format!("Board /{board_short}/ favicon override cleared."),
-        &format!("board-{board_short}"),
+        &format!("board-appearance-{board_short}"),
+        "board-banners",
     )
     .into_response())
 }
@@ -438,9 +439,10 @@ pub async fn update_board_favicon(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
     match favicon_result {
-        Ok(board_short) => Ok(super::admin_panel_redirect_anchor(
+        Ok(board_short) => Ok(super::admin_panel_redirect_anchor_open(
             &format!("Board /{board_short}/ favicon updated."),
-            &format!("board-{board_short}"),
+            &format!("board-appearance-{board_short}"),
+            "board-banners",
         )
         .into_response()),
         Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor(
@@ -694,7 +696,7 @@ pub struct ClearBoardBannerForm {
     pub csrf: Option<String>,
 }
 
-async fn board_anchor_from_id(state: &AppState, board_id: i64) -> Result<String> {
+async fn board_appearance_anchor_from_id(state: &AppState, board_id: i64) -> Result<String> {
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
@@ -704,7 +706,7 @@ async fn board_anchor_from_id(state: &AppState, board_id: i64) -> Result<String>
                 rusqlite::params![board_id],
                 |row| row.get::<_, String>(0),
             )?;
-            Ok(format!("board-{board_short}"))
+            Ok(format!("board-appearance-{board_short}"))
         }
     })
     .await
@@ -805,7 +807,7 @@ async fn upload_banner_for_scope(
                 BannerScope::Global => "global-banners".to_string(),
                 BannerScope::Home => "home-banners".to_string(),
                 BannerScope::Board => {
-                    format!("board-{}", board_short.as_deref().unwrap_or_default())
+                    format!("board-appearance-{}", board_short.as_deref().unwrap_or_default())
                 }
             };
             tracing::info!(
@@ -911,7 +913,7 @@ pub async fn upload_board_banner(
     let board_id = parsed
         .board_id
         .ok_or_else(|| AppError::BadRequest("Missing board id.".into()))?;
-    let board_anchor = board_anchor_from_id(&state, board_id).await?;
+    let board_anchor = board_appearance_anchor_from_id(&state, board_id).await?;
     match upload_banner_for_scope(
         state,
         session_id,
@@ -930,13 +932,13 @@ pub async fn upload_board_banner(
         Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
             &message,
             &board_anchor,
-            &board_anchor,
+            "board-banners",
         )
         .into_response()),
         Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor_open(
             &format_banner_upload_error(&error),
             &board_anchor,
-            &board_anchor,
+            "board-banners",
         )
         .into_response()),
         Err(error) => Err(error),
@@ -991,7 +993,9 @@ pub async fn update_banner_meta(
             Ok(match asset.scope {
                 BannerScope::Global => "global-banners".to_string(),
                 BannerScope::Home => "home-banners".to_string(),
-                BannerScope::Board => format!("board-{}", asset.board_short.unwrap_or_default()),
+                BannerScope::Board => {
+                    format!("board-appearance-{}", asset.board_short.unwrap_or_default())
+                }
             })
         }
     })
@@ -1033,7 +1037,9 @@ pub async fn delete_banner(
             Ok(match asset.scope {
                 BannerScope::Global => "global-banners".to_string(),
                 BannerScope::Home => "home-banners".to_string(),
-                BannerScope::Board => format!("board-{}", asset.board_short.unwrap_or_default()),
+                BannerScope::Board => {
+                    format!("board-appearance-{}", asset.board_short.unwrap_or_default())
+                }
             })
         }
     })
@@ -1076,7 +1082,9 @@ pub async fn move_banner(
             Ok(match asset.scope {
                 BannerScope::Global => "global-banners".to_string(),
                 BannerScope::Home => "home-banners".to_string(),
-                BannerScope::Board => format!("board-{}", asset.board_short.unwrap_or_default()),
+                BannerScope::Board => {
+                    format!("board-appearance-{}", asset.board_short.unwrap_or_default())
+                }
             })
         }
     })
@@ -1118,9 +1126,10 @@ pub async fn clear_board_banner_override(
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    Ok(super::admin_panel_redirect_anchor(
+    Ok(super::admin_panel_redirect_anchor_open(
         &format!("Board /{board_short}/ banner override cleared."),
-        &format!("board-{board_short}"),
+        &format!("board-appearance-{board_short}"),
+        "board-banners",
     )
     .into_response())
 }

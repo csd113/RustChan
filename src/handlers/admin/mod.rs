@@ -352,32 +352,98 @@ struct BackupSummary {
     status_line: String,
 }
 
-fn load_admin_panel_snapshot(
+struct OverviewDomainData {
+    backup_summary: BackupSummary,
+}
+
+struct BoardsDomainData {
+    boards: Vec<crate::models::Board>,
+}
+
+struct ModerationDomainData {
+    bans: Vec<crate::models::Ban>,
+    filters: Vec<crate::models::WordFilter>,
+    reports: Vec<crate::models::ReportWithContext>,
+    appeals: Vec<crate::models::BanAppeal>,
+}
+
+struct AppearanceDomainData {
+    site_name: String,
+    site_subtitle: String,
+    default_theme: String,
+    banner_rotation_interval_minutes: i64,
+    banner_external_links_enabled: bool,
+    themes: Vec<crate::models::Theme>,
+    global_banners: Vec<crate::models::BannerAsset>,
+    home_banners: Vec<crate::models::BannerAsset>,
+    board_banners: Vec<crate::models::BannerAsset>,
+}
+
+struct BackupsDomainData {
+    full_backups: Vec<BackupInfo>,
+    board_backups: Vec<BackupInfo>,
+}
+
+struct MaintenanceDomainData {
+    db_size_bytes: i64,
+    db_size_warning: bool,
+}
+
+fn load_overview_domain_data(full_backups: &[BackupInfo]) -> OverviewDomainData {
+    OverviewDomainData {
+        backup_summary: build_backup_summary(full_backups),
+    }
+}
+
+fn load_boards_domain_data(conn: &rusqlite::Connection) -> Result<BoardsDomainData> {
+    Ok(BoardsDomainData {
+        boards: db::get_all_boards(conn)?,
+    })
+}
+
+fn load_moderation_domain_data(conn: &rusqlite::Connection) -> Result<ModerationDomainData> {
+    Ok(ModerationDomainData {
+        bans: db::list_bans(conn)?,
+        filters: db::get_word_filters(conn)?,
+        reports: db::get_open_reports(conn)?,
+        appeals: db::get_open_ban_appeals(conn)?,
+    })
+}
+
+fn load_appearance_domain_data(
     conn: &rusqlite::Connection,
-    onion_address_val: Option<String>,
-    auto_full_backup_settings: crate::middleware::AutoFullBackupSettingsSnapshot,
-) -> Result<(AdminPanelSnapshot, Option<String>)> {
-    let boards = db::get_all_boards(conn)?;
-    let bans = db::list_bans(conn)?;
-    let filters = db::get_word_filters(conn)?;
-    let reports = db::get_open_reports(conn)?;
-    let appeals = db::get_open_ban_appeals(conn)?;
-    let site_name = db::get_site_name(conn);
-    let site_subtitle = db::get_site_subtitle(conn);
-    let default_theme = db::get_default_user_theme(conn);
-    let banner_rotation_interval_minutes = db::get_banner_rotation_interval_minutes(conn);
-    let banner_external_links_enabled = db::get_banner_external_links_enabled(conn);
+    boards: &[crate::models::Board],
+) -> Result<AppearanceDomainData> {
     let themes = db::load_themes(conn)?;
     let global_banners =
         db::list_banner_assets_for_scope(conn, crate::models::BannerScope::Global)?;
     let home_banners = db::list_banner_assets_for_scope(conn, crate::models::BannerScope::Home)?;
     let mut board_banners = Vec::new();
-    for board in &boards {
+    for board in boards {
         board_banners.extend(db::list_banner_assets_for_board(conn, board.id)?);
     }
-    let full_backups = list_backup_files(&full_backup_dir(), BackupListKind::Full);
-    let board_backups = list_backup_files(&board_backup_dir(), BackupListKind::Board);
-    let backup_summary = build_backup_summary(&full_backups);
+
+    Ok(AppearanceDomainData {
+        site_name: db::get_site_name(conn),
+        site_subtitle: db::get_site_subtitle(conn),
+        default_theme: db::get_default_user_theme(conn),
+        banner_rotation_interval_minutes: db::get_banner_rotation_interval_minutes(conn),
+        banner_external_links_enabled: db::get_banner_external_links_enabled(conn),
+        themes,
+        global_banners,
+        home_banners,
+        board_banners,
+    })
+}
+
+fn load_backups_domain_data() -> BackupsDomainData {
+    BackupsDomainData {
+        full_backups: list_backup_files(&full_backup_dir(), BackupListKind::Full),
+        board_backups: list_backup_files(&board_backup_dir(), BackupListKind::Board),
+    }
+}
+
+fn load_maintenance_domain_data(conn: &rusqlite::Connection) -> MaintenanceDomainData {
     let db_size_bytes = db::get_db_size_bytes(conn).unwrap_or(0);
     let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
         let file_size = std::fs::metadata(&CONFIG.database_path)
@@ -386,29 +452,47 @@ fn load_admin_panel_snapshot(
     } else {
         false
     };
+
+    MaintenanceDomainData {
+        db_size_bytes,
+        db_size_warning,
+    }
+}
+
+fn load_admin_panel_snapshot(
+    conn: &rusqlite::Connection,
+    onion_address_val: Option<String>,
+    auto_full_backup_settings: crate::middleware::AutoFullBackupSettingsSnapshot,
+) -> Result<(AdminPanelSnapshot, Option<String>)> {
+    let boards_domain = load_boards_domain_data(conn)?;
+    let moderation_domain = load_moderation_domain_data(conn)?;
+    let appearance_domain = load_appearance_domain_data(conn, &boards_domain.boards)?;
+    let backups_domain = load_backups_domain_data();
+    let overview_domain = load_overview_domain_data(&backups_domain.full_backups);
+    let maintenance_domain = load_maintenance_domain_data(conn);
     Ok((
         AdminPanelSnapshot {
-            boards,
-            bans,
-            filters,
-            reports,
-            appeals,
-            site_name,
-            site_subtitle,
-            default_theme,
-            banner_rotation_interval_minutes,
-            banner_external_links_enabled,
+            boards: boards_domain.boards,
+            bans: moderation_domain.bans,
+            filters: moderation_domain.filters,
+            reports: moderation_domain.reports,
+            appeals: moderation_domain.appeals,
+            site_name: appearance_domain.site_name,
+            site_subtitle: appearance_domain.site_subtitle,
+            default_theme: appearance_domain.default_theme,
+            banner_rotation_interval_minutes: appearance_domain.banner_rotation_interval_minutes,
+            banner_external_links_enabled: appearance_domain.banner_external_links_enabled,
             auto_full_backup_interval_hours: auto_full_backup_settings.interval_hours,
             auto_full_backup_copies_to_keep: auto_full_backup_settings.copies_to_keep,
-            themes,
-            global_banners,
-            home_banners,
-            board_banners,
-            full_backups,
-            board_backups,
-            db_size_bytes,
-            db_size_warning,
-            backup_summary,
+            themes: appearance_domain.themes,
+            global_banners: appearance_domain.global_banners,
+            home_banners: appearance_domain.home_banners,
+            board_banners: appearance_domain.board_banners,
+            full_backups: backups_domain.full_backups,
+            board_backups: backups_domain.board_backups,
+            db_size_bytes: maintenance_domain.db_size_bytes,
+            db_size_warning: maintenance_domain.db_size_warning,
+            backup_summary: overview_domain.backup_summary,
         },
         onion_address_val,
     ))
