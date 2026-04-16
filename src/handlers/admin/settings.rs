@@ -807,7 +807,10 @@ async fn upload_banner_for_scope(
                 BannerScope::Global => "global-banners".to_string(),
                 BannerScope::Home => "home-banners".to_string(),
                 BannerScope::Board => {
-                    format!("board-appearance-{}", board_short.as_deref().unwrap_or_default())
+                    format!(
+                        "board-appearance-{}",
+                        board_short.as_deref().unwrap_or_default()
+                    )
                 }
             };
             tracing::info!(

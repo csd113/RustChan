@@ -732,8 +732,8 @@ fn render_board_appearance_card(
     format!(
         r#"<details class="board-settings-card" id="board-appearance-{short}"{open_attr}>
 <summary>/{short}/ — {name}</summary>
-<div class="admin-subsection">
-  <div class="admin-card-header">
+<div class="admin-subsection board-appearance-settings-subsection">
+  <div class="admin-card-header board-card-edge-header">
     <h3>// board appearance</h3>
     <p>Theme selection, banner mode, favicon overrides, and board-specific banners live here.</p>
   </div>
@@ -1525,7 +1525,8 @@ pub fn admin_panel_page(
     let banner_settings_open_attr = if matches!(
         open_section,
         Some("board-banners" | "global-banners" | "home-banners")
-    ) || open_section.is_some_and(|section| section.starts_with("board-appearance-"))
+    ) || open_section
+        .is_some_and(|section| section.starts_with("board-appearance-"))
     {
         " open"
     } else {
@@ -2890,6 +2891,8 @@ mod tests {
             Some("reports"),
         );
 
-        assert!(html.contains(r#"<details class="admin-dropdown" data-admin-dropdown-key="reports" open>"#));
+        assert!(html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="reports" open>"#
+        ));
     }
 }

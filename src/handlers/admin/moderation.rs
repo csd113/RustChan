@@ -313,14 +313,12 @@ pub async fn accept_appeal(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(
-        super::admin_panel_redirect_anchor_open(
-            "Appeal accepted and ban lifted.",
-            "appeals",
-            "reports",
-        )
-        .into_response(),
+    Ok(super::admin_panel_redirect_anchor_open(
+        "Appeal accepted and ban lifted.",
+        "appeals",
+        "reports",
     )
+    .into_response())
 }
 
 // ─── POST /admin/filter/add ───────────────────────────────────────────────────
@@ -527,9 +525,8 @@ mod tests {
 
     #[test]
     fn resolve_report_redirect_reopens_moderation_section() {
-        let response =
-            admin_panel_redirect_anchor_open("Report resolved.", "reports", "reports")
-                .into_response();
+        let response = admin_panel_redirect_anchor_open("Report resolved.", "reports", "reports")
+            .into_response();
         let location = response
             .headers()
             .get(axum::http::header::LOCATION)

@@ -1130,6 +1130,11 @@ html:not([data-theme]) .admin-panel h1 {
   padding-right: 1rem;
 }
 
+.board-appearance-settings-subsection {
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+
 .admin-banner-editor .admin-file-field {
   flex: 0 1 24rem;
   min-width: 0;

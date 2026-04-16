@@ -11,10 +11,7 @@ static ADMIN_CSS: &str = include_str!("../../../static/admin.css");
 static ADMIN_JS: &str = include_str!("../../../static/admin.js");
 static THEME_INIT_JS: &str = include_str!("../../../static/theme-init.js");
 
-fn static_asset_response(
-    body: &'static str,
-    content_type: &'static str,
-) -> impl IntoResponse {
+fn static_asset_response(body: &'static str, content_type: &'static str) -> impl IntoResponse {
     (
         StatusCode::OK,
         [

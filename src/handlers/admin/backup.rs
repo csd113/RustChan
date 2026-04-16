@@ -3180,14 +3180,12 @@ pub async fn restore_saved_board_backup(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)));
 
     match board_short_result {
-        Ok(Ok(board_short)) => {
-            Ok(super::admin_panel_redirect_anchor_open(
-                &format!("Board /{board_short}/ restored."),
-                &format!("board-backup-{board_short}"),
-                "board-backup-restore",
-            )
-            .into_response())
-        }
+        Ok(Ok(board_short)) => Ok(super::admin_panel_redirect_anchor_open(
+            &format!("Board /{board_short}/ restored."),
+            &format!("board-backup-{board_short}"),
+            "board-backup-restore",
+        )
+        .into_response()),
         Ok(Err(app_err)) => {
             let msg = encode_q(&app_err.to_string());
             Ok(Redirect::to(&format!("/admin/panel?restore_error={msg}")).into_response())
@@ -3456,7 +3454,7 @@ pub async fn board_restore(
             );
             if xhr_request {
                 return crate::handlers::board::xhr_redirect_response(&redirect_url)
-                .unwrap_or_else(|error| error.into_response());
+                    .unwrap_or_else(|error| error.into_response());
             }
             redirect_page_response(&redirect_url, &format!("Board /{board_short}/ restored."))
         }

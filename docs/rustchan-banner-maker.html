@@ -3,274 +3,514 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>468×60 Banner Creator</title>
-<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700&family=Syne+Mono&display=swap" rel="stylesheet">
+<title>RustChan Banner Builder</title>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
   :root {
-    --bg: #0e0e10;
-    --surface: #17171a;
-    --surface2: #1f1f24;
-    --border: #2c2c33;
-    --border-bright: #3d3d48;
-    --accent: #e8d06b;
-    --accent-dim: rgba(232,208,107,0.12);
-    --text: #e8e8ec;
-    --text-2: #8888a0;
-    --text-3: #55556a;
-    --radius: 8px;
-    --font: 'Syne', sans-serif;
-    --mono: 'Syne Mono', monospace;
+    color-scheme: dark;
+    --bg: #050505;
+    --panel: #0d0d0d;
+    --panel-2: #0f1210;
+    --panel-3: #060c06;
+    --border: #1a2e1a;
+    --border-strong: #224228;
+    --border-glow: #17b84a;
+    --green: #00c840;
+    --green-bright: #00ff41;
+    --green-dim: #4f9d63;
+    --green-pale: #9be49b;
+    --text: #c7e7c7;
+    --text-dim: #89ae89;
+    --amber: #ffb300;
+    --red: #ff5b62;
+    --shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+    --font: 'Courier New', Consolas, 'Lucida Console', monospace;
+  }
+
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    background: var(--bg);
+    font-size: 13px;
   }
 
   body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font);
+    margin: 0;
     min-height: 100vh;
-    display: flex;
-    justify-content: center;
-    padding: 40px 20px 60px;
+    font-family: var(--font);
+    color: var(--text);
+    line-height: 1.55;
+    background:
+      radial-gradient(circle at top, rgba(0, 200, 64, 0.12), transparent 28%),
+      linear-gradient(180deg, #070907 0%, #050505 100%);
+    background-image:
+      repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0, 0, 0, 0.18) 2px, rgba(0, 0, 0, 0.18) 4px),
+      radial-gradient(circle at top, rgba(0, 200, 64, 0.12), transparent 28%),
+      linear-gradient(180deg, #070907 0%, #050505 100%);
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 14%, transparent 86%, rgba(0, 0, 0, 0.22));
+    mix-blend-mode: screen;
+    opacity: 0.5;
+  }
+
+  button, input, textarea, select {
+    font: inherit;
+  }
+
+  button {
+    border: 0;
+    color: var(--text);
+    background: var(--panel-3);
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  a {
+    color: var(--green);
+    text-decoration: none;
+  }
+
+  a:hover {
+    color: var(--green-bright);
   }
 
   .app {
-    width: 100%;
-    max-width: 680px;
+    width: min(100%, 1520px);
+    margin: 0 auto;
+    padding: 18px;
+    display: grid;
+    gap: 16px;
   }
 
-  .header {
+  .hero {
+    position: relative;
+    overflow: hidden;
     display: flex;
-    align-items: baseline;
-    gap: 14px;
-    margin-bottom: 20px;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 18px;
+    padding: 16px 18px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.02);
   }
 
-  .header h1 {
-    font-size: 22px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
+  .hero::after {
+    content: '';
+    position: absolute;
+    inset: auto -10% -40% -10%;
+    height: 100px;
+    background: radial-gradient(circle, rgba(0, 200, 64, 0.12), transparent 65%);
+    pointer-events: none;
+  }
+
+  .hero-copy {
+    min-width: 0;
+    max-width: 52rem;
+    position: relative;
+    z-index: 1;
+  }
+
+  .hero-kicker {
+    color: var(--text-dim);
+    font-size: 0.76rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+
+  .hero h1 {
+    margin: 0.25rem 0 0;
+    font-size: 1.35rem;
+    letter-spacing: 0.08em;
+    color: var(--green-bright);
+  }
+
+  html:not([data-theme]) .hero h1 {
+    text-shadow: 0 0 10px rgba(0, 255, 65, 0.4);
+  }
+
+  .hero p {
+    margin: 0.45rem 0 0;
+    max-width: 50rem;
+    color: var(--text-dim);
+    font-size: 0.88rem;
+    line-height: 1.6;
+  }
+
+  .hero-meta {
+    display: grid;
+    gap: 10px;
+    justify-items: end;
+    position: relative;
+    z-index: 1;
+  }
+
+  .badge-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    background: rgba(0, 200, 64, 0.06);
+    color: var(--green-pale);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .size-toggle {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px;
+    background: var(--panel-3);
+    border: 1px solid var(--border);
+  }
+
+  .size-btn {
+    padding: 6px 11px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 0.74rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+  }
+
+  .size-btn:hover {
     color: var(--text);
   }
 
-  .chip {
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--accent);
-    background: var(--accent-dim);
-    border: 1px solid rgba(232,208,107,0.25);
-    padding: 3px 9px;
-    border-radius: 99px;
+  .size-btn.active {
+    background: rgba(0, 200, 64, 0.14);
+    border-color: var(--green);
+    color: var(--green-bright);
+  }
+
+  .workspace {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+
+  .sidebar,
+  .stage {
+    display: grid;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .stage {
+    width: min(100%, 1240px);
+    justify-self: center;
+    order: -1;
+  }
+
+  .sidebar {
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+
+  .sidebar > .card {
+    min-width: 0;
+  }
+
+  .export-section {
+    grid-column: 1 / -1;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+    min-width: 0;
+  }
+
+  .card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(0, 200, 64, 0.05), transparent);
+  }
+
+  .card-title {
+    font-size: 0.86rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--green);
+  }
+
+  .mini-note {
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .card-body {
+    padding: 14px;
+  }
+
+  .card-body > * + * {
+    margin-top: 12px;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+  }
+
+  .grid {
+    display: grid;
+    gap: 10px;
+  }
+
+  .grid-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .grid-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .span-2 {
+    grid-column: 1 / -1;
+  }
+
+  label {
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  input[type="text"],
+  input[type="number"],
+  textarea,
+  select {
+    width: 100%;
+    min-width: 0;
+    padding: 0.55rem 0.7rem;
+    background: var(--panel-3);
+    border: 1px solid var(--border);
+    color: var(--green-pale);
+    outline: none;
+    box-sizing: border-box;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+
+  textarea {
+    min-height: 6.5rem;
+    resize: vertical;
+  }
+
+  input[type="text"]:focus,
+  input[type="number"]:focus,
+  textarea:focus,
+  select:focus {
+    border-color: var(--border-glow);
+    box-shadow: 0 0 0 1px rgba(23, 184, 74, 0.16);
+  }
+
+  select {
+    cursor: pointer;
+  }
+
+  input[type="range"] {
+    width: 100%;
+    accent-color: var(--green);
+  }
+
+  .tone-row,
+  .toggle-row,
+  .tool-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .tone-row {
+    background: var(--panel-3);
+    border: 1px solid var(--border);
+    padding: 7px 10px;
+    cursor: pointer;
+  }
+
+  .tone-swatch {
+    width: 22px;
+    height: 22px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    flex: 0 0 auto;
+  }
+
+  .tone-value {
+    color: var(--text);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-transform: uppercase;
     letter-spacing: 0.04em;
   }
 
-  /* ── SIZE TOGGLE (restricted to your two exact sizes) ── */
-  .size-toggle {
-    display: flex;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 3px;
-    gap: 3px;
-    margin-left: auto;
-  }
-  .size-btn {
-    font-family: var(--mono);
-    font-size: 11px;
-    padding: 5px 12px;
-    border-radius: 5px;
-    border: none;
-    background: none;
-    color: var(--text-2);
-    cursor: pointer;
-    transition: all 0.15s;
-    white-space: nowrap;
-    letter-spacing: 0.03em;
-  }
-  .size-btn:hover { color: var(--text); }
-  .size-btn.active {
-    background: var(--accent);
-    color: #0e0e10;
-    font-weight: 600;
-  }
-
-  /* ── CANVAS PREVIEW ── */
-  .canvas-section {
-    margin-bottom: 28px;
-  }
-
-  .canvas-toolbar {
-    display: flex;
-    justify-content: center;
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-
-  .canvas-outer {
-    background: repeating-conic-gradient(#1a1a1f 0% 25%, #222228 0% 50%) 0 0 / 20px 20px;
-    border: 1px solid var(--border-bright);
-    border-radius: var(--radius);
-    padding: 20px;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    position: relative;
-    overflow: hidden;
-  }
-
-  #c {
-    display: block;
-    border-radius: 3px;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.5);
-    cursor: default;
-  }
-
-  #c.dragging { cursor: grabbing; }
-  #c.draggable { cursor: grab; }
-
-  .drag-hint {
+  input[type="color"] {
     position: absolute;
-    bottom: 8px;
-    right: 10px;
-    font-family: var(--mono);
-    font-size: 10px;
-    color: var(--text-3);
-    display: none;
-    gap: 4px;
-    align-items: center;
-  }
-  .drag-hint.visible { display: flex; }
-  .drag-hint svg { opacity: 0.5; }
-
-  /* ── PANELS ── */
-  .panel {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-    margin-bottom: 10px;
-  }
-
-  .panel-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    cursor: pointer;
-    user-select: none;
-    border-bottom: 1px solid transparent;
-    transition: background 0.15s;
-  }
-  .panel-head:hover { background: var(--surface2); }
-  .panel-head.open { border-bottom-color: var(--border); }
-
-  .panel-title {
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-2);
-  }
-  .panel-head.open .panel-title { color: var(--accent); }
-
-  .panel-chevron {
-    color: var(--text-3);
-    transition: transform 0.2s;
-    flex-shrink: 0;
-  }
-  .panel-head.open .panel-chevron { transform: rotate(180deg); }
-
-  .panel-body {
-    padding: 16px;
-    display: none;
-  }
-  .panel-body.open { display: block; }
-
-  /* ── GRID ── */
-  .grid { display: grid; gap: 12px; }
-  .grid-2 { grid-template-columns: 1fr 1fr; }
-  .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
-  .span2 { grid-column: 1 / -1; }
-
-  .field { display: flex; flex-direction: column; gap: 5px; }
-
-  label {
-    font-size: 11px;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-2);
-    font-family: var(--mono);
-  }
-
-  input[type=text], input[type=number], select {
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
-    font-family: var(--font);
-    font-size: 14px;
-    padding: 8px 10px;
-    outline: none;
-    width: 100%;
-    transition: border-color 0.15s;
-  }
-  input[type=text]:focus, input[type=number]:focus, select:focus {
-    border-color: var(--accent);
-  }
-  select { cursor: pointer; }
-  select option { background: var(--surface2); }
-
-  /* ── COLOR SWATCH ── */
-  .color-field { display: flex; flex-direction: column; gap: 5px; }
-  .color-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 10px;
-    cursor: pointer;
-    transition: border-color 0.15s;
-  }
-  .color-row:hover { border-color: var(--border-bright); }
-  .color-swatch {
-    width: 22px;
-    height: 22px;
-    border-radius: 4px;
-    border: 1px solid rgba(255,255,255,0.1);
-    flex-shrink: 0;
-  }
-  .color-hex {
-    font-family: var(--mono);
-    font-size: 13px;
-    color: var(--text);
-    flex: 1;
-    text-transform: uppercase;
-  }
-  input[type=color] {
-    position: absolute;
-    opacity: 0;
-    pointer-events: none;
     width: 0;
     height: 0;
+    opacity: 0;
+    pointer-events: none;
   }
 
-  /* ── UPLOAD ── */
+  .btn-group {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .btn-tog,
+  .btn-ghost,
+  .btn-soft,
+  .btn-primary,
+  .icon-btn {
+    border: 1px solid var(--border);
+    background: var(--panel-3);
+    color: var(--text);
+    transition: border-color 0.15s, background 0.15s, color 0.15s, transform 0.08s;
+  }
+
+  .btn-tog,
+  .btn-ghost,
+  .btn-soft {
+    padding: 0.48rem 0.7rem;
+  }
+
+  .btn-primary {
+    width: 100%;
+    padding: 0.95rem 1rem;
+    background: rgba(0, 200, 64, 0.14);
+    border-color: var(--green);
+    color: var(--green-bright);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+
+  .btn-primary:hover {
+    background: rgba(0, 200, 64, 0.2);
+  }
+
+  .btn-ghost:hover,
+  .btn-soft:hover,
+  .btn-tog:hover,
+  .icon-btn:hover {
+    border-color: var(--border-strong);
+    color: var(--green-bright);
+  }
+
+  .btn-tog.active {
+    background: rgba(0, 200, 64, 0.14);
+    border-color: var(--green);
+    color: var(--green-bright);
+  }
+
+  .btn-primary:active,
+  .btn-ghost:active,
+  .btn-soft:active,
+  .btn-tog:active,
+  .icon-btn:active,
+  .size-btn:active {
+    transform: translateY(1px);
+  }
+
+  .toggle-row {
+    justify-content: space-between;
+  }
+
+  .toggle-label {
+    color: var(--text-dim);
+    font-size: 0.82rem;
+  }
+
+  .toggle-switch {
+    position: relative;
+    width: 38px;
+    height: 22px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--panel-3);
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+  }
+
+  .toggle-switch::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #d9f6dc;
+    transition: transform 0.2s;
+  }
+
+  .toggle-switch.on {
+    background: rgba(0, 200, 64, 0.22);
+    border-color: var(--green);
+  }
+
+  .toggle-switch.on::after {
+    transform: translateX(16px);
+  }
+
   .upload-zone {
-    border: 1.5px dashed var(--border-bright);
-    border-radius: var(--radius);
-    padding: 20px 16px;
+    display: grid;
+    gap: 6px;
+    place-items: center;
     text-align: center;
+    padding: 18px 16px;
+    border: 1.5px dashed var(--border-strong);
+    background: rgba(0, 0, 0, 0.12);
     cursor: pointer;
     position: relative;
-    transition: border-color 0.2s, background 0.2s;
+    transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
   }
-  .upload-zone:hover, .upload-zone.drag-over {
-    border-color: var(--accent);
-    background: var(--accent-dim);
+
+  .upload-zone:hover,
+  .upload-zone.drag-over {
+    border-color: var(--green);
+    background: rgba(0, 200, 64, 0.08);
+    box-shadow: 0 0 0 1px rgba(0, 200, 64, 0.12);
   }
+
   .upload-zone input {
     position: absolute;
     inset: 0;
@@ -279,822 +519,1767 @@
     width: 100%;
     height: 100%;
   }
-  .upload-icon { color: var(--text-3); margin-bottom: 8px; }
-  .upload-main { font-size: 14px; color: var(--text); font-weight: 500; }
-  .upload-sub { font-size: 12px; color: var(--text-2); margin-top: 3px; }
 
-  .img-loaded-row {
-    display: none;
-    align-items: center;
+  .upload-main {
+    color: var(--text);
+    font-weight: 700;
+    font-size: 0.93rem;
+  }
+
+  .upload-sub {
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    max-width: 32rem;
+  }
+
+  .layer-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .layer-empty {
+    padding: 13px;
+    border: 1px dashed var(--border);
+    color: var(--text-dim);
+    font-size: 0.81rem;
+    background: rgba(0, 0, 0, 0.08);
+  }
+
+  .layer-row {
+    display: grid;
+    grid-template-columns: 48px minmax(0, 1fr) auto;
     gap: 10px;
-    background: var(--surface2);
+    align-items: center;
+    padding: 9px;
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 10px 14px;
-  }
-  .img-loaded-row.visible { display: flex; }
-  .img-thumb { width: 40px; height: 24px; object-fit: cover; border-radius: 3px; border: 1px solid var(--border-bright); }
-  .img-name { font-size: 13px; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .btn-ghost {
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    color: var(--text-2);
-    font-size: 12px;
-    font-family: var(--font);
-    padding: 4px 10px;
+    background: var(--panel-3);
     cursor: pointer;
+  }
+
+  .layer-row.selected {
+    border-color: var(--green);
+    box-shadow: 0 0 0 1px rgba(0, 200, 64, 0.16);
+  }
+
+  .layer-row.hidden {
+    opacity: 0.55;
+  }
+
+  .layer-thumb {
+    width: 48px;
+    height: 30px;
+    border: 1px solid var(--border);
+    object-fit: cover;
+    background: #000;
+  }
+
+  .layer-meta {
+    min-width: 0;
+    display: grid;
+    gap: 2px;
+  }
+
+  .layer-name {
+    color: var(--text);
+    font-size: 0.84rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
-    transition: border-color 0.15s, color 0.15s;
-  }
-  .btn-ghost:hover { border-color: #e87070; color: #e87070; }
-
-  .divider { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
-
-  /* ── RANGE ── */
-  .range-wrap { display: flex; align-items: center; gap: 10px; }
-  input[type=range] {
-    flex: 1;
-    accent-color: var(--accent);
-    cursor: pointer;
-  }
-  .range-val {
-    font-family: var(--mono);
-    font-size: 12px;
-    color: var(--accent);
-    width: 36px;
-    text-align: right;
   }
 
-  /* ── TOGGLE BUTTONS ── */
-  .btn-group { display: flex; gap: 4px; }
-  .btn-tog {
-    flex: 1;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text-2);
-    font-family: var(--font);
-    font-size: 13px;
-    padding: 7px 4px;
-    cursor: pointer;
-    transition: all 0.15s;
-    text-align: center;
+  .layer-sub {
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .btn-tog:hover { border-color: var(--border-bright); color: var(--text); }
-  .btn-tog.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
 
-  /* ── SHADOW ── */
-  .toggle-row {
+  .layer-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+
+  .icon-btn {
+    padding: 0.36rem 0.55rem;
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .panel-block {
+    display: grid;
+    gap: 10px;
+  }
+
+  .panel-block + .panel-block {
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+
+  .panel-note {
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    line-height: 1.6;
+  }
+
+  .range-row {
     display: flex;
     align-items: center;
+    gap: 10px;
+  }
+
+  .range-value {
+    min-width: 3.8rem;
+    text-align: right;
+    color: var(--green-bright);
+    font-size: 0.78rem;
+  }
+
+  .canvas-card {
+    overflow: hidden;
+  }
+
+  .canvas-head-extra {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  .canvas-shell {
+    padding: 18px;
+    display: grid;
+    gap: 14px;
+  }
+
+  .canvas-status {
+    display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
   }
-  .toggle-label { font-size: 13px; color: var(--text-2); }
-  .toggle-switch {
-    width: 36px; height: 20px;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 99px;
+
+  .canvas-frame {
     position: relative;
-    cursor: pointer;
-    transition: background 0.2s, border-color 0.2s;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 22px;
+    border: 1px solid var(--border);
+    background:
+      radial-gradient(circle at top, rgba(0, 200, 64, 0.08), transparent 28%),
+      repeating-conic-gradient(rgba(255, 255, 255, 0.06) 0% 25%, rgba(255, 255, 255, 0.02) 0% 50%) 0 0 / 18px 18px;
+    overflow: auto;
   }
-  .toggle-switch.on { background: var(--accent); border-color: var(--accent); }
-  .toggle-switch::after {
-    content: '';
-    position: absolute;
-    width: 14px; height: 14px;
-    border-radius: 50%;
-    background: #fff;
-    top: 2px; left: 2px;
-    transition: transform 0.2s;
+
+  canvas {
+    display: block;
+    touch-action: none;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
   }
-  .toggle-switch.on::after { transform: translateX(16px); }
 
-  /* ── EXPORT ── */
-  .export-section { margin-top: 20px; }
+  canvas.dragging {
+    cursor: grabbing;
+  }
 
-  #exportBtn, .download-btn {
+  canvas.moving {
+    cursor: move;
+  }
+
+  canvas.resizing {
+    cursor: nwse-resize;
+  }
+
+  .canvas-hud {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+    flex-wrap: wrap;
     width: 100%;
-    padding: 14px;
-    background: var(--accent);
-    color: #0e0e10;
-    border: none;
-    border-radius: var(--radius);
-    font-family: var(--font);
-    font-size: 15px;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    cursor: pointer;
-    transition: opacity 0.15s, transform 0.1s;
+    pointer-events: none;
   }
-  #exportBtn:hover, .download-btn:hover { opacity: 0.9; }
-  #exportBtn:active, .download-btn:active { transform: scale(0.99); }
+
+  .hud-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.54);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: rgba(196, 230, 198, 0.92);
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .canvas-tip {
+    max-width: 42rem;
+    padding: 6px 9px;
+    border-radius: 2px;
+    background: rgba(0, 0, 0, 0.54);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: rgba(196, 230, 198, 0.84);
+    font-size: 0.7rem;
+    line-height: 1.4;
+    letter-spacing: 0.02em;
+  }
 
   .preview-wrap {
     display: none;
-    margin-top: 14px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
     overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--panel-3);
   }
-  .preview-wrap.visible { display: block; }
+
+  .preview-wrap.visible {
+    display: block;
+  }
+
   .preview-head {
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-    font-size: 12px;
-    color: var(--text-2);
-    font-family: var(--mono);
     display: flex;
-    align-items: center;
     justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
+
   .preview-tag {
-    font-size: 10px;
-    background: rgba(100,220,100,0.1);
-    color: #7adf7a;
-    border: 1px solid rgba(100,220,100,0.2);
+    color: var(--green-bright);
+    border: 1px solid rgba(0, 255, 65, 0.25);
+    background: rgba(0, 255, 65, 0.09);
     padding: 2px 8px;
-    border-radius: 99px;
-    letter-spacing: 0.05em;
+    border-radius: 999px;
   }
+
   .preview-body {
-    padding: 16px;
-    background: repeating-conic-gradient(#1a1a1f 0% 25%, #222228 0% 50%) 0 0 / 16px 16px;
+    padding: 14px;
     display: flex;
     justify-content: center;
   }
+
   #previewImg {
     display: block;
-    border: 2px solid var(--border-bright);
-    border-radius: 2px;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.4);
-  }
-  .save-hint {
-    padding: 8px 14px;
-    font-size: 12px;
-    color: var(--text-3);
-    font-family: var(--mono);
+    max-width: 100%;
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
   }
 
-  /* ── OPACITY BADGE ON CANVAS ── */
-  .canvas-overlay-info {
-    position: absolute;
-    top: 8px;
-    left: 50%;
-    transform: translateX(-50%);
-    font-family: var(--mono);
-    font-size: 10px;
-    color: rgba(255,255,255,0.5);
-    background: rgba(0,0,0,0.4);
-    padding: 2px 8px;
-    border-radius: 99px;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity 0.3s;
-    white-space: nowrap;
-  }
-  .canvas-outer:hover .canvas-overlay-info.visible {
-    opacity: 1;
+  .preview-actions {
+    display: flex;
+    gap: 8px;
+    padding: 0 14px 14px;
   }
 
-  .note {
-    font-size: 11px;
-    color: var(--text-3);
-    font-family: var(--mono);
-    margin-top: 4px;
+  .hidden {
+    display: none !important;
+  }
+
+  .soft-divider {
+    margin: 0;
+    border: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  @media (max-width: 1100px) {
+    .workspace {
+      grid-template-columns: 1fr;
+    }
+
+    .stage {
+      width: 100%;
+    }
+
+    .sidebar {
+      grid-template-columns: 1fr;
+    }
+
+    .hero {
+      flex-direction: column;
+    }
+
+    .hero-meta {
+      justify-items: start;
+    }
+
+    .badge-row {
+      justify-content: flex-start;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .app {
+      padding: 12px;
+    }
+
+    .sidebar {
+      grid-template-columns: 1fr;
+    }
+
+    .grid-2,
+    .grid-3 {
+      grid-template-columns: 1fr;
+    }
+
+    .layer-row {
+      grid-template-columns: 1fr;
+    }
+
+    .layer-actions {
+      justify-content: flex-start;
+    }
+
+    .canvas-tip {
+      max-width: none;
+    }
   }
 </style>
 </head>
 <body>
 <div class="app">
-  <div class="header">
-    <h1>Banner Creator <span class="chip">ROBUST</span></h1>
-    <!-- ONLY your two exact sizes – as requested -->
-    <div class="size-toggle">
-      <button class="size-btn active" data-w="468" data-h="60" onclick="setSize(this)">468 × 60</button>
-      <button class="size-btn" data-w="936" data-h="120" onclick="setSize(this)">936 × 120</button>
+  <header class="hero">
+    <div class="hero-copy">
+      <div class="hero-kicker">RustChan docs utility</div>
+      <h1>Layered Banner Builder</h1>
+      <p>Compose 468×60 and 936×120 banners with stacked image overlays, live resize handles, and the same dark terminal feel as the rest of RustChan.</p>
     </div>
-  </div>
-
-  <!-- CANVAS PREVIEW -->
-  <div class="canvas-section">
-    <div class="canvas-toolbar">
-      <button id="dragBgBtn" onclick="setDragMode('bg')" class="size-btn active">🖼️ Background</button>
-      <button id="dragTextBtn" onclick="setDragMode('text')" class="size-btn">✍️ Text</button>
-    </div>
-
-    <div class="canvas-outer" id="canvasOuter">
-      <canvas id="c"></canvas>
-      <div class="drag-hint" id="dragHint">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
-        drag to reposition
+    <div class="hero-meta">
+      <div class="badge-row">
+        <span class="badge">RustChan palette</span>
+        <span class="badge">Layered export</span>
+        <span class="badge">PNG output</span>
       </div>
-      <div class="canvas-overlay-info" id="overlayInfo"></div>
-      <div style="position:absolute;top:8px;left:10px;font-family:var(--mono);font-size:10px;color:rgba(255,255,255,0.3);pointer-events:none;" id="dimLabel">468 × 60</div>
+      <div class="size-toggle" aria-label="Banner size">
+        <button class="size-btn active" data-w="468" data-h="60" type="button">468 × 60</button>
+        <button class="size-btn" data-w="936" data-h="120" type="button">936 × 120</button>
+      </div>
     </div>
-  </div>
+  </header>
 
-  <!-- BACKGROUND PANEL -->
-  <div class="panel" id="panelBg">
-    <div class="panel-head open" onclick="togglePanel('panelBg')">
-      <span class="panel-title">Background</span>
-      <svg class="panel-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
-    </div>
-    <div class="panel-body open">
-      <div class="upload-zone" id="uploadZone">
-        <input type="file" id="imgUpload" accept="image/*">
-        <div class="upload-icon">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+  <main class="workspace">
+    <aside class="sidebar">
+      <section class="card">
+        <div class="card-head">
+          <span class="card-title">Background</span>
+          <span class="mini-note">site-style fill</span>
         </div>
-        <div class="upload-main">Drop an image or click to browse</div>
-        <div class="upload-sub">PNG, JPG, GIF, WebP — any size • Drag on canvas to reposition</div>
-      </div>
-
-      <div class="img-loaded-row" id="imgLoadedRow">
-        <img id="imgThumb" class="img-thumb" src="" alt="">
-        <span class="img-name" id="imgName"></span>
-        <button class="btn-ghost" onclick="clearImage()">Remove</button>
-      </div>
-
-      <div id="imgControls" style="display:none; margin-top: 14px;">
-        <div class="grid grid-3">
-          <div class="field span2">
-            <label>Image Fit</label>
-            <select id="imgFit">
-              <option value="cover">Cover (crop to fill)</option>
-              <option value="contain">Contain (letterbox)</option>
-              <option value="stretch">Stretch to fill</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Opacity %</label>
-            <input type="number" id="imgOpacity" value="100" min="0" max="100">
-          </div>
-        </div>
-        <div class="note">↖ Use “Drag Background” mode above to reposition</div>
-      </div>
-
-      <div id="colorControls" style="margin-top:14px;">
-        <div class="grid grid-2">
-          <div class="color-field">
-            <label>Color</label>
-            <div class="color-row" onclick="document.getElementById('bgColor').click()">
-              <div class="color-swatch" id="bgSwatch1"></div>
-              <span class="color-hex" id="bgHex1">#1A1A2E</span>
+        <div class="card-body">
+          <div class="grid grid-2">
+            <div class="field">
+              <label>Base Color</label>
+              <div class="tone-row" data-color-target="bgColor1">
+                <div class="tone-swatch" id="bgSwatch1"></div>
+                <span class="tone-value" id="bgHex1">#0A0F0A</span>
+              </div>
+              <input type="color" id="bgColor1" value="#0a0f0a">
             </div>
-            <input type="color" id="bgColor" value="#1a1a2e">
-          </div>
-          <div class="color-field">
-            <label>Gradient end</label>
-            <div class="color-row" onclick="document.getElementById('bgColor2').click()">
-              <div class="color-swatch" id="bgSwatch2"></div>
-              <span class="color-hex" id="bgHex2">#16213E</span>
+            <div class="field">
+              <label>Gradient Color</label>
+              <div class="tone-row" data-color-target="bgColor2">
+                <div class="tone-swatch" id="bgSwatch2"></div>
+                <span class="tone-value" id="bgHex2">#101612</span>
+              </div>
+              <input type="color" id="bgColor2" value="#101612">
             </div>
-            <input type="color" id="bgColor2" value="#16213e">
           </div>
-        </div>
-        <div class="grid" style="margin-top:12px;">
           <div class="field">
             <label>Gradient Direction</label>
             <div class="btn-group" id="gradDirGroup">
-              <button class="btn-tog active" data-val="none">None</button>
-              <button class="btn-tog" data-val="lr">→</button>
-              <button class="btn-tog" data-val="rl">←</button>
-              <button class="btn-tog" data-val="tb">↓</button>
-              <button class="btn-tog" data-val="bt">↑</button>
+              <button class="btn-tog active" data-val="none" type="button">None</button>
+              <button class="btn-tog" data-val="lr" type="button">Left to right</button>
+              <button class="btn-tog" data-val="rl" type="button">Right to left</button>
+              <button class="btn-tog" data-val="tb" type="button">Top to bottom</button>
+              <button class="btn-tog" data-val="bt" type="button">Bottom to top</button>
             </div>
           </div>
+          <p class="panel-note">Keep the background clean and let the stacked image layers do the heavy lifting when you want a more complex composition.</p>
         </div>
-      </div>
-    </div>
-  </div>
+      </section>
 
-  <!-- TEXT PANEL -->
-  <div class="panel" id="panelText">
-    <div class="panel-head open" onclick="togglePanel('panelText')">
-      <span class="panel-title">Text (multi-line supported)</span>
-      <svg class="panel-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
-    </div>
-    <div class="panel-body open">
-      <div class="grid">
-        <div class="field span2">
-          <label>Content</label>
-          <input type="text" id="textInput" placeholder="Your banner text&#10;New line with Enter" value="">
-          <div class="note">Drag in “Text” mode to reposition • Use Enter for new lines</div>
+      <section class="card">
+        <div class="card-head">
+          <span class="card-title">Images</span>
+          <span class="mini-note" id="layerCountLabel">0 layers</span>
         </div>
-      </div>
-      <div class="grid grid-2" style="margin-top:12px;">
-        <div class="color-field">
-          <label>Text Color</label>
-          <div class="color-row" onclick="document.getElementById('textColor').click()">
-            <div class="color-swatch" id="textSwatch"></div>
-            <span class="color-hex" id="textHex">#FFFFFF</span>
-          </div>
-          <input type="color" id="textColor" value="#ffffff">
-        </div>
-        <div class="field">
-          <label>Font Size</label>
-          <div class="range-wrap">
-            <input type="range" id="fontSize" min="8" max="68" value="24">
-            <span class="range-val" id="fontSizeVal">24px</span>
-          </div>
-        </div>
-      </div>
-      <div class="grid grid-2" style="margin-top:12px;">
-        <div class="field">
-          <label>Weight / Style</label>
-          <select id="fontStyle">
-            <option value="normal">Normal</option>
-            <option value="bold" selected>Bold</option>
-            <option value="italic">Italic</option>
-            <option value="bold italic">Bold Italic</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>Font</label>
-          <select id="fontFace">
-            <option value="'Syne', sans-serif" selected>Syne (Modern)</option>
-            <option value="sans-serif">System Sans</option>
-            <option value="'Arial Black', sans-serif">Arial Black</option>
-            <option value="Impact, sans-serif">Impact</option>
-            <option value="'Georgia', serif">Georgia</option>
-            <option value="'Courier New', monospace">Courier New</option>
-          </select>
-        </div>
-      </div>
-      <hr class="divider">
-      <div class="toggle-row" style="margin-bottom:10px;">
-        <span class="toggle-label">Text shadow</span>
-        <div class="toggle-switch" id="shadowToggle" onclick="toggleShadow()"></div>
-      </div>
-      <div id="shadowControls" style="display:none;">
-        <div class="grid grid-2">
-          <div class="color-field">
-            <label>Shadow Color</label>
-            <div class="color-row" onclick="document.getElementById('shadowColor').click()">
-              <div class="color-swatch" id="shadowSwatch"></div>
-              <span class="color-hex" id="shadowHex">#000000</span>
+        <div class="card-body">
+          <label class="upload-zone" id="uploadZone">
+            <input type="file" id="layerUpload" accept="image/*" multiple>
+            <div class="upload-main">Drop images here or click to upload</div>
+            <div class="upload-sub">Add as many layers as you want. Drag on the canvas to move, and use the handles to resize each image box.</div>
+          </label>
+
+          <div class="layer-list" id="layerList"></div>
+
+          <div id="layerPanel" class="panel-block hidden">
+            <div class="panel-block">
+              <div class="field">
+                <label>Layer Name</label>
+                <input type="text" id="layerName" placeholder="Layer name">
+              </div>
+              <div class="grid grid-2">
+                <div class="field">
+                  <label>Fit Mode</label>
+                  <select id="layerFit">
+                    <option value="contain">Contain</option>
+                    <option value="cover">Cover</option>
+                    <option value="stretch">Stretch</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>Opacity</label>
+                  <div class="range-row">
+                    <input type="range" id="layerOpacity" min="0" max="100" value="100">
+                    <span class="range-value" id="layerOpacityVal">100%</span>
+                  </div>
+                </div>
+              </div>
             </div>
-            <input type="color" id="shadowColor" value="#000000">
+
+            <div class="panel-block">
+              <div class="grid grid-2">
+                <div class="field">
+                  <label>X</label>
+                  <input type="number" id="layerX" step="1">
+                </div>
+                <div class="field">
+                  <label>Y</label>
+                  <input type="number" id="layerY" step="1">
+                </div>
+                <div class="field">
+                  <label>Width</label>
+                  <input type="number" id="layerW" step="1" min="8">
+                </div>
+                <div class="field">
+                  <label>Height</label>
+                  <input type="number" id="layerH" step="1" min="8">
+                </div>
+              </div>
+              <div class="tool-row">
+                <button class="btn-soft" id="layerCenterBtn" type="button">Center</button>
+                <button class="btn-soft" id="layerFitCanvasBtn" type="button">Fit canvas</button>
+              </div>
+              <div class="tool-row">
+                <button class="btn-soft" id="layerUpBtn" type="button">Move up</button>
+                <button class="btn-soft" id="layerDownBtn" type="button">Move down</button>
+                <button class="btn-soft" id="layerDuplicateBtn" type="button">Duplicate</button>
+                <button class="btn-soft" id="layerDeleteBtn" type="button">Delete</button>
+              </div>
+              <p class="panel-note">The image box is what you resize in the viewer. Set the fit mode to control whether the image is preserved, cropped, or stretched inside that box.</p>
+            </div>
           </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <span class="card-title">Text</span>
+          <span class="mini-note">drag in text mode</span>
+        </div>
+        <div class="card-body">
+          <div class="field span-2">
+            <label>Message</label>
+            <textarea id="textInput" placeholder="Your banner text&#10;Add another line with Enter"></textarea>
+            <p class="panel-note">Switch the canvas mode to text, then drag the text block where you want it. Multi-line copy is supported here.</p>
+          </div>
+
+          <div class="grid grid-2">
+            <div class="field">
+              <label>Text Color</label>
+              <div class="tone-row" data-color-target="textColor">
+                <div class="tone-swatch" id="textSwatch"></div>
+                <span class="tone-value" id="textHex">#C7E7C7</span>
+              </div>
+              <input type="color" id="textColor" value="#c7e7c7">
+            </div>
+            <div class="field">
+              <label>Font Size</label>
+              <div class="range-row">
+                <input type="range" id="fontSize" min="8" max="68" value="24">
+                <span class="range-value" id="fontSizeVal">24px</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid grid-2">
+            <div class="field">
+              <label>Font Style</label>
+              <select id="fontStyle">
+                <option value="normal">Normal</option>
+                <option value="bold" selected>Bold</option>
+                <option value="italic">Italic</option>
+                <option value="bold italic">Bold Italic</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Font</label>
+              <select id="fontFace">
+                <option value="'Courier New', Consolas, 'Lucida Console', monospace" selected>RustChan Mono</option>
+                <option value="Consolas, 'Courier New', monospace">Consolas</option>
+                <option value="'Lucida Console', 'Courier New', monospace">Lucida Console</option>
+                <option value="'Arial Black', sans-serif">Arial Black</option>
+                <option value="Impact, sans-serif">Impact</option>
+                <option value="'Georgia', serif">Georgia</option>
+              </select>
+            </div>
+          </div>
+
           <div class="field">
-            <label>Shadow Blur</label>
-            <div class="range-wrap">
-              <input type="range" id="shadowBlur" min="0" max="30" value="6">
-              <span class="range-val" id="shadowBlurVal">6px</span>
+            <label>Text Align</label>
+            <div class="btn-group" id="textAlignGroup">
+              <button class="btn-tog" data-val="left" type="button">Left</button>
+              <button class="btn-tog active" data-val="center" type="button">Center</button>
+              <button class="btn-tog" data-val="right" type="button">Right</button>
+            </div>
+          </div>
+
+          <hr class="soft-divider">
+
+          <div class="toggle-row">
+            <span class="toggle-label">Text shadow</span>
+            <div class="toggle-switch" id="shadowToggle" aria-label="Toggle text shadow"></div>
+          </div>
+
+          <div id="shadowControls" class="panel-block hidden">
+            <div class="grid grid-2">
+              <div class="field">
+                <label>Shadow Color</label>
+                <div class="tone-row" data-color-target="shadowColor">
+                  <div class="tone-swatch" id="shadowSwatch"></div>
+                  <span class="tone-value" id="shadowHex">#000000</span>
+                </div>
+                <input type="color" id="shadowColor" value="#000000">
+              </div>
+              <div class="field">
+                <label>Shadow Blur</label>
+                <div class="range-row">
+                  <input type="range" id="shadowBlur" min="0" max="30" value="6">
+                  <span class="range-value" id="shadowBlurVal">6px</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <p class="panel-note">Text stays above the image layers, which matches the way RustChan banners usually read on the live site.</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <span class="card-title">Export</span>
+          <span class="mini-note">preview and download</span>
+        </div>
+        <div class="card-body">
+          <button id="exportBtn" class="btn-primary" type="button">Preview and export PNG</button>
+          <div class="preview-wrap" id="previewWrap">
+            <div class="preview-head">
+              <span id="previewDims">preview · 468 × 60</span>
+              <span class="preview-tag">READY</span>
+            </div>
+            <div class="preview-body">
+              <img id="previewImg" alt="banner preview">
+            </div>
+            <div class="preview-actions">
+              <button id="downloadBtn" class="btn-primary" type="button" style="flex:1;">Download PNG</button>
+              <button id="closePreviewBtn" class="btn-ghost" type="button" style="flex:1;">Close preview</button>
             </div>
           </div>
         </div>
-      </div>
-    </div>
-  </div>
+      </section>
+    </aside>
 
-  <!-- EXPORT -->
-  <div class="export-section">
-    <button id="exportBtn" onclick="exportPNG()">
-      Preview &amp; Export PNG ↓
-    </button>
-    <div class="preview-wrap" id="previewWrap">
-      <div class="preview-head">
-        <span id="previewDims">preview · 468 × 60</span>
-        <span class="preview-tag">READY</span>
-      </div>
-      <div class="preview-body">
-        <img id="previewImg" alt="banner preview">
-      </div>
-      <div style="padding:12px 14px;display:flex;gap:8px;">
-        <button onclick="downloadBanner()" class="download-btn" style="flex:1;background:#7adf7a;color:#0e0e10;">⬇️ Download PNG</button>
-        <button onclick="hidePreview()" class="btn-ghost" style="flex:1;">Close Preview</button>
-      </div>
-    </div>
-  </div>
+    <section class="stage">
+      <section class="card canvas-card">
+        <div class="card-head">
+          <span class="card-title">Canvas</span>
+          <div class="canvas-head-extra">
+            <span class="badge" id="canvasSizeBadge">468 × 60</span>
+            <span class="badge" id="canvasLayerBadge">0 image layers</span>
+            <span class="badge" id="canvasSelectionBadge">No layer selected</span>
+          </div>
+        </div>
+        <div class="canvas-shell">
+          <div class="canvas-status">
+            <div class="canvas-hud">
+              <div class="hud-group">
+                <span class="pill" id="hudSize">468 × 60</span>
+                <span class="pill" id="hudLayers">0 image layers</span>
+              </div>
+            </div>
+            <div class="canvas-tip" id="canvasTip">
+              Image mode: click a layer to select it, drag to move, and pull a corner handle to resize the image box. Text mode lets you move the banner copy around the canvas.
+            </div>
+          </div>
+          <div class="tool-row">
+            <div class="btn-group" id="modeGroup" aria-label="Canvas mode">
+              <button class="btn-tog active" data-mode="images" type="button">Image layers</button>
+              <button class="btn-tog" data-mode="text" type="button">Text drag</button>
+            </div>
+            <span class="panel-note" style="margin:0;">Click an image to select it, drag the handles to resize, or switch to text mode to move the copy block.</span>
+          </div>
+          <div class="canvas-frame" id="canvasFrame">
+            <canvas id="bannerCanvas"></canvas>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
 </div>
 
 <script>
-let W = 468, H = 60;
-const maxDisplay = 640;
-const canvas = document.getElementById('c');
+const canvas = document.getElementById('bannerCanvas');
 const ctx = canvas.getContext('2d', { alpha: true });
+const maxDisplayWidth = 1200;
 
-let bgImage = null;
-let imgOffsetX = 0, imgOffsetY = 0;
+let W = 468;
+let H = 60;
+let layerSeq = 1;
 let gradDir = 'none';
-let hAlign = 'center', vAlign = 'middle';
-let shadowOn = false;
-let dragMode = 'bg';
-let textX = 234;   // initial center for 468×60
-let textY = 30;    // initial middle for 468×60
-let isDragging = false;
-let isDraggingText = false;
-let dragStartX = 0, dragStartY = 0;
-let dragBaseX = 0, dragBaseY = 0;
-let dragBaseTextX = 0, dragBaseTextY = 0;
+let interactionMode = 'images';
+let selectedLayerId = null;
+let layers = [];
+let dragState = null;
 
-// Canvas setup
+const textState = {
+  value: '',
+  x: W / 2,
+  y: H / 2,
+  color: '#c7e7c7',
+  size: 24,
+  style: 'bold',
+  face: "'Courier New', Consolas, 'Lucida Console', monospace",
+  align: 'center',
+  shadow: false,
+  shadowColor: '#000000',
+  shadowBlur: 6
+};
+
+const bgState = {
+  color1: '#0a0f0a',
+  color2: '#101612'
+};
+
+const dom = {
+  canvasFrame: document.getElementById('canvasFrame'),
+  canvasSizeBadge: document.getElementById('canvasSizeBadge'),
+  canvasLayerBadge: document.getElementById('canvasLayerBadge'),
+  canvasSelectionBadge: document.getElementById('canvasSelectionBadge'),
+  hudSize: document.getElementById('hudSize'),
+  hudLayers: document.getElementById('hudLayers'),
+  uploadZone: document.getElementById('uploadZone'),
+  layerUpload: document.getElementById('layerUpload'),
+  layerList: document.getElementById('layerList'),
+  layerPanel: document.getElementById('layerPanel'),
+  layerName: document.getElementById('layerName'),
+  layerFit: document.getElementById('layerFit'),
+  layerOpacity: document.getElementById('layerOpacity'),
+  layerOpacityVal: document.getElementById('layerOpacityVal'),
+  layerX: document.getElementById('layerX'),
+  layerY: document.getElementById('layerY'),
+  layerW: document.getElementById('layerW'),
+  layerH: document.getElementById('layerH'),
+  layerCenterBtn: document.getElementById('layerCenterBtn'),
+  layerFitCanvasBtn: document.getElementById('layerFitCanvasBtn'),
+  layerUpBtn: document.getElementById('layerUpBtn'),
+  layerDownBtn: document.getElementById('layerDownBtn'),
+  layerDuplicateBtn: document.getElementById('layerDuplicateBtn'),
+  layerDeleteBtn: document.getElementById('layerDeleteBtn'),
+  textInput: document.getElementById('textInput'),
+  textColor: document.getElementById('textColor'),
+  fontSize: document.getElementById('fontSize'),
+  fontSizeVal: document.getElementById('fontSizeVal'),
+  fontStyle: document.getElementById('fontStyle'),
+  fontFace: document.getElementById('fontFace'),
+  textAlignGroup: document.getElementById('textAlignGroup'),
+  shadowToggle: document.getElementById('shadowToggle'),
+  shadowControls: document.getElementById('shadowControls'),
+  shadowColor: document.getElementById('shadowColor'),
+  shadowBlur: document.getElementById('shadowBlur'),
+  shadowBlurVal: document.getElementById('shadowBlurVal'),
+  exportBtn: document.getElementById('exportBtn'),
+  previewWrap: document.getElementById('previewWrap'),
+  previewImg: document.getElementById('previewImg'),
+  previewDims: document.getElementById('previewDims'),
+  downloadBtn: document.getElementById('downloadBtn'),
+  closePreviewBtn: document.getElementById('closePreviewBtn'),
+  gradDirGroup: document.getElementById('gradDirGroup'),
+  modeGroup: document.getElementById('modeGroup'),
+  bgColor1: document.getElementById('bgColor1'),
+  bgColor2: document.getElementById('bgColor2'),
+  bgSwatch1: document.getElementById('bgSwatch1'),
+  bgSwatch2: document.getElementById('bgSwatch2'),
+  bgHex1: document.getElementById('bgHex1'),
+  bgHex2: document.getElementById('bgHex2'),
+  textSwatch: document.getElementById('textSwatch'),
+  textHex: document.getElementById('textHex'),
+  shadowSwatch: document.getElementById('shadowSwatch'),
+  shadowHex: document.getElementById('shadowHex'),
+  layerCountLabel: document.getElementById('layerCountLabel'),
+  canvasTip: document.getElementById('canvasTip')
+};
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function makeId() {
+  return `layer-${layerSeq++}`;
+}
+
+function formatName(name) {
+  const base = String(name || 'Layer').trim();
+  return base || 'Layer';
+}
+
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error(`Unable to read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageFromDataURL(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Image decode failed'));
+    img.src = src;
+  });
+}
+
+function initialLayerBox(img) {
+  const maxW = W * 0.74;
+  const maxH = H * 0.74;
+  const aspect = img.width / img.height;
+  let w = maxW;
+  let h = w / aspect;
+  if (h > maxH) {
+    h = maxH;
+    w = h * aspect;
+  }
+  return {
+    x: (W - w) / 2,
+    y: (H - h) / 2,
+    w,
+    h
+  };
+}
+
+function createLayer(name, src, image) {
+  const box = initialLayerBox(image);
+  return {
+    id: makeId(),
+    name: formatName(name),
+    src,
+    image,
+    x: box.x,
+    y: box.y,
+    w: box.w,
+    h: box.h,
+    opacity: 100,
+    fit: 'contain',
+    visible: true
+  };
+}
+
+function getSelectedLayer() {
+  return layers.find(layer => layer.id === selectedLayerId) || null;
+}
+
+function getCanvasScale() {
+  return Math.min(2, maxDisplayWidth / Math.max(W, 100));
+}
+
 function applyCanvasSize() {
   canvas.width = W;
   canvas.height = H;
-  const scale = Math.min(1, maxDisplay / Math.max(W, 100));
-  canvas.style.width = Math.round(W * scale) + 'px';
-  canvas.style.height = Math.round(H * scale) + 'px';
-  document.getElementById('dimLabel').textContent = `${W} × ${H}`;
+  const frameWidth = Math.max(0, dom.canvasFrame.clientWidth - 32);
+  const scale = Math.min(getCanvasScale(), frameWidth > 0 ? frameWidth / W : getCanvasScale());
+  canvas.style.width = `${Math.round(W * scale)}px`;
+  canvas.style.height = `${Math.round(H * scale)}px`;
+  dom.canvasSizeBadge.textContent = `${W} × ${H}`;
+  dom.hudSize.textContent = `${W} × ${H}`;
   draw();
 }
-applyCanvasSize();
 
-// ── SIZE SWITCH (only the two sizes you requested) ──
-function setSize(btn) {
-  document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
+function updateLayerCount() {
+  const count = layers.length;
+  const label = `${count} image layer${count === 1 ? '' : 's'}`;
+  dom.layerCountLabel.textContent = label;
+  dom.canvasLayerBadge.textContent = label;
+  dom.hudLayers.textContent = label;
+}
 
+function updateSelectionBadge() {
+  const layer = getSelectedLayer();
+  dom.canvasSelectionBadge.textContent = layer ? layer.name : 'No layer selected';
+}
+
+function setInteractionMode(mode) {
+  interactionMode = mode;
+  dom.modeGroup.querySelectorAll('.btn-tog').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+  if (mode === 'text') {
+    dom.canvasTip.textContent = 'Text mode: drag the banner copy block on the canvas. Switch back to image mode to select, move, and resize the image layers.';
+  } else {
+    dom.canvasTip.textContent = 'Image mode: click a layer to select it, drag to move, and pull a corner handle to resize the image box. Text mode lets you move the banner copy around the canvas.';
+  }
+  draw();
+}
+
+function setSize(button) {
+  const newW = Number(button.dataset.w);
+  const newH = Number(button.dataset.h);
   const oldW = W;
   const oldH = H;
+  const ratioW = newW / oldW;
+  const ratioH = newH / oldH;
 
-  W = parseInt(btn.dataset.w);
-  H = parseInt(btn.dataset.h);
+  W = newW;
+  H = newH;
 
-  // Scale everything proportionally so nothing jumps when switching between your two sizes
-  const ratioW = W / oldW;
-  const ratioH = H / oldH;
+  layers.forEach(layer => {
+    layer.x *= ratioW;
+    layer.y *= ratioH;
+    layer.w *= ratioW;
+    layer.h *= ratioH;
+  });
 
-  imgOffsetX *= ratioW;
-  imgOffsetY *= ratioH;
-  textX *= ratioW;
-  textY *= ratioH;
+  textState.x *= ratioW;
+  textState.y *= ratioH;
+  textState.size = Math.max(8, Math.round(textState.size * ratioH));
+  textState.shadowBlur = Math.max(0, Math.round(textState.shadowBlur * ratioH));
 
   applyCanvasSize();
+  renderLayerList();
+  syncLayerPanel();
 }
 
-// Scale getter
-function getScale() {
-  return Math.min(1, maxDisplay / Math.max(W, 100));
+function setSelectedLayer(id) {
+  selectedLayerId = id;
+  renderLayerList();
+  syncLayerPanel();
+  updateSelectionBadge();
+  draw();
 }
 
-// ── PANEL TOGGLE ──
-function togglePanel(id) {
-  const panel = document.getElementById(id);
-  const head = panel.querySelector('.panel-head');
-  const body = panel.querySelector('.panel-body');
-  head.classList.toggle('open');
-  body.classList.toggle('open');
+function moveLayerToIndex(layerId, newIndex) {
+  const index = layers.findIndex(layer => layer.id === layerId);
+  if (index < 0) return;
+  const target = clamp(newIndex, 0, layers.length - 1);
+  if (target === index) return;
+  const [layer] = layers.splice(index, 1);
+  layers.splice(target, 0, layer);
+  renderLayerList();
+  draw();
 }
 
-// ── COLOR PICKERS ──
-function bindColor(inputId, swatchId, hexId) {
-  const inp = document.getElementById(inputId);
-  const swatch = document.getElementById(swatchId);
-  const hex = document.getElementById(hexId);
-  const update = () => {
-    swatch.style.background = inp.value;
-    hex.textContent = inp.value.toUpperCase();
-    draw();
+function duplicateSelectedLayer() {
+  const layer = getSelectedLayer();
+  if (!layer) return;
+  const clone = {
+    ...layer,
+    id: makeId(),
+    name: `${layer.name} copy`,
+    x: layer.x + 12,
+    y: layer.y + 12
   };
-  inp.addEventListener('input', update);
-  update();
-}
-bindColor('bgColor', 'bgSwatch1', 'bgHex1');
-bindColor('bgColor2', 'bgSwatch2', 'bgHex2');
-bindColor('textColor', 'textSwatch', 'textHex');
-bindColor('shadowColor', 'shadowSwatch', 'shadowHex');
-
-// ── GRADIENT & ALIGN BUTTONS ──
-document.getElementById('gradDirGroup').addEventListener('click', e => {
-  const btn = e.target.closest('.btn-tog');
-  if (!btn) return;
-  document.querySelectorAll('#gradDirGroup .btn-tog').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  gradDir = btn.dataset.val;
-  draw();
-});
-
-// ── RANGES ──
-document.getElementById('fontSize').addEventListener('input', function() {
-  document.getElementById('fontSizeVal').textContent = this.value + 'px';
-  draw();
-});
-document.getElementById('shadowBlur').addEventListener('input', function() {
-  document.getElementById('shadowBlurVal').textContent = this.value + 'px';
-  draw();
-});
-
-// ── SHADOW TOGGLE ──
-function toggleShadow() {
-  shadowOn = !shadowOn;
-  document.getElementById('shadowToggle').classList.toggle('on', shadowOn);
-  document.getElementById('shadowControls').style.display = shadowOn ? 'block' : 'none';
-  draw();
+  const index = layers.findIndex(item => item.id === layer.id);
+  layers.splice(index + 1, 0, clone);
+  setSelectedLayer(clone.id);
 }
 
-// ── INPUT LISTENERS ──
-document.getElementById('textInput').addEventListener('input', draw);
-document.getElementById('fontStyle').addEventListener('change', draw);
-document.getElementById('fontFace').addEventListener('change', draw);
-document.getElementById('imgFit').addEventListener('change', draw);
-document.getElementById('imgOpacity').addEventListener('input', draw);
-
-// ── DRAG MODE (Background OR Text) ──
-function setDragMode(mode) {
-  dragMode = mode;
-  document.getElementById('dragBgBtn').classList.toggle('active', mode === 'bg');
-  document.getElementById('dragTextBtn').classList.toggle('active', mode === 'text');
-  document.getElementById('dragHint').classList.add('visible');
-}
-
-function updateDragModeUI() {
-  const bgBtn = document.getElementById('dragBgBtn');
-  if (!bgImage) {
-    bgBtn.disabled = true;
-    if (dragMode === 'bg') setDragMode('text');
-  } else {
-    bgBtn.disabled = false;
+function deleteLayer(layerId) {
+  const index = layers.findIndex(layer => layer.id === layerId);
+  if (index < 0) return;
+  layers.splice(index, 1);
+  if (selectedLayerId === layerId) {
+    const next = layers[Math.min(index, layers.length - 1)] || null;
+    selectedLayerId = next ? next.id : null;
   }
+  renderLayerList();
+  syncLayerPanel();
+  updateSelectionBadge();
+  draw();
 }
 
-// ── IMAGE UPLOAD ──
-const uploadZone = document.getElementById('uploadZone');
-uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
-uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
-uploadZone.addEventListener('drop', e => {
-  e.preventDefault();
-  uploadZone.classList.remove('drag-over');
-  const file = e.dataTransfer.files[0];
-  if (file && file.type.startsWith('image/')) loadImageFile(file);
-});
-document.getElementById('imgUpload').addEventListener('change', function() {
-  if (this.files[0]) loadImageFile(this.files[0]);
-});
+function toggleLayerVisible(layerId) {
+  const layer = layers.find(item => item.id === layerId);
+  if (!layer) return;
+  layer.visible = !layer.visible;
+  renderLayerList();
+  draw();
+}
 
-function loadImageFile(file) {
-  const reader = new FileReader();
-  reader.onload = ev => {
-    const img = new Image();
-    img.onload = () => {
-      bgImage = img;
-      imgOffsetX = 0;
-      imgOffsetY = 0;
-      document.getElementById('imgName').textContent = file.name.length > 22 ? file.name.substring(0,19)+'…' : file.name;
-      document.getElementById('imgThumb').src = ev.target.result;
-      document.getElementById('uploadZone').style.display = 'none';
-      document.getElementById('imgLoadedRow').classList.add('visible');
-      document.getElementById('imgControls').style.display = 'block';
-      document.getElementById('colorControls').style.display = 'none';
-      canvas.classList.add('draggable');
-      updateDragModeUI();
-      draw();
+function centerLayer(layer) {
+  layer.x = (W - layer.w) / 2;
+  layer.y = (H - layer.h) / 2;
+  clampLayerToCanvas(layer);
+}
+
+function fitLayerToCanvas(layer) {
+  layer.x = 0;
+  layer.y = 0;
+  layer.w = W;
+  layer.h = H;
+  layer.fit = 'cover';
+}
+
+function clampLayerToCanvas(layer) {
+  const marginX = Math.min(24, Math.max(8, layer.w * 0.25));
+  const marginY = Math.min(12, Math.max(8, layer.h * 0.25));
+  layer.x = clamp(layer.x, -layer.w + marginX, W - marginX);
+  layer.y = clamp(layer.y, -layer.h + marginY, H - marginY);
+}
+
+function clampTextPosition() {
+  textState.x = clamp(textState.x, 0, W);
+  textState.y = clamp(textState.y, 0, H);
+}
+
+function syncLayerPanel() {
+  const layer = getSelectedLayer();
+  dom.layerPanel.classList.toggle('hidden', !layer);
+  if (!layer) return;
+  dom.layerName.value = layer.name;
+  dom.layerFit.value = layer.fit;
+  dom.layerOpacity.value = layer.opacity;
+  dom.layerOpacityVal.textContent = `${layer.opacity}%`;
+  dom.layerX.value = Math.round(layer.x);
+  dom.layerY.value = Math.round(layer.y);
+  dom.layerW.value = Math.max(1, Math.round(layer.w));
+  dom.layerH.value = Math.max(1, Math.round(layer.h));
+}
+
+function updateLayerPanelFromState() {
+  const layer = getSelectedLayer();
+  if (!layer) return;
+  dom.layerName.value = layer.name;
+  dom.layerFit.value = layer.fit;
+  dom.layerOpacity.value = layer.opacity;
+  dom.layerOpacityVal.textContent = `${layer.opacity}%`;
+  dom.layerX.value = Math.round(layer.x);
+  dom.layerY.value = Math.round(layer.y);
+  dom.layerW.value = Math.round(layer.w);
+  dom.layerH.value = Math.round(layer.h);
+}
+
+function renderLayerList() {
+  dom.layerList.innerHTML = '';
+  if (!layers.length) {
+    const empty = document.createElement('div');
+    empty.className = 'layer-empty';
+    empty.textContent = 'No image layers yet. Upload one or more images to build a stack.';
+    dom.layerList.appendChild(empty);
+    updateLayerCount();
+    updateSelectionBadge();
+    return;
+  }
+
+  layers.forEach((layer, index) => {
+    const row = document.createElement('div');
+    row.className = 'layer-row';
+    if (layer.id === selectedLayerId) row.classList.add('selected');
+    if (!layer.visible) row.classList.add('hidden');
+
+    const thumb = document.createElement('img');
+    thumb.className = 'layer-thumb';
+    thumb.src = layer.src;
+    thumb.alt = layer.name;
+
+    const meta = document.createElement('div');
+    meta.className = 'layer-meta';
+
+    const name = document.createElement('div');
+    name.className = 'layer-name';
+    name.textContent = `${index + 1}. ${layer.name}`;
+
+    const sub = document.createElement('div');
+    sub.className = 'layer-sub';
+    sub.textContent = `${layer.fit} · ${layer.opacity}% · ${Math.round(layer.w)} × ${Math.round(layer.h)}`;
+
+    meta.appendChild(name);
+    meta.appendChild(sub);
+
+    const actions = document.createElement('div');
+    actions.className = 'layer-actions';
+
+    const actionDefs = [
+      ['toggle', layer.visible ? 'Hide' : 'Show'],
+      ['up', 'Up'],
+      ['down', 'Dn'],
+      ['copy', 'Copy'],
+      ['delete', 'Del']
+    ];
+
+    actionDefs.forEach(([action, label]) => {
+      const btn = document.createElement('button');
+      btn.className = 'icon-btn';
+      btn.type = 'button';
+      btn.dataset.action = action;
+      btn.dataset.layerId = layer.id;
+      btn.textContent = label;
+      actions.appendChild(btn);
+    });
+
+    row.appendChild(thumb);
+    row.appendChild(meta);
+    row.appendChild(actions);
+
+    row.addEventListener('click', () => setSelectedLayer(layer.id));
+    actions.addEventListener('click', event => event.stopPropagation());
+    row.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', event => {
+        event.stopPropagation();
+        const action = btn.dataset.action;
+        if (action === 'toggle') toggleLayerVisible(layer.id);
+        if (action === 'up') moveLayerToIndex(layer.id, index + 1);
+        if (action === 'down') moveLayerToIndex(layer.id, index - 1);
+        if (action === 'copy') duplicateLayerById(layer.id);
+        if (action === 'delete') deleteLayer(layer.id);
+      });
+    });
+
+    dom.layerList.appendChild(row);
+  });
+
+  updateLayerCount();
+  updateSelectionBadge();
+}
+
+function duplicateLayerById(layerId) {
+  const layer = layers.find(item => item.id === layerId);
+  if (!layer) return;
+  const clone = {
+    ...layer,
+    id: makeId(),
+    name: `${layer.name} copy`,
+    x: layer.x + 12,
+    y: layer.y + 12
+  };
+  const index = layers.findIndex(item => item.id === layerId);
+  layers.splice(index + 1, 0, clone);
+  setSelectedLayer(clone.id);
+}
+
+async function addImageFiles(fileList) {
+  const files = Array.from(fileList || []).filter(file => file.type && file.type.startsWith('image/'));
+  if (!files.length) return;
+
+  dom.canvasTip.textContent = files.length === 1
+    ? 'Loading 1 image layer...'
+    : `Loading ${files.length} image layers...`;
+
+  const results = await Promise.allSettled(files.map(async file => {
+    const src = await readFileAsDataURL(file);
+    const image = await loadImageFromDataURL(src);
+    return createLayer(file.name, src, image);
+  }));
+
+  const added = [];
+  const failed = [];
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled') {
+      added.push(result.value);
+    } else {
+      failed.push(files[index].name);
+    }
+  });
+
+  if (added.length) {
+    layers.push(...added);
+    setSelectedLayer(added[added.length - 1].id);
+    dom.canvasTip.textContent = added.length === 1
+      ? '1 image layer added. Use image mode to move and resize it on the canvas.'
+      : `${added.length} image layers added. Use image mode to move and resize them on the canvas.`;
+  }
+
+  if (failed.length) {
+    dom.canvasTip.textContent += ` ${failed.length} file${failed.length === 1 ? '' : 's'} could not be loaded.`;
+  }
+
+  renderLayerList();
+  updateLayerCount();
+  draw();
+}
+
+function getPointerPos(event) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * (W / rect.width),
+    y: (event.clientY - rect.top) * (H / rect.height)
+  };
+}
+
+function pointInRect(point, rect) {
+  return point.x >= rect.x && point.x <= rect.x + rect.w && point.y >= rect.y && point.y <= rect.y + rect.h;
+}
+
+function getHandleRects(layer) {
+  const size = Math.max(7, Math.min(10, Math.round(Math.min(layer.w, layer.h) * 0.12)));
+  const half = size / 2;
+  return {
+    nw: { x: layer.x - half, y: layer.y - half, w: size, h: size },
+    ne: { x: layer.x + layer.w - half, y: layer.y - half, w: size, h: size },
+    se: { x: layer.x + layer.w - half, y: layer.y + layer.h - half, w: size, h: size },
+    sw: { x: layer.x - half, y: layer.y + layer.h - half, w: size, h: size }
+  };
+}
+
+function hitTestLayer(point) {
+  for (let i = layers.length - 1; i >= 0; i -= 1) {
+    const layer = layers[i];
+    if (!layer.visible) continue;
+    if (point.x >= layer.x && point.x <= layer.x + layer.w && point.y >= layer.y && point.y <= layer.y + layer.h) {
+      return layer;
+    }
+  }
+  return null;
+}
+
+function hitTestHandle(layer, point) {
+  const handles = getHandleRects(layer);
+  for (const [name, rect] of Object.entries(handles)) {
+    if (pointInRect(point, rect)) return name;
+  }
+  return null;
+}
+
+function updateCanvasCursor(point) {
+  if (dragState) return;
+  if (interactionMode === 'text') {
+    canvas.style.cursor = 'move';
+    return;
+  }
+  const layer = hitTestLayer(point);
+  if (!layer) {
+    canvas.style.cursor = 'default';
+    return;
+  }
+  if (selectedLayerId === layer.id) {
+    const handle = hitTestHandle(layer, point);
+    if (handle) {
+      canvas.style.cursor = handle === 'nw' || handle === 'se' ? 'nwse-resize' : 'nesw-resize';
+      return;
+    }
+  }
+  canvas.style.cursor = 'move';
+}
+
+function startDrag(event) {
+  const point = getPointerPos(event);
+
+  if (interactionMode === 'text') {
+    dragState = {
+      type: 'text',
+      start: point,
+      base: { x: textState.x, y: textState.y }
     };
-    img.src = ev.target.result;
+    canvas.classList.add('dragging');
+    canvas.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    return;
+  }
+
+  const layer = hitTestLayer(point);
+  if (!layer) {
+    setSelectedLayer(null);
+    return;
+  }
+
+  setSelectedLayer(layer.id);
+  const handle = hitTestHandle(layer, point);
+  dragState = {
+    type: handle ? 'resize' : 'move',
+    handle,
+    layerId: layer.id,
+    start: point,
+    base: {
+      x: layer.x,
+      y: layer.y,
+      w: layer.w,
+      h: layer.h
+    }
   };
-  reader.readAsDataURL(file);
+  canvas.classList.add('dragging');
+  canvas.classList.add(handle ? 'resizing' : 'moving');
+  canvas.setPointerCapture(event.pointerId);
+  event.preventDefault();
 }
 
-function clearImage() {
-  bgImage = null;
-  imgOffsetX = 0; imgOffsetY = 0;
-  document.getElementById('imgUpload').value = '';
-  document.getElementById('uploadZone').style.display = 'block';
-  document.getElementById('imgLoadedRow').classList.remove('visible');
-  document.getElementById('imgControls').style.display = 'none';
-  document.getElementById('colorControls').style.display = 'block';
-  canvas.classList.remove('draggable');
-  updateDragModeUI();
+function updateDrag(event) {
+  if (!dragState) {
+    const point = getPointerPos(event);
+    updateCanvasCursor(point);
+    return;
+  }
+
+  const point = getPointerPos(event);
+  const dx = point.x - dragState.start.x;
+  const dy = point.y - dragState.start.y;
+
+  if (dragState.type === 'text') {
+    textState.x = dragState.base.x + dx;
+    textState.y = dragState.base.y + dy;
+    clampTextPosition();
+    draw();
+    return;
+  }
+
+  const layer = layers.find(item => item.id === dragState.layerId);
+  if (!layer) return;
+
+  if (dragState.type === 'move') {
+    layer.x = dragState.base.x + dx;
+    layer.y = dragState.base.y + dy;
+    clampLayerToCanvas(layer);
+  } else if (dragState.type === 'resize') {
+    const minW = 8;
+    const minH = 8;
+    let x = dragState.base.x;
+    let y = dragState.base.y;
+    let w = dragState.base.w;
+    let h = dragState.base.h;
+
+    if (dragState.handle.includes('w')) {
+      x = dragState.base.x + dx;
+      w = dragState.base.w - dx;
+    }
+    if (dragState.handle.includes('e')) {
+      w = dragState.base.w + dx;
+    }
+    if (dragState.handle.includes('n')) {
+      y = dragState.base.y + dy;
+      h = dragState.base.h - dy;
+    }
+    if (dragState.handle.includes('s')) {
+      h = dragState.base.h + dy;
+    }
+
+    if (w < minW) {
+      if (dragState.handle.includes('w')) x -= (minW - w);
+      w = minW;
+    }
+    if (h < minH) {
+      if (dragState.handle.includes('n')) y -= (minH - h);
+      h = minH;
+    }
+
+    layer.x = x;
+    layer.y = y;
+    layer.w = w;
+    layer.h = h;
+    clampLayerToCanvas(layer);
+  }
+
+  updateLayerPanelFromState();
   draw();
 }
 
-// ── CLAMP BACKGROUND IN COVER MODE (prevents blank sections) ──
-// The image is now forced to always reach every border of the banner box.
-// Dragging can never create empty/transparent areas — the cover option
-// fully covers the canvas at all times while still letting you pan the crop window.
-function clampImageOffset() {
-  if (!bgImage || document.getElementById('imgFit').value !== 'cover') return;
-  const ratio = Math.max(W / bgImage.width, H / bgImage.height);
-  const dw = bgImage.width * ratio;
-  const dh = bgImage.height * ratio;
-  const centerX = (W - dw) / 2;
-  const centerY = (H - dh) / 2;
-  const minOffsetX = centerX;
-  const maxOffsetX = -centerX;
-  const minOffsetY = centerY;
-  const maxOffsetY = -centerY;
-  imgOffsetX = Math.max(minOffsetX, Math.min(maxOffsetX, imgOffsetX));
-  imgOffsetY = Math.max(minOffsetY, Math.min(maxOffsetY, imgOffsetY));
+function endDrag(event) {
+  if (!dragState) return;
+  try {
+    canvas.releasePointerCapture(event.pointerId);
+  } catch (error) {
+    // Pointer capture is best-effort here.
+  }
+  dragState = null;
+  canvas.classList.remove('dragging', 'moving', 'resizing');
+  renderLayerList();
+  syncLayerPanel();
+  updateSelectionBadge();
+  draw();
 }
 
-// ── DRAG LOGIC (Background + Text) ──
-canvas.addEventListener('mousedown', e => {
-  if (dragMode === 'bg' && bgImage) {
-    isDragging = true;
-    dragStartX = e.clientX;
-    dragStartY = e.clientY;
-    dragBaseX = imgOffsetX;
-    dragBaseY = imgOffsetY;
-    canvas.classList.add('dragging');
-    canvas.classList.remove('draggable');
-    e.preventDefault();
-  } else if (dragMode === 'text') {
-    isDraggingText = true;
-    dragStartX = e.clientX;
-    dragStartY = e.clientY;
-    dragBaseTextX = textX;
-    dragBaseTextY = textY;
-    canvas.classList.add('dragging');
-    e.preventDefault();
+function measureTextBlock() {
+  const raw = textState.value.trim();
+  if (!raw) return null;
+  const lines = raw.split('\n');
+  ctx.save();
+  ctx.font = `${textState.style} ${textState.size}px ${textState.face}`;
+  const lineHeight = Math.round(textState.size * 1.22);
+  const widths = lines.map(line => ctx.measureText(line || ' ').width);
+  const maxWidth = Math.max(1, ...widths);
+  ctx.restore();
+  let x = textState.x;
+  if (textState.align === 'left') x = textState.x;
+  else if (textState.align === 'right') x = textState.x - maxWidth;
+  else x = textState.x - maxWidth / 2;
+  return {
+    x: x - 6,
+    y: textState.y - ((lines.length - 1) * lineHeight) / 2 - 6,
+    w: maxWidth + 12,
+    h: lines.length * lineHeight + 12
+  };
+}
+
+function drawLayer(layer) {
+  if (!layer.visible) return;
+  ctx.save();
+  ctx.globalAlpha = layer.opacity / 100;
+
+  if (layer.fit === 'stretch') {
+    ctx.drawImage(layer.image, layer.x, layer.y, layer.w, layer.h);
+  } else {
+    const imgRatio = layer.image.width / layer.image.height;
+    const boxRatio = layer.w / layer.h;
+    let dw = layer.w;
+    let dh = layer.h;
+
+    if (layer.fit === 'contain') {
+      if (imgRatio > boxRatio) {
+        dh = layer.w / imgRatio;
+      } else {
+        dw = layer.h * imgRatio;
+      }
+    } else if (layer.fit === 'cover') {
+      if (imgRatio > boxRatio) {
+        dh = layer.w / imgRatio;
+      } else {
+        dw = layer.h * imgRatio;
+      }
+      const scale = Math.max(layer.w / layer.image.width, layer.h / layer.image.height);
+      dw = layer.image.width * scale;
+      dh = layer.image.height * scale;
+    }
+
+    const dx = layer.x + (layer.w - dw) / 2;
+    const dy = layer.y + (layer.h - dh) / 2;
+    ctx.drawImage(layer.image, dx, dy, dw, dh);
   }
-});
 
-window.addEventListener('mousemove', e => {
-  const info = document.getElementById('overlayInfo');
-  if (isDragging && bgImage) {
-    const dx = (e.clientX - dragStartX) / getScale();
-    const dy = (e.clientY - dragStartY) / getScale();
-    imgOffsetX = dragBaseX + dx;
-    imgOffsetY = dragBaseY + dy;
-    clampImageOffset();               // ← ensures no blank sections
-    info.textContent = `BG  x:${Math.round(imgOffsetX)}  y:${Math.round(imgOffsetY)}`;
-    info.classList.add('visible');
-    draw();
-  } else if (isDraggingText) {
-    const dx = (e.clientX - dragStartX) / getScale();
-    const dy = (e.clientY - dragStartY) / getScale();
-    textX = dragBaseTextX + dx;
-    textY = dragBaseTextY + dy;
-    info.textContent = `TEXT x:${Math.round(textX)}  y:${Math.round(textY)}`;
-    info.classList.add('visible');
-    draw();
+  ctx.restore();
+}
+
+function drawBackground() {
+  const { color1, color2 } = bgState;
+  if (gradDir === 'none') {
+    ctx.fillStyle = color1;
+    ctx.fillRect(0, 0, W, H);
+    return;
   }
-});
 
-window.addEventListener('mouseup', () => {
-  const info = document.getElementById('overlayInfo');
-  if (isDragging) {
-    isDragging = false;
-    canvas.classList.remove('dragging');
-    if (bgImage) canvas.classList.add('draggable');
+  let gradient;
+  if (gradDir === 'lr') gradient = ctx.createLinearGradient(0, 0, W, 0);
+  else if (gradDir === 'rl') gradient = ctx.createLinearGradient(W, 0, 0, 0);
+  else if (gradDir === 'tb') gradient = ctx.createLinearGradient(0, 0, 0, H);
+  else gradient = ctx.createLinearGradient(0, H, 0, 0);
+  gradient.addColorStop(0, color1);
+  gradient.addColorStop(1, color2);
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawText() {
+  const raw = textState.value.trim();
+  if (!raw) return;
+
+  const lines = raw.split('\n');
+  const lineHeight = Math.round(textState.size * 1.22);
+
+  ctx.save();
+  ctx.font = `${textState.style} ${textState.size}px ${textState.face}`;
+  ctx.textAlign = textState.align;
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = textState.color;
+
+  if (textState.shadow) {
+    ctx.shadowColor = textState.shadowColor;
+    ctx.shadowBlur = textState.shadowBlur;
+    ctx.shadowOffsetX = 2;
+    ctx.shadowOffsetY = 2;
   }
-  if (isDraggingText) isDraggingText = false;
-  setTimeout(() => info.classList.remove('visible'), 1200);
-});
 
-// Touch support
-canvas.addEventListener('touchstart', e => {
-  if (dragMode === 'bg' && bgImage) {
-    isDragging = true;
-    dragStartX = e.touches[0].clientX;
-    dragStartY = e.touches[0].clientY;
-    dragBaseX = imgOffsetX;
-    dragBaseY = imgOffsetY;
-    e.preventDefault();
-  } else if (dragMode === 'text') {
-    isDraggingText = true;
-    dragStartX = e.touches[0].clientX;
-    dragStartY = e.touches[0].clientY;
-    dragBaseTextX = textX;
-    dragBaseTextY = textY;
-    e.preventDefault();
-  }
-}, { passive: false });
+  const startY = textState.y - ((lines.length - 1) * lineHeight) / 2;
+  lines.forEach((line, index) => {
+    ctx.fillText(line, textState.x, startY + index * lineHeight);
+  });
 
-window.addEventListener('touchmove', e => {
-  if (isDragging && bgImage) {
-    const dx = (e.touches[0].clientX - dragStartX) / getScale();
-    const dy = (e.touches[0].clientY - dragStartY) / getScale();
-    imgOffsetX = dragBaseX + dx;
-    imgOffsetY = dragBaseY + dy;
-    clampImageOffset();               // ← ensures no blank sections
-    draw();
-  } else if (isDraggingText) {
-    const dx = (e.touches[0].clientX - dragStartX) / getScale();
-    const dy = (e.touches[0].clientY - dragStartY) / getScale();
-    textX = dragBaseTextX + dx;
-    textY = dragBaseTextY + dy;
-    draw();
-  }
-}, { passive: false });
+  ctx.restore();
+}
 
-window.addEventListener('touchend', () => {
-  isDragging = false;
-  isDraggingText = false;
-});
+function drawSelection() {
+  const layer = getSelectedLayer();
+  if (!layer || interactionMode !== 'images') return;
 
-// ── DRAW (core rendering) ──
+  ctx.save();
+  ctx.strokeStyle = 'rgba(0, 255, 65, 0.95)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 3]);
+  ctx.strokeRect(layer.x + 0.5, layer.y + 0.5, layer.w, layer.h);
+  ctx.setLineDash([]);
+
+  const handles = getHandleRects(layer);
+  Object.values(handles).forEach(rect => {
+    ctx.fillStyle = '#050505';
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.strokeStyle = '#00ff41';
+    ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
+  });
+
+  ctx.restore();
+}
+
+function drawTextGuide() {
+  if (interactionMode !== 'text' || !textState.value.trim()) return;
+  const box = measureTextBlock();
+  if (!box) return;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(0, 255, 65, 0.5)';
+  ctx.setLineDash([3, 3]);
+  ctx.strokeRect(box.x + 0.5, box.y + 0.5, box.w, box.h);
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(0, 255, 65, 0.8)';
+  ctx.fillRect(box.x, box.y - 12, 42, 10);
+  ctx.fillStyle = '#050505';
+  ctx.font = "10px 'Courier New', Consolas, monospace";
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillText('TEXT', box.x + 4, box.y - 11);
+  ctx.restore();
+}
+
 function draw() {
   ctx.clearRect(0, 0, W, H);
-
-  // Background
-  if (bgImage) {
-    const fit = document.getElementById('imgFit').value;
-    const opacity = parseInt(document.getElementById('imgOpacity').value) / 100 || 1;
-    ctx.save();
-    ctx.globalAlpha = opacity;
-
-    if (fit === 'stretch') {
-      ctx.drawImage(bgImage, 0, 0, W, H);
-    } else if (fit === 'contain') {
-      const ratio = Math.min(W / bgImage.width, H / bgImage.height);
-      const dw = bgImage.width * ratio;
-      const dh = bgImage.height * ratio;
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, W, H);
-      ctx.drawImage(bgImage, (W - dw) / 2 + imgOffsetX, (H - dh) / 2 + imgOffsetY, dw, dh);
-    } else { // cover
-      const ratio = Math.max(W / bgImage.width, H / bgImage.height);
-      const dw = bgImage.width * ratio;
-      const dh = bgImage.height * ratio;
-      ctx.drawImage(bgImage, (W - dw) / 2 + imgOffsetX, (H - dh) / 2 + imgOffsetY, dw, dh);
-    }
-    ctx.restore();
-  } else {
-    const bg1 = document.getElementById('bgColor').value;
-    const bg2 = document.getElementById('bgColor2').value;
-    if (gradDir === 'none') {
-      ctx.fillStyle = bg1;
-    } else {
-      let grd;
-      if (gradDir === 'lr') grd = ctx.createLinearGradient(0, 0, W, 0);
-      else if (gradDir === 'rl') grd = ctx.createLinearGradient(W, 0, 0, 0);
-      else if (gradDir === 'tb') grd = ctx.createLinearGradient(0, 0, 0, H);
-      else grd = ctx.createLinearGradient(0, H, 0, 0);
-      grd.addColorStop(0, bg1);
-      grd.addColorStop(1, bg2);
-      ctx.fillStyle = grd;
-    }
-    ctx.fillRect(0, 0, W, H);
-  }
-
-  // Text (multi-line + draggable anchor)
-  const rawText = document.getElementById('textInput').value.trim();
-  if (rawText) {
-    const tc = document.getElementById('textColor').value;
-    const fs = parseInt(document.getElementById('fontSize').value) || 24;
-    const fw = document.getElementById('fontStyle').value;
-    const ff = document.getElementById('fontFace').value;
-
-    ctx.save();
-    ctx.font = `${fw} ${fs}px ${ff}`;
-    ctx.textAlign = hAlign;
-    ctx.textBaseline = vAlign === 'top' ? 'top' : vAlign === 'bottom' ? 'bottom' : 'middle';
-
-    if (shadowOn) {
-      ctx.shadowColor = document.getElementById('shadowColor').value;
-      ctx.shadowBlur = parseInt(document.getElementById('shadowBlur').value) || 0;
-      ctx.shadowOffsetX = 2;
-      ctx.shadowOffsetY = 2;
-    }
-
-    ctx.fillStyle = tc;
-
-    const lines = rawText.split('\n');
-    const lineHeight = fs * 1.25;
-
-    let startY = textY;
-    if (vAlign === 'middle') startY -= (lines.length - 1) * lineHeight / 2;
-    else if (vAlign === 'bottom') startY -= (lines.length - 1) * lineHeight;
-
-    for (let i = 0; i < lines.length; i++) {
-      ctx.fillText(lines[i], textX, startY + i * lineHeight);
-    }
-
-    ctx.restore();
-  }
+  drawBackground();
+  layers.forEach(drawLayer);
+  drawText();
+  drawSelection();
+  drawTextGuide();
 }
 
-// ── EXPORT ──
 function exportPNG() {
   draw();
-  const img = document.getElementById('previewImg');
-  img.src = canvas.toDataURL('image/png', 1.0);
-  const wrap = document.getElementById('previewWrap');
-  document.getElementById('previewDims').textContent = `preview · ${W} × ${H}`;
-  wrap.classList.add('visible');
-  wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  dom.previewImg.src = canvas.toDataURL('image/png', 1);
+  dom.previewDims.textContent = `preview · ${W} × ${H}`;
+  dom.previewWrap.classList.add('visible');
+  dom.previewWrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 function downloadBanner() {
   draw();
   const link = document.createElement('a');
   link.download = `banner-${W}x${H}.png`;
-  link.href = canvas.toDataURL('image/png', 1.0);
+  link.href = canvas.toDataURL('image/png', 1);
   link.click();
 }
 
 function hidePreview() {
-  document.getElementById('previewWrap').classList.remove('visible');
+  dom.previewWrap.classList.remove('visible');
 }
 
-// Init
-draw();
-updateDragModeUI();
-document.getElementById('dragHint').classList.add('visible');
+function setSwatch(input, swatch, hex) {
+  swatch.style.background = input.value;
+  hex.textContent = input.value.toUpperCase();
+}
 
-// Keyboard shortcut: Ctrl/Cmd + K = export
-window.addEventListener('keydown', e => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-    e.preventDefault();
-    exportPNG();
+function bindColor(input, swatch, hex, onUpdate) {
+  const update = () => {
+    setSwatch(input, swatch, hex);
+    if (onUpdate) onUpdate(input.value);
+    draw();
+  };
+  input.addEventListener('input', update);
+  update();
+}
+
+function syncTextAlignButtons() {
+  dom.textAlignGroup.querySelectorAll('.btn-tog').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.val === textState.align);
+  });
+}
+
+dom.sizeButtons = Array.from(document.querySelectorAll('.size-btn'));
+dom.sizeButtons.forEach(button => {
+  button.addEventListener('click', () => {
+    dom.sizeButtons.forEach(btn => btn.classList.remove('active'));
+    button.classList.add('active');
+    setSize(button);
+  });
+});
+
+dom.gradDirGroup.addEventListener('click', event => {
+  const btn = event.target.closest('.btn-tog');
+  if (!btn) return;
+  dom.gradDirGroup.querySelectorAll('.btn-tog').forEach(item => item.classList.remove('active'));
+  btn.classList.add('active');
+  gradDir = btn.dataset.val;
+  draw();
+});
+
+dom.modeGroup.addEventListener('click', event => {
+  const btn = event.target.closest('.btn-tog');
+  if (!btn) return;
+  setInteractionMode(btn.dataset.mode);
+});
+
+dom.textAlignGroup.addEventListener('click', event => {
+  const btn = event.target.closest('.btn-tog');
+  if (!btn) return;
+  textState.align = btn.dataset.val;
+  syncTextAlignButtons();
+  draw();
+});
+
+document.querySelectorAll('.tone-row').forEach(row => {
+  const targetId = row.dataset.colorTarget;
+  const input = document.getElementById(targetId);
+  row.addEventListener('click', () => input.click());
+});
+
+bindColor(dom.bgColor1, dom.bgSwatch1, dom.bgHex1, value => {
+  bgState.color1 = value;
+});
+bindColor(dom.bgColor2, dom.bgSwatch2, dom.bgHex2, value => {
+  bgState.color2 = value;
+});
+bindColor(dom.textColor, dom.textSwatch, dom.textHex, value => {
+  textState.color = value;
+});
+bindColor(dom.shadowColor, dom.shadowSwatch, dom.shadowHex, value => {
+  textState.shadowColor = value;
+});
+
+dom.layerUpload.addEventListener('change', event => {
+  if (event.target.files && event.target.files.length) {
+    addImageFiles(event.target.files);
+    event.target.value = '';
   }
 });
+
+dom.uploadZone.addEventListener('dragover', event => {
+  event.preventDefault();
+  dom.uploadZone.classList.add('drag-over');
+});
+
+dom.uploadZone.addEventListener('dragleave', () => {
+  dom.uploadZone.classList.remove('drag-over');
+});
+
+dom.uploadZone.addEventListener('drop', event => {
+  event.preventDefault();
+  dom.uploadZone.classList.remove('drag-over');
+  if (event.dataTransfer.files && event.dataTransfer.files.length) {
+    addImageFiles(event.dataTransfer.files);
+  }
+});
+
+dom.layerName.addEventListener('input', () => {
+  const layer = getSelectedLayer();
+  if (!layer) return;
+  layer.name = dom.layerName.value.trim() || 'Layer';
+  renderLayerList();
+  updateSelectionBadge();
+});
+
+dom.layerFit.addEventListener('change', () => {
+  const layer = getSelectedLayer();
+  if (!layer) return;
+  layer.fit = dom.layerFit.value;
+  renderLayerList();
+  draw();
+});
+
+dom.layerOpacity.addEventListener('input', () => {
+  const layer = getSelectedLayer();
+  if (!layer) return;
+  layer.opacity = Number(dom.layerOpacity.value);
+  dom.layerOpacityVal.textContent = `${layer.opacity}%`;
+  renderLayerList();
+  draw();
+});
+
+function updateSelectedLayerFromInputs() {
+  const layer = getSelectedLayer();
+  if (!layer) return;
+  layer.x = Number(dom.layerX.value);
+  layer.y = Number(dom.layerY.value);
+  layer.w = Math.max(8, Number(dom.layerW.value));
+  layer.h = Math.max(8, Number(dom.layerH.value));
+  clampLayerToCanvas(layer);
+  updateLayerPanelFromState();
+  renderLayerList();
+  draw();
+}
+
+dom.layerX.addEventListener('input', updateSelectedLayerFromInputs);
+dom.layerY.addEventListener('input', updateSelectedLayerFromInputs);
+dom.layerW.addEventListener('input', updateSelectedLayerFromInputs);
+dom.layerH.addEventListener('input', updateSelectedLayerFromInputs);
+
+dom.layerCenterBtn.addEventListener('click', () => {
+  const layer = getSelectedLayer();
+  if (!layer) return;
+  centerLayer(layer);
+  updateLayerPanelFromState();
+  renderLayerList();
+  draw();
+});
+
+dom.layerFitCanvasBtn.addEventListener('click', () => {
+  const layer = getSelectedLayer();
+  if (!layer) return;
+  fitLayerToCanvas(layer);
+  updateLayerPanelFromState();
+  renderLayerList();
+  draw();
+});
+
+dom.layerUpBtn.addEventListener('click', () => {
+  const layer = getSelectedLayer();
+  if (!layer) return;
+  moveLayerToIndex(layer.id, layers.findIndex(item => item.id === layer.id) + 1);
+});
+
+dom.layerDownBtn.addEventListener('click', () => {
+  const layer = getSelectedLayer();
+  if (!layer) return;
+  moveLayerToIndex(layer.id, layers.findIndex(item => item.id === layer.id) - 1);
+});
+
+dom.layerDuplicateBtn.addEventListener('click', duplicateSelectedLayer);
+dom.layerDeleteBtn.addEventListener('click', () => {
+  const layer = getSelectedLayer();
+  if (layer) deleteLayer(layer.id);
+});
+
+dom.textInput.addEventListener('input', function () {
+  textState.value = this.value;
+  this.style.height = 'auto';
+  this.style.height = `${Math.min(this.scrollHeight, 220)}px`;
+  draw();
+});
+
+dom.fontSize.addEventListener('input', function () {
+  textState.size = Number(this.value);
+  dom.fontSizeVal.textContent = `${textState.size}px`;
+  draw();
+});
+
+dom.fontStyle.addEventListener('change', function () {
+  textState.style = this.value;
+  draw();
+});
+
+dom.fontFace.addEventListener('change', function () {
+  textState.face = this.value;
+  draw();
+});
+
+dom.shadowToggle.addEventListener('click', () => {
+  textState.shadow = !textState.shadow;
+  dom.shadowToggle.classList.toggle('on', textState.shadow);
+  dom.shadowControls.classList.toggle('hidden', !textState.shadow);
+  draw();
+});
+
+dom.shadowBlur.addEventListener('input', function () {
+  textState.shadowBlur = Number(this.value);
+  dom.shadowBlurVal.textContent = `${textState.shadowBlur}px`;
+  draw();
+});
+
+dom.exportBtn.addEventListener('click', exportPNG);
+dom.downloadBtn.addEventListener('click', downloadBanner);
+dom.closePreviewBtn.addEventListener('click', hidePreview);
+
+canvas.addEventListener('pointerdown', startDrag);
+canvas.addEventListener('pointermove', updateDrag);
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+canvas.addEventListener('pointerleave', event => {
+  if (!dragState) canvas.style.cursor = 'default';
+  if (dragState && dragState.type === 'text') return;
+});
+
+window.addEventListener('keydown', event => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  const isTyping = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault();
+    exportPNG();
+    return;
+  }
+
+  if (isTyping) return;
+
+  if (event.key === 'Delete' || event.key === 'Backspace') {
+    const layer = getSelectedLayer();
+    if (layer && interactionMode === 'images') {
+      event.preventDefault();
+      deleteLayer(layer.id);
+    }
+    return;
+  }
+
+  const step = event.shiftKey ? 10 : 1;
+  const layer = getSelectedLayer();
+
+  if (interactionMode === 'images' && layer) {
+    if (event.key === 'ArrowLeft') { event.preventDefault(); layer.x -= step; clampLayerToCanvas(layer); updateLayerPanelFromState(); renderLayerList(); draw(); }
+    if (event.key === 'ArrowRight') { event.preventDefault(); layer.x += step; clampLayerToCanvas(layer); updateLayerPanelFromState(); renderLayerList(); draw(); }
+    if (event.key === 'ArrowUp') { event.preventDefault(); layer.y -= step; clampLayerToCanvas(layer); updateLayerPanelFromState(); renderLayerList(); draw(); }
+    if (event.key === 'ArrowDown') { event.preventDefault(); layer.y += step; clampLayerToCanvas(layer); updateLayerPanelFromState(); renderLayerList(); draw(); }
+  }
+
+  if (interactionMode === 'text') {
+    if (event.key === 'ArrowLeft') { event.preventDefault(); textState.x -= step; clampTextPosition(); draw(); }
+    if (event.key === 'ArrowRight') { event.preventDefault(); textState.x += step; clampTextPosition(); draw(); }
+    if (event.key === 'ArrowUp') { event.preventDefault(); textState.y -= step; clampTextPosition(); draw(); }
+    if (event.key === 'ArrowDown') { event.preventDefault(); textState.y += step; clampTextPosition(); draw(); }
+  }
+});
+
+window.addEventListener('resize', applyCanvasSize);
+
+async function bootstrap() {
+  syncTextAlignButtons();
+  dom.layerPanel.classList.add('hidden');
+  dom.shadowControls.classList.add('hidden');
+  dom.layerOpacityVal.textContent = `${dom.layerOpacity.value}%`;
+  dom.fontSizeVal.textContent = `${dom.fontSize.value}px`;
+  dom.shadowBlurVal.textContent = `${dom.shadowBlur.value}px`;
+  setSwatch(dom.bgColor1, dom.bgSwatch1, dom.bgHex1);
+  setSwatch(dom.bgColor2, dom.bgSwatch2, dom.bgHex2);
+  setSwatch(dom.textColor, dom.textSwatch, dom.textHex);
+  setSwatch(dom.shadowColor, dom.shadowSwatch, dom.shadowHex);
+  textState.value = dom.textInput.value;
+  textState.color = dom.textColor.value;
+  textState.size = Number(dom.fontSize.value);
+  textState.style = dom.fontStyle.value;
+  textState.face = dom.fontFace.value;
+  textState.shadowColor = dom.shadowColor.value;
+  textState.shadowBlur = Number(dom.shadowBlur.value);
+  updateLayerCount();
+  updateSelectionBadge();
+  applyCanvasSize();
+  renderLayerList();
+  setInteractionMode('images');
+  draw();
+}
+
+bootstrap();
 </script>
 </body>
 </html>
