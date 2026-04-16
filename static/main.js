@@ -1,8 +1,6 @@
-// main.js — RustChan client-side logic
-// FIX[NEW-H1]: All JavaScript has been moved from inline <script> tags to this
-// external file, removing the need for 'unsafe-inline' in the CSP script-src
-// directive. Dynamic per-page values are passed via data-* attributes on HTML
-// elements and read here at runtime.
+// main.js — RustChan client-side logic.
+// Dynamic per-page values are passed via data-* attributes on HTML elements
+// and read here at runtime.
 
 'use strict';
 
@@ -2700,28 +2698,9 @@ document.addEventListener('keydown', function (e) {
   }
 });
 
-// ─── YouTube / Streamable embed unfurling ────────────────────────────────────
-// FIX[YT-EMBED]: The previous approach placed buildEmbed() inside an inline
-// <script> block in the Rust thread template.  Inline scripts are blocked by
-// the page's CSP (`script-src 'self'` with no `'unsafe-inline'`), so thumbnails
-// and inline playback were completely broken.
-//
-// The fix:
-//   • The Rust template now emits a hidden <div id="thread-config"> element
-//     carrying board-specific values as data-* attributes (embed-enabled,
-//     draft-key).  No inline script is needed.
-//   • buildEmbed() and the draft-autosave logic live here in main.js (loaded
-//     via <script src="…" defer>, which the CSP allows).
-//
-// Supported YouTube URL formats handled by the Rust backend (sanitize.rs):
-//   https://youtube.com/watch?v=VIDEOID
-//   https://www.youtube.com/watch?v=VIDEOID
-//   https://youtu.be/VIDEOID
-//   https://youtube.com/shorts/VIDEOID
-//   Any of the above with extra query params (&t=, &feature=, etc.)
-//
-// Thumbnail source : https://img.youtube.com/vi/VIDEOID/hqdefault.jpg
-// Embed player     : https://www.youtube.com/embed/VIDEOID  (inline, no redirect)
+// YouTube / Streamable embed unfurling.
+// The Rust template emits board-specific values as data-* attributes on
+// #thread-config so the client can build embeds without inline scripts.
 
 (function () {
   var cfg = document.getElementById('thread-config');
@@ -2819,8 +2798,7 @@ document.addEventListener('keydown', function (e) {
 })();
 
 // ─── Draft autosave ───────────────────────────────────────────────────────────
-// FIX[YT-EMBED]: Moved from inline <script> in thread.rs (was CSP-blocked) to
-// here.  The draft key is now read from data-draft-key on #thread-config.
+// The draft key is read from data-draft-key on #thread-config.
 
 (function () {
   var cfg = document.getElementById('thread-config');

@@ -1,5 +1,4 @@
-// theme-init.js — loaded in <head> to switch the page into JS mode and apply
-// any saved theme preference before first paint.
+// Switch the page into JS mode and apply any saved theme before first paint.
 try {
   document.documentElement.classList.remove('no-js');
   document.documentElement.classList.add('js');

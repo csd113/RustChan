@@ -1,9 +1,4 @@
-// models.rs — plain data structs that map 1:1 to database rows.
-// No ORM magic; fields match column names for easy rusqlite mapping.
-//
-// NOTE: When writing rusqlite FromRow impls for wide structs like Board (18+
-// fields), prefer named-column access (`row.get("col")?`) over positional
-// indices to avoid silent mis-binding when columns are reordered.
+// Plain data structs that map to database rows.
 
 use serde::{Deserialize, Serialize};
 

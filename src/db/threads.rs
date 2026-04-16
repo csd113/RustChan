@@ -8,16 +8,6 @@
 //   delete_thread          → super::paths_safe_to_delete       (file safety)
 //   prune_old_threads      → super::paths_safe_to_delete       (file safety)
 //
-// FIX summary (from audit):
-//              so it sees the post-delete DB state before any concurrent insert
-//              moved inside the transaction to close the TOCTOU race
-//              helper using execute_batch for cleaner error flow
-//              prepare_cached outside the loop (was documented as fixed but
-//              was not actually implemented)
-//              locked state is only changed when archiving
-//              replaced with bulk WHERE id IN (...)
-//              a single JOIN query
-
 use crate::models::Thread;
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};

@@ -1,5 +1,3 @@
-// src/db/pool.rs
-
 use crate::config::CONFIG;
 use anyhow::{Context, Result};
 use r2d2::Pool;

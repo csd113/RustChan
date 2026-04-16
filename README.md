@@ -200,7 +200,7 @@ RustChan is straightforward to start and includes the tools needed for longer-te
 
 ### Helpful settings
 
-`settings.toml` is generated automatically at `rustchan-data/settings.toml`. A small sample:
+`settings.toml` is generated automatically at `rustchan-data/settings.toml`. Example:
 
 ```toml
 forum_name = "RustChan"

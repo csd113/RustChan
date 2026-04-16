@@ -91,17 +91,7 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
     use std::io::Write;
 
     let db_path = std::path::Path::new(&crate::config::CONFIG.database_path);
-
-    // Apply the same Fix #9 empty-parent guard used in
-    // `run_server`.  The original code used a plain `if let Some(parent)`
-    // check, which does NOT handle the case where `Path::parent()` returns
-    // `Some("")` for a bare filename (e.g. "rustchan.db").
-    // `create_dir_all("")` fails with `NotFound`, so we normalise an empty
-    // parent to `"."` just as `run_server` does.
-    let db_parent: std::path::PathBuf = match db_path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => std::path::PathBuf::from("."),
-    };
+    let db_parent = super::parent_dir_or_current(db_path);
     std::fs::create_dir_all(&db_parent)?;
 
     let pool = db::init_pool()?;

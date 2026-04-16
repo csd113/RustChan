@@ -4,12 +4,6 @@
 // moderation log, ban appeals, IP history, WAL checkpoint, VACUUM, DB size,
 // and the list_admins helper used by CLI tooling.
 //
-// FIX summary (from audit):
-//              INSERT … RETURNING id replaces execute + last_insert_rowid()
-//              added rows-affected checks so missing targets surface as errors
-//              already correct; doc comment clarified
-//              requires a schema-level UNIQUE constraint
-
 use crate::models::{AdminSession, AdminUser, Ban, WordFilter};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};

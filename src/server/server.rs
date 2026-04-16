@@ -125,17 +125,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // clear error rather than discovering misconfiguration at runtime (#8).
     CONFIG.validate()?;
 
-    // Fix #9: Path::parent() on a bare filename (e.g. "rustchan.db") returns
-    // Some("") rather than None, so the old `unwrap_or(".")` never fired and
-    // `create_dir_all("")` would fail with NotFound.  Treat an empty-string
-    // parent the same as a missing one.
-    let data_dir: std::path::PathBuf = {
-        let p = std::path::Path::new(&CONFIG.database_path);
-        match p.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-            _ => std::path::PathBuf::from("."),
-        }
-    };
+    let data_dir = super::parent_dir_or_current(std::path::Path::new(&CONFIG.database_path));
 
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&CONFIG.upload_dir)?;

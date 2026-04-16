@@ -301,7 +301,7 @@ Important notes:
 
 ## Important settings.toml Options
 
-The generated file documents every setting inline. These are the ones most operators care about first:
+The generated file documents every setting inline. Commonly tuned settings:
 
 ```toml
 forum_name = "RustChan"

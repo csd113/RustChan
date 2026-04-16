@@ -1,15 +1,4 @@
-// media/thumbnail.rs
-//
-// Thumbnail generation for all media types.
-//
-// Rules (from project spec):
-//   • All thumbnails are WebP, regardless of source format.
-//   • For video and converted-GIF (WebM) sources: extract the first frame
-//     via ffmpeg and save as WebP.
-//   • Max dimension: 250 × 250, aspect ratio preserved.
-//   • WebP quality: 80.
-//   • If ffmpeg is unavailable, write a static SVG placeholder for video;
-//     for images, fall back to the `image` crate (no ffmpeg required).
+// Thumbnail generation for uploaded media.
 
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, GenericImageView, ImageFormat};

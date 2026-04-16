@@ -1,23 +1,10 @@
-// detect.rs — Startup detection for optional external tools.
-//
-// All terminal output goes through crate::logging helpers so it is
-// serialised with the tracing terminal layer (CONSOLE_MUTEX).  This
-// prevents interleaving with concurrent log events during startup.
-//
-// Structured events (info!/warn!/error!) capture the detection result in
-// the JSON log file with structured fields.  Human-readable install
-// instructions are written via console_print_raw so they appear only
-// on TTY-mode terminals and never pollute piped / systemd output.
+// Startup detection for optional external tools.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 /// Result of probing for a tool at startup.
-///
-/// Note: the `Spawning` variant that existed in v1.0 has been removed.
-/// `detect_tor` now returns `Option<JoinHandle<()>>` directly; it no longer
-/// uses this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     /// Tool is ready for use immediately (e.g. ffmpeg).

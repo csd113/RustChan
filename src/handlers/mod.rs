@@ -1,4 +1,4 @@
-// src/handlers/mod.rs
+// Request handlers.
 
 pub mod admin;
 pub mod banner;

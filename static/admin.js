@@ -245,22 +245,8 @@
   document.addEventListener('DOMContentLoaded', initAdminLiveLog);
 })();
 
-// Covers two flows:
-//
-//   A) "Save to server" forms - POST via fetch(), modal shows live progress,
-//      "Done - reload" button appears when the fetch resolves.
-//
-//   B) "Download to computer" links - GET triggers a file download.  We show
-//      the modal with live progress while the server builds the zip, then
-//      dismiss it automatically once phase=DONE is reported.  The actual
-//      download still happens natively in the browser.
-//
-// Note: all handlers here are CSP-safe (no inline onclick/onX attributes).
-// The "Done - reload" button uses data-action="close-backup-modal" and is
-// dispatched by the existing global click handler below.
-//
-// Phase codes (mirror middleware::backup_phase in Rust):
-//   0=idle  1=snapshot_db  2=count_files  3=compress  4=save  5=done
+// Backup progress modal for both POST-based saves and GET downloads.
+// Handlers stay CSP-safe and reuse the same phase codes as middleware::backup_phase.
 (function () {
   var _pollTimer = null;
   var _downloadMode = false;

@@ -1,15 +1,4 @@
-// config.rs — Runtime configuration.
-//
-// Priority (highest → lowest):
-// 1. Environment variables (CHAN_BIND, CHAN_DB, …)
-// 2. settings.toml (<exe-dir>/rustchan-data/settings.toml)
-// 3. Hard-coded defaults
-//
-// On first run, settings.toml is generated next to the binary with all
-// default values and explanatory comments. Edit it, restart the server.
-//
-// SECURITY: The cookie_secret is auto-generated on first run and persisted
-// to settings.toml. It is never left at a well-known default value.
+// Runtime configuration and settings-file loading.
 use rand_core::{OsRng, RngCore};
 use serde::Deserialize;
 use std::env;

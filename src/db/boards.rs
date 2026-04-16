@@ -3,11 +3,6 @@
 // Covers: site_settings table, boards CRUD, delete_board (with file-safety
 // guard via super::paths_safe_to_delete), and aggregate site statistics.
 //
-// FIX summary (from audit):
-//              COUNT loop with a single query using a correlated subquery
-//              single aggregate query pass
-//              INSERT … RETURNING id replaces execute + last_insert_rowid()
-
 use crate::models::{Board, BoardAccessMode, BoardBannerMode};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};

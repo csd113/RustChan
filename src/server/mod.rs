@@ -17,6 +17,8 @@ pub mod console;
 #[allow(clippy::module_inception)]
 pub mod server;
 
+use std::path::{Path, PathBuf};
+
 pub use server::run_server;
 
 // Re-export the global atomics so console/ (and any future module) can
@@ -26,3 +28,10 @@ pub use server::{ACTIVE_IPS, ACTIVE_UPLOADS, IN_FLIGHT, REQUEST_COUNT, SPINNER_T
 
 // Re-export cleanup so main.rs panic hook can call it without a long path.
 pub use console::cleanup;
+
+pub(crate) fn parent_dir_or_current(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}

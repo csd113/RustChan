@@ -1,31 +1,4 @@
-// media/mod.rs
-//
-// Public interface for the media processing pipeline.
-//
-// Usage from the upload pipeline:
-//
-//   let processor = MediaProcessor::new();   // detects ffmpeg once
-//   let result = processor.process_upload(
-//       &temp_path, mime, &dest_dir, &file_stem, &thumbs_dir, thumb_max,
-//   )?;
-//   // result.file_path      — final file on disk (converted if applicable)
-//   // result.thumbnail_path — WebP thumbnail (or SVG placeholder)
-//   // result.mime_type      — final MIME (may differ from original for gif→webm)
-//   // result.was_converted  — true when format changed
-//   // result.original_size  — bytes of input file
-//   // result.final_size     — bytes of output file
-//
-// FFmpeg detection:
-//   `MediaProcessor::new()` calls `ffmpeg::detect_ffmpeg()` exactly once and
-//   stores the result in `ffmpeg_available`.  Alternatively, use
-//   `MediaProcessor::new_with_ffmpeg(bool)` to supply a pre-detected value
-//   (e.g. from the startup check stored in `AppState`).
-//
-// Graceful degradation:
-//   If ffmpeg is not found, `process_upload` stores files as-is and
-//   `generate_thumbnail` writes a static SVG placeholder for video; for
-//   images the `image` crate is used as a fallback thumbnail generator.
-//   No error is returned to the user in either case.
+// Media processing pipeline helpers.
 
 pub mod convert;
 pub mod exif;

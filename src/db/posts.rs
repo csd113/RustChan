@@ -6,13 +6,6 @@
 //                      create_thread_with_op's manual transaction.
 //   delete_post        calls super::paths_safe_to_delete.
 //
-// FIX summary (from audit):
-//              to IMMEDIATE (raw BEGIN IMMEDIATE) to prevent write contention
-//              created_at fetch) into a single SELECT, eliminating race window
-//              eliminate the TOCTOU race
-//              in claim_next_job and fail_job and could diverge
-//              processes all bytes regardless of length difference
-
 use crate::models::Post;
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
@@ -882,7 +875,7 @@ pub fn get_poll_for_thread(
 /// the same INSERT statement via a correlated WHERE EXISTS. A mismatched
 /// (`poll_id`, `option_id`) pair inserts nothing and returns false.
 ///
-/// Note (): This function returns false for two distinct cases:
+/// This returns false for two distinct cases:
 ///   1. The voter has already voted (UNIQUE constraint fires INSERT OR IGNORE)
 ///   2. The `option_id` does not belong to `poll_id` (EXISTS check fails)
 ///
@@ -941,10 +934,8 @@ pub fn get_poll_context(
 ///
 /// Returns the number of vote rows deleted.
 ///
-/// Note (): The parameter was previously named `retention_cutoff` in some
-/// call sites, which is misleading — a lower value retains more votes, and a
-/// higher value prunes more. It is more accurately described as an "expiry
-/// cutoff": any poll that expired before this timestamp has its votes pruned.
+/// This parameter is an expiry cutoff: polls that expired before it have
+/// their vote rows pruned.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.

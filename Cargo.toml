@@ -11,11 +11,8 @@ repository = "https://github.com/csd113/RustChan"
 keywords = ["imageboard", "forum", "rust"]
 categories = ["web-programming", "multimedia::images"]
 
-# cargo-msrv <0.16 reads package.metadata.msrv instead of the Cargo-standard
-# rust-version field; keep both in sync so `cargo msrv verify` works regardless
-# of which version of cargo-msrv is installed.
+# Keep `cargo-msrv` metadata aligned with `rust-version`.
 [package.metadata]
-# FIX[MSRV]: was "1.75" — updated to match rust-version above.
 msrv = "1.90"
 
 [profile.release]
