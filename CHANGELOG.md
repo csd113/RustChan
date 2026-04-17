@@ -2,6 +2,33 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.1.5]
+
+### Added
+
+- The bundled banner builder in `docs/rustchan-banner-maker.html` has been rebuilt into a layered editor with stacked image uploads, per-layer controls, drag-and-resize handles, live preview, and export tools for both supported banner sizes.
+- The admin panel now ships with its own dedicated `admin.css` and `admin.js` assets instead of leaning on the shared site bundle.
+
+### Improved
+
+- The admin panel has been split into clearer sections and subsections, making board setup, moderation, settings, backups, and banner management easier to scan and work through on both desktop and mobile.
+- Banner editing in the admin UI is smoother: target pickers behave more predictably, external-link warnings show up inline before save, and the banner forms are laid out more cleanly.
+- Admin login and banner-serving internals were tightened up, with cleaner helper paths for session handling, banner access checks, and post-query lookups.
+- Backup and restore actions now use a more consistent redirect path, which keeps the progress modal and post-restore navigation on the rails after full-site and board restore requests.
+
+### Fixed
+
+- Restore uploads and backup actions in the admin panel now resolve their redirect targets more reliably, including cases where the browser only exposes the final response URL or HTML fallback.
+- Protected board banner assets and external-banner warning routes now fail with the right `404` and `403` responses instead of falling through to less helpful error paths.
+
+### Documentation
+
+- `README.md`, `SETUP.md`, and the release notes were cleaned up for the `1.1.5` release, with plainer wording and less filler.
+
+### Internal
+
+- Removed dead code, unused API paths, and stale helper branches that were no longer part of the live request flow.
+
 ## [1.1.4]
 
 ### Added

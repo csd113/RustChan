@@ -262,7 +262,7 @@ rustchan-data/
 
 ## Banner Artwork Requirements
 
-RustChan `1.1.4` adds board banners plus a separate home-page announcement banner.
+RustChan `1.1.5` adds board banners plus a separate home-page announcement banner.
 
 Banner upload requirements:
 

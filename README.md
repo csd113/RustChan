@@ -11,7 +11,7 @@
 One binary. One data folder. Zero required runtime dependencies.  
 Built with Rust, powered by SQLite, and designed for people who want their own corner of the web.
 
-[![Version](https://img.shields.io/badge/Version-1.1.4-0ea5e9?style=for-the-badge)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-1.1.5-0ea5e9?style=for-the-badge)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/Rust-1.90%2B-orange?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![SQLite](https://img.shields.io/badge/SQLite-Bundled-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Axum](https://img.shields.io/badge/Axum-0.8-16a34a?style=for-the-badge)](https://github.com/tokio-rs/axum)
@@ -19,7 +19,7 @@ Built with Rust, powered by SQLite, and designed for people who want their own c
 
 [What Is RustChan?](#what-is-rustchan) ·
 [Why People Like It](#why-people-like-it) ·
-[New In 1.1.4](#new-in-114) ·
+[New In 1.1.5](#new-in-115) ·
 [Quick Start](#five-minute-quick-start) ·
 [Feature Tour](#feature-tour) ·
 [Setup](#setup-and-operations) ·
@@ -66,17 +66,16 @@ It is a compact, self-contained setup that is easy to host and easy to move.
 
 RustChan runs as a single program and can be managed from the browser.
 
-## New In 1.1.4
+## New In 1.1.5
 
-Version `1.1.4` adds a full banner system:
+Version `1.1.5` is a cleanup and workflow release:
 
-- **Global rotating board banners**: upload multiple board-header banners from the admin panel, rotate them on each refresh by default, or enforce a time-based rotation interval.
-- **Per-board banner overrides**: each board can inherit the global pool, disable banners entirely, or use one fixed board-specific override.
-- **Clickable banner destinations**: banners can point at internal boards or internal paths directly, and optional external links are gated behind an on-site warning page.
-- **Home page MOTD/news banner**: the home page now has its own separate banner box for announcements or important updates.
-- **Clean media handling**: uploaded banner art is validated to the exact `468x60` aspect ratio, converted to WebP, and documented with a minimum `468x60` / recommended `936x120` workflow.
+- **Admin panel overhaul**: the admin UI is broken into clearer sections with dedicated scripts and styles, so board setup, moderation, settings, and backup work are easier to follow.
+- **Better banner tooling**: the bundled banner builder now supports layered image editing, live resizing, cleaner previews, and export tools for both RustChan banner sizes.
+- **Smoother restore flow**: backup and restore actions now keep their redirect targets straight more consistently, which makes the admin progress flow less brittle.
+- **Under-the-hood cleanup**: older dead paths and helper code were trimmed back, and login, banner, and query helpers were tightened up.
 
-The full release history lives in [CHANGELOG.md](CHANGELOG.md). This release focuses on polish, reliability, and day-to-day usability.
+The full release history lives in [CHANGELOG.md](CHANGELOG.md).
 
 ## Five-Minute Quick Start
 
@@ -155,7 +154,7 @@ A few helpful notes:
 
 ## Banner Artwork
 
-RustChan `1.1.4` includes banner slots for board pages and the home page.
+RustChan `1.1.5` includes banner slots for board pages and the home page.
 
 - Board banners render centered under the board name/description.
 - On board index pages, the banner sits above `[Index] [Catalog] [Archive]`.
