@@ -19,7 +19,7 @@ use crate::{
     error::{AppError, Result},
     handlers::board::ensure_csrf,
     middleware::AppState,
-    models::{BannerScope, BoardAccessMode, BoardBannerMode},
+    models::{BannerScope, BannerTargetType, BoardAccessMode, BoardBannerMode},
     utils::crypto::hash_password,
 };
 use axum::{
@@ -62,6 +62,10 @@ async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<S
         .text()
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))
+}
+
+async fn read_checkbox_field(field: axum::extract::multipart::Field<'_>) -> Result<bool> {
+    Ok(checkbox_is_on(Some(&read_text_field(field).await?)))
 }
 
 async fn read_limited_upload_bytes(
@@ -626,13 +630,9 @@ async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpl
             Some("target_external_url") => {
                 target_external_url = Some(read_text_field(field).await?)
             }
-            Some("show_on_index") => {
-                show_on_index = checkbox_is_on(Some(&read_text_field(field).await?))
-            }
-            Some("show_on_catalog") => {
-                show_on_catalog = checkbox_is_on(Some(&read_text_field(field).await?))
-            }
-            Some("enabled") => enabled = checkbox_is_on(Some(&read_text_field(field).await?)),
+            Some("show_on_index") => show_on_index = read_checkbox_field(field).await?,
+            Some("show_on_catalog") => show_on_catalog = read_checkbox_field(field).await?,
+            Some("enabled") => enabled = read_checkbox_field(field).await?,
             Some("banner") => {
                 let bytes = read_limited_upload_bytes(field, MAX_BANNER_UPLOAD_BYTES).await?;
                 if !bytes.is_empty() {
@@ -706,11 +706,33 @@ async fn board_appearance_anchor_from_id(state: &AppState, board_id: i64) -> Res
                 rusqlite::params![board_id],
                 |row| row.get::<_, String>(0),
             )?;
-            Ok(format!("board-appearance-{board_short}"))
+            Ok(banner::board_appearance_anchor(&board_short))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
+}
+
+fn resolve_banner_target_selection(
+    target_type_raw: &str,
+    target_value_raw: Option<&str>,
+    target_board_value_raw: Option<&str>,
+    target_thread_value_raw: Option<&str>,
+    target_external_url_raw: Option<&str>,
+    allow_external_links: bool,
+) -> Result<(BannerTargetType, String)> {
+    let selected_target_value = banner::select_banner_target_value(
+        target_type_raw,
+        target_value_raw,
+        target_board_value_raw,
+        target_thread_value_raw,
+        target_external_url_raw,
+    );
+    banner::parse_banner_target(
+        target_type_raw,
+        &selected_target_value,
+        allow_external_links,
+    )
 }
 
 async fn upload_banner_for_scope(
@@ -723,18 +745,13 @@ async fn upload_banner_for_scope(
     tokio::task::spawn_blocking(move || -> Result<String> {
         let conn = state.db.get()?;
         super::require_admin_session_sid(&conn, session_id.as_deref())?;
-        let allow_external_links = db::get_banner_external_links_enabled(&conn);
-        let selected_target_value = banner::select_banner_target_value(
+        let (target_type, target_value) = resolve_banner_target_selection(
             &parsed.target_type,
             parsed.target_value.as_deref(),
             parsed.target_board_value.as_deref(),
             parsed.target_thread_value.as_deref(),
             parsed.target_external_url.as_deref(),
-        );
-        let (target_type, target_value) = banner::parse_banner_target(
-            &parsed.target_type,
-            &selected_target_value,
-            allow_external_links,
+            db::get_banner_external_links_enabled(&conn),
         )?;
 
         let board_short = if scope == BannerScope::Board {
@@ -803,16 +820,7 @@ async fn upload_banner_for_scope(
                     rusqlite::params![board_id],
                 )?;
             }
-            let anchor = match scope {
-                BannerScope::Global => "global-banners".to_string(),
-                BannerScope::Home => "home-banners".to_string(),
-                BannerScope::Board => {
-                    format!(
-                        "board-appearance-{}",
-                        board_short.as_deref().unwrap_or_default()
-                    )
-                }
-            };
+            let anchor = banner::banner_admin_anchor(scope, board_short.as_deref());
             tracing::info!(
                 target: "admin",
                 banner_id,
@@ -964,16 +972,12 @@ pub async fn update_banner_meta(
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             let asset = db::get_banner_asset(&conn, form.banner_id)?
                 .ok_or_else(|| AppError::BadRequest("Banner not found.".into()))?;
-            let selected_target_value = banner::select_banner_target_value(
+            let (target_type, target_value) = resolve_banner_target_selection(
                 &form.target_type,
                 form.target_value.as_deref(),
                 form.target_board_value.as_deref(),
                 form.target_thread_value.as_deref(),
                 form.target_external_url.as_deref(),
-            );
-            let (target_type, target_value) = banner::parse_banner_target(
-                &form.target_type,
-                &selected_target_value,
                 db::get_banner_external_links_enabled(&conn),
             )?;
             db::update_banner_asset_meta(
@@ -993,13 +997,10 @@ pub async fn update_banner_meta(
                     checkbox_is_on(form.show_on_catalog.as_deref())
                 },
             )?;
-            Ok(match asset.scope {
-                BannerScope::Global => "global-banners".to_string(),
-                BannerScope::Home => "home-banners".to_string(),
-                BannerScope::Board => {
-                    format!("board-appearance-{}", asset.board_short.unwrap_or_default())
-                }
-            })
+            Ok(banner::banner_admin_anchor(
+                asset.scope,
+                asset.board_short.as_deref(),
+            ))
         }
     })
     .await
@@ -1037,13 +1038,10 @@ pub async fn delete_banner(
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             let asset = db::delete_banner_asset(&conn, form.banner_id)?;
             banner::delete_banner_asset_file(&asset)?;
-            Ok(match asset.scope {
-                BannerScope::Global => "global-banners".to_string(),
-                BannerScope::Home => "home-banners".to_string(),
-                BannerScope::Board => {
-                    format!("board-appearance-{}", asset.board_short.unwrap_or_default())
-                }
-            })
+            Ok(banner::banner_admin_anchor(
+                asset.scope,
+                asset.board_short.as_deref(),
+            ))
         }
     })
     .await
@@ -1082,13 +1080,10 @@ pub async fn move_banner(
             let asset = db::get_banner_asset(&conn, form.banner_id)?
                 .ok_or_else(|| AppError::BadRequest("Banner not found.".into()))?;
             db::move_banner_asset(&mut conn, form.banner_id, move_up)?;
-            Ok(match asset.scope {
-                BannerScope::Global => "global-banners".to_string(),
-                BannerScope::Home => "home-banners".to_string(),
-                BannerScope::Board => {
-                    format!("board-appearance-{}", asset.board_short.unwrap_or_default())
-                }
-            })
+            Ok(banner::banner_admin_anchor(
+                asset.scope,
+                asset.board_short.as_deref(),
+            ))
         }
     })
     .await
@@ -1131,7 +1126,7 @@ pub async fn clear_board_banner_override(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
     Ok(super::admin_panel_redirect_anchor_open(
         &format!("Board /{board_short}/ banner override cleared."),
-        &format!("board-appearance-{board_short}"),
+        &banner::board_appearance_anchor(&board_short),
         "board-banners",
     )
     .into_response())

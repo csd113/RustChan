@@ -164,10 +164,6 @@ pub(crate) fn xhr_post_error_response(error: AppError) -> Result<Response> {
             xhr_handled_error_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, &message)
         }
         AppError::Conflict(message) => xhr_handled_error_response(StatusCode::CONFLICT, &message),
-        AppError::RateLimited => xhr_handled_error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "You are posting too fast. Slow down.",
-        ),
         AppError::DbBusy => xhr_handled_error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "The server is temporarily busy. Please try again in a moment.",

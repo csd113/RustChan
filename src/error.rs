@@ -9,7 +9,6 @@
 //   Forbidden         → 403
 //   UploadTooLarge    → 413  (Content Too Large)
 //   InvalidMediaType  → 415  (Unsupported Media Type)
-//   RateLimited       → 429  (Too Many Requests)
 //   DbBusy            → 503  (Service Unavailable, with Retry-After)
 //   Internal          → 500
 
@@ -50,10 +49,6 @@ pub enum AppError {
     /// 409 — resource already exists or snapshot already imported
     #[error("Conflict: {0}")]
     Conflict(String),
-
-    /// 429 — rate limited
-    #[error("Rate limited: posting too fast")]
-    RateLimited,
 
     /// 503 — database write contention; client should retry
     #[error("Database busy — please retry")]
@@ -122,10 +117,6 @@ impl IntoResponse for AppError {
             }
             Self::UploadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
             Self::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg.clone()),
-            Self::RateLimited => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "You are posting too fast. Slow down.".to_string(),
-            ),
             Self::DbBusy => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "The server is temporarily busy. Please try again in a moment.".to_string(),

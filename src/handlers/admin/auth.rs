@@ -7,10 +7,10 @@
 //   2. GET  /admin       → redirect to panel if already logged in, else show login form
 //   3. POST /admin/logout → delete session from DB → clear cookie
 //
-// Brute-force protection ():
+// Brute-force protection:
 //   After LOGIN_FAIL_LIMIT failed attempts within LOGIN_FAIL_WINDOW seconds, the IP is
 //   locked out for the remainder of that window.  On success the counter is cleared.
-//   Keys are SHA-256(IP) to avoid retaining raw addresses in memory ().
+//   Keys are SHA-256(IP) to avoid retaining raw addresses in memory.
 
 use crate::{
     config::CONFIG,
@@ -42,7 +42,7 @@ use tracing::warn;
 // IP is locked out for the remainder of that window.  On success the counter
 // is cleared immediately so a genuine admin is never self-locked.
 //
-// Keys are SHA-256(IP) to avoid retaining raw addresses in memory ().
+// Keys are SHA-256(IP) to avoid retaining raw addresses in memory.
 
 const LOGIN_FAIL_LIMIT: u32 = 5;
 const LOGIN_FAIL_WINDOW: u64 = 900; // 15 minutes
@@ -159,6 +159,30 @@ fn ensure_admin_login_csrf(
     )
 }
 
+async fn render_admin_login_response(
+    state: &AppState,
+    jar: CookieJar,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    error: Option<&str>,
+) -> Result<Response> {
+    let (jar, csrf) = ensure_admin_login_csrf(jar, headers, Some(peer));
+    let boards = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<Vec<crate::models::Board>> {
+            let conn = pool.get()?;
+            Ok(db::get_all_boards(&conn)?)
+        }
+    })
+    .await
+    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+    Ok((
+        jar,
+        Html(templates::admin_login_page(error, &csrf, &boards)),
+    )
+        .into_response())
+}
+
 // ─── GET /admin ───────────────────────────────────────────────────────────────
 
 pub async fn admin_index(
@@ -217,10 +241,17 @@ pub async fn admin_login(
     let ip_key = login_ip_key(&client_ip);
     if is_login_locked(&ip_key) {
         warn!(
-            "Admin login blocked (brute-force lockout) for ip_prefix={}",
-            &ip_key[..8]
+            ip_prefix = %&ip_key[..8],
+            "Admin login blocked by brute-force lockout"
         );
-        return Err(AppError::RateLimited);
+        return render_admin_login_response(
+            &state,
+            jar,
+            &headers,
+            peer,
+            Some("Too many failed admin login attempts. Please wait a few minutes and try again."),
+        )
+        .await;
     }
 
     // CSRF check
@@ -229,25 +260,8 @@ pub async fn admin_login(
     let username = form.username.trim().to_string();
     let username_log = redact_login_username(&username);
     if username.is_empty() || username.len() > 64 {
-        let (jar, csrf) = ensure_admin_login_csrf(jar, &headers, Some(peer));
-        let boards = tokio::task::spawn_blocking({
-            let pool = state.db.clone();
-            move || {
-                let conn = pool.get()?;
-                db::get_all_boards(&conn)
-            }
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-        return Ok((
-            jar,
-            Html(templates::admin_login_page(
-                Some("Invalid username."),
-                &csrf,
-                &boards,
-            )),
-        )
-            .into_response());
+        return render_admin_login_response(&state, jar, &headers, peer, Some("Invalid username."))
+            .await;
     }
 
     let pool = state.db.clone();
@@ -269,33 +283,24 @@ pub async fn admin_login(
 
     match result {
         None => {
-            warn!(username = %username_log, "Failed admin login attempt");
-            let (jar, csrf) = ensure_admin_login_csrf(jar, &headers, Some(peer));
-            let boards = tokio::task::spawn_blocking({
-                let pool = state.db.clone();
-                move || {
-                    let conn = pool.get()?;
-                    db::get_all_boards(&conn)
-                }
-            })
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
             let fails = record_login_fail(&ip_key);
+            let locked_out = fails >= LOGIN_FAIL_LIMIT;
             warn!(
                 username = %username_log,
-                "Failed admin login (attempt {}/{})",
-                fails,
-                LOGIN_FAIL_LIMIT
+                ip_prefix = %&ip_key[..8],
+                attempts = fails,
+                attempt_limit = LOGIN_FAIL_LIMIT,
+                locked_out,
+                "Failed admin login"
             );
-            Ok((
+            render_admin_login_response(
+                &state,
                 jar,
-                Html(templates::admin_login_page(
-                    Some("Invalid username or password."),
-                    &csrf,
-                    &boards,
-                )),
+                &headers,
+                peer,
+                Some("Invalid username or password."),
             )
-                .into_response())
+            .await
         }
         Some(admin_id) => {
             clear_login_fails(&ip_key);
@@ -392,7 +397,7 @@ pub async fn admin_logout(
 mod tests {
     use super::*;
     use axum::{
-        body::Body,
+        body::{to_bytes, Body},
         http::{header, Request, StatusCode},
         routing::post,
         Router,
@@ -481,6 +486,45 @@ mod tests {
         assert!(!is_login_locked(&key));
 
         ADMIN_LOGIN_FAILS.remove(&key);
+    }
+
+    #[tokio::test]
+    async fn locked_out_admin_login_rerenders_login_form_with_specific_message() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let ip_key = login_ip_key("127.0.0.1");
+        ADMIN_LOGIN_FAILS.remove(&ip_key);
+        ADMIN_LOGIN_FAILS.insert(ip_key.clone(), (LOGIN_FAIL_LIMIT, login_now_secs()));
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from("username=admin&password=wrong&_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        ADMIN_LOGIN_FAILS.remove(&ip_key);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(body.contains("Too many failed admin login attempts."));
     }
 
     #[tokio::test]

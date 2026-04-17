@@ -95,6 +95,20 @@ pub fn banner_open_section(anchor: &str) -> &str {
     }
 }
 
+#[must_use]
+pub fn board_appearance_anchor(board_short: &str) -> String {
+    format!("board-appearance-{board_short}")
+}
+
+#[must_use]
+pub fn banner_admin_anchor(scope: BannerScope, board_short: Option<&str>) -> String {
+    match scope {
+        BannerScope::Global => "global-banners".to_string(),
+        BannerScope::Home => "home-banners".to_string(),
+        BannerScope::Board => board_appearance_anchor(board_short.unwrap_or_default()),
+    }
+}
+
 /// Resolve the on-disk path for a banner asset.
 ///
 /// # Errors
@@ -221,21 +235,29 @@ pub fn banner_asset_url(asset: &BannerAsset) -> String {
 #[must_use]
 pub fn banner_target_draft(target_type: BannerTargetType, target_value: &str) -> BannerTargetDraft {
     BannerTargetDraft {
-        board_value: if matches!(target_type, BannerTargetType::InternalBoard) {
-            target_value.to_string()
-        } else {
-            String::new()
-        },
-        thread_value: if matches!(target_type, BannerTargetType::InternalPath) {
-            target_value.to_string()
-        } else {
-            String::new()
-        },
-        external_url: if matches!(target_type, BannerTargetType::ExternalUrl) {
-            target_value.to_string()
-        } else {
-            String::new()
-        },
+        board_value: banner_target_value(
+            target_type,
+            BannerTargetType::InternalBoard,
+            target_value,
+        ),
+        thread_value: banner_target_value(
+            target_type,
+            BannerTargetType::InternalPath,
+            target_value,
+        ),
+        external_url: banner_target_value(target_type, BannerTargetType::ExternalUrl, target_value),
+    }
+}
+
+fn banner_target_value(
+    selected_type: BannerTargetType,
+    field_type: BannerTargetType,
+    target_value: &str,
+) -> String {
+    if selected_type == field_type {
+        target_value.to_string()
+    } else {
+        String::new()
     }
 }
 
@@ -714,8 +736,9 @@ fn count_gif_frames(bytes: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        banner_storage_path, canonicalize_banner_bytes, choose_active_banner,
-        validate_banner_restore_entry_name, validate_banner_storage_key, MAX_ANIMATED_GIF_FRAMES,
+        banner_admin_anchor, banner_open_section, banner_storage_path, banner_target_draft,
+        canonicalize_banner_bytes, choose_active_banner, validate_banner_restore_entry_name,
+        validate_banner_storage_key, MAX_ANIMATED_GIF_FRAMES,
     };
     use crate::models::{BannerAsset, BannerScope, BannerTargetType};
     use image::{codecs::gif::GifEncoder, Delay, Frame, ImageBuffer, ImageFormat, Rgba};
@@ -750,6 +773,37 @@ mod tests {
         );
         assert!(validate_banner_restore_entry_name("../evil.webp").is_err());
         assert!(validate_banner_restore_entry_name("nested/evil.webp").is_err());
+    }
+
+    #[test]
+    fn banner_admin_anchor_matches_scope() {
+        assert_eq!(
+            banner_admin_anchor(BannerScope::Global, None),
+            "global-banners"
+        );
+        assert_eq!(banner_admin_anchor(BannerScope::Home, None), "home-banners");
+        assert_eq!(
+            banner_admin_anchor(BannerScope::Board, Some("tech")),
+            "board-appearance-tech"
+        );
+        assert_eq!(banner_open_section("global-banners"), "board-banners");
+        assert_eq!(
+            banner_open_section("board-appearance-tech"),
+            "board-banners"
+        );
+    }
+
+    #[test]
+    fn banner_target_draft_only_populates_selected_field() {
+        let board = banner_target_draft(BannerTargetType::InternalBoard, "tech");
+        assert_eq!(board.board_value, "tech");
+        assert!(board.thread_value.is_empty());
+        assert!(board.external_url.is_empty());
+
+        let thread = banner_target_draft(BannerTargetType::InternalPath, "/tech/thread/42");
+        assert!(thread.board_value.is_empty());
+        assert_eq!(thread.thread_value, "/tech/thread/42");
+        assert!(thread.external_url.is_empty());
     }
 
     #[test]

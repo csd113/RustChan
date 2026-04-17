@@ -452,12 +452,12 @@ fn render_board_backup_actions(board: &Board, csrf_token: &str) -> String {
     <input type="hidden" name="_csrf" value="{csrf}">
     <input type="hidden" name="board_short" value="{short}">
     <input type="hidden" name="download_after_create" value="1">
-    <button type="submit">&#8659; download to computer /{short}/</button>
+    <button type="submit">&#8659; download /{short}/ backup</button>
   </form>
   <form method="POST" action="/admin/board/backup/create" class="board-backup-create-form" data-board="{short}">
     <input type="hidden" name="_csrf" value="{csrf}">
     <input type="hidden" name="board_short" value="{short}">
-    <button type="submit">&#128190; save to server /{short}/</button>
+    <button type="submit">&#128190; save /{short}/ backup to server</button>
   </form>
 </div>"#,
         short = escape_html(&board.short_name),

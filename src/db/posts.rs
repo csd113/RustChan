@@ -17,6 +17,16 @@ use std::collections::HashMap;
 /// Previously the magic number 3 appeared in both `claim_next_job` (WHERE attempts < 3)
 /// and `fail_job` (CASE WHEN attempts >= 3), with no guarantee they would stay in sync.
 const MAX_JOB_ATTEMPTS: i64 = 3;
+const POST_SELECT_COLUMNS: &str = "id, thread_id, board_id, name, tripcode, subject, body, \
+    body_html, ip_hash, file_path, file_name, file_size, thumb_path, mime_type, created_at, \
+    deletion_token, is_op, media_type, audio_file_path, audio_file_name, audio_file_size, \
+    audio_mime_type, edited_at, media_processing_state, media_processing_error";
+const POST_SELECT_COLUMNS_WITH_P_ALIAS: &str =
+    "p.id, p.thread_id, p.board_id, p.name, p.tripcode, p.subject, p.body, p.body_html, \
+    p.ip_hash, p.file_path, p.file_name, p.file_size, p.thumb_path, p.mime_type, p.created_at, \
+    p.deletion_token, p.is_op, p.media_type, p.audio_file_path, p.audio_file_name, \
+    p.audio_file_size, p.audio_mime_type, p.edited_at, p.media_processing_state, \
+    p.media_processing_error";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobFailureState {
@@ -92,14 +102,10 @@ pub(super) fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<Post>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at, media_processing_state, media_processing_error
-         FROM posts WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
-    )?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {POST_SELECT_COLUMNS}
+         FROM posts WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC"
+    ))?;
     let posts = stmt
         .query_map(params![thread_id], map_post)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -121,16 +127,12 @@ pub fn get_new_posts_since(
     since_id: i64,
     max_results: i64,
 ) -> Result<Vec<Post>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at, media_processing_state, media_processing_error
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {POST_SELECT_COLUMNS}
          FROM posts WHERE thread_id = ?1 AND id > ?2
          ORDER BY id ASC
-         LIMIT ?3",
-    )?;
+         LIMIT ?3"
+    ))?;
     let posts = stmt
         .query_map(params![thread_id, since_id, max_results], map_post)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -157,11 +159,7 @@ pub fn get_posts_by_ids_in_thread(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at, media_processing_state, media_processing_error
+        "SELECT {POST_SELECT_COLUMNS}
          FROM posts
          WHERE thread_id = ?1 AND id IN ({placeholders})
          ORDER BY created_at ASC, id ASC"
@@ -199,17 +197,9 @@ pub fn get_preview_posts_for_threads(
         .join(", ");
     let limit_param = thread_ids.len() + 1;
     let sql = format!(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at, media_processing_state, media_processing_error
+        "SELECT {POST_SELECT_COLUMNS}
          FROM (
-             SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                    ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                    created_at, deletion_token, is_op, media_type,
-                    audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                    edited_at, media_processing_state, media_processing_error,
+             SELECT {POST_SELECT_COLUMNS},
                     ROW_NUMBER() OVER (
                         PARTITION BY thread_id
                         ORDER BY created_at DESC, id DESC
@@ -398,14 +388,10 @@ pub(super) fn create_poll_inner(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<Post>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at, media_processing_state, media_processing_error
-         FROM posts WHERE id = ?1",
-    )?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {POST_SELECT_COLUMNS}
+         FROM posts WHERE id = ?1"
+    ))?;
     Ok(stmt.query_row(params![post_id], map_post).optional()?)
 }
 
@@ -418,17 +404,13 @@ pub fn get_post_on_board(
     board_short: &str,
     post_id: i64,
 ) -> Result<Option<Post>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT p.id, p.thread_id, p.board_id, p.name, p.tripcode, p.subject,
-                p.body, p.body_html, p.ip_hash, p.file_path, p.file_name, p.file_size,
-                p.thumb_path, p.mime_type, p.created_at, p.deletion_token, p.is_op,
-                p.media_type, p.audio_file_path, p.audio_file_name, p.audio_file_size,
-                p.audio_mime_type, p.edited_at, p.media_processing_state, p.media_processing_error
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {POST_SELECT_COLUMNS_WITH_P_ALIAS}
          FROM posts p
          JOIN boards b ON b.id = p.board_id
          WHERE p.id = ?1 AND b.short_name = ?2
-         LIMIT 1",
-    )?;
+         LIMIT 1"
+    ))?;
     Ok(stmt
         .query_row(params![post_id, board_short], map_post)
         .optional()?)

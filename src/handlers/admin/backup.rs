@@ -168,10 +168,6 @@ fn admin_xhr_error_response(error: &AppError) -> Response {
             Some((StatusCode::UNSUPPORTED_MEDIA_TYPE, message.clone()))
         }
         AppError::Conflict(message) => Some((StatusCode::CONFLICT, message.clone())),
-        AppError::RateLimited => Some((
-            StatusCode::TOO_MANY_REQUESTS,
-            "You are posting too fast. Slow down.".to_string(),
-        )),
         AppError::DbBusy => Some((
             StatusCode::SERVICE_UNAVAILABLE,
             "The server is temporarily busy. Please try again in a moment.".to_string(),

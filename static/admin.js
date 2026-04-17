@@ -409,7 +409,7 @@
       if (payload && payload.error) {
         submitHelper.setProgress(
           0,
-          submitHelper.extractError(xhr, payload, 'Restore upload failed (' + xhr.status + ')')
+          submitHelper.extractError(xhr, payload, title + ' failed (' + xhr.status + ')')
         );
         showDoneButton();
         return;
@@ -426,20 +426,20 @@
       }
       submitHelper.setProgress(
         0,
-        submitHelper.extractError(xhr, payload, 'Restore upload failed (' + xhr.status + ')')
+        submitHelper.extractError(xhr, payload, title + ' failed (' + xhr.status + ')')
       );
       showDoneButton();
     });
 
     xhr.addEventListener('error', function () {
       submitHelper.setBusy(false);
-      submitHelper.setProgress(0, 'Restore upload failed. Please try again.');
+      submitHelper.setProgress(0, title + ' failed. Please try again.');
       showDoneButton();
     });
 
     xhr.addEventListener('abort', function () {
       submitHelper.setBusy(false);
-      submitHelper.setProgress(0, 'Restore upload cancelled.');
+      submitHelper.setProgress(0, title + ' cancelled.');
       showDoneButton();
     });
 
@@ -474,7 +474,7 @@
         _stopPolling();
         if (!resp.ok && !resp.redirected) {
           submitHelper.setBusy(false);
-          submitHelper.setProgress(0, 'Server returned an error (' + resp.status + ')');
+          submitHelper.setProgress(0, title + ' failed (' + resp.status + ').');
           showDoneButton();
           return null;
         }
@@ -513,7 +513,7 @@
       .catch(function (err) {
         _stopPolling();
         submitHelper.setBusy(false);
-        submitHelper.setProgress(0, 'Error: ' + (err.message || 'backup failed'));
+        submitHelper.setProgress(0, title + ': ' + (err.message || 'request failed'));
         showDoneButton();
       });
   }

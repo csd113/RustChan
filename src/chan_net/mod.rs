@@ -83,10 +83,6 @@ impl IntoResponse for ChanError {
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg),
             AppError::UploadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg),
             AppError::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg),
-            AppError::RateLimited => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "Posting too fast.".to_string(),
-            ),
             AppError::DbBusy => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Database busy — retry shortly.".to_string(),
