@@ -393,6 +393,20 @@ mod tests {
         cursor.into_inner()
     }
 
+    fn install_admin_session(state: &crate::middleware::AppState) {
+        let conn = state.db.get().expect("db connection");
+        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
+        let admin_id =
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+        crate::db::create_session(
+            &conn,
+            "session123",
+            admin_id,
+            chrono::Utc::now().timestamp() + 3600,
+        )
+        .expect("create session");
+    }
+
     #[tokio::test]
     async fn board_restore_route_accepts_large_multipart_body_without_global_media_limit() {
         let app = admin_routes().with_state(crate::test_support::app_state());
@@ -504,6 +518,8 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .expect("refresh header");
         assert!(refresh.contains("/admin/panel?restore_error="));
+        assert!(refresh.contains("open=full-backup-restore"));
+        assert!(refresh.contains("#full-backup-restore"));
         assert!(refresh.contains("board+backup"));
 
         let body = to_bytes(response.into_body(), usize::MAX)
@@ -512,5 +528,119 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).expect("utf8 body");
         assert!(body.contains("Restore failed."));
         assert!(body.contains("/admin/panel?restore_error="));
+        assert!(body.contains("open=full-backup-restore"));
+        assert!(body.contains("#full-backup-restore"));
+    }
+
+    #[tokio::test]
+    async fn saved_full_restore_missing_backup_redirects_back_to_full_backup_section() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let app = admin_routes().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/backup/restore-saved")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(
+                        header::COOKIE,
+                        "csrf_token=csrf123; chan_admin_session=session123",
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from("filename=missing.zip&_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect location");
+        assert!(location.contains("/admin/panel?restore_error="));
+        assert!(location.contains("Backup+file+not+found."));
+        assert!(location.contains("open=full-backup-restore"));
+        assert!(location.contains("#full-backup-restore"));
+    }
+
+    #[tokio::test]
+    async fn saved_board_restore_missing_backup_redirects_back_to_board_backup_section() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let app = admin_routes().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/board/backup/restore-saved")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(
+                        header::COOKIE,
+                        "csrf_token=csrf123; chan_admin_session=session123",
+                    )
+                    .body(Body::from("filename=missing.zip&_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect location");
+        assert!(location.contains("/admin/panel?restore_error="));
+        assert!(location.contains("Backup+file+not+found."));
+        assert!(location.contains("open=board-backup-restore"));
+        assert!(location.contains("#board-backup-restore"));
+    }
+
+    #[tokio::test]
+    async fn board_restore_invalid_upload_redirects_back_to_board_backup_section() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let app = admin_routes().with_state(state);
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123")],
+            Some(("backup_file", "broken.zip", b"not-a-zip", "application/zip")),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/board/restore")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::HOST, "localhost")
+                    .header(
+                        header::COOKIE,
+                        "csrf_token=csrf123; chan_admin_session=session123",
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let refresh = response
+            .headers()
+            .get("refresh")
+            .and_then(|value| value.to_str().ok())
+            .expect("refresh header");
+        assert!(refresh.contains("/admin/panel?restore_error="));
+        assert!(refresh.contains("open=board-backup-restore"));
+        assert!(refresh.contains("#board-backup-restore"));
+        assert!(refresh.contains("Unrecognized+format"));
     }
 }

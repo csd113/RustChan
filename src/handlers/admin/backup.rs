@@ -154,6 +154,9 @@ fn is_xml_http_request(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
 }
 
+const FULL_BACKUP_RESTORE_SECTION: &str = "full-backup-restore";
+const BOARD_BACKUP_RESTORE_SECTION: &str = "board-backup-restore";
+
 fn admin_xhr_error_response(error: &AppError) -> Response {
     let handled = match error {
         AppError::NotFound(message) => Some((StatusCode::NOT_FOUND, message.clone())),
@@ -321,10 +324,6 @@ struct StreamedRestoreUpload {
     uploaded_bytes: u64,
 }
 
-fn restore_error_redirect_target(message: &str) -> String {
-    format!("/admin/panel?restore_error={}", encode_q(message))
-}
-
 fn restore_start_response(
     kind: RestoreKind,
     xhr_request: bool,
@@ -338,7 +337,7 @@ fn restore_start_response(
         .unwrap_or_else(|response_error| response_error.into_response());
     }
     redirect_page_response(
-        &restore_error_redirect_target(&error.to_string()),
+        &restore_error_redirect_target(kind, &error.to_string()),
         kind.start_failure_message(),
     )
 }
@@ -357,7 +356,7 @@ fn restore_upload_parse_response(
         .unwrap_or_else(|response_error| response_error.into_response());
     }
     redirect_page_response(
-        &restore_error_redirect_target(&message),
+        &restore_error_redirect_target(kind, &message),
         kind.upload_failure_message(),
     )
 }
@@ -367,8 +366,49 @@ fn restore_failure_response(kind: RestoreKind, xhr_request: bool, error: &AppErr
         return admin_xhr_error_response(error);
     }
     redirect_page_response(
-        &restore_error_redirect_target(&error.to_string()),
+        &restore_error_redirect_target(kind, &error.to_string()),
         kind.failure_message(),
+    )
+}
+
+impl RestoreKind {
+    const fn open_section(self) -> &'static str {
+        match self {
+            Self::Full => FULL_BACKUP_RESTORE_SECTION,
+            Self::Board => BOARD_BACKUP_RESTORE_SECTION,
+        }
+    }
+
+    const fn anchor(self) -> &'static str {
+        self.open_section()
+    }
+}
+
+fn restore_success_redirect_target(kind: RestoreKind, board_short: Option<&str>) -> String {
+    match kind {
+        RestoreKind::Full => format!(
+            "/admin/panel?restored=1&open={}#{}",
+            kind.open_section(),
+            kind.anchor()
+        ),
+        RestoreKind::Board => {
+            let board_short = board_short.expect("board restore success requires board short");
+            format!(
+                "/admin/panel?flash={}&open={}#board-backup-{}",
+                encode_q(&format!("Board /{board_short}/ restored.")),
+                kind.open_section(),
+                board_short
+            )
+        }
+    }
+}
+
+fn restore_error_redirect_target(kind: RestoreKind, message: &str) -> String {
+    format!(
+        "/admin/panel?restore_error={}&open={}#{}",
+        encode_q(message),
+        kind.open_section(),
+        kind.anchor()
     )
 }
 
@@ -2332,13 +2372,18 @@ pub async fn admin_restore(
             new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
             if xhr_request {
-                let response =
-                    crate::handlers::board::xhr_redirect_response("/admin/panel?restored=1")
-                        .unwrap_or_else(|error| error.into_response());
+                let response = crate::handlers::board::xhr_redirect_response(
+                    &restore_success_redirect_target(RestoreKind::Full, None),
+                )
+                .unwrap_or_else(|error| error.into_response());
                 return (jar.add(new_cookie), response).into_response();
             }
 
-            (jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response()
+            (
+                jar.add(new_cookie),
+                Redirect::to(&restore_success_redirect_target(RestoreKind::Full, None)),
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::error!(
@@ -2966,7 +3011,7 @@ pub async fn restore_saved_full_backup(
     // is deferred into spawn_blocking where it runs only after the session check.
     let upload_dir = CONFIG.upload_dir.clone();
 
-    let fresh_sid: String = tokio::task::spawn_blocking({
+    let restore_result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let mut live_conn = pool.get()?;
@@ -2990,7 +3035,25 @@ pub async fn restore_saved_full_backup(
         }
     })
     .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)));
+
+    let fresh_sid = match restore_result {
+        Ok(Ok(fresh_sid)) => fresh_sid,
+        Ok(Err(error)) => {
+            return Ok(Redirect::to(&restore_error_redirect_target(
+                RestoreKind::Full,
+                &error.to_string(),
+            ))
+            .into_response());
+        }
+        Err(join_error) => {
+            return Ok(Redirect::to(&restore_error_redirect_target(
+                RestoreKind::Full,
+                &join_error.to_string(),
+            ))
+            .into_response());
+        }
+    };
 
     if fresh_sid.is_empty() {
         let jar = jar.remove(Cookie::from(super::SESSION_COOKIE));
@@ -3004,7 +3067,11 @@ pub async fn restore_saved_full_backup(
     new_cookie.set_secure(super::should_set_secure_cookie(&headers, Some(peer)));
     // Set Max-Age to match normal login behaviour.
     new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
-    Ok((jar.add(new_cookie), Redirect::to("/admin/panel?restored=1")).into_response())
+    Ok((
+        jar.add(new_cookie),
+        Redirect::to(&restore_success_redirect_target(RestoreKind::Full, None)),
+    )
+        .into_response())
 }
 
 enum ExtractBoardFromFullBackupOutcome {
@@ -3028,7 +3095,7 @@ pub async fn extract_board_from_full_backup(
     let action = form.action.clone();
     let upload_dir = CONFIG.upload_dir.clone();
 
-    let outcome = tokio::task::spawn_blocking({
+    let outcome_result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<ExtractBoardFromFullBackupOutcome> {
             let mut conn = pool.get()?;
@@ -3087,7 +3154,25 @@ pub async fn extract_board_from_full_backup(
         }
     })
     .await
-    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)));
+
+    let outcome = match outcome_result {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(error)) => {
+            return Ok(Redirect::to(&restore_error_redirect_target(
+                RestoreKind::Full,
+                &error.to_string(),
+            ))
+            .into_response());
+        }
+        Err(join_error) => {
+            return Ok(Redirect::to(&restore_error_redirect_target(
+                RestoreKind::Full,
+                &join_error.to_string(),
+            ))
+            .into_response());
+        }
+    };
 
     match outcome {
         ExtractBoardFromFullBackupOutcome::Download { filename } => {
@@ -3102,7 +3187,7 @@ pub async fn extract_board_from_full_backup(
             Ok(super::admin_panel_redirect_anchor_open(
                 &format!("Board /{board_short}/ restored."),
                 &format!("board-backup-{board_short}"),
-                "board-backup-restore",
+                BOARD_BACKUP_RESTORE_SECTION,
             )
             .into_response())
         }
@@ -3166,17 +3251,19 @@ pub async fn restore_saved_board_backup(
         Ok(Ok(board_short)) => Ok(super::admin_panel_redirect_anchor_open(
             &format!("Board /{board_short}/ restored."),
             &format!("board-backup-{board_short}"),
-            "board-backup-restore",
+            BOARD_BACKUP_RESTORE_SECTION,
         )
         .into_response()),
-        Ok(Err(app_err)) => {
-            let msg = encode_q(&app_err.to_string());
-            Ok(Redirect::to(&format!("/admin/panel?restore_error={msg}")).into_response())
-        }
-        Err(join_err) => {
-            let msg = encode_q(&join_err.to_string());
-            Ok(Redirect::to(&format!("/admin/panel?restore_error={msg}")).into_response())
-        }
+        Ok(Err(app_err)) => Ok(Redirect::to(&restore_error_redirect_target(
+            RestoreKind::Board,
+            &app_err.to_string(),
+        ))
+        .into_response()),
+        Err(join_err) => Ok(Redirect::to(&restore_error_redirect_target(
+            RestoreKind::Board,
+            &join_err.to_string(),
+        ))
+        .into_response()),
     }
 }
 
@@ -3431,10 +3518,8 @@ pub async fn board_restore(
 
     match result {
         Ok(board_short) => {
-            let redirect_url = format!(
-                "/admin/panel?flash={}&open=board-backup-restore#board-backup-{board_short}",
-                encode_q(&format!("Board /{board_short}/ restored."))
-            );
+            let redirect_url =
+                restore_success_redirect_target(RestoreKind::Board, Some(&board_short));
             if xhr_request {
                 return crate::handlers::board::xhr_redirect_response(&redirect_url)
                     .unwrap_or_else(|error| error.into_response());
@@ -3559,6 +3644,26 @@ mod tests {
         .expect("utf8 body");
         assert!(body.contains("Upload parsing failed"));
         assert!(body.contains("missing multipart field"));
+    }
+
+    #[test]
+    fn full_restore_success_redirect_target_reopens_full_backup_section() {
+        let target = super::restore_success_redirect_target(RestoreKind::Full, None);
+
+        assert_eq!(
+            target,
+            "/admin/panel?restored=1&open=full-backup-restore#full-backup-restore"
+        );
+    }
+
+    #[test]
+    fn board_restore_success_redirect_target_keeps_board_anchor() {
+        let target = super::restore_success_redirect_target(RestoreKind::Board, Some("tech"));
+
+        assert_eq!(
+            target,
+            "/admin/panel?flash=Board+%2Ftech%2F+restored.&open=board-backup-restore#board-backup-tech"
+        );
     }
 
     #[test]
