@@ -182,17 +182,14 @@ impl JobQueue {
 
     /// Number of jobs currently in "pending" state (not yet started).
     /// Used by the terminal stats display.
-    #[allow(dead_code)]
     pub fn pending_count(&self) -> i64 {
         i64::try_from(self.pending_jobs.load(Ordering::Relaxed)).unwrap_or(i64::MAX)
     }
 
-    #[allow(dead_code)]
     pub fn dropped_count(&self) -> u64 {
         self.dropped_jobs.load(Ordering::Relaxed)
     }
 
-    #[allow(dead_code)]
     pub fn active_video_count(&self) -> u64 {
         self.active_video_jobs.load(Ordering::Relaxed)
     }

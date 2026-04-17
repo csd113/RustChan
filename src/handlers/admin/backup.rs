@@ -180,18 +180,6 @@ fn admin_xhr_error_response(error: &AppError) -> Response {
             tracing::error!("Internal admin restore XHR error: {:?}", error);
             None
         }
-        AppError::Api {
-            status,
-            detail,
-            endpoint,
-        } => {
-            tracing::error!(
-                status,
-                endpoint = endpoint.as_deref().unwrap_or("unknown"),
-                "API error during admin restore XHR request: {detail}",
-            );
-            None
-        }
         AppError::Tls(message) => {
             tracing::error!("TLS admin restore XHR error: {message}");
             None
@@ -205,7 +193,6 @@ fn admin_xhr_error_response(error: &AppError) -> Response {
 
     let (status, message) = match error {
         AppError::Internal(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
-        AppError::Api { detail, .. } => (StatusCode::BAD_GATEWAY, detail.clone()),
         AppError::Tls(message) => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,

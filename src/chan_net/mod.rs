@@ -98,21 +98,6 @@ impl IntoResponse for ChanError {
                     "An internal error occurred.".to_string(),
                 )
             }
-            AppError::Api {
-                status,
-                detail,
-                endpoint,
-            } => {
-                tracing::error!(
-                    status,
-                    endpoint = endpoint.as_deref().unwrap_or("unknown"),
-                    "ChanNet API error: {detail}",
-                );
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("API error {status}: {detail}"),
-                )
-            }
             AppError::Tls(msg) => {
                 tracing::error!("ChanNet TLS error: {msg}");
                 (StatusCode::INTERNAL_SERVER_ERROR, msg)

@@ -36,8 +36,8 @@ impl MediaType {
 
     /// Infer `MediaType` from a file extension (lowercase, no dot).
     /// Used during the backfill migration for pre-existing posts.
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)]
     pub fn from_ext(ext: &str) -> Self {
         match ext {
             "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "svg" => Self::Image,
@@ -367,7 +367,6 @@ pub struct Post {
 
 /// Admin user record
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 pub struct AdminUser {
     pub id: i64,
     pub username: String,
@@ -378,7 +377,6 @@ pub struct AdminUser {
 
 /// Active admin session
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 pub struct AdminSession {
     pub id: String,
     pub admin_id: i64,
@@ -393,7 +391,6 @@ pub struct Ban {
     pub ip_hash: String,
     pub reason: Option<String>,
     pub expires_at: Option<i64>,
-    #[allow(dead_code)]
     pub created_at: i64,
 }
 
@@ -424,7 +421,6 @@ pub struct ThreadSummary {
 
 /// A poll attached to a thread's OP
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 pub struct Poll {
     pub id: i64,
     pub thread_id: i64,
@@ -435,7 +431,6 @@ pub struct Poll {
 
 /// A single poll option with live vote count (joined from `poll_votes`)
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 pub struct PollOption {
     pub id: i64,
     pub poll_id: i64,
@@ -551,7 +546,6 @@ pub struct SiteStats {
 
 /// A user-filed report against a post
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 pub struct Report {
     pub id: i64,
     pub post_id: i64,
@@ -579,7 +573,6 @@ pub struct ReportWithContext {
 
 /// A single entry in the moderation action log
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 pub struct ModLogEntry {
     pub id: i64,
     pub admin_id: i64,
@@ -627,7 +620,6 @@ pub struct BanAppeal {
     pub id: i64,
     pub ip_hash: String,
     pub reason: String,
-    #[allow(dead_code)]
     pub status: String, // "open" | "dismissed"
     pub created_at: i64,
 }

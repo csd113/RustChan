@@ -334,16 +334,6 @@ pub fn detect_tor(
     Some(handle)
 }
 
-/// Previously killed the tor subprocess.
-/// The [`TorClient`] is owned by the `tokio::spawn` task; dropping the runtime
-/// closes all circuits cleanly. This function is a no-op and should not be called.
-#[deprecated(
-    since = "1.1.0",
-    note = "Arti lifecycle is managed by the runtime. Dropping TorClient closes circuits cleanly. This fn is a no-op."
-)]
-#[allow(dead_code)]
-pub const fn kill_tor() {}
-
 // ─── Core Arti task ───────────────────────────────────────────────────────────
 
 async fn run_arti(

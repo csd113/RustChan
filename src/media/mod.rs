@@ -24,9 +24,6 @@ pub struct ProcessedMedia {
     pub mime_type: String,
     /// `true` when the file was converted to a different format.
     pub was_converted: bool,
-    /// Size of the original input in bytes.
-    #[allow(dead_code)]
-    pub original_size: u64,
     /// Size of the final stored file in bytes.
     pub final_size: u64,
 }
@@ -72,11 +69,9 @@ impl MediaProcessor {
                  Install ffmpeg to enable optimal format conversion."
             );
         }
-        let webp_available = available && ffmpeg::check_webp_encoder();
-        Self {
-            ffmpeg_available: available,
-            ffmpeg_webp_available: webp_available,
-        }
+        let mut processor = Self::new_with_ffmpeg(available);
+        processor.ffmpeg_webp_available = available && ffmpeg::check_webp_encoder();
+        processor
     }
 
     /// Create a `MediaProcessor` with pre-detected capability flags.
@@ -95,7 +90,6 @@ impl MediaProcessor {
     /// `ffmpeg_webp_available` defaults to the same value as `ffmpeg_available`.
     /// Prefer [`new_with_ffmpeg_caps`](Self::new_with_ffmpeg_caps) in handlers.
     #[must_use]
-    #[allow(dead_code)]
     pub const fn new_with_ffmpeg(ffmpeg_available: bool) -> Self {
         Self {
             ffmpeg_available,
@@ -169,13 +163,12 @@ impl MediaProcessor {
         // generate_thumbnail returns the actual path written, which may differ
         // from thumb_path when a video thumbnail falls back to an SVG placeholder
         // (the pre-selected .webp extension would mismatch the SVG content).
-        let actual_thumb_path = match thumbnail::generate_thumbnail(
+        let actual_thumb_path = match self.generate_thumbnail(
             &conv.final_path,
             conv.final_mime,
-            &thumb_path,
+            thumb_dir,
+            file_stem,
             thumb_max,
-            self.ffmpeg_available,
-            self.ffmpeg_webp_available,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -192,7 +185,6 @@ impl MediaProcessor {
             thumbnail_path: actual_thumb_path,
             mime_type: conv.final_mime.to_string(),
             was_converted: conv.was_converted,
-            original_size,
             final_size: conv.final_size,
         })
     }
@@ -208,7 +200,6 @@ impl MediaProcessor {
     /// # Errors
     /// Returns an error only if both ffmpeg and the image-crate fallback fail
     /// AND writing the placeholder also fails.
-    #[allow(dead_code)]
     pub fn generate_thumbnail(
         self,
         input_path: &Path,

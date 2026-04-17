@@ -1067,7 +1067,6 @@ pub fn fail_job(conn: &rusqlite::Connection, id: i64, error: &str) -> Result<Job
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-#[allow(dead_code)]
 pub fn pending_job_count(conn: &rusqlite::Connection) -> Result<i64> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM background_jobs WHERE status = 'pending'",

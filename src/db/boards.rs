@@ -260,7 +260,7 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn create_board(
     conn: &rusqlite::Connection,
     short: &str,

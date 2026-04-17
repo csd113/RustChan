@@ -63,19 +63,6 @@ pub enum AppError {
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
 
-    /// Structured error for future API integration.
-    ///
-    /// Carries the HTTP status returned by the remote API, a human-readable
-    /// detail string, and an optional endpoint label so log lines are
-    /// self-describing without having to cross-reference request traces.
-    #[error("API error {status} at {endpoint:?}: {detail}")]
-    #[allow(dead_code)]
-    Api {
-        status: u16,
-        detail: String,
-        endpoint: Option<String>,
-    },
-
     /// TLS initialisation or certificate error (startup-time only).
     #[error("TLS error: {0}")]
     Tls(String),
@@ -150,22 +137,6 @@ impl IntoResponse for AppError {
                     "An internal error occurred.".to_string(),
                 )
             }
-            Self::Api {
-                status,
-                detail,
-                endpoint,
-            } => {
-                error!(
-                    status,
-                    endpoint = endpoint.as_deref().unwrap_or("unknown"),
-                    "API error: {detail}",
-                );
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "An upstream service returned an unexpected response. Please try again later."
-                        .to_string(),
-                )
-            }
             Self::Tls(msg) => {
                 error!("TLS error: {msg}");
                 (
@@ -187,22 +158,6 @@ mod tests {
     use super::AppError;
     use axum::body::to_bytes;
     use axum::response::IntoResponse as _;
-
-    #[test]
-    fn api_errors_hide_upstream_details_from_users() {
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        let response = AppError::Api {
-            status: 502,
-            detail: "upstream exploded".to_string(),
-            endpoint: Some("test".to_string()),
-        }
-        .into_response();
-        let body = runtime
-            .block_on(to_bytes(response.into_body(), usize::MAX))
-            .expect("body bytes");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
-        assert!(!body.contains("upstream exploded"));
-    }
 
     #[test]
     fn tls_errors_hide_internal_messages_from_users() {

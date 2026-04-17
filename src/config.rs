@@ -379,7 +379,6 @@ pub struct Config {
     pub initial_default_theme: String,
     /// Built-in themes enabled by default when the site seeds its theme catalog.
     pub initial_enabled_builtin_themes: Vec<String>,
-    #[allow(dead_code)] // read by CLI subcommands and printed at startup
     pub port: u16,
     pub max_image_size: usize, // bytes
     pub max_video_size: usize, // bytes
@@ -410,10 +409,6 @@ pub struct Config {
     pub database_path: String,
     pub upload_dir: String,
     pub thumb_size: u32,
-    #[allow(dead_code)] // used as default when creating boards via CLI/admin
-    pub default_bump_limit: u32,
-    #[allow(dead_code)] // used as default when creating boards via CLI/admin
-    pub max_threads_per_board: u32,
     /// Maximum GET requests per IP per `rate_limit_window`.
     pub rate_limit_gets: u32,
     pub rate_limit_window: u64,
@@ -619,8 +614,6 @@ impl Config {
             database_path: env_str("CHAN_DB", &default_db),
             upload_dir: env_str("CHAN_UPLOADS", &default_uploads),
             thumb_size: env_parse("CHAN_THUMB_SIZE", 250),
-            default_bump_limit: env_parse("CHAN_BUMP_LIMIT", 500),
-            max_threads_per_board: env_parse("CHAN_MAX_THREADS", 150),
             rate_limit_gets: env_parse("CHAN_RATE_GETS", 60),
             rate_limit_window: env_parse("CHAN_RATE_WINDOW", 60),
             cookie_secret,

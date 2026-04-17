@@ -179,21 +179,6 @@ pub(crate) fn xhr_post_error_response(error: AppError) -> Result<Response> {
                 "An internal error occurred.",
             )
         }
-        AppError::Api {
-            status,
-            detail,
-            endpoint,
-        } => {
-            tracing::error!(
-                status,
-                endpoint = endpoint.as_deref().unwrap_or("unknown"),
-                "API error during XHR post submission: {detail}",
-            );
-            xhr_error_response(
-                StatusCode::BAD_GATEWAY,
-                "An upstream service returned an unexpected response. Please try again later.",
-            )
-        }
         AppError::Tls(message) => {
             tracing::error!("TLS error during XHR post submission: {message}");
             xhr_error_response(
@@ -2004,7 +1989,6 @@ pub async fn update_thread_preference(
 #[derive(serde::Deserialize)]
 pub struct ReportForm {
     pub post_id: i64,
-    #[allow(dead_code)]
     pub thread_id: i64,
     pub board: String,
     pub reason: Option<String>,
@@ -2065,6 +2049,11 @@ pub async fn file_report(
             if post.board_id != board.id {
                 return Err(AppError::BadRequest(
                     "Post does not belong to this board.".into(),
+                ));
+            }
+            if post.thread_id != form.thread_id {
+                return Err(AppError::BadRequest(
+                    "Reported thread does not match the selected post.".into(),
                 ));
             }
             // Use the DB's thread_id for the redirect — not the user-submitted value.
