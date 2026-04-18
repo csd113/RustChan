@@ -16,6 +16,7 @@
 
 #[cfg(feature = "tls-acme")]
 pub mod acme;
+#[cfg(feature = "tls-self-signed")]
 pub mod self_signed;
 
 use std::{path::Path, sync::Arc};
@@ -94,8 +95,19 @@ pub fn build_acceptor(cfg: &TlsConfig, data_dir: &Path) -> Result<Option<Accepto
         }
     }
     tracing::info!(target: "tls", "TLS: no cert configured — generating self-signed dev certificate");
-    let (acceptor, server_cfg) = self_signed::generate_or_load(data_dir)?;
-    Ok(Some(Acceptor::Static(acceptor, server_cfg)))
+    #[cfg(feature = "tls-self-signed")]
+    {
+        let (acceptor, server_cfg) = self_signed::generate_or_load(data_dir)?;
+        Ok(Some(Acceptor::Static(acceptor, server_cfg)))
+    }
+    #[cfg(not(feature = "tls-self-signed"))]
+    {
+        Err(AppError::Tls(
+            "TLS is enabled but no certificate source is available. Configure [tls.manual_cert] \
+             or rebuild with a certificate feature such as `tls-self-signed` or `tls-acme`."
+                .to_string(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
