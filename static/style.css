@@ -1602,12 +1602,6 @@ html:not([data-theme]) .poster-id-btn {
     max-height: 80px;
   }
 
-  .embed-placeholder-thumb {
-    width: 100%;
-    max-width: 100%;
-    max-height: min(44vw, 220px);
-    object-fit: cover;
-  }
 }
 
 @media (max-width: 700px) {
@@ -3621,6 +3615,15 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   color: var(--text-dim);
   font-size: 0.82rem;
   border: 1px solid var(--border);
+}
+
+@media (max-width: 700px) {
+  .embed-placeholder-thumb {
+    width: 100%;
+    max-width: 100%;
+    max-height: min(44vw, 220px);
+    object-fit: cover;
+  }
 }
 
 .embed-iframe {

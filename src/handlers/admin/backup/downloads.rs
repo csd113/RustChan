@@ -1,0 +1,284 @@
+use super::*;
+
+pub(super) fn temp_board_download_token_path(filename: &str) -> PathBuf {
+    temp_board_download_dir().join(format!("{filename}.token"))
+}
+
+pub fn write_temp_board_download_token(filename: &str, token: &str) -> Result<()> {
+    std::fs::create_dir_all(temp_board_download_dir()).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Create temp board backup dir: {error}"))
+    })?;
+    std::fs::write(temp_board_download_token_path(filename), token).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Write temp board download token: {error}"))
+    })?;
+    Ok(())
+}
+
+pub(super) fn consume_temp_board_download_token(filename: &str, token: &str) -> Result<bool> {
+    let token_path = temp_board_download_token_path(filename);
+    let stored = match std::fs::read_to_string(&token_path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "Read temp board download token: {error}"
+            )));
+        }
+    };
+    if stored.trim() != token {
+        return Ok(false);
+    }
+    std::fs::remove_file(token_path).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Remove temp board download token: {error}"))
+    })?;
+    Ok(true)
+}
+
+pub(super) fn prune_stale_temp_board_downloads() {
+    let dir = temp_board_download_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let cutoff = std::time::Duration::from_secs(60 * 60);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_zip = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+        if !is_zip {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(age) = modified.elapsed() else {
+            continue;
+        };
+        if age >= cutoff {
+            let _ = std::fs::remove_file(path);
+            if let Some(filename) = entry.file_name().to_str() {
+                let _ = std::fs::remove_file(temp_board_download_token_path(filename));
+            }
+        }
+    }
+}
+
+struct TempFileStream {
+    inner: Option<ReaderStream<tokio::fs::File>>,
+    cleanup_path: Option<PathBuf>,
+}
+
+impl TempFileStream {
+    fn new(file: tokio::fs::File, cleanup_path: PathBuf) -> Self {
+        Self {
+            inner: Some(ReaderStream::new(file)),
+            cleanup_path: Some(cleanup_path),
+        }
+    }
+}
+
+impl Stream for TempFileStream {
+    type Item = std::result::Result<axum::body::Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner
+            .as_mut()
+            .map_or_else(|| Poll::Ready(None), |inner| Pin::new(inner).poll_next(cx))
+    }
+}
+
+impl Drop for TempFileStream {
+    fn drop(&mut self) {
+        let _ = self.inner.take();
+        if let Some(path) = self.cleanup_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+pub struct DownloadBackupQuery {
+    cleanup: Option<String>,
+    token: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct DeleteBackupForm {
+    kind: String,
+    filename: String,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+pub async fn download_backup(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<DownloadBackupQuery>,
+    axum::extract::Path((kind, filename)): axum::extract::Path<(String, String)>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+
+    let safe_filename = sanitize_backup_zip_filename(&filename)?;
+
+    match kind.as_str() {
+        "temp-board" => {
+            prune_stale_temp_board_downloads();
+            if let Some(token) = query.token.as_deref() {
+                if !consume_temp_board_download_token(&safe_filename, token)? {
+                    return Err(AppError::Forbidden(
+                        "Invalid or expired download token.".into(),
+                    ));
+                }
+            } else {
+                tokio::task::spawn_blocking({
+                    let pool = state.db.clone();
+                    move || -> Result<()> {
+                        let conn = pool.get()?;
+                        super::require_admin_session_sid(&conn, session_id.as_deref())?;
+                        Ok(())
+                    }
+                })
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+            }
+        }
+        "full" | "board" => {
+            tokio::task::spawn_blocking({
+                let pool = state.db.clone();
+                move || -> Result<()> {
+                    let conn = pool.get()?;
+                    super::require_admin_session_sid(&conn, session_id.as_deref())?;
+                    Ok(())
+                }
+            })
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+        }
+        _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
+    }
+
+    let backup_dir = match kind.as_str() {
+        "full" => full_backup_dir(),
+        "board" => board_backup_dir(),
+        "temp-board" => temp_board_download_dir(),
+        _ => unreachable!("validated above"),
+    };
+
+    let path = backup_dir.join(&safe_filename);
+
+    let file_size = tokio::fs::metadata(&path)
+        .await
+        .map_err(|_| AppError::NotFound("Backup file not found.".into()))?
+        .len();
+
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
+    let cleanup_temp = kind == "temp-board" && query.cleanup.as_deref() == Some("1");
+    let stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<axum::body::Bytes, std::io::Error>> + Send>,
+    > = if cleanup_temp {
+        Box::pin(TempFileStream::new(file, path.clone()))
+    } else {
+        Box::pin(ReaderStream::new(file))
+    };
+    let body = axum::body::Body::from_stream(stream);
+
+    let disposition = format!("attachment; filename=\"{safe_filename}\"");
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::CONTENT_LENGTH, file_size.to_string()),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+pub async fn backup_progress_json(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let p = &state.backup_progress;
+    let json = format!(
+        r#"{{"phase":{},"files_done":{},"files_total":{},"bytes_done":{},"bytes_total":{}}}"#,
+        p.phase.load(Ordering::Relaxed),
+        p.files_done.load(Ordering::Relaxed),
+        p.files_total.load(Ordering::Relaxed),
+        p.bytes_done.load(Ordering::Relaxed),
+        p.bytes_total.load(Ordering::Relaxed),
+    );
+
+    Ok((
+        [(header::CONTENT_TYPE, "application/json".to_string())],
+        json,
+    )
+        .into_response())
+}
+
+pub async fn delete_backup(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<DeleteBackupForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+
+    let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
+
+    let backup_dir = match form.kind.as_str() {
+        "full" => full_backup_dir(),
+        "board" => board_backup_dir(),
+        _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
+    };
+    let backup_kind = match form.kind.as_str() {
+        "full" => BackupListKind::Full,
+        "board" => BackupListKind::Board,
+        _ => unreachable!(),
+    };
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+
+            let path = backup_dir.join(&safe_filename);
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {e}")))?;
+                invalidate_backup_list_cache(&backup_dir, backup_kind);
+                tracing::info!(target: "admin", filename = %safe_filename, "Backup file deleted");
+            }
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok(Redirect::to("/admin/panel?backup_deleted=1").into_response())
+}

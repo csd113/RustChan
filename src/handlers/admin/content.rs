@@ -112,14 +112,7 @@ pub struct ReorderBoardForm {
 }
 
 fn safe_return_to(path: Option<&str>) -> &str {
-    let Some(path) = path else {
-        return "/admin/panel";
-    };
-    if path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\") {
-        path
-    } else {
-        "/admin/panel"
-    }
+    crate::utils::redirect::safe_internal_path_or(path, "/admin/panel")
 }
 
 pub async fn delete_board(

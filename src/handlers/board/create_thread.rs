@@ -1,0 +1,170 @@
+use super::*;
+
+// ─── POST /:board/ — create new thread ───────────────────────────────────────
+
+#[allow(clippy::too_many_lines)]
+pub async fn create_thread(
+    State(state): State<AppState>,
+    Path(board_short): Path<String>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
+    jar: CookieJar,
+    req_headers: HeaderMap,
+    multipart: Multipart,
+) -> Result<Response> {
+    let current_theme = current_theme_from_jar(&jar);
+    let xhr_request = is_xml_http_request(&req_headers);
+    let admin_session_id = jar
+        .get(ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
+    match board_access_preflight(
+        &state,
+        &board_short,
+        admin_session_id.clone(),
+        access_cookie,
+        BoardAccessRequirement::Post,
+        format!("/{board_short}"),
+    )
+    .await?
+    {
+        BoardAccessDecision::Allowed(_) => {}
+        BoardAccessDecision::Denied(denial) => {
+            let redirect_to = unlock_redirect_url(&board_short, &denial.return_to);
+            return Ok(Redirect::to(&redirect_to).into_response());
+        }
+    }
+
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    let form = parse_post_multipart(multipart, csrf_cookie.as_deref()).await?;
+
+    if !form.csrf_verified {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+
+    let post_form_state = crate::templates::forms::PostFormState {
+        name: form.name.clone(),
+        subject: form.subject.clone(),
+        body: form.body.clone(),
+        deletion_token: form.deletion_token.clone(),
+        sage: form.sage,
+    };
+
+    // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
+    let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
+
+    // Clones kept outside the closure so we can re-render the board page inline on error.
+    let admin_session_err = admin_session_id.clone();
+    let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
+
+    let board_short_err = board_short.clone();
+    let identity_key = identity_key(&client_ip, &jar);
+    let result = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let job_queue = state.job_queue.clone();
+        let ffmpeg_available = state.ffmpeg_available;
+        let ffmpeg_webp_available = state.ffmpeg_webp_available;
+        move || -> Result<String> {
+            let conn = pool.get()?;
+            Ok(posting::submit_post(
+                &conn,
+                &job_queue,
+                posting::SubmitPostCommand {
+                    mode: posting::SubmitPostMode::NewThread {
+                        subject: form.subject,
+                        poll_question: form.poll_question,
+                        poll_options: form.poll_options,
+                        poll_duration_secs: form.poll_duration_secs,
+                    },
+                    board_short,
+                    identity_key,
+                    cookie_secret: CONFIG.cookie_secret.clone(),
+                    admin_session_id,
+                    ban_csrf_token,
+                    submission_token: form.submission_token,
+                    name: form.name,
+                    body: form.body,
+                    deletion_token: form.deletion_token,
+                    pow_nonce: form.pow_nonce,
+                    image_file_data: form.image_file,
+                    file_data: form.file,
+                    audio_file_data: form.audio_file,
+                    upload_dir: CONFIG.upload_dir.clone(),
+                    thumb_size: CONFIG.thumb_size,
+                    max_image_size: CONFIG.max_image_size,
+                    max_video_size: CONFIG.max_video_size,
+                    max_audio_size: CONFIG.max_audio_size,
+                    ffmpeg_available,
+                    ffmpeg_webp_available,
+                },
+            )?
+            .redirect_url)
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+
+    // BadRequest → re-render the board page with an inline error banner so the
+    // user sees the message in context without being sent to a separate error page.
+    let redirect_url = match result {
+        Ok(url) => url,
+        Err(AppError::BadRequest(msg)) => {
+            if xhr_request {
+                return xhr_handled_error_response(StatusCode::UNPROCESSABLE_ENTITY, &msg);
+            }
+            let board_short_render = board_short_err.clone();
+            let pool = state.db.clone();
+            let current_theme = current_theme.clone();
+            let html = tokio::task::spawn_blocking(move || -> Result<String> {
+                let conn = pool.get()?;
+                let page_data = render::load_board_page_data(
+                    &conn,
+                    &board_short_render,
+                    1,
+                    THREADS_PER_PAGE,
+                    PREVIEW_REPLIES,
+                    admin_session_err.as_deref(),
+                )?;
+                let banner_selection = crate::banner::resolve_board_banner(
+                    &conn,
+                    &page_data.board,
+                    crate::models::BannerPlacement::Index,
+                    &format!("/{}", board_short_render),
+                )?;
+                let banner_html = crate::banner::render_banner_html(
+                    &banner_selection,
+                    "board-banner-slot",
+                    "board-banner-image",
+                );
+                Ok(render::render_board_page(
+                    &page_data,
+                    &csrf_for_error,
+                    Some(&msg),
+                    Some(&post_form_state),
+                    &banner_html,
+                    current_theme.as_deref(),
+                    true,
+                ))
+            })
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+            let mut resp = Html(html).into_response();
+            *resp.status_mut() = axum::http::StatusCode::UNPROCESSABLE_ENTITY;
+            return Ok(resp);
+        }
+        Err(error) => {
+            if xhr_request {
+                return xhr_post_error_response(error);
+            }
+            return Err(error);
+        }
+    };
+
+    if xhr_request {
+        return xhr_redirect_response(&redirect_url);
+    }
+
+    Ok(Redirect::to(&redirect_url).into_response())
+}
+
+// ─── GET /:board/catalog ──────────────────────────────────────────────────────

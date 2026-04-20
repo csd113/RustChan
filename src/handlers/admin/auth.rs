@@ -342,7 +342,7 @@ pub async fn admin_login(
                 let bootstrap = super::create_admin_session_bootstrap(cookie.value());
                 Redirect::to(&format!(
                     "/admin/panel?bootstrap={}",
-                    super::encode_query_component(&bootstrap)
+                    crate::utils::redirect::encode_query_component(&bootstrap)
                 ))
             };
             Ok((jar.add(cookie), redirect).into_response())
@@ -375,21 +375,8 @@ pub async fn admin_logout(
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
     }
     let jar = jar.remove(Cookie::from(super::SESSION_COOKIE));
-    // Redirect back to the page where logout was triggered, or fall back to login.
-    // Reject backslash (and its percent-encoded form %5C) in
-    // addition to the existing checks.  On some browsers /\\evil.com and
-    // /%5Cevil.com are treated as protocol-relative redirects to evil.com.
-    let destination = form
-        .return_to
-        .as_deref()
-        .filter(|s| {
-            s.starts_with('/')
-                && !s.contains("//")
-                && !s.contains("..")
-                && !s.contains('\\')
-                && !s.to_ascii_lowercase().contains("%5c")
-        })
-        .unwrap_or("/admin");
+    let destination =
+        crate::utils::redirect::strict_safe_internal_path_or(form.return_to.as_deref(), "/admin");
     Ok((jar, Redirect::to(destination)).into_response())
 }
 

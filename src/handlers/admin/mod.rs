@@ -54,6 +54,7 @@ use axum_extra::extract::cookie::CookieJar;
 use axum_extra::extract::cookie::SameSite;
 use dashmap::DashMap;
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::IpAddr;
 use std::net::SocketAddr;
@@ -166,22 +167,7 @@ fn is_loopback_alias(host: &str) -> bool {
     host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
-fn encode_query_component(input: &str) -> String {
-    let mut encoded = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(char::from(byte));
-            }
-            b' ' => encoded.push_str("%20"),
-            _ => {
-                use std::fmt::Write as _;
-                let _ = write!(encoded, "%{byte:02X}");
-            }
-        }
-    }
-    encoded
-}
+pub(super) use crate::utils::redirect::encode_query_component;
 
 pub(super) fn should_set_secure_cookie(headers: &HeaderMap, peer: Option<SocketAddr>) -> bool {
     if !CONFIG.https_cookies {
@@ -252,28 +238,73 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
 fn admin_panel_redirect_with_status(
     message: &str,
     is_error: bool,
-    anchor: Option<&str>,
-    open_section: Option<&str>,
+    target: AdminPanelTarget<'_>,
 ) -> Redirect {
     let key = if is_error { "flash_error" } else { "flash" };
     let mut url = format!("/admin/panel?{key}={}", encode_query_component(message));
-    if let Some(section) = open_section.filter(|value| !value.is_empty()) {
+    if let Some(section) = target.open_section_value() {
         url.push_str("&open=");
         url.push_str(&encode_query_component(section));
     }
-    if let Some(anchor) = anchor.filter(|value| !value.is_empty()) {
+    if let Some(anchor) = target.anchor_value() {
         url.push('#');
         url.push_str(anchor);
     }
     Redirect::to(&url)
 }
 
+#[derive(Clone, Debug, Default)]
+pub(super) struct AdminPanelTarget<'a> {
+    anchor: Option<Cow<'a, str>>,
+    open_section: Option<Cow<'a, str>>,
+}
+
+impl<'a> AdminPanelTarget<'a> {
+    pub(super) const fn none() -> Self {
+        Self {
+            anchor: None,
+            open_section: None,
+        }
+    }
+
+    pub(super) fn anchor(anchor: &'a str) -> Self {
+        Self {
+            anchor: Some(Cow::Borrowed(anchor)),
+            open_section: None,
+        }
+    }
+
+    pub(super) fn anchor_open(anchor: &'a str, open_section: &'a str) -> Self {
+        Self {
+            anchor: Some(Cow::Borrowed(anchor)),
+            open_section: Some(Cow::Borrowed(open_section)),
+        }
+    }
+
+    pub(super) fn owned_anchor_open(anchor: String, open_section: &'a str) -> Self {
+        Self {
+            anchor: Some(Cow::Owned(anchor)),
+            open_section: Some(Cow::Borrowed(open_section)),
+        }
+    }
+
+    pub(super) fn anchor_value(&self) -> Option<&str> {
+        self.anchor.as_deref().filter(|value| !value.is_empty())
+    }
+
+    pub(super) fn open_section_value(&self) -> Option<&str> {
+        self.open_section
+            .as_deref()
+            .filter(|value| !value.is_empty())
+    }
+}
+
 pub(super) fn admin_panel_redirect(message: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, false, None, None)
+    admin_panel_redirect_with_status(message, false, AdminPanelTarget::none())
 }
 
 pub(super) fn admin_panel_redirect_anchor(message: &str, anchor: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, false, Some(anchor), None)
+    admin_panel_redirect_with_status(message, false, AdminPanelTarget::anchor(anchor))
 }
 
 pub(super) fn admin_panel_redirect_anchor_open(
@@ -281,11 +312,15 @@ pub(super) fn admin_panel_redirect_anchor_open(
     anchor: &str,
     open_section: &str,
 ) -> Redirect {
-    admin_panel_redirect_with_status(message, false, Some(anchor), Some(open_section))
+    admin_panel_redirect_with_status(
+        message,
+        false,
+        AdminPanelTarget::anchor_open(anchor, open_section),
+    )
 }
 
 pub(super) fn admin_panel_error_redirect_anchor(message: &str, anchor: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, true, Some(anchor), None)
+    admin_panel_redirect_with_status(message, true, AdminPanelTarget::anchor(anchor))
 }
 
 pub(super) fn admin_panel_error_redirect_anchor_open(
@@ -293,7 +328,11 @@ pub(super) fn admin_panel_error_redirect_anchor_open(
     anchor: &str,
     open_section: &str,
 ) -> Redirect {
-    admin_panel_redirect_with_status(message, true, Some(anchor), Some(open_section))
+    admin_panel_redirect_with_status(
+        message,
+        true,
+        AdminPanelTarget::anchor_open(anchor, open_section),
+    )
 }
 
 // ─── GET /admin/panel ─────────────────────────────────────────────────────────
@@ -550,35 +589,49 @@ fn render_admin_panel_from_snapshot(
     flash: Option<(bool, String)>,
     open_section: Option<&str>,
 ) -> String {
-    let flash_ref = flash.as_ref().map(|(is_err, msg)| (*is_err, msg.as_str()));
-    crate::templates::admin_panel_page(
-        &snapshot.boards,
-        &snapshot.bans,
-        &snapshot.filters,
+    let flash_ref = flash
+        .as_ref()
+        .map(|(is_error, message)| crate::templates::AdminPanelFlash {
+            is_error: *is_error,
+            message,
+        });
+    let view = crate::templates::AdminPanelViewModel {
         csrf_token,
-        &snapshot.full_backups,
-        &snapshot.board_backups,
-        snapshot.db_size_bytes,
-        snapshot.db_size_warning,
-        &snapshot.backup_summary.status_line,
-        snapshot.backup_summary.warning.as_deref(),
-        &snapshot.reports,
-        &snapshot.appeals,
-        &snapshot.site_name,
-        &snapshot.site_subtitle,
-        &snapshot.default_theme,
-        snapshot.banner_rotation_interval_minutes,
-        snapshot.banner_external_links_enabled,
-        snapshot.auto_full_backup_interval_hours,
-        snapshot.auto_full_backup_copies_to_keep,
-        &snapshot.themes,
-        &snapshot.global_banners,
-        &snapshot.home_banners,
-        &snapshot.board_banners,
-        tor_address.as_deref(),
-        flash_ref,
+        boards: &snapshot.boards,
+        moderation: crate::templates::AdminPanelModerationView {
+            bans: &snapshot.bans,
+            filters: &snapshot.filters,
+            reports: &snapshot.reports,
+            appeals: &snapshot.appeals,
+        },
+        appearance: crate::templates::AdminPanelAppearanceView {
+            site_name: &snapshot.site_name,
+            site_subtitle: &snapshot.site_subtitle,
+            default_theme: &snapshot.default_theme,
+            banner_rotation_interval_minutes: snapshot.banner_rotation_interval_minutes,
+            banner_external_links_enabled: snapshot.banner_external_links_enabled,
+            themes: &snapshot.themes,
+            global_banners: &snapshot.global_banners,
+            home_banners: &snapshot.home_banners,
+            board_banners: &snapshot.board_banners,
+        },
+        backups: crate::templates::AdminPanelBackupsView {
+            full_backups: &snapshot.full_backups,
+            board_backups: &snapshot.board_backups,
+            backup_status_line: &snapshot.backup_summary.status_line,
+            backup_warning: snapshot.backup_summary.warning.as_deref(),
+            auto_full_backup_interval_hours: snapshot.auto_full_backup_interval_hours,
+            auto_full_backup_copies_to_keep: snapshot.auto_full_backup_copies_to_keep,
+        },
+        maintenance: crate::templates::AdminPanelMaintenanceView {
+            db_size_bytes: snapshot.db_size_bytes,
+            db_size_warning: snapshot.db_size_warning,
+        },
+        tor_address: tor_address.as_deref(),
+        flash: flash_ref,
         open_section,
-    )
+    };
+    crate::templates::admin_panel_page(&view)
 }
 
 pub async fn admin_panel(

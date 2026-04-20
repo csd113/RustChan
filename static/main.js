@@ -2888,16 +2888,3 @@ document.addEventListener('click', function (e) {
     }
   }, 3000);
 })();
-
-// ─── Admin backup progress bar ────────────────────────────────────────────────
-//
-// Covers two flows:
-//
-//   A) "Save to server" forms — POST via fetch(), modal shows live progress,
-//      "Done — reload" button appears when the fetch resolves.
-//
-//   B) "Download to computer" links — GET triggers a file download.  We show
-//      the modal with live progress while the server builds the zip, then
-//      dismiss it automatically once phase=DONE is reported.  The actual
-//      download still happens natively in the browser (iframe trick).
-//

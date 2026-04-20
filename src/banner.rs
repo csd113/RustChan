@@ -399,7 +399,9 @@ pub fn resolve_banner_href(
                 Some(format!(
                     "/banner/external/{}?return_to={}",
                     asset.id,
-                    crate::templates::urlencoding_simple(&safe_return_to(current_path))
+                    crate::utils::redirect::encode_form_query_component(&safe_return_to(
+                        current_path
+                    ))
                 ))
             }
         }
@@ -408,17 +410,13 @@ pub fn resolve_banner_href(
 
 #[must_use]
 pub fn safe_return_to(path: &str) -> String {
-    if path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\") {
-        path.to_string()
-    } else {
-        "/".to_string()
-    }
+    crate::utils::redirect::safe_internal_path_or(Some(path), "/").to_string()
 }
 
 #[must_use]
 pub fn normalize_internal_path(path: &str) -> Option<String> {
     let trimmed = path.trim();
-    if trimmed.starts_with('/') && !trimmed.starts_with("//") && !trimmed.starts_with("/\\") {
+    if crate::utils::redirect::is_basic_safe_internal_path(trimmed) {
         Some(trimmed.to_string())
     } else {
         None

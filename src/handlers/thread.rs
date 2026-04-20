@@ -20,7 +20,7 @@ use crate::{
         parse_post_multipart, posting, render,
     },
     middleware::AppState,
-    utils::crypto::{hash_ip, verify_pow},
+    utils::crypto::hash_ip,
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
@@ -55,37 +55,31 @@ pub async fn view_thread(
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
-    let access_context = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        let board_short = board_short.clone();
-        let admin_session_id = admin_session_id.clone();
-        let access_cookie = access_cookie.clone();
-        move || -> Result<crate::handlers::board::BoardAccessContext> {
-            let conn = pool.get()?;
-            crate::handlers::board::load_board_access_context(
-                &conn,
-                &board_short,
-                admin_session_id.as_deref(),
-                access_cookie.as_deref(),
-            )
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
     let return_to = format!("/{board_short}/thread/{thread_id}");
-    if !access_context.can_view {
-        let html = crate::handlers::board::render_board_unlock_html(
-            &access_context.board,
-            &csrf,
-            &return_to,
-            None,
-            current_theme.as_deref(),
-        );
-        return Ok(crate::handlers::board::board_access_required_response(
-            jar, html,
-        ));
-    }
+    let access_context = match crate::handlers::board::board_access_preflight(
+        &state,
+        &board_short,
+        admin_session_id.clone(),
+        access_cookie,
+        crate::handlers::board::BoardAccessRequirement::View,
+        return_to,
+    )
+    .await?
+    {
+        crate::handlers::board::BoardAccessDecision::Allowed(context) => context,
+        crate::handlers::board::BoardAccessDecision::Denied(denial) => {
+            let html = crate::handlers::board::render_board_unlock_html(
+                &denial.context.board,
+                &csrf,
+                &denial.return_to,
+                None,
+                current_theme.as_deref(),
+            );
+            return Ok(crate::handlers::board::board_access_required_response(
+                jar, html,
+            ));
+        }
+    };
 
     let page_data = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -189,30 +183,19 @@ pub async fn post_reply(
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
-    let can_post = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        let board_short = board_short.clone();
-        let admin_session_id = admin_session_id.clone();
-        let access_cookie = access_cookie.clone();
-        move || -> Result<bool> {
-            let conn = pool.get()?;
-            let access_context = crate::handlers::board::load_board_access_context(
-                &conn,
-                &board_short,
-                admin_session_id.as_deref(),
-                access_cookie.as_deref(),
-            )?;
-            Ok(access_context.can_post)
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    let access_decision = crate::handlers::board::board_access_preflight(
+        &state,
+        &board_short,
+        admin_session_id.clone(),
+        access_cookie,
+        crate::handlers::board::BoardAccessRequirement::Post,
+        format!("/{board_short}/thread/{thread_id}"),
+    )
+    .await?;
 
-    if !can_post {
-        let redirect_to = crate::handlers::board::unlock_redirect_url(
-            &board_short,
-            &format!("/{board_short}/thread/{thread_id}"),
-        );
+    if let crate::handlers::board::BoardAccessDecision::Denied(denial) = access_decision {
+        let redirect_to =
+            crate::handlers::board::unlock_redirect_url(&board_short, &denial.return_to);
         return Ok(Redirect::to(&redirect_to).into_response());
     }
 
@@ -230,27 +213,7 @@ pub async fn post_reply(
         deletion_token: form.deletion_token.clone(),
         sage: form.sage,
     };
-    let raw_body = form.body;
-
-    let upload_dir = CONFIG.upload_dir.clone();
-    let thumb_size = CONFIG.thumb_size;
-    let max_image_size = CONFIG.max_image_size;
-    let max_video_size = CONFIG.max_video_size;
-    let max_audio_size = CONFIG.max_audio_size;
-    let ffmpeg_available = state.ffmpeg_available;
-    let ffmpeg_webp_available = state.ffmpeg_webp_available;
-    let cookie_secret = CONFIG.cookie_secret.clone();
-    let file_data = form.file;
-    let audio_file_data = form.audio_file;
-    let image_file_data = form.image_file;
-    let name_val = form.name;
-    let del_token_val = form.deletion_token;
-    let submission_token = form.submission_token;
-    let form_sage = form.sage;
-    let pow_nonce = form.pow_nonce; // needed for per-reply PoW check
-                                    // Extract admin session before spawn_blocking so we can skip the per-board
-                                    // cooldown for admins (the cookie value is !Send and can't cross the boundary).
-                                    // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
+    // Extract csrf_token before spawn_blocking so the ban page appeal form works.
     let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
 
     // Clones kept outside the closure so we can re-render the thread page inline on error.
@@ -263,145 +226,41 @@ pub async fn post_reply(
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = state.job_queue.clone();
+        let ffmpeg_available = state.ffmpeg_available;
+        let ffmpeg_webp_available = state.ffmpeg_webp_available;
         move || -> Result<String> {
             let conn = pool.get()?;
-
-            let board = db::get_board_by_short(&conn, &board_short)?
-                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-
-            let thread = db::get_thread(&conn, thread_id)?
-                .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
-
-            if thread.board_id != board.id {
-                return Err(AppError::NotFound("Thread not found in this board.".into()));
-            }
-            if thread.locked {
-                return Err(AppError::Forbidden("This thread is locked.".into()));
-            }
-
-            let ip_hash = hash_ip(&identity_key, &cookie_secret);
-            if let Some(reason) = db::is_banned(&conn, &ip_hash)? {
-                return Err(AppError::BannedUser {
-                    reason: if reason.is_empty() {
-                        "No reason given".to_string()
-                    } else {
-                        reason
-                    },
-                    csrf_token: ban_csrf_token,
-                });
-            }
-            if let Some(existing) =
-                db::get_post_submission(&conn, &submission_token, &ip_hash, board.id)?
-            {
-                return Ok(format!(
-                    "/{}/thread/{}#p{}",
-                    board_short, existing.thread_id, existing.post_id
-                ));
-            }
-
-            // Per-board post cooldown — the SOLE post rate control.
-            // Verify admin session first; admins bypass the cooldown entirely.
-            let is_admin = posting::is_admin_session(&conn, admin_session_id.as_deref());
-
-            // post_cooldown_secs = 0 means no cooldown at all on this board.
-            if board.post_cooldown_secs > 0 && !is_admin {
-                let elapsed = db::get_seconds_since_last_post(&conn, board.id, &ip_hash)?;
-                if let Some(secs) = elapsed {
-                    let remaining = board.post_cooldown_secs.saturating_sub(secs);
-                    if remaining > 0 {
-                        return Err(AppError::BadRequest(format!("Please wait {remaining} more second{} before posting again.", if remaining == 1 { "" } else { "s" })));
-                    }
-                }
-            }
-
-            // PoW CAPTCHA check for replies, mirroring create_thread().
-            // Previously this check was absent, allowing bots to bypass CAPTCHA on
-            // captcha-protected boards by posting replies instead of new threads.
-            if board.allow_captcha && !verify_pow(&board_short, &pow_nonce) {
-                return Err(AppError::BadRequest(
-                    "CAPTCHA verification failed. Please wait for the solver to complete before posting.".into()
-                ));
-            }
-
-            let filters = posting::load_word_filters(&conn)?;
-            let (name, tripcode) = posting::resolve_post_identity(&name_val, board.allow_tripcodes);
-            let board_allows_media = board.allow_images
-                || board.allow_video
-                || board.allow_audio
-                || (crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files);
-            let has_file = file_data.is_some() || audio_file_data.is_some() || image_file_data.is_some();
-            let (body_text, body_html) =
-                posting::build_post_body(
-                    &raw_body,
-                    has_file,
-                    board_allows_media,
-                    board.collapse_greentext,
-                    &filters,
-                )?;
-
-            let uploads = posting::process_uploads(
-                image_file_data,
-                file_data,
-                audio_file_data,
-                &board,
+            Ok(posting::submit_post(
                 &conn,
-                &posting::UploadConfig {
-                    upload_dir: &upload_dir,
-                    thumb_size,
-                    max_image_size,
-                    max_video_size,
-                    max_audio_size,
+                &job_queue,
+                posting::SubmitPostCommand {
+                    mode: posting::SubmitPostMode::Reply {
+                        thread_id,
+                        sage: form.sage,
+                    },
+                    board_short,
+                    identity_key,
+                    cookie_secret: CONFIG.cookie_secret.clone(),
+                    admin_session_id,
+                    ban_csrf_token,
+                    submission_token: form.submission_token,
+                    name: form.name,
+                    body: form.body,
+                    deletion_token: form.deletion_token,
+                    pow_nonce: form.pow_nonce,
+                    image_file_data: form.image_file,
+                    file_data: form.file,
+                    audio_file_data: form.audio_file,
+                    upload_dir: CONFIG.upload_dir.clone(),
+                    thumb_size: CONFIG.thumb_size,
+                    max_image_size: CONFIG.max_image_size,
+                    max_video_size: CONFIG.max_video_size,
+                    max_audio_size: CONFIG.max_audio_size,
                     ffmpeg_available,
                     ffmpeg_webp_available,
                 },
-            )?;
-
-            let deletion_token = posting::resolve_deletion_token(&del_token_val);
-
-            // Sage suppresses the bump regardless of reply count.
-            let should_bump = !form_sage && thread.reply_count < board.bump_limit;
-
-            let new_post = posting::build_new_post(
-                thread_id,
-                board.id,
-                name,
-                tripcode,
-                None,
-                body_text.clone(),
-                body_html,
-                ip_hash.clone(),
-                &uploads,
-                deletion_token,
-                false,
-            );
-            let pending_upload_op = posting::build_pending_upload_op(&uploads)?;
-            let post_id = match db::create_reply_with_thread_update(
-                &conn,
-                &new_post,
-                &submission_token,
-                should_bump,
-                pending_upload_op.as_ref(),
-            ) {
-                Ok(post_id) => post_id,
-                Err(error) => {
-                    uploads.rollback_new_files(&conn, &upload_dir)?;
-                    return Err(error.into());
-                }
-            };
-            posting::finalize_pending_uploads(&conn, &upload_dir, &uploads);
-
-            crate::handlers::enqueue_post_jobs(
-                &job_queue,
-                &conn,
-                post_id,
-                &ip_hash,
-                body_text.len(),
-                uploads.primary.as_ref(),
-                &board.short_name,
-            );
-
-            tracing::info!(target: "board", post_id = post_id, thread_id = thread_id, board = %board.short_name, "Reply posted");
-            Ok(format!("/{}/thread/{thread_id}#p{post_id}", board.short_name))
+            )?
+            .redirect_url)
         }
     })
     .await
