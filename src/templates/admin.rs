@@ -1,5 +1,3 @@
-// templates/admin.rs
-//
 // Page templates for the admin interface:
 //   admin_login_page        — login form
 //   admin_panel_page        — main control panel (boards, bans, reports, …)

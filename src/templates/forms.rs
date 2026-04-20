@@ -1,5 +1,3 @@
-// templates/forms.rs
-//
 // HTML form fragments injected into board and thread pages.
 // These are not full pages — they produce <div>…</div> snippets that
 // board.rs and thread.rs embed inside their own layouts.

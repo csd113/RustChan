@@ -7,8 +7,6 @@
     clippy::too_many_lines
 )]
 
-// handlers/admin/backup.rs
-//
 // Backup and restore subsystem for the admin panel.
 // Covers full-site backups, board-level backups, streaming downloads,
 // saved-backup restoration, and live board.json restore.
