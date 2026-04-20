@@ -298,6 +298,122 @@ async fn create_thread_xhr_validation_failure_returns_json_error() {
 }
 
 #[tokio::test]
+async fn create_thread_xhr_banned_user_redirects_to_banned_page() {
+    let state = crate::test_support::app_state();
+    {
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        crate::db::add_ban(
+            &conn,
+            &crate::utils::crypto::hash_ip("127.0.0.1", &crate::config::CONFIG.cookie_secret),
+            "testing ban",
+            None,
+        )
+        .expect("add ban");
+    }
+
+    let router = Router::new()
+        .route("/{board}", post(super::create_thread))
+        .with_state(state);
+    let (boundary, body) = crate::test_support::multipart_body(
+        &[("_csrf", "csrf123"), ("body", "hello banned")],
+        None,
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-rustchan-redirect")
+            .and_then(|value| value.to_str().ok()),
+        Some(super::banned_page_redirect_url("testing ban").as_str())
+    );
+}
+
+#[tokio::test]
+async fn create_thread_xhr_captcha_failure_returns_inline_json_error() {
+    let state = crate::test_support::app_state();
+    {
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET allow_captcha = 1 WHERE short_name = 'test'",
+            [],
+        )
+        .expect("enable captcha");
+    }
+
+    let router = Router::new()
+        .route("/{board}", post(super::create_thread))
+        .with_state(state);
+    let (boundary, body) = crate::test_support::multipart_body(
+        &[("_csrf", "csrf123"), ("body", "captcha please")],
+        None,
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json; charset=utf-8")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-rustchan-error-status")
+            .and_then(|value| value.to_str().ok()),
+        Some(StatusCode::UNPROCESSABLE_ENTITY.as_str())
+    );
+
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body")
+            .to_vec(),
+    )
+    .expect("utf8 body");
+    assert!(body.contains("CAPTCHA verification failed"));
+}
+
+#[tokio::test]
 async fn duplicate_report_redirects_back_without_500() {
     let state = crate::test_support::app_state();
     let (thread_id, post_id) = {

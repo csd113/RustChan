@@ -544,7 +544,11 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::models::BackupBoardSummary;
-    use axum::{body::to_bytes, http::StatusCode};
+    use axum::{
+        body::to_bytes,
+        http::{header, HeaderMap, HeaderValue, StatusCode},
+    };
+    use axum_extra::extract::cookie::{Cookie, CookieJar};
     use rusqlite::params;
     use std::io::{Cursor, Write as _};
     use std::path::Path;
@@ -587,6 +591,46 @@ mod tests {
             deletion_token: "token".into(),
             is_op,
         }
+    }
+
+    struct PathCleanup(std::path::PathBuf);
+
+    impl Drop for PathCleanup {
+        fn drop(&mut self) {
+            match std::fs::metadata(&self.0) {
+                Ok(metadata) if metadata.is_dir() => {
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    fn install_admin_session(state: &crate::middleware::AppState) {
+        let conn = state.db.get().expect("db connection");
+        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
+        let admin_id =
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+        crate::db::create_session(
+            &conn,
+            "session123",
+            admin_id,
+            chrono::Utc::now().timestamp() + 3600,
+        )
+        .expect("create session");
+    }
+
+    fn admin_cookie_jar() -> CookieJar {
+        CookieJar::new()
+            .add(Cookie::new("csrf_token", "csrf123"))
+            .add(Cookie::new(super::super::SESSION_COOKIE, "session123"))
+    }
+
+    fn unique_zip_name(prefix: &str) -> String {
+        format!("{prefix}-{}.zip", uuid::Uuid::new_v4().simple())
     }
 
     #[tokio::test]
@@ -658,6 +702,137 @@ mod tests {
             target,
             "/admin/panel?flash=Board+%2Ftech%2F+restored.&open=board-backup-restore#board-backup-tech"
         );
+    }
+
+    #[tokio::test]
+    async fn saved_full_restore_invalid_zip_redirects_back_to_full_backup_section() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+
+        std::fs::create_dir_all(super::full_backup_dir()).expect("create full backup dir");
+        let filename = unique_zip_name("saved-full-restore-invalid");
+        let backup_path = super::full_backup_dir().join(&filename);
+        let _backup_cleanup = PathCleanup(backup_path.clone());
+        std::fs::write(&backup_path, b"not-a-zip").expect("write invalid zip");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost"));
+
+        let response = super::restore_saved_full_backup(
+            axum::extract::State(state),
+            admin_cookie_jar(),
+            headers,
+            crate::test_support::connect_info(),
+            axum::extract::Form(super::RestoreSavedForm {
+                filename,
+                csrf: Some("csrf123".to_string()),
+            }),
+        )
+        .await
+        .expect("restore response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect location");
+        assert!(location.contains("/admin/panel?restore_error="));
+        assert!(location.contains("Invalid+zip"));
+        assert!(location.contains("open=full-backup-restore"));
+        assert!(location.contains("#full-backup-restore"));
+    }
+
+    #[tokio::test]
+    async fn saved_board_restore_success_redirects_back_to_restored_board_section() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+
+        let board_short = format!("b{}", &uuid::Uuid::new_v4().simple().to_string()[..7]);
+        let manifest_json = {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, &board_short, "Restore Test", "", false)
+                .expect("create board");
+            serde_json::to_vec_pretty(
+                &build_board_backup_manifest(&conn, &board_short).expect("build manifest"),
+            )
+            .expect("manifest json")
+        };
+
+        std::fs::create_dir_all(super::board_backup_dir()).expect("create board backup dir");
+        let filename = unique_zip_name("saved-board-restore-success");
+        let backup_path = super::board_backup_dir().join(&filename);
+        let _backup_cleanup = PathCleanup(backup_path.clone());
+        let _upload_cleanup = PathCleanup(
+            std::path::PathBuf::from(&crate::config::CONFIG.upload_dir).join(&board_short),
+        );
+
+        {
+            let file = std::fs::File::create(&backup_path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("board.json", options)
+                .expect("start board.json");
+            zip.write_all(&manifest_json).expect("write board.json");
+            zip.finish().expect("finish zip");
+        }
+
+        let response = super::restore_saved_board_backup(
+            axum::extract::State(state),
+            admin_cookie_jar(),
+            axum::extract::Form(super::RestoreSavedForm {
+                filename,
+                csrf: Some("csrf123".to_string()),
+            }),
+        )
+        .await
+        .expect("restore response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect location");
+        let expected_flash =
+            super::super::encode_query_component(&format!("Board /{board_short}/ restored."));
+        assert!(location.contains(&format!("flash={expected_flash}")));
+        assert!(location.contains("open=board-backup-restore"));
+        assert!(location.contains(&format!("#board-backup-{board_short}")));
+    }
+
+    #[tokio::test]
+    async fn saved_board_restore_invalid_zip_redirects_back_to_board_restore_section() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+
+        std::fs::create_dir_all(super::board_backup_dir()).expect("create board backup dir");
+        let filename = unique_zip_name("saved-board-restore-invalid");
+        let backup_path = super::board_backup_dir().join(&filename);
+        let _backup_cleanup = PathCleanup(backup_path.clone());
+        std::fs::write(&backup_path, b"not-a-zip").expect("write invalid zip");
+
+        let response = super::restore_saved_board_backup(
+            axum::extract::State(state),
+            admin_cookie_jar(),
+            axum::extract::Form(super::RestoreSavedForm {
+                filename,
+                csrf: Some("csrf123".to_string()),
+            }),
+        )
+        .await
+        .expect("restore response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect location");
+        assert!(location.contains("/admin/panel?restore_error="));
+        assert!(location.contains("Invalid+zip"));
+        assert!(location.contains("open=board-backup-restore"));
+        assert!(location.contains("#board-backup-restore"));
     }
 
     #[test]

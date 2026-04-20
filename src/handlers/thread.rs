@@ -1218,4 +1218,107 @@ mod tests {
         .expect("utf8 body");
         assert!(body.contains("\"error\""));
     }
+
+    #[tokio::test]
+    async fn reply_cooldown_failure_rerenders_thread_inline() {
+        let state = crate::test_support::app_state();
+        let thread_id = {
+            let conn = state.db.get().expect("db connection");
+            let board_id =
+                crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            conn.execute(
+                "UPDATE boards SET post_cooldown_secs = 60 WHERE short_name = 'test'",
+                [],
+            )
+            .expect("enable cooldown");
+
+            let ip_hash =
+                crate::utils::crypto::hash_ip("127.0.0.1", &crate::config::CONFIG.cookie_secret);
+            let post = crate::db::NewPost {
+                thread_id: 0,
+                board_id,
+                name: "anon".to_string(),
+                tripcode: None,
+                subject: Some("subject".to_string()),
+                body: "op body".to_string(),
+                body_html: "op body".to_string(),
+                ip_hash: Some(ip_hash),
+                file_path: None,
+                file_name: None,
+                file_size: None,
+                thumb_path: None,
+                mime_type: None,
+                media_type: None,
+                audio_file_path: None,
+                audio_file_name: None,
+                audio_file_size: None,
+                audio_mime_type: None,
+                deletion_token: "token".to_string(),
+                is_op: true,
+            };
+            let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
+                &conn,
+                board_id,
+                Some("subject"),
+                &post,
+                "",
+                None,
+                None,
+            )
+            .expect("create thread");
+            thread_id
+        };
+
+        let router = Router::new()
+            .route("/{board}/thread/{id}", post(super::post_reply))
+            .with_state(state.clone());
+        let (reply_boundary, reply_body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "reply body")],
+            None,
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/test/thread/{thread_id}"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={reply_boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(reply_body))
+                    .expect("reply request"),
+            )
+            .await
+            .expect("reply response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            !response.headers().contains_key(header::LOCATION),
+            "cooldown failures should stay inline on the thread page"
+        );
+
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains("Please wait"));
+        assert!(body.contains("before posting again."));
+
+        let reply_count = {
+            let conn = state.db.get().expect("db connection");
+            conn.query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1 AND is_op = 0",
+                rusqlite::params![thread_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("reply count")
+        };
+        assert_eq!(reply_count, 0);
+    }
 }

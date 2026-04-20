@@ -322,6 +322,35 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     }
 }
 
+fn full_restore_success_response(
+    jar: CookieJar,
+    headers: &HeaderMap,
+    peer: std::net::SocketAddr,
+    fresh_sid: String,
+    xhr_request: bool,
+) -> Response {
+    let mut new_cookie = Cookie::new(super::SESSION_COOKIE, fresh_sid);
+    new_cookie.set_http_only(true);
+    new_cookie.set_same_site(super::ADMIN_COOKIE_SAME_SITE);
+    new_cookie.set_path("/");
+    new_cookie.set_secure(super::should_set_secure_cookie(headers, Some(peer)));
+    new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
+
+    if xhr_request {
+        let response = crate::handlers::board::xhr_redirect_response(
+            &restore_success_redirect_target(RestoreKind::Full, None),
+        )
+        .unwrap_or_else(|error| error.into_response());
+        return (jar.add(new_cookie), response).into_response();
+    }
+
+    (
+        jar.add(new_cookie),
+        Redirect::to(&restore_success_redirect_target(RestoreKind::Full, None)),
+    )
+        .into_response()
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::arithmetic_side_effects)]
 pub async fn admin_restore(
@@ -417,26 +446,7 @@ pub async fn admin_restore(
                 return (jar, Redirect::to("/admin")).into_response();
             }
 
-            let mut new_cookie = Cookie::new(super::SESSION_COOKIE, fresh_sid);
-            new_cookie.set_http_only(true);
-            new_cookie.set_same_site(super::ADMIN_COOKIE_SAME_SITE);
-            new_cookie.set_path("/");
-            new_cookie.set_secure(super::should_set_secure_cookie(&headers, Some(peer)));
-            new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
-
-            if xhr_request {
-                let response = crate::handlers::board::xhr_redirect_response(
-                    &restore_success_redirect_target(RestoreKind::Full, None),
-                )
-                .unwrap_or_else(|error| error.into_response());
-                return (jar.add(new_cookie), response).into_response();
-            }
-
-            (
-                jar.add(new_cookie),
-                Redirect::to(&restore_success_redirect_target(RestoreKind::Full, None)),
-            )
-                .into_response()
+            full_restore_success_response(jar, &headers, peer, fresh_sid, xhr_request)
         }
         Err(e) => {
             tracing::error!(
@@ -518,15 +528,46 @@ pub async fn restore_saved_full_backup(
         return Ok((jar, Redirect::to("/admin")).into_response());
     }
 
-    let mut new_cookie = Cookie::new(super::SESSION_COOKIE, fresh_sid);
-    new_cookie.set_http_only(true);
-    new_cookie.set_same_site(super::ADMIN_COOKIE_SAME_SITE);
-    new_cookie.set_path("/");
-    new_cookie.set_secure(super::should_set_secure_cookie(&headers, Some(peer)));
-    new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
-    Ok((
-        jar.add(new_cookie),
-        Redirect::to(&restore_success_redirect_target(RestoreKind::Full, None)),
-    )
-        .into_response())
+    Ok(full_restore_success_response(
+        jar, &headers, peer, fresh_sid, false,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::full_restore_success_response;
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+    use axum_extra::extract::cookie::CookieJar;
+
+    #[test]
+    fn saved_full_restore_success_response_sets_session_cookie_and_reopens_section() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost"));
+
+        let response = full_restore_success_response(
+            CookieJar::new(),
+            &headers,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 41000)),
+            "fresh-session".to_string(),
+            false,
+        );
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/admin/panel?restored=1&open=full-backup-restore#full-backup-restore")
+        );
+
+        let set_cookie = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.contains(super::super::SESSION_COOKIE))
+            .expect("session cookie");
+        assert!(set_cookie.contains("chan_admin_session=fresh-session"));
+    }
 }

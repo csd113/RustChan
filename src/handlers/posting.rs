@@ -611,3 +611,367 @@ pub fn submit_post(
 
     Ok(SubmitPostResult { redirect_url })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{submit_post, SubmitPostCommand, SubmitPostMode};
+    use crate::error::AppError;
+
+    const TEST_BOARD: &str = "test";
+    const TEST_COOKIE_SECRET: &str = "cookie-secret";
+    const TEST_IDENTITY_KEY: &str = "127.0.0.1";
+
+    fn sample_post(
+        board_id: i64,
+        thread_id: i64,
+        body: &str,
+        is_op: bool,
+        ip_hash: Option<String>,
+    ) -> crate::db::NewPost {
+        crate::db::NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: is_op.then(|| "subject".to_string()),
+            body: body.to_string(),
+            body_html: body.to_string(),
+            ip_hash,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op,
+        }
+    }
+
+    fn thread_command(
+        board_short: &str,
+        submission_token: &str,
+        body: &str,
+        upload_dir: &str,
+    ) -> SubmitPostCommand {
+        SubmitPostCommand {
+            mode: SubmitPostMode::NewThread {
+                subject: String::new(),
+                poll_question: String::new(),
+                poll_options: Vec::new(),
+                poll_duration_secs: None,
+            },
+            board_short: board_short.to_string(),
+            identity_key: TEST_IDENTITY_KEY.to_string(),
+            cookie_secret: TEST_COOKIE_SECRET.to_string(),
+            admin_session_id: None,
+            ban_csrf_token: "ban-csrf".to_string(),
+            submission_token: submission_token.to_string(),
+            name: "anon".to_string(),
+            body: body.to_string(),
+            deletion_token: String::new(),
+            pow_nonce: String::new(),
+            image_file_data: None,
+            file_data: None,
+            audio_file_data: None,
+            upload_dir: upload_dir.to_string(),
+            thumb_size: 250,
+            max_image_size: 1024,
+            max_video_size: 1024,
+            max_audio_size: 1024,
+            ffmpeg_available: false,
+            ffmpeg_webp_available: false,
+        }
+    }
+
+    fn reply_command(
+        board_short: &str,
+        thread_id: i64,
+        submission_token: &str,
+        body: &str,
+        upload_dir: &str,
+    ) -> SubmitPostCommand {
+        SubmitPostCommand {
+            mode: SubmitPostMode::Reply {
+                thread_id,
+                sage: false,
+            },
+            board_short: board_short.to_string(),
+            identity_key: TEST_IDENTITY_KEY.to_string(),
+            cookie_secret: TEST_COOKIE_SECRET.to_string(),
+            admin_session_id: None,
+            ban_csrf_token: "ban-csrf".to_string(),
+            submission_token: submission_token.to_string(),
+            name: "anon".to_string(),
+            body: body.to_string(),
+            deletion_token: String::new(),
+            pow_nonce: String::new(),
+            image_file_data: None,
+            file_data: None,
+            audio_file_data: None,
+            upload_dir: upload_dir.to_string(),
+            thumb_size: 250,
+            max_image_size: 1024,
+            max_video_size: 1024,
+            max_audio_size: 1024,
+            ffmpeg_available: false,
+            ffmpeg_webp_available: false,
+        }
+    }
+
+    #[test]
+    fn submit_post_rejects_banned_user_before_creating_thread() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+
+        let ip_hash = crate::utils::crypto::hash_ip(TEST_IDENTITY_KEY, TEST_COOKIE_SECRET);
+        crate::db::add_ban(&conn, &ip_hash, "posting blocked", None).expect("add ban");
+
+        let error = match submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command(
+                TEST_BOARD,
+                "banned-thread",
+                "thread body",
+                upload_dir.path().to_str().expect("upload dir"),
+            ),
+        ) {
+            Ok(result) => panic!(
+                "expected banned submission to fail, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::BannedUser { reason, csrf_token } => {
+                assert_eq!(reason, "posting blocked");
+                assert_eq!(csrf_token, "ban-csrf");
+            }
+            other => panic!("expected BannedUser, got {other:?}"),
+        }
+
+        let thread_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
+            .expect("thread count");
+        assert_eq!(thread_count, 0);
+    }
+
+    #[test]
+    fn submit_post_enforces_board_cooldown_for_reply() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        let board_id =
+            crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET post_cooldown_secs = 60 WHERE short_name = ?1",
+            rusqlite::params![TEST_BOARD],
+        )
+        .expect("enable cooldown");
+
+        let ip_hash = crate::utils::crypto::hash_ip(TEST_IDENTITY_KEY, TEST_COOKIE_SECRET);
+        let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
+            &conn,
+            board_id,
+            Some("cooldown thread"),
+            &sample_post(board_id, 0, "op body", true, Some(ip_hash)),
+            "",
+            None,
+            None,
+        )
+        .expect("create thread");
+
+        let error = match submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            reply_command(
+                TEST_BOARD,
+                thread_id,
+                "cooldown-reply",
+                "reply body",
+                upload_dir.path().to_str().expect("upload dir"),
+            ),
+        ) {
+            Ok(result) => panic!("expected cooldown rejection, got {}", result.redirect_url),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("Please wait"));
+                assert!(message.contains("before posting again."));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_post_rejects_captcha_failure_for_new_thread() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET allow_captcha = 1 WHERE short_name = ?1",
+            rusqlite::params![TEST_BOARD],
+        )
+        .expect("enable captcha");
+
+        let error = match submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command(
+                TEST_BOARD,
+                "captcha-thread",
+                "thread body",
+                upload_dir.path().to_str().expect("upload dir"),
+            ),
+        ) {
+            Ok(result) => panic!("expected captcha rejection, got {}", result.redirect_url),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert_eq!(
+                    message,
+                    "CAPTCHA verification failed. Please wait for the solver to complete before posting."
+                );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_post_returns_existing_op_redirect_for_duplicate_thread_submission() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+
+        submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command(
+                TEST_BOARD,
+                "dup-thread",
+                "thread body",
+                upload_dir.path().to_str().expect("upload dir"),
+            ),
+        )
+        .expect("first submission");
+
+        let duplicate = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command(
+                TEST_BOARD,
+                "dup-thread",
+                "thread body",
+                upload_dir.path().to_str().expect("upload dir"),
+            ),
+        )
+        .expect("duplicate submission");
+
+        let (thread_id, op_post_id): (i64, i64) = conn
+            .query_row(
+                "SELECT t.id, p.id
+                 FROM threads t
+                 JOIN posts p ON p.thread_id = t.id AND p.is_op = 1
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("thread and op");
+        let thread_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
+            .expect("thread count");
+        let post_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
+            .expect("post count");
+
+        assert_eq!(
+            duplicate.redirect_url,
+            format!("/{TEST_BOARD}/thread/{thread_id}#p{op_post_id}")
+        );
+        assert_eq!(thread_count, 1);
+        assert_eq!(post_count, 1);
+    }
+
+    #[test]
+    fn submit_post_returns_existing_reply_redirect_for_duplicate_reply_submission() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        let board_id =
+            crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
+            &conn,
+            board_id,
+            Some("reply target"),
+            &sample_post(board_id, 0, "op body", true, Some("other-ip".to_string())),
+            "",
+            None,
+            None,
+        )
+        .expect("create thread");
+
+        submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            reply_command(
+                TEST_BOARD,
+                thread_id,
+                "dup-reply",
+                "reply body",
+                upload_dir.path().to_str().expect("upload dir"),
+            ),
+        )
+        .expect("first reply");
+
+        let duplicate = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            reply_command(
+                TEST_BOARD,
+                thread_id,
+                "dup-reply",
+                "reply body",
+                upload_dir.path().to_str().expect("upload dir"),
+            ),
+        )
+        .expect("duplicate reply");
+
+        let reply_post_id: i64 = conn
+            .query_row(
+                "SELECT id FROM posts
+                 WHERE thread_id = ?1 AND is_op = 0
+                 ORDER BY id DESC
+                 LIMIT 1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("reply id");
+        let reply_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1 AND is_op = 0",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("reply count");
+
+        assert_eq!(
+            duplicate.redirect_url,
+            format!("/{TEST_BOARD}/thread/{thread_id}#p{reply_post_id}")
+        );
+        assert_eq!(reply_count, 1);
+    }
+}
