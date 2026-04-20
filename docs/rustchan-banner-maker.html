@@ -866,7 +866,7 @@
       <div class="badge-row">
         <span class="badge">RustChan palette</span>
         <span class="badge">Layered export</span>
-        <span class="badge">PNG output</span>
+        <span class="badge">WebP output</span>
       </div>
       <div class="size-toggle" aria-label="Banner size">
         <button class="size-btn active" data-w="468" data-h="60" type="button">468 × 60</button>
@@ -922,8 +922,8 @@
         </div>
         <div class="card-body">
           <label class="upload-zone" id="uploadZone">
-            <input type="file" id="layerUpload" accept="image/*" multiple>
-            <div class="upload-main">Drop images here or click to upload</div>
+            <input type="file" id="layerUpload" accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp,image/*" multiple>
+            <div class="upload-main">Drop images or GIFs here or click to upload</div>
             <div class="upload-sub">Add as many layers as you want. Drag on the canvas to move, and use the handles to resize each image box.</div>
           </label>
 
@@ -1088,7 +1088,7 @@
           <span class="mini-note">preview and download</span>
         </div>
         <div class="card-body">
-          <button id="exportBtn" class="btn-primary" type="button">Preview and export PNG</button>
+          <button id="exportBtn" class="btn-primary" type="button">Preview and export WebP</button>
           <div class="preview-wrap" id="previewWrap">
             <div class="preview-head">
               <span id="previewDims">preview · 468 × 60</span>
@@ -1098,7 +1098,7 @@
               <img id="previewImg" alt="banner preview">
             </div>
             <div class="preview-actions">
-              <button id="downloadBtn" class="btn-primary" type="button" style="flex:1;">Download PNG</button>
+              <button id="downloadBtn" class="btn-primary" type="button" style="flex:1;">Download WebP</button>
               <button id="closePreviewBtn" class="btn-ghost" type="button" style="flex:1;">Close preview</button>
             </div>
           </div>
@@ -1148,6 +1148,9 @@
 const canvas = document.getElementById('bannerCanvas');
 const ctx = canvas.getContext('2d', { alpha: true });
 const maxDisplayWidth = 1200;
+const EXPORT_MIME_TYPE = 'image/webp';
+const EXPORT_FILE_EXT = 'webp';
+const SUPPORTED_IMAGE_FILE_RE = /\.(png|jpe?g|gif|webp)$/i;
 
 let W = 468;
 let H = 60;
@@ -1265,6 +1268,12 @@ function loadImageFromDataURL(src) {
     img.onerror = () => reject(new Error('Image decode failed'));
     img.src = src;
   });
+}
+
+function isSupportedLayerFile(file) {
+  if (!file) return false;
+  if (file.type && file.type.startsWith('image/')) return true;
+  return SUPPORTED_IMAGE_FILE_RE.test(file.name || '');
 }
 
 function initialLayerBox(img) {
@@ -1584,7 +1593,7 @@ function duplicateLayerById(layerId) {
 }
 
 async function addImageFiles(fileList) {
-  const files = Array.from(fileList || []).filter(file => file.type && file.type.startsWith('image/'));
+  const files = Array.from(fileList || []).filter(isSupportedLayerFile);
   if (!files.length) return;
 
   dom.canvasTip.textContent = files.length === 1
@@ -1969,9 +1978,9 @@ function draw() {
   drawTextGuide();
 }
 
-function exportPNG() {
+function exportWebP() {
   draw();
-  dom.previewImg.src = canvas.toDataURL('image/png', 1);
+  dom.previewImg.src = canvas.toDataURL(EXPORT_MIME_TYPE, 1);
   dom.previewDims.textContent = `preview · ${W} × ${H}`;
   dom.previewWrap.classList.add('visible');
   dom.previewWrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -1980,8 +1989,8 @@ function exportPNG() {
 function downloadBanner() {
   draw();
   const link = document.createElement('a');
-  link.download = `banner-${W}x${H}.png`;
-  link.href = canvas.toDataURL('image/png', 1);
+  link.download = `banner-${W}x${H}.${EXPORT_FILE_EXT}`;
+  link.href = canvas.toDataURL(EXPORT_MIME_TYPE, 1);
   link.click();
 }
 
@@ -2200,7 +2209,7 @@ dom.shadowBlur.addEventListener('input', function () {
   draw();
 });
 
-dom.exportBtn.addEventListener('click', exportPNG);
+dom.exportBtn.addEventListener('click', exportWebP);
 dom.downloadBtn.addEventListener('click', downloadBanner);
 dom.closePreviewBtn.addEventListener('click', hidePreview);
 
@@ -2218,7 +2227,7 @@ window.addEventListener('keydown', event => {
   const isTyping = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault();
-    exportPNG();
+    exportWebP();
     return;
   }
 

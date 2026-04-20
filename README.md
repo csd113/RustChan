@@ -24,6 +24,14 @@ RustChan is built in Rust, ships with bundled SQLite, and is designed to be unde
 
 </div>
 
+<p align="center">
+  <img width="100%" alt="RustChan home page" src="https://github.com/user-attachments/assets/3993ae93-aa9f-4285-b623-7a8f286b60ae" />
+</p>
+
+<p align="center">
+  <img width="100%" alt="RustChan board view" src="https://github.com/user-attachments/assets/ba89f0e2-0cee-4aa8-a085-4507575c0247" />
+</p>
+
 ## What Is RustChan?
 
 RustChan is a self-hosted imageboard server. It gives you boards, threads, replies, media uploads, moderation, backups, and the usual imageboard nonsense, all in a single Rust binary.
