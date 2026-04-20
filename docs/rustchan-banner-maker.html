@@ -1969,17 +1969,19 @@ function drawTextGuide() {
   ctx.restore();
 }
 
-function draw() {
+function draw(includeGuides = true) {
   ctx.clearRect(0, 0, W, H);
   drawBackground();
   layers.forEach(drawLayer);
   drawText();
-  drawSelection();
-  drawTextGuide();
+  if (includeGuides) {
+    drawSelection();
+    drawTextGuide();
+  }
 }
 
 function exportWebP() {
-  draw();
+  draw(false);
   dom.previewImg.src = canvas.toDataURL(EXPORT_MIME_TYPE, 1);
   dom.previewDims.textContent = `preview · ${W} × ${H}`;
   dom.previewWrap.classList.add('visible');
@@ -1987,7 +1989,7 @@ function exportWebP() {
 }
 
 function downloadBanner() {
-  draw();
+  draw(false);
   const link = document.createElement('a');
   link.download = `banner-${W}x${H}.${EXPORT_FILE_EXT}`;
   link.href = canvas.toDataURL(EXPORT_MIME_TYPE, 1);
