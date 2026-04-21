@@ -32,7 +32,7 @@ static LIVE_SITE_NAME: LazyLock<RwLock<Arc<str>>> =
 static LIVE_SITE_SUBTITLE: LazyLock<RwLock<Arc<str>>> =
     LazyLock::new(|| RwLock::new(Arc::from("select board to proceed")));
 
-/// In-memory cache for the admin-configured default theme (empty = terminal).
+/// In-memory cache for the admin-configured default theme.
 /// Updated immediately when admin saves site settings so pages reflect the
 /// change without requiring a server restart or extra DB round-trip per request.
 static LIVE_DEFAULT_THEME: LazyLock<RwLock<Arc<str>>> =
@@ -130,7 +130,7 @@ pub fn set_live_site_subtitle(subtitle: &str) {
 }
 
 /// Update the in-memory default theme cache.
-/// Pass an empty string to reset to "terminal" (the built-in default).
+/// Pass an empty string to clear the admin override and fall back to the hard default.
 pub fn set_live_default_theme(theme: &str) {
     *LIVE_DEFAULT_THEME.write() = Arc::from(theme);
 }
@@ -737,4 +737,50 @@ pub fn error_page(code: u16, message: &str) -> String {
         false,
         "/",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{base_layout, set_live_default_theme, set_live_themes};
+    use crate::models::Theme;
+
+    fn builtin_theme(slug: &str, display_name: &str, sort_order: i64) -> Theme {
+        Theme {
+            slug: slug.to_string(),
+            display_name: display_name.to_string(),
+            description: format!("{display_name} description"),
+            swatch_hex: "#123456".to_string(),
+            enabled: true,
+            sort_order,
+            is_builtin: true,
+            custom_css: String::new(),
+        }
+    }
+
+    #[test]
+    fn base_layout_uses_forest_default_and_featured_theme_order() {
+        set_live_default_theme("forest");
+        set_live_themes(vec![
+            builtin_theme("forest", "Forest", 10),
+            builtin_theme("blue-sky", "Blue Sky", 20),
+            builtin_theme("deep-orbit", "Deep Orbit", 30),
+            builtin_theme("terminal", "Terminal", 40),
+            builtin_theme("dorfic", "DORFic", 50),
+        ]);
+
+        let html = base_layout("Home", None, "<p>body</p>", "", &[], None, None, false, "/");
+
+        assert!(html.contains(r#"data-default-theme="forest""#));
+
+        let forest_idx = html.find(">Forest</a>").expect("forest option");
+        let blue_sky_idx = html.find(">Blue Sky</a>").expect("blue sky option");
+        let deep_orbit_idx = html.find(">Deep Orbit</a>").expect("deep orbit option");
+        let terminal_idx = html.find(">Terminal</a>").expect("terminal option");
+        let dorfic_idx = html.find(">DORFic</a>").expect("dorfic option");
+
+        assert!(forest_idx < blue_sky_idx);
+        assert!(blue_sky_idx < deep_orbit_idx);
+        assert!(deep_orbit_idx < terminal_idx);
+        assert!(terminal_idx < dorfic_idx);
+    }
 }

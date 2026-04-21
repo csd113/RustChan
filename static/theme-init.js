@@ -24,7 +24,7 @@ try {
   };
   var _t = localStorage.getItem('rustchan_theme');
   if (!_valid(_t)) {
-    _t = document.documentElement.getAttribute('data-default-theme') || 'fluorogrid';
+    _t = document.documentElement.getAttribute('data-default-theme') || 'forest';
   }
   if (_valid(_t)) {
     if (_t === 'terminal') {

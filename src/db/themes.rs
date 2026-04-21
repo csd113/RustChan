@@ -5,6 +5,40 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
+use std::collections::BTreeSet;
+
+const LEGACY_DEFAULT_BUILTIN_THEMES: &[&str] = &[
+    "terminal",
+    "aero",
+    "dorfic",
+    "forest",
+    "chanclassic",
+    "neoncubicle",
+    "fluorogrid",
+];
+
+fn configured_enabled_builtin_slugs() -> Vec<String> {
+    let mut enabled_builtin_slugs = CONFIG
+        .initial_enabled_builtin_themes
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>();
+
+    let configured = enabled_builtin_slugs
+        .iter()
+        .map(|slug| slug.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let legacy_default = LEGACY_DEFAULT_BUILTIN_THEMES
+        .iter()
+        .map(|slug| slug.to_string())
+        .collect::<BTreeSet<_>>();
+
+    if configured == legacy_default {
+        enabled_builtin_slugs.extend(["blue-sky".to_string(), "deep-orbit".to_string()]);
+    }
+
+    enabled_builtin_slugs
+}
 
 fn map_theme(row: &rusqlite::Row<'_>) -> rusqlite::Result<Theme> {
     Ok(Theme {
@@ -65,11 +99,7 @@ pub fn get_theme(conn: &rusqlite::Connection, slug: &str) -> Result<Option<Theme
 /// # Errors
 /// Returns an error if any database write fails.
 pub fn upsert_builtin_themes(conn: &rusqlite::Connection) -> Result<()> {
-    let enabled_builtin_slugs = CONFIG
-        .initial_enabled_builtin_themes
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect::<Vec<_>>();
+    let enabled_builtin_slugs = configured_enabled_builtin_slugs();
 
     for theme in builtin_theme_rows(&enabled_builtin_slugs) {
         conn.execute(
@@ -280,4 +310,65 @@ pub fn theme_css_response(conn: &rusqlite::Connection, slug: &str) -> Result<Opt
 #[must_use]
 pub fn is_builtin_slug(slug: &str) -> bool {
     builtin_theme(slug).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn legacy_default_builtin_list_is_upgraded_with_new_featured_themes() {
+        let enabled_builtin_slugs = super::configured_enabled_builtin_slugs();
+
+        assert!(enabled_builtin_slugs.iter().any(|slug| slug == "blue-sky"));
+        assert!(enabled_builtin_slugs
+            .iter()
+            .any(|slug| slug == "deep-orbit"));
+    }
+
+    #[test]
+    fn load_themes_keeps_featured_builtins_first() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+        let themes = super::load_themes(&conn).expect("load themes");
+        let builtins = themes
+            .iter()
+            .filter(|theme| theme.is_builtin && theme.enabled)
+            .map(|theme| theme.slug.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            builtins,
+            vec![
+                "forest",
+                "blue-sky",
+                "deep-orbit",
+                "terminal",
+                "dorfic",
+                "chanclassic",
+                "aero",
+                "neoncubicle",
+                "fluorogrid",
+            ]
+        );
+    }
+
+    #[test]
+    fn load_themes_includes_new_builtin_theme_metadata() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+        let themes = super::load_themes(&conn).expect("load themes");
+
+        let blue_sky = themes
+            .iter()
+            .find(|theme| theme.slug == "blue-sky")
+            .expect("blue sky theme");
+        assert_eq!(blue_sky.display_name, "Blue Sky");
+        assert!(blue_sky.enabled);
+
+        let deep_orbit = themes
+            .iter()
+            .find(|theme| theme.slug == "deep-orbit")
+            .expect("deep orbit theme");
+        assert_eq!(deep_orbit.display_name, "Deep Orbit");
+        assert!(deep_orbit.enabled);
+    }
 }

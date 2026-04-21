@@ -306,8 +306,8 @@ The generated file documents every setting inline. Commonly tuned settings:
 ```toml
 forum_name = "RustChan"
 site_subtitle = "select board to proceed"
-default_theme = "fluorogrid"
-enabled_builtin_themes = ["terminal", "aero", "dorfic", "forest", "chanclassic", "neoncubicle", "fluorogrid"]
+default_theme = "forest"
+enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]
 port = 8080
 
 max_image_size_mb = 8

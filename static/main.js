@@ -1547,12 +1547,12 @@ function toggleThreadMenu(toggle) {
   // Priority: personal localStorage preference > server-configured default.
   // The server injects data-default-theme on <html> when the admin picks a
   // non-default theme. New visitors (no localStorage) should see that theme
-  // instead of falling back to terminal.
+  // instead of falling back to the built-in default.
   (function () {
     var active = null;
     try { active = localStorage.getItem('rustchan_theme'); } catch (e) {}
     if (!active || THEMES.indexOf(active) === -1) {
-      active = document.documentElement.getAttribute('data-default-theme') || 'fluorogrid';
+      active = document.documentElement.getAttribute('data-default-theme') || 'forest';
     }
     if (active && THEMES.indexOf(active) !== -1) { applyTheme(active); }
   }());

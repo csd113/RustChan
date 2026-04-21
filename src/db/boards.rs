@@ -193,7 +193,7 @@ pub fn get_site_subtitle(conn: &rusqlite::Connection) -> String {
         .unwrap_or_else(|| "select board to proceed".to_string())
 }
 
-/// Convenience: read the admin-configured default UI theme (empty = "terminal").
+/// Convenience: read the admin-configured default UI theme.
 pub fn get_default_user_theme(conn: &rusqlite::Connection) -> String {
     get_site_setting(conn, "default_theme")
         .unwrap_or_else(|error| {

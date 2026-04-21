@@ -8,57 +8,71 @@ pub struct BuiltinTheme {
     pub sort_order: i64,
 }
 
-pub const HARD_DEFAULT_THEME: &str = "fluorogrid";
+pub const HARD_DEFAULT_THEME: &str = "forest";
 
 pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
+    BuiltinTheme {
+        slug: "forest",
+        display_name: "Forest",
+        description: "Earthy dark woodland palette with parchment accents.",
+        swatch_hex: "#6fa84a",
+        sort_order: 10,
+    },
+    BuiltinTheme {
+        slug: "blue-sky",
+        display_name: "Blue Sky",
+        description: "Soft cloud-blue daylight palette with calm reading contrast.",
+        swatch_hex: "#6d98c4",
+        sort_order: 20,
+    },
+    BuiltinTheme {
+        slug: "deep-orbit",
+        display_name: "Deep Orbit",
+        description: "Muted indigo night palette with moonlit contrast.",
+        swatch_hex: "#7fa8b8",
+        sort_order: 30,
+    },
     BuiltinTheme {
         slug: "terminal",
         display_name: "Terminal",
         description: "CRT-style dark green terminal theme.",
         swatch_hex: "#00ff41",
-        sort_order: 10,
-    },
-    BuiltinTheme {
-        slug: "aero",
-        display_name: "Frutiger Aero",
-        description: "Bright glossy blues with soft rounded chrome.",
-        swatch_hex: "#6aaed6",
-        sort_order: 55,
+        sort_order: 40,
     },
     BuiltinTheme {
         slug: "dorfic",
         display_name: "DORFic",
         description: "Warm amber sci-fi terminal with darker chrome.",
         swatch_hex: "#ffcc66",
-        sort_order: 30,
-    },
-    BuiltinTheme {
-        slug: "forest",
-        display_name: "Forest",
-        description: "Earthy dark woodland palette with parchment accents.",
-        swatch_hex: "#6fa84a",
-        sort_order: 40,
+        sort_order: 50,
     },
     BuiltinTheme {
         slug: "chanclassic",
         display_name: "ChanClassic",
         description: "Light beige classic imageboard styling.",
         swatch_hex: "#800000",
-        sort_order: 50,
+        sort_order: 60,
+    },
+    BuiltinTheme {
+        slug: "aero",
+        display_name: "Frutiger Aero",
+        description: "Bright glossy blues with soft rounded chrome.",
+        swatch_hex: "#6aaed6",
+        sort_order: 70,
     },
     BuiltinTheme {
         slug: "neoncubicle",
         display_name: "NeonCubicle",
         description: "Soft office-futurist magenta and gray palette.",
         swatch_hex: "#b03888",
-        sort_order: 60,
+        sort_order: 80,
     },
     BuiltinTheme {
         slug: "fluorogrid",
         display_name: "FluoroGrid",
         description: "Light retro-futurist grid with bright accent colors.",
         swatch_hex: "#8833aa",
-        sort_order: 70,
+        sort_order: 90,
     },
 ];
 

@@ -151,7 +151,7 @@ That folder is the thing to back up if you want to move the site or keep it safe
 ```toml
 forum_name = "RustChan"
 site_subtitle = "select board to proceed"
-default_theme = "fluorogrid"
+default_theme = "forest"
 port = 8080
 enable_tor_support = true
 require_ffmpeg = false

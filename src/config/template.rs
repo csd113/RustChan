@@ -15,11 +15,11 @@ site_subtitle = "select board to proceed"
 
 # Default theme for first-time visitors before they pick their own.
 # Valid values: built-in or admin-created custom theme slugs.
-default_theme = "fluorogrid"
+default_theme = "forest"
 
 # Built-in themes enabled when the theme catalog is first seeded.
 # Remove built-in slugs here if you want them disabled after restart.
-enabled_builtin_themes = ["terminal", "aero", "dorfic", "forest", "chanclassic", "neoncubicle", "fluorogrid"]
+enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]
 
 
 # ── Network / web server ──────────────────────────────────────────────────────

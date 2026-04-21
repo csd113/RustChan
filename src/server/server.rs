@@ -195,7 +195,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             let default_theme = crate::db::get_default_user_theme(&conn);
             if default_theme.is_empty()
                 && !CONFIG.initial_default_theme.is_empty()
-                && CONFIG.initial_default_theme != "fluorogrid"
+                && CONFIG.initial_default_theme != crate::theme::HARD_DEFAULT_THEME
             {
                 let _ = crate::db::set_site_setting(
                     &conn,

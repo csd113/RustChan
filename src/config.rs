@@ -487,7 +487,9 @@ impl Config {
         );
         let initial_default_theme = env_str(
             "CHAN_DEFAULT_THEME",
-            s.default_theme.as_deref().unwrap_or("fluorogrid"),
+            s.default_theme
+                .as_deref()
+                .unwrap_or(crate::theme::HARD_DEFAULT_THEME),
         );
         let initial_enabled_builtin_themes = s.enabled_builtin_themes.unwrap_or_else(|| {
             crate::theme::builtin_theme_slugs()
@@ -1174,7 +1176,7 @@ fn port_from_bind_addr(addr: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_settings_file_lines;
+    use super::{rewrite_settings_file_lines, template::settings_template};
 
     #[test]
     fn rewrite_settings_file_lines_updates_requested_keys_and_preserves_comments() {
@@ -1236,5 +1238,15 @@ enabled = true
         assert!(backup_hours_idx < anchor_idx);
         assert!(backup_copies_idx < anchor_idx);
         assert!(anchor_idx < tls_idx);
+    }
+
+    #[test]
+    fn settings_template_uses_forest_and_featured_theme_order() {
+        let template = settings_template("secret");
+
+        assert!(template.contains(r#"default_theme = "forest""#));
+        assert!(template.contains(
+            r#"enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]"#
+        ));
     }
 }
