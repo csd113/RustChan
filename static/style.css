@@ -947,7 +947,14 @@ html.no-js .post-form-wrap {
   font-size: 0.8rem;
   white-space: nowrap;
   padding-top: 6px;
-  min-width: 80px;
+  width: 1%;
+  min-width: 0;
+  padding-right: 4px;
+}
+
+.post-form td:nth-child(2) {
+  width: 99%;
+  padding-left: 4px;
 }
 
 .post-form input[type="text"],
