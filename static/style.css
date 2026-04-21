@@ -1372,6 +1372,19 @@ html:not([data-theme]) .poster-id-btn {
 }
 .backrefs .backref:hover { color: var(--green-bright); text-decoration: underline; }
 
+.post-body .quotelink.missing-post-ref,
+.backrefs .backref.missing-post-ref,
+.post-body .crosslink.missing-post-ref {
+  color: var(--red, #e05555);
+  text-decoration: underline dotted;
+  text-decoration-thickness: 1px;
+}
+.post-body .quotelink.missing-post-ref:hover,
+.backrefs .backref.missing-post-ref:hover,
+.post-body .crosslink.missing-post-ref:hover {
+  color: var(--red-bright, #ff6b6b);
+}
+
 /* ── Hover popup preview ───────────────────────────────────────────────────── */
 .quotelink-popup {
   position: absolute;
@@ -1412,6 +1425,10 @@ html:not([data-theme]) .poster-id-btn {
   font-size: 0.78rem;
   color: var(--text-dim, #666);
   margin-left: 18px;
+}
+
+.missing-hash-notice {
+  margin: 0 0 10px;
 }
 
 /* ── Highlighted post ──────────────────────────────────────────────────────── */

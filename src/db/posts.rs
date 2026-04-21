@@ -1227,11 +1227,11 @@ mod tests {
         get_posts_for_thread, record_post_submission, search_posts, search_terms,
         set_post_media_processing_state, to_fts_query, MEDIA_PROCESSING_FAILED,
     };
-    use crate::error::AppError;
     use crate::db::{
         create_board, create_reply_with_thread_update, create_thread_with_optional_poll,
         get_board_by_short, NewPost,
     };
+    use crate::error::AppError;
     use rusqlite::Connection;
 
     fn test_conn() -> Connection {
@@ -1492,5 +1492,81 @@ mod tests {
             Err(AppError::NotFound(msg)) => assert!(msg.contains("Post id")),
             other => panic!("expected not found on retry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn delete_post_decrements_reply_count_for_the_thread() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "count", "Count", "", false).expect("create board");
+        let op = NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some("subject".to_string()),
+            body: "body".to_string(),
+            body_html: "body".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: true,
+        };
+        let (thread_id, _post_id, _) =
+            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
+                .expect("create thread");
+
+        let reply = NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "reply".to_string(),
+            body_html: "reply".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: false,
+        };
+        let reply_id =
+            create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+
+        let before_count: i64 = conn
+            .query_row(
+                "SELECT reply_count FROM threads WHERE id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("thread count before delete");
+        assert_eq!(before_count, 1);
+
+        super::delete_post(&conn, reply_id).expect("delete reply");
+
+        let after_count: i64 = conn
+            .query_row(
+                "SELECT reply_count FROM threads WHERE id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("thread count after delete");
+        assert_eq!(after_count, 0);
     }
 }

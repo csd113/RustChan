@@ -735,8 +735,8 @@ mod tests {
         count_threads_for_board, create_reply_with_thread_update, delete_thread,
         prune_old_archived_threads, prune_old_threads,
     };
-    use crate::error::AppError;
     use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
+    use crate::error::AppError;
     use crate::models::MediaType;
     use crate::pending_fs::finalize_delete_files_payload;
     use rusqlite::{params, Connection};
@@ -894,6 +894,53 @@ mod tests {
 
         let deleted = delete_thread(&conn, thread_id).expect("delete thread");
         assert!(deleted.paths.is_empty());
+        match delete_thread(&conn, thread_id) {
+            Err(AppError::NotFound(msg)) => assert!(msg.contains("Thread id")),
+            other => panic!("expected not found on retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_thread_removes_replies_and_retries_cleanly() {
+        let conn = test_conn();
+        let board_id =
+            create_board(&conn, "delthr", "Del Thread Replies", "", false).expect("create board");
+        let thread_id = create_plain_thread(&conn, board_id, "thread with reply");
+        let reply = NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "reply".to_string(),
+            body_html: "reply".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: false,
+        };
+        create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+
+        let deleted = delete_thread(&conn, thread_id).expect("delete thread");
+        assert!(deleted.paths.is_empty());
+        assert!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("post count after delete")
+                == 0
+        );
         match delete_thread(&conn, thread_id) {
             Err(AppError::NotFound(msg)) => assert!(msg.contains("Thread id")),
             other => panic!("expected not found on retry, got {other:?}"),

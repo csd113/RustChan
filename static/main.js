@@ -1901,6 +1901,7 @@ function toggleThreadMenu(toggle) {
 
 (function () {
   var _highlighted = null;
+  var _missingHashNotice = null;
 
   function highlightPost(id) {
     clearHighlight();
@@ -1917,14 +1918,40 @@ function toggleThreadMenu(toggle) {
     }
   }
 
+  function clearMissingHashNotice() {
+    if (_missingHashNotice && _missingHashNotice.parentNode) {
+      _missingHashNotice.parentNode.removeChild(_missingHashNotice);
+    }
+    _missingHashNotice = null;
+  }
+
+  function showMissingHashNotice(pid) {
+    clearMissingHashNotice();
+    var container = document.getElementById('thread-posts');
+    if (!container || !container.parentNode) return;
+    var notice = document.createElement('div');
+    notice.className = 'missing-post-notice missing-hash-notice';
+    notice.innerHTML =
+      '<span class="missing-post-icon">&#x2715;</span> ' +
+      '<strong>&gt;&gt;' + pid + '</strong> — post not found' +
+      '<span class="missing-post-sub">it may have been deleted</span>';
+    container.parentNode.insertBefore(notice, container);
+    _missingHashNotice = notice;
+  }
+
   function highlightPostFromHash(scrollBehavior) {
     var match = window.location.hash.match(/^#p(\d+)$/);
     if (!match) {
+      clearMissingHashNotice();
       clearHighlight();
       return;
     }
     var target = document.getElementById('p' + match[1]);
-    if (!target) return;
+    if (!target) {
+      showMissingHashNotice(match[1]);
+      return;
+    }
+    clearMissingHashNotice();
     highlightPost(match[1]);
     if (scrollBehavior && typeof target.scrollIntoView === 'function') {
       target.scrollIntoView({ behavior: scrollBehavior, block: 'start' });
@@ -1934,6 +1961,7 @@ function toggleThreadMenu(toggle) {
   document.addEventListener('click', function (e) {
     if (e.target.classList.contains('quotelink')) return;
     if (e.target.classList.contains('backref')) return;
+    clearMissingHashNotice();
     clearHighlight();
   });
 
@@ -2030,6 +2058,10 @@ function toggleThreadMenu(toggle) {
       if (link.dataset.quotelinkWired === '1') return;
       link.dataset.quotelinkWired = '1';
       var pid = link.getAttribute('data-pid');
+      if (pid && !document.getElementById('p' + pid)) {
+        link.classList.add('missing-post-ref');
+        link.setAttribute('title', 'post not found');
+      }
       link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); showPopup(link, pid); });
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
       link.addEventListener('click', function (e) {
@@ -2059,6 +2091,10 @@ function toggleThreadMenu(toggle) {
       if (link.dataset.backrefWired === '1') return;
       link.dataset.backrefWired = '1';
       var pid = link.getAttribute('data-pid');
+      if (pid && !document.getElementById('p' + pid)) {
+        link.classList.add('missing-post-ref');
+        link.setAttribute('title', 'post not found');
+      }
       link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); showPopup(link, pid); });
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
       link.addEventListener('click', function (e) {
@@ -2214,6 +2250,8 @@ function toggleThreadMenu(toggle) {
         function showCbMissingError() {
           var cbPopup = getCbPopup();
           if (!cbPopup) return;
+          link.classList.add('missing-post-ref');
+          link.setAttribute('title', 'post not found');
           cbPopup.innerHTML =
             '<div class="missing-post-notice">' +
             '<span class="missing-post-icon">&#x2715;</span> ' +
