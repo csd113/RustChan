@@ -27,6 +27,7 @@ pub struct BannerImagePreflight {
     pub width: u32,
     pub height: u32,
     pub animated_gif_frames: Option<usize>,
+    pub animated_webp: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -367,6 +368,8 @@ pub fn canonicalize_banner_bytes(bytes: &[u8], target_path: &Path) -> Result<(u3
             preflight.width,
             preflight.height,
         )?
+    } else if preflight.animated_webp {
+        write_animated_webp_banner_asset(bytes, target_path, preflight.width, preflight.height)?
     } else {
         let img = decode_uploaded_banner(bytes, &preflight)?;
         let processed = normalize_banner_image(&img);
@@ -673,12 +676,58 @@ fn write_animated_gif_banner_asset_scaled_with_caps(
     }
 }
 
+fn write_animated_webp_banner_asset(
+    bytes: &[u8],
+    target_path: &Path,
+    original_width: u32,
+    original_height: u32,
+) -> Result<(u32, u32)> {
+    let (max_width, max_height) = maybe_shrink_dimensions(original_width, original_height);
+    let should_scale = (max_width, max_height) != (original_width, original_height);
+    if should_scale
+        && crate::media::ffmpeg::detect_ffmpeg()
+        && crate::media::ffmpeg::check_webp_encoder()
+    {
+        let input_path = animated_webp_temp_path(target_path);
+        std::fs::write(&input_path, bytes)
+            .with_context(|| format!("write {}", input_path.display()))?;
+        let conversion = crate::media::ffmpeg::ffmpeg_image_to_webp_scaled(
+            &input_path,
+            target_path,
+            max_width,
+            max_height,
+        )
+        .with_context(|| format!("scale animated webp banner {}", input_path.display()));
+        let _ = std::fs::remove_file(&input_path);
+        if conversion.is_ok() {
+            return Ok((max_width, max_height));
+        }
+        if let Err(error) = conversion {
+            tracing::warn!("animated WebP banner scaling failed ({error:#}); storing original");
+        }
+    }
+
+    std::fs::write(target_path, bytes)
+        .with_context(|| format!("write {}", target_path.display()))?;
+    Ok((original_width, original_height))
+}
+
 fn animated_gif_temp_path(target_path: &Path) -> PathBuf {
     let parent = target_path
         .parent()
         .map_or_else(runtime_banner_dir, Path::to_path_buf);
     parent.join(format!(
         "{}-animated-input.gif",
+        uuid::Uuid::new_v4().simple()
+    ))
+}
+
+fn animated_webp_temp_path(target_path: &Path) -> PathBuf {
+    let parent = target_path
+        .parent()
+        .map_or_else(runtime_banner_dir, Path::to_path_buf);
+    parent.join(format!(
+        "{}-animated-input.webp",
         uuid::Uuid::new_v4().simple()
     ))
 }
@@ -744,6 +793,7 @@ fn preflight_banner_bytes(bytes: &[u8]) -> Result<BannerImagePreflight> {
         width,
         height,
         animated_gif_frames,
+        animated_webp: format == ImageFormat::WebP && is_animated_webp(bytes),
     })
 }
 
@@ -773,6 +823,9 @@ fn validate_banner_dimensions(width: u32, height: u32) -> Result<()> {
 fn decode_uploaded_banner(bytes: &[u8], preflight: &BannerImagePreflight) -> Result<DynamicImage> {
     if preflight.animated_gif_frames.is_some() {
         anyhow::bail!("Animated GIF banners are handled separately.");
+    }
+    if preflight.animated_webp {
+        anyhow::bail!("Animated WebP banners are handled separately.");
     }
     let img = image::load_from_memory(bytes).context("decode banner image")?;
     Ok(img)
@@ -805,14 +858,39 @@ fn count_gif_frames(bytes: &[u8]) -> usize {
     frame_markers.max(1)
 }
 
+fn is_animated_webp(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return false;
+    }
+    let mut offset = 12usize;
+    while offset.saturating_add(8) <= bytes.len() {
+        let chunk_type = &bytes[offset..offset + 4];
+        let size_bytes = [
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ];
+        let chunk_size = u32::from_le_bytes(size_bytes) as usize;
+        if chunk_type == b"ANIM" || chunk_type == b"ANMF" {
+            return true;
+        }
+        offset = offset
+            .saturating_add(8)
+            .saturating_add(chunk_size)
+            .saturating_add(chunk_size % 2);
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         banner_admin_anchor, banner_asset_content_type, banner_gif_fallback_path,
         banner_open_section, banner_storage_path, banner_target_draft, canonicalize_banner_bytes,
-        choose_active_banner, validate_banner_restore_entry_name, validate_banner_storage_key,
-        write_animated_gif_banner_asset_scaled_with_caps, DISPLAY_HEIGHT, DISPLAY_WIDTH,
-        MAX_ANIMATED_GIF_FRAMES,
+        choose_active_banner, is_animated_webp, validate_banner_restore_entry_name,
+        validate_banner_storage_key, write_animated_gif_banner_asset_scaled_with_caps,
+        write_animated_webp_banner_asset, DISPLAY_HEIGHT, DISPLAY_WIDTH, MAX_ANIMATED_GIF_FRAMES,
     };
     use crate::models::{BannerAsset, BannerScope, BannerTargetType};
     use image::{codecs::gif::GifEncoder, Delay, Frame, ImageBuffer, ImageFormat, Rgba};
@@ -962,6 +1040,20 @@ mod tests {
         assert_eq!(std::fs::read(&gif_path).expect("read fallback GIF"), bytes);
         assert_eq!(banner_asset_content_type(&gif_path), "image/gif");
         let _ = std::fs::remove_file(gif_path);
+    }
+
+    #[test]
+    fn animated_webp_banner_is_preserved_without_static_decode() {
+        let bytes = b"RIFF\x18\x00\x00\x00WEBPVP8X\n\x00\x00\x00\x02\x00\x00\x00\xd3\x01\x00;\x00\x00ANIM\x00\x00\x00\x00";
+        assert!(is_animated_webp(bytes));
+
+        let target = std::env::temp_dir().join(format!("{}.webp", uuid::Uuid::new_v4().simple()));
+        let dimensions =
+            write_animated_webp_banner_asset(bytes, &target, DISPLAY_WIDTH, DISPLAY_HEIGHT)
+                .expect("animated WebP should be written directly");
+        assert_eq!(dimensions, (DISPLAY_WIDTH, DISPLAY_HEIGHT));
+        assert_eq!(std::fs::read(&target).expect("read animated WebP"), bytes);
+        let _ = std::fs::remove_file(target);
     }
 
     #[test]
