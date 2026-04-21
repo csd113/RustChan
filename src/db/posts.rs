@@ -428,11 +428,14 @@ pub fn get_post_on_board(
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<String>> {
+pub fn delete_post(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+) -> crate::error::Result<crate::db::DeletePathsResult> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin delete_post transaction")?;
 
-    let result: anyhow::Result<Vec<String>> = (|| {
+    let result: crate::error::Result<crate::db::DeletePathsResult> = (|| {
         let (thread_id, is_op, candidates) = {
             let mut candidates = Vec::new();
             let mut stmt = conn.prepare_cached(
@@ -452,13 +455,15 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
                 .optional()?;
 
             let Some((thread_id, is_op, f, t, a)) = row else {
-                anyhow::bail!("Post id {post_id} not found");
+                return Err(crate::error::AppError::NotFound(format!(
+                    "Post id {post_id} not found"
+                )));
             };
 
             if is_op {
-                anyhow::bail!(
+                return Err(crate::error::AppError::BadRequest(format!(
                     "Post id {post_id} is the OP for thread {thread_id}; delete the thread instead"
-                );
+                )));
             }
 
             if let Some(p) = f {
@@ -480,7 +485,9 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
             .execute("DELETE FROM posts WHERE id = ?1", params![post_id])
             .context("Failed to delete post")?;
         if deleted == 0 {
-            anyhow::bail!("Post id {post_id} not found");
+            return Err(crate::error::AppError::NotFound(format!(
+                "Post id {post_id} not found"
+            )));
         }
 
         let updated = conn.execute(
@@ -493,13 +500,22 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
             params![thread_id],
         )?;
         if updated == 0 {
-            anyhow::bail!("Thread id {thread_id} not found while updating reply count");
+            return Err(crate::error::AppError::NotFound(format!(
+                "Thread id {thread_id} not found while updating reply count"
+            )));
         }
 
         // Check which paths are now safe — runs inside the transaction so it sees
         // the just-deleted state.
         let safe = super::paths_safe_to_delete(conn, candidates)?;
-        Ok(safe)
+        let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
+        if let Some(op) = pending_fs_op.as_ref() {
+            super::insert_pending_fs_op(conn, op)?;
+        }
+        Ok(crate::db::DeletePathsResult {
+            paths: safe,
+            pending_fs_op_id: pending_fs_op.map(|op| op.id),
+        })
     })();
 
     match result {
@@ -1211,7 +1227,11 @@ mod tests {
         get_posts_for_thread, record_post_submission, search_posts, search_terms,
         set_post_media_processing_state, to_fts_query, MEDIA_PROCESSING_FAILED,
     };
-    use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
+    use crate::error::AppError;
+    use crate::db::{
+        create_board, create_reply_with_thread_update, create_thread_with_optional_poll,
+        get_board_by_short, NewPost,
+    };
     use rusqlite::Connection;
 
     fn test_conn() -> Connection {
@@ -1408,5 +1428,69 @@ mod tests {
                 .expect("count failed after clear"),
             0
         );
+    }
+
+    #[test]
+    fn delete_post_returns_not_found_on_retry() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "delp", "Del Post", "", false).expect("create board");
+        let op = NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some("subject".to_string()),
+            body: "body".to_string(),
+            body_html: "body".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: true,
+        };
+        let (thread_id, _post_id, _) =
+            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
+                .expect("create thread");
+        assert_eq!(thread_id, 1);
+
+        let reply = NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "reply".to_string(),
+            body_html: "reply".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: false,
+        };
+        let reply_id =
+            create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+
+        let deleted = super::delete_post(&conn, reply_id).expect("delete post");
+        assert!(deleted.paths.is_empty());
+        match super::delete_post(&conn, reply_id) {
+            Err(AppError::NotFound(msg)) => assert!(msg.contains("Post id")),
+            other => panic!("expected not found on retry, got {other:?}"),
+        }
     }
 }

@@ -137,6 +137,22 @@ impl ProcessedUploads {
     }
 }
 
+fn cleanup_unused_upload_stage(stage_root: Option<&std::path::Path>) {
+    let Some(stage_dir) = stage_root else {
+        return;
+    };
+    if !stage_dir.exists() {
+        return;
+    }
+    if let Err(error) = std::fs::remove_dir_all(stage_dir) {
+        tracing::warn!(
+            stage_dir = %stage_dir.display(),
+            error = %error,
+            "failed to clean unused upload stage directory"
+        );
+    }
+}
+
 fn build_upload_finalize_payload(
     stage_dir: &std::path::Path,
     primary: Option<&crate::utils::files::UploadedFile>,
@@ -281,7 +297,7 @@ pub fn process_uploads(
         .to_str()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Upload stage root is non-UTF-8")))?;
 
-    let (primary, audio, primary_hash) = crate::handlers::process_audio_first_uploads(
+    let processed = crate::handlers::process_audio_first_uploads(
         audio_file_data,
         image_file_data,
         file_data,
@@ -295,7 +311,15 @@ pub fn process_uploads(
         config.max_audio_size,
         config.ffmpeg_available,
         config.ffmpeg_webp_available,
-    )?;
+    );
+
+    let (primary, audio, primary_hash) = match processed {
+        Ok(processed) => processed,
+        Err(error) => {
+            cleanup_unused_upload_stage(stage_root.as_deref());
+            return Err(error);
+        }
+    };
 
     let pending_finalize = stage_root.as_ref().and_then(|stage_dir| {
         build_upload_finalize_payload(stage_dir, primary.as_ref(), audio.as_ref(), primary_hash)
@@ -304,6 +328,10 @@ pub fn process_uploads(
                 payload,
             })
     });
+
+    if pending_finalize.is_none() {
+        cleanup_unused_upload_stage(stage_root.as_deref());
+    }
 
     Ok(ProcessedUploads {
         primary,
@@ -614,8 +642,10 @@ pub fn submit_post(
 
 #[cfg(test)]
 mod tests {
-    use super::{submit_post, SubmitPostCommand, SubmitPostMode};
+    use super::{process_uploads, submit_post, SubmitPostCommand, SubmitPostMode, UploadConfig};
     use crate::error::AppError;
+    use crate::handlers::TempUpload;
+    use sha2::Digest as _;
 
     const TEST_BOARD: &str = "test";
     const TEST_COOKIE_SECRET: &str = "cookie-secret";
@@ -721,6 +751,43 @@ mod tests {
             ffmpeg_available: false,
             ffmpeg_webp_available: false,
         }
+    }
+
+    fn temp_upload(name: &str, bytes: &[u8]) -> (TempUpload, String) {
+        let temp_file = tempfile::Builder::new()
+            .prefix("rustchan-posting-test-upload-")
+            .tempfile()
+            .expect("temp upload");
+        std::fs::write(temp_file.path(), bytes).expect("write temp upload");
+        (
+            TempUpload {
+                temp_file,
+                sniff_bytes: bytes.to_vec(),
+                size_bytes: bytes.len(),
+            },
+            name.to_string(),
+        )
+    }
+
+    fn one_pixel_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::DynamicImage::new_rgba8(1, 1)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encode png");
+        bytes
+    }
+
+    fn pending_upload_stage_count(upload_dir: &std::path::Path) -> usize {
+        let pending = upload_dir.join(".pending");
+        if !pending.exists() {
+            return 0;
+        }
+        std::fs::read_dir(pending)
+            .expect("read pending dir")
+            .count()
     }
 
     #[test]
@@ -848,6 +915,91 @@ mod tests {
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn process_uploads_cleans_staged_image_when_combo_audio_fails() {
+        let state = crate::test_support::app_state();
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let board = crate::db::get_board_by_short(&conn, TEST_BOARD)
+            .expect("load board")
+            .expect("board exists");
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let image = temp_upload("cover.png", &one_pixel_png());
+        let bad_audio = temp_upload("renamed.mp3", b"not really audio");
+
+        let result = process_uploads(
+            Some(image),
+            None,
+            Some(bad_audio),
+            &board,
+            &conn,
+            &UploadConfig {
+                upload_dir: upload_dir.path().to_str().expect("upload dir"),
+                thumb_size: 64,
+                max_image_size: 1024 * 1024,
+                max_video_size: 1024 * 1024,
+                max_audio_size: 1024 * 1024,
+                ffmpeg_available: false,
+                ffmpeg_webp_available: false,
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+    }
+
+    #[test]
+    fn process_uploads_cleans_empty_stage_when_primary_upload_is_dedup_reused() {
+        let state = crate::test_support::app_state();
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let board = crate::db::get_board_by_short(&conn, TEST_BOARD)
+            .expect("load board")
+            .expect("board exists");
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let board_dir = upload_dir.path().join(TEST_BOARD);
+        let thumb_dir = board_dir.join("thumbs");
+        std::fs::create_dir_all(&thumb_dir).expect("create media dirs");
+        std::fs::write(board_dir.join("cached.png"), b"cached file").expect("cached file");
+        std::fs::write(thumb_dir.join("cached.webp"), b"cached thumb").expect("cached thumb");
+
+        let bytes = one_pixel_png();
+        let hash = hex::encode(sha2::Sha256::digest(&bytes));
+        crate::db::record_file_hash(
+            &conn,
+            &hash,
+            "test/cached.png",
+            "test/thumbs/cached.webp",
+            "image/png",
+        )
+        .expect("record file hash");
+
+        let result = process_uploads(
+            None,
+            Some(temp_upload("same-but-renamed.jpg", &bytes)),
+            None,
+            &board,
+            &conn,
+            &UploadConfig {
+                upload_dir: upload_dir.path().to_str().expect("upload dir"),
+                thumb_size: 64,
+                max_image_size: 1024 * 1024,
+                max_video_size: 1024 * 1024,
+                max_audio_size: 1024 * 1024,
+                ffmpeg_available: false,
+                ffmpeg_webp_available: false,
+            },
+        )
+        .expect("dedup upload");
+
+        assert!(result.pending_finalize.is_none());
+        assert!(result
+            .primary
+            .as_ref()
+            .is_some_and(|file| file.dedup_reused));
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
     }
 
     #[test]

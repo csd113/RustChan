@@ -390,14 +390,24 @@ pub async fn admin_delete_post(
             let thread_id = post.thread_id;
             let is_op = post.is_op;
 
-            let paths = if post.is_op {
+            let deleted = if post.is_op {
                 db::delete_thread(&conn, post.thread_id)?
             } else {
                 db::delete_post(&conn, post_id)?
             };
 
-            for p in paths {
-                crate::utils::files::delete_file(&upload_dir, &p);
+            if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+                &conn,
+                &upload_dir,
+                deleted.pending_fs_op_id.as_deref(),
+                &deleted.paths,
+            ) {
+                tracing::warn!(
+                    target: "admin",
+                    post_id = post_id,
+                    error = %error,
+                    "deleted post but file cleanup did not fully complete"
+                );
             }
 
             let action = if is_op {
@@ -479,9 +489,19 @@ pub async fn admin_delete_thread(
                         .collect()
                 });
 
-            let paths = db::delete_thread(&conn, thread_id)?;
-            for p in paths {
-                crate::utils::files::delete_file(&upload_dir, &p);
+            let deleted = db::delete_thread(&conn, thread_id)?;
+            if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+                &conn,
+                &upload_dir,
+                deleted.pending_fs_op_id.as_deref(),
+                &deleted.paths,
+            ) {
+                tracing::warn!(
+                    target: "admin",
+                    thread_id = thread_id,
+                    error = %error,
+                    "deleted thread but file cleanup did not fully complete"
+                );
             }
 
             let _ = db::log_mod_action(

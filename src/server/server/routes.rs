@@ -19,6 +19,7 @@ fn post_upload_body_limit() -> usize {
     CONFIG
         .max_video_size
         .max(CONFIG.max_audio_size)
+        .max(CONFIG.max_image_size)
         .saturating_add(POST_MULTIPART_HEADROOM_BYTES)
 }
 
@@ -369,7 +370,7 @@ fn admin_backup_routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::admin_routes;
+    use super::{admin_routes, post_upload_body_limit, POST_MULTIPART_HEADROOM_BYTES};
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -391,6 +392,20 @@ mod tests {
             writer.finish().expect("finish zip");
         }
         cursor.into_inner()
+    }
+
+    #[test]
+    fn post_upload_body_limit_allows_largest_media_class() {
+        let largest_media_limit = crate::config::CONFIG
+            .max_image_size
+            .max(crate::config::CONFIG.max_video_size)
+            .max(crate::config::CONFIG.max_audio_size);
+
+        assert!(post_upload_body_limit() >= largest_media_limit);
+        assert_eq!(
+            post_upload_body_limit(),
+            largest_media_limit.saturating_add(POST_MULTIPART_HEADROOM_BYTES)
+        );
     }
 
     fn install_admin_session(state: &crate::middleware::AppState) {

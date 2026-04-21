@@ -1027,25 +1027,47 @@ async fn prune_threads(
         let do_archive = allow_archive || CONFIG.archive_before_prune;
         if do_archive {
             let count = crate::db::archive_old_threads(&conn, board_id, max_threads)?;
-            let paths =
+            let deleted =
                 crate::db::prune_old_archived_threads(&conn, board_id, max_archived_threads)?;
-            for p in &paths {
-                crate::utils::files::delete_file(&CONFIG.upload_dir, p);
+            if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+                &conn,
+                &CONFIG.upload_dir,
+                deleted.pending_fs_op_id.as_deref(),
+                &deleted.paths,
+            ) {
+                tracing::warn!(
+                    target: "workers",
+                    board = %board_short,
+                    board_id = board_id,
+                    error = %error,
+                    "archived prune cleanup did not fully complete"
+                );
             }
             if count > 0 {
                 tracing::info!(target: "workers", count = count, board = %board_short, board_id = board_id, "ThreadArchive: threads archived");
             }
-            if !paths.is_empty() {
-                tracing::info!(target: "workers", archived_cap = max_archived_threads, board = %board_short, board_id = board_id, files_removed = paths.len(), "ThreadArchivePrune: archived threads deleted");
+            if !deleted.paths.is_empty() {
+                tracing::info!(target: "workers", archived_cap = max_archived_threads, board = %board_short, board_id = board_id, files_removed = deleted.paths.len(), "ThreadArchivePrune: archived threads deleted");
             }
         } else {
-            let paths = crate::db::prune_old_threads(&conn, board_id, max_threads)?;
-            let count = paths.len();
-            for p in &paths {
-                crate::utils::files::delete_file(&CONFIG.upload_dir, p);
+            let deleted = crate::db::prune_old_threads(&conn, board_id, max_threads)?;
+            let count = deleted.paths.len();
+            if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+                &conn,
+                &CONFIG.upload_dir,
+                deleted.pending_fs_op_id.as_deref(),
+                &deleted.paths,
+            ) {
+                tracing::warn!(
+                    target: "workers",
+                    board = %board_short,
+                    board_id = board_id,
+                    error = %error,
+                    "thread prune cleanup did not fully complete"
+                );
             }
             if count > 0 {
-                tracing::info!(target: "workers", count = count, board = %board_short, board_id = board_id, files_removed = paths.len(), "ThreadPrune: threads deleted");
+                tracing::info!(target: "workers", count = count, board = %board_short, board_id = board_id, files_removed = deleted.paths.len(), "ThreadPrune: threads deleted");
             }
         }
         Ok(())

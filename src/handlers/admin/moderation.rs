@@ -162,6 +162,12 @@ pub async fn admin_ban_and_delete(
             let (admin_id, admin_name) =
                 super::require_admin_session_with_name(&conn, session_id.as_deref())?;
 
+            let post = db::get_post(&conn, post_id)?
+                .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
+            if post.thread_id != thread_id {
+                return Err(AppError::NotFound("Post not found.".into()));
+            }
+
             // Validate ip_hash: must be a well-formed SHA-256 hex string (64 hex
             // chars).  The value comes from a form field in the post toolbar; a
             // confused or tampered submission should be rejected cleanly.
@@ -184,9 +190,19 @@ pub async fn admin_ban_and_delete(
 
             // Delete post (or whole thread if OP)
             if is_op {
-                let paths = db::delete_thread(&conn, thread_id)?;
-                for p in paths {
-                    crate::utils::files::delete_file(&crate::config::CONFIG.upload_dir, &p);
+                let deleted = db::delete_thread(&conn, thread_id)?;
+                if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+                    &conn,
+                    &crate::config::CONFIG.upload_dir,
+                    deleted.pending_fs_op_id.as_deref(),
+                    &deleted.paths,
+                ) {
+                    tracing::warn!(
+                        target: "admin",
+                        thread_id = thread_id,
+                        error = %error,
+                        "ban-delete thread cleanup did not fully complete"
+                    );
                 }
                 let _ = db::log_mod_action(
                     &conn,
@@ -199,9 +215,19 @@ pub async fn admin_ban_and_delete(
                     "",
                 );
             } else {
-                let paths = db::delete_post(&conn, post_id)?;
-                for p in paths {
-                    crate::utils::files::delete_file(&crate::config::CONFIG.upload_dir, &p);
+                let deleted = db::delete_post(&conn, post_id)?;
+                if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+                    &conn,
+                    &crate::config::CONFIG.upload_dir,
+                    deleted.pending_fs_op_id.as_deref(),
+                    &deleted.paths,
+                ) {
+                    tracing::warn!(
+                        target: "admin",
+                        post_id = post_id,
+                        error = %error,
+                        "ban-delete post cleanup did not fully complete"
+                    );
                 }
                 let _ = db::log_mod_action(
                     &conn,

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 pub const UPLOAD_FINALIZE_KIND: &str = "upload_finalize";
+pub const DELETE_FILES_KIND: &str = "delete_files";
 pub const FULL_RESTORE_SWAP_KIND: &str = "full_restore_swap";
 pub const BOARD_RESTORE_SWAP_KIND: &str = "board_restore_swap";
 
@@ -22,6 +23,11 @@ pub struct UploadFinalizePayload {
     pub primary_file_path: Option<String>,
     pub primary_thumb_path: Option<String>,
     pub primary_mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteFilesPayload {
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +103,47 @@ fn cleanup_empty_parent_dir(path: &Path, live: &Path) {
         {
             let _ = std::fs::remove_dir(parent);
         }
+    }
+}
+
+/// Finalize a delete-files pending op by removing the listed paths and, if the
+/// cleanup succeeds, clearing the durable operation record.
+///
+/// # Errors
+/// Returns an error if any file removal fails. Missing files are treated as
+/// already-cleaned and do not fail the operation.
+pub fn finalize_delete_files_payload(
+    conn: &rusqlite::Connection,
+    upload_dir: &str,
+    pending_op_id: Option<&str>,
+    paths: &[String],
+) -> Result<()> {
+    let mut cleanup_errors = Vec::new();
+
+    for path in paths {
+        if let Err(error) = crate::utils::files::delete_file_checked(upload_dir, path) {
+            cleanup_errors.push(anyhow::anyhow!(error));
+        }
+    }
+
+    if cleanup_errors.is_empty() {
+        if let Some(op_id) = pending_op_id {
+            if let Err(error) = crate::db::delete_pending_fs_op(conn, op_id) {
+                warn!(
+                    op_id = %op_id,
+                    error = %error,
+                    "deleted files but could not clear pending delete op"
+                );
+            }
+        }
+        Ok(())
+    } else {
+        let detail = cleanup_errors
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        anyhow::bail!("Delete cleanup incomplete: {detail}");
     }
 }
 
@@ -244,6 +291,11 @@ pub fn reconcile_pending_fs_ops(pool: &crate::db::DbPool, upload_dir: &str) -> R
                 referenced_upload_stage_dirs.insert(payload.stage_dir.clone());
                 finalize_upload_payload(&conn, upload_dir, &payload)?;
             }
+            DELETE_FILES_KIND => {
+                let payload: DeleteFilesPayload = serde_json::from_str(&op.payload_json)
+                    .with_context(|| format!("Parse delete_files payload for {}", op.id))?;
+                finalize_delete_files_payload(&conn, upload_dir, Some(&op.id), &payload.paths)?;
+            }
             FULL_RESTORE_SWAP_KIND => {
                 let payload: FullRestoreSwapPayload = serde_json::from_str(&op.payload_json)
                     .with_context(|| format!("Parse full_restore_swap payload for {}", op.id))?;
@@ -283,11 +335,67 @@ pub fn reconcile_pending_fs_ops(pool: &crate::db::DbPool, upload_dir: &str) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::{finalize_board_restore_payload, BoardRestoreSwapPayload};
+    use super::{
+        finalize_board_restore_payload, finalize_delete_files_payload, BoardRestoreSwapPayload,
+        DeleteFilesPayload, DELETE_FILES_KIND,
+    };
+    use crate::db::{init_test_pool, insert_pending_fs_op};
 
     fn create_dir_with_file(path: &std::path::Path, file_name: &str, contents: &str) {
         std::fs::create_dir_all(path).expect("create dir");
         std::fs::write(path.join(file_name), contents).expect("write file");
+    }
+
+    #[test]
+    fn finalize_delete_files_payload_removes_files_and_clears_pending_op() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_dir = temp_dir.path().join("uploads");
+        let board_dir = upload_dir.join("tech");
+        let thumb_dir = board_dir.join("thumbs");
+        std::fs::create_dir_all(&thumb_dir).expect("create thumb dir");
+        std::fs::write(board_dir.join("file.webp"), "file").expect("write file");
+        std::fs::write(thumb_dir.join("file.webp"), "thumb").expect("write thumb");
+
+        let pool = init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+
+        let payload = DeleteFilesPayload {
+            paths: vec![
+                "tech/file.webp".to_string(),
+                "tech/thumbs/file.webp".to_string(),
+            ],
+        };
+        let op = crate::pending_fs::PendingFsOpInsert {
+            id: "delete-files-op".to_string(),
+            kind: DELETE_FILES_KIND,
+            payload_json: serde_json::to_string(&payload).expect("serialize payload"),
+        };
+        insert_pending_fs_op(&conn, &op).expect("insert pending op");
+
+        finalize_delete_files_payload(
+            &conn,
+            upload_dir.to_str().expect("utf8 upload dir"),
+            Some(&op.id),
+            &payload.paths,
+        )
+        .expect("delete cleanup");
+
+        assert!(!board_dir.join("file.webp").exists());
+        assert!(!thumb_dir.join("file.webp").exists());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM pending_fs_ops", [], |row| row
+                .get::<_, i64>(0))
+                .expect("pending op count"),
+            0
+        );
+
+        finalize_delete_files_payload(
+            &conn,
+            upload_dir.to_str().expect("utf8 upload dir"),
+            None,
+            &payload.paths,
+        )
+        .expect("retry cleanup should be idempotent");
     }
 
     #[test]

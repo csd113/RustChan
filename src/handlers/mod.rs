@@ -22,6 +22,13 @@ use tokio::io::AsyncWriteExt as _;
 
 const MIME_SNIFF_BYTES: usize = 512;
 
+fn max_primary_upload_bytes() -> usize {
+    CONFIG
+        .max_image_size
+        .max(CONFIG.max_video_size)
+        .max(CONFIG.max_audio_size)
+}
+
 async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String> {
     field
         .text()
@@ -213,8 +220,7 @@ pub async fn parse_post_multipart(
                 poll_duration_unit = read_text_field(field).await?;
             }
             Some("file") => {
-                let max = CONFIG.max_video_size.max(CONFIG.max_audio_size);
-                file = read_upload_field(field, max, "upload").await?;
+                file = read_upload_field(field, max_primary_upload_bytes(), "upload").await?;
             }
             Some("audio_file") => {
                 audio_file = read_upload_field(field, CONFIG.max_audio_size, "audio").await?;
@@ -365,6 +371,25 @@ pub fn process_primary_upload(
         | crate::models::MediaType::Audio
         | crate::models::MediaType::Other => {}
     }
+
+    crate::utils::files::validate_upload_from_path(
+        upload.temp_file.path(),
+        &upload.sniff_bytes,
+        upload.size_bytes,
+        &crate::utils::files::SaveUploadOptions {
+            original_filename: &fname,
+            boards_dir: save_root,
+            board_short: &board.short_name,
+            thumb_size,
+            max_image_size,
+            max_video_size,
+            max_audio_size,
+            ffmpeg_available,
+            ffmpeg_webp_available,
+            allow_any_files,
+        },
+    )
+    .map_err(|error| classify_upload_error(&error))?;
 
     // SHA-256 deduplication — serve the cached entry without re-saving.
     //
@@ -678,7 +703,8 @@ pub fn enqueue_post_jobs(
 
 #[cfg(test)]
 mod tests {
-    use super::{process_audio_first_uploads, TempUpload};
+    use super::{max_primary_upload_bytes, process_audio_first_uploads, TempUpload};
+    use sha2::Digest as _;
 
     fn sample_board() -> crate::models::Board {
         crate::models::Board {
@@ -701,6 +727,29 @@ mod tests {
             },
             name.to_string(),
         )
+    }
+
+    fn create_file_hash_table(conn: &rusqlite::Connection) {
+        conn.execute(
+            "CREATE TABLE file_hashes (
+                sha256 TEXT PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                thumb_path TEXT NOT NULL DEFAULT '',
+                mime_type TEXT NOT NULL DEFAULT ''
+            )",
+            [],
+        )
+        .expect("create file_hashes");
+    }
+
+    #[test]
+    fn primary_upload_limit_allows_largest_media_class() {
+        let largest_media_limit = crate::config::CONFIG
+            .max_image_size
+            .max(crate::config::CONFIG.max_video_size)
+            .max(crate::config::CONFIG.max_audio_size);
+
+        assert_eq!(max_primary_upload_bytes(), largest_media_limit);
     }
 
     #[test]
@@ -733,6 +782,55 @@ mod tests {
             Err(error) => assert!(error
                 .to_string()
                 .contains("Use either the audio/image upload flow or the other-file slot")),
+        }
+    }
+
+    #[test]
+    fn primary_upload_rejects_malformed_image_even_when_hash_is_cached() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        create_file_hash_table(&conn);
+
+        let board = crate::test_fixtures::sample_board();
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
+        let save_root = tempfile::tempdir().expect("save root");
+        let malformed = b"\x89PNG\r\n\x1a\nthis is not a complete png";
+        let upload = temp_upload("broken.png", malformed);
+
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(malformed);
+        let hash = hex::encode(hasher.finalize());
+
+        let board_dir = uploads_dir.path().join(&board.short_name);
+        let thumbs_dir = board_dir.join("thumbs");
+        std::fs::create_dir_all(&thumbs_dir).expect("create thumb dir");
+        std::fs::write(board_dir.join("cached.png"), malformed).expect("write cached file");
+        std::fs::write(thumbs_dir.join("cached.webp"), b"fake thumb").expect("write cached thumb");
+        crate::db::record_file_hash(
+            &conn,
+            &hash,
+            &format!("{}/cached.png", board.short_name),
+            &format!("{}/thumbs/cached.webp", board.short_name),
+            "image/png",
+        )
+        .expect("record hash");
+
+        let result = super::process_primary_upload(
+            Some(upload),
+            &board,
+            &conn,
+            uploads_dir.path().to_str().expect("uploads dir path"),
+            save_root.path().to_str().expect("save root path"),
+            64,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            false,
+            false,
+        );
+
+        match result {
+            Ok(_) => panic!("malformed image should be rejected before dedup reuse"),
+            Err(error) => assert!(error.to_string().contains("image header is malformed")),
         }
     }
 }

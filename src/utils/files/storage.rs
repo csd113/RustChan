@@ -41,6 +41,8 @@ struct UploadPlan {
     thumbs_dir: PathBuf,
 }
 
+const MAX_UPLOAD_IMAGE_PIXELS: u64 = 100_000_000;
+
 /// Classify an uploaded file into the MIME type `RustChan` should persist.
 ///
 /// # Errors
@@ -88,7 +90,8 @@ pub fn save_upload_from_path(
     if original_size == 0 {
         return Err(anyhow::anyhow!("File is empty."));
     }
-    let plan = build_upload_plan(input_path, sniff_bytes, original_size, options)?;
+    let validated = validate_upload(input_path, sniff_bytes, original_size, options)?;
+    let plan = build_upload_plan(validated, original_size, options)?;
     let file_id = Uuid::new_v4().simple().to_string();
 
     if plan.media_type == crate::models::MediaType::Other {
@@ -233,11 +236,62 @@ fn prepare_processor_input(
 }
 
 fn build_upload_plan(
+    validated: ValidatedUpload,
+    original_size: usize,
+    options: &SaveUploadOptions<'_>,
+) -> Result<UploadPlan> {
+    let dest_dir = PathBuf::from(options.boards_dir).join(options.board_short);
+    let thumbs_dir = dest_dir.join("thumbs");
+    std::fs::create_dir_all(&dest_dir).context("Failed to create board directory")?;
+    if validated.media_type != crate::models::MediaType::Other {
+        std::fs::create_dir_all(&thumbs_dir).context("Failed to create board thumbs directory")?;
+    }
+    check_disk_space(&dest_dir, original_size)?;
+    let processing_pending = options.ffmpeg_available
+        && matches!(
+            validated.media_type,
+            crate::models::MediaType::Video | crate::models::MediaType::Audio
+        )
+        && (validated.media_type != crate::models::MediaType::Video
+            || validated.mime_type == "video/mp4"
+            || validated.mime_type == "video/webm");
+
+    Ok(UploadPlan {
+        mime_type: validated.mime_type,
+        media_type: validated.media_type,
+        jpeg_orientation: validated.jpeg_orientation,
+        processing_pending,
+        dest_dir,
+        thumbs_dir,
+    })
+}
+
+struct ValidatedUpload {
+    mime_type: String,
+    media_type: crate::models::MediaType,
+    jpeg_orientation: u32,
+}
+
+/// Validate an upload against media policy before deduplication or persistence.
+///
+/// # Errors
+/// Returns an error when MIME sniffing, type policy, size checks, or image
+/// decoding validation fail.
+pub fn validate_upload_from_path(
     input_path: &Path,
     sniff_bytes: &[u8],
     original_size: usize,
     options: &SaveUploadOptions<'_>,
-) -> Result<UploadPlan> {
+) -> Result<()> {
+    validate_upload(input_path, sniff_bytes, original_size, options).map(|_| ())
+}
+
+fn validate_upload(
+    input_path: &Path,
+    sniff_bytes: &[u8],
+    original_size: usize,
+    options: &SaveUploadOptions<'_>,
+) -> Result<ValidatedUpload> {
     let mime_type = classify_upload_mime(input_path, sniff_bytes, options.allow_any_files)?;
     if mime_type == "image/svg+xml" {
         anyhow::bail!(
@@ -254,6 +308,9 @@ fn build_upload_plan(
             max_size / 1024 / 1024
         );
     }
+    if media_type == crate::models::MediaType::Image {
+        validate_decodable_image(input_path, &mime_type)?;
+    }
 
     let jpeg_orientation = if mime_type == "image/jpeg" {
         read_exif_orientation_from_file(input_path)?
@@ -261,29 +318,10 @@ fn build_upload_plan(
         1
     };
 
-    let dest_dir = PathBuf::from(options.boards_dir).join(options.board_short);
-    let thumbs_dir = dest_dir.join("thumbs");
-    std::fs::create_dir_all(&dest_dir).context("Failed to create board directory")?;
-    if media_type != crate::models::MediaType::Other {
-        std::fs::create_dir_all(&thumbs_dir).context("Failed to create board thumbs directory")?;
-    }
-    check_disk_space(&dest_dir, original_size)?;
-    let processing_pending = options.ffmpeg_available
-        && matches!(
-            media_type,
-            crate::models::MediaType::Video | crate::models::MediaType::Audio
-        )
-        && (media_type != crate::models::MediaType::Video
-            || mime_type == "video/mp4"
-            || mime_type == "video/webm");
-
-    Ok(UploadPlan {
+    Ok(ValidatedUpload {
         mime_type,
         media_type,
         jpeg_orientation,
-        processing_pending,
-        dest_dir,
-        thumbs_dir,
     })
 }
 
@@ -417,6 +455,108 @@ fn arbitrary_file_ext(original_filename: &str) -> String {
         .map_or_else(|| "bin".to_string(), |ext| ext.to_ascii_lowercase())
 }
 
+fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
+    let Some(format) = mime_to_image_format(mime_type) else {
+        return Ok(());
+    };
+
+    let data = std::fs::read(input_path).with_context(|| {
+        format!(
+            "Failed to read {} for image validation",
+            input_path.display()
+        )
+    })?;
+    if mime_type == "image/png" {
+        validate_png_structure(&data)?;
+    }
+    let reader = image::ImageReader::with_format(std::io::Cursor::new(&data), format);
+    let (width, height) = reader.into_dimensions().with_context(|| {
+        format!("File appears to be {mime_type}, but its image header is malformed or incomplete.")
+    })?;
+    if u64::from(width).saturating_mul(u64::from(height)) > MAX_UPLOAD_IMAGE_PIXELS {
+        anyhow::bail!("Image dimensions {width}x{height} exceed the safety limit.");
+    }
+
+    image::load_from_memory_with_format(&data, format).with_context(|| {
+        format!("File appears to be {mime_type}, but the image data could not be decoded.")
+    })?;
+    Ok(())
+}
+
+fn validate_png_structure(data: &[u8]) -> Result<()> {
+    const MALFORMED_PNG_ERROR: &str =
+        "File appears to be image/png, but its image header is malformed or incomplete.";
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if data.len() < PNG_SIGNATURE.len() + 12 {
+        anyhow::bail!(MALFORMED_PNG_ERROR);
+    }
+    if data.get(..PNG_SIGNATURE.len()) != Some(PNG_SIGNATURE.as_slice()) {
+        anyhow::bail!(MALFORMED_PNG_ERROR);
+    }
+
+    let mut offset = PNG_SIGNATURE.len();
+    let mut saw_ihdr = false;
+
+    while offset + 12 <= data.len() {
+        let length_bytes: [u8; 4] = data
+            .get(offset..offset + 4)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+        let length = u32::from_be_bytes(length_bytes) as usize;
+        let chunk_type = data
+            .get(offset + 4..offset + 8)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+        let chunk_data_start = offset + 8;
+        let chunk_data_end = chunk_data_start.saturating_add(length);
+        let crc_end = chunk_data_end.saturating_add(4);
+        if crc_end > data.len() {
+            anyhow::bail!(MALFORMED_PNG_ERROR);
+        }
+
+        if !saw_ihdr {
+            if chunk_type != b"IHDR" || length != 13 {
+                anyhow::bail!(MALFORMED_PNG_ERROR);
+            }
+            let width_bytes: [u8; 4] = data
+                .get(chunk_data_start..chunk_data_start + 4)
+                .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+            let height_bytes: [u8; 4] = data
+                .get(chunk_data_start + 4..chunk_data_start + 8)
+                .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+            let width = u32::from_be_bytes(width_bytes);
+            let height = u32::from_be_bytes(height_bytes);
+            if width == 0 || height == 0 {
+                anyhow::bail!(MALFORMED_PNG_ERROR);
+            }
+            saw_ihdr = true;
+        } else if chunk_type == b"IEND" {
+            return Ok(());
+        }
+
+        offset = crc_end;
+    }
+
+    anyhow::bail!(MALFORMED_PNG_ERROR);
+}
+
+fn mime_to_image_format(mime_type: &str) -> Option<image::ImageFormat> {
+    match mime_type {
+        "image/jpeg" => Some(image::ImageFormat::Jpeg),
+        "image/png" => Some(image::ImageFormat::Png),
+        "image/gif" => Some(image::ImageFormat::Gif),
+        "image/webp" => Some(image::ImageFormat::WebP),
+        "image/bmp" => Some(image::ImageFormat::Bmp),
+        "image/tiff" => Some(image::ImageFormat::Tiff),
+        "image/heic" | "image/heif" => None,
+        _ => None,
+    }
+}
+
 fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {
     if orientation <= 1 {
         return;
@@ -506,7 +646,36 @@ fn mime_to_ext(mime: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::save_audio_with_image_thumb_from_path;
+    use super::{save_audio_with_image_thumb_from_path, save_upload_from_path, SaveUploadOptions};
+
+    fn one_pixel_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::DynamicImage::new_rgba8(1, 1)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encode png");
+        bytes
+    }
+
+    fn test_upload_options<'a>(
+        root: &'a std::path::Path,
+        original_filename: &'a str,
+    ) -> SaveUploadOptions<'a> {
+        SaveUploadOptions {
+            original_filename,
+            boards_dir: root.to_str().expect("utf8 root"),
+            board_short: "test",
+            thumb_size: 64,
+            max_image_size: 1024 * 1024,
+            max_video_size: 1024 * 1024,
+            max_audio_size: 1024 * 1024,
+            ffmpeg_available: false,
+            ffmpeg_webp_available: false,
+            allow_any_files: false,
+        }
+    }
 
     #[test]
     fn combo_flac_audio_is_saved_losslessly_without_pending_processing() {
@@ -539,5 +708,76 @@ mod tests {
         let stored_bytes =
             std::fs::read(tempdir.path().join(&uploaded.file_path)).expect("read stored flac");
         assert_eq!(stored_bytes, flac_bytes);
+    }
+
+    #[test]
+    fn malformed_png_magic_is_rejected_before_storage() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input = tempfile::Builder::new()
+            .suffix(".png")
+            .tempfile_in(tempdir.path())
+            .expect("temp file");
+        let malformed = b"\x89PNG\r\n\x1a\nthis is not a complete png";
+        std::fs::write(input.path(), malformed).expect("write malformed png");
+
+        let error = match save_upload_from_path(
+            input.path(),
+            malformed,
+            malformed.len(),
+            &test_upload_options(tempdir.path(), "broken.png"),
+        ) {
+            Ok(_) => panic!("malformed png should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("image header is malformed"));
+        assert!(!tempdir.path().join("test").exists());
+    }
+
+    #[test]
+    fn malformed_png_without_tempfile_suffix_is_rejected_before_storage() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input = tempfile::Builder::new()
+            .tempfile_in(tempdir.path())
+            .expect("temp file");
+        let malformed = b"\x89PNG\r\n\x1a\nthis is not a complete png";
+        std::fs::write(input.path(), malformed).expect("write malformed png");
+
+        let error = match save_upload_from_path(
+            input.path(),
+            malformed,
+            malformed.len(),
+            &test_upload_options(tempdir.path(), "broken.png"),
+        ) {
+            Ok(_) => panic!("malformed png should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("image header is malformed"));
+        assert!(!tempdir.path().join("test").exists());
+    }
+
+    #[test]
+    fn decodable_png_upload_still_saves_and_thumbnails() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input = tempfile::Builder::new()
+            .suffix(".png")
+            .tempfile_in(tempdir.path())
+            .expect("temp file");
+        let png = one_pixel_png();
+        std::fs::write(input.path(), &png).expect("write png");
+
+        let uploaded = save_upload_from_path(
+            input.path(),
+            &png,
+            png.len(),
+            &test_upload_options(tempdir.path(), "renamed.txt"),
+        )
+        .expect("valid png saves");
+
+        assert_eq!(uploaded.mime_type, "image/png");
+        assert_eq!(uploaded.original_name, "renamed.txt");
+        assert!(tempdir.path().join(&uploaded.file_path).exists());
+        assert!(tempdir.path().join(&uploaded.thumb_path).exists());
     }
 }

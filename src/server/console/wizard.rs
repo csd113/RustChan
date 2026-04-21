@@ -391,10 +391,20 @@ pub fn kb_delete_thread(pool: &DbPool, reader: &mut dyn BufRead) {
     }
 
     match crate::db::delete_thread(&conn, thread_id) {
-        Ok(paths) => {
-            let n = paths.len();
-            for p in &paths {
-                crate::utils::files::delete_file(&crate::config::CONFIG.upload_dir, p);
+        Ok(deleted) => {
+            let n = deleted.paths.len();
+            if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+                &conn,
+                &crate::config::CONFIG.upload_dir,
+                deleted.pending_fs_op_id.as_deref(),
+                &deleted.paths,
+            ) {
+                tracing::warn!(
+                    target: "console",
+                    thread_id = thread_id,
+                    error = %error,
+                    "console delete thread cleanup did not fully complete"
+                );
             }
             tracing::info!(
                 target: "console", thread_id = thread_id, files_removed = n,
