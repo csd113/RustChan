@@ -787,7 +787,7 @@ fn render_board_appearance_card(
     let form_id = format!("board-settings-form-{}", board.id);
     format!(
         r#"<details class="board-settings-card" id="board-appearance-{short}"{open_attr}>
-<summary>/{short}/ — {name}</summary>
+<summary>/{short}/ — {name} {nsfw_tag}</summary>
 <div class="admin-subsection board-appearance-settings-subsection">
   <div class="admin-card-header board-card-edge-header">
     <h3>// board appearance</h3>
@@ -817,6 +817,11 @@ fn render_board_appearance_card(
 </details>"#,
         short = escape_html(&board.short_name),
         name = escape_html(&board.name),
+        nsfw_tag = if board.nsfw {
+            r#"<span class="tag nsfw-tag">NSFW</span>"#
+        } else {
+            ""
+        },
         open_attr = open_attr,
         form_id = escape_html(&form_id),
         inherit_theme_selected = if board.default_theme.is_empty() {
@@ -1271,9 +1276,9 @@ pub fn admin_ip_history_page(
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_panel_page, render_board_settings_card, AdminPanelAppearanceView,
-        AdminPanelBackupsView, AdminPanelMaintenanceView, AdminPanelModerationView,
-        AdminPanelViewModel,
+        admin_panel_page, render_board_appearance_card, render_board_settings_card,
+        AdminPanelAppearanceView, AdminPanelBackupsView, AdminPanelMaintenanceView,
+        AdminPanelModerationView, AdminPanelViewModel,
     };
     use crate::models::{
         BackupBoardSummary, BackupInfo, Board, BoardAccessMode, BoardBannerMode, Report,
@@ -1443,6 +1448,24 @@ mod tests {
         assert!(html.contains("// danger zone"));
         assert!(!html.contains("class=\"board-backup-download-form\""));
         assert!(html.contains("action=\"/admin/board/delete\""));
+    }
+
+    #[test]
+    fn board_appearance_card_keeps_nsfw_tag() {
+        let mut board = sample_board();
+        board.nsfw = true;
+        let html = render_board_appearance_card(
+            &board,
+            std::slice::from_ref(&board),
+            "csrf",
+            &[sample_theme()],
+            &[],
+            None,
+        );
+
+        assert!(html.contains(
+            r#"<summary>/tech/ — Technology <span class="tag nsfw-tag">NSFW</span></summary>"#
+        ));
     }
 
     #[test]
