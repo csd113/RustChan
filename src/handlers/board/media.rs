@@ -7,6 +7,8 @@ fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
         Some("jpg" | "jpeg") => Some("image/jpeg"),
         Some("png") => Some("image/png"),
         Some("gif") => Some("image/gif"),
+        Some("heic") => Some("image/heic"),
+        Some("heif") => Some("image/heif"),
         Some("bmp") => Some("image/bmp"),
         Some("tiff" | "tif") => Some("image/tiff"),
         // SVG is intentionally omitted: serving SVG inline allows stored XSS via

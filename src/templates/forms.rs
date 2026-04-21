@@ -36,7 +36,8 @@ const fn upload_progress_row() -> &'static str {
 
 const AUDIO_ACCEPT: &str =
     "audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac";
-const IMAGE_ACCEPT: &str = "image/jpeg,image/png,image/gif,image/webp";
+const IMAGE_ACCEPT: &str =
+    "image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif";
 const POLL_OPTION_MAX_LENGTH: usize = 200;
 
 fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
@@ -100,7 +101,7 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
 
     if board.allow_images {
         accept_parts.push(IMAGE_ACCEPT);
-        hint_parts.push(format!("jpg/png/gif/webp · max {image_mb} MiB"));
+        hint_parts.push(format!("jpg/png/gif/webp/heic · max {image_mb} MiB"));
     }
     if board.allow_video {
         accept_parts.push("video/mp4,video/webm");
@@ -135,7 +136,7 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
               <summary aria-label="Show optional image upload">▾ Optional Image</summary>
               <div class="upload-secondary-panel">
                 <input type="file" name="image_file" data-onchange-check-size="1" accept="{IMAGE_ACCEPT}">
-                <span class="form-field-help">{audio_image_hint} · jpg/png/gif/webp · max {image_mb} MiB</span>
+                <span class="form-field-help">{audio_image_hint} · jpg/png/gif/webp/heic · max {image_mb} MiB</span>
               </div>
             </details>"#
         )
@@ -428,9 +429,13 @@ mod tests {
         assert!(html.contains("<td>audio</td>"));
         assert!(html.contains("Optional Image"));
         assert!(html.contains("optional cover image for the audio post"));
+        assert!(html.contains("image/heic"));
+        assert!(html.contains(".heic"));
         assert!(html.contains("accept=\"audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac\""));
         assert!(html.contains("mp3/ogg/flac/wav/m4a · max"));
-        assert!(!html.contains("jpg/png/gif/webp · max 8 MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a"));
+        assert!(
+            !html.contains("jpg/png/gif/webp/heic · max 8 MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a")
+        );
         assert!(!html.contains("video/mp4,video/webm"));
         assert!(!html.contains("name=\"file\""));
     }

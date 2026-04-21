@@ -16,6 +16,12 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
 
     if data.get(4..8) == Some(b"ftyp") {
         if let Some(brand) = data.get(8..12) {
+            if has_ftyp_brand(data, &[b"heic", b"heix", b"hevc", b"hevx"]) {
+                return Ok("image/heic");
+            }
+            if has_ftyp_brand(data, &[b"mif1", b"msf1"]) {
+                return Ok("image/heif");
+            }
             if brand == b"M4A " || brand == b"m4a " {
                 return Ok("audio/mp4");
             }
@@ -97,9 +103,19 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     }
 
     Err(anyhow::anyhow!(
-        "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, BMP, TIFF, \
+        "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, HEIC, HEIF, BMP, TIFF, \
          MP4, WebM, MP3, OGG, FLAC, WAV, M4A, AAC"
     ))
+}
+
+fn has_ftyp_brand(data: &[u8], accepted: &[&[u8; 4]]) -> bool {
+    data.get(8..data.len().min(64)).is_some_and(|brands| {
+        brands.chunks_exact(4).any(|brand| {
+            accepted
+                .iter()
+                .any(|candidate| brand == candidate.as_slice())
+        })
+    })
 }
 
 #[must_use]

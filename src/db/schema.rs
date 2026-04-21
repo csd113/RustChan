@@ -663,7 +663,8 @@ fn backfill_media_type(conn: &rusqlite::Connection) -> Result<()> {
              SET media_type = CASE
                  WHEN file_path LIKE '%.jpg'  OR file_path LIKE '%.jpeg' OR
                       file_path LIKE '%.png'  OR file_path LIKE '%.gif'  OR
-                      file_path LIKE '%.webp' THEN 'image'
+                      file_path LIKE '%.webp' OR file_path LIKE '%.heic' OR
+                      file_path LIKE '%.heif' THEN 'image'
                  WHEN file_path LIKE '%.mp4'  OR file_path LIKE '%.webm' THEN 'video'
                  WHEN file_path LIKE '%.mp3'  OR file_path LIKE '%.ogg'  OR
                       file_path LIKE '%.flac' OR file_path LIKE '%.wav'  OR

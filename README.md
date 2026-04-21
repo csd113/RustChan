@@ -71,7 +71,7 @@ RustChan is for people who want a forum they can actually understand and keep ru
 
 ### Media
 
-- Image uploads: JPEG, PNG, GIF, WebP, BMP, TIFF, and SVG
+- Image uploads: JPEG, PNG, GIF, WebP, HEIC, HEIF, BMP, TIFF, and SVG
 - Video uploads: MP4 and WebM
 - Audio uploads: MP3, OGG, FLAC, WAV, M4A, and AAC
 - Automatic thumbnails and audio waveforms when `ffmpeg` is available

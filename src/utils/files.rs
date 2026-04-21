@@ -41,6 +41,8 @@ mod tests {
         assert_eq!(mime_to_ext_pub("image/png"), "png");
         assert_eq!(mime_to_ext_pub("image/gif"), "gif");
         assert_eq!(mime_to_ext_pub("image/webp"), "webp");
+        assert_eq!(mime_to_ext_pub("image/heic"), "heic");
+        assert_eq!(mime_to_ext_pub("image/heif"), "heif");
         assert_eq!(mime_to_ext_pub("video/mp4"), "mp4");
         assert_eq!(mime_to_ext_pub("video/webm"), "webm");
         assert_eq!(mime_to_ext_pub("audio/webm"), "webm");
@@ -86,6 +88,33 @@ mod tests {
         assert_eq!(
             super::mime::detect_mime_type(b"RIFF\x00\x00\x00\x00WEBPrest").expect("webp"),
             "image/webp"
+        );
+    }
+
+    #[test]
+    fn detect_heic_ftyp_brand() {
+        assert_eq!(
+            super::mime::detect_mime_type(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00")
+                .expect("heic"),
+            "image/heic"
+        );
+    }
+
+    #[test]
+    fn detect_heif_ftyp_brand() {
+        assert_eq!(
+            super::mime::detect_mime_type(b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00")
+                .expect("heif"),
+            "image/heif"
+        );
+    }
+
+    #[test]
+    fn detect_heic_compatible_ftyp_brand() {
+        assert_eq!(
+            super::mime::detect_mime_type(b"\x00\x00\x00\x20ftypmif1\x00\x00\x00\x00heic")
+                .expect("heic compatible brand"),
+            "image/heic"
         );
     }
 

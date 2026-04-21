@@ -416,6 +416,8 @@ fn should_store_without_recompress(path: &Path) -> bool {
                     | "flac"
                     | "gif"
                     | "gz"
+                    | "heic"
+                    | "heif"
                     | "jpeg"
                     | "jpg"
                     | "m4a"

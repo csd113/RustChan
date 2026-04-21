@@ -256,6 +256,7 @@ fn mime_to_image_format(mime: &str) -> Option<ImageFormat> {
         "image/png" => Some(ImageFormat::Png),
         "image/gif" => Some(ImageFormat::Gif),
         "image/webp" => Some(ImageFormat::WebP),
+        "image/heic" | "image/heif" => None,
         "image/bmp" => Some(ImageFormat::Bmp),
         "image/tiff" => Some(ImageFormat::Tiff),
         _ => None,

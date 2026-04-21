@@ -58,7 +58,7 @@ http_port = 8080
 
 
 # ── Upload limits ─────────────────────────────────────────────────────────────
-# Maximum size for image uploads in MiB (jpg, png, gif, webp).
+# Maximum size for image uploads in MiB (jpg, png, gif, webp, heic).
 max_image_size_mb = 8
 
 # Maximum size for video uploads in MiB (mp4, webm).

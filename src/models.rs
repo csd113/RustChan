@@ -40,7 +40,8 @@ impl MediaType {
     #[must_use]
     pub fn from_ext(ext: &str) -> Self {
         match ext {
-            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "svg" => Self::Image,
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "bmp" | "tiff" | "tif"
+            | "svg" => Self::Image,
             "mp4" | "webm" => Self::Video,
             "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "opus" => Self::Audio,
             _ => Self::Other,
@@ -725,6 +726,7 @@ mod tests {
     #[test]
     fn media_type_from_ext() {
         assert_eq!(MediaType::from_ext("jpg"), MediaType::Image);
+        assert_eq!(MediaType::from_ext("heic"), MediaType::Image);
         assert_eq!(MediaType::from_ext("mp4"), MediaType::Video);
         assert_eq!(MediaType::from_ext("flac"), MediaType::Audio);
         assert_eq!(MediaType::from_ext("exe"), MediaType::Other);
