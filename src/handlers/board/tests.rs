@@ -6,6 +6,63 @@ use axum::{
 };
 use tower::ServiceExt as _;
 
+fn seed_post_password_board(state: &crate::middleware::AppState) -> (i64, i64, i64) {
+    let conn = state.db.get().expect("db connection");
+    let board_id =
+        crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
+    let password_hash = crate::utils::crypto::hash_password("swordfish").expect("hash password");
+    conn.execute(
+        "UPDATE boards SET access_mode = ?1, access_password_hash = ?2, allow_editing = 1 WHERE id = ?3",
+        rusqlite::params!["post_password", password_hash, board_id],
+    )
+    .expect("update board access");
+    let post = crate::db::NewPost {
+        thread_id: 0,
+        board_id,
+        name: "anon".to_string(),
+        tripcode: None,
+        subject: Some("subject".to_string()),
+        body: "protected posting body".to_string(),
+        body_html: "protected posting body".to_string(),
+        ip_hash: None,
+        file_path: None,
+        file_name: None,
+        file_size: None,
+        thumb_path: None,
+        mime_type: None,
+        media_type: None,
+        audio_file_path: None,
+        audio_file_name: None,
+        audio_file_size: None,
+        audio_mime_type: None,
+        deletion_token: "edit-token".to_string(),
+        is_op: true,
+    };
+    let poll = crate::db::threads::PollInsert {
+        question: "pick one",
+        options: &["yes".to_string(), "no".to_string()],
+        expires_at: chrono::Utc::now().timestamp() + 3600,
+    };
+    let (thread_id, post_id, poll_id) = crate::db::create_thread_with_optional_poll(
+        &conn,
+        board_id,
+        Some("subject"),
+        &post,
+        "",
+        Some(&poll),
+        None,
+    )
+    .expect("create thread");
+    let option_id: i64 = conn
+        .query_row(
+            "SELECT id FROM poll_options WHERE poll_id = ?1 ORDER BY id LIMIT 1",
+            rusqlite::params![poll_id.expect("poll id")],
+            |row| row.get(0),
+        )
+        .expect("poll option id");
+    (thread_id, post_id, option_id)
+}
+
 #[test]
 fn protected_board_without_password_hash_fails_closed() {
     let board = crate::models::Board {
@@ -15,6 +72,178 @@ fn protected_board_without_password_hash_fails_closed() {
     };
     assert!(!super::can_view_board(&board, false, None));
     assert!(!super::can_post_to_board(&board, false, None));
+}
+
+#[tokio::test]
+async fn post_password_board_remains_viewable_without_unlock() {
+    let state = crate::test_support::app_state();
+    let (thread_id, _, _) = seed_post_password_board(&state);
+
+    let router = Router::new()
+        .route("/{board}", get(super::board_index))
+        .route("/{board}/catalog", get(super::catalog))
+        .route(
+            "/{board}/thread/{id}",
+            get(crate::handlers::thread::view_thread),
+        )
+        .with_state(state);
+
+    for uri in [
+        "/secret".to_string(),
+        "/secret/catalog".to_string(),
+        format!("/secret/thread/{thread_id}"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn post_password_board_write_actions_require_unlock() {
+    let state = crate::test_support::app_state();
+    let (thread_id, post_id, option_id) = seed_post_password_board(&state);
+    let router = Router::new()
+        .route("/{board}", post(super::create_thread))
+        .route(
+            "/{board}/thread/{id}",
+            post(crate::handlers::thread::post_reply),
+        )
+        .route(
+            "/{board}/post/{id}/edit",
+            get(crate::handlers::thread::edit_post_get),
+        )
+        .route(
+            "/{board}/post/{id}/edit",
+            post(crate::handlers::thread::edit_post_post),
+        )
+        .route("/vote", post(crate::handlers::thread::vote_handler))
+        .with_state(state);
+
+    let (boundary, body) =
+        crate::test_support::multipart_body(&[("_csrf", "csrf123"), ("body", "new thread")], None);
+    let create_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/secret")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("create response");
+    assert_eq!(create_response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        create_response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/secret/unlock?return_to=%2Fsecret")
+    );
+
+    let (boundary, body) =
+        crate::test_support::multipart_body(&[("_csrf", "csrf123"), ("body", "reply")], None);
+    let reply_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/secret/thread/{thread_id}"))
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("reply response");
+    assert_eq!(reply_response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        reply_response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("/secret/unlock?return_to=%2Fsecret%2Fthread%2F{thread_id}").as_str())
+    );
+
+    let edit_get_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/secret/post/{post_id}/edit"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("edit get response");
+    assert_eq!(edit_get_response.status(), StatusCode::FORBIDDEN);
+
+    let edit_post_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/secret/post/{post_id}/edit"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .body(Body::from(
+                    "deletion_token=edit-token&body=changed&_csrf=csrf123",
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("edit post response");
+    assert_eq!(edit_post_response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        edit_post_response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("/secret/unlock?return_to=%2Fsecret%2Fpost%2F{post_id}%2Fedit").as_str())
+    );
+
+    let vote_response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/vote")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(format!("option_id={option_id}&_csrf=csrf123")))
+                .expect("request"),
+        )
+        .await
+        .expect("vote response");
+    assert_eq!(vote_response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        vote_response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("/secret/unlock?return_to=%2Fsecret%2Fthread%2F{thread_id}%23poll").as_str())
+    );
 }
 
 #[tokio::test]
@@ -656,6 +885,122 @@ async fn unlock_board_access_sets_cookie_and_redirects() {
         .find(|value| value.contains(&super::board_access_cookie_name("secret")))
         .expect("board access cookie");
     assert!(set_cookie.contains("HttpOnly"));
+}
+
+#[tokio::test]
+async fn changing_board_password_invalidates_existing_unlock_cookie() {
+    let state = crate::test_support::app_state();
+    {
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
+        let password_hash =
+            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+        conn.execute(
+            "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
+            rusqlite::params!["view_password", password_hash],
+        )
+        .expect("update board access");
+    }
+
+    let router = Router::new()
+        .route("/{board}/unlock", post(super::unlock_board_access))
+        .route("/{board}/catalog", get(super::catalog))
+        .with_state(state.clone());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/secret/unlock")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(
+                    "password=swordfish&return_to=%2Fsecret%2Fcatalog&_csrf=csrf123",
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("unlock response");
+    let access_cookie = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find(|value| value.contains(&super::board_access_cookie_name("secret")))
+        .and_then(|value| value.split(';').next())
+        .expect("board access cookie")
+        .to_string();
+
+    {
+        let conn = state.db.get().expect("db connection");
+        let password_hash = crate::utils::crypto::hash_password("newpass").expect("hash password");
+        conn.execute(
+            "UPDATE boards SET access_password_hash = ?1 WHERE short_name = 'secret'",
+            rusqlite::params![password_hash],
+        )
+        .expect("change board password");
+    }
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/secret/catalog")
+                .header(header::COOKIE, access_cookie)
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("catalog response");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn malformed_board_password_hash_renders_misconfiguration_message() {
+    let state = crate::test_support::app_state();
+    {
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, "broken", "Broken", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'broken'",
+            rusqlite::params!["view_password", "not-a-phc-string"],
+        )
+        .expect("update board access");
+    }
+
+    let router = Router::new()
+        .route("/{board}/unlock", post(super::unlock_board_access))
+        .with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/broken/unlock")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(
+                    "password=anything&return_to=%2Fbroken%2Fcatalog&_csrf=csrf123",
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("unlock response");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body")
+            .to_vec(),
+    )
+    .expect("utf8 body");
+    assert!(body.contains("This board password is misconfigured. Please contact an administrator."));
 }
 
 #[tokio::test]

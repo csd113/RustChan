@@ -608,7 +608,7 @@ fn render_board_settings_card(
       </select>
     </label>
     <label>Board password
-      <input type="text" name="access_password" maxlength="256" autocomplete="off" placeholder="{access_password_placeholder}">
+      <input type="password" name="access_password" maxlength="256" autocomplete="off" placeholder="{access_password_placeholder}">
       <span style="font-size:0.72rem;color:var(--text-dim)">{access_password_status}</span>
     </label>
     <label title="Minimum seconds a user must wait between posts on this board. 0 = no cooldown.">
@@ -732,6 +732,8 @@ fn render_board_settings_card(
         },
         access_password_status = if board.access_password_hash.is_empty() {
             "No board password is currently saved."
+        } else if matches!(board.access_mode, crate::models::BoardAccessMode::Public) {
+            "A password is saved but unused while this board is public."
         } else {
             "A password is saved. Leave blank to keep it."
         },
@@ -1448,6 +1450,42 @@ mod tests {
         assert!(html.contains("// danger zone"));
         assert!(!html.contains("class=\"board-backup-download-form\""));
         assert!(html.contains("action=\"/admin/board/delete\""));
+    }
+
+    #[test]
+    fn board_settings_card_masks_board_password_input() {
+        let board = sample_board();
+        let html = render_board_settings_card(
+            &board,
+            0,
+            std::slice::from_ref(&board),
+            "csrf",
+            &[sample_theme()],
+            &[],
+            None,
+        );
+
+        assert!(html.contains(
+            r#"<input type="password" name="access_password" maxlength="256" autocomplete="off""#
+        ));
+    }
+
+    #[test]
+    fn public_board_with_saved_password_explains_password_is_unused() {
+        let mut board = sample_board();
+        board.access_mode = BoardAccessMode::Public;
+        board.access_password_hash = "hashed".into();
+        let html = render_board_settings_card(
+            &board,
+            0,
+            std::slice::from_ref(&board),
+            "csrf",
+            &[sample_theme()],
+            &[],
+            None,
+        );
+
+        assert!(html.contains("A password is saved but unused while this board is public."));
     }
 
     #[test]

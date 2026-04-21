@@ -84,6 +84,9 @@ pub async fn serve_banner_asset(
     let Ok(path) = banner::banner_asset_path(&asset) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if !path.exists() || !path.is_file() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let content_type = banner::banner_asset_content_type(&path);
 
     let req = req.map(|_| axum::body::Body::empty());
@@ -213,7 +216,7 @@ pub async fn external_banner_continue(
 mod tests {
     use axum::{
         body::Body,
-        http::{Request, StatusCode},
+        http::{header, Request, StatusCode},
         routing::get,
         Router,
     };
@@ -248,6 +251,60 @@ mod tests {
         .expect("insert banner asset")
     }
 
+    fn insert_missing_global_banner(state: &crate::middleware::AppState) -> i64 {
+        let conn = state.db.get().expect("db connection");
+        crate::db::insert_banner_asset(
+            &conn,
+            crate::models::BannerScope::Global,
+            None,
+            "0123456789abcdef0123456789abcdef",
+            468,
+            60,
+            1024,
+            true,
+            1,
+            crate::models::BannerTargetType::None,
+            "",
+            true,
+            true,
+        )
+        .expect("insert banner asset")
+    }
+
+    fn insert_existing_global_banner(
+        state: &crate::middleware::AppState,
+    ) -> (i64, std::path::PathBuf) {
+        let storage_key = uuid::Uuid::new_v4().simple().to_string();
+        let path = crate::banner::banner_storage_path(
+            crate::models::BannerScope::Global,
+            None,
+            &storage_key,
+        )
+        .expect("banner path");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create banner dir");
+        }
+        std::fs::write(&path, b"banner bytes").expect("write banner file");
+        let conn = state.db.get().expect("db connection");
+        let banner_id = crate::db::insert_banner_asset(
+            &conn,
+            crate::models::BannerScope::Global,
+            None,
+            &storage_key,
+            468,
+            60,
+            12,
+            true,
+            1,
+            crate::models::BannerTargetType::None,
+            "",
+            true,
+            true,
+        )
+        .expect("insert banner asset");
+        (banner_id, path)
+    }
+
     #[tokio::test]
     async fn serve_banner_asset_returns_not_found_for_missing_banner_id() {
         let router = Router::new()
@@ -265,6 +322,95 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn serve_banner_asset_returns_not_found_for_missing_file() {
+        let state = crate::test_support::app_state();
+        let banner_id = insert_missing_global_banner(&state);
+        let router = Router::new()
+            .route("/banner/assets/{id}", get(super::serve_banner_asset))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/banner/assets/{banner_id}?v=1"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(response.headers().get(header::CACHE_CONTROL).is_none());
+    }
+
+    #[tokio::test]
+    async fn serve_banner_asset_sets_cache_control_by_version_query() {
+        let state = crate::test_support::app_state();
+        let (banner_id, path) = insert_existing_global_banner(&state);
+        let router = Router::new()
+            .route("/banner/assets/{id}", get(super::serve_banner_asset))
+            .with_state(state);
+
+        let unversioned = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/banner/assets/{banner_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unversioned.status(), StatusCode::OK);
+        assert_eq!(
+            unversioned
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(super::UNVERSIONED_CACHE_CONTROL)
+        );
+
+        let versioned = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/banner/assets/{banner_id}?v=123"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(versioned.status(), StatusCode::OK);
+        assert_eq!(
+            versioned
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(super::VERSIONED_CACHE_CONTROL)
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn serve_banner_asset_rejects_malformed_id_path() {
+        let router = Router::new()
+            .route("/banner/assets/{id}", get(super::serve_banner_asset))
+            .with_state(crate::test_support::app_state());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/banner/assets/not-a-number")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -391,9 +391,16 @@ pub fn canonicalize_banner_bytes(bytes: &[u8], target_path: &Path) -> Result<(u3
 /// # Errors
 /// Returns an error if the path cannot be derived or the file cannot be removed.
 pub fn delete_banner_asset_file(asset: &BannerAsset) -> Result<()> {
-    let path = banner_asset_path(asset)?;
-    if path.exists() {
-        std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    let webp_path = banner_storage_path(
+        asset.scope,
+        asset.board_short.as_deref(),
+        &asset.storage_key,
+    )?;
+    let gif_path = banner_gif_fallback_path(&webp_path);
+    for path in [&webp_path, &gif_path] {
+        if path.exists() {
+            std::fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
+        }
     }
     Ok(())
 }
@@ -859,18 +866,20 @@ fn count_gif_frames(bytes: &[u8]) -> usize {
 }
 
 fn is_animated_webp(bytes: &[u8]) -> bool {
-    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+    if bytes.get(0..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WEBP") {
         return false;
     }
     let mut offset = 12usize;
     while offset.saturating_add(8) <= bytes.len() {
-        let chunk_type = &bytes[offset..offset + 4];
-        let size_bytes = [
-            bytes[offset + 4],
-            bytes[offset + 5],
-            bytes[offset + 6],
-            bytes[offset + 7],
-        ];
+        let Some(chunk_type) = bytes.get(offset..offset + 4) else {
+            return false;
+        };
+        let Some(size_bytes) = bytes.get(offset + 4..offset + 8) else {
+            return false;
+        };
+        let Ok(size_bytes) = <[u8; 4]>::try_from(size_bytes) else {
+            return false;
+        };
         let chunk_size = u32::from_le_bytes(size_bytes) as usize;
         if chunk_type == b"ANIM" || chunk_type == b"ANMF" {
             return true;
@@ -888,9 +897,11 @@ mod tests {
     use super::{
         banner_admin_anchor, banner_asset_content_type, banner_gif_fallback_path,
         banner_open_section, banner_storage_path, banner_target_draft, canonicalize_banner_bytes,
-        choose_active_banner, is_animated_webp, validate_banner_restore_entry_name,
-        validate_banner_storage_key, write_animated_gif_banner_asset_scaled_with_caps,
-        write_animated_webp_banner_asset, DISPLAY_HEIGHT, DISPLAY_WIDTH, MAX_ANIMATED_GIF_FRAMES,
+        choose_active_banner, is_animated_webp, normalize_external_url, normalize_internal_path,
+        parse_banner_target, resolve_banner_href, safe_return_to,
+        validate_banner_restore_entry_name, validate_banner_storage_key,
+        write_animated_gif_banner_asset_scaled_with_caps, write_animated_webp_banner_asset,
+        DISPLAY_HEIGHT, DISPLAY_WIDTH, MAX_ANIMATED_GIF_FRAMES,
     };
     use crate::models::{BannerAsset, BannerScope, BannerTargetType};
     use image::{codecs::gif::GifEncoder, Delay, Frame, ImageBuffer, ImageFormat, Rgba};
@@ -959,6 +970,49 @@ mod tests {
         assert!(thread.board_value.is_empty());
         assert_eq!(thread.thread_value, "/tech/thread/42");
         assert!(thread.external_url.is_empty());
+    }
+
+    #[test]
+    fn banner_target_validation_rejects_unsafe_redirect_shapes() {
+        assert_eq!(safe_return_to("https://evil.example"), "/");
+        assert_eq!(safe_return_to("//evil.example/path"), "/");
+        assert!(normalize_internal_path("/tech/thread/42").is_some());
+        assert!(normalize_internal_path("//evil.example/path").is_none());
+        assert!(normalize_external_url("https://example.com/path").is_some());
+        assert!(normalize_external_url("javascript:alert(1)").is_none());
+        assert!(parse_banner_target(
+            BannerTargetType::ExternalUrl.as_str(),
+            "https://example.com",
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn disabled_external_banner_link_resolves_to_plain_image() {
+        let asset = BannerAsset {
+            id: 42,
+            scope: BannerScope::Global,
+            board_id: None,
+            board_short: None,
+            storage_key: "0123456789abcdef0123456789abcdef".into(),
+            width: DISPLAY_WIDTH as i64,
+            height: DISPLAY_HEIGHT as i64,
+            file_size: 1,
+            enabled: true,
+            sort_order: 1,
+            target_type: BannerTargetType::ExternalUrl,
+            target_value: "https://example.com".into(),
+            show_on_index: true,
+            show_on_catalog: true,
+            created_at: 1,
+        };
+
+        assert!(resolve_banner_href(&asset, false, "/b").is_none());
+        assert_eq!(
+            resolve_banner_href(&asset, true, "https://evil.example").as_deref(),
+            Some("/banner/external/42?return_to=%2F")
+        );
     }
 
     #[test]
@@ -1040,6 +1094,41 @@ mod tests {
         assert_eq!(std::fs::read(&gif_path).expect("read fallback GIF"), bytes);
         assert_eq!(banner_asset_content_type(&gif_path), "image/gif");
         let _ = std::fs::remove_file(gif_path);
+    }
+
+    #[test]
+    fn deleting_banner_asset_removes_webp_and_gif_siblings() {
+        let storage_key = uuid::Uuid::new_v4().simple().to_string();
+        let asset = BannerAsset {
+            id: 1,
+            scope: BannerScope::Global,
+            board_id: None,
+            board_short: None,
+            storage_key,
+            width: DISPLAY_WIDTH as i64,
+            height: DISPLAY_HEIGHT as i64,
+            file_size: 1,
+            enabled: true,
+            sort_order: 1,
+            target_type: BannerTargetType::None,
+            target_value: String::new(),
+            show_on_index: true,
+            show_on_catalog: true,
+            created_at: 1,
+        };
+        let webp_path = banner_storage_path(asset.scope, None, &asset.storage_key)
+            .expect("global banner path should be valid");
+        let gif_path = banner_gif_fallback_path(&webp_path);
+        if let Some(parent) = webp_path.parent() {
+            std::fs::create_dir_all(parent).expect("create banner test directory");
+        }
+        std::fs::write(&webp_path, b"webp").expect("write webp sibling");
+        std::fs::write(&gif_path, b"gif").expect("write gif sibling");
+
+        super::delete_banner_asset_file(&asset).expect("delete banner files");
+
+        assert!(!webp_path.exists());
+        assert!(!gif_path.exists());
     }
 
     #[test]

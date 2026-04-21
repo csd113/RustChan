@@ -283,7 +283,7 @@ pub fn can_view_board(board: &Board, is_admin: bool, access_cookie: Option<&str>
 
 pub fn can_post_to_board(board: &Board, is_admin: bool, access_cookie: Option<&str>) -> bool {
     is_admin
-        || !board.access_mode.requires_post_password()
+        || !board.access_mode.requires_unlock_for_posting()
         || has_valid_board_access_cookie(
             &board.short_name,
             &board.access_password_hash,
@@ -371,6 +371,22 @@ pub(crate) fn render_board_unlock_html(
         current_theme,
         board.collapse_greentext,
     )
+}
+
+pub(crate) fn board_access_denied_response(
+    jar: CookieJar,
+    denial: &BoardAccessDenial,
+    csrf_token: &str,
+    current_theme: Option<&str>,
+) -> Response {
+    let html = render_board_unlock_html(
+        &denial.context.board,
+        csrf_token,
+        &denial.return_to,
+        None,
+        current_theme,
+    );
+    board_access_required_response(jar, html)
 }
 
 pub async fn banned_page(Query(query): Query<BannedPageQuery>, jar: CookieJar) -> Response {

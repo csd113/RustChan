@@ -9,7 +9,7 @@ fn validate_board_backup_access_settings(
         })?;
     manifest.board.access_mode = access_mode.as_str().to_string();
 
-    if access_mode.requires_post_password() && manifest.board.access_password_hash.is_empty() {
+    if access_mode.is_password_protected() && manifest.board.access_password_hash.is_empty() {
         return Err(AppError::BadRequest(
             "Protected board backups must include a password hash.".into(),
         ));

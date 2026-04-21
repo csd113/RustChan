@@ -116,8 +116,19 @@ impl BoardAccessMode {
     }
 
     #[must_use]
-    pub const fn requires_post_password(self) -> bool {
+    pub const fn is_password_protected(self) -> bool {
         matches!(self, Self::ViewPassword | Self::PostPassword)
+    }
+
+    #[must_use]
+    pub const fn requires_unlock_for_posting(self) -> bool {
+        self.is_password_protected()
+    }
+
+    #[must_use]
+    #[allow(dead_code)]
+    pub const fn requires_post_password(self) -> bool {
+        self.requires_unlock_for_posting()
     }
 }
 
@@ -754,6 +765,21 @@ mod tests {
                 "from_db_str() round-trip failed for {access_mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn board_access_mode_password_helpers_match_existing_post_requirement() {
+        assert!(!BoardAccessMode::Public.is_password_protected());
+        assert!(!BoardAccessMode::Public.requires_unlock_for_posting());
+        assert!(!BoardAccessMode::Public.requires_post_password());
+
+        assert!(BoardAccessMode::ViewPassword.is_password_protected());
+        assert!(BoardAccessMode::ViewPassword.requires_unlock_for_posting());
+        assert!(BoardAccessMode::ViewPassword.requires_post_password());
+
+        assert!(BoardAccessMode::PostPassword.is_password_protected());
+        assert!(BoardAccessMode::PostPassword.requires_unlock_for_posting());
+        assert!(BoardAccessMode::PostPassword.requires_post_password());
     }
 
     #[test]

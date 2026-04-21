@@ -26,14 +26,12 @@ pub async fn catalog(
     {
         BoardAccessDecision::Allowed(context) => context,
         BoardAccessDecision::Denied(denial) => {
-            let html = render_board_unlock_html(
-                &denial.context.board,
+            return Ok(board_access_denied_response(
+                jar,
+                &denial,
                 &csrf,
-                &denial.return_to,
-                None,
                 current_theme.as_deref(),
-            );
-            return Ok(board_access_required_response(jar, html));
+            ));
         }
     };
 
@@ -44,13 +42,11 @@ pub async fn catalog(
     let catalog_data = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
-        let admin_session_id = admin_session_id.clone();
         let viewer_key = viewer_key.clone();
         move || -> Result<(CatalogRenderData, crate::banner::BannerSelection)> {
             let conn = pool.get()?;
-            let access_context =
-                load_board_access_context(&conn, &board_short, admin_session_id.as_deref(), None)?;
-            let board = access_context.board;
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
             let all_threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
             let prefs = db::get_preferences_for_board(&conn, &viewer_key, board.id)?;
             let (threads, hidden_threads, pinned_ids) = split_catalog_threads(all_threads, &prefs);
@@ -195,14 +191,12 @@ pub async fn hidden_threads(
     {
         BoardAccessDecision::Allowed(context) => context,
         BoardAccessDecision::Denied(denial) => {
-            let html = render_board_unlock_html(
-                &denial.context.board,
+            return Ok(board_access_denied_response(
+                jar,
+                &denial,
                 &csrf,
-                &denial.return_to,
-                None,
                 current_theme.as_deref(),
-            );
-            return Ok(board_access_required_response(jar, html));
+            ));
         }
     };
 
@@ -276,14 +270,12 @@ pub async fn board_archive(
     )
     .await?
     {
-        let html = render_board_unlock_html(
-            &denial.context.board,
+        return Ok(board_access_denied_response(
+            jar,
+            &denial,
             &csrf,
-            &denial.return_to,
-            None,
             current_theme.as_deref(),
-        );
-        return Ok(board_access_required_response(jar, html));
+        ));
     }
 
     let html = tokio::task::spawn_blocking({
@@ -363,14 +355,12 @@ pub async fn search(
     )
     .await?
     {
-        let html = render_board_unlock_html(
-            &denial.context.board,
+        return Ok(board_access_denied_response(
+            jar,
+            &denial,
             &csrf,
-            &denial.return_to,
-            None,
             current_theme.as_deref(),
-        );
-        return Ok(board_access_required_response(jar, html));
+        ));
     }
 
     let html = tokio::task::spawn_blocking({

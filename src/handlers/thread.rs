@@ -68,15 +68,11 @@ pub async fn view_thread(
     {
         crate::handlers::board::BoardAccessDecision::Allowed(context) => context,
         crate::handlers::board::BoardAccessDecision::Denied(denial) => {
-            let html = crate::handlers::board::render_board_unlock_html(
-                &denial.context.board,
+            return Ok(crate::handlers::board::board_access_denied_response(
+                jar,
+                &denial,
                 &csrf,
-                &denial.return_to,
-                None,
                 current_theme.as_deref(),
-            );
-            return Ok(crate::handlers::board::board_access_required_response(
-                jar, html,
             ));
         }
     };

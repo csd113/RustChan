@@ -120,14 +120,12 @@ pub async fn board_index(
     {
         BoardAccessDecision::Allowed(context) => context,
         BoardAccessDecision::Denied(denial) => {
-            let html = render_board_unlock_html(
-                &denial.context.board,
+            return Ok(board_access_denied_response(
+                jar,
+                &denial,
                 &csrf,
-                &denial.return_to,
-                None,
                 current_theme.as_deref(),
-            );
-            return Ok(board_access_required_response(jar, html));
+            ));
         }
     };
 

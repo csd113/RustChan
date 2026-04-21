@@ -31,6 +31,37 @@ pub struct BoardSettingsForm {
     csrf: Option<String>,
 }
 
+fn resolve_board_access_password_hash(
+    access_mode: BoardAccessMode,
+    existing_password_hash: String,
+    submitted_password: &str,
+    clear_password: bool,
+) -> Result<String> {
+    if submitted_password.chars().count() > 256 {
+        return Err(AppError::BadRequest(
+            "Board password must be 256 characters or fewer.".into(),
+        ));
+    }
+
+    let access_password_hash = if submitted_password.is_empty() {
+        if clear_password {
+            String::new()
+        } else {
+            existing_password_hash
+        }
+    } else {
+        hash_password(submitted_password)?
+    };
+
+    if access_mode.is_password_protected() && access_password_hash.is_empty() {
+        return Err(AppError::BadRequest(
+            "Password-protected boards require a saved password. Enter a new board password or switch access mode to Public before removing it.".into(),
+        ));
+    }
+
+    Ok(access_password_hash)
+}
+
 pub async fn update_board_settings(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -83,11 +114,6 @@ pub async fn update_board_settings(
     let access_mode = BoardAccessMode::from_db_str(form.access_mode.as_deref().unwrap_or("public"))
         .ok_or_else(|| AppError::BadRequest("Invalid board access mode.".into()))?;
     let access_password = form.access_password.clone().unwrap_or_default();
-    if access_password.chars().count() > 256 {
-        return Err(AppError::BadRequest(
-            "Board password must be 256 characters or fewer.".into(),
-        ));
-    }
     let board_id = form.board_id;
     let banner_mode =
         BoardBannerMode::from_db_str(form.banner_mode.as_deref().unwrap_or("inherit"))
@@ -120,20 +146,12 @@ pub async fn update_board_settings(
                             .is_some_and(|theme| theme.enabled)
                 })
                 .unwrap_or_default();
-            let access_password_hash = if access_password.is_empty() {
-                if form.clear_access_password.as_deref() == Some("1") {
-                    String::new()
-                } else {
-                    existing_password_hash
-                }
-            } else {
-                hash_password(&access_password)?
-            };
-            if access_mode.requires_post_password() && access_password_hash.is_empty() {
-                return Err(AppError::BadRequest(
-                    "Protected boards require a password before they can be saved.".into(),
-                ));
-            }
+            let access_password_hash = resolve_board_access_password_hash(
+                access_mode,
+                existing_password_hash,
+                &access_password,
+                form.clear_access_password.as_deref() == Some("1"),
+            )?;
             db::update_board_settings(
                 &mut conn,
                 board_id,

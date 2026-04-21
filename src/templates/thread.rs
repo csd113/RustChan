@@ -287,7 +287,8 @@ pub fn thread_page(
                 "display:none"
             },
         );
-    } else if !thread.locked && !thread.archived && board.access_mode.requires_post_password() {
+    } else if !thread.locked && !thread.archived && board.access_mode.requires_unlock_for_posting()
+    {
         body.push_str(&super::board::render_post_access_gate(
             board,
             csrf_token,
@@ -1205,6 +1206,9 @@ mod tests {
         assert!(html.contains(r#"href="/test">[ Return ]</a>"#));
         assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
         assert!(html.contains(r#"id="board-access-gate""#));
+        assert!(html.contains(
+            r#"name="password" maxlength="256" autocomplete="current-password" required"#
+        ));
     }
 
     #[test]

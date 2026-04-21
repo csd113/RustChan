@@ -286,7 +286,7 @@ pub async fn unlock_board_access(
         return Ok(board_access_required_response(jar, html));
     }
 
-    if access_context.board.access_mode.requires_post_password()
+    if access_context.board.access_mode.is_password_protected()
         && access_context.board.access_password_hash.is_empty()
     {
         let html = render_board_unlock_html(

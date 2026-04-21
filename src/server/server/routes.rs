@@ -407,6 +407,204 @@ mod tests {
         .expect("create session");
     }
 
+    fn board_settings_form_body(
+        board_id: i64,
+        access_mode: &str,
+        access_password: &str,
+        clear_access_password: bool,
+    ) -> String {
+        let mut body = format!(
+            "board_id={board_id}&name=Test&description=&access_mode={access_mode}&access_password={access_password}&_csrf=csrf123"
+        );
+        if clear_access_password {
+            body.push_str("&clear_access_password=1");
+        }
+        body
+    }
+
+    async fn post_board_settings(
+        state: crate::middleware::AppState,
+        body: String,
+    ) -> axum::response::Response {
+        let app = admin_routes().with_state(state);
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/board/settings")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(
+                    header::COOKIE,
+                    "csrf_token=csrf123; chan_admin_session=session123",
+                )
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+    }
+
+    fn create_admin_settings_board(state: &crate::middleware::AppState) -> i64 {
+        install_admin_session(state);
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board")
+    }
+
+    fn board_access_row(state: &crate::middleware::AppState, board_id: i64) -> (String, String) {
+        let conn = state.db.get().expect("db connection");
+        conn.query_row(
+            "SELECT access_mode, access_password_hash FROM boards WHERE id = ?1",
+            rusqlite::params![board_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("board access row")
+    }
+
+    #[tokio::test]
+    async fn board_settings_protected_mode_with_new_password_saves_hash() {
+        let state = crate::test_support::app_state();
+        let board_id = create_admin_settings_board(&state);
+
+        let response = post_board_settings(
+            state.clone(),
+            board_settings_form_body(board_id, "view_password", "swordfish", false),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let (access_mode, password_hash) = board_access_row(&state, board_id);
+        assert_eq!(access_mode, "view_password");
+        assert!(
+            crate::utils::crypto::verify_password("swordfish", &password_hash)
+                .expect("valid board password hash")
+        );
+    }
+
+    #[tokio::test]
+    async fn board_settings_blank_password_keeps_existing_hash() {
+        let state = crate::test_support::app_state();
+        let board_id = create_admin_settings_board(&state);
+        let original_hash =
+            crate::utils::crypto::hash_password("oldpass").expect("hash board password");
+        {
+            let conn = state.db.get().expect("db connection");
+            conn.execute(
+                "UPDATE boards SET access_mode = 'view_password', access_password_hash = ?1 WHERE id = ?2",
+                rusqlite::params![original_hash, board_id],
+            )
+            .expect("seed board access");
+        }
+
+        let response = post_board_settings(
+            state.clone(),
+            board_settings_form_body(board_id, "view_password", "", false),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let (access_mode, password_hash) = board_access_row(&state, board_id);
+        assert_eq!(access_mode, "view_password");
+        assert!(
+            crate::utils::crypto::verify_password("oldpass", &password_hash)
+                .expect("valid board password hash")
+        );
+    }
+
+    #[tokio::test]
+    async fn board_settings_rejects_removing_password_from_protected_mode() {
+        let state = crate::test_support::app_state();
+        let board_id = create_admin_settings_board(&state);
+        let original_hash =
+            crate::utils::crypto::hash_password("oldpass").expect("hash board password");
+        {
+            let conn = state.db.get().expect("db connection");
+            conn.execute(
+                "UPDATE boards SET access_mode = 'view_password', access_password_hash = ?1 WHERE id = ?2",
+                rusqlite::params![original_hash, board_id],
+            )
+            .expect("seed board access");
+        }
+
+        let response = post_board_settings(
+            state.clone(),
+            board_settings_form_body(board_id, "view_password", "", true),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(body.contains("Password-protected boards require a saved password."));
+        let (access_mode, password_hash) = board_access_row(&state, board_id);
+        assert_eq!(access_mode, "view_password");
+        assert!(
+            crate::utils::crypto::verify_password("oldpass", &password_hash)
+                .expect("valid board password hash")
+        );
+    }
+
+    #[tokio::test]
+    async fn board_settings_remove_password_while_public_clears_hash() {
+        let state = crate::test_support::app_state();
+        let board_id = create_admin_settings_board(&state);
+        let original_hash =
+            crate::utils::crypto::hash_password("oldpass").expect("hash board password");
+        {
+            let conn = state.db.get().expect("db connection");
+            conn.execute(
+                "UPDATE boards SET access_password_hash = ?1 WHERE id = ?2",
+                rusqlite::params![original_hash, board_id],
+            )
+            .expect("seed board access");
+        }
+
+        let response = post_board_settings(
+            state.clone(),
+            board_settings_form_body(board_id, "public", "", true),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let (access_mode, password_hash) = board_access_row(&state, board_id);
+        assert_eq!(access_mode, "public");
+        assert!(password_hash.is_empty());
+    }
+
+    #[tokio::test]
+    async fn board_settings_new_password_takes_precedence_over_remove_checkbox() {
+        let state = crate::test_support::app_state();
+        let board_id = create_admin_settings_board(&state);
+        let original_hash =
+            crate::utils::crypto::hash_password("oldpass").expect("hash board password");
+        {
+            let conn = state.db.get().expect("db connection");
+            conn.execute(
+                "UPDATE boards SET access_mode = 'view_password', access_password_hash = ?1 WHERE id = ?2",
+                rusqlite::params![original_hash, board_id],
+            )
+            .expect("seed board access");
+        }
+
+        let response = post_board_settings(
+            state.clone(),
+            board_settings_form_body(board_id, "view_password", "newpass", true),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let (access_mode, password_hash) = board_access_row(&state, board_id);
+        assert_eq!(access_mode, "view_password");
+        assert!(
+            crate::utils::crypto::verify_password("newpass", &password_hash)
+                .expect("valid board password hash")
+        );
+        assert!(
+            !crate::utils::crypto::verify_password("oldpass", &password_hash)
+                .expect("valid board password hash")
+        );
+    }
+
     #[tokio::test]
     async fn board_restore_route_accepts_large_multipart_body_without_global_media_limit() {
         let app = admin_routes().with_state(crate::test_support::app_state());

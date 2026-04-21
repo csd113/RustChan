@@ -187,7 +187,7 @@ pub(crate) fn render_post_access_gate(
     <tr><td>status</td>
         <td><span style="font-size:0.8rem;color:var(--text-dim)">{description}</span></td></tr>
     <tr><td>password</td>
-        <td><input type="password" name="password" maxlength="256" autocomplete="current-password">
+        <td><input type="password" name="password" maxlength="256" autocomplete="current-password" required>
             <button type="submit">{button_label}</button></td></tr>
   </table>
 </form>
@@ -766,7 +766,7 @@ pub fn board_page(
                 "display:none"
             },
         );
-    } else if board.access_mode.requires_post_password() {
+    } else if board.access_mode.requires_unlock_for_posting() {
         body.push_str(&render_post_access_gate(
             board,
             csrf_token,
@@ -1123,7 +1123,7 @@ pub fn catalog_page(
 </div>"##,
             form = super::forms::new_thread_form(&board.short_name, csrf_token, board, None)
         );
-    } else if board.access_mode.requires_post_password() {
+    } else if board.access_mode.requires_unlock_for_posting() {
         body.push_str(&render_post_access_gate(
             board,
             csrf_token,

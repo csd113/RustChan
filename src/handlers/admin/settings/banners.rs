@@ -149,6 +149,22 @@ fn resolve_banner_target_selection(
     )
 }
 
+fn restore_board_banner_inheritance_if_empty(
+    conn: &rusqlite::Connection,
+    board_id: Option<i64>,
+) -> Result<()> {
+    let Some(board_id) = board_id else {
+        return Ok(());
+    };
+    if db::list_banner_assets_for_board(conn, board_id)?.is_empty() {
+        conn.execute(
+            "UPDATE boards SET banner_mode = 'inherit' WHERE id = ?1 AND banner_mode = 'override'",
+            rusqlite::params![board_id],
+        )?;
+    }
+    Ok(())
+}
+
 async fn upload_banner_for_scope(
     state: AppState,
     session_id: Option<String>,
@@ -157,7 +173,7 @@ async fn upload_banner_for_scope(
     parsed: ParsedBannerUpload,
 ) -> Result<String> {
     tokio::task::spawn_blocking(move || -> Result<String> {
-        let conn = state.db.get()?;
+        let mut conn = state.db.get()?;
         super::require_admin_session_sid(&conn, session_id.as_deref())?;
         let (target_type, target_value) = resolve_banner_target_selection(
             &parsed.target_type,
@@ -201,9 +217,10 @@ async fn upload_banner_for_scope(
             banner::write_banner_asset(&draft_asset, &parsed.banner_bytes)?;
 
         let result = (|| -> Result<String> {
-            let sort_order = db::next_banner_sort_order(&conn, scope, board_id)?;
+            let tx = conn.transaction()?;
+            let sort_order = db::next_banner_sort_order(&tx, scope, board_id)?;
             let banner_id = db::insert_banner_asset(
-                &conn,
+                &tx,
                 scope,
                 board_id,
                 &storage_key,
@@ -229,11 +246,17 @@ async fn upload_banner_for_scope(
             if scope == BannerScope::Board {
                 let board_id =
                     board_id.ok_or_else(|| AppError::BadRequest("Missing board id.".into()))?;
-                conn.execute(
+                let affected = tx.execute(
                     "UPDATE boards SET banner_mode = 'override' WHERE id = ?1",
                     rusqlite::params![board_id],
                 )?;
+                if affected == 0 {
+                    return Err(AppError::BadRequest(format!(
+                        "Board id {board_id} not found"
+                    )));
+                }
             }
+            tx.commit()?;
             let anchor = banner::banner_admin_anchor(scope, board_short.as_deref());
             tracing::info!(
                 target: "admin",
@@ -452,6 +475,9 @@ pub async fn delete_banner(
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             let asset = db::delete_banner_asset(&conn, form.banner_id)?;
             banner::delete_banner_asset_file(&asset)?;
+            if asset.scope == BannerScope::Board {
+                restore_board_banner_inheritance_if_empty(&conn, asset.board_id)?;
+            }
             Ok(banner::banner_admin_anchor(
                 asset.scope,
                 asset.board_short.as_deref(),
@@ -533,6 +559,10 @@ pub async fn clear_board_banner_override(
             for asset in &assets {
                 banner::delete_banner_asset_file(asset)?;
             }
+            conn.execute(
+                "UPDATE boards SET banner_mode = 'inherit' WHERE id = ?1 AND banner_mode = 'override'",
+                rusqlite::params![form.board_id],
+            )?;
             Ok(board_short)
         }
     })
@@ -544,4 +574,69 @@ pub async fn clear_board_banner_override(
         "board-banners",
     )
     .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restore_board_banner_inheritance_if_empty;
+
+    fn board_banner_mode(conn: &rusqlite::Connection, board_id: i64) -> String {
+        conn.query_row(
+            "SELECT banner_mode FROM boards WHERE id = ?1",
+            rusqlite::params![board_id],
+            |row| row.get(0),
+        )
+        .expect("board banner mode")
+    }
+
+    #[test]
+    fn restores_inherit_when_board_banner_set_is_empty() {
+        let state = crate::test_support::app_state();
+        let conn = state.db.get().expect("db connection");
+        let board_id =
+            crate::db::create_board(&conn, "b", "Random", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET banner_mode = 'override' WHERE id = ?1",
+            rusqlite::params![board_id],
+        )
+        .expect("set override mode");
+
+        restore_board_banner_inheritance_if_empty(&conn, Some(board_id))
+            .expect("restore inheritance");
+
+        assert_eq!(board_banner_mode(&conn, board_id), "inherit");
+    }
+
+    #[test]
+    fn keeps_override_when_board_banner_set_still_has_assets() {
+        let state = crate::test_support::app_state();
+        let conn = state.db.get().expect("db connection");
+        let board_id =
+            crate::db::create_board(&conn, "b", "Random", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET banner_mode = 'override' WHERE id = ?1",
+            rusqlite::params![board_id],
+        )
+        .expect("set override mode");
+        crate::db::insert_banner_asset(
+            &conn,
+            crate::models::BannerScope::Board,
+            Some(board_id),
+            "0123456789abcdef0123456789abcdef",
+            468,
+            60,
+            1024,
+            true,
+            1,
+            crate::models::BannerTargetType::None,
+            "",
+            true,
+            true,
+        )
+        .expect("insert board banner");
+
+        restore_board_banner_inheritance_if_empty(&conn, Some(board_id)).expect("keep override");
+
+        assert_eq!(board_banner_mode(&conn, board_id), "override");
+    }
 }
