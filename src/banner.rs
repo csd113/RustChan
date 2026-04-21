@@ -7,8 +7,6 @@ use crate::models::{
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageFormat, ImageReader};
 use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
     io::Cursor,
     path::{Component, Path, PathBuf},
 };
@@ -114,11 +112,25 @@ pub fn banner_admin_anchor(scope: BannerScope, board_short: Option<&str>) -> Str
 /// # Errors
 /// Returns an error if the stored banner key is not canonical.
 pub fn banner_asset_path(asset: &BannerAsset) -> Result<PathBuf> {
-    banner_storage_path(
+    let webp_path = banner_storage_path(
         asset.scope,
         asset.board_short.as_deref(),
         &asset.storage_key,
-    )
+    )?;
+    let gif_path = banner_gif_fallback_path(&webp_path);
+    if gif_path.exists() && !webp_path.exists() {
+        Ok(gif_path)
+    } else {
+        Ok(webp_path)
+    }
+}
+
+#[must_use]
+pub fn banner_asset_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("gif") => "image/gif",
+        _ => "image/webp",
+    }
 }
 
 /// Build the storage path for a banner asset.
@@ -145,7 +157,7 @@ pub fn banner_storage_path(
     Ok(path)
 }
 
-/// Convert a validated storage key into its `.webp` file name.
+/// Convert a validated storage key into its primary `.webp` file name.
 ///
 /// # Errors
 /// Returns an error if the storage key is not canonical.
@@ -210,13 +222,11 @@ pub fn validate_banner_restore_entry_name(name: &str) -> Result<String> {
             _ => None,
         })
         .ok_or_else(|| anyhow::anyhow!("Banner restore entry name is not valid UTF-8."))?;
-    if components.next().is_some()
-        || Path::new(file_name)
-            .extension()
-            .and_then(|ext| ext.to_str())
-            != Some("webp")
-    {
-        anyhow::bail!("Banner restore entries must be scoped .webp files.");
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|ext| ext.to_str());
+    if components.next().is_some() || !matches!(extension, Some("webp" | "gif")) {
+        anyhow::bail!("Banner restore entries must be scoped .webp or .gif files.");
     }
 
     let stem = Path::new(file_name)
@@ -351,9 +361,12 @@ pub fn canonicalize_banner_bytes(bytes: &[u8], target_path: &Path) -> Result<(u3
     }
 
     let stored_dimensions = if preflight.animated_gif_frames.is_some() {
-        let (width, height) = maybe_shrink_dimensions(preflight.width, preflight.height);
-        write_animated_gif_banner_asset_scaled(bytes, target_path, width, height)?;
-        (width, height)
+        write_animated_gif_banner_asset_scaled(
+            bytes,
+            target_path,
+            preflight.width,
+            preflight.height,
+        )?
     } else {
         let img = decode_uploaded_banner(bytes, &preflight)?;
         let processed = normalize_banner_image(&img);
@@ -364,8 +377,9 @@ pub fn canonicalize_banner_bytes(bytes: &[u8], target_path: &Path) -> Result<(u3
         dimensions
     };
 
-    let metadata = std::fs::metadata(target_path)
-        .with_context(|| format!("stat {}", target_path.display()))?;
+    let stored_path = stored_banner_path_after_write(target_path);
+    let metadata = std::fs::metadata(&stored_path)
+        .with_context(|| format!("stat {}", stored_path.display()))?;
     Ok((stored_dimensions.0, stored_dimensions.1, metadata.len()))
 }
 
@@ -482,19 +496,15 @@ pub fn choose_active_banner(
         return (asset, fragment, false);
     }
 
-    let mut hasher = DefaultHasher::new();
-    for asset in candidates {
-        asset.id.hash(&mut hasher);
-        asset.sort_order.hash(&mut hasher);
-        asset.created_at.hash(&mut hasher);
-    }
-    let len = u64::try_from(candidates.len()).unwrap_or(1);
-    let index = usize::try_from(hasher.finish() % len).unwrap_or(0);
+    let nonce = uuid::Uuid::new_v4().as_u128();
+    let len = u128::try_from(candidates.len()).unwrap_or(1);
+    let index = usize::try_from(nonce % len).unwrap_or(0);
     let asset = candidates.get(index).cloned();
-    let fragment = asset
-        .as_ref()
-        .map_or_else(|| "none".to_string(), |item| format!("stable-{}", item.id));
-    (asset, fragment, false)
+    let fragment = asset.as_ref().map_or_else(
+        || "none".to_string(),
+        |item| format!("refresh-{nonce}-{}", item.id),
+    );
+    (asset, fragment, true)
 }
 
 pub fn load_site_banner_settings(conn: &rusqlite::Connection) -> BannerSiteSettings {
@@ -607,31 +617,60 @@ fn resolve_from_candidates(
 fn write_animated_gif_banner_asset_scaled(
     bytes: &[u8],
     target_path: &Path,
-    max_width: u32,
-    max_height: u32,
-) -> Result<()> {
-    if !crate::media::ffmpeg::detect_ffmpeg() {
-        anyhow::bail!(
-            "Animated GIF banners require ffmpeg so they can be converted to animated WebP."
-        );
-    }
-    if !crate::media::ffmpeg::check_webp_encoder() {
-        anyhow::bail!("Animated GIF banners require an ffmpeg build with libwebp support.");
+    original_width: u32,
+    original_height: u32,
+) -> Result<(u32, u32)> {
+    write_animated_gif_banner_asset_scaled_with_caps(
+        bytes,
+        target_path,
+        original_width,
+        original_height,
+        crate::media::ffmpeg::detect_ffmpeg(),
+        crate::media::ffmpeg::check_webp_encoder(),
+    )
+}
+
+fn write_animated_gif_banner_asset_scaled_with_caps(
+    bytes: &[u8],
+    target_path: &Path,
+    original_width: u32,
+    original_height: u32,
+    ffmpeg_available: bool,
+    ffmpeg_webp_available: bool,
+) -> Result<(u32, u32)> {
+    let (max_width, max_height) = maybe_shrink_dimensions(original_width, original_height);
+    if !ffmpeg_available || !ffmpeg_webp_available {
+        write_gif_banner_fallback(bytes, target_path)?;
+        return Ok((original_width, original_height));
     }
 
     let input_path = animated_gif_temp_path(target_path);
     std::fs::write(&input_path, bytes)
         .with_context(|| format!("write {}", input_path.display()))?;
 
+    let webp_path = banner_webp_path(target_path);
     let conversion = crate::media::ffmpeg::ffmpeg_image_to_webp_scaled(
         &input_path,
-        target_path,
+        &webp_path,
         max_width,
         max_height,
     )
     .with_context(|| format!("convert animated gif banner {}", input_path.display()));
     let _ = std::fs::remove_file(&input_path);
-    conversion
+    match conversion {
+        Ok(()) => {
+            let gif_path = banner_gif_fallback_path(&webp_path);
+            if gif_path.exists() {
+                let _ = std::fs::remove_file(gif_path);
+            }
+            Ok((max_width, max_height))
+        }
+        Err(error) => {
+            tracing::warn!("animated GIF banner conversion failed ({error:#}); storing GIF");
+            write_gif_banner_fallback(bytes, &webp_path)?;
+            Ok((original_width, original_height))
+        }
+    }
 }
 
 fn animated_gif_temp_path(target_path: &Path) -> PathBuf {
@@ -642,6 +681,41 @@ fn animated_gif_temp_path(target_path: &Path) -> PathBuf {
         "{}-animated-input.gif",
         uuid::Uuid::new_v4().simple()
     ))
+}
+
+fn write_gif_banner_fallback(bytes: &[u8], target_path: &Path) -> Result<()> {
+    let webp_path = banner_webp_path(target_path);
+    let gif_path = banner_gif_fallback_path(&webp_path);
+    std::fs::write(&gif_path, bytes).with_context(|| format!("write {}", gif_path.display()))?;
+    if webp_path.exists() {
+        let _ = std::fs::remove_file(webp_path);
+    }
+    Ok(())
+}
+
+fn banner_webp_path(path: &Path) -> PathBuf {
+    if path.extension().and_then(|ext| ext.to_str()) == Some("webp") {
+        path.to_path_buf()
+    } else {
+        path.with_extension("webp")
+    }
+}
+
+fn banner_gif_fallback_path(path: &Path) -> PathBuf {
+    path.with_extension("gif")
+}
+
+fn stored_banner_path_after_write(target_path: &Path) -> PathBuf {
+    if target_path.exists() {
+        return target_path.to_path_buf();
+    }
+    let webp_path = banner_webp_path(target_path);
+    let gif_path = banner_gif_fallback_path(&webp_path);
+    if gif_path.exists() {
+        gif_path
+    } else {
+        webp_path
+    }
 }
 
 fn preflight_banner_bytes(bytes: &[u8]) -> Result<BannerImagePreflight> {
@@ -734,9 +808,11 @@ fn count_gif_frames(bytes: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        banner_admin_anchor, banner_open_section, banner_storage_path, banner_target_draft,
-        canonicalize_banner_bytes, choose_active_banner, validate_banner_restore_entry_name,
-        validate_banner_storage_key, MAX_ANIMATED_GIF_FRAMES,
+        banner_admin_anchor, banner_asset_content_type, banner_gif_fallback_path,
+        banner_open_section, banner_storage_path, banner_target_draft, canonicalize_banner_bytes,
+        choose_active_banner, validate_banner_restore_entry_name, validate_banner_storage_key,
+        write_animated_gif_banner_asset_scaled_with_caps, DISPLAY_HEIGHT, DISPLAY_WIDTH,
+        MAX_ANIMATED_GIF_FRAMES,
     };
     use crate::models::{BannerAsset, BannerScope, BannerTargetType};
     use image::{codecs::gif::GifEncoder, Delay, Frame, ImageBuffer, ImageFormat, Rgba};
@@ -765,6 +841,9 @@ mod tests {
         assert!(
             validate_banner_restore_entry_name("global/0123456789abcdef0123456789abcdef.webp")
                 .is_ok()
+        );
+        assert!(
+            validate_banner_restore_entry_name("home/0123456789abcdef0123456789abcdef.gif").is_ok()
         );
         assert!(
             validate_banner_restore_entry_name("0123456789abcdef0123456789abcdef.webp").is_err()
@@ -805,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_banner_choice_is_deterministic_without_rotation() {
+    fn zero_rotation_chooses_per_refresh_and_skips_304_short_circuit() {
         let a = BannerAsset {
             id: 1,
             scope: BannerScope::Global,
@@ -830,11 +909,11 @@ mod tests {
         };
         let first = choose_active_banner(&[a.clone(), b.clone()], &settings);
         let second = choose_active_banner(&[a, b], &settings);
-        assert_eq!(
-            first.0.as_ref().map(|asset| asset.id),
-            second.0.as_ref().map(|asset| asset.id)
-        );
-        assert!(!first.2);
+        assert!(first.0.is_some());
+        assert!(second.0.is_some());
+        assert_ne!(first.1, second.1);
+        assert!(first.2);
+        assert!(second.2);
     }
 
     #[test]
@@ -852,6 +931,37 @@ mod tests {
         }
         let target = std::env::temp_dir().join("banner-test.webp");
         assert!(canonicalize_banner_bytes(&bytes, &target).is_err());
+    }
+
+    #[test]
+    fn animated_gif_banner_falls_back_to_gif_without_ffmpeg() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut bytes);
+            for color in [Rgba([0, 0, 0, 255]), Rgba([255, 255, 255, 255])] {
+                let image = ImageBuffer::from_pixel(DISPLAY_WIDTH, DISPLAY_HEIGHT, color);
+                let frame = Frame::from_parts(image, 0, 0, Delay::from_numer_denom_ms(10, 1));
+                encoder
+                    .encode_frame(frame)
+                    .expect("encoding banner GIF frame should succeed");
+            }
+        }
+        let target = std::env::temp_dir().join(format!("{}.webp", uuid::Uuid::new_v4().simple()));
+        let gif_path = banner_gif_fallback_path(&target);
+        let dimensions = write_animated_gif_banner_asset_scaled_with_caps(
+            &bytes,
+            &target,
+            DISPLAY_WIDTH,
+            DISPLAY_HEIGHT,
+            false,
+            false,
+        )
+        .expect("GIF fallback should be written when ffmpeg is unavailable");
+        assert_eq!(dimensions, (DISPLAY_WIDTH, DISPLAY_HEIGHT));
+        assert!(!target.exists());
+        assert_eq!(std::fs::read(&gif_path).expect("read fallback GIF"), bytes);
+        assert_eq!(banner_asset_content_type(&gif_path), "image/gif");
+        let _ = std::fs::remove_file(gif_path);
     }
 
     #[test]

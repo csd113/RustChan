@@ -84,6 +84,7 @@ pub async fn serve_banner_asset(
     let Ok(path) = banner::banner_asset_path(&asset) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let content_type = banner::banner_asset_content_type(&path);
 
     let req = req.map(|_| axum::body::Body::empty());
     ServeFile::new(path).oneshot(req).await.map_or_else(
@@ -91,7 +92,7 @@ pub async fn serve_banner_asset(
         |resp| {
             let mut resp = resp.map(axum::body::Body::new);
             resp.headers_mut()
-                .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/webp"));
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
             resp.headers_mut().insert(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static(if has_version {
