@@ -1868,6 +1868,19 @@ html:not([data-theme]) .admin-panel h1 {
   box-shadow: inset 0 1px 2px rgba(88, 114, 141, 0.10);
 }
 
+[data-theme="blue-sky"] .admin-section input::placeholder,
+[data-theme="blue-sky"] .admin-section textarea::placeholder {
+  color: #6c7f91;
+}
+
+[data-theme="blue-sky"] .admin-section input:disabled,
+[data-theme="blue-sky"] .admin-section select:disabled,
+[data-theme="blue-sky"] .admin-section textarea:disabled {
+  background: #dbe4ed;
+  border-color: #b7cad9;
+  color: #8597a9;
+}
+
 [data-theme="blue-sky"] .admin-section input:focus,
 [data-theme="blue-sky"] .admin-section select:focus,
 [data-theme="blue-sky"] .admin-section textarea:focus {
@@ -1888,6 +1901,19 @@ html:not([data-theme]) .admin-panel h1 {
   color: #d8dee8;
   border-color: var(--deep-orbit-input-border);
   box-shadow: inset 0 1px 2px rgba(0,0,0,0.40);
+}
+
+[data-theme="deep-orbit"] .admin-section input::placeholder,
+[data-theme="deep-orbit"] .admin-section textarea::placeholder {
+  color: #7c8796;
+}
+
+[data-theme="deep-orbit"] .admin-section input:disabled,
+[data-theme="deep-orbit"] .admin-section select:disabled,
+[data-theme="deep-orbit"] .admin-section textarea:disabled {
+  background: #1a2029;
+  border-color: #2d3745;
+  color: #798595;
 }
 
 [data-theme="deep-orbit"] .admin-section input:focus,
