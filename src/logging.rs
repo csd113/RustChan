@@ -120,6 +120,22 @@ fn extract_component(target: &str) -> &str {
     }
 }
 
+fn display_component(target: &str) -> String {
+    if is_tor_target(target) {
+        match extract_component(target) {
+            "bootstrap" | "dirmgr" | "state" | "sqlite" => "tor-dir".to_string(),
+            "guard" | "guardmgr" => "tor-net".to_string(),
+            "chanmgr" => "tor-chan".to_string(),
+            "circmgr" | "mgr" | "reactor" => "tor-circ".to_string(),
+            "hspool" | "publish" | "descriptor" => "onion".to_string(),
+            "config" => "tor-cfg".to_string(),
+            other => other.to_string(),
+        }
+    } else {
+        extract_component(target).to_string()
+    }
+}
+
 // ─── Shared formatting helpers ────────────────────────────────────────────────
 
 /// Write the fixed-width level tag.  Returns the ANSI open/close codes for
@@ -147,7 +163,7 @@ fn write_level_tag(writer: &mut Writer<'_>, level: Level, ansi: bool) -> fmt::Re
 
 /// Write the fixed-width (8-char) component tag, cyan when `ansi` is true.
 fn write_component_tag(writer: &mut Writer<'_>, target: &str, ansi: bool) -> fmt::Result {
-    let component = extract_component(target);
+    let component = display_component(target);
     let chars: Vec<char> = component.chars().collect();
     let len = chars.len().min(8);
     let display: String = chars.get(..len).unwrap_or(&chars).iter().collect();
@@ -193,6 +209,8 @@ fn humanize_field_name(name: &str) -> String {
         "freed_kib" => "freed KiB".to_string(),
         "has_csrf_cookie" => "CSRF cookie".to_string(),
         "has_session_cookie" => "session cookie".to_string(),
+        "attempts" => "attempts".to_string(),
+        "reason" => "reason".to_string(),
         "uri" => "URI".to_string(),
         "id" => "ID".to_string(),
         "latency_ms" => "latency".to_string(),
@@ -215,8 +233,29 @@ fn is_external_source(file: &str) -> bool {
 fn is_tor_component(component: &str) -> bool {
     matches!(
         component,
-        "guard" | "hspool" | "reactor" | "circmgr" | "dirmgr" | "guardmgr" | "chanmgr"
+        "bootstrap"
+            | "chanmgr"
+            | "circmgr"
+            | "config"
+            | "descriptor"
+            | "dirmgr"
+            | "guard"
+            | "guardmgr"
+            | "hspool"
+            | "lib"
+            | "mgr"
+            | "publish"
+            | "reactor"
+            | "sqlite"
+            | "state"
     )
+}
+
+fn is_tor_target(target: &str) -> bool {
+    target == "arti_client"
+        || target.starts_with("arti_client::")
+        || target.starts_with("tor_")
+        || target.starts_with("tor-")
 }
 
 fn title_case_message(message: &str) -> String {
@@ -255,8 +294,87 @@ fn parse_formatted_duration(value: &str) -> Option<String> {
     }
 }
 
+fn format_duration_parts(total_nanos: u128) -> Option<String> {
+    let total_millis = (total_nanos.saturating_add(500_000)) / 1_000_000;
+    if total_millis == 0 {
+        return Some("0s".to_string());
+    }
+
+    let total_secs = (total_millis.saturating_add(500)) / 1000;
+    if total_secs >= 60 {
+        let minutes = total_secs / 60;
+        let secs = total_secs % 60;
+        if secs == 0 {
+            Some(format!("{minutes}m"))
+        } else {
+            Some(format!("{minutes}m {secs}s"))
+        }
+    } else if total_secs >= 10 {
+        Some(format!("{total_secs}s"))
+    } else {
+        Some(format!("{:.1}s", total_millis as f64 / 1000.0))
+    }
+}
+
+fn parse_compound_duration(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_end_matches('.');
+    if !trimmed.contains(char::is_whitespace) {
+        return None;
+    }
+
+    let mut total_nanos = 0u128;
+    let mut saw_unit = false;
+    for part in trimmed.split_whitespace() {
+        let split = part
+            .find(|ch: char| !ch.is_ascii_digit())
+            .filter(|&index| index > 0)?;
+        let (number, unit) = part.split_at(split);
+        let value = number.parse::<u128>().ok()?;
+        let nanos = match unit {
+            "h" => value.saturating_mul(3_600_000_000_000),
+            "m" => value.saturating_mul(60_000_000_000),
+            "s" => value.saturating_mul(1_000_000_000),
+            "ms" => value.saturating_mul(1_000_000),
+            "us" | "µs" => value.saturating_mul(1_000),
+            "ns" => value,
+            _ => return None,
+        };
+        total_nanos = total_nanos.saturating_add(nanos);
+        saw_unit = true;
+    }
+
+    saw_unit
+        .then(|| format_duration_parts(total_nanos))
+        .flatten()
+}
+
+fn normalize_duration(value: &str) -> Option<String> {
+    parse_formatted_duration(value).or_else(|| parse_compound_duration(value))
+}
+
+fn scrub_tor_value(value: &str) -> String {
+    let mut out = value.to_string();
+
+    while let Some(start) = out.find("GuardId(") {
+        let Some(end) = out[start..].find(')') else {
+            break;
+        };
+        out.replace_range(start..start + end + 1, "[scrubbed guard]");
+    }
+
+    while let Some(start) = out.find(" via Circ ") {
+        let token_value_start = start + " via Circ ".len();
+        let end = out[token_value_start..]
+            .find(char::is_whitespace)
+            .map_or(out.len(), |offset| token_value_start + offset);
+        out.replace_range(start..end, "");
+    }
+
+    out
+}
+
 fn normalize_field_value(name: &str, value: &str) -> String {
-    if let Some(duration) = parse_formatted_duration(value) {
+    if let Some(duration) = normalize_duration(value) {
         return duration;
     }
 
@@ -268,7 +386,7 @@ fn normalize_field_value(name: &str, value: &str) -> String {
         return format!("{value} ms");
     }
 
-    value.to_string()
+    scrub_tor_value(value)
 }
 
 fn should_hide_field(name: &str, value: &str) -> bool {
@@ -345,12 +463,42 @@ fn upsert_field(fields: &mut Vec<(String, String)>, name: &str, value: String) {
     }
 }
 
+fn remove_field(fields: &mut Vec<(String, String)>, name: &str) -> Option<String> {
+    fields
+        .iter()
+        .position(|(field_name, _)| field_name == name)
+        .map(|index| fields.remove(index).1)
+}
+
 fn extract_percent(message: &str) -> Option<String> {
     let percent_index = message.find('%')?;
     let number = message[..percent_index]
         .rsplit_once(' ')
         .map_or(&message[..percent_index], |(_, value)| value);
     Some(format!("{number}%"))
+}
+
+fn extract_attempt_count(message: &str) -> Option<String> {
+    let before = message
+        .strip_prefix("We failed ")?
+        .split_once(" times to bootstrap")?
+        .0;
+    before.parse::<u64>().ok().map(|count| count.to_string())
+}
+
+fn short_tor_error(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("invalid document from directory server") {
+        "directory server sent invalid data".to_string()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "network timeout".to_string()
+    } else if lower.contains("unusable guard") || lower.contains("could not connect to guard") {
+        "could not connect to a Tor guard".to_string()
+    } else if lower.contains("consensus") && lower.contains("expired") {
+        "network directory consensus expired".to_string()
+    } else {
+        scrub_tor_value(error)
+    }
 }
 
 fn normalize_message_text(message: &str) -> String {
@@ -376,11 +524,19 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
         "guard" => {
             if let Some((_, retry)) = message.split_once("Retrying in ") {
                 let retry = retry.trim_end_matches('.');
-                let retry = parse_formatted_duration(retry).unwrap_or_else(|| retry.to_string());
+                let retry = normalize_duration(retry).unwrap_or_else(|| retry.to_string());
                 fields.message = Some("Tor guard connection failed".to_string());
                 upsert_field(&mut fields.fields, "retry_in", retry);
+            } else if message.contains("Next retry time unknown") {
+                fields.message = Some("Tor guard connection failed".to_string());
+                upsert_field(&mut fields.fields, "retry_in", "unknown".to_string());
             } else if message.starts_with("Questionable guard:") {
                 fields.message = Some("Tor marked a guard as unstable".to_string());
+                if let Some(rate) = extract_percent(&message) {
+                    upsert_field(&mut fields.fields, "failure_rate", rate);
+                }
+            } else if message.starts_with("Disabling guard:") {
+                fields.message = Some("Tor disabled an unstable guard".to_string());
                 if let Some(rate) = extract_percent(&message) {
                     upsert_field(&mut fields.fields, "failure_rate", rate);
                 }
@@ -391,18 +547,82 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
                 fields.message = Some(
                     "Tor onion-service circuits are failing; waiting before retrying".to_string(),
                 );
+            } else if message.starts_with("unknown vanguard mode") {
+                fields.message = Some("Tor onion-service vanguard mode is unknown".to_string());
             }
         }
         "reactor" => {
             if message.eq_ignore_ascii_case("removing circuit leg") {
                 fields.message = Some("Tor circuit closed".to_string());
+                remove_field(&mut fields.fields, "tunnel_id");
+            } else if message.contains("descriptor upload")
+                || message.contains("Unable to upload")
+                || message.contains("publish")
+            {
+                fields.message =
+                    Some(normalize_message_text(&message).replace("HS", "onion service"));
+            }
+        }
+        "bootstrap" => {
+            if message == "Unable to advance downloading state" {
+                fields.message = Some("Tor directory bootstrap stalled".to_string());
+            } else if message.starts_with("We failed ") && message.contains("times to bootstrap") {
+                fields.message = Some("Tor directory bootstrap failed".to_string());
+                if let Some(attempts) = extract_attempt_count(&message) {
+                    upsert_field(&mut fields.fields, "attempts", attempts);
+                }
+            }
+        }
+        "lib" => {
+            if message == "Bootstrapping task exited before finishing." {
+                fields.message =
+                    Some("Tor directory bootstrap stopped before finishing".to_string());
+            } else if message == "Got a new NetDir, but it's older than the one we currently have!"
+            {
+                fields.message = Some(
+                    "Tor received an older network directory; keeping current copy".to_string(),
+                );
+            }
+        }
+        "state" => {
+            if message.starts_with("Problem with certificate received from") {
+                fields.message = Some("Tor directory certificate was rejected".to_string());
+            } else if message.starts_with("Discarding certificates") {
+                fields.message =
+                    Some("Tor discarded unrequested directory certificates".to_string());
+            } else if message.starts_with("Received microdescriptor") {
+                fields.message = Some("Tor discarded an unrequested relay descriptor".to_string());
+            } else if message == "Found a mismatched microdescriptor in cache; ignoring" {
+                fields.message =
+                    Some("Tor ignored a mismatched cached relay descriptor".to_string());
+            }
+        }
+        "sqlite" => {
+            if message.starts_with("Removing unreferenced file") {
+                fields.message = Some("Tor removed an unreferenced cache file".to_string());
+            }
+        }
+        "mgr" => {
+            if message == "All tunnel attempts failed due to timeout" {
+                fields.message = Some("Tor circuit build timed out".to_string());
+            } else if message == "Reached circuit build retry limit, exiting..." {
+                fields.message = Some("Tor circuit build retry limit reached".to_string());
+            } else if message == "Request failed" {
+                fields.message = Some("Tor circuit request failed".to_string());
             }
         }
         _ => {}
     }
 
+    if message.starts_with("Error while adding directory info") {
+        fields.message = Some("Tor directory update failed".to_string());
+        if let Some(error) = remove_field(&mut fields.fields, "error") {
+            upsert_field(&mut fields.fields, "reason", short_tor_error(&error));
+        }
+    }
+
     if let Some(file) = file {
-        if is_external_source(file) && is_tor_component(component) {
+        if (is_external_source(file) || is_tor_target(target)) && is_tor_component(component) {
             if let Some(msg) = fields.message.as_mut() {
                 if !msg.starts_with("Tor ") {
                     *msg = format!("Tor: {msg}");
@@ -738,9 +958,29 @@ pub fn console_prompt(msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_component, humanize_field_name, is_external_source, normalize_field_value,
-        normalize_message_text, parse_formatted_duration,
+        display_component, extract_component, humanize_field_name, is_external_source,
+        normalize_duration, normalize_field_value, normalize_message_text,
+        parse_formatted_duration, rewrite_message, LogEventFields,
     };
+
+    fn rewrite_for_test(target: &str, message: &str, fields: &[(&str, &str)]) -> LogEventFields {
+        let mut event_fields = LogEventFields {
+            message: Some(message.to_string()),
+            fields: fields
+                .iter()
+                .filter_map(|(name, value)| {
+                    let clean = normalize_field_value(name, value);
+                    (!super::should_hide_field(name, &clean)).then(|| (name.to_string(), clean))
+                })
+                .collect(),
+        };
+        rewrite_message(
+            target,
+            Some("/Users/example/.cargo/registry/src/index.crates.io/tor-test/src/lib.rs"),
+            &mut event_fields,
+        );
+        event_fields
+    }
 
     #[test]
     fn parses_formatted_duration_into_plain_text() {
@@ -752,6 +992,10 @@ mod tests {
             parse_formatted_duration("FormattedDuration(125.0s)").as_deref(),
             Some("2m 5s")
         );
+        assert_eq!(
+            normalize_duration("29s 999ms 988us 413ns").as_deref(),
+            Some("30s")
+        );
     }
 
     #[test]
@@ -760,6 +1004,13 @@ mod tests {
         assert_eq!(humanize_field_name("latency_ms"), "latency");
         assert_eq!(normalize_field_value("latency_ms", "42"), "42 ms");
         assert_eq!(normalize_field_value("guard", "GuardId(foo)"), "[scrubbed]");
+        assert_eq!(
+            normalize_field_value(
+                "error",
+                "Invalid document from directory server [scrubbed] via Circ 8.98"
+            ),
+            "Invalid document from directory server [scrubbed]"
+        );
     }
 
     #[test]
@@ -781,5 +1032,101 @@ mod tests {
         ));
         assert!(!is_external_source("src/server/server.rs"));
         assert_eq!(extract_component("rustchan::server::server"), "server");
+        assert_eq!(display_component("tor_dirmgr::bootstrap"), "tor-dir");
+        assert_eq!(display_component("tor_guardmgr::guard"), "tor-net");
+        assert_eq!(display_component("tor_circmgr::hspool"), "onion");
+    }
+
+    #[test]
+    fn rewrites_common_tor_guard_messages() {
+        let fields = rewrite_for_test(
+            "tor_guardmgr::guard",
+            "Could not connect to guard $AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA. Retrying in 29s 999ms 988us 413ns.",
+            &[],
+        );
+
+        assert_eq!(
+            fields.message.as_deref(),
+            Some("Tor guard connection failed")
+        );
+        assert_eq!(
+            fields.fields,
+            vec![("retry_in".to_string(), "30s".to_string())]
+        );
+
+        let fields = rewrite_for_test(
+            "tor_guardmgr::guard",
+            "Disabling guard: 72.5% of circuits died under mysterious circumstances, exceeding threshold of 70.0%",
+            &[("guard", "GuardId(abc)")],
+        );
+        assert_eq!(
+            fields.message.as_deref(),
+            Some("Tor disabled an unstable guard")
+        );
+        assert_eq!(
+            fields.fields,
+            vec![("failure_rate".to_string(), "72.5%".to_string())]
+        );
+    }
+
+    #[test]
+    fn rewrites_common_tor_directory_messages() {
+        let fields = rewrite_for_test(
+            "tor_dirmgr::bootstrap",
+            "Error while adding directory info",
+            &[(
+                "error",
+                "Invalid document from directory server [scrubbed] via Circ 8.98",
+            )],
+        );
+        assert_eq!(
+            fields.message.as_deref(),
+            Some("Tor directory update failed")
+        );
+        assert_eq!(
+            fields.fields,
+            vec![(
+                "reason".to_string(),
+                "directory server sent invalid data".to_string()
+            )]
+        );
+
+        let fields = rewrite_for_test(
+            "tor_dirmgr::bootstrap",
+            "We failed 3 times to bootstrap a directory. We're going to give up.",
+            &[],
+        );
+        assert_eq!(
+            fields.message.as_deref(),
+            Some("Tor directory bootstrap failed")
+        );
+        assert_eq!(
+            fields.fields,
+            vec![("attempts".to_string(), "3".to_string())]
+        );
+    }
+
+    #[test]
+    fn rewrites_common_onion_and_circuit_messages() {
+        let fields = rewrite_for_test(
+            "tor_circmgr::hspool",
+            "Too many preemptive onion service circuits failed; waiting a while.",
+            &[],
+        );
+        assert_eq!(
+            fields.message.as_deref(),
+            Some("Tor onion-service circuits are failing; waiting before retrying")
+        );
+
+        let fields = rewrite_for_test(
+            "tor_proto::client::reactor",
+            "removing circuit leg",
+            &[("tunnel_id", "Circ 8.98"), ("reason", "closed")],
+        );
+        assert_eq!(fields.message.as_deref(), Some("Tor circuit closed"));
+        assert_eq!(
+            fields.fields,
+            vec![("reason".to_string(), "closed".to_string())]
+        );
     }
 }
