@@ -3114,92 +3114,93 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
 /* ── Blue Sky ────────────────────────────────────────────────────────────── */
 [data-theme="blue-sky"] {
   color-scheme: light;
-  --bg:           #d4dde4;
-  --bg-panel:     #e0e7ec;
-  --bg-post:      #e4ebef;
-  --bg-op:        #f0f4f6;
-  --bg-input:     #f3f6f8;
-  --border:       #a4b2bd;
-  --border-glow:  #6f879d;
-  --green:        #5e7890;
-  --green-dim:    #6d7f91;
-  --green-bright: #48687f;
-  --green-pale:   #7f9ab0;
-  --amber:        #8c9d8f;
-  --red:          #b07a7f;
-  --gray:         #aeb9c2;
-  --gray-light:   #f3f6f8;
-  --text:         #2f3b45;
-  --text-dim:     #5a6874;
+  --bg:           #d2e1ec;
+  --bg-panel:     #deebf3;
+  --bg-post:      #e8f1f6;
+  --bg-op:        #f5f8f9;
+  --bg-input:     #f7fafb;
+  --border:       #9eb6c6;
+  --border-glow:  #6f9fbd;
+  --green:        #527f9d;
+  --green-dim:    #658197;
+  --green-bright: #346a8f;
+  --green-pale:   #7aa9c5;
+  --amber:        #9aa87a;
+  --red:          #bd7d89;
+  --gray:         #a8b7c1;
+  --gray-light:   #f7fafb;
+  --text:         #263845;
+  --text-dim:     #536977;
   --font:         'Trebuchet MS', 'Segoe UI', Arial, sans-serif;
   --font-display: 'Trebuchet MS', 'Segoe UI', Arial, sans-serif;
-  --blue-sky-header-bg: rgba(228, 235, 239, 0.94);
-  --blue-sky-panel-bg: linear-gradient(180deg, rgba(231,237,241,0.97) 0%, rgba(214,224,231,0.98) 100%);
-  --blue-sky-elevated-bg: linear-gradient(180deg, rgba(241,245,247,0.98) 0%, rgba(224,233,238,0.98) 100%);
-  --blue-sky-panel-shadow: 0 8px 22px rgba(82, 98, 112, 0.12);
-  --blue-sky-surface-border: #a7b4bf;
-  --blue-sky-surface-hover-border: #7c92a4;
-  --blue-sky-link: #5e7890;
-  --blue-sky-link-visited: #697789;
-  --blue-sky-link-hover: #47687f;
-  --blue-sky-nav-text: #3e5366;
-  --blue-sky-nav-hover-bg: rgba(111, 135, 157, 0.15);
-  --blue-sky-nav-hover-text: #2f4658;
-  --blue-sky-button-bg: #d4dee6;
-  --blue-sky-button-hover-bg: #c6d4dd;
-  --blue-sky-success-bg: #c7d6ca;
-  --blue-sky-success-border: #8c9d8f;
-  --blue-sky-success-hover-bg: #b7cbbb;
-  --blue-sky-success-hover-border: #748977;
-  --blue-sky-danger-bg: #dfc9ca;
-  --blue-sky-danger-border: #b07a7f;
-  --blue-sky-danger-hover-bg: #d5b9bb;
-  --blue-sky-danger-hover-border: #9d686d;
-  --blue-sky-input-border: #b2bec7;
-  --blue-sky-pinned-border: #8c9d8f;
-  --blue-sky-muted: #65727d;
-  --poster-chip-bg: #edf2f5;
-  --poster-chip-fg: #31414f;
-  --poster-chip-accent: #6f879d;
-  --poster-chip-shadow: rgba(111, 135, 157, 0.22);
-  --post-highlight-outline: #6f879d;
-  --post-highlight-bg: rgba(111, 135, 157, 0.15);
-  --accept-btn-bg: #c9d9cc;
-  --accept-btn-accent: #849b87;
-  --accept-btn-fg: #314436;
-  --accept-btn-shadow: rgba(132, 155, 135, 0.24);
+  --blue-sky-header-bg: rgba(230, 240, 247, 0.94);
+  --blue-sky-panel-bg: linear-gradient(180deg, rgba(232,242,248,0.98) 0%, rgba(211,226,237,0.98) 100%);
+  --blue-sky-elevated-bg: linear-gradient(180deg, rgba(247,250,251,0.99) 0%, rgba(226,238,245,0.98) 100%);
+  --blue-sky-panel-shadow: 0 9px 24px rgba(73, 111, 137, 0.15);
+  --blue-sky-surface-border: #9fb8ca;
+  --blue-sky-surface-hover-border: #6f9fbd;
+  --blue-sky-link: #527f9d;
+  --blue-sky-link-visited: #756f9b;
+  --blue-sky-link-hover: #346a8f;
+  --blue-sky-nav-text: #344f63;
+  --blue-sky-nav-hover-bg: rgba(111, 159, 189, 0.16);
+  --blue-sky-nav-hover-text: #263f52;
+  --blue-sky-button-bg: #cfe1ec;
+  --blue-sky-button-hover-bg: #bdd5e4;
+  --blue-sky-success-bg: #cfdec3;
+  --blue-sky-success-border: #9aa87a;
+  --blue-sky-success-hover-bg: #bfd2b2;
+  --blue-sky-success-hover-border: #7e8f62;
+  --blue-sky-danger-bg: #e7cad0;
+  --blue-sky-danger-border: #bd7d89;
+  --blue-sky-danger-hover-bg: #dcb8c0;
+  --blue-sky-danger-hover-border: #a86573;
+  --blue-sky-input-border: #adc1ce;
+  --blue-sky-pinned-border: #9aa87a;
+  --blue-sky-muted: #627887;
+  --poster-chip-bg: #eef6fa;
+  --poster-chip-fg: #2a4050;
+  --poster-chip-accent: #6f9fbd;
+  --poster-chip-shadow: rgba(111, 159, 189, 0.24);
+  --post-highlight-outline: #6f9fbd;
+  --post-highlight-bg: rgba(111, 159, 189, 0.16);
+  --accept-btn-bg: #d2e3c9;
+  --accept-btn-accent: #8fa576;
+  --accept-btn-fg: #33462d;
+  --accept-btn-shadow: rgba(143, 165, 118, 0.25);
 }
 [data-theme="blue-sky"] body {
-  background: #d4dde4;
+  background: #d2e1ec;
   background-image:
-    radial-gradient(circle at top, rgba(255,255,255,0.40), transparent 34%),
-    radial-gradient(circle at 16% 20%, rgba(111,135,157,0.12), transparent 34%),
-    radial-gradient(circle at 84% 12%, rgba(140,157,143,0.10), transparent 28%),
-    linear-gradient(180deg, rgba(241,245,247,0.96) 0%, rgba(222,231,236,0.95) 42%, rgba(212,221,228,1) 100%);
+    radial-gradient(circle at top, rgba(255,255,255,0.46), transparent 32%),
+    radial-gradient(circle at 14% 18%, rgba(111,159,189,0.18), transparent 34%),
+    radial-gradient(circle at 84% 12%, rgba(154,168,122,0.12), transparent 26%),
+    radial-gradient(circle at 70% 74%, rgba(189,125,137,0.08), transparent 30%),
+    linear-gradient(180deg, rgba(246,250,252,0.96) 0%, rgba(221,235,244,0.95) 40%, rgba(210,225,236,1) 100%);
   background-attachment: fixed;
 }
 [data-theme="blue-sky"] ::selection {
-  background: rgba(111, 135, 157, 0.24);
-  color: #2f3b45;
+  background: rgba(111, 159, 189, 0.25);
+  color: #263845;
 }
 [data-theme="blue-sky"] body::-webkit-scrollbar {
   width: 12px;
   height: 12px;
 }
 [data-theme="blue-sky"] body::-webkit-scrollbar-track {
-  background: #e3ebf0;
+  background: #e4f0f6;
 }
 [data-theme="blue-sky"] body::-webkit-scrollbar-thumb {
-  background: #a8b7c2;
-  border: 2px solid #e3ebf0;
+  background: #9bb8cb;
+  border: 2px solid #e4f0f6;
 }
 [data-theme="blue-sky"] .site-header,
 [data-theme="blue-sky"] .site-footer {
   background: var(--blue-sky-header-bg);
 }
 [data-theme="blue-sky"] .site-header {
-  border-bottom: 1px solid #afbbc4;
-  box-shadow: 0 10px 24px rgba(82, 98, 112, 0.09);
+  border-bottom: 1px solid #a7bece;
+  box-shadow: 0 10px 24px rgba(73, 111, 137, 0.11);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
 }
@@ -3207,7 +3208,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
   content: none;
 }
 [data-theme="blue-sky"] .site-name {
-  color: #435f75;
+  color: #3e7193;
   letter-spacing: 0.08em;
   font-size: 1.7rem;
 }
@@ -3245,7 +3246,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
   box-shadow: inset 0 0 0 1px var(--blue-sky-pinned-border), var(--blue-sky-panel-shadow);
 }
 [data-theme="blue-sky"] .catalog-item.sticky.is-pinned {
-  border-color: #687f73;
+  border-color: #7c8f61;
 }
 [data-theme="blue-sky"] a {
   color: var(--blue-sky-link);
@@ -3280,14 +3281,14 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
 [data-theme="blue-sky"] input[type="submit"] {
   background: var(--blue-sky-button-bg);
   border-color: var(--blue-sky-surface-border);
-  color: #344b5f;
+  color: #2d4b61;
 }
 [data-theme="blue-sky"] button:hover,
 [data-theme="blue-sky"] .btn:hover,
 [data-theme="blue-sky"] input[type="submit"]:hover {
   background: var(--blue-sky-button-hover-bg);
   border-color: var(--blue-sky-surface-hover-border);
-  color: #2b4050;
+  color: #233d51;
   box-shadow: none;
 }
 [data-theme="blue-sky"] .post-form button[type="submit"],
@@ -3295,26 +3296,26 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
 [data-theme="blue-sky"] .poll-vote-submit {
   background: var(--blue-sky-success-bg);
   border-color: var(--blue-sky-success-border);
-  color: #314436;
+  color: #35492f;
 }
 [data-theme="blue-sky"] .post-form button[type="submit"]:hover,
 [data-theme="blue-sky"] .compress-do-btn:hover,
 [data-theme="blue-sky"] .poll-vote-submit:hover {
   background: var(--blue-sky-success-hover-bg);
   border-color: var(--blue-sky-success-hover-border);
-  color: #26382b;
+  color: #2b3d25;
 }
 [data-theme="blue-sky"] .btn-danger,
 [data-theme="blue-sky"] .compress-cancel-btn {
   background: var(--blue-sky-danger-bg);
   border-color: var(--blue-sky-danger-border);
-  color: #5b3438;
+  color: #65373f;
 }
 [data-theme="blue-sky"] .btn-danger:hover,
 [data-theme="blue-sky"] .compress-cancel-btn:hover {
   background: var(--blue-sky-danger-hover-bg);
   border-color: var(--blue-sky-danger-hover-border);
-  color: #4d2b2f;
+  color: #552d35;
 }
 [data-theme="blue-sky"] .header-search input,
 [data-theme="blue-sky"] .post-form input[type="text"],
@@ -3322,10 +3323,10 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
 [data-theme="blue-sky"] .board-settings-grid input,
 [data-theme="blue-sky"] .poll-creator-row input,
 [data-theme="blue-sky"] .poll-option-row input {
-  background: #f3f6f8;
-  color: #2f3b45;
+  background: #f7fafb;
+  color: #263845;
   border-color: var(--blue-sky-input-border);
-  box-shadow: inset 0 1px 2px rgba(82, 98, 112, 0.10);
+  box-shadow: inset 0 1px 2px rgba(73, 111, 137, 0.10);
 }
 [data-theme="blue-sky"] .header-search input::placeholder,
 [data-theme="blue-sky"] .post-form input[type="text"]::placeholder,
@@ -3333,7 +3334,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
 [data-theme="blue-sky"] .board-settings-grid input::placeholder,
 [data-theme="blue-sky"] .poll-creator-row input::placeholder,
 [data-theme="blue-sky"] .poll-option-row input::placeholder {
-  color: #75838e;
+  color: #6f8390;
 }
 [data-theme="blue-sky"] .header-search input:focus,
 [data-theme="blue-sky"] .post-form input[type="text"]:focus,
@@ -3350,29 +3351,29 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
 [data-theme="blue-sky"] input[type="text"]:disabled,
 [data-theme="blue-sky"] textarea:disabled,
 [data-theme="blue-sky"] select:disabled {
-  background: #dfe7ec;
-  border-color: #bbc7d0;
-  color: #85929d;
+  background: #dce8f0;
+  border-color: #b8c8d3;
+  color: #7f929f;
   cursor: not-allowed;
   opacity: 0.88;
   box-shadow: none;
 }
 [data-theme="blue-sky"] .name {
-  color: #48687f;
+  color: #346a8f;
 }
 [data-theme="blue-sky"] .subject strong,
 [data-theme="blue-sky"] .subject a {
-  color: #2f3b45;
+  color: #263845;
 }
 [data-theme="blue-sky"] .post-num:hover,
 [data-theme="blue-sky"] .post-ref:hover,
 [data-theme="blue-sky"] .backrefs .backref:hover,
 [data-theme="blue-sky"] .post-body .quotelink:hover {
-  color: #3d6078;
+  color: #2f668b;
 }
 [data-theme="blue-sky"] .subject::after {
   content: "•";
-  color: #7d8993;
+  color: #7f91a0;
 }
 [data-theme="blue-sky"] .post-time,
 [data-theme="blue-sky"] .file-info,
@@ -3394,27 +3395,27 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
 [data-theme="blue-sky"] .greentext,
 [data-theme="blue-sky"] details.greentext-block > summary,
 [data-theme="blue-sky"] details.greentext-block[open] > summary {
-  color: #657f69;
+  color: #67855e;
 }
 [data-theme="blue-sky"] details.greentext-block {
-  background: rgba(218, 228, 234, 0.76);
-  border-color: #b2bec7;
+  background: rgba(224, 238, 231, 0.78);
+  border-color: #b8c9b1;
 }
 [data-theme="blue-sky"] .post-body code,
 [data-theme="blue-sky"] pre,
 [data-theme="blue-sky"] code {
-  background: #f3f6f8;
-  color: #3b4f60;
-  border-color: #b2bec7;
+  background: #f7fafb;
+  color: #334e62;
+  border-color: #adc1ce;
 }
 [data-theme="blue-sky"] .post-body .spoiler {
-  background: #7f8d98;
-  color: #7f8d98;
+  background: #7c93a3;
+  color: #7c93a3;
 }
 [data-theme="blue-sky"] .post-body .spoiler.revealed,
 [data-theme="blue-sky"] .post-body .spoiler:hover {
-  background: #c5d2da;
-  color: #2f3b45;
+  background: #c9ddec;
+  color: #263845;
 }
 [data-theme="blue-sky"] .locked-notice,
 [data-theme="blue-sky"] .error {
@@ -3423,18 +3424,18 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
 }
 [data-theme="blue-sky"] .post-error-banner,
 [data-theme="blue-sky"] .admin-flash.flash-error {
-  background: rgba(176, 122, 127, 0.16);
-  border-color: rgba(157, 104, 109, 0.42);
-  color: #76474c;
+  background: rgba(189, 125, 137, 0.17);
+  border-color: rgba(168, 101, 115, 0.42);
+  color: #7a4550;
 }
 [data-theme="blue-sky"] .post-success-banner,
 [data-theme="blue-sky"] .admin-flash.flash-ok {
-  background: rgba(140, 157, 143, 0.18);
-  border-color: rgba(116, 137, 119, 0.42);
-  color: #405a43;
+  background: rgba(154, 168, 122, 0.19);
+  border-color: rgba(126, 143, 98, 0.42);
+  color: #465b36;
 }
 [data-theme="blue-sky"] .error-page h1 {
-  color: #b07a7f;
+  color: #bd7d89;
 }
 
 /* ── Deep Orbit ──────────────────────────────────────────────────────────── */
