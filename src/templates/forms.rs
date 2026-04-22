@@ -39,6 +39,7 @@ const AUDIO_ACCEPT: &str =
 const IMAGE_ACCEPT: &str =
     "image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif";
 const POLL_OPTION_MAX_LENGTH: usize = 200;
+const POLL_OPTION_MAX_COUNT: usize = 20;
 
 fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
@@ -251,17 +252,15 @@ pub(super) fn new_thread_form(
           <summary>[ 📊 Add a Poll to this thread ]</summary>
           <div class="poll-creator-inner">
             <div class="poll-creator-row">
-              <!-- maxlength matches server limit of 500 chars (was 256) -->
               <label>Question<input type="text" name="poll_question" placeholder="What do you think?" maxlength="500"></label>
             </div>
-            <div id="poll-options-list" data-poll-option-maxlength="{poll_option_max_length}">
+            <div id="poll-options-list" data-poll-option-maxlength="{poll_option_max_length}" data-poll-option-maxcount="{poll_option_max_count}">
               {poll_option_rows}
             </div>
             <button type="button" class="poll-add-btn" data-action="add-poll-option">+ Add Option</button>
             <div class="poll-creator-row poll-duration-row">
               <label>Duration
                 <input type="number" name="poll_duration_value" value="24" min="1" max="720" class="poll-duration-input">
-                <!-- Added Days option — server now accepts "days" unit -->
                 <select name="poll_duration_unit" class="poll-duration-unit">
                   <option value="hours">Hours</option>
                   <option value="minutes">Minutes</option>
@@ -289,6 +288,7 @@ pub(super) fn new_thread_form(
         edit_token_row = edit_token_row,
         captcha_row = captcha_row,
         poll_option_max_length = POLL_OPTION_MAX_LENGTH,
+        poll_option_max_count = POLL_OPTION_MAX_COUNT,
         poll_option_rows = poll_option_rows,
     )
 }
@@ -376,7 +376,7 @@ pub(super) fn reply_form(
 mod tests {
     use super::{
         build_upload_form_policy, new_thread_form, render_poll_option_row, reply_form,
-        PostFormState, POLL_OPTION_MAX_LENGTH,
+        PostFormState, POLL_OPTION_MAX_COUNT, POLL_OPTION_MAX_LENGTH,
     };
 
     fn uploads_disabled_board() -> crate::models::Board {
@@ -477,6 +477,9 @@ mod tests {
         let html = new_thread_form("test", "csrf", &uploads_disabled_board(), None);
         assert!(html.contains(&format!(
             r#"data-poll-option-maxlength="{POLL_OPTION_MAX_LENGTH}""#
+        )));
+        assert!(html.contains(&format!(
+            r#"data-poll-option-maxcount="{POLL_OPTION_MAX_COUNT}""#
         )));
         assert_eq!(html.matches(r#"class="poll-option-input""#).count(), 2);
     }

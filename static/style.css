@@ -1509,6 +1509,51 @@ html:not([data-theme]) .poster-id-btn {
   box-shadow: 0 0 10px rgba(0,200,64,0.3);
 }
 
+.media-thumb-fallback {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--border);
+  background: rgba(0, 0, 0, 0.12);
+  color: var(--text-dim);
+  font-size: 0.68rem;
+  line-height: 1.3;
+  text-align: center;
+  text-transform: lowercase;
+  word-break: break-word;
+  cursor: default;
+  padding: 6px;
+}
+
+.media-thumb-missing > .thumb,
+.media-thumb-missing > .catalog-thumb {
+  display: none;
+}
+
+.media-thumb-missing > .media-thumb-fallback {
+  display: flex;
+}
+
+.audio-thumb .media-thumb-fallback.thumb,
+.media-preview .media-thumb-fallback.thumb {
+  max-width: 150px;
+  max-height: 150px;
+  width: 100%;
+  min-height: 90px;
+}
+
+.reply .audio-thumb .media-thumb-fallback.thumb,
+.reply .media-preview .media-thumb-fallback.thumb {
+  max-width: 80px;
+  max-height: 80px;
+  min-height: 80px;
+}
+
+.catalog-card-media .media-thumb-fallback.catalog-thumb {
+  width: 100%;
+  height: 100%;
+}
+
 .media-preview {
   position: relative;
   cursor: pointer;

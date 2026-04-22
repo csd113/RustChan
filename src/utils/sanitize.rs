@@ -466,9 +466,27 @@ mod tests {
     }
 
     #[test]
+    fn test_adjacent_and_nested_markup() {
+        let escaped = escape_html("**bold**__italic__ [spoiler]:fire:[/spoiler]");
+        let html = render_post_body(&escaped, false);
+        assert!(html.contains("<strong>bold</strong>"));
+        assert!(html.contains("<em>italic</em>"));
+        assert!(html.contains("class=\"spoiler\""));
+        assert!(html.contains("🔥"));
+    }
+
+    #[test]
     fn test_emoji_shortcode() {
         let html = render_post_body(":fire: hot take", false);
         assert!(html.contains("🔥"));
+    }
+
+    #[test]
+    fn test_emoji_shortcodes_do_not_touch_links() {
+        let escaped = escape_html("see https://example.com/:fire: and :fire:");
+        let html = render_post_body(&escaped, false);
+        assert!(html.contains("🔥"));
+        assert!(html.contains("href=\"https://example.com/:fire:\""));
     }
 
     #[test]
@@ -511,6 +529,25 @@ mod tests {
             !html.contains("href=\"/b/\""),
             "href must not be the board index"
         );
+    }
+
+    #[test]
+    fn test_valid_dice_rendering() {
+        let escaped = escape_html("roll [dice 2d6]");
+        let html = render_post_body(&escaped, false);
+        assert!(html.contains(r#"class="dice-roll""#));
+        assert!(html.contains(r#"title="2d6 roll""#));
+        assert!(html.contains("🎲 2d6 ▸"));
+        assert!(html.contains(" = "));
+    }
+
+    #[test]
+    fn test_malformed_dice_syntax_stays_literal() {
+        let escaped = escape_html("roll [dice 1x6] [dice 3d1000]");
+        let html = render_post_body(&escaped, false);
+        assert!(!html.contains(r#"class="dice-roll""#));
+        assert!(html.contains("[dice 1x6]"));
+        assert!(html.contains("[dice 3d1000]"));
     }
 
     #[test]

@@ -282,6 +282,22 @@ fn preview_text(input: &str, max_chars: usize) -> String {
     preview
 }
 
+fn render_catalog_media_thumb(
+    class_name: &str,
+    src: &str,
+    alt: &str,
+    fallback_text: &str,
+) -> String {
+    format!(
+        r#"<img class="{class_name}" src="/boards/{src}" loading="lazy" alt="{alt}" data-media-thumb="1">
+<div class="catalog-thumb-fallback media-thumb-fallback" hidden>{fallback_text}</div>"#,
+        class_name = escape_html(class_name),
+        src = escape_html(src),
+        alt = escape_html(alt),
+        fallback_text = escape_html(fallback_text),
+    )
+}
+
 fn render_catalog_thumb(thread: &Thread) -> String {
     let badges = super::thread::render_thread_state_badges(thread.sticky, thread.locked);
     let media = thread.op_thumb.as_ref().map_or_else(
@@ -293,19 +309,16 @@ fn render_catalog_thumb(thread: &Thread) -> String {
                 .map_or_else(
                     || r#"<div class="catalog-no-image">no img</div>"#.to_string(),
                     |embed_thumb| {
-                        format!(
-                            r#"<img class="catalog-thumb embed-catalog-thumb" src="{}" loading="lazy" alt="video thumbnail">"#,
-                            escape_html(&embed_thumb)
+                        render_catalog_media_thumb(
+                            "catalog-thumb embed-catalog-thumb",
+                            &embed_thumb,
+                            "video thumbnail",
+                            "no img",
                         )
                     },
                 )
         },
-        |thumb| {
-            format!(
-                r#"<img class="catalog-thumb" src="/boards/{}" loading="lazy" alt="">"#,
-                escape_html(thumb)
-            )
-        },
+        |thumb| render_catalog_media_thumb("catalog-thumb", thumb, "", "no img"),
     );
 
     format!(r#"<div class="catalog-card-media">{media}{badges}</div>"#)
@@ -1480,6 +1493,8 @@ mod tests {
 
         assert!(html.contains("catalog-card-link"));
         assert!(html.contains("catalog-card-media"));
+        assert!(html.contains(r#"data-media-thumb="1""#));
+        assert!(html.contains("catalog-thumb-fallback"));
         assert!(html.contains("thread-state-badge-pin"));
         assert!(html.contains("thread-state-badge-lock"));
         assert!(html.contains(r#"data-pinned="1""#));

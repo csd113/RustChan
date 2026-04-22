@@ -307,13 +307,6 @@ pub fn thread_page(
     body.push_str(report_modal_script());
     body.push_str(thread_autoupdate_script());
 
-    // Quotelink script moved to /static/main.js
-
-    // ── Inline ban+delete prompt ───────────────────────────────────────────
-    if is_admin {
-        // adminBanDelete moved to /static/main.js
-    }
-
     // The previous approach used inline <script> blocks to inject
     // board-specific values (EMBED_ENABLED, DRAFT_KEY) at render time.  Inline
     // scripts are blocked by the CSP `script-src 'self'` directive (which
@@ -561,6 +554,26 @@ fn annotate_op_quotelinks(body_html: &str, thread_op_id: Option<i64>) -> String 
 const FILE_NAME_STEM_PREFIX_DISPLAY_CHARS: usize = 20;
 const FILE_NAME_TRUNCATION_MARKER: &str = "(...)";
 
+fn render_media_thumb(
+    img_class: &str,
+    fallback_class: &str,
+    src: &str,
+    alt: &str,
+    loading: &str,
+    fallback_text: &str,
+) -> String {
+    format!(
+        r#"<img class="{img_class}" src="/boards/{src}" loading="{loading}" alt="{alt}" data-media-thumb="1">
+<div class="{fallback_class} media-thumb-fallback" hidden>{fallback_text}</div>"#,
+        img_class = escape_html(img_class),
+        fallback_class = escape_html(fallback_class),
+        src = escape_html(src),
+        loading = escape_html(loading),
+        alt = escape_html(alt),
+        fallback_text = escape_html(fallback_text),
+    )
+}
+
 fn truncate_file_name_stem(input: &str) -> String {
     if input.chars().count() <= FILE_NAME_STEM_PREFIX_DISPLAY_CHARS {
         return input.to_string();
@@ -769,7 +782,7 @@ pub fn render_post(
   File: {file_link} ({sz})
 </div>
 <div class="audio-thumb">
-  <img class="thumb" src="/boards/{th}" loading="eager" alt="audio">
+  {thumb_html}
 </div>
 <audio controls preload="none" class="audio-player" data-audio-title="{orig}">
   <source src="/boards/{f}" type="{mime}">
@@ -778,7 +791,14 @@ pub fn render_post(
 </div>"#,
                     file_link = file_link,
                     f = escape_html(file),
-                    th = escape_html(thumb),
+                    thumb_html = render_media_thumb(
+                        "thumb",
+                        "thumb",
+                        thumb,
+                        "audio",
+                        "eager",
+                        "preview unavailable",
+                    ),
                     orig = escape_html(name_str),
                     sz = escape_html(&size_str),
                     mime = escape_html(mime)
@@ -792,7 +812,7 @@ pub fn render_post(
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
 <a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to play">
-  <img class="thumb" src="/boards/{th}" loading="eager" alt="video thumbnail">
+  {thumb_html}
   <div class="media-expand-overlay">&#9654;</div>
 </a>
 <video class="media-expanded media-expanded-video" controls preload="none" playsinline webkit-playsinline style="display:none">
@@ -801,7 +821,14 @@ pub fn render_post(
 </div>"#,
                     file_link = file_link,
                     f = escape_html(file),
-                    th = escape_html(thumb),
+                    thumb_html = render_media_thumb(
+                        "thumb",
+                        "thumb",
+                        thumb,
+                        "video thumbnail",
+                        "eager",
+                        "preview unavailable",
+                    ),
                     sz = escape_html(&size_str),
                     mime = escape_html(mime)
                 );
@@ -818,7 +845,7 @@ pub fn render_post(
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
 <a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
-  <img class="thumb" src="/boards/{th}" loading="eager" alt="image">
+  {thumb_html}
   <div class="media-expand-overlay">&#x2922;</div>
 </a>
 <img class="media-expanded media-expanded-image" src="" data-src="/boards/{f}" style="display:none"
@@ -832,7 +859,14 @@ pub fn render_post(
                     },
                     file_link = file_link,
                     f = escape_html(file),
-                    th = escape_html(thumb),
+                    thumb_html = render_media_thumb(
+                        "thumb",
+                        "thumb",
+                        thumb,
+                        "image",
+                        "eager",
+                        "preview unavailable",
+                    ),
                     sz = escape_html(&size_str),
                     audio_combo_html = combo_audio.map_or_else(
                         String::new,
@@ -1335,6 +1369,31 @@ mod tests {
         assert!(html.contains("media processing failed"));
         assert!(html.contains("Preview generation failed; original file is still available."));
         assert!(html.contains(r#"href="/boards/test/image.webp""#));
+    }
+
+    #[test]
+    fn media_thumb_markup_includes_hidden_fallback_for_missing_assets() {
+        let post = sample_post();
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: true,
+                allow_editing: false,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html.contains(r#"data-media-thumb="1""#));
+        assert!(html.contains("media-thumb-fallback"));
     }
 
     #[test]

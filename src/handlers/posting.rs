@@ -532,7 +532,19 @@ pub fn submit_post(
                 .map(|option| option.trim().to_string())
                 .filter(|option| !option.is_empty())
                 .collect();
-            let poll_insert = if !q.is_empty() && valid_opts.len() >= 2 {
+            let poll_insert = if q.is_empty() && valid_opts.is_empty() {
+                None
+            } else {
+                if q.is_empty() {
+                    return Err(AppError::BadRequest(
+                        "Polls need a question and at least two options.".into(),
+                    ));
+                }
+                if valid_opts.len() < 2 {
+                    return Err(AppError::BadRequest(
+                        "Polls need a question and at least two options.".into(),
+                    ));
+                }
                 let secs = poll_duration_secs.ok_or_else(|| {
                     AppError::BadRequest("A duration is required when creating a poll.".into())
                 })?;
@@ -543,8 +555,6 @@ pub fn submit_post(
                     options: &valid_opts,
                     expires_at,
                 })
-            } else {
-                None
             };
             let create_result = db::create_thread_with_optional_poll(
                 conn,
@@ -694,6 +704,45 @@ mod tests {
                 poll_question: String::new(),
                 poll_options: Vec::new(),
                 poll_duration_secs: None,
+            },
+            board_short: board_short.to_string(),
+            identity_key: TEST_IDENTITY_KEY.to_string(),
+            cookie_secret: TEST_COOKIE_SECRET.to_string(),
+            admin_session_id: None,
+            ban_csrf_token: "ban-csrf".to_string(),
+            submission_token: submission_token.to_string(),
+            name: "anon".to_string(),
+            body: body.to_string(),
+            deletion_token: String::new(),
+            pow_nonce: String::new(),
+            image_file_data: None,
+            file_data: None,
+            audio_file_data: None,
+            upload_dir: upload_dir.to_string(),
+            thumb_size: 250,
+            max_image_size: 1024,
+            max_video_size: 1024,
+            max_audio_size: 1024,
+            ffmpeg_available: false,
+            ffmpeg_webp_available: false,
+        }
+    }
+
+    fn thread_command_with_poll(
+        board_short: &str,
+        submission_token: &str,
+        body: &str,
+        upload_dir: &str,
+        poll_question: &str,
+        poll_options: Vec<&str>,
+        poll_duration_secs: Option<i64>,
+    ) -> SubmitPostCommand {
+        SubmitPostCommand {
+            mode: SubmitPostMode::NewThread {
+                subject: String::new(),
+                poll_question: poll_question.to_string(),
+                poll_options: poll_options.into_iter().map(str::to_string).collect(),
+                poll_duration_secs,
             },
             board_short: board_short.to_string(),
             identity_key: TEST_IDENTITY_KEY.to_string(),
@@ -912,6 +961,38 @@ mod tests {
                     message,
                     "CAPTCHA verification failed. Please wait for the solver to complete before posting."
                 );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_post_rejects_partial_poll_submission() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+
+        let error = match submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command_with_poll(
+                TEST_BOARD,
+                "poll-token",
+                "thread body",
+                upload_dir.path().to_str().expect("upload dir"),
+                "pick one",
+                vec!["yes"],
+                Some(3600),
+            ),
+        ) {
+            Ok(result) => panic!("expected partial poll rejection, got {}", result.redirect_url),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert_eq!(message, "Polls need a question and at least two options.");
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }

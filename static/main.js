@@ -144,6 +144,7 @@ document.addEventListener('DOMContentLoaded', function () {
   localizePostTimes(document);
   upgradeLegacySpoilers(document);
   wireAudioMiniPlayers(document);
+  wireMediaThumbFallbacks(document);
   syncMobileHeaderOffset();
 
   if (window.ResizeObserver) {
@@ -164,6 +165,7 @@ window.addEventListener('resize', syncMobileHeaderOffset);
     localizePostTimes(container);
     upgradeLegacySpoilers(container);
     wireAudioMiniPlayers(container);
+    wireMediaThumbFallbacks(container);
     if (_origLocalize) _origLocalize(container);
   };
 }());
@@ -926,6 +928,43 @@ function wireAudioMiniPlayers(root) {
     audio.addEventListener('play', function () {
       updateAudioMiniPlayer(audio);
     });
+  });
+}
+
+function wireMediaThumbFallbacks(root) {
+  (root || document).querySelectorAll('img[data-media-thumb="1"]').forEach(function (img) {
+    if (img.dataset.mediaThumbWired === '1') return;
+    img.dataset.mediaThumbWired = '1';
+
+    var fallback = img.nextElementSibling;
+    if (!fallback || !fallback.classList || !fallback.classList.contains('media-thumb-fallback')) {
+      return;
+    }
+
+    var wrapper = img.closest('.catalog-card-media, .media-preview, .audio-thumb');
+
+    function showFallback() {
+      if (wrapper) wrapper.classList.add('media-thumb-missing');
+      img.hidden = true;
+      fallback.hidden = false;
+    }
+
+    function showThumb() {
+      if (wrapper) wrapper.classList.remove('media-thumb-missing');
+      fallback.hidden = true;
+      img.hidden = false;
+    }
+
+    img.addEventListener('error', showFallback, { once: true });
+    img.addEventListener('load', showThumb, { once: true });
+
+    if (img.complete) {
+      if (img.naturalWidth > 0) {
+        showThumb();
+      } else {
+        showFallback();
+      }
+    }
   });
 }
 
@@ -1939,6 +1978,19 @@ function toggleThreadMenu(toggle) {
     _missingHashNotice = notice;
   }
 
+  function updatePostRefState(link) {
+    var pid = link && link.getAttribute('data-pid');
+    if (!pid) return;
+    var target = document.getElementById('p' + pid);
+    var missing = !target;
+    link.classList.toggle('missing-post-ref', missing);
+    if (missing) {
+      link.setAttribute('title', 'post not found');
+    } else {
+      link.removeAttribute('title');
+    }
+  }
+
   function highlightPostFromHash(scrollBehavior) {
     var match = window.location.hash.match(/^#p(\d+)$/);
     if (!match) {
@@ -1958,9 +2010,18 @@ function toggleThreadMenu(toggle) {
     }
   }
 
+  function syncQuotedPostState(root) {
+    (root || document)
+      .querySelectorAll('a.quotelink[data-pid], a.backref[data-pid]')
+      .forEach(function (link) {
+        updatePostRefState(link);
+      });
+    highlightPostFromHash();
+  }
+
   document.addEventListener('click', function (e) {
-    if (e.target.classList.contains('quotelink')) return;
-    if (e.target.classList.contains('backref')) return;
+    var link = e.target.closest && e.target.closest('a.quotelink, a.backref');
+    if (link) return;
     clearMissingHashNotice();
     clearHighlight();
   });
@@ -2058,10 +2119,7 @@ function toggleThreadMenu(toggle) {
       if (link.dataset.quotelinkWired === '1') return;
       link.dataset.quotelinkWired = '1';
       var pid = link.getAttribute('data-pid');
-      if (pid && !document.getElementById('p' + pid)) {
-        link.classList.add('missing-post-ref');
-        link.setAttribute('title', 'post not found');
-      }
+      updatePostRefState(link);
       link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); showPopup(link, pid); });
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
       link.addEventListener('click', function (e) {
@@ -2091,10 +2149,7 @@ function toggleThreadMenu(toggle) {
       if (link.dataset.backrefWired === '1') return;
       link.dataset.backrefWired = '1';
       var pid = link.getAttribute('data-pid');
-      if (pid && !document.getElementById('p' + pid)) {
-        link.classList.add('missing-post-ref');
-        link.setAttribute('title', 'post not found');
-      }
+      updatePostRefState(link);
       link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); showPopup(link, pid); });
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
       link.addEventListener('click', function (e) {
@@ -2144,6 +2199,7 @@ function toggleThreadMenu(toggle) {
 
   wireQuotelinks(document);
   buildBackrefs();
+  syncQuotedPostState(document);
 
   if (window._qlHooked) return;
   window._qlHooked = true;
@@ -2152,6 +2208,7 @@ function toggleThreadMenu(toggle) {
     if (_origInsert) _origInsert(container);
     wireQuotelinks(container);
     buildBackrefs();
+    syncQuotedPostState(document);
   };
 })();
 
@@ -2325,6 +2382,11 @@ function getPollOptionMaxLength(list) {
   return parseInt(list.dataset.pollOptionMaxlength, 10) || 200;
 }
 
+function getPollOptionMaxCount(list) {
+  if (!list) return 20;
+  return parseInt(list.dataset.pollOptionMaxcount, 10) || 20;
+}
+
 function buildPollOptionRowHtml(count, maxLength) {
   return (
     '<input type="text" class="poll-option-input" name="poll_option" placeholder="Option ' + count + '" maxlength="' + maxLength + '">' +
@@ -2336,7 +2398,7 @@ function addPollOption() {
   var list = document.getElementById('poll-options-list');
   if (!list) return;
   var count = list.querySelectorAll('.poll-option-row').length + 1;
-  if (count > 10) return;
+  if (count > getPollOptionMaxCount(list)) return;
   var row = document.createElement('div');
   row.className = 'poll-option-row';
   row.innerHTML = buildPollOptionRowHtml(count, getPollOptionMaxLength(list));

@@ -140,7 +140,7 @@ pub(super) fn apply_dice(text: &str, re_dice: &regex::Regex) -> String {
         .into_owned()
 }
 
-pub(super) fn apply_emoji(text: &str) -> String {
+fn replace_emoji_shortcodes(text: &str) -> String {
     const CODES: &[(&str, &str)] = &[
         (":smile:", "😊"),
         (":lol:", "😂"),
@@ -178,6 +178,26 @@ pub(super) fn apply_emoji(text: &str) -> String {
             out = out.replace(code, emoji);
         }
     }
+    out
+}
+
+pub(super) fn apply_emoji(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(start) = rest.find('<') {
+        out.push_str(&replace_emoji_shortcodes(&rest[..start]));
+
+        let after_tag = &rest[start..];
+        let Some(end) = after_tag.find('>') else {
+            out.push_str(&replace_emoji_shortcodes(after_tag));
+            return out;
+        };
+        out.push_str(&after_tag[..=end]);
+        rest = &after_tag[end + 1..];
+    }
+
+    out.push_str(&replace_emoji_shortcodes(rest));
     out
 }
 
