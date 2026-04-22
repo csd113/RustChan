@@ -40,6 +40,10 @@ pub struct DeletePathsResult {
     pub pending_fs_op_id: Option<String>,
 }
 
+/// Build a pending filesystem delete operation for paths collected during a DB delete.
+///
+/// # Errors
+/// Returns an error if the delete-files payload cannot be serialized.
 pub fn build_delete_files_pending_op(
     paths: &[String],
 ) -> Result<Option<crate::pending_fs::PendingFsOpInsert>> {

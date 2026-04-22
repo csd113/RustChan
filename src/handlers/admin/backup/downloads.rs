@@ -1,3 +1,5 @@
+#![allow(clippy::wildcard_imports)]
+
 use super::*;
 
 pub(super) fn temp_board_download_token_path(filename: &str) -> PathBuf {

@@ -48,6 +48,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut full_backup_rows = String::new();
     if view.backups.full_backups.is_empty() {
@@ -219,7 +220,7 @@ fn render_board_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     board_backup_rows
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn render_admin_backups_section(
     csrf_token: &str,
     backup_warning_html: &str,

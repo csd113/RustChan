@@ -169,7 +169,7 @@ fn render_appeal_rows(view: &AdminPanelViewModel<'_>) -> String {
     appeal_rows
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn render_admin_moderation_section(
     csrf_token: &str,
     report_rows: &str,

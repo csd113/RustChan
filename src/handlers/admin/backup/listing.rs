@@ -1,3 +1,5 @@
+#![allow(clippy::wildcard_imports)]
+
 use super::*;
 
 const BACKUP_LIST_CACHE_TTL: Duration = Duration::from_secs(30);

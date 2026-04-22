@@ -878,6 +878,7 @@ fn render_board_backup_card(board: &Board, csrf_token: &str, open_section: Optio
     )
 }
 
+#[must_use]
 pub fn admin_panel_page(view: &AdminPanelViewModel<'_>) -> String {
     layout::render(view)
 }

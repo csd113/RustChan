@@ -163,6 +163,7 @@ fn render_board_appearance_cards(view: &AdminPanelViewModel<'_>) -> String {
     board_appearance_cards
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
     let mut builtin_theme_cards = String::new();
     let mut custom_theme_cards = String::new();
@@ -338,7 +339,7 @@ fn render_admin_site_settings_section(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn render_admin_appearance_section(
     csrf_token: &str,
     banner_rotation_interval_minutes: i64,

@@ -29,7 +29,7 @@ pub use server::{ACTIVE_IPS, ACTIVE_UPLOADS, IN_FLIGHT, REQUEST_COUNT, SPINNER_T
 // Re-export cleanup so main.rs panic hook can call it without a long path.
 pub use console::cleanup;
 
-pub(crate) fn parent_dir_or_current(path: &Path) -> PathBuf {
+pub fn parent_dir_or_current(path: &Path) -> PathBuf {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),

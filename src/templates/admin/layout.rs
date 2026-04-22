@@ -64,8 +64,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 }
 
 fn render_flash(flash: Option<AdminPanelFlash<'_>>) -> String {
-    match flash {
-        Some(flash) => {
+    flash.map_or_else(String::new, |flash| {
             let cls = if flash.is_error {
                 "flash-error"
             } else {
@@ -76,9 +75,7 @@ fn render_flash(flash: Option<AdminPanelFlash<'_>>) -> String {
                 cls = cls,
                 msg = escape_html(flash.message),
             )
-        }
-        None => String::new(),
-    }
+        })
 }
 
 fn render_admin_overview_section() -> String {

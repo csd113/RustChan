@@ -267,21 +267,21 @@ impl<'a> AdminPanelTarget<'a> {
         }
     }
 
-    pub(super) fn anchor(anchor: &'a str) -> Self {
+    pub(super) const fn anchor(anchor: &'a str) -> Self {
         Self {
             anchor: Some(Cow::Borrowed(anchor)),
             open_section: None,
         }
     }
 
-    pub(super) fn anchor_open(anchor: &'a str, open_section: &'a str) -> Self {
+    pub(super) const fn anchor_open(anchor: &'a str, open_section: &'a str) -> Self {
         Self {
             anchor: Some(Cow::Borrowed(anchor)),
             open_section: Some(Cow::Borrowed(open_section)),
         }
     }
 
-    pub(super) fn owned_anchor_open(anchor: String, open_section: &'a str) -> Self {
+    pub(super) const fn owned_anchor_open(anchor: String, open_section: &'a str) -> Self {
         Self {
             anchor: Some(Cow::Owned(anchor)),
             open_section: Some(Cow::Borrowed(open_section)),

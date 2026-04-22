@@ -552,7 +552,6 @@ fn mime_to_image_format(mime_type: &str) -> Option<image::ImageFormat> {
         "image/webp" => Some(image::ImageFormat::WebP),
         "image/bmp" => Some(image::ImageFormat::Bmp),
         "image/tiff" => Some(image::ImageFormat::Tiff),
-        "image/heic" | "image/heif" => None,
         _ => None,
     }
 }
@@ -720,14 +719,13 @@ mod tests {
         let malformed = b"\x89PNG\r\n\x1a\nthis is not a complete png";
         std::fs::write(input.path(), malformed).expect("write malformed png");
 
-        let error = match save_upload_from_path(
+        let Err(error) = save_upload_from_path(
             input.path(),
             malformed,
             malformed.len(),
             &test_upload_options(tempdir.path(), "broken.png"),
-        ) {
-            Ok(_) => panic!("malformed png should be rejected"),
-            Err(error) => error,
+        ) else {
+            panic!("malformed png should be rejected");
         };
 
         assert!(error.to_string().contains("image header is malformed"));
@@ -743,14 +741,13 @@ mod tests {
         let malformed = b"\x89PNG\r\n\x1a\nthis is not a complete png";
         std::fs::write(input.path(), malformed).expect("write malformed png");
 
-        let error = match save_upload_from_path(
+        let Err(error) = save_upload_from_path(
             input.path(),
             malformed,
             malformed.len(),
             &test_upload_options(tempdir.path(), "broken.png"),
-        ) {
-            Ok(_) => panic!("malformed png should be rejected"),
-            Err(error) => error,
+        ) else {
+            panic!("malformed png should be rejected");
         };
 
         assert!(error.to_string().contains("image header is malformed"));

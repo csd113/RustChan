@@ -1,3 +1,5 @@
+#![allow(clippy::wildcard_imports)]
+
 use super::*;
 
 fn media_content_type(path: &std::path::Path) -> Option<&'static str> {

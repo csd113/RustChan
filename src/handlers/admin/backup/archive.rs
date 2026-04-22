@@ -1,3 +1,5 @@
+#![allow(clippy::wildcard_imports)]
+
 use super::*;
 
 pub(super) fn parse_board_backup_manifest_from_zip<R: std::io::Read + std::io::Seek>(

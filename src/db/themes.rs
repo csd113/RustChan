@@ -30,7 +30,7 @@ fn configured_enabled_builtin_slugs() -> Vec<String> {
         .collect::<BTreeSet<_>>();
     let legacy_default = LEGACY_DEFAULT_BUILTIN_THEMES
         .iter()
-        .map(|slug| slug.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<BTreeSet<_>>();
 
     if configured == legacy_default {

@@ -381,6 +381,7 @@ pub fn build_new_post(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn submit_post(
     conn: &rusqlite::Connection,
     job_queue: &crate::workers::JobQueue,

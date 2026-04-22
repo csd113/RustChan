@@ -1,3 +1,5 @@
+#![allow(clippy::wildcard_imports)]
+
 use super::*;
 use axum::http::Uri;
 use std::net::IpAddr;

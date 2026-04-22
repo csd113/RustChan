@@ -294,10 +294,10 @@ fn parse_formatted_duration(value: &str) -> Option<String> {
     }
 }
 
-fn format_duration_parts(total_nanos: u128) -> Option<String> {
+fn format_duration_parts(total_nanos: u128) -> String {
     let total_millis = (total_nanos.saturating_add(500_000)) / 1_000_000;
     if total_millis == 0 {
-        return Some("0s".to_string());
+        return "0s".to_string();
     }
 
     let total_secs = (total_millis.saturating_add(500)) / 1000;
@@ -305,14 +305,14 @@ fn format_duration_parts(total_nanos: u128) -> Option<String> {
         let minutes = total_secs / 60;
         let secs = total_secs % 60;
         if secs == 0 {
-            Some(format!("{minutes}m"))
+            format!("{minutes}m")
         } else {
-            Some(format!("{minutes}m {secs}s"))
+            format!("{minutes}m {secs}s")
         }
     } else if total_secs >= 10 {
-        Some(format!("{total_secs}s"))
+        format!("{total_secs}s")
     } else {
-        Some(format!("{:.1}s", total_millis as f64 / 1000.0))
+        format!("{}.{:01}s", total_millis / 1000, (total_millis % 1000) / 100)
     }
 }
 
@@ -343,9 +343,7 @@ fn parse_compound_duration(value: &str) -> Option<String> {
         saw_unit = true;
     }
 
-    saw_unit
-        .then(|| format_duration_parts(total_nanos))
-        .flatten()
+    saw_unit.then(|| format_duration_parts(total_nanos))
 }
 
 fn normalize_duration(value: &str) -> Option<String> {
@@ -359,7 +357,7 @@ fn scrub_tor_value(value: &str) -> String {
         let Some(end) = out[start..].find(')') else {
             break;
         };
-        out.replace_range(start..start + end + 1, "[scrubbed guard]");
+        out.replace_range(start..=(start + end), "[scrubbed guard]");
     }
 
     while let Some(start) = out.find(" via Circ ") {
@@ -512,6 +510,7 @@ fn normalize_message_text(message: &str) -> String {
     title_case_message(&cleaned)
 }
 
+#[allow(clippy::too_many_lines)]
 fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields) {
     let Some(message) = fields.message.clone() else {
         return;

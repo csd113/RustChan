@@ -126,7 +126,7 @@ pub struct BanDeleteForm {
     csrf: Option<String>,
 }
 
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
 pub async fn admin_ban_and_delete(
     State(state): State<AppState>,
     jar: CookieJar,

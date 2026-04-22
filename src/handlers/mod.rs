@@ -319,6 +319,7 @@ use crate::models::Board;
 /// Must be called from inside a `spawn_blocking` closure.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::too_many_lines)]
 pub fn process_primary_upload(
     file_data: Option<(TempUpload, String)>,
     board: &Board,
