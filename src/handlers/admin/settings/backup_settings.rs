@@ -1,3 +1,4 @@
+// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
 #![allow(clippy::wildcard_imports)]
 
 use super::*;

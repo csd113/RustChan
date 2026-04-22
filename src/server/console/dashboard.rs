@@ -1,3 +1,4 @@
+// The string-pattern check here is intentional; the lint would only add noise to this console test.
 #![allow(clippy::single_char_pattern)]
 
 // server/console/dashboard.rs — Pure render functions for each ConsoleMode.

@@ -97,7 +97,9 @@ pub fn render_archive_state_badges(sticky: bool) -> String {
 // ─── Thread page ──────────────────────────────────────────────────────────────
 
 #[must_use]
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn thread_page(
     board: &Board,
@@ -397,6 +399,7 @@ fn render_poll(
         let total = pd.total_votes.max(1);
         html.push_str(r#"<div class="poll-results">"#);
         for opt in &pd.options {
+            // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
             #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
             let pct = (opt.vote_count as f64 / total as f64 * 100.0).round() as i64;
             let is_voted = pd.user_voted_option == Some(opt.id);
@@ -1053,6 +1056,7 @@ pub fn render_post(
 // ─── Edit post page ───────────────────────────────────────────────────────────
 
 #[must_use]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn edit_post_page(
     board: &Board,

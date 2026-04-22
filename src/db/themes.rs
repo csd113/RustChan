@@ -159,11 +159,11 @@ pub fn create_custom_theme(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Update a theme and migrate any references if the slug changes.
 ///
 /// # Errors
 /// Returns an error if the theme is missing or the update fails.
+#[allow(clippy::too_many_arguments)]
 pub fn update_theme(
     conn: &rusqlite::Connection,
     existing_slug: &str,

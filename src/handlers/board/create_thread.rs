@@ -1,4 +1,8 @@
+// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
 #![allow(clippy::wildcard_imports)]
+// The format string stays inline because the handler already has several
+// branching paths and this keeps the redirect target easy to scan.
+#![allow(clippy::uninlined_format_args)]
 
 use super::*;
 

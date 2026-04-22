@@ -1,7 +1,8 @@
+// Route handlers use a shared module API and a deliberately broad import set
+// so the request flow stays readable without a lot of plumbing noise.
 #![allow(
     clippy::similar_names,
     clippy::too_many_lines,
-    clippy::uninlined_format_args,
     clippy::redundant_pub_crate,
     clippy::significant_drop_tightening,
     clippy::format_push_string,

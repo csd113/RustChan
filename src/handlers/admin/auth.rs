@@ -99,7 +99,6 @@ fn is_login_locked(ip_key: &str) -> bool {
 }
 
 /// Record a failed login attempt; returns the new failure count.
-#[allow(clippy::arithmetic_side_effects)]
 #[allow(clippy::significant_drop_tightening)]
 fn record_login_fail(ip_key: &str) -> u32 {
     let now = login_now_secs();
@@ -228,8 +227,8 @@ pub struct LoginForm {
     csrf: Option<String>,
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,

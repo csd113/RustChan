@@ -1,3 +1,4 @@
+// Public re-exports here match the module layout and keep paths stable for callers.
 #![allow(clippy::redundant_pub_crate)]
 
 // templates/board.rs
@@ -58,6 +59,7 @@ fn board_reorder_controls(
     )
 }
 
+// These flags map directly to render or DB inputs, so bundling them would make the call sites less clear.
 #[allow(clippy::fn_params_excessive_bools)]
 fn render_board_card(
     stats: &crate::models::BoardStats,
@@ -329,6 +331,7 @@ fn render_catalog_thumb(thread: &Thread) -> String {
     format!(r#"<div class="catalog-card-media">{media}{badges}</div>"#)
 }
 
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 fn render_catalog_actions(
     board_short: &str,
@@ -375,6 +378,7 @@ fn render_catalog_actions(
     )
 }
 
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 fn render_catalog_card(
     board: &Board,
@@ -519,8 +523,10 @@ fn board_cards(
 }
 
 #[must_use]
-#[allow(clippy::too_many_arguments)]
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
+#[allow(clippy::too_many_arguments)]
 pub fn index_page(
     board_stats: &[crate::models::BoardStats],
     site_stats: Option<&crate::models::SiteStats>,
@@ -572,6 +578,7 @@ pub fn index_page(
                 .to_string()
         },
         |site_stats| {
+// This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
             #[allow(clippy::cast_precision_loss)]
             let active_gb = site_stats.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
             format!(
@@ -702,7 +709,9 @@ pub fn index_page(
 // ─── Board index ──────────────────────────────────────────────────────────────
 
 #[must_use]
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn board_page(
     board: &Board,
@@ -1030,12 +1039,14 @@ fn render_thread_summary(
 // ─── Catalog page ─────────────────────────────────────────────────────────────
 
 #[must_use]
+// These flags map directly to render or DB inputs, so bundling them would make the call sites less clear.
 #[allow(
     clippy::fn_params_excessive_bools,
-    clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::implicit_hasher
 )]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
+#[allow(clippy::too_many_arguments)]
 pub fn catalog_page(
     board: &Board,
     threads: &[Thread],
@@ -1234,6 +1245,7 @@ pub fn catalog_page(
 // ─── Search results ───────────────────────────────────────────────────────────
 
 #[must_use]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn search_page(
     board: &Board,

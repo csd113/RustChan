@@ -289,7 +289,9 @@ pub fn create_board(
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+#[allow(clippy::fn_params_excessive_bools)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
+#[allow(clippy::too_many_arguments)]
 pub fn create_board_with_media_flags(
     conn: &rusqlite::Connection,
     short: &str,
@@ -373,7 +375,9 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
 ///
 /// # Errors
 /// Returns an error if the database operation fails or the board id is not found.
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+#[allow(clippy::fn_params_excessive_bools)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
+#[allow(clippy::too_many_arguments)]
 pub fn update_board_settings(
     conn: &mut rusqlite::Connection,
     id: i64,

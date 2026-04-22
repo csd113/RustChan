@@ -48,6 +48,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     )
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut full_backup_rows = String::new();
@@ -220,7 +221,10 @@ fn render_board_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     board_backup_rows
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#[allow(clippy::too_many_lines)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
+#[allow(clippy::too_many_arguments)]
 fn render_admin_backups_section(
     csrf_token: &str,
     backup_warning_html: &str,

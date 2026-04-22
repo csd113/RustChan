@@ -120,11 +120,11 @@ pub fn next_banner_sort_order(
     Ok(next)
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Insert a banner asset row.
 ///
 /// # Errors
 /// Returns an error if the storage key is invalid or the insert fails.
+#[allow(clippy::too_many_arguments)]
 pub fn insert_banner_asset(
     conn: &rusqlite::Connection,
     scope: BannerScope,

@@ -86,7 +86,6 @@ pub(super) fn validate_board_short_name(short_name: &str) -> Result<()> {
     }
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 fn remap_numeric_references(body: &str, prefix: &str, pairs: &[(String, String)]) -> String {
     let mut result = body.to_string();
     for (old, new) in pairs {
@@ -120,7 +119,6 @@ fn remap_numeric_references(body: &str, prefix: &str, pairs: &[(String, String)]
     result
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 pub(super) fn remap_body_quotelinks(
     body: &str,
     board_short: &str,
@@ -140,7 +138,6 @@ pub(super) fn render_restored_body_html(body: &str) -> String {
     crate::utils::sanitize::render_post_body(&escaped, false)
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 pub(super) fn copy_limited<R: std::io::Read, W: std::io::Write>(
     reader: &mut R,
     writer: &mut W,

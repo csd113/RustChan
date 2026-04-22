@@ -1,8 +1,8 @@
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #![allow(
     clippy::too_many_lines,
     clippy::semicolon_if_nothing_returned,
     clippy::option_if_let_else,
-    clippy::uninlined_format_args,
     clippy::useless_let_if_seq,
     clippy::assigning_clones
 )]

@@ -332,16 +332,22 @@ pub struct AcmeConfig {
     // (the Let's Encrypt implementation lives in a separate module).
     // They are intentionally kept here so the `[tls.acme]` section in
     // settings.toml deserializes cleanly even when the feature is off.
+    // The dead-code allow exists because the config shape is stable even when
+    // this build cannot act on the fields.
     #[serde(default)]
+    // Feature-gated, but still part of the stable settings shape.
     #[allow(dead_code)]
     pub domains: Vec<String>,
     #[serde(default)]
+    // Feature-gated, but still part of the stable settings shape.
     #[allow(dead_code)]
     pub email: Option<String>,
     #[serde(default = "default_true")]
+    // Feature-gated, but still part of the stable settings shape.
     #[allow(dead_code)]
     pub staging: bool,
     #[serde(default = "default_acme_dir")]
+    // Feature-gated, but still part of the stable settings shape.
     #[allow(dead_code)]
     pub cache_dir: String,
 }
@@ -371,6 +377,7 @@ fn default_acme_dir() -> String {
 // ─── Runtime config ───────────────────────────────────────────────────────────
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
 
+// This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     // ── Loaded from settings.toml (env vars still override) ──────────────────
@@ -474,6 +481,7 @@ pub struct Config {
 
 impl Config {
     #[must_use]
+    // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
     #[allow(clippy::too_many_lines)]
     pub fn from_env() -> Self {
         let s = load_settings_file();

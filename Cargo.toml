@@ -173,17 +173,19 @@ windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 # [patch.crates-io]
 # openssl-sys = { path = "patches/openssl-sys-stub" }
 
+# Crate-wide Clippy policy: keep the dangerous footguns visible, but relax the lints that are noisy for large route, template, and DB-mapping modules.
+# Individual exceptions are documented next to the code so maintainers can see why each one exists.
 [lints.clippy]
 too_many_arguments             = "allow"
 manual_pattern_char_comparison = "allow"
-# Deny the most dangerous footguns
-unwrap_used                    = "warn"   # force .expect("reason") or proper handling
-expect_used                    = "allow"  # allow in tests; use with a message in production
-indexing_slicing               = "warn"   # prefer .get() with bounds check
-arithmetic_side_effects        = "allow"  # too noisy for general arithmetic
-missing_errors_doc             = "allow"  # pedantic docs lint, too noisy for all Results
-doc_markdown                   = "allow"  # allow non-backticked identifiers in docs
+# Keep panic-prone patterns visible while still allowing intentional, well-documented uses in tests and startup invariants.
+unwrap_used                    = "warn"   # keep panic-on-bug paths visible without blocking the build
+expect_used                    = "allow"  # intentional in tests and startup invariants where a panic would signal a bug
+indexing_slicing               = "warn"   # direct indexing is still visible for review, but only when intentional
+arithmetic_side_effects        = "allow"  # local math and display conversions are documented near the code
+missing_errors_doc             = "allow"  # public error docs are useful, but not every internal helper needs them
+doc_markdown                   = "allow"  # docs prioritize clarity over strict backtick style
 doc_lazy_continuation          = "allow"  # don't require strict indentation for doc lists
-items_after_statements         = "allow"  # permit helper items inside functions
-wildcard_imports               = "allow"  # crate-level style choice for imports
-uninlined_format_args          = "allow"  # allow older-style format! calls
+items_after_statements         = "allow"  # some helpers stay inline for readability inside larger render/parse functions
+wildcard_imports               = "allow"  # route modules use broad imports to keep handler files compact
+uninlined_format_args          = "allow"  # older format strings are kept where they aid readability during staged cleanup

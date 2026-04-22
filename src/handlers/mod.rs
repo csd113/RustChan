@@ -50,7 +50,6 @@ async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<S
 // Text fields (CSRF token, post body, …) are routed through `field.text()`
 // which is bounded by axum's body length limit set in the router layer.
 
-#[allow(clippy::arithmetic_side_effects)]
 async fn stream_field_to_temp_file(
     mut field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
@@ -318,7 +317,7 @@ use crate::models::Board;
 /// Returns `Ok(None)` when `file_data` is `None` (no file attached).
 /// Must be called from inside a `spawn_blocking` closure.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::arithmetic_side_effects)]
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 pub fn process_primary_upload(
     file_data: Option<(TempUpload, String)>,
@@ -518,6 +517,7 @@ pub fn process_audio_combo(
     Ok(Some(aud_file))
 }
 
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn process_audio_first_uploads(
     audio_file_data: Option<(TempUpload, String)>,

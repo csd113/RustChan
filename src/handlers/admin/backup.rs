@@ -1,3 +1,4 @@
+// The closure keeps the call-site shape aligned with the surrounding combinator chain.
 #![allow(
     clippy::redundant_closure_for_method_calls,
     clippy::needless_pass_by_value,
@@ -118,6 +119,7 @@ use restore_board::execute_board_restore;
 use restore_full::refresh_live_site_state_from_db;
 use restore_full::restore_db_from_snapshot;
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
     let _maintenance_guard = state.maintenance_gate.try_begin("Full backup download")?;
@@ -314,7 +316,6 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 
 /// Count regular files (not directories) under `dir` recursively.
 /// Used to initialise the progress bar's `files_total` before compression starts.
-#[allow(clippy::arithmetic_side_effects)]
 fn count_files_in_dir(dir: &std::path::Path) -> u64 {
     if !dir.is_dir() {
         return 0;
@@ -489,7 +490,6 @@ pub fn temp_board_download_dir() -> PathBuf {
 /// MEM-FIX: Same approach as `admin_backup` — build zip into a `NamedTempFile` on
 /// disk, then stream the result in 64 KiB chunks.
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn board_backup(
     State(state): State<AppState>,
     jar: CookieJar,

@@ -126,6 +126,8 @@ impl BoardAccessMode {
     }
 
     #[must_use]
+    // This alias remains for API clarity and backward-compatible call sites,
+    // even though the newer helper is preferred in most code paths.
     #[allow(dead_code)]
     pub const fn requires_post_password(self) -> bool {
         self.requires_unlock_for_posting()
@@ -255,6 +257,7 @@ pub enum BannerPlacement {
 
 /// A board, e.g. /tech/ — Technology
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Board {
     pub id: i64,
@@ -513,7 +516,6 @@ impl Pagination {
     /// Total number of pages. Always returns at least 1 so templates can
     /// safely display "page 1 of 1" even on empty result sets.
     #[must_use]
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn total_pages(&self) -> i64 {
         // per_page is guaranteed >= 1 by new(), but defend against manual
         // construction just in case.
@@ -690,7 +692,6 @@ mod tests {
     // ── MediaType serde ↔ DB string parity ────────────────────────────────
 
     #[test]
-    #[allow(clippy::expect_used)]
     fn media_type_serde_matches_db_str() {
         for mt in [
             MediaType::Image,
@@ -744,7 +745,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
     fn board_access_mode_serde_matches_db_str() {
         for access_mode in [
             BoardAccessMode::Public,
@@ -783,7 +783,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
     fn board_banner_mode_serde_matches_db_str() {
         for banner_mode in [
             BoardBannerMode::Inherit,
@@ -807,7 +806,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
     fn banner_scope_serde_matches_db_str() {
         for scope in [BannerScope::Global, BannerScope::Board, BannerScope::Home] {
             let json =
@@ -823,7 +821,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
     fn banner_target_type_serde_matches_db_str() {
         for target_type in [
             BannerTargetType::None,

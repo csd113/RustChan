@@ -25,7 +25,6 @@ pub fn extract_video_embed(url: &str) -> Option<(&'static str, String)> {
     None
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 fn extract_yt_id(url: &str) -> Option<String> {
     if let Some(pos) = url.find("youtu.be/") {
         let rest = &url[pos + 9..];
@@ -52,7 +51,6 @@ fn extract_yt_id(url: &str) -> Option<String> {
     extract_yt_id_from_watch_param(url)
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 fn extract_yt_id_from_watch_param(url: &str) -> Option<String> {
     for prefix in ["?v=", "&v="] {
         if let Some(pos) = url.find(prefix) {
@@ -70,7 +68,6 @@ fn extract_yt_id_from_watch_param(url: &str) -> Option<String> {
     None
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 fn extract_streamable_id(url: &str) -> Option<String> {
     if let Some(pos) = url.find("streamable.com/") {
         let rest = &url[pos + 15..];
@@ -97,7 +94,6 @@ const fn d6_face(n: u32) -> char {
     }
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 fn roll_dice(count: u32, sides: u32) -> (Vec<u32>, u32) {
     let mut rolls = Vec::with_capacity(count as usize);
     let mut sum = 0u32;

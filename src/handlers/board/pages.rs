@@ -1,3 +1,4 @@
+// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
@@ -84,7 +85,6 @@ pub async fn index(
 
 // ─── GET /:board/ — board index ───────────────────────────────────────────────
 
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn board_index(
     State(state): State<AppState>,
     Path(board_short): Path<String>,

@@ -1,3 +1,4 @@
+// Public re-exports here match the module layout and keep paths stable for callers.
 #![allow(clippy::redundant_pub_crate)]
 
 // src/middleware/ip.rs

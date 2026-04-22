@@ -426,7 +426,9 @@ pub fn urlencoding_simple(s: &str) -> String {
 
 // ─── Base layout ─────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
+#[allow(clippy::too_many_arguments)]
 pub fn base_layout(
     title: &str,
     board_short: Option<&str>,

@@ -7,7 +7,6 @@ use anyhow::Result;
 /// # Errors
 /// Returns an error when the header is empty or the file type is not one of
 /// `RustChan`'s accepted upload formats.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     if data.is_empty() {
         return Err(anyhow::anyhow!("File is empty."));

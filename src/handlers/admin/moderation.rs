@@ -27,7 +27,6 @@ pub struct AddBanForm {
     csrf: Option<String>,
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn add_ban(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -126,7 +125,8 @@ pub struct BanDeleteForm {
     csrf: Option<String>,
 }
 
-#[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#[allow(clippy::too_many_lines)]
 pub async fn admin_ban_and_delete(
     State(state): State<AppState>,
     jar: CookieJar,

@@ -1,3 +1,4 @@
+// These branches are clearer in this state module than the more compact Clippy-suggested form.
 #![allow(
     clippy::option_if_let_else,
     clippy::map_unwrap_or,

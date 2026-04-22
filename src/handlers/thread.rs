@@ -1,8 +1,5 @@
-#![allow(
-    clippy::too_many_lines,
-    clippy::option_if_let_else,
-    clippy::uninlined_format_args
-)]
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#![allow(clippy::too_many_lines, clippy::option_if_let_else)]
 
 // handlers/thread.rs
 //
@@ -330,7 +327,6 @@ pub struct ThreadPageQuery {
     pub reported: Option<String>,
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn edit_post_get(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
@@ -454,7 +450,6 @@ enum EditOutcome {
     ErrorPage(String),
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn edit_post_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,

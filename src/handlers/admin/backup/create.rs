@@ -1,5 +1,5 @@
+// Public re-exports here match the module layout and keep paths stable for callers.
 #![allow(clippy::redundant_pub_crate, clippy::too_many_lines)]
-
 use super::*;
 
 pub(crate) fn create_full_backup_to_server(
@@ -189,6 +189,7 @@ pub(crate) fn create_full_backup_to_server(
     Ok(filename)
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 pub async fn create_full_backup(
     State(state): State<AppState>,
@@ -224,6 +225,7 @@ pub struct BoardBackupCreateForm {
     csrf: Option<String>,
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 pub async fn create_board_backup(
     State(state): State<AppState>,

@@ -222,6 +222,7 @@ fn image_crate_thumbnail(
         .context("failed to decode image for thumbnail")?;
 
     let (w, h) = img.dimensions();
+    // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,

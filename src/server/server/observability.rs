@@ -1,3 +1,4 @@
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #![allow(
     clippy::too_many_lines,
     clippy::option_if_let_else,
@@ -33,6 +34,7 @@ struct HealthPayload {
 }
 
 #[derive(Serialize)]
+// This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
 #[allow(clippy::struct_excessive_bools)]
 struct ReadyPayload {
     status: &'static str,

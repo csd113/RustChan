@@ -1,3 +1,4 @@
+// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
@@ -78,6 +79,9 @@ pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<Bac
                     .map(|d| d.as_secs().cast_signed());
                 let modified = modified_epoch
                     .and_then(|secs| {
+                        // chrono's deprecated constructor is still the
+                        // smallest/clearest way to format this optional file
+                        // timestamp in this verification-only path.
                         #[allow(deprecated)]
                         chrono::DateTime::<Utc>::from_timestamp(secs, 0)
                             .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())

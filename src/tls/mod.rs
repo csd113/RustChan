@@ -12,6 +12,7 @@
 // Both are suppressed at module level — this is the idiomatic, zero-overhead fix used across the Rust ecosystem
 // for internal helpers that need crate-wide visibility while living in a private module.
 #![allow(unreachable_pub)]
+// Public re-exports here match the module layout and keep paths stable for callers.
 #![allow(clippy::redundant_pub_crate)]
 
 #[cfg(feature = "tls-acme")]

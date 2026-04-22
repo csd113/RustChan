@@ -1,3 +1,4 @@
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #![allow(clippy::too_many_lines)]
 
 // src/server/server/routes.rs

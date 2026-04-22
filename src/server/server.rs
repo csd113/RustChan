@@ -108,7 +108,6 @@ impl Drop for ScopedDecrement<'_> {
 // ─── Server mode ─────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::Result<()> {
     // rustls 0.23 requires an explicit process-wide crypto provider.
     // install_default() is idempotent — a second call (e.g. in tests) returns

@@ -514,6 +514,7 @@ fn normalize_message_text(message: &str) -> String {
     title_case_message(&cleaned)
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields) {
     let Some(message) = fields.message.clone() else {

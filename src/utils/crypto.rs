@@ -211,13 +211,12 @@ pub fn verify_pow(board_short: &str, nonce: &str) -> bool {
     let now_minutes = now / 60;
 
     // Prune stale entries to bound memory usage.
-    #[allow(clippy::arithmetic_side_effects)]
+
     SEEN_NONCES.retain(|_, ts| now - *ts < POW_WINDOW_SECS);
 
     // Try current minute and the prior (POW_GRACE_MINUTES - 1) minutes.
     let cache_key = format!("{board_short}:{nonce}");
     for delta in 0..POW_GRACE_MINUTES {
-        #[allow(clippy::arithmetic_side_effects)]
         let challenge = pow_challenge(board_short, (now_minutes - delta) * 60);
         let input = format!("{challenge}:{nonce}");
         let hash = Sha256::digest(input.as_bytes());
@@ -270,7 +269,7 @@ pub fn validate_password(p: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+
     use super::*;
 
     // ── Password hashing ─────────────────────────────────────────────

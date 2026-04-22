@@ -521,6 +521,7 @@ fn render_board_backup_actions(board: &Board, csrf_token: &str) -> String {
     )
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 fn render_board_settings_card(
     board: &Board,
@@ -968,6 +969,7 @@ pub fn mod_log_page(
 #[must_use]
 pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &str) -> String {
     let saved = size_before.saturating_sub(size_after);
+    // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -1017,6 +1019,7 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
     )
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn admin_db_health_result_page(

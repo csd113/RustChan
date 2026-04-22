@@ -238,7 +238,7 @@ pub fn start(
 /// are accurate across calls. Runs on the calling thread — use
 /// `tokio::task::block_in_place` at the call site when inside an async context.
 #[allow(clippy::cast_precision_loss)]
-#[allow(clippy::arithmetic_side_effects)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_stats(
     pool: &crate::db::DbPool,

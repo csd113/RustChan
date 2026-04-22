@@ -1,3 +1,4 @@
+// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
@@ -278,6 +279,7 @@ impl BoardRestoreWorkspace {
     }
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 pub(super) fn execute_board_restore<F>(
     conn: &mut rusqlite::Connection,
@@ -813,6 +815,7 @@ enum ExtractBoardFromFullBackupOutcome {
     Restore { board_short: String },
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 pub async fn extract_board_from_full_backup(
     State(state): State<AppState>,
@@ -928,8 +931,8 @@ pub async fn extract_board_from_full_backup(
     }
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn restore_saved_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -995,8 +998,8 @@ pub async fn restore_saved_board_backup(
     }
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn board_restore(
     State(state): State<AppState>,
     jar: CookieJar,

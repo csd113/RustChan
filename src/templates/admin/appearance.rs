@@ -163,6 +163,7 @@ fn render_board_appearance_cards(view: &AdminPanelViewModel<'_>) -> String {
     board_appearance_cards
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
     let mut builtin_theme_cards = String::new();
@@ -273,6 +274,7 @@ fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
     (builtin_theme_cards, custom_theme_cards)
 }
 
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 fn render_admin_site_settings_section(
     csrf_token: &str,
@@ -339,7 +341,10 @@ fn render_admin_site_settings_section(
     )
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#[allow(clippy::too_many_lines)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
+#[allow(clippy::too_many_arguments)]
 fn render_admin_appearance_section(
     csrf_token: &str,
     banner_rotation_interval_minutes: i64,

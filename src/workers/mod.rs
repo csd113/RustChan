@@ -1,3 +1,4 @@
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #![allow(clippy::too_many_lines)]
 
 // workers/mod.rs — Background job queue and worker pool.
@@ -435,7 +436,6 @@ async fn worker_loop(
 /// Base: 500 ms × 2^n, capped at 60 s.
 /// Jitter: uniform random 0–500 ms added to spread simultaneous retries
 /// across all workers so they do not storm the DB at the same instant.
-#[allow(clippy::arithmetic_side_effects)]
 fn backoff_duration(consecutive_errors: u32) -> Duration {
     const BASE_MS: u64 = 500;
     const MAX_MS: u64 = 60_000;
@@ -1095,7 +1095,6 @@ fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
 /// Only files inside `{upload_dir}/{board}/thumbs/` are considered — original
 /// uploads are never touched.  Deletion is best-effort: individual failures
 /// are logged and skipped rather than aborting the whole pass.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
     // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
     let mut files: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();

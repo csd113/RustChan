@@ -57,8 +57,6 @@ use config::{generate_settings_file_if_missing, CONFIG};
 // can be tuned via `blocking_threads` in settings.toml or the
 // CHAN_BLOCKING_THREADS environment variable.
 
-#[allow(clippy::arithmetic_side_effects)]
-#[allow(clippy::expect_used)]
 fn main() -> anyhow::Result<()> {
     // ── Double-click / no-TTY guard ───────────────────────────────────────────
     // When launched from a file manager (Linux) or Explorer (Windows), stdout

@@ -340,6 +340,7 @@ pub fn process_uploads(
     })
 }
 
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn build_new_post(
     thread_id: i64,
@@ -381,6 +382,7 @@ pub fn build_new_post(
     }
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 pub fn submit_post(
     conn: &rusqlite::Connection,

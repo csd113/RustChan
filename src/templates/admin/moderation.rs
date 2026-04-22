@@ -169,7 +169,10 @@ fn render_appeal_rows(view: &AdminPanelViewModel<'_>) -> String {
     appeal_rows
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#[allow(clippy::too_many_lines)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
+#[allow(clippy::too_many_arguments)]
 fn render_admin_moderation_section(
     csrf_token: &str,
     report_rows: &str,

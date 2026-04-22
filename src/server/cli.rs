@@ -84,7 +84,6 @@ pub enum AdminAction {
 // ─── Admin CLI mode ───────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::arithmetic_side_effects)]
 pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
     use crate::{db, utils::crypto};
     use chrono::TimeZone;

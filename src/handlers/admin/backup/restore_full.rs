@@ -1,3 +1,4 @@
+// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
@@ -32,6 +33,7 @@ pub(super) fn refresh_live_site_state_from_db(conn: &rusqlite::Connection) -> Re
     Ok(())
 }
 
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     live_conn: &mut rusqlite::Connection,
@@ -353,8 +355,8 @@ fn full_restore_success_response(
         .into_response()
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn admin_restore(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -463,8 +465,8 @@ pub async fn admin_restore(
     }
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn restore_saved_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,

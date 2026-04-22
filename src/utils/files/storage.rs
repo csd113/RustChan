@@ -196,6 +196,7 @@ pub fn delete_file_checked(boards_dir: &str, relative_path: &str) -> Result<()> 
 }
 
 #[must_use]
+// This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
 #[allow(clippy::cast_precision_loss)]
 pub fn format_file_size(bytes: i64) -> String {
     if bytes < 1024 {
