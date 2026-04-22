@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-use super::migrations::{apply_pending_migrations, stamp_schema_version, CURRENT_MAX_MIGRATION};
+use super::migrations::{read_schema_version, stamp_schema_version, POST_SQUASH_SCHEMA_VERSION};
 
 const BASE_SCHEMA_SQL: &str = "
     CREATE TABLE IF NOT EXISTS boards (
@@ -304,19 +304,174 @@ const INDEX_SCHEMA_SQL: &str = "
         ON post_submissions(created_at ASC);
 ";
 
+const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 28] = [
+    (
+        "boards",
+        "display_order",
+        "ALTER TABLE boards ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "max_archived_threads",
+        "ALTER TABLE boards ADD COLUMN max_archived_threads INTEGER NOT NULL DEFAULT 150",
+    ),
+    (
+        "boards",
+        "allow_video",
+        "ALTER TABLE boards ADD COLUMN allow_video INTEGER NOT NULL DEFAULT 1",
+    ),
+    (
+        "boards",
+        "allow_tripcodes",
+        "ALTER TABLE boards ADD COLUMN allow_tripcodes INTEGER NOT NULL DEFAULT 1",
+    ),
+    (
+        "boards",
+        "allow_images",
+        "ALTER TABLE boards ADD COLUMN allow_images INTEGER NOT NULL DEFAULT 1",
+    ),
+    (
+        "boards",
+        "allow_audio",
+        "ALTER TABLE boards ADD COLUMN allow_audio INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "allow_any_files",
+        "ALTER TABLE boards ADD COLUMN allow_any_files INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "edit_window_secs",
+        "ALTER TABLE boards ADD COLUMN edit_window_secs INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "allow_editing",
+        "ALTER TABLE boards ADD COLUMN allow_editing INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "allow_archive",
+        "ALTER TABLE boards ADD COLUMN allow_archive INTEGER NOT NULL DEFAULT 1",
+    ),
+    (
+        "boards",
+        "allow_video_embeds",
+        "ALTER TABLE boards ADD COLUMN allow_video_embeds INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "allow_captcha",
+        "ALTER TABLE boards ADD COLUMN allow_captcha INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "show_poster_ids",
+        "ALTER TABLE boards ADD COLUMN show_poster_ids INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "collapse_greentext",
+        "ALTER TABLE boards ADD COLUMN collapse_greentext INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "post_cooldown_secs",
+        "ALTER TABLE boards ADD COLUMN post_cooldown_secs INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "default_theme",
+        "ALTER TABLE boards ADD COLUMN default_theme TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "boards",
+        "banner_mode",
+        "ALTER TABLE boards ADD COLUMN banner_mode TEXT NOT NULL DEFAULT 'inherit'
+         CHECK (banner_mode IN ('inherit', 'none', 'override'))",
+    ),
+    (
+        "boards",
+        "access_mode",
+        "ALTER TABLE boards ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'public'
+         CHECK (access_mode IN ('public', 'view_password', 'post_password'))",
+    ),
+    (
+        "boards",
+        "access_password_hash",
+        "ALTER TABLE boards ADD COLUMN access_password_hash TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "threads",
+        "archived",
+        "ALTER TABLE threads ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "posts",
+        "media_type",
+        "ALTER TABLE posts ADD COLUMN media_type TEXT",
+    ),
+    (
+        "posts",
+        "audio_file_path",
+        "ALTER TABLE posts ADD COLUMN audio_file_path TEXT",
+    ),
+    (
+        "posts",
+        "audio_file_name",
+        "ALTER TABLE posts ADD COLUMN audio_file_name TEXT",
+    ),
+    (
+        "posts",
+        "audio_file_size",
+        "ALTER TABLE posts ADD COLUMN audio_file_size INTEGER",
+    ),
+    (
+        "posts",
+        "audio_mime_type",
+        "ALTER TABLE posts ADD COLUMN audio_mime_type TEXT",
+    ),
+    (
+        "posts",
+        "edited_at",
+        "ALTER TABLE posts ADD COLUMN edited_at INTEGER",
+    ),
+    (
+        "posts",
+        "media_processing_state",
+        "ALTER TABLE posts ADD COLUMN media_processing_state TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "posts",
+        "media_processing_error",
+        "ALTER TABLE posts ADD COLUMN media_processing_error TEXT",
+    ),
+];
+
 pub(super) fn install_or_migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
     let fresh_database = is_fresh_database(conn)?;
-
-    // The base schema is the current complete shape. Existing databases may
-    // already have older versions of these tables, so migrations and targeted
-    // compatibility repairs below finish the startup path.
-    create_base_tables(conn)?;
-
     if fresh_database {
-        stamp_schema_version(conn, CURRENT_MAX_MIGRATION)?;
+        install_post_squash_baseline(conn)?;
     } else {
-        apply_pending_migrations(conn)?;
+        let schema_version = read_schema_version(conn)?;
+        if schema_version == POST_SQUASH_SCHEMA_VERSION && has_post_squash_baseline_markers(conn)? {
+            finish_baseline_schema(conn)?;
+        } else {
+            upgrade_pre_squash_database_to_v1(conn)?;
+        }
     }
+
+    Ok(())
+}
+
+fn install_post_squash_baseline(conn: &rusqlite::Connection) -> Result<()> {
+    finish_baseline_schema(conn)?;
+    stamp_schema_version(conn, POST_SQUASH_SCHEMA_VERSION)
+}
+
+fn finish_baseline_schema(conn: &rusqlite::Connection) -> Result<()> {
+    create_base_tables(conn)?;
     create_indexes(conn)?;
     ensure_reports_table_integrity(conn)?;
     ensure_posts_ip_hash_nullable(conn)?;
@@ -327,6 +482,23 @@ pub(super) fn install_or_migrate_schema(conn: &rusqlite::Connection) -> Result<(
     ensure_post_invariants(conn)?;
     ensure_board_access_invariants(conn)?;
     Ok(())
+}
+
+fn upgrade_pre_squash_database_to_v1(conn: &rusqlite::Connection) -> Result<()> {
+    // Legacy databases may have any old historical schema_version up through
+    // the removed early-development ladder. Bring them to the same canonical
+    // post-squash baseline as a fresh install, then stamp v1 only after every
+    // compatibility step succeeds.
+    create_base_tables(conn)?;
+    ensure_legacy_columns_for_baseline(conn)?;
+    create_indexes(conn)?;
+    ensure_reports_table_integrity(conn)?;
+    ensure_posts_ip_hash_nullable(conn)?;
+    backfill_media_type(conn)?;
+    ensure_posts_search_index(conn)?;
+    ensure_post_invariants(conn)?;
+    ensure_board_access_invariants(conn)?;
+    stamp_schema_version(conn, POST_SQUASH_SCHEMA_VERSION)
 }
 
 fn create_base_tables(conn: &rusqlite::Connection) -> Result<()> {
@@ -346,9 +518,69 @@ fn is_fresh_database(conn: &rusqlite::Connection) -> Result<bool> {
     .context("Failed to detect whether database is fresh")
 }
 
+fn has_post_squash_baseline_markers(conn: &rusqlite::Connection) -> Result<bool> {
+    Ok(object_exists(conn, "table", "banner_assets")?
+        && column_exists(conn, "boards", "banner_mode")?
+        && column_exists(conn, "boards", "access_mode")?
+        && column_exists(conn, "threads", "archived")?
+        && column_exists(conn, "posts", "media_processing_state")?)
+}
+
+fn object_exists(conn: &rusqlite::Connection, kind: &str, name: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = ?1 AND name = ?2
+        )",
+        rusqlite::params![kind, name],
+        |row| row.get(0),
+    )
+    .with_context(|| format!("Failed to inspect schema object {kind}:{name}"))
+}
+
 fn create_indexes(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(INDEX_SCHEMA_SQL)
         .context("Schema index creation failed")
+}
+
+fn ensure_legacy_columns_for_baseline(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Begin legacy baseline column bridge failed")?;
+    let result = (|| {
+        for (table, column, sql) in LEGACY_BASELINE_COLUMN_ADDITIONS {
+            ensure_column(conn, table, column, sql)?;
+        }
+        conn.execute_batch(
+            "UPDATE boards
+             SET display_order = id
+             WHERE display_order = 0;
+
+             UPDATE boards
+             SET collapse_greentext = CASE
+                 WHEN EXISTS (
+                     SELECT 1
+                     FROM site_settings
+                     WHERE key = 'collapse_greentext'
+                       AND (value = '1' OR lower(value) = 'true')
+                 ) THEN 1
+                 ELSE 0
+             END
+             WHERE collapse_greentext = 0;",
+        )
+        .context("Backfill legacy board baseline columns failed")?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .context("Commit legacy baseline column bridge failed"),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 fn ensure_posts_search_index(conn: &rusqlite::Connection) -> Result<()> {
@@ -462,6 +694,33 @@ fn read_column_notnull(conn: &rusqlite::Connection, table: &str, column: &str) -
         .query_row(&query, [column], |row| row.get(0))
         .with_context(|| format!("Failed to read {table}.{column} nullability"))?;
     Ok(notnull == 1)
+}
+
+fn ensure_column(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+    add_column_sql: &str,
+) -> Result<()> {
+    if column_exists(conn, table, column)? {
+        return Ok(());
+    }
+
+    conn.execute_batch(add_column_sql)
+        .with_context(|| format!("Add legacy baseline column {table}.{column} failed"))
+}
+
+fn column_exists(conn: &rusqlite::Connection, table: &str, column: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM pragma_table_info(?1)
+            WHERE name = ?2
+        )",
+        rusqlite::params![table, column],
+        |row| row.get(0),
+    )
+    .with_context(|| format!("Failed to inspect schema column {table}.{column}"))
 }
 
 fn run_structural_migration(
@@ -691,18 +950,146 @@ fn backfill_media_type(conn: &rusqlite::Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::install_or_migrate_schema;
-    use crate::db::migrations::CURRENT_MAX_MIGRATION;
+    use crate::db::migrations::POST_SQUASH_SCHEMA_VERSION;
+
+    fn schema_version(conn: &rusqlite::Connection) -> i64 {
+        conn.query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .expect("read schema_version")
+    }
+
+    fn object_exists(conn: &rusqlite::Connection, kind: &str, name: &str) -> bool {
+        conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM sqlite_master
+                WHERE type = ?1 AND name = ?2
+            )",
+            rusqlite::params![kind, name],
+            |row| row.get(0),
+        )
+        .expect("inspect sqlite object")
+    }
+
+    fn table_has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
+        conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM pragma_table_info(?1)
+                WHERE name = ?2
+            )",
+            rusqlite::params![table, column],
+            |row| row.get(0),
+        )
+        .expect("inspect table column")
+    }
+
+    fn create_representative_legacy_schema(conn: &rusqlite::Connection, version: i64) {
+        conn.execute_batch(
+            r"
+            CREATE TABLE boards (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                short_name  TEXT NOT NULL UNIQUE,
+                name        TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                nsfw        INTEGER NOT NULL DEFAULT 0,
+                max_threads INTEGER NOT NULL DEFAULT 150,
+                bump_limit  INTEGER NOT NULL DEFAULT 500,
+                created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE threads (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                board_id    INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+                subject     TEXT,
+                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                bumped_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+                locked      INTEGER NOT NULL DEFAULT 0,
+                sticky      INTEGER NOT NULL DEFAULT 0,
+                reply_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE posts (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id      INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                board_id       INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+                name           TEXT NOT NULL DEFAULT 'Anonymous',
+                tripcode       TEXT,
+                subject        TEXT,
+                body           TEXT NOT NULL,
+                body_html      TEXT NOT NULL,
+                ip_hash        TEXT NOT NULL,
+                file_path      TEXT,
+                file_name      TEXT,
+                file_size      INTEGER,
+                thumb_path     TEXT,
+                mime_type      TEXT,
+                created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+                deletion_token TEXT NOT NULL,
+                is_op          INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE site_settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE schema_version (
+                version INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(version)
+            );",
+        )
+        .expect("create representative legacy schema");
+
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            [version],
+        )
+        .expect("insert legacy schema version");
+    }
+
+    fn insert_legacy_thread_with_post(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            r"
+            INSERT INTO site_settings (key, value) VALUES ('collapse_greentext', 'true');
+            INSERT INTO boards (id, short_name, name) VALUES (1, 'b', 'Random');
+            INSERT INTO threads (id, board_id, subject) VALUES (10, 1, 'legacy subject');
+            INSERT INTO posts (
+                id, thread_id, board_id, body, body_html, ip_hash,
+                file_path, file_name, mime_type, deletion_token, is_op
+            )
+            VALUES (
+                100, 10, 1, 'legacy searchable body', '<p>legacy searchable body</p>',
+                'old-ip', 'uploads/a.png', 'a.png', 'image/png', 'tok', 1
+            );",
+        )
+        .expect("insert representative legacy data");
+    }
+
+    fn insert_legacy_duplicate_ops(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            r"
+            INSERT INTO boards (id, short_name, name) VALUES (1, 'b', 'Random');
+            INSERT INTO threads (id, board_id, subject) VALUES (10, 1, 'legacy subject');
+            INSERT INTO posts (id, thread_id, board_id, body, body_html, ip_hash, deletion_token, is_op)
+            VALUES (100, 10, 1, 'first op', 'first op', 'ip-a', 'tok-a', 1);
+            INSERT INTO posts (id, thread_id, board_id, body, body_html, ip_hash, deletion_token, is_op)
+            VALUES (101, 10, 1, 'duplicate op', 'duplicate op', 'ip-b', 'tok-b', 1);",
+        )
+        .expect("insert invalid legacy data");
+    }
 
     #[test]
-    fn fresh_database_is_stamped_to_current_schema_version() {
+    fn fresh_database_installs_canonical_post_squash_baseline() {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
         install_or_migrate_schema(&conn).expect("install schema");
 
-        let version: i64 = conn
-            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
-            .expect("read schema_version");
-
-        assert_eq!(version, CURRENT_MAX_MIGRATION);
+        assert_eq!(schema_version(&conn), POST_SQUASH_SCHEMA_VERSION);
+        assert!(object_exists(&conn, "table", "boards"));
+        assert!(object_exists(&conn, "table", "posts"));
+        assert!(object_exists(&conn, "table", "posts_fts"));
+        assert!(object_exists(&conn, "index", "idx_posts_one_op_per_thread"));
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_banner_assets_scope_sort"
+        ));
+        assert!(object_exists(&conn, "trigger", "posts_ai"));
+        assert!(object_exists(&conn, "trigger", "posts_board_match_insert"));
+        assert!(object_exists(&conn, "trigger", "boards_access_mode_insert"));
     }
 
     #[test]
@@ -806,5 +1193,89 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM posts_fts", [], |row| row.get(0))
             .expect("read posts_fts count");
         assert_eq!(fts_count, 1);
+    }
+
+    #[test]
+    fn legacy_database_upgrades_to_post_squash_baseline_and_preserves_data() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+        create_representative_legacy_schema(&conn, 4);
+        insert_legacy_thread_with_post(&conn);
+
+        install_or_migrate_schema(&conn).expect("upgrade legacy schema");
+
+        assert_eq!(schema_version(&conn), POST_SQUASH_SCHEMA_VERSION);
+        assert!(table_has_column(&conn, "boards", "banner_mode"));
+        assert!(table_has_column(&conn, "boards", "access_password_hash"));
+        assert!(table_has_column(&conn, "threads", "archived"));
+        assert!(table_has_column(&conn, "posts", "media_processing_state"));
+        assert!(object_exists(&conn, "table", "banner_assets"));
+        assert!(object_exists(&conn, "table", "posts_fts"));
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_posts_media_processing_state"
+        ));
+        assert!(object_exists(&conn, "trigger", "posts_ai"));
+        assert!(object_exists(&conn, "trigger", "posts_board_match_insert"));
+
+        let post: (String, Option<String>, String) = conn
+            .query_row(
+                "SELECT body, media_type, ip_hash FROM posts WHERE id = 100",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read preserved post");
+        assert_eq!(
+            post,
+            (
+                "legacy searchable body".to_string(),
+                Some("image".to_string()),
+                "old-ip".to_string()
+            )
+        );
+
+        let fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM posts_fts", [], |row| row.get(0))
+            .expect("read posts_fts count");
+        assert_eq!(fts_count, 1);
+
+        let collapse_greentext: i64 = conn
+            .query_row(
+                "SELECT collapse_greentext FROM boards WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read collapse_greentext");
+        assert_eq!(collapse_greentext, 1);
+    }
+
+    #[test]
+    fn historical_v1_database_is_still_detected_as_legacy() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+        create_representative_legacy_schema(&conn, POST_SQUASH_SCHEMA_VERSION);
+        insert_legacy_thread_with_post(&conn);
+
+        install_or_migrate_schema(&conn).expect("upgrade historical v1 schema");
+
+        assert_eq!(schema_version(&conn), POST_SQUASH_SCHEMA_VERSION);
+        assert!(table_has_column(&conn, "boards", "banner_mode"));
+        assert!(table_has_column(&conn, "posts", "media_processing_state"));
+        assert!(object_exists(&conn, "table", "banner_assets"));
+        assert!(object_exists(&conn, "trigger", "posts_ai"));
+    }
+
+    #[test]
+    fn failed_legacy_upgrade_does_not_stamp_post_squash_version() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+        create_representative_legacy_schema(&conn, 36);
+        insert_legacy_duplicate_ops(&conn);
+
+        let error = install_or_migrate_schema(&conn).expect_err("legacy upgrade should fail");
+        assert!(
+            error.to_string().contains("Schema index creation failed")
+                || error.to_string().contains("Post invariant creation failed"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(schema_version(&conn), 36);
     }
 }
