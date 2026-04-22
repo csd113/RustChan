@@ -288,11 +288,16 @@ fn render_catalog_media_thumb(
     alt: &str,
     fallback_text: &str,
 ) -> String {
+    let img_src = if src.starts_with("http://") || src.starts_with("https://") {
+        src.to_string()
+    } else {
+        format!("/boards/{src}")
+    };
     format!(
-        r#"<img class="{class_name}" src="/boards/{src}" loading="lazy" alt="{alt}" data-media-thumb="1">
+        r#"<img class="{class_name}" src="{src}" loading="lazy" alt="{alt}" data-media-thumb="1">
 <div class="catalog-thumb-fallback media-thumb-fallback" hidden>{fallback_text}</div>"#,
         class_name = escape_html(class_name),
-        src = escape_html(src),
+        src = escape_html(&img_src),
         alt = escape_html(alt),
         fallback_text = escape_html(fallback_text),
     )
@@ -1498,6 +1503,31 @@ mod tests {
         assert!(html.contains("thread-state-badge-pin"));
         assert!(html.contains("thread-state-badge-lock"));
         assert!(html.contains(r#"data-pinned="1""#));
+    }
+
+    #[test]
+    fn catalog_card_uses_absolute_embed_thumbnail_urls_without_board_prefix() {
+        let board = sample_board();
+        let mut thread = sample_thread();
+        thread.op_file = None;
+        thread.op_thumb = None;
+        thread.op_body = Some("watch https://www.youtube.com/watch?v=dQw4w9WgXcQ".into());
+
+        let html = render_catalog_card(
+            &board,
+            &thread,
+            false,
+            "csrf",
+            "pin",
+            "Pin thread",
+            "hide",
+            "Hide thread",
+            "/test/catalog",
+        );
+
+        assert!(html.contains(r#"src="https://img.youtube.com/vi/dQw4w9WgXcQ/mqdefault.jpg""#));
+        assert!(!html.contains(r#"src="/boards/https://img.youtube.com"#));
+        assert!(html.contains("embed-catalog-thumb"));
     }
 
     #[test]
