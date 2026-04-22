@@ -255,8 +255,7 @@ pub fn start_worker_pool(
     ffmpeg_vp9_available: bool,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let n = std::thread::available_parallelism()
-        .map(NonZero::get)
-        .unwrap_or(2)
+        .map_or(2, NonZero::get)
         .min(4); // cap at 4 to avoid overwhelming SQLite's write lock
 
     tracing::info!(target: "workers", count = n, "Background worker pool online");

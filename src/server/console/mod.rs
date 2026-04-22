@@ -342,7 +342,7 @@ fn walkdir_size(path: &std::path::Path) -> u64 {
             if e.file_type().is_ok_and(|ft| ft.is_dir()) {
                 walkdir_size(&e.path())
             } else {
-                e.metadata().map(|m| m.len()).unwrap_or(0)
+                e.metadata().map_or(0, |m| m.len())
             }
         })
         .sum()

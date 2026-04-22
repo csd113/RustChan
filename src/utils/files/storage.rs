@@ -784,7 +784,9 @@ mod tests {
 
         assert_eq!(uploaded.mime_type, "application/octet-stream");
         assert_eq!(uploaded.media_type, crate::models::MediaType::Other);
-        assert!(uploaded.file_path.ends_with(".txt"));
+        assert!(std::path::Path::new(&uploaded.file_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("txt")));
 
         let stored =
             std::fs::read(tempdir.path().join(&uploaded.file_path)).expect("read stored upload");

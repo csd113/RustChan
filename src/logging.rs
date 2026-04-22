@@ -600,10 +600,8 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
                     Some("Tor ignored a mismatched cached relay descriptor".to_string());
             }
         }
-        "sqlite" => {
-            if message.starts_with("Removing unreferenced file") {
-                fields.message = Some("Tor removed an unreferenced cache file".to_string());
-            }
+        "sqlite" if message.starts_with("Removing unreferenced file") => {
+            fields.message = Some("Tor removed an unreferenced cache file".to_string());
         }
         "mgr" => {
             if message == "All tunnel attempts failed due to timeout" {

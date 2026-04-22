@@ -679,9 +679,7 @@ impl Config {
                 mb.saturating_mul(1024).saturating_mul(1024)
             },
             blocking_threads: {
-                let cpus = std::thread::available_parallelism()
-                    .map(std::num::NonZero::get)
-                    .unwrap_or(4);
+                let cpus = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
                 let configured =
                     env_parse("CHAN_BLOCKING_THREADS", s.blocking_threads.unwrap_or(0));
                 if configured == 0 {
@@ -1137,9 +1135,7 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
 }
 
 fn env_bool(key: &str, default: bool) -> bool {
-    env::var(key)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(default)
+    env::var(key).map_or(default, |v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 fn env_list(key: &str, file_value: Option<Vec<String>>, default: &[&str]) -> Vec<String> {
@@ -1498,7 +1494,7 @@ port = 8080
             template.contains("# Built-in themes enabled when the theme catalog is first seeded.")
         );
         assert!(template.contains(
-            "# After first startup, use Admin -> Theme Catalog to enable or disable themes."
+            "# After first startup, Admin -> Theme Catalog owns the live enabled/disabled state."
         ));
     }
 }

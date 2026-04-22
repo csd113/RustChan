@@ -48,7 +48,7 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
 }
 
 /// Probe the configured `ffprobe` path at startup so bogus explicit paths are
-/// detected immediately instead of only failing later on the first WebM probe.
+/// detected immediately instead of only failing later on the first `WebM` probe.
 pub fn detect_ffprobe() -> bool {
     let ok = probe_tool(&crate::config::CONFIG.ffprobe_path);
 
@@ -139,8 +139,7 @@ fn probe_tool(program: &str) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Probe whether the detected ffmpeg has `libvpx-vp9` + `libopus` compiled in.
@@ -567,7 +566,7 @@ async fn proxy_tor_stream(
     // local port. axum's ConnectInfo sees this port as the peer port on the
     // incoming socket, so ClientIp / extract_ip can retrieve the token without
     // any HTTP parsing, through keep-alive, across all content types.
-    let local_port = local.local_addr().map(|a| a.port()).unwrap_or(0);
+    let local_port = local.local_addr().map_or(0, |a| a.port());
     let token: Arc<str> = {
         let mut bytes = [0u8; 16];
         OsRng.fill_bytes(&mut bytes);
@@ -675,7 +674,8 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let script = tempdir.path().join("ffprobe");
         let mut file = std::fs::File::create(&script).expect("create script");
-        file.write_all(b"#!/bin/sh\nexit 0\n").expect("write script");
+        file.write_all(b"#!/bin/sh\nexit 0\n")
+            .expect("write script");
         let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&script, perms).expect("chmod");

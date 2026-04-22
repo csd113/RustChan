@@ -179,7 +179,7 @@ pub(super) fn latest_verified_full_backup_modified_time_in_dir(dir: &Path) -> Op
         };
         candidates.push((modified, path));
     }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
     for (modified, path) in candidates {
         if common::verify_full_backup_zip(&path).is_ok() {
             return Some(modified);

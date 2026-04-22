@@ -69,8 +69,7 @@ pub fn detect_ffmpeg() -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Execute `ffmpeg` with the given argument slice.
@@ -371,8 +370,7 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
 
 fn detect_vp9_encoding_profile() -> Vp9EncodingProfile {
     let threads = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
+        .map_or(1, std::num::NonZeroUsize::get)
         .clamp(1, 16);
 
     let tile_columns = match threads {
