@@ -21,15 +21,15 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
     BuiltinTheme {
         slug: "blue-sky",
         display_name: "Blue Sky",
-        description: "Soft cloud-blue daylight palette with calm reading contrast.",
-        swatch_hex: "#6d98c4",
+        description: "Cool hazy daylight palette with cloud, stone, and muted blue tones.",
+        swatch_hex: "#6f879d",
         sort_order: 20,
     },
     BuiltinTheme {
         slug: "deep-orbit",
         display_name: "Deep Orbit",
-        description: "Muted indigo night palette with moonlit contrast.",
-        swatch_hex: "#7fa8b8",
+        description: "Cozy charcoal-indigo night palette with moon-gray text and soft teal-lavender accents.",
+        swatch_hex: "#88a8a2",
         sort_order: 30,
     },
     BuiltinTheme {

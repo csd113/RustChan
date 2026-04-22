@@ -1862,23 +1862,23 @@ html:not([data-theme]) .admin-panel h1 {
 [data-theme="blue-sky"] .admin-section input,
 [data-theme="blue-sky"] .admin-section select,
 [data-theme="blue-sky"] .admin-section textarea {
-  background: #edf3f8;
-  color: #233142;
+  background: #f3f6f8;
+  color: #2f3b45;
   border-color: var(--blue-sky-input-border);
-  box-shadow: inset 0 1px 2px rgba(88, 114, 141, 0.10);
+  box-shadow: inset 0 1px 2px rgba(82, 98, 112, 0.10);
 }
 
 [data-theme="blue-sky"] .admin-section input::placeholder,
 [data-theme="blue-sky"] .admin-section textarea::placeholder {
-  color: #6c7f91;
+  color: #75838e;
 }
 
 [data-theme="blue-sky"] .admin-section input:disabled,
 [data-theme="blue-sky"] .admin-section select:disabled,
 [data-theme="blue-sky"] .admin-section textarea:disabled {
-  background: #dbe4ed;
-  border-color: #b7cad9;
-  color: #8597a9;
+  background: #dfe7ec;
+  border-color: #bbc7d0;
+  color: #85929d;
 }
 
 [data-theme="blue-sky"] .admin-section input:focus,
@@ -1897,23 +1897,23 @@ html:not([data-theme]) .admin-panel h1 {
 [data-theme="deep-orbit"] .admin-section input,
 [data-theme="deep-orbit"] .admin-section select,
 [data-theme="deep-orbit"] .admin-section textarea {
-  background: #1c232d;
-  color: #d8dee8;
+  background: #1b1e28;
+  color: #d5d7df;
   border-color: var(--deep-orbit-input-border);
   box-shadow: inset 0 1px 2px rgba(0,0,0,0.40);
 }
 
 [data-theme="deep-orbit"] .admin-section input::placeholder,
 [data-theme="deep-orbit"] .admin-section textarea::placeholder {
-  color: #7c8796;
+  color: #828696;
 }
 
 [data-theme="deep-orbit"] .admin-section input:disabled,
 [data-theme="deep-orbit"] .admin-section select:disabled,
 [data-theme="deep-orbit"] .admin-section textarea:disabled {
-  background: #1a2029;
-  border-color: #2d3745;
-  color: #798595;
+  background: #191c25;
+  border-color: #2f3340;
+  color: #7d8291;
 }
 
 [data-theme="deep-orbit"] .admin-section input:focus,
