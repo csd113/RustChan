@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-use super::migrations::{apply_migrations, set_schema_version, CURRENT_MAX_MIGRATION};
+use super::migrations::{apply_pending_migrations, stamp_schema_version, CURRENT_MAX_MIGRATION};
 
 const BASE_SCHEMA_SQL: &str = "
     CREATE TABLE IF NOT EXISTS boards (
@@ -304,27 +304,32 @@ const INDEX_SCHEMA_SQL: &str = "
         ON post_submissions(created_at ASC);
 ";
 
-pub(super) fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
+pub(super) fn install_or_migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
     let fresh_database = is_fresh_database(conn)?;
 
-    create_base_schema(conn)?;
+    // The base schema is the current complete shape. Existing databases may
+    // already have older versions of these tables, so migrations and targeted
+    // compatibility repairs below finish the startup path.
+    create_base_tables(conn)?;
 
     if fresh_database {
-        set_schema_version(conn, CURRENT_MAX_MIGRATION)?;
+        stamp_schema_version(conn, CURRENT_MAX_MIGRATION)?;
     } else {
-        apply_migrations(conn)?;
+        apply_pending_migrations(conn)?;
     }
     create_indexes(conn)?;
     ensure_reports_table_integrity(conn)?;
+    ensure_posts_ip_hash_nullable(conn)?;
+    backfill_media_type(conn)?;
+    // The posts table may be rebuilt by compatibility repairs above, so create
+    // FTS and post triggers only after those table-level repairs are complete.
     ensure_posts_search_index(conn)?;
     ensure_post_invariants(conn)?;
     ensure_board_access_invariants(conn)?;
-    relax_posts_ip_hash(conn)?;
-    backfill_media_type(conn)?;
     Ok(())
 }
 
-fn create_base_schema(conn: &rusqlite::Connection) -> Result<()> {
+fn create_base_tables(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(BASE_SCHEMA_SQL)
         .context("Schema table creation failed")
 }
@@ -472,8 +477,11 @@ fn run_structural_migration(
 
     match conn.execute_batch(sql) {
         Ok(()) => {
-            conn.execute_batch("COMMIT")
-                .with_context(|| format!("Commit {failure_context}"))?;
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
+                return Err(error).with_context(|| format!("Commit {failure_context}"));
+            }
             conn.execute_batch("PRAGMA foreign_keys = ON;")
                 .with_context(|| format!("Re-enable foreign keys after {failure_context}"))?;
             tracing::info!(target: "db", "{success_log}");
@@ -580,7 +588,7 @@ fn ensure_reports_table_integrity(conn: &rusqlite::Connection) -> Result<()> {
     )
 }
 
-fn relax_posts_ip_hash(conn: &rusqlite::Connection) -> Result<()> {
+fn ensure_posts_ip_hash_nullable(conn: &rusqlite::Connection) -> Result<()> {
     if read_column_notnull(conn, "posts", "ip_hash")? {
         run_structural_migration(
             conn,
@@ -682,18 +690,121 @@ fn backfill_media_type(conn: &rusqlite::Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::create_schema;
+    use super::install_or_migrate_schema;
     use crate::db::migrations::CURRENT_MAX_MIGRATION;
 
     #[test]
     fn fresh_database_is_stamped_to_current_schema_version() {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
-        create_schema(&conn).expect("create schema");
+        install_or_migrate_schema(&conn).expect("install schema");
 
         let version: i64 = conn
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .expect("read schema_version");
 
         assert_eq!(version, CURRENT_MAX_MIGRATION);
+    }
+
+    #[test]
+    fn legacy_posts_ip_hash_rebuild_keeps_posts_triggers_and_indexes() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            r"
+            CREATE TABLE posts (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id        INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                board_id         INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+                name             TEXT NOT NULL DEFAULT 'Anonymous',
+                tripcode         TEXT,
+                subject          TEXT,
+                body             TEXT NOT NULL,
+                body_html        TEXT NOT NULL,
+                ip_hash          TEXT NOT NULL,
+                file_path        TEXT,
+                file_name        TEXT,
+                file_size        INTEGER,
+                thumb_path       TEXT,
+                mime_type        TEXT,
+                created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+                deletion_token   TEXT NOT NULL,
+                is_op            INTEGER NOT NULL DEFAULT 0,
+                media_type       TEXT,
+                audio_file_path  TEXT,
+                audio_file_name  TEXT,
+                audio_file_size  INTEGER,
+                audio_mime_type  TEXT,
+                edited_at        INTEGER,
+                media_processing_state TEXT NOT NULL DEFAULT '',
+                media_processing_error TEXT
+            );
+            CREATE TABLE schema_version (
+                version INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(version)
+            );
+            INSERT INTO schema_version (version) VALUES (41);
+            ",
+        )
+        .expect("create legacy posts table");
+
+        install_or_migrate_schema(&conn).expect("install schema");
+
+        let posts_ai_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'trigger' AND name = 'posts_ai'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check posts_ai trigger");
+        let board_match_trigger_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'trigger' AND name = 'posts_board_match_insert'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check board-match trigger");
+        let one_op_index_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'index' AND name = 'idx_posts_one_op_per_thread'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check one-op index");
+
+        assert!(posts_ai_exists);
+        assert!(board_match_trigger_exists);
+        assert!(one_op_index_exists);
+
+        conn.execute(
+            "INSERT INTO boards (short_name, name) VALUES ('test', 'Test')",
+            [],
+        )
+        .expect("insert board");
+        let board_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, 'subject')",
+            [board_id],
+        )
+        .expect("insert thread");
+        let thread_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO posts (thread_id, board_id, body, body_html, deletion_token, is_op)
+             VALUES (?1, ?2, 'searchable body', 'searchable body', 'token', 1)",
+            (thread_id, board_id),
+        )
+        .expect("insert post");
+
+        let fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM posts_fts", [], |row| row.get(0))
+            .expect("read posts_fts count");
+        assert_eq!(fts_count, 1);
     }
 }

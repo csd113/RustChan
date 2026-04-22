@@ -1104,25 +1104,30 @@ pub fn admin_db_health_result_page(
         }
     }
 
-    let backup_html = if let Some(backup) = &report.repair_backup {
-        format!(
-            r#"<p><strong>Pre-repair backup:</strong> <code>{}</code></p>"#,
-            escape_html(&backup.filename)
-        )
-    } else if let Some(error) = &report.repair_backup_error {
-        format!(
-            r#"<p><strong>Pre-repair backup:</strong> <span style="color:var(--red-bright)">Failed</span> <code>{}</code></p>"#,
-            escape_html(error)
-        )
-    } else {
-        r#"<p><strong>Pre-repair backup:</strong> Not run</p>"#.to_string()
-    };
+    let backup_html = report.repair_backup.as_ref().map_or_else(
+        || {
+            report.repair_backup_error.as_ref().map_or_else(
+                || r"<p><strong>Pre-repair backup:</strong> Not run</p>".to_string(),
+                |error| {
+                    format!(
+                        r#"<p><strong>Pre-repair backup:</strong> <span style="color:var(--red-bright)">Failed</span> <code>{}</code></p>"#,
+                        escape_html(error)
+                    )
+                },
+            )
+        },
+        |backup| {
+            format!(
+                r"<p><strong>Pre-repair backup:</strong> <code>{}</code></p>",
+                escape_html(&backup.filename)
+            )
+        },
+    );
     let before_checks_html = render_db_health_snapshot(&report.before);
-    let after_checks_html = report
-        .after
-        .as_ref()
-        .map(render_db_health_snapshot)
-        .unwrap_or_else(|| r#"<p><strong>After:</strong> Not run</p>"#.to_string());
+    let after_checks_html = report.after.as_ref().map_or_else(
+        || r"<p><strong>After:</strong> Not run</p>".to_string(),
+        render_db_health_snapshot,
+    );
 
     let body = format!(
         r#"<div class="admin-panel">
@@ -1207,7 +1212,7 @@ fn render_db_check_result(label: &str, result: &crate::db::DbCheckResult) -> Str
     let output = result.output();
     if result.ok || result.messages.len() <= 1 {
         return format!(
-            r#"<p><strong>{label}:</strong> {status} <code>{output}</code></p>"#,
+            r"<p><strong>{label}:</strong> {status} <code>{output}</code></p>",
             label = label,
             status = status,
             output = escape_html(&output),

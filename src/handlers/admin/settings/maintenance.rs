@@ -23,12 +23,14 @@ fn create_pre_repair_backup(
     copies_to_keep: u64,
 ) -> Result<String> {
     #[cfg(test)]
-    if let Some(message) = PRE_REPAIR_BACKUP_FAILURE
-        .lock()
-        .expect("backup failure mutex")
-        .clone()
     {
-        return Err(AppError::Internal(anyhow::anyhow!(message)));
+        let backup_failure = PRE_REPAIR_BACKUP_FAILURE
+            .lock()
+            .expect("backup failure mutex")
+            .clone();
+        if let Some(message) = backup_failure {
+            return Err(AppError::Internal(anyhow::anyhow!(message)));
+        }
     }
 
     crate::handlers::admin::create_full_backup_to_server(pool, None, progress, copies_to_keep)
@@ -150,7 +152,10 @@ pub async fn admin_db_repair(
 
             let report = match backup_result {
                 Ok(filename) => db::attempt_db_repair(&conn, Some(db::DbRepairBackup { filename })),
-                Err(error) => db::db_repair_aborted_for_backup_failure(&conn, error.to_string()),
+                Err(error) => {
+                    let backup_error = error.to_string();
+                    db::db_repair_aborted_for_backup_failure(&conn, &backup_error)
+                }
             };
             tracing::info!(
                 target: "admin",

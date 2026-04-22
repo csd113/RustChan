@@ -45,7 +45,7 @@ pub struct DbHealthSnapshot {
 
 impl DbHealthSnapshot {
     #[must_use]
-    pub fn ok(&self) -> bool {
+    pub const fn ok(&self) -> bool {
         self.integrity.ok && self.foreign_keys.ok
     }
 }
@@ -859,9 +859,7 @@ fn foreign_key_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
         let rowid: Option<i64> = row.get(1)?;
         let parent: String = row.get(2)?;
         let fkid: i64 = row.get(3)?;
-        let rowid = rowid
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let rowid = rowid.map_or_else(|| "unknown".to_string(), |value| value.to_string());
         Ok(format!(
             "table={table} rowid={rowid} parent={parent} fkid={fkid}"
         ))
@@ -1031,13 +1029,13 @@ pub fn attempt_db_repair(
 
 pub fn db_repair_aborted_for_backup_failure(
     conn: &rusqlite::Connection,
-    backup_error: String,
+    backup_error: &str,
 ) -> DbHealthReport {
     DbHealthReport {
         before: db_health_snapshot(conn),
         repair_attempted: false,
         repair_backup: None,
-        repair_backup_error: Some(backup_error.clone()),
+        repair_backup_error: Some(backup_error.to_string()),
         repair_summary: vec![
             format!("Pre-repair backup failed: {backup_error}"),
             "No repair or maintenance actions were run.".to_string(),
@@ -1127,7 +1125,7 @@ mod tests {
         let pool = crate::db::init_test_pool().expect("test pool");
         let conn = pool.get().expect("db connection");
 
-        let report = db_repair_aborted_for_backup_failure(&conn, "disk full".to_string());
+        let report = db_repair_aborted_for_backup_failure(&conn, "disk full");
 
         assert!(!report.repair_attempted);
         assert_eq!(report.repair_backup_error.as_deref(), Some("disk full"));

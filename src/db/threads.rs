@@ -743,7 +743,7 @@ mod tests {
 
     fn test_conn() -> Connection {
         let conn = Connection::open_in_memory().expect("in-memory sqlite");
-        super::super::schema::create_schema(&conn).expect("create schema");
+        super::super::schema::install_or_migrate_schema(&conn).expect("install schema");
         conn
     }
 

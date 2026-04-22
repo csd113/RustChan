@@ -4,8 +4,18 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;
 
-use super::schema::create_schema;
+use super::schema::install_or_migrate_schema;
 use super::types::DbPool;
+
+const CONNECTION_PRAGMAS: &str = "
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    PRAGMA foreign_keys = ON;
+    PRAGMA cache_size = -32000;
+    PRAGMA temp_store = MEMORY;
+    PRAGMA mmap_size = 67108864;
+    PRAGMA busy_timeout = 10000;
+";
 
 /// Initialise the `SQLite` connection pool and ensure the schema exists.
 ///
@@ -19,17 +29,8 @@ pub fn init_pool() -> Result<DbPool> {
         std::fs::create_dir_all(parent).context("Failed to create database directory")?;
     }
 
-    let manager = SqliteConnectionManager::file(db_path).with_init(|conn| {
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;
-             PRAGMA cache_size = -32000;
-             PRAGMA temp_store = MEMORY;
-             PRAGMA mmap_size = 67108864;
-             PRAGMA busy_timeout = 10000;",
-        )
-    });
+    let manager = SqliteConnectionManager::file(db_path)
+        .with_init(|conn| conn.execute_batch(CONNECTION_PRAGMAS));
 
     let pool_size = CONFIG.db_pool_size;
     let pool = Pool::builder()
@@ -39,7 +40,7 @@ pub fn init_pool() -> Result<DbPool> {
         .context("Failed to build database pool")?;
 
     let conn = pool.get().context("Failed to get DB connection")?;
-    create_schema(&conn)?;
+    install_or_migrate_schema(&conn)?;
     super::upsert_builtin_themes(&conn)?;
 
     tracing::info!(target: "db", path = db_path, "Database initialised");
@@ -52,17 +53,8 @@ pub fn init_pool() -> Result<DbPool> {
 /// # Errors
 /// Returns an error if the temporary pool cannot be created or initialised.
 pub fn init_test_pool() -> Result<DbPool> {
-    let manager = SqliteConnectionManager::memory().with_init(|conn| {
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;
-             PRAGMA cache_size = -32000;
-             PRAGMA temp_store = MEMORY;
-             PRAGMA mmap_size = 67108864;
-             PRAGMA busy_timeout = 10000;",
-        )
-    });
+    let manager =
+        SqliteConnectionManager::memory().with_init(|conn| conn.execute_batch(CONNECTION_PRAGMAS));
 
     let pool = Pool::builder()
         .max_size(4)
@@ -71,7 +63,7 @@ pub fn init_test_pool() -> Result<DbPool> {
         .context("Failed to build test database pool")?;
 
     let conn = pool.get().context("Failed to get test DB connection")?;
-    create_schema(&conn)?;
+    install_or_migrate_schema(&conn)?;
     super::upsert_builtin_themes(&conn)?;
     Ok(pool)
 }
