@@ -888,6 +888,51 @@ async fn unlock_board_access_sets_cookie_and_redirects() {
 }
 
 #[tokio::test]
+async fn unlock_board_access_rejects_malformed_return_to_and_uses_board_default() {
+    let state = crate::test_support::app_state();
+    {
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
+        let password_hash =
+            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+        conn.execute(
+            "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
+            rusqlite::params!["view_password", password_hash],
+        )
+        .expect("update board access");
+    }
+
+    let router = Router::new()
+        .route("/{board}/unlock", post(super::unlock_board_access))
+        .with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/secret/unlock")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(
+                    "password=swordfish&return_to=%2F%2Fevil.example%2Fcatalog&_csrf=csrf123",
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/secret/catalog")
+    );
+}
+
+#[tokio::test]
 async fn changing_board_password_invalidates_existing_unlock_cookie() {
     let state = crate::test_support::app_state();
     {
@@ -957,6 +1002,34 @@ async fn changing_board_password_invalidates_existing_unlock_cookie() {
         .expect("catalog response");
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn theme_redirect_rejects_external_referer_fallback() {
+    let router = Router::new()
+        .route("/theme/{theme}", get(crate::handlers::board::set_theme))
+        .with_state(crate::test_support::app_state());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/theme/forest")
+                .header(header::REFERER, "https://evil.example/secret/catalog")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/")
+    );
 }
 
 #[tokio::test]

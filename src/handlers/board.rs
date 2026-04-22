@@ -544,8 +544,8 @@ pub(crate) fn board_access_rate_limited_response(
     )
 }
 
-fn safe_return_to(path: &str) -> &str {
-    crate::utils::redirect::safe_internal_path_or(Some(path), "/")
+fn safe_return_to(path: Option<&str>, fallback: &str) -> String {
+    crate::utils::redirect::strict_safe_internal_path_or(path, fallback).to_string()
 }
 
 pub fn identity_key(client_ip: &str, jar: &CookieJar) -> String {

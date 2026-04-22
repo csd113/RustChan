@@ -1,4 +1,6 @@
 use super::*;
+use axum::http::Uri;
+use std::net::IpAddr;
 
 // ─── CSRF cookie helper ───────────────────────────────────────────────────────
 
@@ -67,16 +69,43 @@ pub async fn set_theme(
 
     let redirect_to = params
         .get("return_to")
-        .map(String::as_str)
-        .map(safe_return_to)
-        .or_else(|| {
-            headers
-                .get(header::REFERER)
-                .and_then(|v| v.to_str().ok())
-                .filter(|v| !v.trim().is_empty())
-        })
-        .unwrap_or("/");
-    Ok((jar, Redirect::to(redirect_to)).into_response())
+        .map(|value| safe_return_to(Some(value.as_str()), "/"))
+        .or_else(|| safe_referer_return_to(&headers))
+        .unwrap_or_else(|| "/".to_string());
+    Ok((jar, Redirect::to(&redirect_to)).into_response())
+}
+
+fn safe_referer_return_to(headers: &HeaderMap) -> Option<String> {
+    let request_host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())?;
+    let referer = headers.get(header::REFERER)?.to_str().ok()?;
+    let uri = referer.parse::<Uri>().ok()?;
+    let referer_host = uri.authority()?;
+    if !hosts_match_for_same_origin(referer_host.as_str(), request_host.as_str()) {
+        return None;
+    }
+    let path_and_query = uri.path_and_query()?.as_str();
+    crate::utils::redirect::is_strict_safe_internal_path(path_and_query).then(|| {
+        path_and_query.to_string()
+    })
+}
+
+fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
+    if source_host.eq_ignore_ascii_case(request_host) {
+        return true;
+    }
+
+    is_loopback_alias(source_host) && is_loopback_alias(request_host)
+}
+
+fn is_loopback_alias(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 pub async fn serve_theme_css(
@@ -130,8 +159,8 @@ pub async fn accept_nsfw(jar: CookieJar, Form(form): Form<NsfwConsentForm>) -> R
     cookie.set_secure(CONFIG.https_cookies);
     cookie.set_max_age(Duration::days(365));
 
-    let redirect_to = form.return_to.as_deref().map_or("/", safe_return_to);
-    Ok((jar.add(cookie), Redirect::to(redirect_to)).into_response())
+    let redirect_to = safe_return_to(form.return_to.as_deref(), "/");
+    Ok((jar.add(cookie), Redirect::to(&redirect_to)).into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -178,12 +207,12 @@ pub async fn board_unlock_page(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
+    let default_return_to = board_unlock_default_return_to(&access_context.board);
     let return_to = query
         .return_to
         .as_deref()
-        .map(safe_return_to)
-        .map(str::to_string)
-        .unwrap_or_else(|| board_unlock_default_return_to(&access_context.board));
+        .map(|path| safe_return_to(Some(path), &default_return_to))
+        .unwrap_or(default_return_to);
 
     if access_context.can_post {
         return Ok((jar, Redirect::to(&return_to)).into_response());
@@ -247,12 +276,12 @@ pub async fn unlock_board_access(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
+    let default_return_to = board_unlock_default_return_to(&access_context.board);
     let return_to = form
         .return_to
         .as_deref()
-        .map(safe_return_to)
-        .map(str::to_string)
-        .unwrap_or_else(|| board_unlock_default_return_to(&access_context.board));
+        .map(|path| safe_return_to(Some(path), &default_return_to))
+        .unwrap_or(default_return_to);
 
     if access_context.can_post {
         return Ok((jar, Redirect::to(&return_to)).into_response());
@@ -445,7 +474,7 @@ pub async fn update_thread_preference(
 
     let redirect_to = form.return_to.as_deref().map_or_else(
         || format!("/{board_short}/catalog"),
-        |path| safe_return_to(path).to_string(),
+        |path| safe_return_to(Some(path), &format!("/{board_short}/catalog")),
     );
     Ok(Redirect::to(&redirect_to).into_response())
 }
