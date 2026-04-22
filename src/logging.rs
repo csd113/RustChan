@@ -312,7 +312,11 @@ fn format_duration_parts(total_nanos: u128) -> String {
     } else if total_secs >= 10 {
         format!("{total_secs}s")
     } else {
-        format!("{}.{:01}s", total_millis / 1000, (total_millis % 1000) / 100)
+        format!(
+            "{}.{:01}s",
+            total_millis / 1000,
+            (total_millis % 1000) / 100
+        )
     }
 }
 

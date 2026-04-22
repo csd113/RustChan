@@ -191,18 +191,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             });
             crate::templates::set_live_site_subtitle(&subtitle);
 
-            // Seed default_theme from settings.toml if not yet configured in DB.
-            let default_theme = crate::db::get_default_user_theme(&conn);
-            if default_theme.is_empty()
-                && !CONFIG.initial_default_theme.is_empty()
-                && CONFIG.initial_default_theme != crate::theme::HARD_DEFAULT_THEME
-            {
-                let _ = crate::db::set_site_setting(
-                    &conn,
-                    "default_theme",
-                    &CONFIG.initial_default_theme,
-                );
-            }
+            seed_initial_default_theme(&conn, &CONFIG.initial_default_theme);
             let _ = crate::db::sync_live_theme_state(&conn);
 
             // Seed the live board list used by error pages and ban pages.
@@ -1046,6 +1035,44 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     Ok(())
 }
 
+fn seed_initial_default_theme(conn: &rusqlite::Connection, initial_default_theme: &str) {
+    let default_theme = crate::db::get_default_user_theme(conn);
+    if !default_theme.is_empty()
+        || initial_default_theme.is_empty()
+        || initial_default_theme == crate::theme::HARD_DEFAULT_THEME
+    {
+        return;
+    }
+
+    match crate::db::get_theme(conn, initial_default_theme) {
+        Ok(Some(theme)) if theme.enabled => {
+            let _ = crate::db::set_site_setting(conn, "default_theme", initial_default_theme);
+        }
+        Ok(Some(_)) => {
+            tracing::warn!(
+                target: "config",
+                default_theme = %initial_default_theme,
+                "settings.toml default_theme is disabled; falling back to the first enabled theme"
+            );
+        }
+        Ok(None) => {
+            tracing::warn!(
+                target: "config",
+                default_theme = %initial_default_theme,
+                "settings.toml default_theme does not match any configured theme; falling back to the first enabled theme"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "config",
+                default_theme = %initial_default_theme,
+                %error,
+                "Could not validate settings.toml default_theme"
+            );
+        }
+    }
+}
+
 // ── HTTPS listener (Static path: self-signed or manual PEM) ──────────────────
 //
 // Uses axum-server which preserves ConnectInfo<SocketAddr> so the IP-banning
@@ -1404,6 +1431,7 @@ mod tests {
     use super::{
         build_redirect_response, format_redirect_authority, redirect_host,
         redirect_trusted_hosts_with, scheduled_full_backup_failure_retry_delay,
+        seed_initial_default_theme,
     };
     use axum::{body::Body, extract::Request, http::header};
     use std::time::Duration;
@@ -1414,6 +1442,66 @@ mod tests {
             .header(header::HOST, host)
             .body(Body::empty())
             .expect("request")
+    }
+
+    fn test_conn() -> r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager> {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        pool.get().expect("db connection")
+    }
+
+    #[test]
+    fn initial_default_theme_seeds_enabled_non_hard_default_theme() {
+        let conn = test_conn();
+
+        seed_initial_default_theme(&conn, "terminal");
+
+        assert_eq!(
+            crate::db::get_site_setting(&conn, "default_theme")
+                .expect("read default theme")
+                .as_deref(),
+            Some("terminal")
+        );
+    }
+
+    #[test]
+    fn initial_default_theme_does_not_overwrite_existing_db_setting() {
+        let conn = test_conn();
+        crate::db::set_site_setting(&conn, "default_theme", "blue-sky").expect("set default");
+
+        seed_initial_default_theme(&conn, "terminal");
+
+        assert_eq!(
+            crate::db::get_site_setting(&conn, "default_theme")
+                .expect("read default theme")
+                .as_deref(),
+            Some("blue-sky")
+        );
+    }
+
+    #[test]
+    fn initial_default_theme_skips_invalid_theme() {
+        let conn = test_conn();
+
+        seed_initial_default_theme(&conn, "missing-theme");
+
+        assert_eq!(
+            crate::db::get_site_setting(&conn, "default_theme").expect("read default theme"),
+            None
+        );
+    }
+
+    #[test]
+    fn initial_default_theme_skips_disabled_theme() {
+        let conn = test_conn();
+        conn.execute("UPDATE themes SET enabled = 0 WHERE slug = 'terminal'", [])
+            .expect("disable terminal");
+
+        seed_initial_default_theme(&conn, "terminal");
+
+        assert_eq!(
+            crate::db::get_site_setting(&conn, "default_theme").expect("read default theme"),
+            None
+        );
     }
 
     #[test]

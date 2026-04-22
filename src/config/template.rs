@@ -18,7 +18,7 @@ site_subtitle = "select board to proceed"
 default_theme = "forest"
 
 # Built-in themes enabled when the theme catalog is first seeded.
-# Remove built-in slugs here if you want them disabled after restart.
+# After first startup, use Admin -> Theme Catalog to enable or disable themes.
 enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]
 
 

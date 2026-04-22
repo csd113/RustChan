@@ -64,11 +64,6 @@ pub async fn update_site_settings(
             crate::templates::set_live_site_subtitle(&new_subtitle);
             tracing::info!(target: "admin", "Site subtitle updated");
 
-            // Persist both values back to settings.toml so they survive a
-            // server restart without requiring a manual file edit.
-            crate::config::update_settings_file_site_names(&new_name, &new_subtitle);
-            tracing::info!(target: "admin", "settings.toml updated");
-
             // Save the default theme slug (validated against allowed values).
             let new_theme = if let Some(value) = form.default_theme.as_deref() {
                 let candidate = db::sanitize_theme_slug(value);
@@ -85,6 +80,11 @@ pub async fn update_site_settings(
             db::set_site_setting(&conn, "default_theme", &new_theme)?;
             db::sync_live_theme_state(&conn)?;
             tracing::info!(target: "admin", "Default theme updated");
+
+            // Persist overlapping global settings back to settings.toml so
+            // they survive a restart without requiring a manual file edit.
+            crate::config::update_settings_file_site_settings(&new_name, &new_subtitle, &new_theme);
+            tracing::info!(target: "admin", "settings.toml updated");
 
             db::set_site_setting(
                 &conn,

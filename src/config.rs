@@ -762,11 +762,36 @@ impl Config {
                  Add `port = 8443` under [tls] in settings.toml, or remove the explicit `port = 0`."
             );
         }
-        if port_from_bind_addr(&self.bind_addr).is_none() {
+        let Some(http_port) = port_from_bind_addr(&self.bind_addr) else {
             anyhow::bail!(
                 "CONFIG ERROR: bind_addr '{}' is not a valid host:port address.",
                 self.bind_addr
             );
+        };
+        if self.tls.enabled && self.tls.port == http_port {
+            anyhow::bail!(
+                "CONFIG ERROR: tls.port ({}) must differ from the main HTTP port ({}).",
+                self.tls.port,
+                http_port
+            );
+        }
+        if self.tls.enabled && self.tls.redirect_http {
+            if self.tls.http_port == http_port {
+                anyhow::bail!(
+                    "CONFIG ERROR: tls.http_port ({}) must differ from the main HTTP port ({}) \
+                     when tls.redirect_http=true.",
+                    self.tls.http_port,
+                    http_port
+                );
+            }
+            if self.tls.http_port == self.tls.port {
+                anyhow::bail!(
+                    "CONFIG ERROR: tls.http_port ({}) must differ from tls.port ({}) \
+                     when tls.redirect_http=true.",
+                    self.tls.http_port,
+                    self.tls.port
+                );
+            }
         }
         for cidr in &self.trusted_proxy_cidrs {
             cidr.parse::<ipnet::IpNet>().map_err(|error| {
@@ -838,6 +863,12 @@ impl Config {
                 self.rustwave_url
             ));
         }
+        if !self.chan_net_api_key.is_empty() && self.chan_net_api_key.len() < 32 {
+            anyhow::bail!(
+                "CONFIG ERROR: chan_net_api_key must be empty to disable ChanNet auth-protected endpoints \
+                 or at least 32 characters long."
+            );
+        }
         if self.enable_tor_support && !self.tor_only {
             tracing::warn!(
                 target: "config",
@@ -871,17 +902,16 @@ impl Config {
     }
 }
 
-/// Update `forum_name` and `site_subtitle` in `settings.toml` in-place,
+/// Update site identity fields in `settings.toml` in-place,
 /// preserving all other lines and comments.
 ///
 /// Called by the admin site-settings handler so that changes made via the
 /// panel are reflected in the file and survive a restart without the operator
 /// needing to hand-edit `settings.toml`.
 ///
-/// If the key is not yet present in the file the function is a no-op for that
-/// key (it won't append new lines — the file is only updated if the key already
-/// exists). On a fresh install `generate_settings_file_if_missing` always
-/// writes both keys, so this is only a concern for manually-crafted files.
+/// If a key is not yet present in the file, it is inserted before the requested
+/// anchor section. On a fresh install `generate_settings_file_if_missing`
+/// already writes these keys, so insertion mainly covers manually-crafted files.
 fn toml_quote(s: &str) -> String {
     let inner = s.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{inner}\"")
@@ -1008,11 +1038,16 @@ fn update_settings_file_entries(updates: &[(&str, String)], insert_missing_befor
     }
 }
 
-pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
+pub fn update_settings_file_site_settings(
+    forum_name: &str,
+    site_subtitle: &str,
+    default_theme: &str,
+) {
     update_settings_file_entries(
         &[
             ("forum_name", toml_quote(forum_name)),
             ("site_subtitle", toml_quote(site_subtitle)),
+            ("default_theme", toml_quote(default_theme)),
         ],
         Some("# ── Network / web server"),
     );
@@ -1176,13 +1211,77 @@ fn port_from_bind_addr(addr: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{rewrite_settings_file_lines, template::settings_template};
+    use super::{rewrite_settings_file_lines, template::settings_template, Config, TlsConfig};
+
+    fn valid_config() -> Config {
+        const MIB: usize = 1024 * 1024;
+        Config {
+            forum_name: "RustChan".to_string(),
+            initial_site_subtitle: "select board to proceed".to_string(),
+            initial_default_theme: crate::theme::HARD_DEFAULT_THEME.to_string(),
+            initial_enabled_builtin_themes: crate::theme::builtin_theme_slugs()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            port: 8080,
+            max_image_size: 8 * MIB,
+            max_video_size: 50 * MIB,
+            max_audio_size: 150 * MIB,
+            enable_tor_support: false,
+            tor_only: false,
+            tor_bootstrap_timeout_secs: 120,
+            tor_max_concurrent_streams: 512,
+            tor_service_nickname: "rustchan".to_string(),
+            require_ffmpeg: false,
+            ffmpeg_path: "ffmpeg".to_string(),
+            ffprobe_path: "ffprobe".to_string(),
+            enable_any_file_uploads_feature: false,
+            bind_addr: "0.0.0.0:8080".to_string(),
+            database_path: "chan.db".to_string(),
+            upload_dir: "__rustchan_test_uploads_does_not_exist__".to_string(),
+            thumb_size: 250,
+            rate_limit_gets: 60,
+            rate_limit_window: 60,
+            cookie_secret: "a".repeat(64),
+            session_duration: 8 * 3600,
+            behind_proxy: false,
+            trusted_proxy_cidrs: vec!["127.0.0.1/32".to_string(), "::1/128".to_string()],
+            https_cookies: false,
+            public_hosts: Vec::new(),
+            wal_checkpoint_interval: 3600,
+            auto_vacuum_interval_hours: 24,
+            auto_full_backup_interval_hours: 24,
+            auto_full_backup_copies_to_keep: 1,
+            poll_cleanup_interval_hours: 72,
+            db_warn_threshold_bytes: 2048 * MIB as u64,
+            job_queue_capacity: 1000,
+            ffmpeg_timeout_secs: 120,
+            archive_before_prune: true,
+            waveform_cache_max_bytes: 200 * MIB as u64,
+            blocking_threads: 4,
+            db_pool_size: 8,
+            rustwave_url: "http://localhost:7071".to_string(),
+            chan_net_bind: "127.0.0.1:7070".to_string(),
+            chan_net_max_body: 10 * MIB,
+            chan_net_command_max_body: 8 * 1024,
+            chan_net_api_key: String::new(),
+            tls: TlsConfig::default(),
+        }
+    }
+
+    fn validation_error(config: &Config) -> String {
+        config
+            .validate()
+            .expect_err("config should fail validation")
+            .to_string()
+    }
 
     #[test]
     fn rewrite_settings_file_lines_updates_requested_keys_and_preserves_comments() {
         let input = r#"# RustChan settings.toml
 forum_name = "RustChan"
 site_subtitle = "select board to proceed"
+default_theme = "forest"
 auto_full_backup_interval_hours = 24
 auto_full_backup_copies_to_keep = 1
 "#;
@@ -1191,6 +1290,7 @@ auto_full_backup_copies_to_keep = 1
             input,
             &[
                 ("forum_name", "\"BackupChan\"".to_string()),
+                ("default_theme", "\"terminal\"".to_string()),
                 ("auto_full_backup_interval_hours", "12".to_string()),
                 ("auto_full_backup_copies_to_keep", "3".to_string()),
             ],
@@ -1200,6 +1300,7 @@ auto_full_backup_copies_to_keep = 1
         assert!(output.starts_with("# RustChan settings.toml\n"));
         assert!(output.contains("forum_name = \"BackupChan\"\n"));
         assert!(output.contains("site_subtitle = \"select board to proceed\"\n"));
+        assert!(output.contains("default_theme = \"terminal\"\n"));
         assert!(output.contains("auto_full_backup_interval_hours = 12\n"));
         assert!(output.contains("auto_full_backup_copies_to_keep = 3\n"));
         assert!(output.ends_with('\n'));
@@ -1241,12 +1342,136 @@ enabled = true
     }
 
     #[test]
+    fn rewrite_settings_file_lines_inserts_missing_default_theme_before_network_section() {
+        let input = r#"# RustChan settings.toml
+forum_name = "RustChan"
+site_subtitle = "select board to proceed"
+
+# ── Network / web server ──────────────────────────────────────────────────────
+port = 8080
+"#;
+
+        let output = rewrite_settings_file_lines(
+            input,
+            &[
+                ("forum_name", "\"NewChan\"".to_string()),
+                ("site_subtitle", "\"new subtitle\"".to_string()),
+                ("default_theme", "\"terminal\"".to_string()),
+            ],
+            Some("# ── Network / web server"),
+        );
+
+        let theme_idx = output
+            .find("default_theme = \"terminal\"")
+            .expect("default_theme inserted");
+        let network_idx = output
+            .find("# ── Network / web server")
+            .expect("network section present");
+
+        assert!(theme_idx < network_idx);
+        assert!(output.contains("forum_name = \"NewChan\"\n"));
+        assert!(output.contains("site_subtitle = \"new subtitle\"\n"));
+    }
+
+    #[test]
+    fn validate_rejects_tls_port_matching_main_http_port() {
+        let mut config = valid_config();
+        config.tls.enabled = true;
+        config.tls.port = 8080;
+
+        let error = validation_error(&config);
+
+        assert_eq!(
+            error,
+            "CONFIG ERROR: tls.port (8080) must differ from the main HTTP port (8080)."
+        );
+    }
+
+    #[test]
+    fn validate_rejects_redirect_http_port_matching_main_http_port() {
+        let mut config = valid_config();
+        config.tls.enabled = true;
+        config.tls.port = 8443;
+        config.tls.redirect_http = true;
+        config.tls.http_port = 8080;
+
+        let error = validation_error(&config);
+
+        assert_eq!(
+            error,
+            "CONFIG ERROR: tls.http_port (8080) must differ from the main HTTP port (8080) when tls.redirect_http=true."
+        );
+    }
+
+    #[test]
+    fn validate_rejects_redirect_http_port_matching_tls_port() {
+        let mut config = valid_config();
+        config.tls.enabled = true;
+        config.tls.port = 8443;
+        config.tls.redirect_http = true;
+        config.tls.http_port = 8443;
+
+        let error = validation_error(&config);
+
+        assert_eq!(
+            error,
+            "CONFIG ERROR: tls.http_port (8443) must differ from tls.port (8443) when tls.redirect_http=true."
+        );
+    }
+
+    #[test]
+    fn validate_accepts_distinct_tls_and_redirect_ports() {
+        let mut config = valid_config();
+        config.tls.enabled = true;
+        config.tls.port = 8443;
+        config.tls.redirect_http = true;
+        config.tls.http_port = 8081;
+
+        config.validate().expect("config should validate");
+    }
+
+    #[test]
+    fn validate_rejects_short_chan_net_api_key() {
+        let mut config = valid_config();
+        config.chan_net_api_key = "short-key".to_string();
+
+        let error = validation_error(&config);
+
+        assert_eq!(
+            error,
+            "CONFIG ERROR: chan_net_api_key must be empty to disable ChanNet auth-protected endpoints or at least 32 characters long."
+        );
+    }
+
+    #[test]
+    fn validate_accepts_empty_or_long_chan_net_api_key() {
+        let mut config = valid_config();
+        config.chan_net_api_key.clear();
+        config.validate().expect("empty key disables endpoints");
+
+        config.chan_net_api_key = "x".repeat(32);
+        config.validate().expect("32-char key is accepted");
+    }
+
+    #[test]
     fn settings_template_uses_forest_and_featured_theme_order() {
         let template = settings_template("secret");
 
         assert!(template.contains(r#"default_theme = "forest""#));
         assert!(template.contains(
             r#"enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]"#
+        ));
+    }
+
+    #[test]
+    fn settings_template_marks_enabled_builtins_as_first_start_seeded() {
+        let template = settings_template("secret");
+
+        assert!(
+            template.contains("# Built-in themes enabled when the theme catalog is first seeded.")
+        );
+        assert!(template.contains(
+            "# After first startup, use Admin -> Theme Catalog to enable or disable themes."
         ));
     }
 }
