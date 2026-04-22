@@ -51,10 +51,14 @@ fn render_admin_maintenance_section(
   bulk deletions (deleted threads, pruned posts, etc.).  This may take a few seconds on large
   databases and briefly blocks writes.
 </p>
+<p style="color:var(--text-dim);font-size:0.85rem">
+  Run database checks after restores or large deletes. Before repair, take a backup; repair can
+  rebuild indexes and search data, but may not fix true file corruption.
+</p>
 <div class="admin-inline-actions">
 <form method="POST" action="/admin/db/check">
   <input type="hidden" name="_csrf" value="{csrf}">
-  <button type="submit">&#x1F50E; check integrity</button>
+  <button type="submit">&#x1F50E; check database health</button>
 </form>
 <form method="POST" action="/admin/vacuum">
   <input type="hidden" name="_csrf" value="{csrf}">

@@ -144,11 +144,13 @@ pub async fn delete_board(
                 .ok();
             if let Some(ref short) = short_name {
                 let health = db::check_db_health(&conn);
-                if !health.before_ok {
+                if !health.before.ok() {
                     return Err(AppError::Internal(anyhow::anyhow!(
-                        "Board delete aborted for /{short}/: live DB integrity check failed: {}. \
-                         Run database integrity check/repair from the admin panel first, or restore a known-good full backup.",
-                        health.before_check
+                        "Board delete aborted for /{short}/: live DB health check failed. \
+                         integrity_check: {}; foreign_key_check: {}. \
+                         Run database health check/repair from the admin panel first, or restore a known-good full backup.",
+                        health.before.integrity.output(),
+                        health.before.foreign_keys.output()
                     )));
                 }
             }

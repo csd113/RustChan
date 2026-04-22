@@ -1030,32 +1030,49 @@ pub fn admin_db_health_result_page(
         "[ database check ]"
     };
     let status_line = if attempted_repair {
-        match report.after_ok {
-            Some(true) => {
-                r#"<p style="color:var(--green-bright)">Repair completed. The database integrity check passed afterward.</p>"#
-            }
-            Some(false) => {
-                r#"<p class="error">Repair finished, but the database still reports a problem. Restoring a known-good full backup is recommended.</p>"#
-            }
-            None => {
-                r#"<p class="error">Repair finished, but no final integrity result was produced.</p>"#
+        if report.repair_backup_error.is_some() {
+            r#"<p class="error">Repair was not run because the pre-repair backup failed.</p>"#
+        } else {
+            match report.after.as_ref().map(crate::db::DbHealthSnapshot::ok) {
+                Some(true) => {
+                    r#"<p style="color:var(--green-bright)">Maintenance completed. Database health checks passed afterward.</p>"#
+                }
+                Some(false) => {
+                    r#"<p class="error">Repair finished, but the database still reports a problem. Restoring a known-good full backup is recommended.</p>"#
+                }
+                None => {
+                    r#"<p class="error">Repair finished, but no final health result was produced.</p>"#
+                }
             }
         }
-    } else if report.before_ok {
-        r#"<p style="color:var(--green-bright)">The database integrity check passed.</p>"#
+    } else if report.before.ok() {
+        r#"<p style="color:var(--green-bright)">Database health checks passed.</p>"#
     } else {
-        r#"<p class="error">The database integrity check found a problem.</p>"#
+        r#"<p class="error">Database health checks found a problem.</p>"#
     };
     let repair_action = if attempted_repair {
         String::new()
     } else {
+        let (label, confirm) = if report.before.ok() {
+            (
+                "&#x1F6E0; run maintenance rebuild",
+                "Run maintenance rebuild? This will create a full backup, then run REINDEX, rebuild the search index, recreate its triggers, and optimize SQLite statistics. Continue?",
+            )
+        } else {
+            (
+                "&#x1F6E0; attempt repair",
+                "Attempt database repair? This will create a full backup, then run integrity checks, REINDEX, and rebuild the search index. It may not fix true file corruption. Continue?",
+            )
+        };
         format!(
             r#"<form method="POST" action="/admin/db/repair" style="margin-top:1rem">
   <input type="hidden" name="_csrf" value="{csrf}">
   <button type="submit"
-          data-confirm="Attempt database repair? This will run integrity checks, REINDEX, and rebuild the search index. It is safe to try, but it may not fix true file corruption. Continue?">&#x1F6E0; attempt repair</button>
+          data-confirm="{confirm}">{label}</button>
 </form>"#,
             csrf = escape_html(csrf_token),
+            confirm = escape_html(confirm),
+            label = label,
         )
     };
 
@@ -1087,6 +1104,26 @@ pub fn admin_db_health_result_page(
         }
     }
 
+    let backup_html = if let Some(backup) = &report.repair_backup {
+        format!(
+            r#"<p><strong>Pre-repair backup:</strong> <code>{}</code></p>"#,
+            escape_html(&backup.filename)
+        )
+    } else if let Some(error) = &report.repair_backup_error {
+        format!(
+            r#"<p><strong>Pre-repair backup:</strong> <span style="color:var(--red-bright)">Failed</span> <code>{}</code></p>"#,
+            escape_html(error)
+        )
+    } else {
+        r#"<p><strong>Pre-repair backup:</strong> Not run</p>"#.to_string()
+    };
+    let before_checks_html = render_db_health_snapshot(&report.before);
+    let after_checks_html = report
+        .after
+        .as_ref()
+        .map(render_db_health_snapshot)
+        .unwrap_or_else(|| r#"<p><strong>After:</strong> Not run</p>"#.to_string());
+
     let body = format!(
         r#"<div class="admin-panel">
 <h1>{title}</h1>
@@ -1095,10 +1132,11 @@ pub fn admin_db_health_result_page(
 {status_line}
 <div class="page-box" style="margin-top:0.75rem;max-width:760px">
 <p><strong>Before:</strong> {before_status}</p>
-<p><strong>Check output:</strong> <code>{before}</code></p>
+{before_checks}
 <p><strong>Repair run:</strong> {repair_attempted}</p>
+{backup}
 <p><strong>After:</strong> {after_status}</p>
-<p><strong>Final output:</strong> <code>{after}</code></p>
+{after_checks}
 </div>
 <h2 style="margin-top:1rem">// repair outcome</h2>
 <ul style="margin:0.75rem 0 0 1.25rem;max-width:760px">
@@ -1110,6 +1148,7 @@ pub fn admin_db_health_result_page(
 </ul>
 {repair_action}
 <p style="margin-top:1rem;color:var(--text-dim)">
+  Run checks after restores or large deletes. Take a backup before repair; this repair flow creates one automatically before making changes.
   This tool can repair index and search-index issues, but true SQLite file corruption may still require restoring a known-good full backup.
 </p>
 <p style="margin-top:1rem">
@@ -1119,19 +1158,20 @@ pub fn admin_db_health_result_page(
 </div>"#,
         title = title,
         status_line = status_line,
-        before = escape_html(&report.before_check),
-        before_status = if report.before_ok {
+        before_status = if report.before.ok() {
             r#"<span style="color:var(--green-bright)">Passed</span>"#
         } else {
             r#"<span style="color:var(--red-bright)">Problem found</span>"#
         },
+        before_checks = before_checks_html,
         repair_attempted = if report.repair_attempted { "Yes" } else { "No" },
-        after = escape_html(report.after_check.as_deref().unwrap_or("not run")),
-        after_status = match report.after_ok {
+        backup = backup_html,
+        after_status = match report.after.as_ref().map(crate::db::DbHealthSnapshot::ok) {
             Some(true) => r#"<span style="color:var(--green-bright)">Passed</span>"#,
             Some(false) => r#"<span style="color:var(--red-bright)">Problem found</span>"#,
             None => "Not run",
         },
+        after_checks = after_checks_html,
         repair_summary = repair_summary_html,
         repair_steps = repair_steps_html,
         repair_action = repair_action,
@@ -1147,6 +1187,43 @@ pub fn admin_db_health_result_page(
         None,
         false,
         "/admin",
+    )
+}
+
+fn render_db_health_snapshot(snapshot: &crate::db::DbHealthSnapshot) -> String {
+    format!(
+        "{integrity}{foreign_keys}",
+        integrity = render_db_check_result("integrity check", &snapshot.integrity),
+        foreign_keys = render_db_check_result("foreign key check", &snapshot.foreign_keys),
+    )
+}
+
+fn render_db_check_result(label: &str, result: &crate::db::DbCheckResult) -> String {
+    let status = if result.ok {
+        r#"<span style="color:var(--green-bright)">Passed</span>"#
+    } else {
+        r#"<span style="color:var(--red-bright)">Problem found</span>"#
+    };
+    let output = result.output();
+    if result.ok || result.messages.len() <= 1 {
+        return format!(
+            r#"<p><strong>{label}:</strong> {status} <code>{output}</code></p>"#,
+            label = label,
+            status = status,
+            output = escape_html(&output),
+        );
+    }
+
+    format!(
+        r#"<p><strong>{label}:</strong> {status}. Found {count} issues.</p>
+<details style="margin:0.35rem 0 0.6rem">
+  <summary>show full {label} output</summary>
+  <pre style="white-space:pre-wrap;margin-top:0.5rem">{output}</pre>
+</details>"#,
+        label = label,
+        status = status,
+        count = result.messages.len(),
+        output = escape_html(&result.messages.join("\n")),
     )
 }
 
