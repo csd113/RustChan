@@ -23,7 +23,10 @@ fn binary_dir() -> PathBuf {
 }
 
 fn settings_file_path() -> PathBuf {
-    // Store settings.toml in rustchan-data/ alongside the database.
+    // Resolve settings.toml next to the running executable, inside
+    // <exe-dir>/rustchan-data/. This is the config source of truth for the live
+    // process; `CHAN_*` environment variables still override selected fields
+    // after the file is loaded.
     // rustchan-data/ is created by run_server before CONFIG is first accessed,
     // so this directory always exists by the time settings are read.
     let data_dir = binary_dir().join("rustchan-data");
@@ -372,12 +375,15 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
 pub struct Config {
     // ── Loaded from settings.toml (env vars still override) ──────────────────
     pub forum_name: String,
-    /// Initial subtitle shown on the home page (seeds the DB on first run).
+    /// Initial subtitle shown on the home page; seeds the DB on first run and
+    /// then the Admin -> Site Settings DB value becomes the live source of truth.
     pub initial_site_subtitle: String,
-    /// Initial default theme slug (seeds the DB on first run).
+    /// Initial default theme slug; seeds the DB on first run and later the
+    /// Admin -> Site Settings DB value becomes the live source of truth.
     /// Valid: built-in or custom theme slug present in the themes table.
     pub initial_default_theme: String,
     /// Built-in themes enabled by default when the site seeds its theme catalog.
+    /// After seeding, the theme catalog in the DB owns the enabled/disabled set.
     pub initial_enabled_builtin_themes: Vec<String>,
     pub port: u16,
     pub max_image_size: usize, // bytes
@@ -508,8 +514,9 @@ impl Config {
         let tor_only = env_bool("CHAN_TOR_ONLY", s.tor_only.unwrap_or(false));
         let enable_tor_support = env_bool("CHAN_TOR_SUPPORT", s.enable_tor_support.unwrap_or(true));
         // When tor_only=true, force the bind host to loopback while preserving
-        // the configured address family and port.
-        let bind_addr = if tor_only && enable_tor_support {
+        // the configured address family and port. Validation later rejects a
+        // tor-only request if Tor support itself is disabled.
+        let bind_addr = if tor_only {
             let port_num = port_from_bind_addr(&bind_addr).unwrap_or(8080);
             let tor_bind_addr = loopback_addr_for_family(&bind_addr, port_num);
             tracing::info!(
@@ -586,7 +593,7 @@ impl Config {
                 .saturating_mul(1024)
                 .saturating_mul(1024),
             enable_tor_support,
-            tor_only: tor_only && enable_tor_support,
+            tor_only,
             tor_bootstrap_timeout_secs: env_parse(
                 "CHAN_TOR_BOOTSTRAP_TIMEOUT",
                 s.tor_bootstrap_timeout_secs.unwrap_or(120),
@@ -867,6 +874,12 @@ impl Config {
             anyhow::bail!(
                 "CONFIG ERROR: chan_net_api_key must be empty to disable ChanNet auth-protected endpoints \
                  or at least 32 characters long."
+            );
+        }
+        if self.tor_only && !self.enable_tor_support {
+            anyhow::bail!(
+                "CONFIG ERROR: tor_only=true requires enable_tor_support=true. \
+                 Tor-only mode needs the built-in onion service to be active."
             );
         }
         if self.enable_tor_support && !self.tor_only {
@@ -1451,6 +1464,20 @@ port = 8080
 
         config.chan_net_api_key = "x".repeat(32);
         config.validate().expect("32-char key is accepted");
+    }
+
+    #[test]
+    fn validate_rejects_tor_only_without_tor_support() {
+        let mut config = valid_config();
+        config.enable_tor_support = false;
+        config.tor_only = true;
+
+        let error = validation_error(&config);
+
+        assert_eq!(
+            error,
+            "CONFIG ERROR: tor_only=true requires enable_tor_support=true. Tor-only mode needs the built-in onion service to be active."
+        );
     }
 
     #[test]

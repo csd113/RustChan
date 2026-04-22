@@ -15,13 +15,7 @@ pub enum ToolStatus {
 // ─── ffmpeg ───────────────────────────────────────────────────────────────────
 
 pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
-    let ok = Command::new(&crate::config::CONFIG.ffmpeg_path)
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let ok = probe_tool(&crate::config::CONFIG.ffmpeg_path);
 
     if ok {
         tracing::info!(target: "rustchan::detect", available = true, "ffmpeg detected — video thumbnails and transcoding enabled");
@@ -51,6 +45,29 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
         }
         ToolStatus::Missing
     }
+}
+
+/// Probe the configured `ffprobe` path at startup so bogus explicit paths are
+/// detected immediately instead of only failing later on the first WebM probe.
+pub fn detect_ffprobe() -> bool {
+    let ok = probe_tool(&crate::config::CONFIG.ffprobe_path);
+
+    if ok {
+        tracing::info!(
+            target: "rustchan::detect",
+            available = true,
+            "ffprobe detected — WebM codec inspection enabled"
+        );
+    } else {
+        tracing::warn!(
+            target: "rustchan::detect",
+            available = false,
+            ffprobe_path = %crate::config::CONFIG.ffprobe_path,
+            "ffprobe not detected — WebM codec inspection will fail for uploads that need it"
+        );
+    }
+
+    ok
 }
 
 /// Probe whether the detected ffmpeg has `libwebp` compiled in.
@@ -114,6 +131,16 @@ fn webp_install_hint() -> String {
         s.retain(|c| c != '\x1b');
     }
     s
+}
+
+fn probe_tool(program: &str) -> bool {
+    Command::new(program)
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Probe whether the detected ffmpeg has `libvpx-vp9` + `libopus` compiled in.
@@ -598,6 +625,7 @@ fn hsid_to_onion_address(hsid: HsId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     /// Verify the v3 onion address encoder against a Python-computed reference
     /// value for the all-zeros Ed25519 key.
@@ -637,5 +665,22 @@ mod tests {
                 .all(|c| matches!(c, 'a'..='z' | '2'..='7')),
             "base32 part must be lowercase a-z2-7 only"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_tool_uses_the_explicit_binary_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let script = tempdir.path().join("ffprobe");
+        let mut file = std::fs::File::create(&script).expect("create script");
+        file.write_all(b"#!/bin/sh\nexit 0\n").expect("write script");
+        let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod");
+
+        assert!(probe_tool(script.to_str().expect("utf8 path")));
+        assert!(!probe_tool("/definitely/not/a/real/ffprobe"));
     }
 }

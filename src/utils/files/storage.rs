@@ -676,6 +676,16 @@ mod tests {
         }
     }
 
+    fn arbitrary_upload_options<'a>(
+        root: &'a std::path::Path,
+        original_filename: &'a str,
+    ) -> SaveUploadOptions<'a> {
+        SaveUploadOptions {
+            allow_any_files: true,
+            ..test_upload_options(root, original_filename)
+        }
+    }
+
     #[test]
     fn combo_flac_audio_is_saved_losslessly_without_pending_processing() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -752,6 +762,33 @@ mod tests {
 
         assert!(error.to_string().contains("image header is malformed"));
         assert!(!tempdir.path().join("test").exists());
+    }
+
+    #[test]
+    fn arbitrary_file_upload_is_saved_when_opted_in() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input = tempfile::Builder::new()
+            .suffix(".txt")
+            .tempfile_in(tempdir.path())
+            .expect("temp file");
+        let contents = b"plain text attachment\n";
+        std::fs::write(input.path(), contents).expect("write text");
+
+        let uploaded = save_upload_from_path(
+            input.path(),
+            contents,
+            contents.len(),
+            &arbitrary_upload_options(tempdir.path(), "notes.txt"),
+        )
+        .expect("save text upload");
+
+        assert_eq!(uploaded.mime_type, "application/octet-stream");
+        assert_eq!(uploaded.media_type, crate::models::MediaType::Other);
+        assert!(uploaded.file_path.ends_with(".txt"));
+
+        let stored =
+            std::fs::read(tempdir.path().join(&uploaded.file_path)).expect("read stored upload");
+        assert_eq!(stored, contents);
     }
 
     #[test]

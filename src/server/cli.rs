@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
     name = "rustchan-cli",
     about = "Self-contained imageboard server",
     long_about = "RustChan Imageboard — single binary, zero dependencies.\n\
-                  Data is stored in ./rustchan-data/ next to the binary.\n\
+                  Config, database, logs, and uploads live in <exe-dir>/rustchan-data/.\n\
                   Run without arguments to start the server."
 )]
 pub struct Cli {

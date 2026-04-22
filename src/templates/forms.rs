@@ -93,6 +93,12 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
     let image_mb = CONFIG.max_image_size / 1024 / 1024;
     let video_mb = CONFIG.max_video_size / 1024 / 1024;
     let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
+    let generic_upload_mb = CONFIG
+        .max_image_size
+        .max(CONFIG.max_video_size)
+        .max(CONFIG.max_audio_size)
+        / 1024
+        / 1024;
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
     let audio_image_dual_mode =
         board.allow_audio && board.allow_images && !board.allow_video && !allow_any_files;
@@ -120,7 +126,7 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
     };
     let file_hint = if allow_any_files {
         if hint_parts.is_empty() {
-            format!("other files download safely as attachments · max {video_mb} MiB")
+            format!("other files download safely as attachments · max {generic_upload_mb} MiB")
         } else {
             format!(
                 "{} &nbsp;|&nbsp; other files download safely as attachments",

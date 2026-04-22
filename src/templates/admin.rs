@@ -541,7 +541,7 @@ fn render_board_settings_card(
         .is_some_and(|next| next.nsfw == board.nsfw);
     let any_files_toggle = if crate::config::CONFIG.enable_any_file_uploads_feature {
         format!(
-            r#"<label><input type="checkbox" name="allow_any_files" value="1"{}> Allow any file downloads</label>"#,
+            r#"<label><input type="checkbox" name="allow_any_files" value="1"{}> Allow any file uploads</label>"#,
             checked(board.allow_any_files)
         )
     } else {

@@ -115,7 +115,7 @@ Then open:
 - `http://localhost:8080`
 - admin panel: `http://localhost:8080/admin`
 
-On first run, RustChan creates `rustchan-data/settings.toml`, the database, logs, backups, and the rest of its runtime layout automatically.
+On first run, RustChan creates `<exe-dir>/rustchan-data/settings.toml`, the database, logs, backups, and the rest of its runtime layout automatically.
 
 Helpful notes:
 
@@ -126,7 +126,7 @@ Helpful notes:
 
 ## Configuration And Data
 
-RustChan keeps its runtime state in `rustchan-data/` next to the binary.
+RustChan keeps its runtime state in `<exe-dir>/rustchan-data/` next to the binary. The live process reads `settings.toml` from that directory, not from the current working directory.
 
 ```text
 rustchan-data/
@@ -163,6 +163,9 @@ port = 8443
 
 Worth knowing:
 
+- These stay TOML-owned at runtime: ports, Tor, arbitrary-file upload gate, ffmpeg/ffprobe paths, backup cadence, and other operational toggles.
+- `CHAN_*` environment variables still override the matching values from `settings.toml` at runtime.
+- When testing a copied or temporary binary, edit that binary's adjacent `rustchan-data/settings.toml`; do not rely on a cwd-local decoy file.
 - `enable_tor_support` is on by default in the generated config.
 - `tor_only = true` makes RustChan bind to loopback only and serve through Tor.
 - `require_ffmpeg = true` makes startup fail if `ffmpeg` is missing.

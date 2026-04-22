@@ -10,15 +10,16 @@ pub(super) fn settings_template(secret: &str) -> String {
 forum_name = "RustChan"
 
 # Subtitle shown below the site name on the home page.
-# Can also be changed later from Admin -> Site Settings.
+# This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
 site_subtitle = "select board to proceed"
 
 # Default theme for first-time visitors before they pick their own.
+# This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
 # Valid values: built-in or admin-created custom theme slugs.
 default_theme = "forest"
 
 # Built-in themes enabled when the theme catalog is first seeded.
-# After first startup, use Admin -> Theme Catalog to enable or disable themes.
+# After first startup, Admin -> Theme Catalog owns the live enabled/disabled state.
 enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]
 
 

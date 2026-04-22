@@ -204,6 +204,9 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // ffmpeg: required for video thumbnails (optional — graceful degradation).
     let ffmpeg_status = crate::detect::detect_ffmpeg(CONFIG.require_ffmpeg);
     let ffmpeg_available = ffmpeg_status == crate::detect::ToolStatus::Available;
+    // ffprobe is used lazily for WebM codec inspection, so probe it at startup
+    // to make explicit configured paths authoritative and catch bogus paths early.
+    let _ffprobe_available = crate::detect::detect_ffprobe();
     // libwebp encoder: needed for image→WebP conversion.  Checked independently
     // so that a stock ffmpeg build (missing libwebp) still enables video/audio
     // features while image conversion degrades gracefully.
