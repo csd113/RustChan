@@ -216,6 +216,50 @@ mod tests {
         .expect("posts_ai trigger sql")
     }
 
+    fn create_controlled_integrity_problem(state: &crate::middleware::AppState) {
+        let board_short = format!("f{}", &uuid::Uuid::new_v4().simple().to_string()[..7]);
+        let conn = state.db.get().expect("db connection");
+        let board_id = crate::db::create_board(&conn, &board_short, "Repair Test", "", false)
+            .expect("create board");
+        let post = crate::db::NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some("repair thread".to_string()),
+            body: "repair test body".to_string(),
+            body_html: "repair test body".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "repair-token".to_string(),
+            is_op: true,
+        };
+        crate::db::create_thread_with_optional_poll(
+            &conn,
+            board_id,
+            Some("repair thread"),
+            &post,
+            "",
+            None,
+            None,
+        )
+        .expect("create thread");
+
+        conn.execute_batch(&format!(
+            "PRAGMA foreign_keys=OFF; BEGIN; DELETE FROM boards WHERE short_name='{board_short}'; COMMIT; PRAGMA foreign_keys=ON;"
+        ))
+        .expect("create controlled integrity problem");
+    }
+
     #[tokio::test]
     async fn admin_db_repair_aborts_before_mutation_when_pre_repair_backup_fails() {
         let state = crate::test_support::app_state();
@@ -280,5 +324,84 @@ mod tests {
         assert!(body.contains("back to admin panel"));
 
         assert_eq!(posts_ai_trigger_sql(&state), sentinel_trigger_sql);
+    }
+
+    #[tokio::test]
+    async fn admin_db_repair_reports_problem_when_integrity_issue_remains_after_repair() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        create_controlled_integrity_problem(&state);
+
+        let router = Router::new()
+            .route("/admin/db/check", post(super::admin_db_check))
+            .route("/admin/db/repair", post(admin_db_repair))
+            .with_state(state.clone());
+
+        let check_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/db/check")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(
+                        header::COOKIE,
+                        "csrf_token=csrf123; chan_admin_session=session123",
+                    )
+                    .body(Body::from("_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("check response");
+
+        assert_eq!(check_response.status(), StatusCode::OK);
+        let check_body = to_bytes(check_response.into_body(), usize::MAX)
+            .await
+            .expect("check body bytes");
+        let check_body = String::from_utf8(check_body.to_vec()).expect("utf8 check body");
+        assert!(check_body.contains("Database health checks found a problem."));
+
+        let repair_response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/db/repair")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(
+                        header::COOKIE,
+                        "csrf_token=csrf123; chan_admin_session=session123",
+                    )
+                    .body(Body::from("_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("repair response");
+
+        assert_eq!(repair_response.status(), StatusCode::OK);
+        let repair_body = to_bytes(repair_response.into_body(), usize::MAX)
+            .await
+            .expect("repair body bytes");
+        let repair_body = String::from_utf8(repair_body.to_vec()).expect("utf8 repair body");
+        assert!(repair_body.contains("[ database repair ]"));
+        assert!(repair_body.contains("Created pre-repair full backup:"));
+        assert!(repair_body.contains("<strong>Repair run:</strong> Yes"));
+        assert!(repair_body.contains("Repair finished, but the database still reports a problem."));
+        assert!(repair_body.contains("<strong>Pre-repair backup:</strong> <code>"));
+        assert!(!repair_body
+            .contains("Maintenance completed. Database health checks passed afterward."));
+        assert!(!repair_body.contains(
+            "The final database health check passed after the repair run, so the detected problem was cleared."
+        ));
+
+        let conn = state.db.get().expect("db connection");
+        let remaining_problem: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .expect("foreign key check");
+        assert!(
+            remaining_problem > 0,
+            "controlled integrity issue should remain"
+        );
     }
 }
