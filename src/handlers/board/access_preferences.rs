@@ -87,9 +87,8 @@ fn safe_referer_return_to(headers: &HeaderMap) -> Option<String> {
         return None;
     }
     let path_and_query = uri.path_and_query()?.as_str();
-    crate::utils::redirect::is_strict_safe_internal_path(path_and_query).then(|| {
-        path_and_query.to_string()
-    })
+    crate::utils::redirect::is_strict_safe_internal_path(path_and_query)
+        .then(|| path_and_query.to_string())
 }
 
 fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {

@@ -986,7 +986,10 @@ mod tests {
                 Some(3600),
             ),
         ) {
-            Ok(result) => panic!("expected partial poll rejection, got {}", result.redirect_url),
+            Ok(result) => panic!(
+                "expected partial poll rejection, got {}",
+                result.redirect_url
+            ),
             Err(error) => error,
         };
 

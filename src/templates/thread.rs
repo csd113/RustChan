@@ -610,6 +610,19 @@ fn render_file_link(file_path: &str, file_name: &str) -> String {
     )
 }
 
+fn effective_media_type(post: &Post) -> crate::models::MediaType {
+    if let Some(mime_media) = post
+        .mime_type
+        .as_deref()
+        .map(crate::models::MediaType::from_mime)
+        .filter(|media| *media != crate::models::MediaType::Other)
+    {
+        return mime_media;
+    }
+
+    post.media_type.unwrap_or(crate::models::MediaType::Other)
+}
+
 /// Render a single post as HTML.
 /// `pub` because board.rs uses this for thread-summary preview posts and
 /// search results; all other call-sites are within this module.
@@ -736,6 +749,8 @@ pub fn render_post(
         media_processing_badge = media_processing_badge,
     );
 
+    let primary_media_type = effective_media_type(post);
+
     // Image / Video / Audio
     if show_media {
         if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
@@ -746,19 +761,10 @@ pub fn render_post(
                 .mime_type
                 .as_deref()
                 .unwrap_or("application/octet-stream");
-            let is_audio = matches!(&post.media_type, Some(crate::models::MediaType::Audio))
-                || post
-                    .mime_type
-                    .as_deref()
-                    .is_some_and(|m| m.starts_with("audio/"));
-            let is_video = !is_audio
-                && (matches!(&post.media_type, Some(crate::models::MediaType::Video))
-                    || post
-                        .mime_type
-                        .as_deref()
-                        .is_some_and(|m| m.starts_with("video/")));
+            let is_audio = matches!(primary_media_type, crate::models::MediaType::Audio);
+            let is_video = matches!(primary_media_type, crate::models::MediaType::Video);
 
-            let combo_audio = if !is_audio && !is_video {
+            let combo_audio = if matches!(primary_media_type, crate::models::MediaType::Image) {
                 match (&post.audio_file_path, &post.audio_mime_type) {
                     (Some(aud_file), Some(aud_mime)) => Some((
                         aud_file.as_str(),
@@ -935,8 +941,8 @@ pub fn render_post(
         }
     }
 
-    // Secondary audio for image+audio combo posts
-    if show_media && !matches!(&post.media_type, Some(crate::models::MediaType::Image)) {
+    // Secondary audio fallback for legacy rows that store a separate audio attachment.
+    if show_media && !matches!(primary_media_type, crate::models::MediaType::Image) {
         if let (Some(aud_file), Some(aud_mime)) = (&post.audio_file_path, &post.audio_mime_type) {
             let aud_name = post.audio_file_name.as_deref().unwrap_or("audio");
             let aud_size = post
@@ -1274,6 +1280,43 @@ mod tests {
         assert!(html.contains(r#"Audio: <a href="/boards/test/song.flac""#));
         assert!(html.contains(r#"data-artwork-src="/boards/test/thumbs/image.webp""#));
         assert!(!html.contains("file-container audio-container audio-combo"));
+    }
+
+    #[test]
+    fn contradictory_image_mime_prefers_combo_render_over_standalone_audio_boxes() {
+        let mut post = sample_post();
+        post.file_path = Some("test/confused.png".into());
+        post.file_name = Some("confused.png".into());
+        post.thumb_path = Some("test/thumbs/confused.png".into());
+        post.mime_type = Some("image/png".into());
+        post.media_type = Some(MediaType::Audio);
+        post.audio_file_path = Some("test/song.mp3".into());
+        post.audio_file_name = Some("song.mp3".into());
+        post.audio_file_size = Some(2048);
+        post.audio_mime_type = Some("audio/mpeg".into());
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: true,
+                allow_editing: false,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html.contains("file-container image-audio-combo"));
+        assert!(html.contains(r#"Audio: <a href="/boards/test/song.mp3""#));
+        assert!(html.contains(r#"class="audio-player audio-player-combo""#));
+        assert!(!html.contains("file-container audio-container audio-combo"));
+        assert!(!html.contains(r#"class="audio-player" data-audio-title="song.mp3""#));
     }
 
     #[test]
