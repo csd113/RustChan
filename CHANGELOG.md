@@ -8,26 +8,48 @@ All notable changes to RustChan will be documented in this file.
 
 - The bundled banner builder in `docs/rustchan-banner-maker.html` has been rebuilt into a layered editor with stacked image uploads, per-layer controls, drag-and-resize handles, live preview, and export tools for both supported banner sizes.
 - The admin panel now ships with its own dedicated `admin.css` and `admin.js` assets instead of leaning on the shared site bundle.
+- HEIC and HEIF image uploads are now accepted by the media pipeline, including MIME detection, thumbnail generation, backup metadata, form copy, and documentation updates.
+- Two new built-in themes, Blue Sky and Deep Orbit, are available across normal pages, admin views, theme seeding, defaults, and setup documentation.
 
 ### Improved
 
 - The admin panel has been split into clearer sections and subsections, making board setup, moderation, settings, backups, and banner management easier to scan and work through on both desktop and mobile.
 - Banner editing in the admin UI is smoother: target pickers behave more predictably, external-link warnings show up inline before save, and the banner forms are laid out more cleanly.
+- The board appearance editor now shows each board's NSFW tag state directly in the appearance card.
 - Admin login and banner-serving internals were tightened up, with cleaner helper paths for session handling, banner access checks, and post-query lookups.
 - Backup and restore actions now use a more consistent redirect path, which keeps the progress modal and post-restore navigation on the rails after full-site and board restore requests.
+- Thread rendering and post state handling are more resilient around post lookups, moderation actions, pending filesystem cleanup, media storage, worker updates, and console board setup.
+- Post rendering now sanitizes formatting more consistently and poll submission validation is stricter on both server-rendered and live-updated pages.
+- Media rendering now prefers recorded MIME type information over filename guessing, improving how attached media is displayed in thread views.
+- Banner exports from the standalone editor no longer include editing guide overlays, and the export flow better matches the screenshots and README examples.
+- Tor bootstrap and runtime logs are humanized into clearer status messages so operators can understand connection progress without reading raw Arti output.
+- Built-in self-signed TLS is now gated behind an explicit feature flag, keeping production builds slimmer unless the development certificate path is needed.
+- Rust dependencies, GitHub Actions release tooling, and lockfile contents were refreshed for the `1.1.5` cycle.
+- Release artifacts now focus on current Apple Silicon macOS builds instead of publishing a separate macOS x86 archive.
+- Blue Sky and Deep Orbit theme palettes were refined for better contrast and fuller coverage across normal and admin surfaces.
 
 ### Fixed
 
 - Restore uploads and backup actions in the admin panel now resolve their redirect targets more reliably, including cases where the browser only exposes the final response URL or HTML fallback.
 - Protected board banner assets and external-banner warning routes now fail with the right `404` and `403` responses instead of falling through to less helpful error paths.
+- Banner rotation now advances correctly on refresh, GIF banners keep a reliable fallback path, and animated WebP banners preserve animation instead of being flattened during processing.
+- Banner upload, restore, and route handling have stronger validation and regression coverage for protected assets, board inheritance, catalog/thread placement, and warning redirects.
+- Post form fields now line up more cleanly with the surrounding form layout.
+- Quote references and delete-reference cleanup now stay more consistent when posts or threads are updated.
+- Board access redirects now harden `return_to` handling so unlock flows cannot bounce users to unsafe destinations.
+- Thumbnail fallback controls are visible when generated thumbnails are unavailable, and catalog embeds can now use absolute thumbnail URLs.
 
 ### Documentation
 
 - `README.md`, `SETUP.md`, and the release notes were cleaned up for the `1.1.5` release, with plainer wording and less filler.
+- The README was rewritten for clearer structure and refreshed with banner-maker screenshots and current feature wording.
 
 ### Internal
 
 - Removed dead code, unused API paths, and stale helper branches that were no longer part of the live request flow.
+- Admin backup, settings, board, posting, and thread handlers were split into smaller modules, with focused regression coverage for posting flows, restore redirects, banner behavior, board redirects, and live thread updates.
+- Clippy warnings were cleaned up across the refactored modules, theme code, logging, storage, templates, and banner handling to keep strict lint compliance.
+- Comments and documentation were trimmed to remove leftover AI-generated phrasing and stale implementation notes.
 
 ## [1.1.4]
 
