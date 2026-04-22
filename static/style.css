@@ -1525,6 +1525,10 @@ html:not([data-theme]) .poster-id-btn {
   padding: 6px;
 }
 
+.media-thumb-fallback[hidden] {
+  display: none !important;
+}
+
 .media-thumb-missing > .thumb,
 .media-thumb-missing > .catalog-thumb {
   display: none;
