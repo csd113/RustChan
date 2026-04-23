@@ -276,9 +276,10 @@ fn render_db_repair_status_response(
     };
 
     if should_refresh {
-        response
-            .headers_mut()
-            .insert(header::REFRESH, HeaderValue::from_static("3"));
+        response.headers_mut().insert(
+            header::REFRESH,
+            HeaderValue::from_static("3; url=/admin/db/repair/status"),
+        );
     }
 
     response
@@ -418,7 +419,10 @@ mod tests {
         }
 
         let router = Router::new()
-            .route("/admin/db/repair", post(admin_db_repair))
+            .route(
+                "/admin/db/repair",
+                get(admin_db_repair_status).post(admin_db_repair),
+            )
             .route("/admin/db/repair/status", get(admin_db_repair_status))
             .with_state(state.clone());
         let response = router
@@ -439,6 +443,13 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::REFRESH)
+                .and_then(|value| value.to_str().ok()),
+            Some("3; url=/admin/db/repair/status")
+        );
         let started_body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("started body bytes");
@@ -476,7 +487,10 @@ mod tests {
 
         let router = Router::new()
             .route("/admin/db/check", post(super::admin_db_check))
-            .route("/admin/db/repair", post(admin_db_repair))
+            .route(
+                "/admin/db/repair",
+                get(admin_db_repair_status).post(admin_db_repair),
+            )
             .route("/admin/db/repair/status", get(admin_db_repair_status))
             .with_state(state.clone());
 
@@ -522,6 +536,13 @@ mod tests {
             .expect("repair response");
 
         assert_eq!(repair_response.status(), StatusCode::OK);
+        assert_eq!(
+            repair_response
+                .headers()
+                .get(header::REFRESH)
+                .and_then(|value| value.to_str().ok()),
+            Some("3; url=/admin/db/repair/status")
+        );
         let started_body = to_bytes(repair_response.into_body(), usize::MAX)
             .await
             .expect("repair started body bytes");
@@ -554,5 +575,40 @@ mod tests {
             remaining_problem > 0,
             "controlled integrity issue should remain"
         );
+    }
+
+    #[tokio::test]
+    async fn admin_db_repair_get_shows_status_instead_of_method_not_allowed() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+
+        let router = Router::new()
+            .route(
+                "/admin/db/repair",
+                get(admin_db_repair_status).post(admin_db_repair),
+            )
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/admin/db/repair")
+                    .header(
+                        header::COOKIE,
+                        "csrf_token=csrf123; chan_admin_session=session123",
+                    )
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(body.contains("[ database repair ]"));
     }
 }

@@ -288,7 +288,8 @@ fn admin_moderation_routes() -> Router<AppState> {
         )
         .route(
             "/admin/db/repair",
-            post(crate::handlers::admin::admin_db_repair),
+            get(crate::handlers::admin::admin_db_repair_status)
+                .post(crate::handlers::admin::admin_db_repair),
         )
         .route(
             "/admin/db/repair/status",
