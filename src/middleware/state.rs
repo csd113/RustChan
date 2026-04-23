@@ -92,6 +92,50 @@ impl MaintenanceGate {
     }
 }
 
+#[derive(Clone)]
+pub enum DbMaintenanceJobStatus {
+    Idle,
+    Running { started_at: i64 },
+    Finished { report: crate::db::DbHealthReport },
+    Failed { finished_at: i64, message: String },
+}
+
+#[derive(Clone)]
+pub struct DbMaintenanceJobs {
+    status: std::sync::Arc<parking_lot::RwLock<DbMaintenanceJobStatus>>,
+}
+
+impl DbMaintenanceJobs {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            status: std::sync::Arc::new(parking_lot::RwLock::new(DbMaintenanceJobStatus::Idle)),
+        }
+    }
+
+    pub fn mark_running(&self) {
+        *self.status.write() = DbMaintenanceJobStatus::Running {
+            started_at: chrono::Utc::now().timestamp(),
+        };
+    }
+
+    pub fn mark_finished(&self, report: crate::db::DbHealthReport) {
+        *self.status.write() = DbMaintenanceJobStatus::Finished { report };
+    }
+
+    pub fn mark_failed(&self, message: String) {
+        *self.status.write() = DbMaintenanceJobStatus::Failed {
+            finished_at: chrono::Utc::now().timestamp(),
+            message,
+        };
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> DbMaintenanceJobStatus {
+        self.status.read().clone()
+    }
+}
+
 pub struct MaintenanceGuard {
     _permit: tokio::sync::OwnedSemaphorePermit,
     active_label: std::sync::Arc<parking_lot::RwLock<Option<String>>>,
@@ -112,6 +156,7 @@ pub struct AppState {
     pub backup_progress: std::sync::Arc<crate::middleware::BackupProgress>,
     pub auto_full_backup_settings: AutoFullBackupSettings,
     pub maintenance_gate: MaintenanceGate,
+    pub db_maintenance_jobs: DbMaintenanceJobs,
     pub chan_ledger: Option<std::sync::Arc<parking_lot::Mutex<crate::chan_net::ledger::TxLedger>>>,
     pub onion_address: std::sync::Arc<tokio::sync::RwLock<Option<String>>>,
 }

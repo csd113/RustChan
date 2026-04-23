@@ -1198,6 +1198,70 @@ pub fn admin_db_health_result_page(
     )
 }
 
+#[must_use]
+pub fn admin_db_repair_running_page(csrf_token: &str, started_at: i64) -> String {
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>[ database repair ]</h1>
+<section class="admin-section">
+<h2>// maintenance rebuild running</h2>
+<div class="page-box" style="margin-top:0.75rem;max-width:760px">
+<p>Maintenance rebuild started at <code>{started_at}</code>.</p>
+<p style="color:var(--text-dim)">This page refreshes automatically while the backup and database rebuild finish.</p>
+</div>
+<p style="margin-top:1rem">
+  <a href="/admin/db/repair/status">refresh status</a> · <a href="/admin/panel">back to admin panel</a>
+</p>
+</section>
+</div>"#
+    );
+
+    base_layout(
+        "Database repair running",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        None,
+        None,
+        false,
+        "/admin",
+    )
+}
+
+#[must_use]
+pub fn admin_db_repair_failed_page(csrf_token: &str, message: &str, finished_at: i64) -> String {
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>[ database repair ]</h1>
+<section class="admin-section">
+<h2>// maintenance rebuild failed</h2>
+<div class="page-box" style="margin-top:0.75rem;max-width:760px">
+<p class="error">The background maintenance rebuild failed.</p>
+<p><strong>Finished:</strong> <code>{finished_at}</code></p>
+<p><strong>Error:</strong> <code>{message}</code></p>
+</div>
+<p style="margin-top:1rem">
+  <a href="/admin/panel">&#8592; back to admin panel</a>
+</p>
+</section>
+</div>"#,
+        message = escape_html(message),
+    );
+
+    base_layout(
+        "Database repair failed",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        None,
+        None,
+        false,
+        "/admin",
+    )
+}
+
 fn render_db_health_snapshot(snapshot: &crate::db::DbHealthSnapshot) -> String {
     format!(
         "{integrity}{foreign_keys}",

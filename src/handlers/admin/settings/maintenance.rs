@@ -136,20 +136,41 @@ pub async fn admin_db_repair(
     super::check_csrf_jar(&jar, form.csrf.as_deref())?;
 
     let (jar, csrf) = ensure_csrf(jar);
-    let html = tokio::task::spawn_blocking({
+    tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let progress = state.backup_progress.clone();
-        let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
-        let csrf_clone = csrf.clone();
-        move || -> Result<String> {
-            {
-                let conn = pool.get()?;
-                super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            }
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
+    let maintenance_guard = state
+        .maintenance_gate
+        .try_begin("Database maintenance rebuild")?;
+    state.db_maintenance_jobs.mark_running();
+    let progress = state.backup_progress.clone();
+    let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
+    let pool = state.db.clone();
+    let db_maintenance_jobs = state.db_maintenance_jobs.clone();
+
+    tokio::spawn(async move {
+        let job_status = db_maintenance_jobs.clone();
+        let join_result = tokio::task::spawn_blocking(move || {
+            let _maintenance_guard = maintenance_guard;
             let backup_result = create_pre_repair_backup(&pool, &progress, copies_to_keep);
 
-            let conn = pool.get()?;
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(error) => {
+                    db_maintenance_jobs.mark_failed(format!(
+                        "Could not open database connection after pre-repair backup: {error}"
+                    ));
+                    return;
+                }
+            };
 
             let report = match backup_result {
                 Ok(filename) => db::attempt_db_repair(&conn, Some(db::DbRepairBackup { filename })),
@@ -167,27 +188,109 @@ pub async fn admin_db_repair(
                 backup_error = report.repair_backup_error.as_deref(),
                 "Admin ran database repair attempt"
             );
+            db_maintenance_jobs.mark_finished(report);
+        })
+        .await;
 
-            Ok(crate::templates::admin_db_health_result_page(
-                &report,
-                true,
-                &csrf_clone,
-            ))
+        if let Err(error) = join_result {
+            job_status.mark_failed(format!("Database repair task failed: {error}"));
+        }
+    });
+
+    Ok(render_db_repair_status_response(
+        &jar,
+        &csrf,
+        state.db_maintenance_jobs.snapshot(),
+    ))
+}
+
+pub async fn admin_db_repair_status(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+
+    let (jar, csrf) = ensure_csrf(jar);
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            Ok(())
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)).into_response())
+    Ok(render_db_repair_status_response(
+        &jar,
+        &csrf,
+        state.db_maintenance_jobs.snapshot(),
+    ))
+}
+
+fn render_db_repair_status_response(
+    jar: &CookieJar,
+    csrf: &str,
+    status: crate::middleware::DbMaintenanceJobStatus,
+) -> Response {
+    let should_refresh = matches!(
+        status,
+        crate::middleware::DbMaintenanceJobStatus::Idle
+            | crate::middleware::DbMaintenanceJobStatus::Running { .. }
+    );
+    let mut response = match status {
+        crate::middleware::DbMaintenanceJobStatus::Idle => (
+            jar.clone(),
+            Html(crate::templates::admin_db_repair_running_page(csrf, 0)),
+        )
+            .into_response(),
+        crate::middleware::DbMaintenanceJobStatus::Running { started_at } => (
+            jar.clone(),
+            Html(crate::templates::admin_db_repair_running_page(
+                csrf, started_at,
+            )),
+        )
+            .into_response(),
+        crate::middleware::DbMaintenanceJobStatus::Finished { report } => (
+            jar.clone(),
+            Html(crate::templates::admin_db_health_result_page(
+                &report, true, csrf,
+            )),
+        )
+            .into_response(),
+        crate::middleware::DbMaintenanceJobStatus::Failed {
+            finished_at,
+            message,
+        } => (
+            jar.clone(),
+            Html(crate::templates::admin_db_repair_failed_page(
+                csrf,
+                &message,
+                finished_at,
+            )),
+        )
+            .into_response(),
+    };
+
+    if should_refresh {
+        response
+            .headers_mut()
+            .insert(header::REFRESH, HeaderValue::from_static("3"));
+    }
+
+    response
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_db_repair, PRE_REPAIR_BACKUP_FAILURE};
+    use super::{admin_db_repair, admin_db_repair_status, PRE_REPAIR_BACKUP_FAILURE};
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
-        routing::post,
+        routing::{get, post},
         Router,
     };
     use tower::ServiceExt as _;
@@ -260,6 +363,40 @@ mod tests {
         .expect("create controlled integrity problem");
     }
 
+    async fn repair_status_body(router: &Router) -> String {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/admin/db/repair/status")
+                    .header(
+                        header::COOKIE,
+                        "csrf_token=csrf123; chan_admin_session=session123",
+                    )
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("status body bytes");
+        String::from_utf8(body.to_vec()).expect("utf8 status body")
+    }
+
+    async fn wait_for_repair_result(router: &Router) -> String {
+        for _ in 0..100 {
+            let body = repair_status_body(router).await;
+            if !body.contains("maintenance rebuild running") {
+                return body;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("database repair did not finish");
+    }
+
     #[tokio::test]
     async fn admin_db_repair_aborts_before_mutation_when_pre_repair_backup_fails() {
         let state = crate::test_support::app_state();
@@ -282,8 +419,10 @@ mod tests {
 
         let router = Router::new()
             .route("/admin/db/repair", post(admin_db_repair))
+            .route("/admin/db/repair/status", get(admin_db_repair_status))
             .with_state(state.clone());
         let response = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -299,18 +438,21 @@ mod tests {
             .await
             .expect("response");
 
+        assert_eq!(response.status(), StatusCode::OK);
+        let started_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("started body bytes");
+        let started_body = String::from_utf8(started_body.to_vec()).expect("utf8 started body");
+        assert!(started_body.contains("[ database repair ]"));
+
+        let body = wait_for_repair_result(&router).await;
+
         {
             let mut failure = PRE_REPAIR_BACKUP_FAILURE
                 .lock()
                 .expect("backup failure mutex");
             *failure = None;
         }
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body bytes");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
 
         assert!(body.contains("[ database repair ]"));
         assert!(body.contains("Repair was not run because the pre-repair backup failed."));
@@ -335,6 +477,7 @@ mod tests {
         let router = Router::new()
             .route("/admin/db/check", post(super::admin_db_check))
             .route("/admin/db/repair", post(admin_db_repair))
+            .route("/admin/db/repair/status", get(admin_db_repair_status))
             .with_state(state.clone());
 
         let check_response = router
@@ -362,6 +505,7 @@ mod tests {
         assert!(check_body.contains("Database health checks found a problem."));
 
         let repair_response = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -378,12 +522,19 @@ mod tests {
             .expect("repair response");
 
         assert_eq!(repair_response.status(), StatusCode::OK);
-        let repair_body = to_bytes(repair_response.into_body(), usize::MAX)
+        let started_body = to_bytes(repair_response.into_body(), usize::MAX)
             .await
-            .expect("repair body bytes");
-        let repair_body = String::from_utf8(repair_body.to_vec()).expect("utf8 repair body");
+            .expect("repair started body bytes");
+        let started_body = String::from_utf8(started_body.to_vec()).expect("utf8 repair body");
+        assert!(started_body.contains("[ database repair ]"));
+
+        let repair_body = wait_for_repair_result(&router).await;
+
         assert!(repair_body.contains("[ database repair ]"));
-        assert!(repair_body.contains("Created pre-repair full backup:"));
+        assert!(
+            repair_body.contains("Created pre-repair full backup:"),
+            "{repair_body}"
+        );
         assert!(repair_body.contains("<strong>Repair run:</strong> Yes"));
         assert!(repair_body.contains("Repair finished, but the database still reports a problem."));
         assert!(repair_body.contains("<strong>Pre-repair backup:</strong> <code>"));

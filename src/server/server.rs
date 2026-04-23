@@ -259,6 +259,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             CONFIG.auto_full_backup_copies_to_keep,
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
+        db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
         chan_ledger,
         onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
     };

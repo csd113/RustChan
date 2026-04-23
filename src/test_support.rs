@@ -15,6 +15,7 @@ pub fn app_state() -> crate::middleware::AppState {
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
         auto_full_backup_settings: crate::middleware::AutoFullBackupSettings::new(24, 1),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
+        db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
         chan_ledger: None,
         onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
     }
