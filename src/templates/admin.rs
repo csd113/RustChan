@@ -1026,6 +1026,7 @@ pub fn admin_db_health_result_page(
     report: &DbHealthReport,
     attempted_repair: bool,
     csrf_token: &str,
+    repair_job_id: Option<u64>,
 ) -> String {
     let title = if attempted_repair {
         "[ database repair ]"
@@ -1142,6 +1143,7 @@ pub fn admin_db_health_result_page(
 <p><strong>Before:</strong> {before_status}</p>
 {before_checks}
 <p><strong>Repair run:</strong> {repair_attempted}</p>
+{repair_job_id_html}
 {backup}
 <p><strong>After:</strong> {after_status}</p>
 {after_checks}
@@ -1173,6 +1175,9 @@ pub fn admin_db_health_result_page(
         },
         before_checks = before_checks_html,
         repair_attempted = if report.repair_attempted { "Yes" } else { "No" },
+        repair_job_id_html = repair_job_id.map_or_else(String::new, |job_id| {
+            format!(r"<p><strong>Run id:</strong> <code>{job_id}</code></p>")
+        }),
         backup = backup_html,
         after_status = match report.after.as_ref().map(crate::db::DbHealthSnapshot::ok) {
             Some(true) => r#"<span style="color:var(--green-bright)">Passed</span>"#,
@@ -1199,7 +1204,39 @@ pub fn admin_db_health_result_page(
 }
 
 #[must_use]
-pub fn admin_db_repair_running_page(csrf_token: &str, started_at: i64) -> String {
+pub fn admin_db_repair_idle_page(csrf_token: &str) -> String {
+    let body = r#"<div class="admin-panel">
+<h1>[ database repair ]</h1>
+<section class="admin-section">
+<h2>// maintenance rebuild</h2>
+<div class="page-box" style="margin-top:0.75rem;max-width:760px">
+<p>No maintenance rebuild is running.</p>
+<p style="color:var(--text-dim)">Start a new maintenance rebuild from the admin panel when you need to create a backup and rebuild indexes.</p>
+</div>
+<p style="margin-top:1rem">
+  <a href="/admin/panel">&#8592; back to admin panel</a>
+</p>
+</section>
+</div>"#
+        .to_string();
+
+    base_layout(
+        "Database repair",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        None,
+        None,
+        false,
+        "/admin",
+    )
+}
+
+#[must_use]
+pub fn admin_db_repair_running_page(csrf_token: &str, job_id: u64, started_at: i64) -> String {
+    let progress_url = format!("/admin/db/repair/progress?job_id={job_id}");
+    let status_url = format!("/admin/db/repair/status?job_id={job_id}");
     let body = format!(
         r#"<div class="admin-panel">
 <h1>[ database repair ]</h1>
@@ -1207,14 +1244,14 @@ pub fn admin_db_repair_running_page(csrf_token: &str, started_at: i64) -> String
 <h2>// maintenance rebuild running</h2>
 <div class="page-box" style="margin-top:0.75rem;max-width:760px">
 <p>Maintenance rebuild started at <code>{started_at}</code>.</p>
-<div class="compress-progress" data-db-repair-progress style="display:block;margin:0.75rem 0">
+<div class="compress-progress" data-db-repair-progress data-db-repair-job-id="{job_id}" data-db-repair-progress-url="{progress_url}" style="display:block;margin:0.75rem 0">
   <div class="compress-progress-track"><div class="compress-progress-bar" data-db-repair-progress-bar style="width:5%"></div></div>
   <div class="compress-progress-text" data-db-repair-progress-text>Starting maintenance rebuild...</div>
 </div>
 <p style="color:var(--text-dim)">This page updates live while the backup and database rebuild finish.</p>
 </div>
 <p style="margin-top:1rem">
-  <a href="/admin/db/repair/status">refresh status</a> · <a href="/admin/panel">back to admin panel</a>
+  <a href="{status_url}">refresh status</a> · <a href="/admin/panel">back to admin panel</a>
 </p>
 </section>
 </div>"#
@@ -1234,7 +1271,55 @@ pub fn admin_db_repair_running_page(csrf_token: &str, started_at: i64) -> String
 }
 
 #[must_use]
-pub fn admin_db_repair_failed_page(csrf_token: &str, message: &str, finished_at: i64) -> String {
+pub fn admin_db_repair_stale_page(
+    csrf_token: &str,
+    requested_job_id: u64,
+    current_job_id: Option<u64>,
+) -> String {
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>[ database repair ]</h1>
+<section class="admin-section">
+<h2>// maintenance rebuild status</h2>
+<div class="page-box" style="margin-top:0.75rem;max-width:760px">
+<p class="error">This page is for maintenance rebuild <code>{requested_job_id}</code>, but that run is no longer the current status.</p>
+{current_job_html}
+</div>
+<p style="margin-top:1rem">
+  <a href="/admin/db/repair/status">current status</a> · <a href="/admin/panel">back to admin panel</a>
+</p>
+</section>
+</div>"#,
+        current_job_html = current_job_id.map_or_else(
+            || "<p>No maintenance rebuild is currently active.</p>".to_string(),
+            |job_id| {
+                format!(
+                    r#"<p>The current maintenance rebuild is <code>{job_id}</code>. <a href="/admin/db/repair/status?job_id={job_id}">Open that status page.</a></p>"#
+                )
+            }
+        ),
+    );
+
+    base_layout(
+        "Database repair status",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        None,
+        None,
+        false,
+        "/admin",
+    )
+}
+
+#[must_use]
+pub fn admin_db_repair_failed_page(
+    csrf_token: &str,
+    message: &str,
+    finished_at: i64,
+    job_id: u64,
+) -> String {
     let body = format!(
         r#"<div class="admin-panel">
 <h1>[ database repair ]</h1>
@@ -1242,6 +1327,7 @@ pub fn admin_db_repair_failed_page(csrf_token: &str, message: &str, finished_at:
 <h2>// maintenance rebuild failed</h2>
 <div class="page-box" style="margin-top:0.75rem;max-width:760px">
 <p class="error">The background maintenance rebuild failed.</p>
+<p><strong>Run id:</strong> <code>{job_id}</code></p>
 <p><strong>Finished:</strong> <code>{finished_at}</code></p>
 <p><strong>Error:</strong> <code>{message}</code></p>
 </div>
@@ -1250,6 +1336,7 @@ pub fn admin_db_repair_failed_page(csrf_token: &str, message: &str, finished_at:
 </p>
 </section>
 </div>"#,
+        job_id = job_id,
         message = escape_html(message),
     );
 

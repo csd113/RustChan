@@ -19,6 +19,11 @@ pub struct DbMaintenanceForm {
     pub csrf: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct DbRepairStatusQuery {
+    pub job_id: Option<u64>,
+}
+
 fn create_pre_repair_backup(
     pool: &crate::db::DbPool,
     progress: &std::sync::Arc<crate::middleware::BackupProgress>,
@@ -117,6 +122,7 @@ pub async fn admin_db_check(
                 &report,
                 false,
                 &csrf_clone,
+                None,
             ))
         }
     })
@@ -151,7 +157,7 @@ pub async fn admin_db_repair(
     let maintenance_guard = state
         .maintenance_gate
         .try_begin("Database maintenance rebuild")?;
-    state.db_maintenance_jobs.mark_running();
+    let _job_id = state.db_maintenance_jobs.mark_running();
     let progress = state.backup_progress.clone();
     let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
     let pool = state.db.clone();
@@ -200,7 +206,7 @@ pub async fn admin_db_repair(
         }
     });
 
-    Ok(render_db_repair_status_response(
+    Ok(render_db_repair_entry_response(
         &jar,
         &csrf,
         state.db_maintenance_jobs.snapshot(),
@@ -210,6 +216,7 @@ pub async fn admin_db_repair(
 pub async fn admin_db_repair_progress_json(
     State(state): State<AppState>,
     jar: CookieJar,
+    Query(query): Query<DbRepairStatusQuery>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
@@ -229,6 +236,7 @@ pub async fn admin_db_repair_progress_json(
     let payload = db_repair_progress_payload(
         state.db_maintenance_jobs.snapshot(),
         state.backup_progress.as_ref(),
+        query.job_id,
     );
     Ok((
         [(header::CONTENT_TYPE, "application/json".to_string())],
@@ -240,7 +248,26 @@ pub async fn admin_db_repair_progress_json(
 fn db_repair_progress_payload(
     status: crate::middleware::DbMaintenanceJobStatus,
     backup_progress: &crate::middleware::BackupProgress,
+    requested_job_id: Option<u64>,
 ) -> serde_json::Value {
+    let current_job_id = status.job_id();
+    if requested_job_id.is_some_and(|job_id| Some(job_id) != current_job_id) {
+        let redirect_url = db_repair_status_url(current_job_id);
+        let label = if current_job_id.is_some() {
+            "A newer maintenance rebuild is active. Opening current status..."
+        } else {
+            "This maintenance rebuild is no longer active. Opening repair page..."
+        };
+        return serde_json::json!({
+            "state": "stale",
+            "job_id": current_job_id,
+            "label": label,
+            "percent": 100,
+            "done": true,
+            "redirect_url": redirect_url,
+        });
+    }
+
     let backup_phase = backup_progress.phase.load(Ordering::Relaxed);
     let backup_files_done = backup_progress.files_done.load(Ordering::Relaxed);
     let backup_files_total = backup_progress.files_total.load(Ordering::Relaxed);
@@ -248,20 +275,23 @@ fn db_repair_progress_payload(
     match status {
         crate::middleware::DbMaintenanceJobStatus::Idle => serde_json::json!({
             "state": "idle",
-            "label": "Waiting to start...",
+            "label": "No maintenance rebuild is running.",
             "percent": 0,
             "done": false,
         }),
         crate::middleware::DbMaintenanceJobStatus::Running {
+            job_id,
             phase: crate::middleware::DbMaintenanceJobPhase::Starting,
             ..
         } => serde_json::json!({
             "state": "running",
+            "job_id": job_id,
             "label": "Starting maintenance rebuild...",
             "percent": 5,
             "done": false,
         }),
         crate::middleware::DbMaintenanceJobStatus::Running {
+            job_id,
             phase: crate::middleware::DbMaintenanceJobPhase::Backup,
             ..
         } => {
@@ -270,33 +300,40 @@ fn db_repair_progress_payload(
             let label = backup_progress_label(backup_phase, backup_files_done, backup_files_total);
             serde_json::json!({
                 "state": "running",
+                "job_id": job_id,
                 "label": label,
                 "percent": backup_percent,
                 "done": false,
             })
         }
         crate::middleware::DbMaintenanceJobStatus::Running {
+            job_id,
             phase: crate::middleware::DbMaintenanceJobPhase::Repair,
             ..
         } => serde_json::json!({
             "state": "running",
+            "job_id": job_id,
             "label": "Rebuilding indexes and checking database health...",
             "percent": 82,
             "done": false,
         }),
-        crate::middleware::DbMaintenanceJobStatus::Finished { .. } => serde_json::json!({
+        crate::middleware::DbMaintenanceJobStatus::Finished { job_id, .. } => serde_json::json!({
             "state": "finished",
+            "job_id": job_id,
             "label": "Maintenance rebuild complete. Opening report...",
             "percent": 100,
             "done": true,
-            "redirect_url": "/admin/db/repair/status",
+            "redirect_url": db_repair_status_url(Some(job_id)),
         }),
-        crate::middleware::DbMaintenanceJobStatus::Failed { message, .. } => serde_json::json!({
+        crate::middleware::DbMaintenanceJobStatus::Failed {
+            job_id, message, ..
+        } => serde_json::json!({
             "state": "failed",
+            "job_id": job_id,
             "label": message,
             "percent": 100,
             "done": true,
-            "redirect_url": "/admin/db/repair/status",
+            "redirect_url": db_repair_status_url(Some(job_id)),
         }),
     }
 }
@@ -337,6 +374,7 @@ fn backup_progress_label(phase: u64, files_done: u64, files_total: u64) -> Strin
 pub async fn admin_db_repair_status(
     State(state): State<AppState>,
     jar: CookieJar,
+    Query(query): Query<DbRepairStatusQuery>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
@@ -358,40 +396,96 @@ pub async fn admin_db_repair_status(
         &jar,
         &csrf,
         state.db_maintenance_jobs.snapshot(),
+        query.job_id,
     ))
+}
+
+fn db_repair_status_url(job_id: Option<u64>) -> String {
+    match job_id {
+        Some(job_id) => format!("/admin/db/repair/status?job_id={job_id}"),
+        None => "/admin/db/repair".to_string(),
+    }
+}
+
+fn render_db_repair_running_response(
+    jar: &CookieJar,
+    csrf: &str,
+    job_id: u64,
+    started_at: i64,
+) -> Response {
+    let refresh = format!("10; url={}", db_repair_status_url(Some(job_id)));
+    let mut response = (
+        jar.clone(),
+        Html(crate::templates::admin_db_repair_running_page(
+            csrf, job_id, started_at,
+        )),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::REFRESH,
+        HeaderValue::from_str(&refresh).expect("valid db repair refresh header"),
+    );
+    response
+}
+
+fn render_db_repair_entry_response(
+    jar: &CookieJar,
+    csrf: &str,
+    status: crate::middleware::DbMaintenanceJobStatus,
+) -> Response {
+    match status {
+        crate::middleware::DbMaintenanceJobStatus::Running {
+            job_id, started_at, ..
+        } => render_db_repair_running_response(jar, csrf, job_id, started_at),
+        crate::middleware::DbMaintenanceJobStatus::Idle
+        | crate::middleware::DbMaintenanceJobStatus::Finished { .. }
+        | crate::middleware::DbMaintenanceJobStatus::Failed { .. } => (
+            jar.clone(),
+            Html(crate::templates::admin_db_repair_idle_page(csrf)),
+        )
+            .into_response(),
+    }
 }
 
 fn render_db_repair_status_response(
     jar: &CookieJar,
     csrf: &str,
     status: crate::middleware::DbMaintenanceJobStatus,
+    requested_job_id: Option<u64>,
 ) -> Response {
-    let should_refresh = matches!(
-        status,
-        crate::middleware::DbMaintenanceJobStatus::Idle
-            | crate::middleware::DbMaintenanceJobStatus::Running { .. }
-    );
-    let mut response = match status {
-        crate::middleware::DbMaintenanceJobStatus::Idle => (
+    if requested_job_id.is_some_and(|job_id| Some(job_id) != status.job_id()) {
+        return (
             jar.clone(),
-            Html(crate::templates::admin_db_repair_running_page(csrf, 0)),
-        )
-            .into_response(),
-        crate::middleware::DbMaintenanceJobStatus::Running { started_at, .. } => (
-            jar.clone(),
-            Html(crate::templates::admin_db_repair_running_page(
-                csrf, started_at,
+            Html(crate::templates::admin_db_repair_stale_page(
+                csrf,
+                requested_job_id.expect("requested job id for stale page"),
+                status.job_id(),
             )),
         )
+            .into_response();
+    }
+
+    match status {
+        crate::middleware::DbMaintenanceJobStatus::Idle => (
+            jar.clone(),
+            Html(crate::templates::admin_db_repair_idle_page(csrf)),
+        )
             .into_response(),
-        crate::middleware::DbMaintenanceJobStatus::Finished { report } => (
+        crate::middleware::DbMaintenanceJobStatus::Running {
+            job_id, started_at, ..
+        } => render_db_repair_running_response(jar, csrf, job_id, started_at),
+        crate::middleware::DbMaintenanceJobStatus::Finished { job_id, report } => (
             jar.clone(),
             Html(crate::templates::admin_db_health_result_page(
-                &report, true, csrf,
+                &report,
+                true,
+                csrf,
+                Some(job_id),
             )),
         )
             .into_response(),
         crate::middleware::DbMaintenanceJobStatus::Failed {
+            job_id,
             finished_at,
             message,
         } => (
@@ -400,19 +494,11 @@ fn render_db_repair_status_response(
                 csrf,
                 &message,
                 finished_at,
+                job_id,
             )),
         )
             .into_response(),
-    };
-
-    if should_refresh {
-        response.headers_mut().insert(
-            header::REFRESH,
-            HeaderValue::from_static("10; url=/admin/db/repair/status"),
-        );
     }
-
-    response
 }
 
 #[cfg(test)]
@@ -421,6 +507,7 @@ mod tests {
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
+        response::Response,
         routing::{get, post},
         Router,
     };
@@ -496,13 +583,27 @@ mod tests {
         .expect("create controlled integrity problem");
     }
 
-    async fn repair_status_body(router: &Router) -> String {
-        let response = router
+    fn repair_router(state: crate::middleware::AppState) -> Router {
+        Router::new()
+            .route(
+                "/admin/db/repair",
+                get(admin_db_repair_status).post(admin_db_repair),
+            )
+            .route("/admin/db/repair/status", get(admin_db_repair_status))
+            .route(
+                "/admin/db/repair/progress",
+                get(super::admin_db_repair_progress_json),
+            )
+            .with_state(state)
+    }
+
+    async fn admin_get(router: &Router, uri: &str) -> Response {
+        router
             .clone()
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/admin/db/repair/status")
+                    .uri(uri)
                     .header(
                         header::COOKIE,
                         "csrf_token=csrf123; chan_admin_session=session123",
@@ -511,12 +612,20 @@ mod tests {
                     .expect("request"),
             )
             .await
-            .expect("status response");
-        assert_eq!(response.status(), StatusCode::OK);
+            .expect("response")
+    }
+
+    async fn response_body(response: Response) -> String {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("status body bytes");
-        String::from_utf8(body.to_vec()).expect("utf8 status body")
+            .expect("body bytes");
+        String::from_utf8(body.to_vec()).expect("utf8 body")
+    }
+
+    async fn repair_status_body(router: &Router) -> String {
+        let response = admin_get(router, "/admin/db/repair/status").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response_body(response).await
     }
 
     async fn wait_for_repair_result(router: &Router) -> String {
@@ -551,13 +660,7 @@ mod tests {
             *failure = Some("simulated pre-repair backup failure".to_string());
         }
 
-        let router = Router::new()
-            .route(
-                "/admin/db/repair",
-                get(admin_db_repair_status).post(admin_db_repair),
-            )
-            .route("/admin/db/repair/status", get(admin_db_repair_status))
-            .with_state(state.clone());
+        let router = repair_router(state.clone());
         let response = router
             .clone()
             .oneshot(
@@ -576,12 +679,16 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
+        let expected_refresh = format!(
+            "10; url={}",
+            super::db_repair_status_url(state.db_maintenance_jobs.snapshot().job_id())
+        );
         assert_eq!(
             response
                 .headers()
                 .get(header::REFRESH)
                 .and_then(|value| value.to_str().ok()),
-            Some("10; url=/admin/db/repair/status")
+            Some(expected_refresh.as_str())
         );
         let started_body = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -626,6 +733,10 @@ mod tests {
                 get(admin_db_repair_status).post(admin_db_repair),
             )
             .route("/admin/db/repair/status", get(admin_db_repair_status))
+            .route(
+                "/admin/db/repair/progress",
+                get(super::admin_db_repair_progress_json),
+            )
             .with_state(state.clone());
 
         let check_response = router
@@ -670,12 +781,16 @@ mod tests {
             .expect("repair response");
 
         assert_eq!(repair_response.status(), StatusCode::OK);
+        let expected_refresh = format!(
+            "10; url={}",
+            super::db_repair_status_url(state.db_maintenance_jobs.snapshot().job_id())
+        );
         assert_eq!(
             repair_response
                 .headers()
                 .get(header::REFRESH)
                 .and_then(|value| value.to_str().ok()),
-            Some("10; url=/admin/db/repair/status")
+            Some(expected_refresh.as_str())
         );
         let started_body = to_bytes(repair_response.into_body(), usize::MAX)
             .await
@@ -717,33 +832,159 @@ mod tests {
         let state = crate::test_support::app_state();
         install_admin_session(&state);
 
-        let router = Router::new()
-            .route(
-                "/admin/db/repair",
-                get(admin_db_repair_status).post(admin_db_repair),
-            )
-            .with_state(state);
+        let router = repair_router(state);
 
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/admin/db/repair")
-                    .header(
-                        header::COOKIE,
-                        "csrf_token=csrf123; chan_admin_session=session123",
-                    )
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
+        let response = admin_get(&router, "/admin/db/repair").await;
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body bytes");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        let body = response_body(response).await;
         assert!(body.contains("[ database repair ]"));
+    }
+
+    #[tokio::test]
+    async fn admin_db_repair_idle_get_page_is_not_running() {
+        let _guard = REPAIR_TEST_LOCK.lock().await;
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let router = repair_router(state);
+
+        let response = admin_get(&router, "/admin/db/repair").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::REFRESH).is_none());
+        let body = response_body(response).await;
+        assert!(body.contains("No maintenance rebuild is running."));
+        assert!(!body.contains("maintenance rebuild running"));
+        assert!(!body.contains("Maintenance rebuild started at <code>0</code>"));
+        assert!(!body.contains("data-db-repair-progress"));
+        assert!(!body.contains("data-db-repair-progress-url"));
+    }
+
+    #[tokio::test]
+    async fn admin_db_repair_idle_status_page_is_not_running() {
+        let _guard = REPAIR_TEST_LOCK.lock().await;
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let router = repair_router(state);
+
+        let response = admin_get(&router, "/admin/db/repair/status").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::REFRESH).is_none());
+        let body = response_body(response).await;
+        assert!(body.contains("No maintenance rebuild is running."));
+        assert!(!body.contains("maintenance rebuild running"));
+        assert!(!body.contains("Maintenance rebuild started at <code>0</code>"));
+        assert!(!body.contains("data-db-repair-progress"));
+    }
+
+    #[tokio::test]
+    async fn admin_db_repair_running_status_page_carries_job_identity() {
+        let _guard = REPAIR_TEST_LOCK.lock().await;
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let job_id = state.db_maintenance_jobs.mark_running();
+        let router = repair_router(state);
+
+        let response = admin_get(&router, "/admin/db/repair/status").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let expected_refresh = format!("10; url=/admin/db/repair/status?job_id={job_id}");
+        assert_eq!(
+            response
+                .headers()
+                .get(header::REFRESH)
+                .and_then(|value| value.to_str().ok()),
+            Some(expected_refresh.as_str())
+        );
+        let body = response_body(response).await;
+        assert!(body.contains("maintenance rebuild running"));
+        assert!(body.contains(&format!(
+            r#"data-db-repair-progress-url="/admin/db/repair/progress?job_id={job_id}""#
+        )));
+        assert!(body.contains(&format!(r#"data-db-repair-job-id="{job_id}""#)));
+        assert!(body.contains(&format!(
+            r#"href="/admin/db/repair/status?job_id={job_id}""#
+        )));
+    }
+
+    #[tokio::test]
+    async fn admin_db_repair_terminal_status_is_bound_to_specific_job_id() {
+        let _guard = REPAIR_TEST_LOCK.lock().await;
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let conn = state.db.get().expect("db connection");
+        let first_job_id = state.db_maintenance_jobs.mark_running();
+        state
+            .db_maintenance_jobs
+            .mark_finished(crate::db::check_db_health(&conn));
+        let second_job_id = state.db_maintenance_jobs.mark_running();
+        let router = repair_router(state);
+
+        let stale_progress = admin_get(
+            &router,
+            &format!("/admin/db/repair/progress?job_id={first_job_id}"),
+        )
+        .await;
+        assert_eq!(stale_progress.status(), StatusCode::OK);
+        let stale_progress = response_body(stale_progress).await;
+        let stale_progress: serde_json::Value =
+            serde_json::from_str(&stale_progress).expect("stale progress json");
+        assert_eq!(
+            stale_progress
+                .get("state")
+                .and_then(serde_json::Value::as_str),
+            Some("stale")
+        );
+        assert_eq!(
+            stale_progress
+                .get("job_id")
+                .and_then(serde_json::Value::as_u64),
+            Some(second_job_id)
+        );
+        let expected_redirect = format!("/admin/db/repair/status?job_id={second_job_id}");
+        assert_eq!(
+            stale_progress
+                .get("redirect_url")
+                .and_then(serde_json::Value::as_str),
+            Some(expected_redirect.as_str())
+        );
+
+        let stale_status = admin_get(
+            &router,
+            &format!("/admin/db/repair/status?job_id={first_job_id}"),
+        )
+        .await;
+        assert_eq!(stale_status.status(), StatusCode::OK);
+        assert!(stale_status.headers().get(header::REFRESH).is_none());
+        let stale_status_body = response_body(stale_status).await;
+        assert!(stale_status_body.contains(&format!(
+            "This page is for maintenance rebuild <code>{first_job_id}</code>"
+        )));
+        assert!(stale_status_body.contains(&format!(
+            r#"href="/admin/db/repair/status?job_id={second_job_id}""#
+        )));
+    }
+
+    #[tokio::test]
+    async fn admin_db_repair_finished_status_page_shows_matching_run_id() {
+        let _guard = REPAIR_TEST_LOCK.lock().await;
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let conn = state.db.get().expect("db connection");
+        let job_id = state.db_maintenance_jobs.mark_running();
+        state
+            .db_maintenance_jobs
+            .mark_finished(crate::db::check_db_health(&conn));
+        let router = repair_router(state);
+
+        let response =
+            admin_get(&router, &format!("/admin/db/repair/status?job_id={job_id}")).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::REFRESH).is_none());
+        let body = response_body(response).await;
+        assert!(body.contains("[ database repair ]"));
+        assert!(body.contains(&format!("<strong>Run id:</strong> <code>{job_id}</code>")));
     }
 }

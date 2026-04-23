@@ -23,7 +23,7 @@ use crate::{
     utils::crypto::hash_password,
 };
 use axum::{
-    extract::{Form, Multipart, State},
+    extract::{Form, Multipart, Query, State},
     http::{header, HeaderMap, HeaderValue},
     response::{Html, IntoResponse, Redirect, Response},
 };

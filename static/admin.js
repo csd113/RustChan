@@ -252,6 +252,7 @@
 
     var bar = wrap.querySelector('[data-db-repair-progress-bar]');
     var text = wrap.querySelector('[data-db-repair-progress-text]');
+    var progressUrl = wrap.getAttribute('data-db-repair-progress-url') || '/admin/db/repair/progress';
     var timer = null;
     var redirected = false;
 
@@ -275,7 +276,7 @@
     }
 
     function poll() {
-      fetch('/admin/db/repair/progress', {
+      fetch(progressUrl, {
         credentials: 'same-origin',
         headers: { 'Accept': 'application/json' }
       })

@@ -96,13 +96,16 @@ impl MaintenanceGate {
 pub enum DbMaintenanceJobStatus {
     Idle,
     Running {
+        job_id: u64,
         started_at: i64,
         phase: DbMaintenanceJobPhase,
     },
     Finished {
+        job_id: u64,
         report: crate::db::DbHealthReport,
     },
     Failed {
+        job_id: u64,
         finished_at: i64,
         message: String,
     },
@@ -117,6 +120,7 @@ pub enum DbMaintenanceJobPhase {
 
 #[derive(Clone)]
 pub struct DbMaintenanceJobs {
+    next_job_id: std::sync::Arc<AtomicU64>,
     status: std::sync::Arc<parking_lot::RwLock<DbMaintenanceJobStatus>>,
 }
 
@@ -124,29 +128,47 @@ impl DbMaintenanceJobs {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            next_job_id: std::sync::Arc::new(AtomicU64::new(1)),
             status: std::sync::Arc::new(parking_lot::RwLock::new(DbMaintenanceJobStatus::Idle)),
         }
     }
 
-    pub fn mark_running(&self) {
+    pub fn mark_running(&self) -> u64 {
+        let job_id = self.next_job_id.fetch_add(1, Ordering::Relaxed);
         *self.status.write() = DbMaintenanceJobStatus::Running {
+            job_id,
             started_at: chrono::Utc::now().timestamp(),
             phase: DbMaintenanceJobPhase::Starting,
         };
+        job_id
     }
 
     pub fn mark_phase(&self, phase: DbMaintenanceJobPhase) {
-        if let DbMaintenanceJobStatus::Running { started_at, .. } = self.snapshot() {
-            *self.status.write() = DbMaintenanceJobStatus::Running { started_at, phase };
+        if let DbMaintenanceJobStatus::Running {
+            job_id, started_at, ..
+        } = self.snapshot()
+        {
+            *self.status.write() = DbMaintenanceJobStatus::Running {
+                job_id,
+                started_at,
+                phase,
+            };
         }
     }
 
     pub fn mark_finished(&self, report: crate::db::DbHealthReport) {
-        *self.status.write() = DbMaintenanceJobStatus::Finished { report };
+        let Some(job_id) = self.snapshot().job_id() else {
+            return;
+        };
+        *self.status.write() = DbMaintenanceJobStatus::Finished { job_id, report };
     }
 
     pub fn mark_failed(&self, message: String) {
+        let Some(job_id) = self.snapshot().job_id() else {
+            return;
+        };
         *self.status.write() = DbMaintenanceJobStatus::Failed {
+            job_id,
             finished_at: chrono::Utc::now().timestamp(),
             message,
         };
@@ -155,6 +177,18 @@ impl DbMaintenanceJobs {
     #[must_use]
     pub fn snapshot(&self) -> DbMaintenanceJobStatus {
         self.status.read().clone()
+    }
+}
+
+impl DbMaintenanceJobStatus {
+    #[must_use]
+    pub const fn job_id(&self) -> Option<u64> {
+        match self {
+            Self::Idle => None,
+            Self::Running { job_id, .. }
+            | Self::Finished { job_id, .. }
+            | Self::Failed { job_id, .. } => Some(*job_id),
+        }
     }
 }
 
@@ -185,7 +219,7 @@ pub struct AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::AutoFullBackupSettings;
+    use super::{AutoFullBackupSettings, DbMaintenanceJobStatus, DbMaintenanceJobs};
 
     #[test]
     fn auto_full_backup_settings_clamps_copies_to_keep() {
@@ -196,5 +230,49 @@ mod tests {
         let snapshot = settings.snapshot();
         assert_eq!(snapshot.interval_hours, 12);
         assert_eq!(snapshot.copies_to_keep, 1);
+    }
+
+    #[test]
+    fn db_maintenance_jobs_start_idle_without_job_identity() {
+        let jobs = DbMaintenanceJobs::new();
+
+        assert!(matches!(jobs.snapshot(), DbMaintenanceJobStatus::Idle));
+        assert_eq!(jobs.snapshot().job_id(), None);
+    }
+
+    #[test]
+    fn db_maintenance_jobs_assign_monotonic_job_ids_and_preserve_them_in_terminal_states() {
+        let jobs = DbMaintenanceJobs::new();
+
+        let first_job_id = jobs.mark_running();
+        let first_status = jobs.snapshot();
+        match first_status {
+            DbMaintenanceJobStatus::Running { job_id, .. } => assert_eq!(job_id, first_job_id),
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Finished { .. }
+            | DbMaintenanceJobStatus::Failed { .. } => panic!("expected running status"),
+        }
+
+        let conn = crate::db::init_test_pool()
+            .expect("test pool")
+            .get()
+            .expect("db connection");
+        jobs.mark_finished(crate::db::check_db_health(&conn));
+        match jobs.snapshot() {
+            DbMaintenanceJobStatus::Finished { job_id, .. } => assert_eq!(job_id, first_job_id),
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Running { .. }
+            | DbMaintenanceJobStatus::Failed { .. } => panic!("expected finished status"),
+        }
+
+        let second_job_id = jobs.mark_running();
+        assert!(second_job_id > first_job_id);
+        jobs.mark_failed("simulated failure".to_string());
+        match jobs.snapshot() {
+            DbMaintenanceJobStatus::Failed { job_id, .. } => assert_eq!(job_id, second_job_id),
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Running { .. }
+            | DbMaintenanceJobStatus::Finished { .. } => panic!("expected failed status"),
+        }
     }
 }
