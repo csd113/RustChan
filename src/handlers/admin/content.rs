@@ -17,6 +17,27 @@ use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use std::path::PathBuf;
 
+fn sanitize_board_short_value(board_short: &str) -> String {
+    board_short
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect()
+}
+
+fn resolve_board_short_name(
+    boards: Option<&[crate::models::Board]>,
+    board_id: i64,
+    fallback_board: &str,
+) -> String {
+    boards
+        .and_then(|boards| boards.iter().find(|board| board.id == board_id))
+        .map_or_else(
+            || sanitize_board_short_value(fallback_board),
+            |board| board.short_name.clone(),
+        )
+}
+
 // ─── POST /admin/board/create ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -310,21 +331,17 @@ pub async fn thread_action(
         let board_name = tokio::task::spawn_blocking(move || -> Result<String> {
             let conn = pool.get()?;
             let thread = db::get_thread(&conn, thread_id)?;
+            let boards = db::get_all_boards(&conn).ok();
             if let Some(t) = thread {
-                let boards = db::get_all_boards(&conn)?;
-                if let Some(b) = boards.iter().find(|b| b.id == t.board_id) {
-                    return Ok(b.short_name.clone());
-                }
+                return Ok(resolve_board_short_name(
+                    boards.as_deref(),
+                    t.board_id,
+                    &form.board,
+                ));
             }
             // Fallback: sanitize the user-supplied board name to prevent open-redirect.
             // Only allow alphanumeric characters (matching the board short_name format).
-            let safe: String = form
-                .board
-                .chars()
-                .filter(char::is_ascii_alphanumeric)
-                .take(8)
-                .collect();
-            Ok(safe)
+            Ok(sanitize_board_short_value(&form.board))
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
@@ -375,19 +392,9 @@ pub async fn admin_delete_post(
 
             // Resolve board name from DB, not user-supplied form field.
             // Fallback sanitizes the user-supplied value to alphanumeric only.
-            let board_name = db::get_all_boards(&conn)?
-                .into_iter()
-                .find(|b| b.id == post.board_id)
-                .map_or_else(
-                    || {
-                        form.board
-                            .chars()
-                            .filter(char::is_ascii_alphanumeric)
-                            .take(8)
-                            .collect()
-                    },
-                    |b| b.short_name,
-                );
+            let boards = db::get_all_boards(&conn).ok();
+            let board_name =
+                resolve_board_short_name(boards.as_deref(), post.board_id, &form.board);
 
             let thread_id = post.thread_id;
             let is_op = post.is_op;
@@ -524,4 +531,192 @@ pub async fn admin_delete_thread(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(Redirect::to(&format!("/{redirect_board}")).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{header, StatusCode};
+    use axum_extra::extract::cookie::{Cookie, CookieJar};
+
+    fn build_admin_jar() -> CookieJar {
+        CookieJar::new()
+            .add(Cookie::new(super::super::SESSION_COOKIE, "session123"))
+            .add(Cookie::new("csrf_token", "csrf123"))
+    }
+
+    fn seed_admin_data() -> (crate::middleware::AppState, i64, i64, i64) {
+        let state = crate::test_support::app_state();
+        let conn = state.db.get().expect("db connection");
+        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
+        let admin_id =
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+        crate::db::create_session(
+            &conn,
+            "session123",
+            admin_id,
+            chrono::Utc::now().timestamp() + 3600,
+        )
+        .expect("create session");
+        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        let board = crate::db::get_board_by_short(&conn, "test")
+            .expect("load board")
+            .expect("board exists");
+
+        let op = crate::db::NewPost {
+            thread_id: 0,
+            board_id: board.id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "op body".to_string(),
+            body_html: "<p>op body</p>".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token-op".to_string(),
+            is_op: true,
+        };
+        let (thread_id, _, _) =
+            crate::db::create_thread_with_optional_poll(&conn, board.id, None, &op, "", None, None)
+                .expect("create thread");
+
+        let reply = crate::db::NewPost {
+            thread_id,
+            board_id: board.id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "reply body".to_string(),
+            body_html: "<p>reply body</p>".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token-reply".to_string(),
+            is_op: false,
+        };
+        let reply_id = crate::db::create_reply_with_thread_update(&conn, &reply, "", true, None)
+            .expect("create reply");
+
+        (state, thread_id, reply_id, board.id)
+    }
+
+    #[test]
+    fn resolve_board_short_name_falls_back_when_boards_missing() {
+        assert_eq!(
+            resolve_board_short_name(None, 123, "fallback-board!"),
+            "fallback"
+        );
+    }
+
+    #[test]
+    fn resolve_board_short_name_prefers_matching_board() {
+        let board = crate::models::Board {
+            id: 7,
+            display_order: 0,
+            short_name: "tech".to_string(),
+            name: "Technology".to_string(),
+            description: String::new(),
+            nsfw: false,
+            max_threads: 100,
+            max_archived_threads: 100,
+            bump_limit: 500,
+            allow_images: true,
+            allow_video: true,
+            allow_audio: true,
+            allow_any_files: false,
+            allow_tripcodes: true,
+            allow_editing: false,
+            edit_window_secs: 300,
+            allow_archive: true,
+            allow_video_embeds: true,
+            allow_captcha: false,
+            show_poster_ids: false,
+            collapse_greentext: false,
+            post_cooldown_secs: 0,
+            default_theme: String::new(),
+            banner_mode: crate::models::BoardBannerMode::Inherit,
+            access_mode: crate::models::BoardAccessMode::Public,
+            access_password_hash: String::new(),
+            created_at: 0,
+        };
+
+        assert_eq!(
+            resolve_board_short_name(Some(std::slice::from_ref(&board)), 7, "fallback"),
+            "tech"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_delete_post_uses_fallback_board_when_lookup_breaks() {
+        let (state, thread_id, reply_id, _board_id) = seed_admin_data();
+        let conn = state.db.get().expect("db connection");
+        conn.execute_batch("ALTER TABLE boards RENAME COLUMN short_name TO short_name_broken")
+            .expect("break board lookup");
+
+        let response = admin_delete_post(
+            State(state),
+            build_admin_jar(),
+            Form(AdminDeletePostForm {
+                post_id: reply_id,
+                board: "fallback".to_string(),
+                csrf: Some("csrf123".to_string()),
+            }),
+        )
+        .await
+        .expect("handler response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("location header");
+        assert_eq!(location, format!("/fallback/thread/{thread_id}"));
+    }
+
+    #[tokio::test]
+    async fn thread_action_uses_fallback_board_when_lookup_breaks() {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data();
+        let conn = state.db.get().expect("db connection");
+        conn.execute_batch("ALTER TABLE boards RENAME COLUMN short_name TO short_name_broken")
+            .expect("break board lookup");
+
+        let response = thread_action(
+            State(state),
+            build_admin_jar(),
+            Form(ThreadActionForm {
+                thread_id,
+                board: "fallback".to_string(),
+                action: "lock".to_string(),
+                csrf: Some("csrf123".to_string()),
+            }),
+        )
+        .await
+        .expect("handler response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("location header");
+        assert_eq!(location, format!("/fallback/thread/{thread_id}"));
+    }
 }
