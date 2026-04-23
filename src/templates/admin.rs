@@ -1207,7 +1207,11 @@ pub fn admin_db_repair_running_page(csrf_token: &str, started_at: i64) -> String
 <h2>// maintenance rebuild running</h2>
 <div class="page-box" style="margin-top:0.75rem;max-width:760px">
 <p>Maintenance rebuild started at <code>{started_at}</code>.</p>
-<p style="color:var(--text-dim)">This page refreshes automatically while the backup and database rebuild finish.</p>
+<div class="compress-progress" data-db-repair-progress style="display:block;margin:0.75rem 0">
+  <div class="compress-progress-track"><div class="compress-progress-bar" data-db-repair-progress-bar style="width:5%"></div></div>
+  <div class="compress-progress-text" data-db-repair-progress-text>Starting maintenance rebuild...</div>
+</div>
+<p style="color:var(--text-dim)">This page updates live while the backup and database rebuild finish.</p>
 </div>
 <p style="margin-top:1rem">
   <a href="/admin/db/repair/status">refresh status</a> · <a href="/admin/panel">back to admin panel</a>

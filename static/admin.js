@@ -245,6 +245,60 @@
   document.addEventListener('DOMContentLoaded', initAdminLiveLog);
 })();
 
+(function () {
+  function initDbRepairProgress() {
+    var wrap = document.querySelector('[data-db-repair-progress]');
+    if (!wrap) return;
+
+    var bar = wrap.querySelector('[data-db-repair-progress-bar]');
+    var text = wrap.querySelector('[data-db-repair-progress-text]');
+    var timer = null;
+    var redirected = false;
+
+    function setProgress(percent, message) {
+      percent = Math.min(100, Math.max(0, Number(percent) || 0));
+      if (bar) bar.style.width = percent + '%';
+      if (text) text.textContent = message || 'Working...';
+    }
+
+    function finish(data) {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      if (redirected) return;
+      redirected = true;
+      setProgress(data && data.percent, data && data.label);
+      window.setTimeout(function () {
+        window.location.assign((data && data.redirect_url) || '/admin/db/repair/status');
+      }, 700);
+    }
+
+    function poll() {
+      fetch('/admin/db/repair/progress', {
+        credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' }
+      })
+        .then(function (resp) {
+          if (!resp.ok) throw new Error('progress request failed');
+          return resp.json();
+        })
+        .then(function (data) {
+          setProgress(data.percent, data.label);
+          if (data.done) finish(data);
+        })
+        .catch(function () {
+          setProgress(5, 'Still working. Waiting for progress update...');
+        });
+    }
+
+    poll();
+    timer = window.setInterval(poll, 750);
+  }
+
+  document.addEventListener('DOMContentLoaded', initDbRepairProgress);
+})();
+
 // Backup progress modal for both POST-based saves and GET downloads.
 // Handlers stay CSP-safe and reuse the same phase codes as middleware::backup_phase.
 (function () {

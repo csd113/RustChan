@@ -295,6 +295,10 @@ fn admin_moderation_routes() -> Router<AppState> {
             "/admin/db/repair/status",
             get(crate::handlers::admin::admin_db_repair_status),
         )
+        .route(
+            "/admin/db/repair/progress",
+            get(crate::handlers::admin::admin_db_repair_progress_json),
+        )
         .route("/admin/vacuum", post(crate::handlers::admin::admin_vacuum))
         .route(
             "/admin/ip/{ip_hash}",

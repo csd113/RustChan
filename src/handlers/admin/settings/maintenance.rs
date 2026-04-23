@@ -2,6 +2,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
+use std::sync::atomic::Ordering;
 
 #[cfg(test)]
 static PRE_REPAIR_BACKUP_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -160,6 +161,7 @@ pub async fn admin_db_repair(
         let job_status = db_maintenance_jobs.clone();
         let join_result = tokio::task::spawn_blocking(move || {
             let _maintenance_guard = maintenance_guard;
+            db_maintenance_jobs.mark_phase(crate::middleware::DbMaintenanceJobPhase::Backup);
             let backup_result = create_pre_repair_backup(&pool, &progress, copies_to_keep);
 
             let conn = match pool.get() {
@@ -172,6 +174,7 @@ pub async fn admin_db_repair(
                 }
             };
 
+            db_maintenance_jobs.mark_phase(crate::middleware::DbMaintenanceJobPhase::Repair);
             let report = match backup_result {
                 Ok(filename) => db::attempt_db_repair(&conn, Some(db::DbRepairBackup { filename })),
                 Err(error) => {
@@ -202,6 +205,133 @@ pub async fn admin_db_repair(
         &csrf,
         state.db_maintenance_jobs.snapshot(),
     ))
+}
+
+pub async fn admin_db_repair_progress_json(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let payload = db_repair_progress_payload(
+        state.db_maintenance_jobs.snapshot(),
+        state.backup_progress.as_ref(),
+    );
+    Ok((
+        [(header::CONTENT_TYPE, "application/json".to_string())],
+        payload.to_string(),
+    )
+        .into_response())
+}
+
+fn db_repair_progress_payload(
+    status: crate::middleware::DbMaintenanceJobStatus,
+    backup_progress: &crate::middleware::BackupProgress,
+) -> serde_json::Value {
+    let backup_phase = backup_progress.phase.load(Ordering::Relaxed);
+    let backup_files_done = backup_progress.files_done.load(Ordering::Relaxed);
+    let backup_files_total = backup_progress.files_total.load(Ordering::Relaxed);
+
+    match status {
+        crate::middleware::DbMaintenanceJobStatus::Idle => serde_json::json!({
+            "state": "idle",
+            "label": "Waiting to start...",
+            "percent": 0,
+            "done": false,
+        }),
+        crate::middleware::DbMaintenanceJobStatus::Running {
+            phase: crate::middleware::DbMaintenanceJobPhase::Starting,
+            ..
+        } => serde_json::json!({
+            "state": "running",
+            "label": "Starting maintenance rebuild...",
+            "percent": 5,
+            "done": false,
+        }),
+        crate::middleware::DbMaintenanceJobStatus::Running {
+            phase: crate::middleware::DbMaintenanceJobPhase::Backup,
+            ..
+        } => {
+            let backup_percent =
+                backup_percent(backup_phase, backup_files_done, backup_files_total);
+            let label = backup_progress_label(backup_phase, backup_files_done, backup_files_total);
+            serde_json::json!({
+                "state": "running",
+                "label": label,
+                "percent": backup_percent,
+                "done": false,
+            })
+        }
+        crate::middleware::DbMaintenanceJobStatus::Running {
+            phase: crate::middleware::DbMaintenanceJobPhase::Repair,
+            ..
+        } => serde_json::json!({
+            "state": "running",
+            "label": "Rebuilding indexes and checking database health...",
+            "percent": 82,
+            "done": false,
+        }),
+        crate::middleware::DbMaintenanceJobStatus::Finished { .. } => serde_json::json!({
+            "state": "finished",
+            "label": "Maintenance rebuild complete. Opening report...",
+            "percent": 100,
+            "done": true,
+            "redirect_url": "/admin/db/repair/status",
+        }),
+        crate::middleware::DbMaintenanceJobStatus::Failed { message, .. } => serde_json::json!({
+            "state": "failed",
+            "label": message,
+            "percent": 100,
+            "done": true,
+            "redirect_url": "/admin/db/repair/status",
+        }),
+    }
+}
+
+fn backup_percent(phase: u64, files_done: u64, files_total: u64) -> u64 {
+    match phase {
+        crate::middleware::backup_phase::SNAPSHOT_DB => 15,
+        crate::middleware::backup_phase::COUNT_FILES => 30,
+        crate::middleware::backup_phase::COMPRESS => files_done
+            .saturating_mul(30)
+            .checked_div(files_total)
+            .map_or(45, |percent| 45 + percent),
+        crate::middleware::backup_phase::DONE => 78,
+        _ => 10,
+    }
+}
+
+fn backup_progress_label(phase: u64, files_done: u64, files_total: u64) -> String {
+    match phase {
+        crate::middleware::backup_phase::SNAPSHOT_DB => {
+            "Creating pre-repair database snapshot...".to_string()
+        }
+        crate::middleware::backup_phase::COUNT_FILES => {
+            "Counting files for the pre-repair backup...".to_string()
+        }
+        crate::middleware::backup_phase::COMPRESS => {
+            if files_total == 0 {
+                "Compressing pre-repair backup...".to_string()
+            } else {
+                format!("Compressing pre-repair backup... {files_done}/{files_total} files")
+            }
+        }
+        crate::middleware::backup_phase::DONE => "Pre-repair backup complete...".to_string(),
+        _ => "Preparing pre-repair backup...".to_string(),
+    }
 }
 
 pub async fn admin_db_repair_status(
@@ -247,7 +377,7 @@ fn render_db_repair_status_response(
             Html(crate::templates::admin_db_repair_running_page(csrf, 0)),
         )
             .into_response(),
-        crate::middleware::DbMaintenanceJobStatus::Running { started_at } => (
+        crate::middleware::DbMaintenanceJobStatus::Running { started_at, .. } => (
             jar.clone(),
             Html(crate::templates::admin_db_repair_running_page(
                 csrf, started_at,
@@ -278,7 +408,7 @@ fn render_db_repair_status_response(
     if should_refresh {
         response.headers_mut().insert(
             header::REFRESH,
-            HeaderValue::from_static("3; url=/admin/db/repair/status"),
+            HeaderValue::from_static("10; url=/admin/db/repair/status"),
         );
     }
 
@@ -295,6 +425,8 @@ mod tests {
         Router,
     };
     use tower::ServiceExt as _;
+
+    static REPAIR_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn install_admin_session(state: &crate::middleware::AppState) {
         let conn = state.db.get().expect("db connection");
@@ -400,6 +532,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_db_repair_aborts_before_mutation_when_pre_repair_backup_fails() {
+        let _guard = REPAIR_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
         install_admin_session(&state);
 
@@ -448,7 +581,7 @@ mod tests {
                 .headers()
                 .get(header::REFRESH)
                 .and_then(|value| value.to_str().ok()),
-            Some("3; url=/admin/db/repair/status")
+            Some("10; url=/admin/db/repair/status")
         );
         let started_body = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -481,6 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_db_repair_reports_problem_when_integrity_issue_remains_after_repair() {
+        let _guard = REPAIR_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
         install_admin_session(&state);
         create_controlled_integrity_problem(&state);
@@ -541,7 +675,7 @@ mod tests {
                 .headers()
                 .get(header::REFRESH)
                 .and_then(|value| value.to_str().ok()),
-            Some("3; url=/admin/db/repair/status")
+            Some("10; url=/admin/db/repair/status")
         );
         let started_body = to_bytes(repair_response.into_body(), usize::MAX)
             .await
@@ -579,6 +713,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_db_repair_get_shows_status_instead_of_method_not_allowed() {
+        let _guard = REPAIR_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
         install_admin_session(&state);
 

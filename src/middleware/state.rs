@@ -95,9 +95,24 @@ impl MaintenanceGate {
 #[derive(Clone)]
 pub enum DbMaintenanceJobStatus {
     Idle,
-    Running { started_at: i64 },
-    Finished { report: crate::db::DbHealthReport },
-    Failed { finished_at: i64, message: String },
+    Running {
+        started_at: i64,
+        phase: DbMaintenanceJobPhase,
+    },
+    Finished {
+        report: crate::db::DbHealthReport,
+    },
+    Failed {
+        finished_at: i64,
+        message: String,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub enum DbMaintenanceJobPhase {
+    Starting,
+    Backup,
+    Repair,
 }
 
 #[derive(Clone)]
@@ -116,7 +131,14 @@ impl DbMaintenanceJobs {
     pub fn mark_running(&self) {
         *self.status.write() = DbMaintenanceJobStatus::Running {
             started_at: chrono::Utc::now().timestamp(),
+            phase: DbMaintenanceJobPhase::Starting,
         };
+    }
+
+    pub fn mark_phase(&self, phase: DbMaintenanceJobPhase) {
+        if let DbMaintenanceJobStatus::Running { started_at, .. } = self.snapshot() {
+            *self.status.write() = DbMaintenanceJobStatus::Running { started_at, phase };
+        }
     }
 
     pub fn mark_finished(&self, report: crate::db::DbHealthReport) {
