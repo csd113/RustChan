@@ -718,7 +718,7 @@ pub fn get_posts_by_ip_hash(
                 p.file_size, p.thumb_path, p.mime_type, p.created_at,
                 p.deletion_token, p.is_op, p.media_type,
                 p.audio_file_path, p.audio_file_name, p.audio_file_size, p.audio_mime_type,
-                p.edited_at,
+                p.edited_at, p.media_processing_state, p.media_processing_error,
                 b.short_name
          FROM posts p
          JOIN boards b ON b.id = p.board_id
@@ -728,10 +728,10 @@ pub fn get_posts_by_ip_hash(
     )?;
 
     let rows = stmt.query_map(rusqlite::params![ip_hash, limit, offset], |row| {
-        // map_post reads columns 0–22 (the 23 canonical post columns).
-        // Column 23 is b.short_name, appended only by this query.
+        // map_post reads columns 0–24 (the 25 canonical post columns).
+        // Column 25 is b.short_name, appended only by this query.
         let post = super::posts::map_post(row)?;
-        let board_short: String = row.get(23)?;
+        let board_short: String = row.get(25)?;
         Ok((post, board_short))
     })?;
 
@@ -1048,8 +1048,11 @@ pub fn db_repair_aborted_for_backup_failure(
 #[cfg(test)]
 mod tests {
     use super::{
-        attempt_db_repair, check_db_health, db_repair_aborted_for_backup_failure, file_ban_appeal,
-        BanAppealSubmission, DbRepairBackup,
+        attempt_db_repair, check_db_health, db_repair_aborted_for_backup_failure,
+        file_ban_appeal, get_posts_by_ip_hash, BanAppealSubmission, DbRepairBackup,
+    };
+    use crate::db::{
+        create_board, create_thread_with_optional_poll, get_board_by_short, NewPost,
     };
 
     #[test]
@@ -1161,5 +1164,59 @@ mod tests {
             .output()
             .contains("fk_health_child"));
         assert!(!report.before.ok());
+    }
+
+    #[test]
+    fn get_posts_by_ip_hash_maps_posts_with_media_processing_columns() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+        let ip_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        create_board(&conn, "test", "Test", "", false).expect("create board");
+        let board = get_board_by_short(&conn, "test")
+            .expect("load board")
+            .expect("board exists");
+        let post = NewPost {
+            thread_id: 0,
+            board_id: board.id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some("subject".to_string()),
+            body: "body".to_string(),
+            body_html: "<p>body</p>".to_string(),
+            ip_hash: Some(ip_hash.to_string()),
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: true,
+        };
+
+        let (_, post_id, _) =
+            create_thread_with_optional_poll(&conn, board.id, None, &post, "", None, None)
+                .expect("create thread");
+        crate::db::set_post_media_processing_state(
+            &conn,
+            post_id,
+            Some("pending"),
+            Some("transcoding"),
+        )
+        .expect("set media processing state");
+
+        let posts = get_posts_by_ip_hash(&conn, ip_hash, 25, 0).expect("load ip history");
+        let (post, board_short) = posts.first().expect("ip history entry");
+
+        assert_eq!(posts.len(), 1);
+        assert_eq!(post.id, post_id);
+        assert_eq!(post.media_processing_state.as_deref(), Some("pending"));
+        assert_eq!(post.media_processing_error.as_deref(), Some("transcoding"));
+        assert_eq!(board_short, "test");
     }
 }
