@@ -217,14 +217,14 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Open backup source: {error}")))?;
         db::rebuild_pending_fs_ops_for_restore(&src)?;
         db::insert_pending_fs_op(&src, &pending_restore_op)?;
-        db::verify_only_pending_fs_op(&src, &pending_restore_id)?;
+        db::verify_pending_fs_op_present(&src, &pending_restore_id)?;
         let backup = Backup::new(&src, live_conn)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Backup init: {error}")))?;
         backup
             .run_to_completion(100, std::time::Duration::from_millis(0), None)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Backup copy: {error}")))?;
         drop(backup);
-        db::verify_only_pending_fs_op(live_conn, &pending_restore_id)?;
+        db::verify_pending_fs_op_present(live_conn, &pending_restore_id)?;
         Ok(())
     })();
 

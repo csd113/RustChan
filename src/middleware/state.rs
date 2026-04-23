@@ -143,35 +143,64 @@ impl DbMaintenanceJobs {
         job_id
     }
 
-    pub fn mark_phase(&self, phase: DbMaintenanceJobPhase) {
-        if let DbMaintenanceJobStatus::Running {
-            job_id, started_at, ..
-        } = self.snapshot()
-        {
-            *self.status.write() = DbMaintenanceJobStatus::Running {
-                job_id,
+    pub fn mark_phase(&self, job_id: u64, phase: DbMaintenanceJobPhase) -> bool {
+        let mut status = self.status.write();
+        match &*status {
+            DbMaintenanceJobStatus::Running {
+                job_id: current_job_id,
                 started_at,
-                phase,
-            };
+                ..
+            } if *current_job_id == job_id => {
+                *status = DbMaintenanceJobStatus::Running {
+                    job_id,
+                    started_at: *started_at,
+                    phase,
+                };
+                true
+            }
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Running { .. }
+            | DbMaintenanceJobStatus::Finished { .. }
+            | DbMaintenanceJobStatus::Failed { .. } => false,
         }
     }
 
-    pub fn mark_finished(&self, report: crate::db::DbHealthReport) {
-        let Some(job_id) = self.snapshot().job_id() else {
-            return;
-        };
-        *self.status.write() = DbMaintenanceJobStatus::Finished { job_id, report };
+    pub fn mark_finished(&self, job_id: u64, report: crate::db::DbHealthReport) -> bool {
+        let mut status = self.status.write();
+        match &*status {
+            DbMaintenanceJobStatus::Running {
+                job_id: current_job_id,
+                ..
+            } if *current_job_id == job_id => {
+                *status = DbMaintenanceJobStatus::Finished { job_id, report };
+                true
+            }
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Running { .. }
+            | DbMaintenanceJobStatus::Finished { .. }
+            | DbMaintenanceJobStatus::Failed { .. } => false,
+        }
     }
 
-    pub fn mark_failed(&self, message: String) {
-        let Some(job_id) = self.snapshot().job_id() else {
-            return;
-        };
-        *self.status.write() = DbMaintenanceJobStatus::Failed {
-            job_id,
-            finished_at: chrono::Utc::now().timestamp(),
-            message,
-        };
+    pub fn mark_failed(&self, job_id: u64, message: String) -> bool {
+        let mut status = self.status.write();
+        match &*status {
+            DbMaintenanceJobStatus::Running {
+                job_id: current_job_id,
+                ..
+            } if *current_job_id == job_id => {
+                *status = DbMaintenanceJobStatus::Failed {
+                    job_id,
+                    finished_at: chrono::Utc::now().timestamp(),
+                    message,
+                };
+                true
+            }
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Running { .. }
+            | DbMaintenanceJobStatus::Finished { .. }
+            | DbMaintenanceJobStatus::Failed { .. } => false,
+        }
     }
 
     #[must_use]
@@ -219,7 +248,9 @@ pub struct AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AutoFullBackupSettings, DbMaintenanceJobStatus, DbMaintenanceJobs};
+    use super::{
+        AutoFullBackupSettings, DbMaintenanceJobPhase, DbMaintenanceJobStatus, DbMaintenanceJobs,
+    };
 
     #[test]
     fn auto_full_backup_settings_clamps_copies_to_keep() {
@@ -257,7 +288,7 @@ mod tests {
             .expect("test pool")
             .get()
             .expect("db connection");
-        jobs.mark_finished(crate::db::check_db_health(&conn));
+        assert!(jobs.mark_finished(first_job_id, crate::db::check_db_health(&conn)));
         match jobs.snapshot() {
             DbMaintenanceJobStatus::Finished { job_id, .. } => assert_eq!(job_id, first_job_id),
             DbMaintenanceJobStatus::Idle
@@ -267,12 +298,115 @@ mod tests {
 
         let second_job_id = jobs.mark_running();
         assert!(second_job_id > first_job_id);
-        jobs.mark_failed("simulated failure".to_string());
+        assert!(jobs.mark_failed(second_job_id, "simulated failure".to_string()));
         match jobs.snapshot() {
             DbMaintenanceJobStatus::Failed { job_id, .. } => assert_eq!(job_id, second_job_id),
             DbMaintenanceJobStatus::Idle
             | DbMaintenanceJobStatus::Running { .. }
             | DbMaintenanceJobStatus::Finished { .. } => panic!("expected failed status"),
+        }
+    }
+
+    #[test]
+    fn db_maintenance_jobs_phase_updates_only_matching_running_job() {
+        let jobs = DbMaintenanceJobs::new();
+        let first_job_id = jobs.mark_running();
+        let second_job_id = jobs.mark_running();
+
+        assert!(!jobs.mark_phase(first_job_id, DbMaintenanceJobPhase::Backup));
+        match jobs.snapshot() {
+            DbMaintenanceJobStatus::Running { job_id, phase, .. } => {
+                assert_eq!(job_id, second_job_id);
+                assert!(matches!(phase, DbMaintenanceJobPhase::Starting));
+            }
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Finished { .. }
+            | DbMaintenanceJobStatus::Failed { .. } => panic!("expected running status"),
+        }
+
+        assert!(jobs.mark_phase(second_job_id, DbMaintenanceJobPhase::Repair));
+        match jobs.snapshot() {
+            DbMaintenanceJobStatus::Running { job_id, phase, .. } => {
+                assert_eq!(job_id, second_job_id);
+                assert!(matches!(phase, DbMaintenanceJobPhase::Repair));
+            }
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Finished { .. }
+            | DbMaintenanceJobStatus::Failed { .. } => panic!("expected running status"),
+        }
+    }
+
+    #[test]
+    fn db_maintenance_jobs_finished_updates_only_matching_running_job() {
+        let jobs = DbMaintenanceJobs::new();
+        let first_job_id = jobs.mark_running();
+        let second_job_id = jobs.mark_running();
+        let conn = crate::db::init_test_pool()
+            .expect("test pool")
+            .get()
+            .expect("db connection");
+        let report = crate::db::check_db_health(&conn);
+
+        assert!(!jobs.mark_finished(first_job_id, report.clone()));
+        match jobs.snapshot() {
+            DbMaintenanceJobStatus::Running { job_id, .. } => assert_eq!(job_id, second_job_id),
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Finished { .. }
+            | DbMaintenanceJobStatus::Failed { .. } => panic!("expected running status"),
+        }
+
+        assert!(jobs.mark_finished(second_job_id, report));
+        match jobs.snapshot() {
+            DbMaintenanceJobStatus::Finished { job_id, .. } => assert_eq!(job_id, second_job_id),
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Running { .. }
+            | DbMaintenanceJobStatus::Failed { .. } => panic!("expected finished status"),
+        }
+    }
+
+    #[test]
+    fn db_maintenance_jobs_failed_updates_only_matching_running_job() {
+        let jobs = DbMaintenanceJobs::new();
+        let first_job_id = jobs.mark_running();
+        let second_job_id = jobs.mark_running();
+
+        assert!(!jobs.mark_failed(first_job_id, "stale failure".to_string()));
+        match jobs.snapshot() {
+            DbMaintenanceJobStatus::Running { job_id, .. } => assert_eq!(job_id, second_job_id),
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Finished { .. }
+            | DbMaintenanceJobStatus::Failed { .. } => panic!("expected running status"),
+        }
+
+        assert!(jobs.mark_failed(second_job_id, "current failure".to_string()));
+        match jobs.snapshot() {
+            DbMaintenanceJobStatus::Failed {
+                job_id, message, ..
+            } => {
+                assert_eq!(job_id, second_job_id);
+                assert_eq!(message, "current failure");
+            }
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Running { .. }
+            | DbMaintenanceJobStatus::Finished { .. } => panic!("expected failed status"),
+        }
+    }
+
+    #[test]
+    fn db_maintenance_jobs_stale_failure_cannot_overwrite_newer_run() {
+        let jobs = DbMaintenanceJobs::new();
+        let first_job_id = jobs.mark_running();
+        let second_job_id = jobs.mark_running();
+
+        assert!(!jobs.mark_failed(first_job_id, "join error".to_string()));
+        match jobs.snapshot() {
+            DbMaintenanceJobStatus::Running { job_id, phase, .. } => {
+                assert_eq!(job_id, second_job_id);
+                assert!(matches!(phase, DbMaintenanceJobPhase::Starting));
+            }
+            DbMaintenanceJobStatus::Idle
+            | DbMaintenanceJobStatus::Finished { .. }
+            | DbMaintenanceJobStatus::Failed { .. } => panic!("expected running status"),
         }
     }
 }

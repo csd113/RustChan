@@ -7,6 +7,14 @@ pub struct PendingFsOpRow {
     pub payload_json: String,
 }
 
+#[derive(Debug, Clone)]
+struct RestoredPendingFsOpRow {
+    id: String,
+    kind: String,
+    payload_json: String,
+    created_at: i64,
+}
+
 const CREATE_PENDING_FS_OPS_SQL: &str = r"
     CREATE TABLE IF NOT EXISTS pending_fs_ops (
         id           TEXT PRIMARY KEY,
@@ -99,6 +107,15 @@ pub fn rebuild_pending_fs_ops_for_restore(conn: &rusqlite::Connection) -> Result
         .context("Read pending_fs_ops objects failed")?;
     drop(object_stmt);
 
+    let preserved_rows = if object_types
+        .iter()
+        .any(|object_type| object_type == "table")
+    {
+        load_pending_fs_ops_for_restore(conn)?
+    } else {
+        Vec::new()
+    };
+
     for object_type in object_types {
         match object_type.as_str() {
             "table" => conn
@@ -114,22 +131,68 @@ pub fn rebuild_pending_fs_ops_for_restore(conn: &rusqlite::Connection) -> Result
         }
     }
 
-    ensure_pending_fs_ops_table(conn)
+    ensure_pending_fs_ops_table(conn)?;
+    restore_pending_fs_ops_rows(conn, &preserved_rows)
 }
 
-/// Verify that restore normalization left exactly the expected pending op.
+fn load_pending_fs_ops_for_restore(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<RestoredPendingFsOpRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, kind, payload_json, created_at
+             FROM pending_fs_ops
+             ORDER BY created_at ASC, id ASC",
+        )
+        .context("Prepare pending_fs_ops restore preservation failed")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(RestoredPendingFsOpRow {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                payload_json: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })
+        .context("Query pending_fs_ops restore preservation failed")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("Read pending_fs_ops restore preservation failed")?;
+    Ok(rows)
+}
+
+fn restore_pending_fs_ops_rows(
+    conn: &rusqlite::Connection,
+    rows: &[RestoredPendingFsOpRow],
+) -> Result<()> {
+    for row in rows {
+        conn.execute(
+            "INSERT INTO pending_fs_ops (id, kind, payload_json, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![&row.id, &row.kind, &row.payload_json, row.created_at],
+        )
+        .with_context(|| format!("Restore pending_fs_op {} failed", row.id))?;
+    }
+    Ok(())
+}
+
+/// Verify that the expected pending operation exists after restore hardening.
 ///
 /// # Errors
-/// Returns an error if pending operations cannot be read or if any unexpected
-/// operation remains.
-pub fn verify_only_pending_fs_op(conn: &rusqlite::Connection, expected_id: &str) -> Result<()> {
-    let pending_ops = list_pending_fs_ops(conn)?;
-    match pending_ops.as_slice() {
-        [op] if op.id == expected_id => Ok(()),
-        _ => anyhow::bail!(
-            "Unexpected pending_fs_ops state after restore normalization: expected only {expected_id}, found {} pending op(s)",
-            pending_ops.len()
-        ),
+/// Returns an error if the expected pending operation is missing or duplicated.
+pub fn verify_pending_fs_op_present(conn: &rusqlite::Connection, expected_id: &str) -> Result<()> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pending_fs_ops WHERE id = ?1",
+            rusqlite::params![expected_id],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("Count pending_fs_op {expected_id} failed"))?;
+    if count == 1 {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Unexpected pending_fs_ops state after restore normalization: expected pending op {expected_id} exactly once, found {count}"
+        )
     }
 }
 
@@ -160,11 +223,13 @@ pub fn list_pending_fs_ops(conn: &rusqlite::Connection) -> Result<Vec<PendingFsO
 mod tests {
     use super::{
         insert_pending_fs_op, list_pending_fs_ops, rebuild_pending_fs_ops_for_restore,
-        verify_only_pending_fs_op,
+        verify_pending_fs_op_present,
     };
+    use std::collections::HashSet;
 
     #[test]
-    fn rebuild_pending_fs_ops_for_restore_removes_hostile_trigger() {
+    fn rebuild_pending_fs_ops_for_restore_preserves_legitimate_rows_and_allows_restore_swap_insert()
+    {
         let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
         conn.execute_batch(
             r#"
@@ -174,8 +239,10 @@ mod tests {
                 payload_json TEXT NOT NULL,
                 created_at   INTEGER NOT NULL DEFAULT (unixepoch())
             );
-            INSERT INTO pending_fs_ops (id, kind, payload_json)
-            VALUES ('restored-evil', 'delete_files', '{"paths":["uploads/evil"]}');
+            INSERT INTO pending_fs_ops (id, kind, payload_json, created_at)
+            VALUES
+                ('upload-finalize', 'upload_finalize', '{"stage_dir":"stage","relative_paths":["tech/file.webp"],"primary_hash":null,"primary_file_path":null,"primary_thumb_path":null,"primary_mime_type":null}', 10),
+                ('delete-files', 'delete_files', '{"paths":["tech/file.webp"]}', 20);
             CREATE TRIGGER pending_fs_ops_reseed
             AFTER INSERT ON pending_fs_ops
             BEGIN
@@ -187,6 +254,18 @@ mod tests {
         .expect("hostile schema");
 
         rebuild_pending_fs_ops_for_restore(&conn).expect("rebuild trusted table");
+        let rebuilt_rows = list_pending_fs_ops(&conn).expect("list rebuilt ops");
+        let [upload_finalize, delete_files] = rebuilt_rows.as_slice() else {
+            panic!("expected two preserved pending ops");
+        };
+        assert_eq!(upload_finalize.id, "upload-finalize");
+        assert_eq!(
+            upload_finalize.kind,
+            crate::pending_fs::UPLOAD_FINALIZE_KIND
+        );
+        assert_eq!(delete_files.id, "delete-files");
+        assert_eq!(delete_files.kind, crate::pending_fs::DELETE_FILES_KIND);
+
         let restore_op = crate::pending_fs::PendingFsOpInsert {
             id: "expected-restore".into(),
             kind: crate::pending_fs::FULL_RESTORE_SWAP_KIND,
@@ -194,11 +273,45 @@ mod tests {
         };
         insert_pending_fs_op(&conn, &restore_op).expect("insert restore op");
 
-        verify_only_pending_fs_op(&conn, &restore_op.id).expect("only restore op remains");
+        verify_pending_fs_op_present(&conn, &restore_op.id).expect("restore op present");
         let pending_ops = list_pending_fs_ops(&conn).expect("list ops");
-        let [op] = pending_ops.as_slice() else {
-            panic!("expected exactly one pending op");
-        };
-        assert_eq!(op.kind, crate::pending_fs::FULL_RESTORE_SWAP_KIND);
+        assert_eq!(pending_ops.len(), 3);
+        let unique_ids = pending_ops
+            .iter()
+            .map(|op| op.id.clone())
+            .collect::<HashSet<_>>();
+        assert_eq!(unique_ids.len(), pending_ops.len());
+        assert!(pending_ops
+            .iter()
+            .any(|op| op.id == "upload-finalize"
+                && op.kind == crate::pending_fs::UPLOAD_FINALIZE_KIND));
+        assert!(pending_ops
+            .iter()
+            .any(|op| op.id == "delete-files" && op.kind == crate::pending_fs::DELETE_FILES_KIND));
+        assert!(pending_ops.iter().any(
+            |op| op.id == restore_op.id && op.kind == crate::pending_fs::FULL_RESTORE_SWAP_KIND
+        ));
+        assert!(!pending_ops.iter().any(|op| op.id == "trigger-evil"));
+    }
+
+    #[test]
+    fn rebuild_pending_fs_ops_for_restore_fails_closed_on_unexpected_schema_object_type() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            r"
+            CREATE TABLE other_table (value INTEGER);
+            CREATE TRIGGER pending_fs_ops
+            AFTER INSERT ON other_table
+            BEGIN
+                SELECT 1;
+            END;
+            ",
+        )
+        .expect("unexpected schema object");
+
+        let error = rebuild_pending_fs_ops_for_restore(&conn).expect_err("unexpected type fails");
+        assert!(error
+            .to_string()
+            .contains("Unexpected pending_fs_ops schema object type trigger"));
     }
 }

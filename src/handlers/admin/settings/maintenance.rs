@@ -157,7 +157,7 @@ pub async fn admin_db_repair(
     let maintenance_guard = state
         .maintenance_gate
         .try_begin("Database maintenance rebuild")?;
-    let _job_id = state.db_maintenance_jobs.mark_running();
+    let job_id = state.db_maintenance_jobs.mark_running();
     let progress = state.backup_progress.clone();
     let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
     let pool = state.db.clone();
@@ -167,20 +167,25 @@ pub async fn admin_db_repair(
         let job_status = db_maintenance_jobs.clone();
         let join_result = tokio::task::spawn_blocking(move || {
             let _maintenance_guard = maintenance_guard;
-            db_maintenance_jobs.mark_phase(crate::middleware::DbMaintenanceJobPhase::Backup);
+            let _ = db_maintenance_jobs
+                .mark_phase(job_id, crate::middleware::DbMaintenanceJobPhase::Backup);
             let backup_result = create_pre_repair_backup(&pool, &progress, copies_to_keep);
 
             let conn = match pool.get() {
                 Ok(conn) => conn,
                 Err(error) => {
-                    db_maintenance_jobs.mark_failed(format!(
-                        "Could not open database connection after pre-repair backup: {error}"
-                    ));
+                    let _ = db_maintenance_jobs.mark_failed(
+                        job_id,
+                        format!(
+                            "Could not open database connection after pre-repair backup: {error}"
+                        ),
+                    );
                     return;
                 }
             };
 
-            db_maintenance_jobs.mark_phase(crate::middleware::DbMaintenanceJobPhase::Repair);
+            let _ = db_maintenance_jobs
+                .mark_phase(job_id, crate::middleware::DbMaintenanceJobPhase::Repair);
             let report = match backup_result {
                 Ok(filename) => db::attempt_db_repair(&conn, Some(db::DbRepairBackup { filename })),
                 Err(error) => {
@@ -197,12 +202,12 @@ pub async fn admin_db_repair(
                 backup_error = report.repair_backup_error.as_deref(),
                 "Admin ran database repair attempt"
             );
-            db_maintenance_jobs.mark_finished(report);
+            let _ = db_maintenance_jobs.mark_finished(job_id, report);
         })
         .await;
 
         if let Err(error) = join_result {
-            job_status.mark_failed(format!("Database repair task failed: {error}"));
+            let _ = job_status.mark_failed(job_id, format!("Database repair task failed: {error}"));
         }
     });
 
@@ -917,7 +922,7 @@ mod tests {
         let first_job_id = state.db_maintenance_jobs.mark_running();
         state
             .db_maintenance_jobs
-            .mark_finished(crate::db::check_db_health(&conn));
+            .mark_finished(first_job_id, crate::db::check_db_health(&conn));
         let second_job_id = state.db_maintenance_jobs.mark_running();
         let router = repair_router(state);
 
@@ -975,7 +980,7 @@ mod tests {
         let job_id = state.db_maintenance_jobs.mark_running();
         state
             .db_maintenance_jobs
-            .mark_finished(crate::db::check_db_health(&conn));
+            .mark_finished(job_id, crate::db::check_db_health(&conn));
         let router = repair_router(state);
 
         let response =
