@@ -1048,12 +1048,10 @@ pub fn db_repair_aborted_for_backup_failure(
 #[cfg(test)]
 mod tests {
     use super::{
-        attempt_db_repair, check_db_health, db_repair_aborted_for_backup_failure,
-        file_ban_appeal, get_posts_by_ip_hash, BanAppealSubmission, DbRepairBackup,
+        attempt_db_repair, check_db_health, db_repair_aborted_for_backup_failure, file_ban_appeal,
+        get_posts_by_ip_hash, BanAppealSubmission, DbRepairBackup,
     };
-    use crate::db::{
-        create_board, create_thread_with_optional_poll, get_board_by_short, NewPost,
-    };
+    use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
 
     #[test]
     fn ban_appeal_submission_is_deduplicated_within_window() {

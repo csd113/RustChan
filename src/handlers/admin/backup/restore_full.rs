@@ -39,6 +39,8 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     live_conn: &mut rusqlite::Connection,
     admin_id: i64,
     upload_dir: &str,
+    live_tor_hidden_service_keys_dir: Option<&Path>,
+    restore_tor_hidden_service_keys: bool,
     archive: &mut zip::ZipArchive<R>,
     restore_label: &str,
     completion_log: &str,
@@ -46,7 +48,22 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     session_warning_log: &str,
 ) -> Result<String> {
     validate_full_restore_archive_layout(archive)?;
-    verify_full_backup_archive(archive)?;
+    let manifest = verify_full_backup_archive(archive)?;
+    if restore_tor_hidden_service_keys && !manifest.tor_hidden_service_keys_included {
+        return Err(AppError::BadRequest(
+            "This backup does not include Tor hidden service keys.".into(),
+        ));
+    }
+    let live_tor_hidden_service_keys_dir = if restore_tor_hidden_service_keys {
+        Some(live_tor_hidden_service_keys_dir.ok_or_else(|| {
+            AppError::BadRequest(
+                "Tor hidden service key restore is not available with the current configuration."
+                    .into(),
+            )
+        })?)
+    } else {
+        None
+    };
 
     let temp_dir = std::env::temp_dir();
     let tmp_id = uuid::Uuid::new_v4().simple().to_string();
@@ -57,8 +74,12 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     let staged_global_favicon_dir = create_staging_dir(&live_global_favicon_dir, "restore-stage")?;
     let live_global_banner_dir = crate::banner::backup_source_dir();
     let staged_global_banner_dir = create_staging_dir(&live_global_banner_dir, "restore-stage")?;
+    let staged_tor_hidden_service_keys_dir = live_tor_hidden_service_keys_dir
+        .map(|live_path| create_staging_dir(live_path, "restore-stage"))
+        .transpose()?;
     let mut favicon_extracted = false;
     let mut banner_extracted = false;
+    let mut tor_hidden_service_key_files_extracted = 0u64;
     let previous_upload_root = upload_root.parent().map_or_else(
         || PathBuf::from(format!("{}.restore-old", upload_root.display())),
         |parent| {
@@ -72,6 +93,21 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             ))
         },
     );
+    let previous_tor_hidden_service_keys_dir = live_tor_hidden_service_keys_dir.map(|live_path| {
+        live_path.parent().map_or_else(
+            || PathBuf::from(format!("{}.restore-old", live_path.display())),
+            |parent| {
+                parent.join(format!(
+                    ".{}.restore-old.{}",
+                    live_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("tor-keys"),
+                    uuid::Uuid::new_v4().simple()
+                ))
+            },
+        )
+    });
     let db_snapshot = temp_dir.join(format!("chan_restore_live_before_{tmp_id}.db"));
     let mut db_extracted = false;
 
@@ -175,6 +211,33 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             copy_limited(&mut entry, &mut out, BANNER_RESTORE_ENTRY_MAX_BYTES).map_err(
                 |error| AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display())),
             )?;
+        } else if let (Some(rel_path), Some(staged_tor_hidden_service_keys_dir)) = (
+            restore_safe_relative_path_under_prefix(
+                &name,
+                super::common::FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
+            )?,
+            staged_tor_hidden_service_keys_dir.as_ref(),
+        ) {
+            let target = staged_tor_hidden_service_keys_dir.join(&rel_path);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&target).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("mkdir {}: {error}", target.display()))
+                })?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).map_err(|error| {
+                        AppError::Internal(anyhow::anyhow!("mkdir parent: {error}"))
+                    })?;
+                }
+                let mut out = std::fs::File::create(&target).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("Create {}: {error}", target.display()))
+                })?;
+                copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
+                })?;
+                tor_hidden_service_key_files_extracted =
+                    tor_hidden_service_key_files_extracted.saturating_add(1);
+            }
         }
     }
 
@@ -194,6 +257,29 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
 
     if banner_extracted {
         canonicalize_restored_banner_dir(&staged_global_banner_dir)?;
+    }
+    if restore_tor_hidden_service_keys {
+        if tor_hidden_service_key_files_extracted != manifest.tor_hidden_service_key_file_count
+            || tor_hidden_service_key_files_extracted == 0
+        {
+            let _ = remove_path_if_exists(&staged_upload_root);
+            let _ = remove_path_if_exists(&staged_global_favicon_dir);
+            let _ = remove_path_if_exists(&staged_global_banner_dir);
+            if let Some(staged_tor_hidden_service_keys_dir) =
+                staged_tor_hidden_service_keys_dir.as_ref()
+            {
+                let _ = remove_path_if_exists(staged_tor_hidden_service_keys_dir);
+            }
+            let _ = std::fs::remove_file(&temp_db);
+            return Err(AppError::BadRequest(
+                "This backup does not contain a complete Tor hidden service identity.".into(),
+            ));
+        }
+        if let Some(staged_tor_hidden_service_keys_dir) =
+            staged_tor_hidden_service_keys_dir.as_ref()
+        {
+            restrict_private_key_material_permissions(staged_tor_hidden_service_keys_dir)?;
+        }
     }
 
     let pending_restore_id = uuid::Uuid::new_v4().to_string();
@@ -235,6 +321,11 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         let _ = remove_path_if_exists(&staged_upload_root);
         let _ = remove_path_if_exists(&staged_global_favicon_dir);
         let _ = remove_path_if_exists(&staged_global_banner_dir);
+        if let Some(staged_tor_hidden_service_keys_dir) =
+            staged_tor_hidden_service_keys_dir.as_ref()
+        {
+            let _ = remove_path_if_exists(staged_tor_hidden_service_keys_dir);
+        }
         if let Err(restore_err) = restore_db_result {
             return Err(AppError::Internal(anyhow::anyhow!(
                 "{restore_label} failed and rollback failed: {error}; rollback error: {restore_err}"
@@ -249,6 +340,11 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         let _ = std::fs::remove_file(&db_snapshot);
         let _ = remove_path_if_exists(&staged_global_favicon_dir);
         let _ = remove_path_if_exists(&staged_global_banner_dir);
+        if let Some(staged_tor_hidden_service_keys_dir) =
+            staged_tor_hidden_service_keys_dir.as_ref()
+        {
+            let _ = remove_path_if_exists(staged_tor_hidden_service_keys_dir);
+        }
         if let Err(restore_err) = restore_db_result {
             return Err(AppError::Internal(anyhow::anyhow!(
                 "{restore_label} filesystem swap failed: {error}; DB rollback error: {restore_err}"
@@ -280,6 +376,27 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     } else {
         let _ = remove_path_if_exists(&staged_global_banner_dir);
     }
+    if let (
+        Some(staged_tor_hidden_service_keys_dir),
+        Some(live_tor_hidden_service_keys_dir),
+        Some(previous_tor_hidden_service_keys_dir),
+    ) = (
+        staged_tor_hidden_service_keys_dir.as_ref(),
+        live_tor_hidden_service_keys_dir,
+        previous_tor_hidden_service_keys_dir.as_ref(),
+    ) {
+        let payload = crate::pending_fs::FullRestoreSwapPayload {
+            staged: staged_tor_hidden_service_keys_dir.display().to_string(),
+            live: live_tor_hidden_service_keys_dir.display().to_string(),
+            previous: previous_tor_hidden_service_keys_dir.display().to_string(),
+        };
+        crate::pending_fs::finalize_full_restore_payload(&payload).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "{restore_label} Tor key restore swap failed: {error}"
+            ))
+        })?;
+        restrict_private_key_material_permissions(live_tor_hidden_service_keys_dir)?;
+    }
 
     let _ = std::fs::remove_file(&temp_db);
     let _ = std::fs::remove_file(&db_snapshot);
@@ -303,6 +420,37 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             Ok(String::new())
         }
     }
+}
+
+fn restrict_private_key_material_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = std::fs::metadata(path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Inspect {}: {error}", path.display()))
+        })?;
+        let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Set permissions on {}: {error}",
+                path.display()
+            ))
+        })?;
+
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path).map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Read {}: {error}", path.display()))
+            })? {
+                let entry = entry.map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("Read dir entry: {error}"))
+                })?;
+                restrict_private_key_material_permissions(&entry.path())?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn full_restore_success_response(
@@ -372,9 +520,12 @@ pub async fn admin_restore(
         let upload = stream_restore_upload_to_tempfile(RestoreKind::Full, &mut multipart).await?;
         validate_streamed_restore_upload(RestoreKind::Full, &jar, &upload)?;
         let zip_tmp = upload.temp_file;
+        let restore_tor_hidden_service_keys = upload.restore_tor_hidden_service_keys;
         let uploaded_filename = upload.uploaded_filename;
 
         let upload_dir = CONFIG.upload_dir.clone();
+        let live_tor_hidden_service_keys_dir =
+            crate::config::configured_tor_hidden_service_keys_dir();
 
         tokio::task::spawn_blocking({
             let pool = state.db.clone();
@@ -404,6 +555,8 @@ pub async fn admin_restore(
                     &mut live_conn,
                     admin_id,
                     &upload_dir,
+                    live_tor_hidden_service_keys_dir.as_deref(),
+                    restore_tor_hidden_service_keys,
                     &mut archive,
                     "Restore",
                     "Restore completed, new session issued",
@@ -462,6 +615,8 @@ pub async fn restore_saved_full_backup(
 
     let path = full_backup_dir().join(&safe_filename);
     let upload_dir = CONFIG.upload_dir.clone();
+    let restore_tor_hidden_service_keys = form.restore_tor_hidden_service_keys;
+    let live_tor_hidden_service_keys_dir = crate::config::configured_tor_hidden_service_keys_dir();
 
     let restore_result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -477,6 +632,8 @@ pub async fn restore_saved_full_backup(
                 &mut live_conn,
                 admin_id,
                 &upload_dir,
+                live_tor_hidden_service_keys_dir.as_deref(),
+                restore_tor_hidden_service_keys,
                 &mut archive,
                 "Restore-saved",
                 "Restore-saved completed",
@@ -518,9 +675,116 @@ pub async fn restore_saved_full_backup(
 
 #[cfg(test)]
 mod tests {
-    use super::full_restore_success_response;
+    use super::{execute_full_restore, full_restore_success_response};
     use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
     use axum_extra::extract::cookie::CookieJar;
+    use std::collections::BTreeMap;
+    use std::io::Write as _;
+
+    fn create_snapshot_db() -> std::path::PathBuf {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("snapshot.db");
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db conn");
+        crate::db::create_board(&conn, "tech", "Technology", "", false).expect("create board");
+        let db_path_str = db_path.to_str().expect("db path").replace('\'', "''");
+        conn.execute_batch(&format!("VACUUM INTO '{db_path_str}'"))
+            .expect("vacuum snapshot");
+        temp_dir.keep().join("snapshot.db")
+    }
+
+    fn write_full_backup_zip(
+        zip_path: &std::path::Path,
+        backup_tor_keys: Option<&[(&str, &str)]>,
+        legacy_manifest: bool,
+    ) {
+        let db_path = create_snapshot_db();
+        let db_bytes = std::fs::read(&db_path).expect("read db");
+        let (tor_hidden_service_keys_included, tor_hidden_service_key_file_count) =
+            backup_tor_keys.map_or((false, 0_u64), |files| (true, files.len() as u64));
+        let manifest_json = if legacy_manifest {
+            serde_json::json!({
+                "version": 2,
+                "generated_at": 1_700_000_000_i64,
+                "rustchan_version": "1.1.3",
+                "db_bytes": db_bytes.len(),
+                "upload_file_count": 0_u64,
+                "favicon_file_count": 0_u64,
+                "banner_file_count": 0_u64,
+                "boards": []
+            })
+        } else {
+            serde_json::json!({
+                "version": 3,
+                "generated_at": 1_700_000_000_i64,
+                "rustchan_version": "1.1.3",
+                "db_bytes": db_bytes.len(),
+                "upload_file_count": 0_u64,
+                "favicon_file_count": 0_u64,
+                "banner_file_count": 0_u64,
+                "tor_hidden_service_keys_included": tor_hidden_service_keys_included,
+                "tor_hidden_service_key_file_count": tor_hidden_service_key_file_count,
+                "boards": []
+            })
+        };
+
+        let file = std::fs::File::create(zip_path).expect("zip file");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file(super::super::common::FULL_BACKUP_MANIFEST_NAME, options)
+            .expect("start manifest");
+        zip.write_all(&serde_json::to_vec(&manifest_json).expect("serialize full backup manifest"))
+            .expect("write manifest");
+        zip.start_file("chan.db", options).expect("start db");
+        zip.write_all(&db_bytes).expect("write db");
+        if let Some(files) = backup_tor_keys {
+            for (name, contents) in files {
+                zip.start_file(
+                    format!(
+                        "{}{}",
+                        super::super::common::FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
+                        name
+                    ),
+                    options,
+                )
+                .expect("start tor key file");
+                zip.write_all(contents.as_bytes())
+                    .expect("write tor key file");
+            }
+        }
+        zip.finish().expect("finish zip");
+    }
+
+    fn read_tree(root: &std::path::Path) -> BTreeMap<String, String> {
+        fn visit(
+            root: &std::path::Path,
+            dir: &std::path::Path,
+            out: &mut BTreeMap<String, String>,
+        ) {
+            let entries = std::fs::read_dir(dir).expect("read dir");
+            for entry in entries {
+                let entry = entry.expect("dir entry");
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(root, &path, out);
+                } else if path.is_file() {
+                    let rel = path
+                        .strip_prefix(root)
+                        .expect("relative path")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let contents = std::fs::read_to_string(&path).expect("read file");
+                    out.insert(rel, contents);
+                }
+            }
+        }
+
+        let mut out = BTreeMap::new();
+        if root.exists() {
+            visit(root, root, &mut out);
+        }
+        out
+    }
 
     #[test]
     fn saved_full_restore_success_response_sets_session_cookie_and_reopens_section() {
@@ -552,5 +816,198 @@ mod tests {
             .find(|value| value.contains(super::super::SESSION_COOKIE))
             .expect("session cookie");
         assert!(set_cookie.contains("chan_admin_session=fresh-session"));
+    }
+
+    #[test]
+    fn full_restore_without_tor_key_opt_in_leaves_live_tor_identity_untouched() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip(
+            &zip_path,
+            Some(&[
+                ("hs_ed25519_secret_key", "backup-secret"),
+                ("hs_ed25519_public_key", "backup-public"),
+            ]),
+            false,
+        );
+
+        let tor_keys_dir = temp_dir.path().join("live-tor-keys");
+        std::fs::create_dir_all(&tor_keys_dir).expect("create live tor dir");
+        std::fs::write(tor_keys_dir.join("hs_ed25519_secret_key"), "live-secret")
+            .expect("write live secret");
+        std::fs::write(tor_keys_dir.join("hs_ed25519_public_key"), "live-public")
+            .expect("write live public");
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            Some(&tor_keys_dir),
+            false,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect("restore should succeed");
+
+        let live_tree = read_tree(&tor_keys_dir);
+        assert_eq!(
+            live_tree,
+            BTreeMap::from([
+                (
+                    "hs_ed25519_public_key".to_string(),
+                    "live-public".to_string()
+                ),
+                (
+                    "hs_ed25519_secret_key".to_string(),
+                    "live-secret".to_string()
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn full_restore_with_tor_key_opt_in_replaces_live_identity_without_merging() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip(
+            &zip_path,
+            Some(&[
+                ("hs_ed25519_secret_key", "backup-secret"),
+                ("hs_ed25519_public_key", "backup-public"),
+            ]),
+            false,
+        );
+
+        let tor_keys_dir = temp_dir.path().join("live-tor-keys");
+        std::fs::create_dir_all(&tor_keys_dir).expect("create live tor dir");
+        std::fs::write(tor_keys_dir.join("hs_ed25519_secret_key"), "live-secret")
+            .expect("write live secret");
+        std::fs::write(tor_keys_dir.join("hs_ed25519_public_key"), "live-public")
+            .expect("write live public");
+        std::fs::write(tor_keys_dir.join("stale-file.txt"), "stale").expect("write stale");
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            Some(&tor_keys_dir),
+            true,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect("restore should succeed");
+
+        let live_tree = read_tree(&tor_keys_dir);
+        assert_eq!(
+            live_tree,
+            BTreeMap::from([
+                (
+                    "hs_ed25519_public_key".to_string(),
+                    "backup-public".to_string()
+                ),
+                (
+                    "hs_ed25519_secret_key".to_string(),
+                    "backup-secret".to_string()
+                ),
+            ])
+        );
+        assert!(!tor_keys_dir.join("stale-file.txt").exists());
+    }
+
+    #[test]
+    fn full_restore_rejects_requested_tor_key_restore_when_backup_has_none() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip(&zip_path, None, false);
+
+        let tor_keys_dir = temp_dir.path().join("live-tor-keys");
+        std::fs::create_dir_all(&tor_keys_dir).expect("create live tor dir");
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        let error = execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            Some(&tor_keys_dir),
+            true,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect_err("restore should reject missing Tor identity");
+
+        match error {
+            crate::error::AppError::BadRequest(message) => {
+                assert!(message.contains("does not include Tor hidden service keys"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn full_restore_accepts_legacy_full_backup_without_tor_metadata() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("legacy.zip");
+        write_full_backup_zip(&zip_path, None, true);
+
+        let tor_keys_dir = temp_dir.path().join("live-tor-keys");
+        std::fs::create_dir_all(&tor_keys_dir).expect("create live tor dir");
+        std::fs::write(tor_keys_dir.join("hs_ed25519_secret_key"), "live-secret")
+            .expect("write live secret");
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            Some(&tor_keys_dir),
+            false,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect("legacy restore should succeed");
+
+        assert_eq!(
+            read_tree(&tor_keys_dir),
+            BTreeMap::from([(
+                "hs_ed25519_secret_key".to_string(),
+                "live-secret".to_string()
+            )])
+        );
     }
 }

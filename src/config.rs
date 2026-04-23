@@ -84,6 +84,18 @@ pub fn runtime_tor_state_dir() -> PathBuf {
 }
 
 #[must_use]
+pub fn runtime_tor_hidden_service_keys_dir() -> PathBuf {
+    runtime_tor_state_dir().join("keys")
+}
+
+#[must_use]
+pub fn configured_tor_hidden_service_keys_dir() -> Option<PathBuf> {
+    CONFIG
+        .enable_tor_support
+        .then(runtime_tor_hidden_service_keys_dir)
+}
+
+#[must_use]
 pub fn runtime_tor_cache_dir() -> PathBuf {
     runtime_tor_dir().join("cache")
 }

@@ -87,13 +87,14 @@ pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<Bac
                             .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
                     })
                     .unwrap_or_default();
-                let (verification, boards) = match kind {
+                let (verification, boards, contains_tor_hidden_service_keys) = match kind {
                     BackupListKind::Full => match common::verify_full_backup_zip(&path) {
                         Ok(manifest) => (
                             Ok(format!("verified v{} backup", manifest.version)),
                             manifest.boards,
+                            manifest.tor_hidden_service_keys_included,
                         ),
-                        Err(error) => (Err(error), Vec::new()),
+                        Err(error) => (Err(error), Vec::new(), false),
                     },
                     BackupListKind::Board => match common::verify_board_backup_zip(&path) {
                         Ok(manifest) => (
@@ -105,8 +106,9 @@ pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<Bac
                                 short_name: manifest.board.short_name,
                                 name: manifest.board.name,
                             }],
+                            false,
                         ),
-                        Err(error) => (Err(error), Vec::new()),
+                        Err(error) => (Err(error), Vec::new(), false),
                     },
                 };
                 files.push(BackupInfo {
@@ -116,6 +118,7 @@ pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<Bac
                     modified_epoch,
                     verified: verification.is_ok(),
                     verification_note: verification.unwrap_or_else(|error| error.to_string()),
+                    contains_tor_hidden_service_keys,
                     boards,
                 });
             }

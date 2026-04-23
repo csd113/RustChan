@@ -7,6 +7,7 @@ pub(crate) fn create_full_backup_to_server(
     session_id: Option<&str>,
     progress: &std::sync::Arc<crate::middleware::BackupProgress>,
     copies_to_keep: u64,
+    include_tor_hidden_service_keys: bool,
 ) -> Result<String> {
     let conn = pool.get()?;
     if let Some(session_id) = session_id {
@@ -14,6 +15,11 @@ pub(crate) fn create_full_backup_to_server(
     }
     let uploads_base = std::path::Path::new(&CONFIG.upload_dir);
     let global_favicon_dir = crate::favicon::global_backup_source_dir();
+    let tor_hidden_service_keys_dir = if include_tor_hidden_service_keys {
+        Some(resolve_tor_hidden_service_keys_dir()?)
+    } else {
+        None
+    };
 
     progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
     log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
@@ -34,9 +40,19 @@ pub(crate) fn create_full_backup_to_server(
     let global_banner_dir = crate::banner::backup_source_dir();
     let favicon_file_count = super::count_files_in_dir(&global_favicon_dir);
     let banner_file_count = super::count_files_in_dir(&global_banner_dir);
+    let tor_hidden_service_key_file_count = if let Some(dir) = tor_hidden_service_keys_dir.as_ref()
+    {
+        count_required_private_files(
+            dir,
+            "Tor hidden service keys were requested, but the configured identity directory could not be read.",
+        )?
+    } else {
+        0
+    };
     let file_count = super::count_files_in_dir(uploads_base)
         .saturating_add(favicon_file_count)
-        .saturating_add(banner_file_count);
+        .saturating_add(banner_file_count)
+        .saturating_add(tor_hidden_service_key_file_count);
     let db_snapshot_size = std::fs::metadata(&temp_db)
         .map(|metadata| metadata.len())
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;
@@ -48,6 +64,8 @@ pub(crate) fn create_full_backup_to_server(
             .saturating_sub(banner_file_count),
         favicon_file_count,
         banner_file_count,
+        include_tor_hidden_service_keys,
+        tor_hidden_service_key_file_count,
     )?;
     drop(conn);
     progress
@@ -121,6 +139,16 @@ pub(crate) fn create_full_backup_to_server(
                 progress,
             )?;
         }
+        if let Some(tor_hidden_service_keys_dir) = tor_hidden_service_keys_dir.as_ref() {
+            super::add_dir_to_zip_with_prefix(
+                &mut zip,
+                tor_hidden_service_keys_dir,
+                tor_hidden_service_keys_dir,
+                super::common::FULL_BACKUP_TOR_KEYS_PREFIX,
+                opts,
+                progress,
+            )?;
+        }
 
         let writer = zip
             .finish()
@@ -180,6 +208,7 @@ pub(crate) fn create_full_backup_to_server(
         filename = %filename,
         bytes = size,
         automated = session_id.is_none(),
+        includes_tor_hidden_service_keys = include_tor_hidden_service_keys,
         "Full backup created"
     );
     progress
@@ -189,12 +218,62 @@ pub(crate) fn create_full_backup_to_server(
     Ok(filename)
 }
 
+fn resolve_tor_hidden_service_keys_dir() -> Result<PathBuf> {
+    crate::config::configured_tor_hidden_service_keys_dir().ok_or_else(|| {
+        AppError::BadRequest(
+            "Tor hidden service key backups are not available with the current configuration."
+                .into(),
+        )
+    })
+}
+
+fn count_required_private_files(dir: &Path, missing_message: &str) -> Result<u64> {
+    fn count_recursive(dir: &Path) -> Result<u64> {
+        let entries = std::fs::read_dir(dir).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Read {}: {error}", dir.display()))
+        })?;
+        let mut count = 0u64;
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| AppError::Internal(anyhow::anyhow!("Read dir entry: {error}")))?;
+            let path = entry.path();
+            if path.is_dir() {
+                count = count.saturating_add(count_recursive(&path)?);
+            } else if path.is_file() {
+                count = count.saturating_add(1);
+            }
+        }
+        Ok(count)
+    }
+
+    if !dir.exists() {
+        return Err(AppError::BadRequest(missing_message.into()));
+    }
+    if !dir.is_dir() {
+        return Err(AppError::BadRequest(missing_message.into()));
+    }
+
+    let count = count_recursive(dir)?;
+    if count == 0 {
+        return Err(AppError::BadRequest(missing_message.into()));
+    }
+    Ok(count)
+}
+
+#[derive(Deserialize)]
+pub struct FullBackupCreateForm {
+    #[serde(default)]
+    include_tor_hidden_service_keys: bool,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+}
+
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 pub async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
-    Form(form): Form<super::super::CsrfOnly>,
+    Form(form): Form<FullBackupCreateForm>,
 ) -> Result<Response> {
     let _maintenance_guard = state.maintenance_gate.try_begin("Full backup creation")?;
     let session_id = jar
@@ -203,11 +282,18 @@ pub async fn create_full_backup(
     super::super::check_csrf_jar(&jar, form.csrf.as_deref())?;
     let progress = state.backup_progress.clone();
     let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
+    let include_tor_hidden_service_keys = form.include_tor_hidden_service_keys;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
-            create_full_backup_to_server(&pool, session_id.as_deref(), &progress, copies_to_keep)?;
+            create_full_backup_to_server(
+                &pool,
+                session_id.as_deref(),
+                &progress,
+                copies_to_keep,
+                include_tor_hidden_service_keys,
+            )?;
             Ok(())
         }
     })
@@ -408,6 +494,8 @@ pub(super) fn build_full_backup_manifest(
     upload_file_count: u64,
     favicon_file_count: u64,
     banner_file_count: u64,
+    tor_hidden_service_keys_included: bool,
+    tor_hidden_service_key_file_count: u64,
 ) -> Result<super::common::FullBackupManifest> {
     let boards = collect_all_rows(
         conn,
@@ -419,13 +507,15 @@ pub(super) fn build_full_backup_manifest(
         },
     )?;
     Ok(super::common::FullBackupManifest {
-        version: 2,
+        version: 3,
         generated_at: Utc::now().timestamp(),
         rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
         db_bytes,
         upload_file_count,
         favicon_file_count,
         banner_file_count,
+        tor_hidden_service_keys_included,
+        tor_hidden_service_key_file_count,
         boards,
     })
 }
@@ -736,4 +826,152 @@ where
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_full_backup_manifest, count_required_private_files};
+    use crate::handlers::admin::backup::common::{
+        verify_full_backup_zip, FULL_BACKUP_MANIFEST_NAME, FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
+    };
+    use std::io::Write as _;
+
+    fn write_test_full_backup_zip(zip_path: &std::path::Path, include_tor_keys: bool) {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let uploads_dir = temp_dir.path().join("uploads");
+        let tor_keys_dir = temp_dir.path().join("tor-keys");
+        std::fs::create_dir_all(uploads_dir.join("tech")).expect("create uploads");
+        std::fs::write(uploads_dir.join("tech/post.txt"), "post").expect("write upload");
+        std::fs::create_dir_all(&tor_keys_dir).expect("create tor key dir");
+        std::fs::write(tor_keys_dir.join("hs_ed25519_secret_key"), "secret")
+            .expect("write secret key");
+        std::fs::write(tor_keys_dir.join("hs_ed25519_public_key"), "public")
+            .expect("write public key");
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db conn");
+        crate::db::create_board(&conn, "tech", "Technology", "", false).expect("create board");
+
+        let db_path = temp_dir.path().join("snapshot.db");
+        let db_path_str = db_path.to_str().expect("db path").replace('\'', "''");
+        conn.execute_batch(&format!("VACUUM INTO '{db_path_str}'"))
+            .expect("vacuum snapshot");
+
+        let manifest = build_full_backup_manifest(
+            &conn,
+            std::fs::metadata(&db_path).expect("db metadata").len(),
+            1,
+            0,
+            0,
+            include_tor_keys,
+            if include_tor_keys { 2 } else { 0 },
+        )
+        .expect("build manifest");
+        let manifest_json = serde_json::to_vec(&manifest).expect("manifest json");
+        let db_bytes = std::fs::read(&db_path).expect("read db");
+
+        let file = std::fs::File::create(zip_path).expect("zip file");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file(FULL_BACKUP_MANIFEST_NAME, options)
+            .expect("start manifest");
+        zip.write_all(&manifest_json).expect("write manifest");
+        zip.start_file("chan.db", options).expect("start db");
+        zip.write_all(&db_bytes).expect("write db");
+        super::super::add_dir_to_zip_with_prefix(
+            &mut zip,
+            &uploads_dir,
+            &uploads_dir,
+            "uploads",
+            options,
+            &crate::middleware::BackupProgress::new(),
+        )
+        .expect("zip uploads");
+        if include_tor_keys {
+            super::super::add_dir_to_zip_with_prefix(
+                &mut zip,
+                &tor_keys_dir,
+                &tor_keys_dir,
+                super::super::common::FULL_BACKUP_TOR_KEYS_PREFIX,
+                options,
+                &crate::middleware::BackupProgress::new(),
+            )
+            .expect("zip tor keys");
+        }
+        zip.finish().expect("finish zip");
+    }
+
+    #[test]
+    fn full_backup_manifest_defaults_to_no_tor_keys_when_not_requested() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db conn");
+        crate::db::create_board(&conn, "tech", "Technology", "", false).expect("create board");
+
+        let manifest =
+            build_full_backup_manifest(&conn, 1024, 5, 1, 2, false, 0).expect("build manifest");
+
+        assert!(!manifest.tor_hidden_service_keys_included);
+        assert_eq!(manifest.tor_hidden_service_key_file_count, 0);
+    }
+
+    #[test]
+    fn full_backup_archive_can_record_and_package_tor_key_material() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("full-with-tor.zip");
+        write_test_full_backup_zip(&zip_path, true);
+
+        let manifest = verify_full_backup_zip(&zip_path).expect("verify zip");
+        assert!(manifest.tor_hidden_service_keys_included);
+        assert_eq!(manifest.tor_hidden_service_key_file_count, 2);
+
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        assert!(archive
+            .by_name(&format!(
+                "{FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX}hs_ed25519_secret_key"
+            ))
+            .is_ok());
+        assert!(archive
+            .by_name(&format!(
+                "{FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX}hs_ed25519_public_key"
+            ))
+            .is_ok());
+    }
+
+    #[test]
+    fn full_backup_archive_omits_tor_key_material_when_not_requested() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("full-without-tor.zip");
+        write_test_full_backup_zip(&zip_path, false);
+
+        let manifest = verify_full_backup_zip(&zip_path).expect("verify zip");
+        assert!(!manifest.tor_hidden_service_keys_included);
+        assert_eq!(manifest.tor_hidden_service_key_file_count, 0);
+
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        assert!(archive
+            .by_name(&format!(
+                "{FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX}hs_ed25519_secret_key"
+            ))
+            .is_err());
+    }
+
+    #[test]
+    fn requested_tor_key_backup_fails_clearly_when_identity_dir_is_missing() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let missing = temp_dir.path().join("missing-keys");
+        let error = count_required_private_files(
+            &missing,
+            "Tor hidden service keys were requested, but the configured identity directory could not be read.",
+        )
+        .expect_err("missing Tor key dir should fail");
+
+        match error {
+            crate::error::AppError::BadRequest(message) => {
+                assert!(message.contains("Tor hidden service keys were requested"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
 }

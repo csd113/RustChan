@@ -520,6 +520,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                                 None,
                                 &progress,
                                 settings.copies_to_keep,
+                                false,
                             )
                         })
                         .await;

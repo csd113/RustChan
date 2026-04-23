@@ -40,6 +40,8 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
         view.backups.backup_status_line,
         view.backups.auto_full_backup_interval_hours,
         view.backups.auto_full_backup_copies_to_keep,
+        &render_full_backup_create_tor_option(view),
+        &render_full_backup_restore_upload_tor_option(view),
         full_backup_open_attr,
         board_backup_open_attr,
         &board_backup_cards,
@@ -106,12 +108,43 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
         } else {
             format!("{} boards indexed", bf.boards.len())
         };
+        let tor_backup_summary = if bf.contains_tor_hidden_service_keys {
+            "includes Tor hidden service keys"
+        } else {
+            "no Tor hidden service keys"
+        };
+        let restore_tor_keys_option = if bf.contains_tor_hidden_service_keys
+            && view.backups.tor_hidden_service_key_backup_available
+        {
+            r#"<label class="admin-quick-field" style="display:block;margin:.5rem 0">
+        <span style="display:block;font-weight:600">Restore Tor hidden service keys</span>
+        <input type="checkbox" name="restore_tor_hidden_service_keys" value="1">
+        <span class="admin-quick-help">Replaces the current onion identity with the one from this backup. This restores the old .onion address and overrides any Tor keys currently on disk.</span>
+      </label>
+      <p class="backup-extract-help" style="margin-top:0;color:var(--red-bright)">Anyone with these keys can impersonate this onion service.</p>"#
+                .to_string()
+        } else {
+            String::new()
+        };
+        let restore_confirm = if bf.contains_tor_hidden_service_keys
+            && view.backups.tor_hidden_service_key_backup_available
+        {
+            format!(
+                "WARNING: Restore from {fname}? This will overwrite the live database and all uploads. If you also restore Tor keys, the current onion identity on disk will be replaced. Cannot be undone.",
+                fname = bf.filename
+            )
+        } else {
+            format!(
+                "WARNING: Restore from {fname}? This will overwrite the live database and all uploads. Cannot be undone.",
+                fname = bf.filename
+            )
+        };
         let _ = write!(
             full_backup_rows,
             r#"<tr>
 <td class="backup-filename-cell">
   <div class="backup-filename">{fname}</div>
-  <div class="backup-submeta">{indexed_boards_summary}</div>
+  <div class="backup-submeta">{indexed_boards_summary} · {tor_backup_summary}</div>
 </td>
 <td class="backup-meta-cell">{size}</td>
 <td class="backup-meta-cell">{modified}</td>
@@ -123,7 +156,8 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
       <form method="POST" action="/admin/backup/restore-saved" class="backup-inline-form">
         <input type="hidden" name="_csrf" value="{csrf}">
         <input type="hidden" name="filename" value="{fname}">
-        <button type="submit" data-confirm="WARNING: Restore from {fname}? This will overwrite the live database and all uploads. Cannot be undone.">&#8635; restore site</button>
+        {restore_tor_keys_option}
+        <button type="submit" data-confirm="{restore_confirm}">&#8635; restore site</button>
       </form>
       <form method="POST" action="/admin/backup/delete" class="backup-inline-form">
         <input type="hidden" name="_csrf" value="{csrf}">
@@ -151,15 +185,45 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
 </tr>"#,
             fname = escape_html(&bf.filename),
             indexed_boards_summary = escape_html(&indexed_boards_summary),
+            tor_backup_summary = escape_html(tor_backup_summary),
             size = size_fmt,
             modified = escape_html(&bf.modified),
             status = status_html,
             csrf = escape_html(view.csrf_token),
+            restore_tor_keys_option = restore_tor_keys_option,
+            restore_confirm = escape_html(&restore_confirm),
             board_picker = board_picker,
             board_help = escape_html(board_help),
         );
     }
     full_backup_rows
+}
+
+fn render_full_backup_create_tor_option(view: &AdminPanelViewModel<'_>) -> String {
+    if !view.backups.tor_hidden_service_key_backup_available {
+        return String::new();
+    }
+
+    r#"<label class="admin-quick-field" style="max-width:28rem">
+    <span style="display:block;font-weight:600">Include Tor hidden service keys</span>
+    <input type="checkbox" name="include_tor_hidden_service_keys" value="1">
+    <span class="admin-quick-help">Preserves the same .onion address after restore. Anyone with these keys can impersonate this onion service.</span>
+  </label>"#
+        .to_string()
+}
+
+fn render_full_backup_restore_upload_tor_option(view: &AdminPanelViewModel<'_>) -> String {
+    if !view.backups.tor_hidden_service_key_backup_available {
+        return String::new();
+    }
+
+    r#"<label class="admin-quick-field" style="max-width:28rem">
+    <span style="display:block;font-weight:600">Restore Tor hidden service keys</span>
+    <input type="checkbox" name="restore_tor_hidden_service_keys" value="1">
+    <span class="admin-quick-help">Only applies when the uploaded backup includes Tor hidden service keys. Replaces the current onion identity with the one from the backup and restores the old .onion address.</span>
+  </label>
+  <p class="backup-extract-help" style="margin:.25rem 0 0;color:var(--red-bright)">Anyone with these keys can impersonate this onion service.</p>"#
+        .to_string()
 }
 
 fn render_board_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
@@ -231,6 +295,8 @@ fn render_admin_backups_section(
     backup_status_line: &str,
     auto_full_backup_interval_hours: u64,
     auto_full_backup_copies_to_keep: u64,
+    full_backup_create_tor_option: &str,
+    full_backup_restore_upload_tor_option: &str,
     full_backup_open_attr: &str,
     board_backup_open_attr: &str,
     board_backup_cards: &str,
@@ -282,6 +348,7 @@ fn render_admin_backups_section(
   <div class="admin-inline-actions admin-inline-actions-spaced">
   <form method="POST" action="/admin/backup/create" id="full-backup-create-form">
   <input type="hidden" name="_csrf" value="{csrf}">
+  {full_backup_create_tor_option}
   <button type="submit" id="full-backup-btn">&#128190; save to server</button>
   </form>
   <form method="POST" action="/admin/restore" enctype="multipart/form-data" class="backup-restore-upload-form admin-file-inline-form" data-restore-label="full backup">
@@ -290,6 +357,7 @@ fn render_admin_backups_section(
     <input type="file" name="backup_file" accept=".zip" required class="admin-file-input">
     <span class="admin-quick-help">Upload a full-site zip backup.</span>
   </label>
+  {full_backup_restore_upload_tor_option}
   <button type="submit" class="btn-danger"
           data-confirm="WARNING: This will overwrite the database and all uploaded files. Cannot be undone. Continue?">&#8635; restore from local file</button>
   </form>
@@ -361,6 +429,8 @@ fn render_admin_backups_section(
         backup_status_line = backup_status_line,
         auto_full_backup_interval_hours = auto_full_backup_interval_hours,
         auto_full_backup_copies_to_keep = auto_full_backup_copies_to_keep,
+        full_backup_create_tor_option = full_backup_create_tor_option,
+        full_backup_restore_upload_tor_option = full_backup_restore_upload_tor_option,
         full_backup_open_attr = full_backup_open_attr,
         board_backup_open_attr = board_backup_open_attr,
         board_backup_cards = board_backup_cards,

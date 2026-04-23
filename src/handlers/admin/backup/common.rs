@@ -14,6 +14,8 @@ pub(super) const BOARD_MANIFEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const BANNER_RESTORE_ENTRY_MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const BANNER_RESTORE_TOTAL_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const FULL_BACKUP_MANIFEST_NAME: &str = "backup.json";
+pub(super) const FULL_BACKUP_TOR_KEYS_PREFIX: &str = "tor/keys";
+pub(super) const FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX: &str = "tor/keys/";
 const SQLITE_HEADER: &[u8] = b"SQLite format 3\0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +28,10 @@ pub(super) struct FullBackupManifest {
     pub favicon_file_count: u64,
     #[serde(default)]
     pub banner_file_count: u64,
+    #[serde(default)]
+    pub tor_hidden_service_keys_included: bool,
+    #[serde(default)]
+    pub tor_hidden_service_key_file_count: u64,
     #[serde(default)]
     pub boards: Vec<BackupBoardSummary>,
 }
@@ -307,6 +313,7 @@ pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
     let mut upload_file_count = 0u64;
     let mut favicon_file_count = 0u64;
     let mut banner_file_count = 0u64;
+    let mut tor_hidden_service_key_file_count = 0u64;
     for idx in 0..archive.len() {
         let entry = archive.by_index(idx).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Read backup entry #{idx}: {error}"))
@@ -322,6 +329,8 @@ pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
             favicon_file_count = favicon_file_count.saturating_add(1);
         } else if name.starts_with("banner/") {
             banner_file_count = banner_file_count.saturating_add(1);
+        } else if name.starts_with(FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX) {
+            tor_hidden_service_key_file_count = tor_hidden_service_key_file_count.saturating_add(1);
         }
     }
 
@@ -342,6 +351,18 @@ pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
             "Invalid full backup: manifest banner count {} does not match archive count {}.",
             manifest.banner_file_count, banner_file_count
         )));
+    }
+    if tor_hidden_service_key_file_count != manifest.tor_hidden_service_key_file_count {
+        return Err(AppError::BadRequest(format!(
+            "Invalid full backup: manifest Tor key count {} does not match archive count {}.",
+            manifest.tor_hidden_service_key_file_count, tor_hidden_service_key_file_count
+        )));
+    }
+    if manifest.tor_hidden_service_keys_included != (tor_hidden_service_key_file_count > 0) {
+        return Err(AppError::BadRequest(
+            "Invalid full backup: manifest Tor key metadata does not match archive contents."
+                .into(),
+        ));
     }
 
     Ok(manifest)
@@ -514,6 +535,8 @@ mod tests {
             upload_file_count: 1,
             favicon_file_count: 1,
             banner_file_count: 0,
+            tor_hidden_service_keys_included: false,
+            tor_hidden_service_key_file_count: 0,
             boards: vec![crate::models::BackupBoardSummary {
                 short_name: "b".into(),
                 name: "Random".into(),
@@ -545,6 +568,64 @@ mod tests {
         let error = verify_full_backup_zip(&zip_path).expect_err("missing manifest rejected");
 
         assert!(error.to_string().contains("missing backup.json"));
+    }
+
+    #[test]
+    fn verify_full_backup_zip_defaults_legacy_tor_metadata_to_not_included() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("legacy-full.zip");
+        let manifest = json!({
+            "version": 2,
+            "generated_at": 1_700_000_000_i64,
+            "rustchan_version": "1.1.3",
+            "db_bytes": 4096_u64,
+            "upload_file_count": 1_u64,
+            "favicon_file_count": 0_u64,
+            "banner_file_count": 0_u64,
+            "boards": []
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest bytes");
+        write_zip(
+            &zip_path,
+            &[
+                (FULL_BACKUP_MANIFEST_NAME, &manifest_bytes),
+                ("chan.db", b"SQLite format 3\0db"),
+                ("uploads/tech/file.txt", b"ok"),
+            ],
+        );
+
+        let verified = verify_full_backup_zip(&zip_path).expect("verify legacy full backup");
+        assert!(!verified.tor_hidden_service_keys_included);
+        assert_eq!(verified.tor_hidden_service_key_file_count, 0);
+    }
+
+    #[test]
+    fn verify_full_backup_zip_rejects_tor_manifest_mismatch() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("tor-mismatch.zip");
+        let manifest = FullBackupManifest {
+            version: 3,
+            generated_at: 1_700_000_000,
+            rustchan_version: "1.1.3".into(),
+            db_bytes: 4096,
+            upload_file_count: 0,
+            favicon_file_count: 0,
+            banner_file_count: 0,
+            tor_hidden_service_keys_included: true,
+            tor_hidden_service_key_file_count: 1,
+            boards: Vec::new(),
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest bytes");
+        write_zip(
+            &zip_path,
+            &[
+                (FULL_BACKUP_MANIFEST_NAME, &manifest_bytes),
+                ("chan.db", b"SQLite format 3\0db"),
+            ],
+        );
+
+        let error = verify_full_backup_zip(&zip_path).expect_err("mismatched Tor metadata");
+        assert!(error.to_string().contains("manifest Tor key count 1"));
     }
 
     #[test]

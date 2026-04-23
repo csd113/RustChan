@@ -98,6 +98,7 @@ pub struct AdminPanelBackupsView<'a> {
     pub backup_warning: Option<&'a str>,
     pub auto_full_backup_interval_hours: u64,
     pub auto_full_backup_copies_to_keep: u64,
+    pub tor_hidden_service_key_backup_available: bool,
 }
 
 pub struct AdminPanelMaintenanceView {
@@ -1581,6 +1582,7 @@ mod tests {
             modified_epoch: Some(1_775_555_700),
             verified: true,
             verification_note: "verified".into(),
+            contains_tor_hidden_service_keys: true,
             boards: vec![BackupBoardSummary {
                 short_name: "tech".into(),
                 name: "Technology".into(),
@@ -1596,6 +1598,7 @@ mod tests {
             modified_epoch: Some(1_775_558_400),
             verified: true,
             verification_note: "verified".into(),
+            contains_tor_hidden_service_keys: false,
             boards: Vec::new(),
         }
     }
@@ -1628,7 +1631,27 @@ mod tests {
         themes: &[Theme],
         open_section: Option<&str>,
     ) -> String {
-        let full_backups = vec![sample_full_backup()];
+        render_admin_panel_for_test_with_backup_options(
+            boards,
+            reports,
+            themes,
+            open_section,
+            true,
+            true,
+        )
+    }
+
+    fn render_admin_panel_for_test_with_backup_options(
+        boards: &[Board],
+        reports: &[ReportWithContext],
+        themes: &[Theme],
+        open_section: Option<&str>,
+        tor_backup_available: bool,
+        full_backup_has_tor_keys: bool,
+    ) -> String {
+        let mut full_backup = sample_full_backup();
+        full_backup.contains_tor_hidden_service_keys = full_backup_has_tor_keys;
+        let full_backups = vec![full_backup];
         let board_backups = vec![sample_board_backup()];
         let view = AdminPanelViewModel {
             csrf_token: "csrf",
@@ -1657,6 +1680,7 @@ mod tests {
                 backup_warning: None,
                 auto_full_backup_interval_hours: 24,
                 auto_full_backup_copies_to_keep: 7,
+                tor_hidden_service_key_backup_available: tor_backup_available,
             },
             maintenance: AdminPanelMaintenanceView {
                 db_size_bytes: 4096,
@@ -1834,5 +1858,63 @@ mod tests {
         assert!(html.contains(
             r#"<details class="admin-dropdown" data-admin-dropdown-key="reports" open>"#
         ));
+    }
+
+    #[test]
+    fn admin_panel_full_backup_form_shows_tor_backup_checkbox_only_when_available() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+
+        let with_tor = render_admin_panel_for_test_with_backup_options(
+            std::slice::from_ref(&board),
+            &[],
+            &themes,
+            None,
+            true,
+            true,
+        );
+        assert!(with_tor.contains(r#"name="include_tor_hidden_service_keys" value="1""#));
+        assert!(with_tor.contains("Include Tor hidden service keys"));
+        assert!(!with_tor.contains(r#"name="include_tor_hidden_service_keys" value="1" checked"#));
+
+        let without_tor = render_admin_panel_for_test_with_backup_options(
+            std::slice::from_ref(&board),
+            &[],
+            &themes,
+            None,
+            false,
+            true,
+        );
+        assert!(!without_tor.contains(r#"name="include_tor_hidden_service_keys" value="1""#));
+    }
+
+    #[test]
+    fn admin_panel_saved_backup_restore_only_offers_tor_key_restore_when_backup_has_keys() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+
+        let with_tor = render_admin_panel_for_test_with_backup_options(
+            std::slice::from_ref(&board),
+            &[],
+            &themes,
+            None,
+            true,
+            true,
+        );
+        assert!(with_tor.contains("includes Tor hidden service keys"));
+        assert!(with_tor.contains(r#"name="restore_tor_hidden_service_keys" value="1""#));
+        assert!(!with_tor.contains(r#"name="restore_tor_hidden_service_keys" value="1" checked"#));
+
+        let without_tor = render_admin_panel_for_test_with_backup_options(
+            std::slice::from_ref(&board),
+            &[],
+            &themes,
+            None,
+            true,
+            false,
+        );
+        assert!(without_tor.contains("no Tor hidden service keys"));
+        assert!(!without_tor
+            .contains("Replaces the current onion identity with the one from this backup."));
     }
 }

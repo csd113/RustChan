@@ -88,6 +88,8 @@ const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 #[derive(Deserialize)]
 pub struct RestoreSavedForm {
     filename: String,
+    #[serde(default)]
+    restore_tor_hidden_service_keys: bool,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
@@ -172,6 +174,8 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                     .saturating_sub(banner_file_count),
                 favicon_file_count,
                 banner_file_count,
+                false,
+                0,
             )?;
             drop(conn);
             // +2 for backup.json and chan.db
@@ -764,6 +768,7 @@ mod tests {
             crate::test_support::connect_info(),
             axum::extract::Form(super::RestoreSavedForm {
                 filename,
+                restore_tor_hidden_service_keys: false,
                 csrf: Some("csrf123".to_string()),
             }),
         )
@@ -953,6 +958,7 @@ mod tests {
             admin_cookie_jar(),
             axum::extract::Form(super::RestoreSavedForm {
                 filename,
+                restore_tor_hidden_service_keys: false,
                 csrf: Some("csrf123".to_string()),
             }),
         )
@@ -1267,6 +1273,8 @@ mod tests {
             upload_file_count: 1,
             favicon_file_count: 0,
             banner_file_count: 0,
+            tor_hidden_service_keys_included: false,
+            tor_hidden_service_key_file_count: 0,
             boards: if indexed_boards {
                 vec![BackupBoardSummary {
                     short_name: "tech".into(),

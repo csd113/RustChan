@@ -179,6 +179,7 @@ impl RestoreKind {
 pub(super) struct StreamedRestoreUpload {
     pub temp_file: tempfile::NamedTempFile,
     pub form_csrf: Option<String>,
+    pub restore_tor_hidden_service_keys: bool,
     pub uploaded_filename: Option<String>,
     pub uploaded_content_type: Option<String>,
     pub uploaded_bytes: u64,
@@ -344,6 +345,7 @@ pub(super) async fn stream_restore_upload_to_tempfile(
 ) -> Result<StreamedRestoreUpload> {
     let mut temp_file: Option<tempfile::NamedTempFile> = None;
     let mut form_csrf: Option<String> = None;
+    let mut restore_tor_hidden_service_keys = false;
     let mut uploaded_filename: Option<String> = None;
     let mut uploaded_content_type: Option<String> = None;
     let mut uploaded_bytes = 0u64;
@@ -369,6 +371,13 @@ pub(super) async fn stream_restore_upload_to_tempfile(
                         .await
                         .map_err(|error| AppError::BadRequest(error.to_string()))?,
                 );
+            }
+            Some("restore_tor_hidden_service_keys") => {
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+                restore_tor_hidden_service_keys = matches!(value.as_str(), "1" | "true" | "on");
             }
             Some("backup_file") => {
                 uploaded_filename = field.file_name().map(str::to_string);
@@ -427,6 +436,7 @@ pub(super) async fn stream_restore_upload_to_tempfile(
     Ok(StreamedRestoreUpload {
         temp_file,
         form_csrf,
+        restore_tor_hidden_service_keys,
         uploaded_filename,
         uploaded_content_type,
         uploaded_bytes,

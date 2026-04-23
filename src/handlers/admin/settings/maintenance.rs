@@ -40,7 +40,13 @@ fn create_pre_repair_backup(
         }
     }
 
-    crate::handlers::admin::create_full_backup_to_server(pool, None, progress, copies_to_keep)
+    crate::handlers::admin::create_full_backup_to_server(
+        pool,
+        None,
+        progress,
+        copies_to_keep,
+        false,
+    )
 }
 
 pub async fn admin_vacuum(

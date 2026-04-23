@@ -623,6 +623,8 @@ fn render_admin_panel_from_snapshot(
             backup_warning: snapshot.backup_summary.warning.as_deref(),
             auto_full_backup_interval_hours: snapshot.auto_full_backup_interval_hours,
             auto_full_backup_copies_to_keep: snapshot.auto_full_backup_copies_to_keep,
+            tor_hidden_service_key_backup_available:
+                crate::config::configured_tor_hidden_service_keys_dir().is_some(),
         },
         maintenance: crate::templates::AdminPanelMaintenanceView {
             db_size_bytes: snapshot.db_size_bytes,

@@ -624,6 +624,8 @@ pub struct BackupInfo {
     pub verified: bool,
     /// Short note describing verification status or the detected problem.
     pub verification_note: String,
+    /// Whether this full backup includes the Tor hidden service identity files.
+    pub contains_tor_hidden_service_keys: bool,
     /// Boards indexed inside the backup when available.
     pub boards: Vec<BackupBoardSummary>,
 }
