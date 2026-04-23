@@ -54,16 +54,15 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             "This backup does not include Tor hidden service keys.".into(),
         ));
     }
-    let live_tor_hidden_service_keys_dir = if restore_tor_hidden_service_keys {
-        Some(live_tor_hidden_service_keys_dir.ok_or_else(|| {
-            AppError::BadRequest(
-                "Tor hidden service key restore is not available with the current configuration."
-                    .into(),
-            )
-        })?)
-    } else {
-        None
-    };
+    let live_tor_hidden_service_keys_dir =
+        match super::common::resolve_tor_hidden_service_keys_availability(
+            restore_tor_hidden_service_keys,
+            live_tor_hidden_service_keys_dir.map(Path::to_path_buf),
+            "Tor hidden service key restore is not available with the current configuration.",
+        )? {
+            super::common::TorHiddenServiceKeysAvailability::Skipped => None,
+            super::common::TorHiddenServiceKeysAvailability::Available(dir) => Some(dir),
+        };
 
     let temp_dir = std::env::temp_dir();
     let tmp_id = uuid::Uuid::new_v4().simple().to_string();
@@ -75,6 +74,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     let live_global_banner_dir = crate::banner::backup_source_dir();
     let staged_global_banner_dir = create_staging_dir(&live_global_banner_dir, "restore-stage")?;
     let staged_tor_hidden_service_keys_dir = live_tor_hidden_service_keys_dir
+        .as_deref()
         .map(|live_path| create_staging_dir(live_path, "restore-stage"))
         .transpose()?;
     let mut favicon_extracted = false;
@@ -93,21 +93,22 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             ))
         },
     );
-    let previous_tor_hidden_service_keys_dir = live_tor_hidden_service_keys_dir.map(|live_path| {
-        live_path.parent().map_or_else(
-            || PathBuf::from(format!("{}.restore-old", live_path.display())),
-            |parent| {
-                parent.join(format!(
-                    ".{}.restore-old.{}",
-                    live_path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("tor-keys"),
-                    uuid::Uuid::new_v4().simple()
-                ))
-            },
-        )
-    });
+    let previous_tor_hidden_service_keys_dir =
+        live_tor_hidden_service_keys_dir.as_ref().map(|live_path| {
+            live_path.parent().map_or_else(
+                || PathBuf::from(format!("{}.restore-old", live_path.display())),
+                |parent| {
+                    parent.join(format!(
+                        ".{}.restore-old.{}",
+                        live_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("tor-keys"),
+                        uuid::Uuid::new_v4().simple()
+                    ))
+                },
+            )
+        });
     let db_snapshot = temp_dir.join(format!("chan_restore_live_before_{tmp_id}.db"));
     let mut db_extracted = false;
 
@@ -288,6 +289,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         live: upload_root.display().to_string(),
         previous: previous_upload_root.display().to_string(),
         additional_swaps: live_tor_hidden_service_keys_dir
+            .as_ref()
             .zip(staged_tor_hidden_service_keys_dir.as_ref())
             .zip(previous_tor_hidden_service_keys_dir.as_ref())
             .map(
@@ -355,7 +357,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     if let Err(error) = crate::pending_fs::finalize_full_restore_payload(
         &pending_restore_payload,
         &upload_root,
-        live_tor_hidden_service_keys_dir,
+        live_tor_hidden_service_keys_dir.as_deref(),
     ) {
         let _ = std::fs::remove_file(&temp_db);
         let _ = std::fs::remove_file(&db_snapshot);
@@ -870,6 +872,83 @@ mod tests {
                 ),
             ])
         );
+    }
+
+    #[test]
+    fn full_restore_without_tor_key_opt_in_succeeds_without_any_tor_configuration() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip(
+            &zip_path,
+            Some(&[
+                ("hs_ed25519_secret_key", "backup-secret"),
+                ("hs_ed25519_public_key", "backup-public"),
+            ]),
+            false,
+        );
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            None,
+            false,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect("restore should succeed without tor configuration");
+    }
+
+    #[test]
+    fn full_restore_rejects_tor_key_opt_in_when_tor_is_unconfigured() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip(
+            &zip_path,
+            Some(&[
+                ("hs_ed25519_secret_key", "backup-secret"),
+                ("hs_ed25519_public_key", "backup-public"),
+            ]),
+            false,
+        );
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        let error = execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            None,
+            true,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect_err("restore should reject tor opt-in without configuration");
+
+        match error {
+            crate::error::AppError::BadRequest(message) => {
+                assert!(message.contains("Tor hidden service key restore is not available"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
     }
 
     #[test]

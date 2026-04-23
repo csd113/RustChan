@@ -16,7 +16,14 @@ pub(crate) fn create_full_backup_to_server(
     let uploads_base = std::path::Path::new(&CONFIG.upload_dir);
     let global_favicon_dir = crate::favicon::global_backup_source_dir();
     let tor_hidden_service_keys_dir = if include_tor_hidden_service_keys {
-        Some(resolve_tor_hidden_service_keys_dir()?)
+        match super::common::resolve_tor_hidden_service_keys_availability(
+            true,
+            crate::config::configured_tor_hidden_service_keys_dir(),
+            "Tor hidden service key backups are not available with the current configuration.",
+        )? {
+            super::common::TorHiddenServiceKeysAvailability::Skipped => None,
+            super::common::TorHiddenServiceKeysAvailability::Available(dir) => Some(dir),
+        }
     } else {
         None
     };
@@ -231,15 +238,6 @@ const fn full_backup_upload_file_count(
         .saturating_sub(favicon_file_count)
         .saturating_sub(banner_file_count)
         .saturating_sub(tor_hidden_service_key_file_count)
-}
-
-fn resolve_tor_hidden_service_keys_dir() -> Result<PathBuf> {
-    crate::config::configured_tor_hidden_service_keys_dir().ok_or_else(|| {
-        AppError::BadRequest(
-            "Tor hidden service key backups are not available with the current configuration."
-                .into(),
-        )
-    })
 }
 
 fn count_required_private_files(dir: &Path, missing_message: &str) -> Result<u64> {
@@ -850,7 +848,9 @@ mod tests {
         FullBackupCreateForm,
     };
     use crate::handlers::admin::backup::common::{
-        verify_full_backup_zip, FULL_BACKUP_MANIFEST_NAME, FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
+        resolve_tor_hidden_service_keys_availability, verify_full_backup_zip,
+        TorHiddenServiceKeysAvailability, FULL_BACKUP_MANIFEST_NAME,
+        FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
     };
     use axum::{
         body::{to_bytes, Body},
@@ -1053,6 +1053,55 @@ mod tests {
         match error {
             crate::error::AppError::BadRequest(message) => {
                 assert!(message.contains("Tor hidden service keys were requested"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn requested_tor_key_backup_skips_cleanly_when_not_requested() {
+        let result = resolve_tor_hidden_service_keys_availability(
+            false,
+            None,
+            "Tor hidden service key backups are not available with the current configuration.",
+        )
+        .expect("resolve skipped tor keys");
+
+        assert_eq!(result, TorHiddenServiceKeysAvailability::Skipped);
+    }
+
+    #[test]
+    fn requested_tor_key_backup_is_rejected_when_tor_is_disabled_or_unconfigured() {
+        let error = resolve_tor_hidden_service_keys_availability(
+            true,
+            None,
+            "Tor hidden service key backups are not available with the current configuration.",
+        )
+        .expect_err("requested tor keys should be rejected without configuration");
+
+        match error {
+            crate::error::AppError::BadRequest(message) => {
+                assert!(message.contains("Tor hidden service key backups are not available"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn requested_tor_key_backup_is_rejected_when_configured_path_is_missing() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let missing = temp_dir.path().join("missing-keys");
+        let error = resolve_tor_hidden_service_keys_availability(
+            true,
+            Some(missing.clone()),
+            "Tor hidden service key backups are not available with the current configuration.",
+        )
+        .expect_err("missing tor keys dir should fail");
+
+        match error {
+            crate::error::AppError::BadRequest(message) => {
+                assert!(message.contains("could not be read"));
+                assert!(message.contains(&missing.display().to_string()));
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }

@@ -802,6 +802,31 @@ mod tests {
     }
 
     #[test]
+    fn finalize_full_restore_rejects_tor_swap_without_private_permissions_flag() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_live = temp_dir.path().join("uploads");
+        let tor_live = temp_dir.path().join("keys");
+        let mut payload = full_restore_payload_for_live(&upload_live);
+        let mut tor_swap = tor_swap_for_live(&tor_live);
+        tor_swap.restrict_private_permissions = false;
+        payload.additional_swaps.push(tor_swap);
+
+        create_dir_with_file(&upload_live, "old.txt", "old");
+        create_dir_with_file(std::path::Path::new(&payload.staged), "new.txt", "new");
+        create_dir_with_file(&tor_live, "hs_ed25519_secret_key", "old-secret");
+        create_dir_with_file(&tor_live, "hs_ed25519_public_key", "old-public");
+
+        let error = finalize_full_restore_payload(&payload, &upload_live, Some(&tor_live))
+            .expect_err("tor swap without private permissions rejected");
+
+        assert!(error.to_string().contains("must restrict permissions"));
+        assert_eq!(
+            std::fs::read_to_string(tor_live.join("hs_ed25519_secret_key")).expect("read tor key"),
+            "old-secret"
+        );
+    }
+
+    #[test]
     fn finalize_full_restore_rejects_arbitrary_additional_live_before_mutation() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let upload_live = temp_dir.path().join("uploads");

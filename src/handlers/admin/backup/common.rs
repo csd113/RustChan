@@ -18,6 +18,35 @@ pub(super) const FULL_BACKUP_TOR_KEYS_PREFIX: &str = "tor/keys";
 pub(super) const FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX: &str = "tor/keys/";
 const SQLITE_HEADER: &[u8] = b"SQLite format 3\0";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TorHiddenServiceKeysAvailability {
+    Skipped,
+    Available(PathBuf),
+}
+
+pub(super) fn resolve_tor_hidden_service_keys_availability(
+    requested: bool,
+    configured_dir: Option<PathBuf>,
+    unavailable_message: &str,
+) -> Result<TorHiddenServiceKeysAvailability> {
+    if !requested {
+        return Ok(TorHiddenServiceKeysAvailability::Skipped);
+    }
+
+    let Some(dir) = configured_dir else {
+        return Err(AppError::BadRequest(unavailable_message.to_string()));
+    };
+
+    std::fs::read_dir(&dir).map_err(|error| {
+        AppError::BadRequest(format!(
+            "{unavailable_message} The configured identity directory {} could not be read: {error}",
+            dir.display()
+        ))
+    })?;
+
+    Ok(TorHiddenServiceKeysAvailability::Available(dir))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct FullBackupManifest {
     pub version: u32,
