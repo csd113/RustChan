@@ -46,6 +46,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     session_warning_log: &str,
 ) -> Result<String> {
     validate_full_restore_archive_layout(archive)?;
+    verify_full_backup_archive(archive)?;
 
     let temp_dir = std::env::temp_dir();
     let tmp_id = uuid::Uuid::new_v4().simple().to_string();
@@ -79,10 +80,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             .by_index(index)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip[{index}]: {error}")))?;
         let name = entry.name().to_string();
-        if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
-            warn!("{suspicious_entry_log}: skipping suspicious entry '{name}'");
-            continue;
-        }
+        validate_restore_safe_entry_name(&name)?;
 
         if name == "chan.db" {
             let mut out = std::fs::File::create(&temp_db)
@@ -110,19 +108,8 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
                 ));
             }
             db_extracted = true;
-        } else if let Some(rel) = name.strip_prefix("uploads/") {
-            if rel.is_empty() {
-                continue;
-            }
-            let rel_path = Path::new(rel);
-            if rel_path
-                .components()
-                .any(|component| component == std::path::Component::ParentDir)
-            {
-                warn!("{suspicious_entry_log}: skipping suspicious entry '{name}'");
-                continue;
-            }
-            let target = staged_upload_root.join(rel_path);
+        } else if let Some(rel_path) = restore_safe_relative_path_under_prefix(&name, "uploads/")? {
+            let target = staged_upload_root.join(&rel_path);
             if entry.is_dir() {
                 std::fs::create_dir_all(&target).map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("mkdir {}: {error}", target.display()))
@@ -140,20 +127,9 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
                     AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
                 })?;
             }
-        } else if let Some(rel) = name.strip_prefix("favicon/") {
-            if rel.is_empty() {
-                continue;
-            }
-            let rel_path = Path::new(rel);
-            if rel_path
-                .components()
-                .any(|component| component == std::path::Component::ParentDir)
-            {
-                warn!("{suspicious_entry_log}: skipping suspicious entry '{name}'");
-                continue;
-            }
+        } else if let Some(rel_path) = restore_safe_relative_path_under_prefix(&name, "favicon/")? {
             favicon_extracted = true;
-            let target = staged_global_favicon_dir.join(rel_path);
+            let target = staged_global_favicon_dir.join(&rel_path);
             if entry.is_dir() {
                 std::fs::create_dir_all(&target).map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("mkdir {}: {error}", target.display()))
@@ -239,13 +215,16 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     let backup_result = (|| -> Result<()> {
         let src = rusqlite::Connection::open(&temp_db)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Open backup source: {error}")))?;
-        db::ensure_pending_fs_ops_table(&src)?;
+        db::rebuild_pending_fs_ops_for_restore(&src)?;
         db::insert_pending_fs_op(&src, &pending_restore_op)?;
+        db::verify_only_pending_fs_op(&src, &pending_restore_id)?;
         let backup = Backup::new(&src, live_conn)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Backup init: {error}")))?;
         backup
             .run_to_completion(100, std::time::Duration::from_millis(0), None)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Backup copy: {error}")))?;
+        drop(backup);
+        db::verify_only_pending_fs_op(live_conn, &pending_restore_id)?;
         Ok(())
     })();
 

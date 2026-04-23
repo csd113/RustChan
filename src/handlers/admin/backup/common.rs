@@ -8,7 +8,6 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::io::Seek;
 use std::path::{Path, PathBuf};
-use tracing::warn;
 
 pub(super) const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub(super) const BOARD_MANIFEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -218,25 +217,10 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
             .by_index(i)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
         let name = entry.name().to_string();
-        if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
-            warn!("Restore: skipping suspicious entry '{name}'");
-            continue;
-        }
-        let Some(rel) = name.strip_prefix("uploads/") else {
+        let Some(rel_path) = restore_safe_relative_path_under_prefix(&name, "uploads/")? else {
             continue;
         };
-        if rel.is_empty() {
-            continue;
-        }
-        let rel_path = Path::new(rel);
-        if rel_path
-            .components()
-            .any(|component| component == std::path::Component::ParentDir)
-        {
-            warn!("Restore: skipping suspicious entry '{name}'");
-            continue;
-        }
-        let target = destination_root.join(rel_path);
+        let target = destination_root.join(&rel_path);
         if entry.is_dir() {
             std::fs::create_dir_all(&target).map_err(|e| {
                 AppError::Internal(anyhow::anyhow!("mkdir {}: {e}", target.display()))
@@ -257,31 +241,54 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
 }
 
 pub(super) fn validate_restore_safe_entry_name(name: &str) -> Result<()> {
-    if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
+    let normalized = name.trim_end_matches('/');
+    let suspicious = name.is_empty()
+        || normalized.is_empty()
+        || name.contains('\0')
+        || name.contains('\\')
+        || name.contains(':')
+        || name.starts_with('/')
+        || normalized
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..");
+
+    if suspicious {
         return Err(AppError::BadRequest(format!(
             "Backup contains suspicious path '{name}'"
         )));
     }
-    let path = Path::new(name);
-    if path
-        .components()
-        .any(|component| component == std::path::Component::ParentDir)
-    {
-        return Err(AppError::BadRequest(format!(
-            "Backup contains suspicious path '{name}'"
-        )));
+    for component in Path::new(name).components() {
+        match component {
+            std::path::Component::Normal(_) => {}
+            _ => {
+                return Err(AppError::BadRequest(format!(
+                    "Backup contains suspicious path '{name}'"
+                )));
+            }
+        }
     }
     Ok(())
 }
 
-pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> {
-    let file = std::fs::File::open(path).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Open backup {}: {error}", path.display()))
-    })?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|error| AppError::BadRequest(format!("Invalid zip backup: {error}")))?;
+pub(super) fn restore_safe_relative_path_under_prefix(
+    name: &str,
+    prefix: &str,
+) -> Result<Option<PathBuf>> {
+    validate_restore_safe_entry_name(name)?;
+    let Some(rel) = name.strip_prefix(prefix) else {
+        return Ok(None);
+    };
+    let rel = rel.trim_end_matches('/');
+    if rel.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(rel.split('/').collect()))
+}
 
-    let manifest = read_full_backup_manifest_from_archive(&mut archive)?;
+pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<FullBackupManifest> {
+    let manifest = read_full_backup_manifest_from_archive(archive)?;
 
     let mut db_entry = archive.by_name("chan.db").map_err(|_| {
         AppError::BadRequest("Invalid full backup: zip must contain 'chan.db' at the root.".into())
@@ -340,6 +347,15 @@ pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> 
     Ok(manifest)
 }
 
+pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> {
+    let file = std::fs::File::open(path).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Open backup {}: {error}", path.display()))
+    })?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| AppError::BadRequest(format!("Invalid zip backup: {error}")))?;
+    verify_full_backup_archive(&mut archive)
+}
+
 pub(super) fn read_full_backup_manifest_from_archive<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<FullBackupManifest> {
@@ -383,8 +399,8 @@ pub(super) fn verify_board_backup_zip(
 mod tests {
     use super::{
         extract_uploads_to_dir, remap_body_quotelinks, validate_board_short_name,
-        verify_board_backup_zip, verify_full_backup_zip, FullBackupManifest,
-        FULL_BACKUP_MANIFEST_NAME,
+        validate_restore_safe_entry_name, verify_board_backup_zip, verify_full_backup_zip,
+        FullBackupManifest, FULL_BACKUP_MANIFEST_NAME,
     };
     use serde_json::json;
     use std::io::Write as _;
@@ -436,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_uploads_to_dir_skips_suspicious_entries() {
+    fn extract_uploads_to_dir_rejects_suspicious_entries() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let zip_path = temp_dir.path().join("uploads.zip");
         {
@@ -457,10 +473,33 @@ mod tests {
         let dest = temp_dir.path().join("dest");
         std::fs::create_dir_all(&dest).expect("dest dir");
 
-        extract_uploads_to_dir(&mut archive, &dest).expect("extract uploads");
+        let error = extract_uploads_to_dir(&mut archive, &dest).expect_err("reject traversal");
 
         assert!(dest.join("test/ok.txt").exists());
         assert!(!dest.join("escape.txt").exists());
+        assert!(error.to_string().contains("suspicious path"));
+    }
+
+    #[test]
+    fn restore_entry_validation_rejects_platform_specific_traversal() {
+        for name in [
+            "../escape.txt",
+            "uploads/../escape.txt",
+            "uploads\\board\\file.txt",
+            "C:/Windows/system.ini",
+            "uploads/C:/Windows/system.ini",
+            "uploads//board/file.txt",
+            "uploads/./board/file.txt",
+            "/uploads/board/file.txt",
+            "\\uploads\\board\\file.txt",
+        ] {
+            assert!(
+                validate_restore_safe_entry_name(name).is_err(),
+                "accepted suspicious path {name:?}"
+            );
+        }
+
+        assert!(validate_restore_safe_entry_name("uploads/board/file.txt").is_ok());
     }
 
     #[test]
@@ -495,6 +534,17 @@ mod tests {
         assert_eq!(verified.upload_file_count, 1);
         assert_eq!(verified.favicon_file_count, 1);
         assert_eq!(verified.boards.len(), 1);
+    }
+
+    #[test]
+    fn verify_full_backup_zip_rejects_missing_manifest() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("full.zip");
+        write_zip(&zip_path, &[("chan.db", b"SQLite format 3\0rest of db")]);
+
+        let error = verify_full_backup_zip(&zip_path).expect_err("missing manifest rejected");
+
+        assert!(error.to_string().contains("missing backup.json"));
     }
 
     #[test]

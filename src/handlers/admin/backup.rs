@@ -65,7 +65,8 @@ mod types;
 use common::{
     copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
     log_backup_progress, read_limited_bytes, remap_body_quotelinks, remove_path_if_exists,
-    render_restored_body_html, validate_board_short_name, BANNER_RESTORE_ENTRY_MAX_BYTES,
+    render_restored_body_html, restore_safe_relative_path_under_prefix, validate_board_short_name,
+    validate_restore_safe_entry_name, verify_full_backup_archive, BANNER_RESTORE_ENTRY_MAX_BYTES,
     BANNER_RESTORE_TOTAL_MAX_BYTES, BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
 };
 pub use create::*;

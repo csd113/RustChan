@@ -21,6 +21,7 @@ use axum::extract::Multipart;
 use tokio::io::AsyncWriteExt as _;
 
 const MIME_SNIFF_BYTES: usize = 512;
+const UNKNOWN_MULTIPART_FIELD_MAX_BYTES: usize = 64 * 1024;
 
 fn max_primary_upload_bytes() -> usize {
     CONFIG
@@ -34,6 +35,25 @@ async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<S
         .text()
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))
+}
+
+pub async fn discard_unknown_multipart_field(
+    mut field: axum::extract::multipart::Field<'_>,
+) -> Result<()> {
+    let mut total = 0usize;
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
+        total = total.saturating_add(chunk.len());
+        if total > UNKNOWN_MULTIPART_FIELD_MAX_BYTES {
+            return Err(AppError::UploadTooLarge(
+                "Unexpected multipart field is too large.".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ─── Streaming multipart size limit ──────────────────────────────────────────
@@ -228,7 +248,7 @@ pub async fn parse_post_multipart(
                 image_file = read_upload_field(field, CONFIG.max_image_size, "image").await?;
             }
             _ => {
-                let _ = field.bytes().await;
+                discard_unknown_multipart_field(field).await?;
             }
         }
     }

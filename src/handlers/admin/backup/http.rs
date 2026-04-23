@@ -416,7 +416,7 @@ pub(super) async fn stream_restore_upload_to_tempfile(
                     "{} ignored unexpected multipart field",
                     kind.title()
                 );
-                let _ = field.bytes().await;
+                crate::handlers::discard_unknown_multipart_field(field).await?;
             }
         }
     }
