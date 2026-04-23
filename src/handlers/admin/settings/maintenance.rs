@@ -45,8 +45,12 @@ fn create_pre_repair_backup(
         None,
         progress,
         copies_to_keep,
-        false,
+        pre_repair_backup_include_tor_hidden_service_keys(),
     )
+}
+
+fn pre_repair_backup_include_tor_hidden_service_keys() -> bool {
+    crate::config::configured_tor_hidden_service_keys_dir().is_some_and(|path| path.is_dir())
 }
 
 pub async fn admin_vacuum(

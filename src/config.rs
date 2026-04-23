@@ -85,7 +85,7 @@ pub fn runtime_tor_state_dir() -> PathBuf {
 
 #[must_use]
 pub fn runtime_tor_hidden_service_keys_dir() -> PathBuf {
-    runtime_tor_state_dir().join("keys")
+    runtime_tor_state_dir().join("keystore")
 }
 
 #[must_use]
@@ -1258,7 +1258,10 @@ fn port_from_bind_addr(addr: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{rewrite_settings_file_lines, template::settings_template, Config, TlsConfig};
+    use super::{
+        rewrite_settings_file_lines, runtime_tor_hidden_service_keys_dir,
+        template::settings_template, Config, TlsConfig,
+    };
 
     fn valid_config() -> Config {
         const MIB: usize = 1024 * 1024;
@@ -1322,6 +1325,11 @@ mod tests {
             .validate()
             .expect_err("config should fail validation")
             .to_string()
+    }
+
+    #[test]
+    fn tor_hidden_service_keys_dir_matches_arti_native_keystore_location() {
+        assert!(runtime_tor_hidden_service_keys_dir().ends_with("runtime/tor/state/keystore"));
     }
 
     #[test]

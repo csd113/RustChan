@@ -368,7 +368,7 @@ async fn run_arti(
     onion_address: Arc<RwLock<Option<String>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // runtime/tor/cache/ — consensus cache (safe to delete; re-fetched on next start).
-    // runtime/tor/state/ — service keypair. Back this up.
+    // runtime/tor/state/keystore/ — service keypair. Back this up.
     //   Delete it only if you want a new .onion address.
     //
     // NOTE: TorClientConfigBuilder::from_directories takes AsRef<Path> directly.

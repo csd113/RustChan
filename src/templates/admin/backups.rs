@@ -353,7 +353,7 @@ fn render_admin_backups_section(
     <h3>// automated full backups</h3>
     <p>Schedule background full-site snapshots and decide how many recent saved copies the server keeps.</p>
   </div>
-  <form method="POST" action="/admin/backup/settings" class="admin-site-settings-form">
+  <form method="POST" action="/admin/backup/settings" class="admin-site-settings-form full-backup-settings-form">
   <input type="hidden" name="_csrf" value="{csrf}">
   <div class="board-settings-grid admin-settings-grid">
     <label title="0 disables scheduled full backups.">
@@ -365,7 +365,7 @@ fn render_admin_backups_section(
       <input type="number" name="auto_full_backup_copies_to_keep" value="{auto_full_backup_copies_to_keep}" min="1" max="1000" style="font-family:inherit">
     </label>
   </div>
-  <div class="backup-form-options">
+  <div class="backup-form-options full-backup-options">
   {auto_full_backup_tor_option}
   </div>
   <div class="board-settings-actions">
@@ -381,15 +381,15 @@ fn render_admin_backups_section(
     <h3>// run or restore now</h3>
     <p>Create a full backup on the server or upload one to replace the live site.</p>
   </div>
-  <div class="admin-inline-actions admin-inline-actions-spaced">
-  <form method="POST" action="/admin/backup/create" id="full-backup-create-form" class="backup-action-form">
+  <div class="full-backup-run-actions">
+  <form method="POST" action="/admin/backup/create" id="full-backup-create-form" class="backup-action-form full-backup-action-form">
   <input type="hidden" name="_csrf" value="{csrf}">
   <button type="submit" id="full-backup-btn">&#128190; save to server</button>
-  <div class="backup-form-options">
+  <div class="backup-form-options full-backup-options">
   {full_backup_create_tor_option}
   </div>
   </form>
-  <form method="POST" action="/admin/restore" enctype="multipart/form-data" class="backup-restore-upload-form admin-file-inline-form" data-restore-label="full backup">
+  <form method="POST" action="/admin/restore" enctype="multipart/form-data" class="backup-restore-upload-form admin-file-inline-form full-backup-action-form" data-restore-label="full backup">
   <input type="hidden" name="_csrf" value="{csrf}">
   <label class="admin-quick-field admin-file-field">Backup archive
     <input type="file" name="backup_file" accept=".zip" required class="admin-file-input">
@@ -397,7 +397,7 @@ fn render_admin_backups_section(
   </label>
   <button type="submit" class="btn-danger"
           data-confirm="WARNING: This will overwrite the database and all uploaded files. Cannot be undone. Continue?">&#8635; restore from local file</button>
-  <div class="backup-form-options">
+  <div class="backup-form-options full-backup-options">
   {full_backup_restore_upload_tor_option}
   </div>
   </form>

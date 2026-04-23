@@ -84,7 +84,7 @@ cookie_secret = "{secret}"
 # ── Tor Onion Service ─────────────────────────────────────────────────────────
 # Built-in Onion Service support (powered by Arti — no system tor required).
 # First run downloads ~2 MB of directory data and can take ~30 s.
-# The service keypair lives in rustchan-data/runtime/tor/state/keys/ — back it up.
+# The service keypair lives in rustchan-data/runtime/tor/state/keystore/ — back it up.
 # Delete that directory to rotate to a new .onion address.
 enable_tor_support = true
 

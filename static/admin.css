@@ -709,25 +709,57 @@ html:not([data-theme]) .admin-panel h1 {
   margin: 0;
 }
 
-.backup-action-form,
-.backup-restore-upload-form {
+#full-backup-restore .backup-action-form,
+#full-backup-restore .backup-restore-upload-form {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 0.55rem;
 }
 
-.backup-form-options {
+#full-backup-restore .full-backup-run-actions {
   display: grid;
-  gap: 0.4rem;
-  width: min(100%, 34rem);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
+  gap: 1rem 1.25rem;
+  align-items: start;
+  margin: 0.75rem 0 0;
+  max-width: 58rem;
 }
 
-.backup-form-options:empty {
+#full-backup-restore .full-backup-action-form {
+  width: 100%;
+  max-width: 30rem;
+  min-width: 0;
+  justify-self: start;
+}
+
+#full-backup-restore .full-backup-action-form .admin-file-field {
+  flex: 0 1 auto;
+  width: 100%;
+  max-width: 26rem;
+}
+
+#full-backup-restore .full-backup-action-form button {
+  width: auto;
+  max-width: 100%;
+}
+
+#full-backup-restore .full-backup-settings-form .board-settings-actions {
+  margin-top: 0.75rem;
+}
+
+#full-backup-restore .full-backup-options {
+  display: grid;
+  gap: 0.4rem;
+  width: 100%;
+  max-width: 34rem;
+}
+
+#full-backup-restore .full-backup-options:empty {
   display: none;
 }
 
-.backup-tor-option {
+#full-backup-restore .backup-tor-option {
   align-items: flex-start;
   gap: 0.5rem;
   max-width: 34rem;
@@ -735,29 +767,29 @@ html:not([data-theme]) .admin-panel h1 {
   line-height: 1.35;
 }
 
-.backup-tor-option input[type="checkbox"] {
+#full-backup-restore .backup-tor-option input[type="checkbox"] {
   margin-top: 0.2rem;
   flex: 0 0 auto;
 }
 
-.backup-tor-option strong {
+#full-backup-restore .backup-tor-option strong {
   display: block;
   color: var(--text);
   font-size: 0.8rem;
   letter-spacing: 0;
 }
 
-.backup-tor-option .admin-quick-help {
+#full-backup-restore .backup-tor-option .admin-quick-help {
   display: block;
   margin-top: 0.15rem;
 }
 
-.backup-tor-option-compact {
+#full-backup-restore .backup-tor-option-compact {
   margin-top: 0.25rem;
   max-width: 100%;
 }
 
-.backup-tor-warning {
+#full-backup-restore .backup-tor-warning {
   margin: 0;
   color: var(--red-bright);
 }
