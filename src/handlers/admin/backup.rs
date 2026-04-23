@@ -88,10 +88,24 @@ const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 #[derive(Deserialize)]
 pub struct RestoreSavedForm {
     filename: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "form_checkbox_bool")]
     restore_tor_hidden_service_keys: bool,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
+}
+
+fn form_checkbox_bool<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(form_checkbox_value_is_on(value.as_deref()))
+}
+
+fn form_checkbox_value_is_on(value: Option<&str>) -> bool {
+    value == Some("1")
+        || value.is_some_and(|item| item.eq_ignore_ascii_case("on"))
+        || value.is_some_and(|item| item.eq_ignore_ascii_case("true"))
 }
 
 use archive::{
@@ -552,6 +566,7 @@ mod tests {
     use crate::models::BackupBoardSummary;
     use axum::{
         body::{to_bytes, Body},
+        extract::Form,
         http::{header, HeaderMap, HeaderValue, Request, StatusCode},
         routing::{get, post},
         Router,
@@ -575,6 +590,37 @@ mod tests {
         }
         cursor.set_position(0);
         zip::ZipArchive::new(cursor).expect("zip archive")
+    }
+
+    async fn echo_restore_saved_form(Form(form): Form<super::RestoreSavedForm>) -> String {
+        form.restore_tor_hidden_service_keys.to_string()
+    }
+
+    #[tokio::test]
+    async fn restore_saved_form_accepts_checked_browser_checkbox_value() {
+        let app = Router::new().route("/parse", post(echo_restore_saved_form));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/parse")
+                    .header(
+                        header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded;charset=UTF-8",
+                    )
+                    .body(Body::from(
+                        "_csrf=test&filename=backup.zip&restore_tor_hidden_service_keys=1",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], b"true");
     }
 
     fn sample_post(board_id: i64, thread_id: i64, body: &str, is_op: bool) -> crate::db::NewPost {

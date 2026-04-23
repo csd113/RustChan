@@ -9,6 +9,7 @@ pub struct FullBackupSettingsForm {
     pub csrf: Option<String>,
     pub auto_full_backup_interval_hours: Option<String>,
     pub auto_full_backup_copies_to_keep: Option<String>,
+    pub auto_full_backup_include_tor_hidden_service_keys: Option<String>,
 }
 
 pub async fn update_full_backup_settings(
@@ -33,6 +34,10 @@ pub async fn update_full_backup_settings(
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(CONFIG.auto_full_backup_copies_to_keep)
         .clamp(1, 1_000);
+    let include_tor_hidden_service_keys = super::checkbox_is_on(
+        form.auto_full_backup_include_tor_hidden_service_keys
+            .as_deref(),
+    );
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -40,12 +45,21 @@ pub async fn update_full_backup_settings(
         move || -> Result<()> {
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            auto_backup_settings.update(interval_hours, copies_to_keep);
-            crate::config::update_settings_file_auto_full_backup(interval_hours, copies_to_keep);
+            auto_backup_settings.update(
+                interval_hours,
+                copies_to_keep,
+                include_tor_hidden_service_keys,
+            );
+            crate::config::update_settings_file_auto_full_backup(
+                interval_hours,
+                copies_to_keep,
+                include_tor_hidden_service_keys,
+            );
             tracing::info!(
                 target: "admin",
                 interval_hours,
                 copies_to_keep,
+                include_tor_hidden_service_keys,
                 "Automatic full-backup settings updated"
             );
             Ok(())

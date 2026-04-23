@@ -668,6 +668,16 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::Write as _;
 
+    static TOR_PERMISSION_FAILURE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct PrivatePermissionFailureReset;
+
+    impl Drop for PrivatePermissionFailureReset {
+        fn drop(&mut self) {
+            crate::pending_fs::set_private_permission_failure_for_test(None);
+        }
+    }
+
     fn create_snapshot_db() -> std::path::PathBuf {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let db_path = temp_dir.path().join("snapshot.db");
@@ -864,6 +874,9 @@ mod tests {
 
     #[test]
     fn full_restore_with_tor_key_opt_in_replaces_live_identity_without_merging() {
+        let _tor_permission_failure_guard = TOR_PERMISSION_FAILURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let zip_path = temp_dir.path().join("backup.zip");
         write_full_backup_zip(
@@ -923,6 +936,9 @@ mod tests {
 
     #[test]
     fn full_restore_tor_key_finalize_failure_keeps_pending_restore_for_reconciliation() {
+        let _tor_permission_failure_guard = TOR_PERMISSION_FAILURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let zip_path = temp_dir.path().join("backup.zip");
         write_full_backup_zip(
@@ -949,6 +965,7 @@ mod tests {
         crate::pending_fs::set_private_permission_failure_for_test(Some(
             "simulated Tor key permission failure".to_string(),
         ));
+        let _private_permission_failure_reset = PrivatePermissionFailureReset;
         let error = execute_full_restore(
             &mut live_conn,
             1,
@@ -962,7 +979,6 @@ mod tests {
             "Test restore",
         )
         .expect_err("restore should report failed Tor key finalization");
-        crate::pending_fs::set_private_permission_failure_for_test(None);
 
         assert!(error
             .to_string()
@@ -981,6 +997,7 @@ mod tests {
         assert_eq!(tor_swap.live, tor_keys_dir.display().to_string());
         assert!(tor_swap.restrict_private_permissions);
 
+        crate::pending_fs::set_private_permission_failure_for_test(None);
         crate::pending_fs::finalize_full_restore_payload(
             &payload,
             &upload_dir,

@@ -277,7 +277,7 @@ fn count_required_private_files(dir: &Path, missing_message: &str) -> Result<u64
 
 #[derive(Deserialize)]
 pub struct FullBackupCreateForm {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::form_checkbox_bool")]
     include_tor_hidden_service_keys: bool,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
@@ -847,11 +847,71 @@ where
 mod tests {
     use super::{
         build_full_backup_manifest, count_required_private_files, full_backup_upload_file_count,
+        FullBackupCreateForm,
     };
     use crate::handlers::admin::backup::common::{
         verify_full_backup_zip, FULL_BACKUP_MANIFEST_NAME, FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
     };
+    use axum::{
+        body::{to_bytes, Body},
+        extract::Form,
+        http::{header, Request, StatusCode},
+        routing::post,
+        Router,
+    };
     use std::io::Write as _;
+    use tower::ServiceExt as _;
+
+    async fn echo_full_backup_create_form(Form(form): Form<FullBackupCreateForm>) -> String {
+        form.include_tor_hidden_service_keys.to_string()
+    }
+
+    #[tokio::test]
+    async fn full_backup_create_form_accepts_checked_browser_checkbox_value() {
+        let app = Router::new().route("/parse", post(echo_full_backup_create_form));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/parse")
+                    .header(
+                        header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded;charset=UTF-8",
+                    )
+                    .body(Body::from("_csrf=test&include_tor_hidden_service_keys=1"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], b"true");
+    }
+
+    #[tokio::test]
+    async fn full_backup_create_form_defaults_missing_checkbox_to_false() {
+        let app = Router::new().route("/parse", post(echo_full_backup_create_form));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/parse")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("_csrf=test"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], b"false");
+    }
 
     fn write_test_full_backup_zip(zip_path: &std::path::Path, include_tor_keys: bool) {
         let temp_dir = tempfile::tempdir().expect("tempdir");

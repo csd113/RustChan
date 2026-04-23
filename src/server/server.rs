@@ -257,6 +257,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         auto_full_backup_settings: crate::middleware::AutoFullBackupSettings::new(
             CONFIG.auto_full_backup_interval_hours,
             CONFIG.auto_full_backup_copies_to_keep,
+            CONFIG.auto_full_backup_include_tor_hidden_service_keys,
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
         db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
@@ -520,7 +521,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                                 None,
                                 &progress,
                                 settings.copies_to_keep,
-                                false,
+                                settings.include_tor_hidden_service_keys,
                             )
                         })
                         .await;

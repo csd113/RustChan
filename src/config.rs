@@ -224,6 +224,9 @@ struct SettingsFile {
     /// How many saved full-site backups to keep on disk after a new saved
     /// backup completes. Minimum 1. Default: 1.
     auto_full_backup_copies_to_keep: Option<u64>,
+    /// Whether automatic full-site backups should include Tor hidden service
+    /// identity keys. Default: false.
+    auto_full_backup_include_tor_hidden_service_keys: Option<bool>,
     /// How often to purge vote records for expired polls, in hours.
     /// Set to 0 to disable. Default: 72 (every 3 days).
     poll_cleanup_interval_hours: Option<u64>,
@@ -454,6 +457,8 @@ pub struct Config {
     /// Maximum number of saved full backups kept on disk after each new saved
     /// full backup completes. Minimum 1.
     pub auto_full_backup_copies_to_keep: u64,
+    /// Whether automatic saved full backups include Tor hidden service identity keys.
+    pub auto_full_backup_include_tor_hidden_service_keys: bool,
     /// Interval in hours between expired poll vote cleanup runs. 0 = disabled.
     pub poll_cleanup_interval_hours: u64,
     /// DB file size threshold in bytes above which admin panel shows a warning.
@@ -668,6 +673,11 @@ impl Config {
                 s.auto_full_backup_copies_to_keep.unwrap_or(1),
             )
             .max(1),
+            auto_full_backup_include_tor_hidden_service_keys: env_bool(
+                "CHAN_AUTO_FULL_BACKUP_INCLUDE_TOR_KEYS",
+                s.auto_full_backup_include_tor_hidden_service_keys
+                    .unwrap_or(false),
+            ),
             poll_cleanup_interval_hours: env_parse(
                 "CHAN_POLL_CLEANUP_HOURS",
                 s.poll_cleanup_interval_hours.unwrap_or(72),
@@ -1084,7 +1094,11 @@ pub fn update_settings_file_site_settings(
     );
 }
 
-pub fn update_settings_file_auto_full_backup(interval_hours: u64, copies_to_keep: u64) {
+pub fn update_settings_file_auto_full_backup(
+    interval_hours: u64,
+    copies_to_keep: u64,
+    include_tor_hidden_service_keys: bool,
+) {
     update_settings_file_entries(
         &[
             (
@@ -1094,6 +1108,10 @@ pub fn update_settings_file_auto_full_backup(interval_hours: u64, copies_to_keep
             (
                 "auto_full_backup_copies_to_keep",
                 copies_to_keep.max(1).to_string(),
+            ),
+            (
+                "auto_full_backup_include_tor_hidden_service_keys",
+                include_tor_hidden_service_keys.to_string(),
             ),
         ],
         Some("# ── Federation / ChanNet gateway"),
@@ -1281,6 +1299,7 @@ mod tests {
             auto_vacuum_interval_hours: 24,
             auto_full_backup_interval_hours: 24,
             auto_full_backup_copies_to_keep: 1,
+            auto_full_backup_include_tor_hidden_service_keys: false,
             poll_cleanup_interval_hours: 72,
             db_warn_threshold_bytes: 2048 * MIB as u64,
             job_queue_capacity: 1000,
@@ -1322,6 +1341,10 @@ auto_full_backup_copies_to_keep = 1
                 ("default_theme", "\"terminal\"".to_string()),
                 ("auto_full_backup_interval_hours", "12".to_string()),
                 ("auto_full_backup_copies_to_keep", "3".to_string()),
+                (
+                    "auto_full_backup_include_tor_hidden_service_keys",
+                    "true".to_string(),
+                ),
             ],
             None,
         );
@@ -1332,6 +1355,7 @@ auto_full_backup_copies_to_keep = 1
         assert!(output.contains("default_theme = \"terminal\"\n"));
         assert!(output.contains("auto_full_backup_interval_hours = 12\n"));
         assert!(output.contains("auto_full_backup_copies_to_keep = 3\n"));
+        assert!(output.contains("auto_full_backup_include_tor_hidden_service_keys = true\n"));
         assert!(output.ends_with('\n'));
     }
 
@@ -1350,6 +1374,10 @@ enabled = true
             &[
                 ("auto_full_backup_interval_hours", "24".to_string()),
                 ("auto_full_backup_copies_to_keep", "1".to_string()),
+                (
+                    "auto_full_backup_include_tor_hidden_service_keys",
+                    "false".to_string(),
+                ),
             ],
             Some("# ── Federation / ChanNet gateway"),
         );
@@ -1360,6 +1388,9 @@ enabled = true
         let backup_copies_idx = output
             .find("auto_full_backup_copies_to_keep = 1")
             .expect("backup copies key inserted");
+        let backup_tor_idx = output
+            .find("auto_full_backup_include_tor_hidden_service_keys = false")
+            .expect("backup Tor key option inserted");
         let anchor_idx = output
             .find("# ── Federation / ChanNet gateway")
             .expect("anchor comment present");
@@ -1367,6 +1398,7 @@ enabled = true
 
         assert!(backup_hours_idx < anchor_idx);
         assert!(backup_copies_idx < anchor_idx);
+        assert!(backup_tor_idx < anchor_idx);
         assert!(anchor_idx < tls_idx);
     }
 

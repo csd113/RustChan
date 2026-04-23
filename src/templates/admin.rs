@@ -98,6 +98,7 @@ pub struct AdminPanelBackupsView<'a> {
     pub backup_warning: Option<&'a str>,
     pub auto_full_backup_interval_hours: u64,
     pub auto_full_backup_copies_to_keep: u64,
+    pub auto_full_backup_include_tor_hidden_service_keys: bool,
     pub tor_hidden_service_key_backup_available: bool,
 }
 
@@ -1680,6 +1681,7 @@ mod tests {
                 backup_warning: None,
                 auto_full_backup_interval_hours: 24,
                 auto_full_backup_copies_to_keep: 7,
+                auto_full_backup_include_tor_hidden_service_keys: false,
                 tor_hidden_service_key_backup_available: tor_backup_available,
             },
             maintenance: AdminPanelMaintenanceView {

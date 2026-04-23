@@ -709,6 +709,59 @@ html:not([data-theme]) .admin-panel h1 {
   margin: 0;
 }
 
+.backup-action-form,
+.backup-restore-upload-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.55rem;
+}
+
+.backup-form-options {
+  display: grid;
+  gap: 0.4rem;
+  width: min(100%, 34rem);
+}
+
+.backup-form-options:empty {
+  display: none;
+}
+
+.backup-tor-option {
+  align-items: flex-start;
+  gap: 0.5rem;
+  max-width: 34rem;
+  color: var(--green-pale);
+  line-height: 1.35;
+}
+
+.backup-tor-option input[type="checkbox"] {
+  margin-top: 0.2rem;
+  flex: 0 0 auto;
+}
+
+.backup-tor-option strong {
+  display: block;
+  color: var(--text);
+  font-size: 0.8rem;
+  letter-spacing: 0;
+}
+
+.backup-tor-option .admin-quick-help {
+  display: block;
+  margin-top: 0.15rem;
+}
+
+.backup-tor-option-compact {
+  margin-top: 0.25rem;
+  max-width: 100%;
+}
+
+.backup-tor-warning {
+  margin: 0;
+  color: var(--red-bright);
+}
+
 .backup-primary-actions {
   display: grid;
   gap: 0.4rem;

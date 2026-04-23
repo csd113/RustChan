@@ -3,26 +3,35 @@
 
 // src/middleware/state.rs
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Clone, Copy)]
 pub struct AutoFullBackupSettingsSnapshot {
     pub interval_hours: u64,
     pub copies_to_keep: u64,
+    pub include_tor_hidden_service_keys: bool,
 }
 
 #[derive(Clone)]
 pub struct AutoFullBackupSettings {
     interval_hours: std::sync::Arc<AtomicU64>,
     copies_to_keep: std::sync::Arc<AtomicU64>,
+    include_tor_hidden_service_keys: std::sync::Arc<AtomicBool>,
 }
 
 impl AutoFullBackupSettings {
     #[must_use]
-    pub fn new(interval_hours: u64, copies_to_keep: u64) -> Self {
+    pub fn new(
+        interval_hours: u64,
+        copies_to_keep: u64,
+        include_tor_hidden_service_keys: bool,
+    ) -> Self {
         Self {
             interval_hours: std::sync::Arc::new(AtomicU64::new(interval_hours)),
             copies_to_keep: std::sync::Arc::new(AtomicU64::new(copies_to_keep.max(1))),
+            include_tor_hidden_service_keys: std::sync::Arc::new(AtomicBool::new(
+                include_tor_hidden_service_keys,
+            )),
         }
     }
 
@@ -31,13 +40,23 @@ impl AutoFullBackupSettings {
         AutoFullBackupSettingsSnapshot {
             interval_hours: self.interval_hours.load(Ordering::Relaxed),
             copies_to_keep: self.copies_to_keep.load(Ordering::Relaxed),
+            include_tor_hidden_service_keys: self
+                .include_tor_hidden_service_keys
+                .load(Ordering::Relaxed),
         }
     }
 
-    pub fn update(&self, interval_hours: u64, copies_to_keep: u64) {
+    pub fn update(
+        &self,
+        interval_hours: u64,
+        copies_to_keep: u64,
+        include_tor_hidden_service_keys: bool,
+    ) {
         self.interval_hours.store(interval_hours, Ordering::Relaxed);
         self.copies_to_keep
             .store(copies_to_keep.max(1), Ordering::Relaxed);
+        self.include_tor_hidden_service_keys
+            .store(include_tor_hidden_service_keys, Ordering::Relaxed);
     }
 }
 
@@ -254,13 +273,14 @@ mod tests {
 
     #[test]
     fn auto_full_backup_settings_clamps_copies_to_keep() {
-        let settings = AutoFullBackupSettings::new(24, 0);
+        let settings = AutoFullBackupSettings::new(24, 0, false);
         assert_eq!(settings.snapshot().copies_to_keep, 1);
 
-        settings.update(12, 0);
+        settings.update(12, 0, true);
         let snapshot = settings.snapshot();
         assert_eq!(snapshot.interval_hours, 12);
         assert_eq!(snapshot.copies_to_keep, 1);
+        assert!(snapshot.include_tor_hidden_service_keys);
     }
 
     #[test]

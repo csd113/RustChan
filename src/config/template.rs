@@ -142,6 +142,10 @@ auto_full_backup_interval_hours = 24
 # Minimum: 1.
 auto_full_backup_copies_to_keep = 1
 
+# Whether automatic full-site backups include Tor hidden service identity keys.
+# Anyone with these keys can impersonate the onion service. Default: false.
+auto_full_backup_include_tor_hidden_service_keys = false
+
 # How often (in hours) to purge vote records for polls that have expired.
 # The poll question and options are kept for display; only per-IP vote rows
 # are deleted. Set to 0 to disable.

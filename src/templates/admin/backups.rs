@@ -40,6 +40,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
         view.backups.backup_status_line,
         view.backups.auto_full_backup_interval_hours,
         view.backups.auto_full_backup_copies_to_keep,
+        &render_auto_full_backup_tor_option(view),
         &render_full_backup_create_tor_option(view),
         &render_full_backup_restore_upload_tor_option(view),
         full_backup_open_attr,
@@ -116,12 +117,14 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
         let restore_tor_keys_option = if bf.contains_tor_hidden_service_keys
             && view.backups.tor_hidden_service_key_backup_available
         {
-            r#"<label class="admin-quick-field" style="display:block;margin:.5rem 0">
-        <span style="display:block;font-weight:600">Restore Tor hidden service keys</span>
+            r#"<label class="admin-inline-checkbox backup-tor-option backup-tor-option-compact">
         <input type="checkbox" name="restore_tor_hidden_service_keys" value="1">
-        <span class="admin-quick-help">Replaces the current onion identity with the one from this backup. This restores the old .onion address and overrides any Tor keys currently on disk.</span>
+        <span>
+          <strong>Restore Tor keys</strong>
+          <span class="admin-quick-help">Replaces the current onion identity with the one from this backup.</span>
+        </span>
       </label>
-      <p class="backup-extract-help" style="margin-top:0;color:var(--red-bright)">Anyone with these keys can impersonate this onion service.</p>"#
+      <p class="backup-extract-help backup-tor-warning">Anyone with these keys can impersonate this onion service.</p>"#
                 .to_string()
         } else {
             String::new()
@@ -156,8 +159,8 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
       <form method="POST" action="/admin/backup/restore-saved" class="backup-inline-form">
         <input type="hidden" name="_csrf" value="{csrf}">
         <input type="hidden" name="filename" value="{fname}">
-        {restore_tor_keys_option}
         <button type="submit" data-confirm="{restore_confirm}">&#8635; restore site</button>
+        {restore_tor_keys_option}
       </form>
       <form method="POST" action="/admin/backup/delete" class="backup-inline-form">
         <input type="hidden" name="_csrf" value="{csrf}">
@@ -199,16 +202,43 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     full_backup_rows
 }
 
+fn render_auto_full_backup_tor_option(view: &AdminPanelViewModel<'_>) -> String {
+    if !view.backups.tor_hidden_service_key_backup_available {
+        return String::new();
+    }
+
+    let checked = if view
+        .backups
+        .auto_full_backup_include_tor_hidden_service_keys
+    {
+        " checked"
+    } else {
+        ""
+    };
+
+    format!(
+        r#"<label class="admin-inline-checkbox backup-tor-option">
+      <input type="checkbox" name="auto_full_backup_include_tor_hidden_service_keys" value="1"{checked}>
+      <span>
+        <strong>Include Tor hidden service keys in automatic full backups</strong>
+        <span class="admin-quick-help">Preserves the same .onion address after restore. Anyone with these keys can impersonate this onion service.</span>
+      </span>
+    </label>"#
+    )
+}
+
 fn render_full_backup_create_tor_option(view: &AdminPanelViewModel<'_>) -> String {
     if !view.backups.tor_hidden_service_key_backup_available {
         return String::new();
     }
 
-    r#"<label class="admin-quick-field" style="max-width:28rem">
-    <span style="display:block;font-weight:600">Include Tor hidden service keys</span>
-    <input type="checkbox" name="include_tor_hidden_service_keys" value="1">
-    <span class="admin-quick-help">Preserves the same .onion address after restore. Anyone with these keys can impersonate this onion service.</span>
-  </label>"#
+    r#"<label class="admin-inline-checkbox backup-tor-option">
+      <input type="checkbox" name="include_tor_hidden_service_keys" value="1">
+      <span>
+        <strong>Include Tor hidden service keys</strong>
+        <span class="admin-quick-help">Preserves the same .onion address after restore. Anyone with these keys can impersonate this onion service.</span>
+      </span>
+    </label>"#
         .to_string()
 }
 
@@ -217,12 +247,14 @@ fn render_full_backup_restore_upload_tor_option(view: &AdminPanelViewModel<'_>) 
         return String::new();
     }
 
-    r#"<label class="admin-quick-field" style="max-width:28rem">
-    <span style="display:block;font-weight:600">Restore Tor hidden service keys</span>
-    <input type="checkbox" name="restore_tor_hidden_service_keys" value="1">
-    <span class="admin-quick-help">Only applies when the uploaded backup includes Tor hidden service keys. Replaces the current onion identity with the one from the backup and restores the old .onion address.</span>
-  </label>
-  <p class="backup-extract-help" style="margin:.25rem 0 0;color:var(--red-bright)">Anyone with these keys can impersonate this onion service.</p>"#
+    r#"<label class="admin-inline-checkbox backup-tor-option">
+      <input type="checkbox" name="restore_tor_hidden_service_keys" value="1">
+      <span>
+        <strong>Restore Tor hidden service keys</strong>
+        <span class="admin-quick-help">Only applies when the uploaded backup includes Tor hidden service keys. Replaces the current onion identity with the one from the backup and restores the old .onion address.</span>
+      </span>
+    </label>
+    <p class="backup-extract-help backup-tor-warning">Anyone with these keys can impersonate this onion service.</p>"#
         .to_string()
 }
 
@@ -295,6 +327,7 @@ fn render_admin_backups_section(
     backup_status_line: &str,
     auto_full_backup_interval_hours: u64,
     auto_full_backup_copies_to_keep: u64,
+    auto_full_backup_tor_option: &str,
     full_backup_create_tor_option: &str,
     full_backup_restore_upload_tor_option: &str,
     full_backup_open_attr: &str,
@@ -332,6 +365,9 @@ fn render_admin_backups_section(
       <input type="number" name="auto_full_backup_copies_to_keep" value="{auto_full_backup_copies_to_keep}" min="1" max="1000" style="font-family:inherit">
     </label>
   </div>
+  <div class="backup-form-options">
+  {auto_full_backup_tor_option}
+  </div>
   <div class="board-settings-actions">
     <button type="submit">save automated backup settings</button>
   </div>
@@ -346,10 +382,12 @@ fn render_admin_backups_section(
     <p>Create a full backup on the server or upload one to replace the live site.</p>
   </div>
   <div class="admin-inline-actions admin-inline-actions-spaced">
-  <form method="POST" action="/admin/backup/create" id="full-backup-create-form">
+  <form method="POST" action="/admin/backup/create" id="full-backup-create-form" class="backup-action-form">
   <input type="hidden" name="_csrf" value="{csrf}">
-  {full_backup_create_tor_option}
   <button type="submit" id="full-backup-btn">&#128190; save to server</button>
+  <div class="backup-form-options">
+  {full_backup_create_tor_option}
+  </div>
   </form>
   <form method="POST" action="/admin/restore" enctype="multipart/form-data" class="backup-restore-upload-form admin-file-inline-form" data-restore-label="full backup">
   <input type="hidden" name="_csrf" value="{csrf}">
@@ -357,9 +395,11 @@ fn render_admin_backups_section(
     <input type="file" name="backup_file" accept=".zip" required class="admin-file-input">
     <span class="admin-quick-help">Upload a full-site zip backup.</span>
   </label>
-  {full_backup_restore_upload_tor_option}
   <button type="submit" class="btn-danger"
           data-confirm="WARNING: This will overwrite the database and all uploaded files. Cannot be undone. Continue?">&#8635; restore from local file</button>
+  <div class="backup-form-options">
+  {full_backup_restore_upload_tor_option}
+  </div>
   </form>
   </div>
 </div>
@@ -429,6 +469,7 @@ fn render_admin_backups_section(
         backup_status_line = backup_status_line,
         auto_full_backup_interval_hours = auto_full_backup_interval_hours,
         auto_full_backup_copies_to_keep = auto_full_backup_copies_to_keep,
+        auto_full_backup_tor_option = auto_full_backup_tor_option,
         full_backup_create_tor_option = full_backup_create_tor_option,
         full_backup_restore_upload_tor_option = full_backup_restore_upload_tor_option,
         full_backup_open_attr = full_backup_open_attr,

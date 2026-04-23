@@ -13,7 +13,7 @@ pub fn app_state() -> crate::middleware::AppState {
         ffmpeg_webp_available: false,
         job_queue,
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
-        auto_full_backup_settings: crate::middleware::AutoFullBackupSettings::new(24, 1),
+        auto_full_backup_settings: crate::middleware::AutoFullBackupSettings::new(24, 1, false),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
         db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
         chan_ledger: None,

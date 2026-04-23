@@ -375,6 +375,7 @@ struct AdminPanelSnapshot {
     banner_external_links_enabled: bool,
     auto_full_backup_interval_hours: u64,
     auto_full_backup_copies_to_keep: u64,
+    auto_full_backup_include_tor_hidden_service_keys: bool,
     themes: Vec<crate::models::Theme>,
     global_banners: Vec<crate::models::BannerAsset>,
     home_banners: Vec<crate::models::BannerAsset>,
@@ -524,6 +525,8 @@ fn load_admin_panel_snapshot(
             banner_external_links_enabled: appearance_domain.banner_external_links_enabled,
             auto_full_backup_interval_hours: auto_full_backup_settings.interval_hours,
             auto_full_backup_copies_to_keep: auto_full_backup_settings.copies_to_keep,
+            auto_full_backup_include_tor_hidden_service_keys: auto_full_backup_settings
+                .include_tor_hidden_service_keys,
             themes: appearance_domain.themes,
             global_banners: appearance_domain.global_banners,
             home_banners: appearance_domain.home_banners,
@@ -623,6 +626,8 @@ fn render_admin_panel_from_snapshot(
             backup_warning: snapshot.backup_summary.warning.as_deref(),
             auto_full_backup_interval_hours: snapshot.auto_full_backup_interval_hours,
             auto_full_backup_copies_to_keep: snapshot.auto_full_backup_copies_to_keep,
+            auto_full_backup_include_tor_hidden_service_keys: snapshot
+                .auto_full_backup_include_tor_hidden_service_keys,
             tor_hidden_service_key_backup_available:
                 crate::config::configured_tor_hidden_service_keys_dir().is_some(),
         },
