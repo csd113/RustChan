@@ -287,6 +287,24 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         staged: staged_upload_root.display().to_string(),
         live: upload_root.display().to_string(),
         previous: previous_upload_root.display().to_string(),
+        additional_swaps: live_tor_hidden_service_keys_dir
+            .zip(staged_tor_hidden_service_keys_dir.as_ref())
+            .zip(previous_tor_hidden_service_keys_dir.as_ref())
+            .map(
+                |(
+                    (live_tor_hidden_service_keys_dir, staged_tor_hidden_service_keys_dir),
+                    previous_tor_hidden_service_keys_dir,
+                )| {
+                    crate::pending_fs::RestorePathSwapPayload {
+                        staged: staged_tor_hidden_service_keys_dir.display().to_string(),
+                        live: live_tor_hidden_service_keys_dir.display().to_string(),
+                        previous: previous_tor_hidden_service_keys_dir.display().to_string(),
+                        restrict_private_permissions: true,
+                    }
+                },
+            )
+            .into_iter()
+            .collect(),
     };
     let pending_restore_op = crate::pending_fs::PendingFsOpInsert {
         id: pending_restore_id.clone(),
@@ -334,24 +352,15 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         return Err(error);
     }
 
-    if let Err(error) = crate::pending_fs::finalize_full_restore_payload(&pending_restore_payload) {
-        let restore_db_result = restore_db_from_snapshot(live_conn, &db_snapshot, restore_label);
+    if let Err(error) = crate::pending_fs::finalize_full_restore_payload(
+        &pending_restore_payload,
+        &upload_root,
+        live_tor_hidden_service_keys_dir,
+    ) {
         let _ = std::fs::remove_file(&temp_db);
         let _ = std::fs::remove_file(&db_snapshot);
-        let _ = remove_path_if_exists(&staged_global_favicon_dir);
-        let _ = remove_path_if_exists(&staged_global_banner_dir);
-        if let Some(staged_tor_hidden_service_keys_dir) =
-            staged_tor_hidden_service_keys_dir.as_ref()
-        {
-            let _ = remove_path_if_exists(staged_tor_hidden_service_keys_dir);
-        }
-        if let Err(restore_err) = restore_db_result {
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "{restore_label} filesystem swap failed: {error}; DB rollback error: {restore_err}"
-            )));
-        }
         return Err(AppError::Internal(anyhow::anyhow!(
-            "{restore_label} filesystem swap failed: {error}"
+            "{restore_label} filesystem swap failed and remains pending for startup reconciliation: {error}"
         )));
     }
     db::delete_pending_fs_op(live_conn, &pending_restore_id)?;
@@ -376,28 +385,6 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     } else {
         let _ = remove_path_if_exists(&staged_global_banner_dir);
     }
-    if let (
-        Some(staged_tor_hidden_service_keys_dir),
-        Some(live_tor_hidden_service_keys_dir),
-        Some(previous_tor_hidden_service_keys_dir),
-    ) = (
-        staged_tor_hidden_service_keys_dir.as_ref(),
-        live_tor_hidden_service_keys_dir,
-        previous_tor_hidden_service_keys_dir.as_ref(),
-    ) {
-        let payload = crate::pending_fs::FullRestoreSwapPayload {
-            staged: staged_tor_hidden_service_keys_dir.display().to_string(),
-            live: live_tor_hidden_service_keys_dir.display().to_string(),
-            previous: previous_tor_hidden_service_keys_dir.display().to_string(),
-        };
-        crate::pending_fs::finalize_full_restore_payload(&payload).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!(
-                "{restore_label} Tor key restore swap failed: {error}"
-            ))
-        })?;
-        restrict_private_key_material_permissions(live_tor_hidden_service_keys_dir)?;
-    }
-
     let _ = std::fs::remove_file(&temp_db);
     let _ = std::fs::remove_file(&db_snapshot);
 
@@ -932,6 +919,94 @@ mod tests {
             ])
         );
         assert!(!tor_keys_dir.join("stale-file.txt").exists());
+    }
+
+    #[test]
+    fn full_restore_tor_key_finalize_failure_keeps_pending_restore_for_reconciliation() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip(
+            &zip_path,
+            Some(&[
+                ("hs_ed25519_secret_key", "backup-secret"),
+                ("hs_ed25519_public_key", "backup-public"),
+            ]),
+            false,
+        );
+
+        let tor_keys_dir = temp_dir.path().join("live-tor-keys");
+        std::fs::create_dir_all(&tor_keys_dir).expect("create live tor dir");
+        std::fs::write(tor_keys_dir.join("hs_ed25519_secret_key"), "live-secret")
+            .expect("write live secret");
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        crate::pending_fs::set_private_permission_failure_for_test(Some(
+            "simulated Tor key permission failure".to_string(),
+        ));
+        let error = execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            Some(&tor_keys_dir),
+            true,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect_err("restore should report failed Tor key finalization");
+        crate::pending_fs::set_private_permission_failure_for_test(None);
+
+        assert!(error
+            .to_string()
+            .contains("remains pending for startup reconciliation"));
+        let pending_ops =
+            crate::db::list_pending_fs_ops(&live_conn).expect("list pending fs ops after failure");
+        let [pending_op] = pending_ops.as_slice() else {
+            panic!("expected exactly one pending restore op");
+        };
+        assert_eq!(pending_op.kind, crate::pending_fs::FULL_RESTORE_SWAP_KIND);
+        let payload: crate::pending_fs::FullRestoreSwapPayload =
+            serde_json::from_str(&pending_op.payload_json).expect("restore payload json");
+        let [tor_swap] = payload.additional_swaps.as_slice() else {
+            panic!("expected one additional Tor key swap");
+        };
+        assert_eq!(tor_swap.live, tor_keys_dir.display().to_string());
+        assert!(tor_swap.restrict_private_permissions);
+
+        crate::pending_fs::finalize_full_restore_payload(
+            &payload,
+            &upload_dir,
+            Some(&tor_keys_dir),
+        )
+        .expect("finalize pending restore after failure clears");
+        crate::db::delete_pending_fs_op(&live_conn, &pending_op.id).expect("delete pending op");
+        assert!(
+            crate::db::list_pending_fs_ops(&live_conn)
+                .expect("list pending ops after finalization")
+                .is_empty(),
+            "pending restore op should clear only after finalization completes"
+        );
+        assert_eq!(
+            read_tree(&tor_keys_dir),
+            BTreeMap::from([
+                (
+                    "hs_ed25519_public_key".to_string(),
+                    "backup-public".to_string()
+                ),
+                (
+                    "hs_ed25519_secret_key".to_string(),
+                    "backup-secret".to_string()
+                ),
+            ])
+        );
     }
 
     #[test]

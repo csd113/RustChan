@@ -1,12 +1,15 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tracing::warn;
 
 pub const UPLOAD_FINALIZE_KIND: &str = "upload_finalize";
 pub const DELETE_FILES_KIND: &str = "delete_files";
 pub const FULL_RESTORE_SWAP_KIND: &str = "full_restore_swap";
 pub const BOARD_RESTORE_SWAP_KIND: &str = "board_restore_swap";
+
+#[cfg(test)]
+static PRIVATE_PERMISSION_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 #[derive(Clone)]
 pub struct PendingFsOpInsert {
@@ -35,6 +38,17 @@ pub struct FullRestoreSwapPayload {
     pub staged: String,
     pub live: String,
     pub previous: String,
+    #[serde(default)]
+    pub additional_swaps: Vec<RestorePathSwapPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestorePathSwapPayload {
+    pub staged: String,
+    pub live: String,
+    pub previous: String,
+    #[serde(default)]
+    pub restrict_private_permissions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +118,168 @@ fn cleanup_empty_parent_dir(path: &Path, live: &Path) {
             let _ = std::fs::remove_dir(parent);
         }
     }
+}
+
+fn absolute_path_without_parent_traversal(path: &Path) -> Result<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("Resolve current directory for restore path validation failed")?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                anyhow::bail!(
+                    "Restore swap path {} contains parent traversal",
+                    path.display()
+                );
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        anyhow::bail!("Restore swap path is empty");
+    }
+    Ok(normalized)
+}
+
+fn reject_existing_symlink(path: &Path) -> Result<()> {
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!("Restore swap path {} cannot be a symlink", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn validated_restore_path(path: &Path) -> Result<PathBuf> {
+    let path = absolute_path_without_parent_traversal(path)?;
+    reject_existing_symlink(&path)?;
+    if path.exists() {
+        return path
+            .canonicalize()
+            .with_context(|| format!("Canonicalize restore swap path {}", path.display()));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Restore swap path {} has no parent", path.display()))?;
+    reject_existing_symlink(parent)?;
+    let parent = parent.canonicalize().with_context(|| {
+        format!(
+            "Canonicalize restore swap parent directory {}",
+            parent.display()
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Restore swap path {} has no final component",
+            path.display()
+        )
+    })?;
+    Ok(parent.join(file_name))
+}
+
+fn expected_restore_path_name(live: &Path, label: &str) -> Result<String> {
+    let live_name = live
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Restore live path {} has no file name", live.display()))?;
+    Ok(format!(".{live_name}.{label}."))
+}
+
+fn validate_restore_generated_name(path: &Path, live: &Path, label: &str) -> Result<()> {
+    let expected_prefix = expected_restore_path_name(live, label)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Restore swap path {} has no UTF-8 file name",
+                path.display()
+            )
+        })?;
+    let Some(suffix) = file_name.strip_prefix(&expected_prefix) else {
+        anyhow::bail!(
+            "Restore swap path {} does not match expected {label} name for {}",
+            path.display(),
+            live.display()
+        );
+    };
+    if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!(
+            "Restore swap path {} has an invalid generated suffix",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_restore_swap_paths(
+    swap: &RestorePathSwapPayload,
+    allowed_live: &Path,
+    require_private_permissions: bool,
+) -> Result<()> {
+    if require_private_permissions && !swap.restrict_private_permissions {
+        anyhow::bail!("Restore swap for private runtime material must restrict permissions");
+    }
+
+    let allowed_live = validated_restore_path(allowed_live)?;
+    let live = validated_restore_path(Path::new(&swap.live))?;
+    if live != allowed_live {
+        anyhow::bail!(
+            "Restore swap live path {} is not an allowed restore target",
+            live.display()
+        );
+    }
+
+    let live_parent = live
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Restore live path {} has no parent", live.display()))?;
+    let staged = validated_restore_path(Path::new(&swap.staged))?;
+    let previous = validated_restore_path(Path::new(&swap.previous))?;
+    if staged.parent() != Some(live_parent) {
+        anyhow::bail!(
+            "Restore swap staged path {} is outside the expected restore staging area",
+            staged.display()
+        );
+    }
+    if previous.parent() != Some(live_parent) {
+        anyhow::bail!(
+            "Restore swap previous path {} is outside the expected restore backup area",
+            previous.display()
+        );
+    }
+    validate_restore_generated_name(&staged, &live, "restore-stage")?;
+    validate_restore_generated_name(&previous, &live, "restore-old")?;
+    Ok(())
+}
+
+fn validate_full_restore_payload_paths(
+    payload: &FullRestoreSwapPayload,
+    upload_dir: &Path,
+    tor_hidden_service_keys_dir: Option<&Path>,
+) -> Result<()> {
+    let primary_swap = RestorePathSwapPayload {
+        staged: payload.staged.clone(),
+        live: payload.live.clone(),
+        previous: payload.previous.clone(),
+        restrict_private_permissions: false,
+    };
+    validate_restore_swap_paths(&primary_swap, upload_dir, false)?;
+
+    for swap in &payload.additional_swaps {
+        let Some(tor_hidden_service_keys_dir) = tor_hidden_service_keys_dir else {
+            anyhow::bail!("Full restore payload contains an unsupported additional swap");
+        };
+        validate_restore_swap_paths(swap, tor_hidden_service_keys_dir, true)?;
+    }
+    Ok(())
 }
 
 /// Finalize a delete-files pending op by removing the listed paths and, if the
@@ -195,6 +371,54 @@ fn finalize_swap(staged: &Path, live: &Path, previous: &Path) -> Result<()> {
     Ok(())
 }
 
+fn restrict_private_path_permissions(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    {
+        let private_permission_failure = PRIVATE_PERMISSION_FAILURE
+            .lock()
+            .expect("private permission failure mutex")
+            .clone();
+        if let Some(message) = private_permission_failure {
+            anyhow::bail!("{message}");
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = std::fs::metadata(path)
+            .with_context(|| format!("Inspect private path {}", path.display()))?;
+        let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("Set private permissions on {}", path.display()))?;
+
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path)
+                .with_context(|| format!("Read private path {}", path.display()))?
+            {
+                let entry = entry
+                    .with_context(|| format!("Read private path entry under {}", path.display()))?;
+                restrict_private_path_permissions(&entry.path())?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+/// Configure a test-only failure injected during private permission repair.
+///
+/// # Panics
+/// Panics if the test failure mutex is poisoned.
+pub fn set_private_permission_failure_for_test(message: Option<String>) {
+    *PRIVATE_PERMISSION_FAILURE
+        .lock()
+        .expect("private permission failure mutex") = message;
+}
+
 /// Finalize a staged upload by moving its files into the live upload tree and
 /// refreshing deduplication metadata.
 ///
@@ -231,12 +455,29 @@ pub fn finalize_upload_payload(
 /// # Errors
 /// Returns an error if the staged or backup directories cannot be moved or
 /// cleaned up.
-pub fn finalize_full_restore_payload(payload: &FullRestoreSwapPayload) -> Result<()> {
-    finalize_swap(
-        Path::new(&payload.staged),
-        Path::new(&payload.live),
-        Path::new(&payload.previous),
-    )
+pub fn finalize_full_restore_payload(
+    payload: &FullRestoreSwapPayload,
+    upload_dir: &Path,
+    tor_hidden_service_keys_dir: Option<&Path>,
+) -> Result<()> {
+    validate_full_restore_payload_paths(payload, upload_dir, tor_hidden_service_keys_dir)?;
+    let primary_swap = RestorePathSwapPayload {
+        staged: payload.staged.clone(),
+        live: payload.live.clone(),
+        previous: payload.previous.clone(),
+        restrict_private_permissions: false,
+    };
+    for swap in std::iter::once(&primary_swap).chain(payload.additional_swaps.iter()) {
+        finalize_swap(
+            Path::new(&swap.staged),
+            Path::new(&swap.live),
+            Path::new(&swap.previous),
+        )?;
+        if swap.restrict_private_permissions {
+            restrict_private_path_permissions(Path::new(&swap.live))?;
+        }
+    }
+    Ok(())
 }
 
 /// Finalize a board-level restore directory swap.
@@ -299,7 +540,13 @@ pub fn reconcile_pending_fs_ops(pool: &crate::db::DbPool, upload_dir: &str) -> R
             FULL_RESTORE_SWAP_KIND => {
                 let payload: FullRestoreSwapPayload = serde_json::from_str(&op.payload_json)
                     .with_context(|| format!("Parse full_restore_swap payload for {}", op.id))?;
-                finalize_full_restore_payload(&payload)?;
+                let tor_hidden_service_keys_dir =
+                    crate::config::configured_tor_hidden_service_keys_dir();
+                finalize_full_restore_payload(
+                    &payload,
+                    Path::new(upload_dir),
+                    tor_hidden_service_keys_dir.as_deref(),
+                )?;
             }
             BOARD_RESTORE_SWAP_KIND => {
                 let payload: BoardRestoreSwapPayload = serde_json::from_str(&op.payload_json)
@@ -336,14 +583,50 @@ pub fn reconcile_pending_fs_ops(pool: &crate::db::DbPool, upload_dir: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::{
-        finalize_board_restore_payload, finalize_delete_files_payload, BoardRestoreSwapPayload,
-        DeleteFilesPayload, DELETE_FILES_KIND,
+        finalize_board_restore_payload, finalize_delete_files_payload,
+        finalize_full_restore_payload, BoardRestoreSwapPayload, DeleteFilesPayload,
+        FullRestoreSwapPayload, RestorePathSwapPayload, DELETE_FILES_KIND, FULL_RESTORE_SWAP_KIND,
     };
     use crate::db::{init_test_pool, insert_pending_fs_op};
 
     fn create_dir_with_file(path: &std::path::Path, file_name: &str, contents: &str) {
         std::fs::create_dir_all(path).expect("create dir");
         std::fs::write(path.join(file_name), contents).expect("write file");
+    }
+
+    fn generated_restore_path(live: &std::path::Path, label: &str) -> std::path::PathBuf {
+        let parent = live.parent().expect("live parent");
+        let name = live
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("live name");
+        parent.join(format!(".{name}.{label}.0123456789abcdef0123456789abcdef"))
+    }
+
+    fn full_restore_payload_for_live(live: &std::path::Path) -> FullRestoreSwapPayload {
+        FullRestoreSwapPayload {
+            staged: generated_restore_path(live, "restore-stage")
+                .display()
+                .to_string(),
+            live: live.display().to_string(),
+            previous: generated_restore_path(live, "restore-old")
+                .display()
+                .to_string(),
+            additional_swaps: Vec::new(),
+        }
+    }
+
+    fn tor_swap_for_live(live: &std::path::Path) -> RestorePathSwapPayload {
+        RestorePathSwapPayload {
+            staged: generated_restore_path(live, "restore-stage")
+                .display()
+                .to_string(),
+            live: live.display().to_string(),
+            previous: generated_restore_path(live, "restore-old")
+                .display()
+                .to_string(),
+            restrict_private_permissions: true,
+        }
     }
 
     #[test]
@@ -467,5 +750,244 @@ mod tests {
         );
         assert!(!staged.exists());
         assert!(!previous.exists());
+    }
+
+    #[test]
+    fn finalize_full_restore_payload_without_additional_swaps_still_succeeds() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let live = temp_dir.path().join("uploads");
+        let payload = full_restore_payload_for_live(&live);
+        create_dir_with_file(&live, "old.txt", "old");
+        create_dir_with_file(std::path::Path::new(&payload.staged), "new.txt", "new");
+
+        finalize_full_restore_payload(&payload, &live, None).expect("finalize full restore");
+
+        assert_eq!(
+            std::fs::read_to_string(live.join("new.txt")).expect("read live"),
+            "new"
+        );
+        assert!(!std::path::Path::new(&payload.staged).exists());
+        assert!(!std::path::Path::new(&payload.previous).exists());
+    }
+
+    #[test]
+    fn finalize_full_restore_payload_with_valid_tor_swap_succeeds() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_live = temp_dir.path().join("uploads");
+        let tor_live = temp_dir.path().join("keys");
+        let mut payload = full_restore_payload_for_live(&upload_live);
+        let tor_swap = tor_swap_for_live(&tor_live);
+        payload.additional_swaps.push(tor_swap.clone());
+
+        create_dir_with_file(&upload_live, "old.txt", "old");
+        create_dir_with_file(std::path::Path::new(&payload.staged), "new.txt", "new");
+        create_dir_with_file(&tor_live, "hs_ed25519_secret_key", "old-secret");
+        create_dir_with_file(
+            std::path::Path::new(&tor_swap.staged),
+            "hs_ed25519_secret_key",
+            "new-secret",
+        );
+
+        finalize_full_restore_payload(&payload, &upload_live, Some(&tor_live))
+            .expect("finalize full restore with tor swap");
+
+        assert_eq!(
+            std::fs::read_to_string(upload_live.join("new.txt")).expect("read upload"),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tor_live.join("hs_ed25519_secret_key")).expect("read tor key"),
+            "new-secret"
+        );
+    }
+
+    #[test]
+    fn finalize_full_restore_rejects_arbitrary_additional_live_before_mutation() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_live = temp_dir.path().join("uploads");
+        let tor_live = temp_dir.path().join("keys");
+        let victim_live = temp_dir.path().join("victim");
+        let mut payload = full_restore_payload_for_live(&upload_live);
+        let mut malicious_swap = tor_swap_for_live(&victim_live);
+        malicious_swap.live = victim_live.display().to_string();
+        payload.additional_swaps.push(malicious_swap);
+
+        create_dir_with_file(&upload_live, "old.txt", "old");
+        create_dir_with_file(std::path::Path::new(&payload.staged), "new.txt", "new");
+        create_dir_with_file(&victim_live, "keep.txt", "keep");
+
+        let error = finalize_full_restore_payload(&payload, &upload_live, Some(&tor_live))
+            .expect_err("arbitrary additional live rejected");
+
+        assert!(error.to_string().contains("not an allowed restore target"));
+        assert_eq!(
+            std::fs::read_to_string(upload_live.join("old.txt")).expect("read upload"),
+            "old"
+        );
+        assert_eq!(
+            std::fs::read_to_string(victim_live.join("keep.txt")).expect("read victim"),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn finalize_full_restore_rejects_parent_traversal_in_additional_swap() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_live = temp_dir.path().join("uploads");
+        let tor_live = temp_dir.path().join("keys");
+        let mut payload = full_restore_payload_for_live(&upload_live);
+        let mut malicious_swap = tor_swap_for_live(&tor_live);
+        malicious_swap.staged = temp_dir
+            .path()
+            .join(".keys.restore-stage.0123456789abcdef0123456789abcdef")
+            .join("..")
+            .join("escape")
+            .display()
+            .to_string();
+        payload.additional_swaps.push(malicious_swap);
+
+        create_dir_with_file(&upload_live, "old.txt", "old");
+        create_dir_with_file(std::path::Path::new(&payload.staged), "new.txt", "new");
+
+        let error = finalize_full_restore_payload(&payload, &upload_live, Some(&tor_live))
+            .expect_err("parent traversal rejected");
+
+        assert!(error.to_string().contains("parent traversal"));
+        assert_eq!(
+            std::fs::read_to_string(upload_live.join("old.txt")).expect("read upload"),
+            "old"
+        );
+    }
+
+    #[test]
+    fn finalize_full_restore_rejects_additional_swap_with_wrong_live_root() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_live = temp_dir.path().join("uploads");
+        let tor_live = temp_dir.path().join("keys");
+        let other_live = temp_dir.path().join("other-keys");
+        let mut payload = full_restore_payload_for_live(&upload_live);
+        payload
+            .additional_swaps
+            .push(tor_swap_for_live(&other_live));
+
+        create_dir_with_file(&upload_live, "old.txt", "old");
+        create_dir_with_file(std::path::Path::new(&payload.staged), "new.txt", "new");
+
+        let error = finalize_full_restore_payload(&payload, &upload_live, Some(&tor_live))
+            .expect_err("wrong additional live root rejected");
+
+        assert!(error.to_string().contains("not an allowed restore target"));
+        assert!(std::path::Path::new(&payload.staged).exists());
+    }
+
+    #[test]
+    fn finalize_full_restore_rejects_additional_staged_or_previous_outside_expected_area() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_live = temp_dir.path().join("uploads");
+        let tor_live = temp_dir.path().join("keys");
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        let mut payload = full_restore_payload_for_live(&upload_live);
+        let mut malicious_swap = tor_swap_for_live(&tor_live);
+        malicious_swap.staged = outside
+            .join(".keys.restore-stage.0123456789abcdef0123456789abcdef")
+            .display()
+            .to_string();
+        payload.additional_swaps.push(malicious_swap);
+
+        create_dir_with_file(&upload_live, "old.txt", "old");
+        create_dir_with_file(std::path::Path::new(&payload.staged), "new.txt", "new");
+
+        let error = finalize_full_restore_payload(&payload, &upload_live, Some(&tor_live))
+            .expect_err("outside staged path rejected");
+
+        assert!(error
+            .to_string()
+            .contains("outside the expected restore staging area"));
+        assert!(std::path::Path::new(&payload.staged).exists());
+
+        let mut payload = full_restore_payload_for_live(&upload_live);
+        let mut malicious_swap = tor_swap_for_live(&tor_live);
+        malicious_swap.previous = outside
+            .join(".keys.restore-old.0123456789abcdef0123456789abcdef")
+            .display()
+            .to_string();
+        payload.additional_swaps.push(malicious_swap);
+        let error = finalize_full_restore_payload(&payload, &upload_live, Some(&tor_live))
+            .expect_err("outside previous path rejected");
+
+        assert!(error
+            .to_string()
+            .contains("outside the expected restore backup area"));
+    }
+
+    #[test]
+    fn reconcile_rejects_malicious_additional_swap_and_keeps_pending_op() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_live = temp_dir.path().join("uploads");
+        let victim_live = temp_dir.path().join("victim");
+        let mut payload = full_restore_payload_for_live(&upload_live);
+        payload
+            .additional_swaps
+            .push(tor_swap_for_live(&victim_live));
+
+        create_dir_with_file(&upload_live, "old.txt", "old");
+        create_dir_with_file(std::path::Path::new(&payload.staged), "new.txt", "new");
+        create_dir_with_file(&victim_live, "keep.txt", "keep");
+
+        let pool = init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+        let op = crate::pending_fs::PendingFsOpInsert {
+            id: "malicious-full-restore".to_string(),
+            kind: FULL_RESTORE_SWAP_KIND,
+            payload_json: serde_json::to_string(&payload).expect("payload json"),
+        };
+        insert_pending_fs_op(&conn, &op).expect("insert pending op");
+        drop(conn);
+
+        let error =
+            crate::pending_fs::reconcile_pending_fs_ops(&pool, upload_live.to_str().expect("utf8"))
+                .expect_err("malicious additional swap rejected");
+
+        assert!(!error.to_string().is_empty());
+        let conn = pool.get().expect("db connection");
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM pending_fs_ops", [], |row| row
+                .get::<_, i64>(0))
+                .expect("pending op count"),
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(upload_live.join("old.txt")).expect("read upload"),
+            "old"
+        );
+        assert_eq!(
+            std::fs::read_to_string(victim_live.join("keep.txt")).expect("read victim"),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn old_full_restore_payload_without_additional_swaps_deserializes_and_finalizes() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_live = temp_dir.path().join("uploads");
+        let payload = full_restore_payload_for_live(&upload_live);
+        create_dir_with_file(&upload_live, "old.txt", "old");
+        create_dir_with_file(std::path::Path::new(&payload.staged), "new.txt", "new");
+        let legacy_json = serde_json::json!({
+            "staged": payload.staged,
+            "live": payload.live,
+            "previous": payload.previous,
+        });
+        let payload: FullRestoreSwapPayload =
+            serde_json::from_value(legacy_json).expect("legacy full restore payload");
+
+        finalize_full_restore_payload(&payload, &upload_live, None)
+            .expect("legacy full restore payload finalizes");
+
+        assert_eq!(
+            std::fs::read_to_string(upload_live.join("new.txt")).expect("read upload"),
+            "new"
+        );
     }
 }

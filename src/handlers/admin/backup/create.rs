@@ -59,9 +59,12 @@ pub(crate) fn create_full_backup_to_server(
     let manifest = build_full_backup_manifest(
         &conn,
         db_snapshot_size,
-        file_count
-            .saturating_sub(favicon_file_count)
-            .saturating_sub(banner_file_count),
+        full_backup_upload_file_count(
+            file_count,
+            favicon_file_count,
+            banner_file_count,
+            tor_hidden_service_key_file_count,
+        ),
         favicon_file_count,
         banner_file_count,
         include_tor_hidden_service_keys,
@@ -216,6 +219,18 @@ pub(crate) fn create_full_backup_to_server(
         .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
     log_backup_phase(crate::middleware::backup_phase::DONE);
     Ok(filename)
+}
+
+const fn full_backup_upload_file_count(
+    total_file_count: u64,
+    favicon_file_count: u64,
+    banner_file_count: u64,
+    tor_hidden_service_key_file_count: u64,
+) -> u64 {
+    total_file_count
+        .saturating_sub(favicon_file_count)
+        .saturating_sub(banner_file_count)
+        .saturating_sub(tor_hidden_service_key_file_count)
 }
 
 fn resolve_tor_hidden_service_keys_dir() -> Result<PathBuf> {
@@ -830,7 +845,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{build_full_backup_manifest, count_required_private_files};
+    use super::{
+        build_full_backup_manifest, count_required_private_files, full_backup_upload_file_count,
+    };
     use crate::handlers::admin::backup::common::{
         verify_full_backup_zip, FULL_BACKUP_MANIFEST_NAME, FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
     };
@@ -857,14 +874,18 @@ mod tests {
         conn.execute_batch(&format!("VACUUM INTO '{db_path_str}'"))
             .expect("vacuum snapshot");
 
+        let tor_key_file_count = if include_tor_keys { 2 } else { 0 };
+        let total_archive_file_count = 1_u64.saturating_add(tor_key_file_count);
+        let upload_file_count =
+            full_backup_upload_file_count(total_archive_file_count, 0, 0, tor_key_file_count);
         let manifest = build_full_backup_manifest(
             &conn,
             std::fs::metadata(&db_path).expect("db metadata").len(),
-            1,
+            upload_file_count,
             0,
             0,
             include_tor_keys,
-            if include_tor_keys { 2 } else { 0 },
+            tor_key_file_count,
         )
         .expect("build manifest");
         let manifest_json = serde_json::to_vec(&manifest).expect("manifest json");
@@ -922,6 +943,7 @@ mod tests {
 
         let manifest = verify_full_backup_zip(&zip_path).expect("verify zip");
         assert!(manifest.tor_hidden_service_keys_included);
+        assert_eq!(manifest.upload_file_count, 1);
         assert_eq!(manifest.tor_hidden_service_key_file_count, 2);
 
         let file = std::fs::File::open(&zip_path).expect("open zip");
@@ -946,6 +968,7 @@ mod tests {
 
         let manifest = verify_full_backup_zip(&zip_path).expect("verify zip");
         assert!(!manifest.tor_hidden_service_keys_included);
+        assert_eq!(manifest.upload_file_count, 1);
         assert_eq!(manifest.tor_hidden_service_key_file_count, 0);
 
         let file = std::fs::File::open(&zip_path).expect("open zip");
