@@ -5,6 +5,134 @@ use super::*;
 use axum::http::Uri;
 use std::net::IpAddr;
 
+const OWNED_POSTS_COOKIE: &str = "rustchan_owned_posts";
+const OWNED_POSTS_COOKIE_MAX: usize = 16;
+pub(crate) const SELF_DELETE_WINDOW_SECS: i64 = 60;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnedPostGrant {
+    pub post_id: i64,
+    pub thread_id: i64,
+    pub board_short: String,
+    pub deletion_token: String,
+    pub expires_at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OwnedPostsCookiePayload {
+    grants: Vec<OwnedPostGrant>,
+}
+
+fn owned_posts_cookie_signature(payload_hex: &str) -> String {
+    crate::utils::crypto::sha256_hex(
+        format!("{}:owned-posts:{payload_hex}", CONFIG.cookie_secret).as_bytes(),
+    )
+}
+
+fn parse_owned_posts_cookie(value: &str) -> Vec<OwnedPostGrant> {
+    let Some((payload_hex, signature)) = value.split_once('.') else {
+        return Vec::new();
+    };
+    if owned_posts_cookie_signature(payload_hex) != signature {
+        return Vec::new();
+    }
+
+    let Ok(payload_bytes) = hex::decode(payload_hex) else {
+        return Vec::new();
+    };
+    let Ok(payload) = serde_json::from_slice::<OwnedPostsCookiePayload>(&payload_bytes) else {
+        return Vec::new();
+    };
+    let now = chrono::Utc::now().timestamp();
+    payload
+        .grants
+        .into_iter()
+        .filter(|grant| grant.expires_at > now)
+        .collect()
+}
+
+fn owned_posts_cookie_value(grants: &[OwnedPostGrant]) -> Option<String> {
+    if grants.is_empty() {
+        return None;
+    }
+    let payload = OwnedPostsCookiePayload {
+        grants: grants.to_vec(),
+    };
+    let payload_json = serde_json::to_vec(&payload).ok()?;
+    let payload_hex = hex::encode(payload_json);
+    let signature = owned_posts_cookie_signature(&payload_hex);
+    Some(format!("{payload_hex}.{signature}"))
+}
+
+fn owned_posts_cookie(grants: &[OwnedPostGrant]) -> Option<Cookie<'static>> {
+    let value = owned_posts_cookie_value(grants)?;
+    let mut cookie = Cookie::new(OWNED_POSTS_COOKIE, value);
+    cookie.set_http_only(true);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_max_age(Duration::minutes(5));
+    Some(cookie)
+}
+
+pub fn owned_post_grants_from_jar(jar: &CookieJar) -> Vec<OwnedPostGrant> {
+    jar.get(OWNED_POSTS_COOKIE)
+        .map(Cookie::value)
+        .map(parse_owned_posts_cookie)
+        .unwrap_or_default()
+}
+
+pub fn owned_post_grant_from_jar(
+    jar: &CookieJar,
+    board_short: &str,
+    post_id: i64,
+) -> Option<OwnedPostGrant> {
+    owned_post_grants_from_jar(jar)
+        .into_iter()
+        .find(|grant| grant.post_id == post_id && grant.board_short == board_short)
+}
+
+pub fn remember_owned_post(
+    jar: CookieJar,
+    board_short: &str,
+    thread_id: i64,
+    post_id: i64,
+    deletion_token: &str,
+) -> CookieJar {
+    let now = chrono::Utc::now().timestamp();
+    let mut grants = owned_post_grants_from_jar(&jar)
+        .into_iter()
+        .filter(|grant| grant.post_id != post_id)
+        .collect::<Vec<_>>();
+    grants.push(OwnedPostGrant {
+        post_id,
+        thread_id,
+        board_short: board_short.to_string(),
+        deletion_token: deletion_token.to_string(),
+        expires_at: now + SELF_DELETE_WINDOW_SECS,
+    });
+    grants.sort_by(|a, b| b.expires_at.cmp(&a.expires_at).then_with(|| b.post_id.cmp(&a.post_id)));
+    grants.truncate(OWNED_POSTS_COOKIE_MAX);
+
+    if let Some(cookie) = owned_posts_cookie(&grants) {
+        jar.add(cookie)
+    } else {
+        jar.remove(Cookie::from(OWNED_POSTS_COOKIE))
+    }
+}
+
+pub fn forget_owned_post(jar: CookieJar, board_short: &str, post_id: i64) -> CookieJar {
+    let grants = owned_post_grants_from_jar(&jar)
+        .into_iter()
+        .filter(|grant| !(grant.post_id == post_id && grant.board_short == board_short))
+        .collect::<Vec<_>>();
+    if let Some(cookie) = owned_posts_cookie(&grants) {
+        jar.add(cookie)
+    } else {
+        jar.remove(Cookie::from(OWNED_POSTS_COOKIE))
+    }
+}
+
 // ─── CSRF cookie helper ───────────────────────────────────────────────────────
 
 /// Ensure the CSRF token cookie is set. Returns (`updated_jar`, `token_string`).

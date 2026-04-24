@@ -21,6 +21,7 @@ pub struct ThreadPageData {
     pub posts: Vec<crate::models::Post>,
     pub poll: Option<PollData>,
     pub is_admin: bool,
+    pub owned_post_controls: std::collections::BTreeMap<i64, templates::thread::OwnedPostControls>,
 }
 
 #[must_use]
@@ -162,6 +163,7 @@ pub fn load_thread_page_data(
         posts,
         poll,
         is_admin,
+        owned_post_controls: std::collections::BTreeMap::new(),
     })
 }
 
@@ -179,6 +181,7 @@ pub fn render_thread_page(
         &data.board,
         &data.thread,
         &data.posts,
+        &data.owned_post_controls,
         csrf_token,
         boards.as_slice(),
         data.is_admin,
@@ -274,6 +277,7 @@ mod tests {
             posts: vec![sample_post(1), sample_post(2), sample_post(3)],
             poll: None,
             is_admin: false,
+            owned_post_controls: std::collections::BTreeMap::new(),
         };
         let after = ThreadPageData {
             board,
@@ -281,6 +285,7 @@ mod tests {
             posts: vec![sample_post(1), sample_post(3)],
             poll: None,
             is_admin: false,
+            owned_post_controls: std::collections::BTreeMap::new(),
         };
 
         assert_ne!(
@@ -304,6 +309,7 @@ mod tests {
             posts: vec![sample_post(1), pending_post.clone()],
             poll: None,
             is_admin: false,
+            owned_post_controls: std::collections::BTreeMap::new(),
         };
 
         pending_post.file_path = Some("test/clip.webm".into());
@@ -316,6 +322,7 @@ mod tests {
             posts: vec![sample_post(1), pending_post],
             poll: None,
             is_admin: false,
+            owned_post_controls: std::collections::BTreeMap::new(),
         };
 
         assert_ne!(

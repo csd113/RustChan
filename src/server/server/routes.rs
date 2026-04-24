@@ -117,6 +117,10 @@ pub(super) fn public_routes() -> Router<AppState> {
             post(crate::handlers::thread::edit_post_post),
         )
         .route(
+            "/{board}/post/{id}/delete",
+            post(crate::handlers::thread::delete_own_post),
+        )
+        .route(
             "/report",
             post(crate::handlers::board::file_report).layer(DefaultBodyLimit::max(65_536)),
         )

@@ -55,6 +55,10 @@ pub struct SubmitPostCommand {
 
 pub struct SubmitPostResult {
     pub redirect_url: String,
+    pub board_short: String,
+    pub thread_id: i64,
+    pub post_id: i64,
+    pub deletion_token: String,
 }
 
 pub struct UploadConfig<'a> {
@@ -445,11 +449,17 @@ pub fn submit_post(
         });
     }
     if let Some(existing) = db::get_post_submission(conn, &submission_token, &ip_hash, board.id)? {
+        let stored_post = db::get_post(conn, existing.post_id)?
+            .ok_or_else(|| AppError::NotFound("Existing post submission target not found.".into()))?;
         return Ok(SubmitPostResult {
             redirect_url: format!(
                 "/{}/thread/{}#p{}",
                 board.short_name, existing.thread_id, existing.post_id
             ),
+            board_short: board.short_name,
+            thread_id: existing.thread_id,
+            post_id: existing.post_id,
+            deletion_token: stored_post.deletion_token,
         });
     }
 
@@ -526,7 +536,7 @@ pub fn submit_post(
                 body_html,
                 ip_hash.clone(),
                 &uploads,
-                deletion_token,
+                deletion_token.clone(),
                 true,
             );
             let q = poll_question.trim().to_string();
@@ -603,7 +613,7 @@ pub fn submit_post(
                 body_html,
                 ip_hash.clone(),
                 &uploads,
-                deletion_token,
+                deletion_token.clone(),
                 false,
             );
             let post_id = match db::create_reply_with_thread_update(
@@ -650,7 +660,13 @@ pub fn submit_post(
         tracing::info!(target: "board", post_id = post_id, thread_id = thread_id, board = %board.short_name, "Reply posted");
     }
 
-    Ok(SubmitPostResult { redirect_url })
+    Ok(SubmitPostResult {
+        redirect_url,
+        board_short: board.short_name,
+        thread_id,
+        post_id,
+        deletion_token,
+    })
 }
 
 #[cfg(test)]

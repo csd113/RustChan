@@ -127,6 +127,10 @@ async fn post_password_board_write_actions_require_unlock() {
             "/{board}/post/{id}/edit",
             post(crate::handlers::thread::edit_post_post),
         )
+        .route(
+            "/{board}/post/{id}/delete",
+            post(crate::handlers::thread::delete_own_post),
+        )
         .route("/vote", post(crate::handlers::thread::vote_handler))
         .with_state(state);
 
@@ -243,6 +247,119 @@ async fn post_password_board_write_actions_require_unlock() {
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok()),
         Some(format!("/secret/unlock?return_to=%2Fsecret%2Fthread%2F{thread_id}%23poll").as_str())
+    );
+}
+
+#[tokio::test]
+async fn self_delete_requires_owned_post_cookie() {
+    let state = crate::test_support::app_state();
+    let conn = state.db.get().expect("db connection");
+    let board_id = crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+    let op = crate::db::NewPost {
+        thread_id: 0,
+        board_id,
+        name: "anon".to_string(),
+        tripcode: None,
+        subject: Some("subject".to_string()),
+        body: "body".to_string(),
+        body_html: "body".to_string(),
+        ip_hash: None,
+        file_path: None,
+        file_name: None,
+        file_size: None,
+        thumb_path: None,
+        mime_type: None,
+        media_type: None,
+        audio_file_path: None,
+        audio_file_name: None,
+        audio_file_size: None,
+        audio_mime_type: None,
+        deletion_token: "op-token".to_string(),
+        is_op: true,
+    };
+    let (thread_id, _op_id, _) =
+        crate::db::create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
+            .expect("create thread");
+    let reply = crate::db::NewPost {
+        thread_id,
+        board_id,
+        name: "anon".to_string(),
+        tripcode: None,
+        subject: None,
+        body: "reply".to_string(),
+        body_html: "reply".to_string(),
+        ip_hash: None,
+        file_path: None,
+        file_name: None,
+        file_size: None,
+        thumb_path: None,
+        mime_type: None,
+        media_type: None,
+        audio_file_path: None,
+        audio_file_name: None,
+        audio_file_size: None,
+        audio_mime_type: None,
+        deletion_token: "reply-token".to_string(),
+        is_op: false,
+    };
+    let reply_id = crate::db::create_reply_with_thread_update(&conn, &reply, "", false, None)
+        .expect("create reply");
+    drop(conn);
+
+    let router = Router::new()
+        .route(
+            "/{board}/post/{id}/delete",
+            post(crate::handlers::thread::delete_own_post),
+        )
+        .with_state(state);
+
+    let forbidden = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/test/post/{reply_id}/delete"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .body(Body::from("deletion_token=reply-token&_csrf=csrf123"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+    let owned_cookie_jar = crate::handlers::board::remember_owned_post(
+        axum_extra::extract::cookie::CookieJar::new(),
+        "test",
+        thread_id,
+        reply_id,
+        "reply-token",
+    );
+    let owned_cookie = owned_cookie_jar
+        .get("rustchan_owned_posts")
+        .expect("owned posts cookie");
+    let allowed = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/test/post/{reply_id}/delete"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(
+                    header::COOKIE,
+                    format!("csrf_token=csrf123; rustchan_owned_posts={}", owned_cookie.value()),
+                )
+                .body(Body::from("deletion_token=reply-token&_csrf=csrf123"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(allowed.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        allowed
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("/test/thread/{thread_id}").as_str())
     );
 }
 

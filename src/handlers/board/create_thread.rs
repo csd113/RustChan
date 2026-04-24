@@ -69,9 +69,9 @@ pub async fn create_thread(
         let job_queue = state.job_queue.clone();
         let ffmpeg_available = state.ffmpeg_available;
         let ffmpeg_webp_available = state.ffmpeg_webp_available;
-        move || -> Result<String> {
+        move || -> Result<posting::SubmitPostResult> {
             let conn = pool.get()?;
-            Ok(posting::submit_post(
+            posting::submit_post(
                 &conn,
                 &job_queue,
                 posting::SubmitPostCommand {
@@ -102,8 +102,7 @@ pub async fn create_thread(
                     ffmpeg_available,
                     ffmpeg_webp_available,
                 },
-            )?
-            .redirect_url)
+            )
         }
     })
     .await
@@ -111,8 +110,8 @@ pub async fn create_thread(
 
     // BadRequest → re-render the board page with an inline error banner so the
     // user sees the message in context without being sent to a separate error page.
-    let redirect_url = match result {
-        Ok(url) => url,
+    let submit_result = match result {
+        Ok(submit_result) => submit_result,
         Err(AppError::BadRequest(msg)) => {
             if xhr_request {
                 return xhr_handled_error_response(StatusCode::UNPROCESSABLE_ENTITY, &msg);
@@ -166,11 +165,19 @@ pub async fn create_thread(
         }
     };
 
+    let jar = remember_owned_post(
+        jar,
+        &submit_result.board_short,
+        submit_result.thread_id,
+        submit_result.post_id,
+        &submit_result.deletion_token,
+    );
+
     if xhr_request {
-        return xhr_redirect_response(&redirect_url);
+        return Ok((jar, xhr_redirect_response(&submit_result.redirect_url)?).into_response());
     }
 
-    Ok(Redirect::to(&redirect_url).into_response())
+    Ok((jar, Redirect::to(&submit_result.redirect_url)).into_response())
 }
 
 // ─── GET /:board/catalog ──────────────────────────────────────────────────────

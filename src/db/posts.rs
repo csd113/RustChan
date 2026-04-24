@@ -435,88 +435,8 @@ pub fn delete_post(
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin delete_post transaction")?;
 
-    let result: crate::error::Result<crate::db::DeletePathsResult> = (|| {
-        let (thread_id, is_op, candidates) = {
-            let mut candidates = Vec::new();
-            let mut stmt = conn.prepare_cached(
-                "SELECT thread_id, is_op, file_path, thumb_path, audio_file_path
-                 FROM posts WHERE id = ?1",
-            )?;
-            let row = stmt
-                .query_row(params![post_id], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i32>(1)? != 0,
-                        r.get::<_, Option<String>>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                    ))
-                })
-                .optional()?;
-
-            let Some((thread_id, is_op, f, t, a)) = row else {
-                return Err(crate::error::AppError::NotFound(format!(
-                    "Post id {post_id} not found"
-                )));
-            };
-
-            if is_op {
-                return Err(crate::error::AppError::BadRequest(format!(
-                    "Post id {post_id} is the OP for thread {thread_id}; delete the thread instead"
-                )));
-            }
-
-            if let Some(p) = f {
-                candidates.push(p);
-            }
-            if let Some(p) = t {
-                candidates.push(p);
-            }
-            if let Some(p) = a {
-                candidates.push(p);
-            }
-
-            (thread_id, is_op, candidates)
-        };
-
-        debug_assert!(!is_op, "OP posts must be deleted through delete_thread");
-
-        let deleted = conn
-            .execute("DELETE FROM posts WHERE id = ?1", params![post_id])
-            .context("Failed to delete post")?;
-        if deleted == 0 {
-            return Err(crate::error::AppError::NotFound(format!(
-                "Post id {post_id} not found"
-            )));
-        }
-
-        let updated = conn.execute(
-            "UPDATE threads
-             SET reply_count = CASE
-                 WHEN reply_count > 0 THEN reply_count - 1
-                 ELSE 0
-             END
-             WHERE id = ?1",
-            params![thread_id],
-        )?;
-        if updated == 0 {
-            return Err(crate::error::AppError::NotFound(format!(
-                "Thread id {thread_id} not found while updating reply count"
-            )));
-        }
-
-        // Check which paths are now safe — runs inside the transaction so it sees
-        // the just-deleted state.
-        let safe = super::paths_safe_to_delete(conn, candidates)?;
-        let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
-        if let Some(op) = pending_fs_op.as_ref() {
-            super::insert_pending_fs_op(conn, op)?;
-        }
-        Ok(crate::db::DeletePathsResult {
-            paths: safe,
-            pending_fs_op_id: pending_fs_op.map(|op| op.id),
-        })
-    })();
+    let result: crate::error::Result<crate::db::DeletePathsResult> =
+        delete_post_reply_in_tx(conn, post_id);
 
     match result {
         Ok(safe) => {
@@ -527,6 +447,181 @@ pub fn delete_post(
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
             Err(e)
+        }
+    }
+}
+
+fn delete_post_reply_in_tx(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+) -> crate::error::Result<crate::db::DeletePathsResult> {
+    let (thread_id, is_op, candidates) = {
+        let mut candidates = Vec::new();
+        let mut stmt = conn.prepare_cached(
+            "SELECT thread_id, is_op, file_path, thumb_path, audio_file_path
+             FROM posts WHERE id = ?1",
+        )?;
+        let row = stmt
+            .query_row(params![post_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i32>(1)? != 0,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .optional()?;
+
+        let Some((thread_id, is_op, f, t, a)) = row else {
+            return Err(crate::error::AppError::NotFound(format!(
+                "Post id {post_id} not found"
+            )));
+        };
+
+        if is_op {
+            return Err(crate::error::AppError::BadRequest(format!(
+                "Post id {post_id} is the OP for thread {thread_id}; delete the thread instead"
+            )));
+        }
+
+        if let Some(p) = f {
+            candidates.push(p);
+        }
+        if let Some(p) = t {
+            candidates.push(p);
+        }
+        if let Some(p) = a {
+            candidates.push(p);
+        }
+
+        (thread_id, is_op, candidates)
+    };
+
+    debug_assert!(!is_op, "OP posts must be deleted through delete_thread");
+
+    let deleted = conn
+        .execute("DELETE FROM posts WHERE id = ?1", params![post_id])
+        .context("Failed to delete post")?;
+    if deleted == 0 {
+        return Err(crate::error::AppError::NotFound(format!(
+            "Post id {post_id} not found"
+        )));
+    }
+
+    let updated = conn.execute(
+        "UPDATE threads
+         SET reply_count = CASE
+             WHEN reply_count > 0 THEN reply_count - 1
+             ELSE 0
+         END
+         WHERE id = ?1",
+        params![thread_id],
+    )?;
+    if updated == 0 {
+        return Err(crate::error::AppError::NotFound(format!(
+            "Thread id {thread_id} not found while updating reply count"
+        )));
+    }
+
+    // Check which paths are now safe — runs inside the transaction so it sees
+    // the just-deleted state.
+    let safe = super::paths_safe_to_delete(conn, candidates)?;
+    let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
+    if let Some(op) = pending_fs_op.as_ref() {
+        super::insert_pending_fs_op(conn, op)?;
+    }
+    Ok(crate::db::DeletePathsResult {
+        paths: safe,
+        pending_fs_op_id: pending_fs_op.map(|op| op.id),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfDeleteOutcome {
+    DeletedReply,
+    DeletedThread,
+    NotFound,
+    WrongToken,
+    WindowClosed,
+    ThreadHasReplies,
+}
+
+/// Delete a post owned by the caller during the short self-delete grace window.
+///
+/// Returns the outcome plus any filesystem paths that should be cleaned up by
+/// the caller when the delete succeeds.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn self_delete_post(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    token: &str,
+    delete_window_secs: i64,
+) -> crate::error::Result<(SelfDeleteOutcome, Option<crate::db::DeletePathsResult>)> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin self_delete_post transaction")?;
+
+    let result: crate::error::Result<(SelfDeleteOutcome, Option<crate::db::DeletePathsResult>)> =
+        (|| {
+            let row: Option<(i64, bool, String, i64)> = conn
+                .query_row(
+                    "SELECT thread_id, is_op, deletion_token, created_at
+                     FROM posts
+                     WHERE id = ?1",
+                    params![post_id],
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i32>(1)? != 0,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+
+            let Some((thread_id, is_op, stored_token, created_at)) = row else {
+                return Ok((SelfDeleteOutcome::NotFound, None));
+            };
+
+            if !constant_time_eq(stored_token.as_bytes(), token.as_bytes()) {
+                return Ok((SelfDeleteOutcome::WrongToken, None));
+            }
+
+            let now = chrono::Utc::now().timestamp();
+            if now.saturating_sub(created_at) > delete_window_secs {
+                return Ok((SelfDeleteOutcome::WindowClosed, None));
+            }
+
+            if is_op {
+                let reply_count: i64 = conn.query_row(
+                    "SELECT reply_count FROM threads WHERE id = ?1",
+                    params![thread_id],
+                    |r| r.get(0),
+                )?;
+                if reply_count > 0 {
+                    return Ok((SelfDeleteOutcome::ThreadHasReplies, None));
+                }
+
+                let deleted = crate::db::threads::delete_thread_verified(conn, thread_id)?;
+                return Ok((SelfDeleteOutcome::DeletedThread, Some(deleted)));
+            }
+
+            let deleted = delete_post_reply_in_tx(conn, post_id)?;
+            Ok((SelfDeleteOutcome::DeletedReply, Some(deleted)))
+        })();
+
+    match result {
+        Ok(outcome) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit self_delete_post transaction")?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
         }
     }
 }
@@ -1223,13 +1318,14 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        count_posts_by_media_processing_state, count_search_results, get_post_submission,
+        count_posts_by_media_processing_state, count_search_results, get_post, get_post_submission,
         get_posts_for_thread, record_post_submission, search_posts, search_terms,
-        set_post_media_processing_state, to_fts_query, MEDIA_PROCESSING_FAILED,
+        self_delete_post, set_post_media_processing_state, to_fts_query, SelfDeleteOutcome,
+        MEDIA_PROCESSING_FAILED,
     };
     use crate::db::{
         create_board, create_reply_with_thread_update, create_thread_with_optional_poll,
-        get_board_by_short, NewPost,
+        get_board_by_short, get_thread, NewPost,
     };
     use crate::error::AppError;
     use rusqlite::Connection;
@@ -1568,5 +1664,144 @@ mod tests {
             )
             .expect("thread count after delete");
         assert_eq!(after_count, 0);
+    }
+
+    #[test]
+    fn self_delete_post_deletes_reply_with_matching_token_inside_window() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "selfdel", "Self Delete", "", false)
+            .expect("create board");
+        let op = NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some("subject".to_string()),
+            body: "body".to_string(),
+            body_html: "body".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "op-token".to_string(),
+            is_op: true,
+        };
+        let (thread_id, _post_id, _) =
+            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
+                .expect("create thread");
+
+        let reply = NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "reply".to_string(),
+            body_html: "reply".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "reply-token".to_string(),
+            is_op: false,
+        };
+        let reply_id =
+            create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+
+        let (outcome, deleted) =
+            self_delete_post(&conn, reply_id, "reply-token", 60).expect("self delete reply");
+
+        assert_eq!(outcome, SelfDeleteOutcome::DeletedReply);
+        assert!(deleted.is_some());
+        assert!(get_post(&conn, reply_id).expect("lookup reply").is_none());
+    }
+
+    #[test]
+    fn self_delete_post_rejects_wrong_token() {
+        let conn = test_conn();
+        let post_id = seed_search_post(&conn, "wrongtok", "hello");
+
+        let (outcome, deleted) =
+            self_delete_post(&conn, post_id, "nope", 60).expect("self delete result");
+
+        assert_eq!(outcome, SelfDeleteOutcome::WrongToken);
+        assert!(deleted.is_none());
+        assert!(get_post(&conn, post_id).expect("lookup post").is_some());
+    }
+
+    #[test]
+    fn self_delete_post_refuses_op_when_thread_has_replies() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "selfop", "Self OP", "", false).expect("create board");
+        let op = NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some("subject".to_string()),
+            body: "body".to_string(),
+            body_html: "body".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "op-token".to_string(),
+            is_op: true,
+        };
+        let (thread_id, op_id, _) =
+            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
+                .expect("create thread");
+
+        let reply = NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "reply".to_string(),
+            body_html: "reply".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "reply-token".to_string(),
+            is_op: false,
+        };
+        create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+
+        let (outcome, deleted) =
+            self_delete_post(&conn, op_id, "op-token", 60).expect("self delete result");
+
+        assert_eq!(outcome, SelfDeleteOutcome::ThreadHasReplies);
+        assert!(deleted.is_none());
+        assert!(get_thread(&conn, thread_id).expect("lookup thread").is_some());
     }
 }

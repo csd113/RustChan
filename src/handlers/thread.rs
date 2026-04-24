@@ -48,6 +48,7 @@ pub async fn view_thread(
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
+    let owned_post_grants = crate::handlers::board::owned_post_grants_from_jar(&jar);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
@@ -100,7 +101,20 @@ pub async fn view_thread(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     let can_post = access_context.can_post;
-    let (thread_sig, page_data, _is_admin) = page_data;
+    let (thread_sig, mut page_data, _is_admin) = page_data;
+    page_data.owned_post_controls = owned_post_grants
+        .into_iter()
+        .filter(|grant| grant.thread_id == thread_id && grant.board_short == board_short)
+        .map(|grant| {
+            (
+                grant.post_id,
+                crate::templates::thread::OwnedPostControls {
+                    deletion_token: grant.deletion_token,
+                    delete_expires_at: grant.expires_at,
+                },
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     let boards_ver = crate::templates::live_boards_version();
     let admin_tag = if page_data.is_admin { "-a" } else { "" };
     let post_tag = if can_post { "-p1" } else { "-p0" };
@@ -109,7 +123,18 @@ pub async fn view_thread(
     } else {
         "-cg0"
     };
-    let etag = format!("\"{thread_sig}-b{boards_ver}{admin_tag}{post_tag}{greentext_tag}\"");
+    let ownership_sig = {
+        let mut owned = page_data
+            .owned_post_controls
+            .iter()
+            .map(|(post_id, controls)| format!("{post_id}:{}", controls.delete_expires_at))
+            .collect::<Vec<_>>();
+        owned.sort_unstable();
+        crate::utils::crypto::sha256_hex(owned.join("|").as_bytes())
+    };
+    let etag = format!(
+        "\"{thread_sig}-b{boards_ver}{admin_tag}{post_tag}{greentext_tag}-o{ownership_sig}\""
+    );
 
     // 3.2: Return 304 Not Modified when client's cached copy is still current.
     let client_etag = req_headers
@@ -221,9 +246,9 @@ pub async fn post_reply(
         let job_queue = state.job_queue.clone();
         let ffmpeg_available = state.ffmpeg_available;
         let ffmpeg_webp_available = state.ffmpeg_webp_available;
-        move || -> Result<String> {
+        move || -> Result<posting::SubmitPostResult> {
             let conn = pool.get()?;
-            Ok(posting::submit_post(
+            posting::submit_post(
                 &conn,
                 &job_queue,
                 posting::SubmitPostCommand {
@@ -252,8 +277,7 @@ pub async fn post_reply(
                     ffmpeg_available,
                     ffmpeg_webp_available,
                 },
-            )?
-            .redirect_url)
+            )
         }
     })
     .await
@@ -262,8 +286,8 @@ pub async fn post_reply(
     // BadRequest → re-render the thread page with an inline error banner so the
     // user sees the message in context (e.g. "wait for captcha to solve") without
     // being redirected to a separate error page and losing their scroll position.
-    let redirect_url = match result {
-        Ok(url) => url,
+    let submit_result = match result {
+        Ok(submit_result) => submit_result,
         Err(AppError::BadRequest(msg)) => {
             if xhr_request {
                 return crate::handlers::board::xhr_handled_error_response(
@@ -308,11 +332,22 @@ pub async fn post_reply(
         }
     };
 
+    let jar = crate::handlers::board::remember_owned_post(
+        jar,
+        &submit_result.board_short,
+        submit_result.thread_id,
+        submit_result.post_id,
+        &submit_result.deletion_token,
+    );
+
     if xhr_request {
-        return crate::handlers::board::xhr_redirect_response(&redirect_url);
+        return Ok(
+            (jar, crate::handlers::board::xhr_redirect_response(&submit_result.redirect_url)?)
+                .into_response(),
+        );
     }
 
-    Ok(Redirect::to(&redirect_url).into_response())
+    Ok((jar, Redirect::to(&submit_result.redirect_url)).into_response())
 }
 
 // ─── GET /:board/post/:id/edit — show edit form ───────────────────────────────
@@ -442,6 +477,13 @@ pub struct EditForm {
     pub body: String,
 }
 
+#[derive(Deserialize)]
+pub struct DeletePostForm {
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+    pub deletion_token: String,
+}
+
 /// Internal result type for the edit submission handler.
 enum EditOutcome {
     /// Redirect the user to this URL.
@@ -457,6 +499,17 @@ pub async fn edit_post_post(
     Form(form): Form<EditForm>,
 ) -> Result<Response> {
     check_csrf_jar(&jar, form.csrf.as_deref())?;
+    let owned_grant = crate::handlers::board::owned_post_grant_from_jar(&jar, &board_short, post_id)
+        .ok_or_else(|| {
+            AppError::Forbidden(
+                "Delete permission for this post is no longer available in this browser.".into(),
+            )
+        })?;
+    if owned_grant.deletion_token != form.deletion_token {
+        return Err(AppError::Forbidden(
+            "Delete permission for this post is no longer available in this browser.".into(),
+        ));
+    }
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
@@ -602,6 +655,125 @@ pub async fn edit_post_post(
             *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
             Ok(response)
         }
+    }
+}
+
+pub async fn delete_own_post(
+    State(state): State<AppState>,
+    Path((board_short, post_id)): Path<(String, i64)>,
+    jar: CookieJar,
+    Form(form): Form<DeletePostForm>,
+) -> Result<Response> {
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
+    let owned_grant = crate::handlers::board::owned_post_grant_from_jar(&jar, &board_short, post_id)
+        .ok_or_else(|| {
+            AppError::Forbidden(
+                "Delete permission for this post is no longer available in this browser.".into(),
+            )
+        })?;
+    if owned_grant.deletion_token != form.deletion_token {
+        return Err(AppError::Forbidden(
+            "Delete permission for this post is no longer available in this browser.".into(),
+        ));
+    }
+    let admin_session_id = jar
+        .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
+    let can_post = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
+        move || -> Result<bool> {
+            let conn = pool.get()?;
+            let access_context = crate::handlers::board::load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )?;
+            Ok(access_context.can_post)
+        }
+    })
+    .await
+    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+
+    if !can_post {
+        let redirect_to = crate::handlers::board::unlock_redirect_url(
+            &board_short,
+            &format!("/{board_short}/post/{post_id}/edit"),
+        );
+        return Ok(Redirect::to(&redirect_to).into_response());
+    }
+
+    let deletion_token = owned_grant.deletion_token;
+    let board_short_for_delete = board_short.clone();
+    let outcome = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<(i64, crate::db::posts::SelfDeleteOutcome)> {
+            let conn = pool.get()?;
+            let post = db::get_post(&conn, post_id)?
+                .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
+            if post.board_id
+                != db::get_board_by_short(&conn, &board_short_for_delete)?
+                    .ok_or_else(|| {
+                        AppError::NotFound(format!("Board /{board_short_for_delete}/ not found"))
+                    })?
+                    .id
+            {
+                return Err(AppError::NotFound("Post not found in this board.".into()));
+            }
+
+            let redirect_thread_id = post.thread_id;
+            let (result, deleted) = db::posts::self_delete_post(
+                &conn,
+                post_id,
+                &deletion_token,
+                crate::handlers::board::SELF_DELETE_WINDOW_SECS,
+            )?;
+
+            if let Some(deleted) = deleted.as_ref() {
+                if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+                    &conn,
+                    &crate::config::CONFIG.upload_dir,
+                    deleted.pending_fs_op_id.as_deref(),
+                    &deleted.paths,
+                ) {
+                    tracing::error!(
+                        post_id,
+                        error = %error,
+                        "self-delete post cleanup did not fully complete"
+                    );
+                }
+            }
+
+            Ok((redirect_thread_id, result))
+        }
+    })
+    .await
+    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+
+    let (thread_id, result) = outcome;
+    match result {
+        crate::db::posts::SelfDeleteOutcome::DeletedReply
+        | crate::db::posts::SelfDeleteOutcome::DeletedThread => {
+            let jar = crate::handlers::board::forget_owned_post(jar, &board_short, post_id);
+            let redirect_url = format!("/{board_short}/thread/{thread_id}");
+            Ok((jar, Redirect::to(&redirect_url)).into_response())
+        }
+        crate::db::posts::SelfDeleteOutcome::NotFound => {
+            Err(AppError::NotFound("Post not found.".into()))
+        }
+        crate::db::posts::SelfDeleteOutcome::WrongToken => Err(AppError::Forbidden(
+            "Delete permission for this post is no longer available in this browser.".into(),
+        )),
+        crate::db::posts::SelfDeleteOutcome::WindowClosed => Err(AppError::Forbidden(
+            "The 60-second self-delete window for this post has closed.".into(),
+        )),
+        crate::db::posts::SelfDeleteOutcome::ThreadHasReplies => Err(AppError::Forbidden(
+            "You can only self-delete a thread starter before anyone replies.".into(),
+        )),
     }
 }
 
@@ -859,6 +1031,7 @@ pub async fn thread_updates(
                             is_admin: false,
                             show_media: true,
                             allow_editing: false, // no edit link in auto-appended HTML; reload restores it
+                            owned_post_controls: None,
                             show_poster_ids: thread.board_id == board.id && board.show_poster_ids,
                             collapse_greentext: board.collapse_greentext,
                             thread_state: None,
@@ -882,6 +1055,7 @@ pub async fn thread_updates(
                                     is_admin: false,
                                     show_media: true,
                                     allow_editing: false,
+                                    owned_post_controls: None,
                                     show_poster_ids: thread.board_id == board.id
                                         && board.show_poster_ids,
                                     collapse_greentext: board.collapse_greentext,

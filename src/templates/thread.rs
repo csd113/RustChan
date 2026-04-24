@@ -10,12 +10,19 @@ use crate::utils::{
     files::format_file_size, redirect::encode_query_component, sanitize::escape_html,
 };
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use super::{
     base_layout, compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script,
     thread_autoupdate_script, TOGGLE_SCRIPT,
 };
+
+#[derive(Debug, Clone)]
+pub struct OwnedPostControls {
+    pub deletion_token: String,
+    pub delete_expires_at: i64,
+}
 
 fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String {
     let jump_link = if is_bottom { "#top" } else { "#bottom" };
@@ -107,6 +114,7 @@ pub fn thread_page(
     board: &Board,
     thread: &Thread,
     posts: &[Post],
+    owned_post_controls: &BTreeMap<i64, OwnedPostControls>,
     csrf_token: &str,
     boards: &[Board],
     is_admin: bool,
@@ -252,6 +260,7 @@ pub fn thread_page(
                 is_admin,
                 show_media: true,
                 allow_editing: board.allow_editing,
+                owned_post_controls: owned_post_controls.get(&post.id).cloned(),
                 show_poster_ids: board.show_poster_ids,
                 collapse_greentext: board.collapse_greentext,
                 thread_state: Some((thread.sticky, thread.locked, thread.archived)),
@@ -462,12 +471,13 @@ fn render_poll(
 
 /// Options that control which controls are rendered for a post.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct RenderPostOpts {
     pub show_delete: bool,
     pub is_admin: bool,
     pub show_media: bool,
     pub allow_editing: bool,
+    pub owned_post_controls: Option<OwnedPostControls>,
     pub show_poster_ids: bool,
     pub collapse_greentext: bool,
     pub thread_state: Option<(bool, bool, bool)>,
@@ -651,6 +661,7 @@ pub fn render_post(
         is_admin,
         show_media,
         allow_editing,
+        owned_post_controls,
         show_poster_ids,
         collapse_greentext,
         thread_state,
@@ -991,14 +1002,36 @@ pub fn render_post(
         let within_edit_window = edit_window_secs == 0
             || (edit_window_secs > 0 && now.saturating_sub(post.created_at) <= edit_window_secs);
         let edit_link = if allow_editing && within_edit_window {
-            format!(
-                r#" <a class="edit-btn" href="/{board}/post/{pid}/edit" title="Edit post">edit</a>"#,
-                board = escape_html(board_short),
-                pid = post.id,
-            )
+            owned_post_controls.as_ref().map_or_else(String::new, |controls| {
+                format!(
+                    r#" <a class="edit-btn" href="/{board}/post/{pid}/edit?token={token}" title="Edit post">edit</a>"#,
+                    board = escape_html(board_short),
+                    pid = post.id,
+                    token = encode_query_component(&controls.deletion_token),
+                )
+            })
         } else {
             String::new()
         };
+
+        let delete_controls = owned_post_controls
+            .as_ref()
+            .filter(|controls| controls.delete_expires_at > now)
+            .map_or_else(String::new, |controls| {
+                format!(
+                    r#" <form class="delete-form self-delete-form" method="POST" action="/{board}/post/{pid}/delete" data-delete-expiry="{expires_at}">
+<input type="hidden" name="_csrf" value="{csrf}">
+<input type="hidden" name="deletion_token" value="{token}">
+<button type="submit" class="del-btn" data-confirm="Delete your post No.{pid}?">delete</button>
+<span class="self-delete-countdown" data-role="self-delete-countdown" aria-live="polite"></span>
+</form>"#,
+                    board = escape_html(board_short),
+                    pid = post.id,
+                    expires_at = controls.delete_expires_at,
+                    csrf = escape_html(csrf_token),
+                    token = escape_html(&controls.deletion_token),
+                )
+            });
 
         let report_btn = format!(
             r#" <button type="button" class="report-btn"
@@ -1011,7 +1044,7 @@ pub fn render_post(
 
         let _ = write!(
             html,
-            r#"<div class="post-controls">{edit_link}{report_btn}</div>"#
+            r#"<div class="post-controls">{edit_link}{delete_controls}{report_btn}</div>"#
         );
     }
 
@@ -1203,6 +1236,7 @@ mod tests {
             &board,
             &thread,
             &posts,
+            &std::collections::BTreeMap::new(),
             "csrf",
             std::slice::from_ref(&board),
             false,
@@ -1239,6 +1273,7 @@ mod tests {
             &board,
             &thread,
             &posts,
+            &std::collections::BTreeMap::new(),
             "csrf",
             std::slice::from_ref(&board),
             false,
@@ -1276,6 +1311,7 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
                 thread_state: None,
@@ -1312,6 +1348,7 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
                 thread_state: None,
@@ -1354,6 +1391,7 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
                 thread_state: None,
@@ -1380,6 +1418,7 @@ mod tests {
                 is_admin: false,
                 show_media: false,
                 allow_editing: false,
+                owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
                 thread_state: Some((true, true, true)),
@@ -1409,6 +1448,7 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
                 thread_state: None,
@@ -1435,6 +1475,7 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
                 thread_state: None,
@@ -1465,6 +1506,7 @@ mod tests {
             &board,
             &thread,
             &posts,
+            &std::collections::BTreeMap::new(),
             "csrf",
             std::slice::from_ref(&board),
             false,

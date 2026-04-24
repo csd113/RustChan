@@ -1023,6 +1023,7 @@ fn render_thread_summary(
                 is_admin,
                 show_media: true,
                 allow_editing: false, // no edit link on board index previews
+                owned_post_controls: None,
                 show_poster_ids,
                 collapse_greentext,
                 thread_state: None,
@@ -1300,6 +1301,7 @@ pub fn search_page(
                     is_admin: false,
                     show_media: true,
                     allow_editing: false, // no edit link on search results
+                    owned_post_controls: None,
                     show_poster_ids: board.show_poster_ids,
                     collapse_greentext: board.collapse_greentext,
                     thread_state: None,

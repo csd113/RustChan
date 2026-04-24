@@ -388,6 +388,53 @@ pub fn set_thread_archived(
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
+fn delete_thread_in_tx(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+) -> crate::error::Result<crate::db::DeletePathsResult> {
+    // Step 1: collect file paths from all posts in this thread.
+    let candidates = collect_thread_file_paths(conn, &[thread_id])?;
+
+    // Step 2: delete thread (CASCADE removes posts).
+    let deleted = conn
+        .execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
+        .context("Failed to delete thread")?;
+    if deleted == 0 {
+        return Err(crate::error::AppError::NotFound(format!(
+            "Thread id {thread_id} not found"
+        )));
+    }
+
+    // Step 3: determine which paths are now unreferenced.
+    // paths_safe_to_delete sees the post-delete state because we're still
+    // inside the same transaction.
+    let safe = super::paths_safe_to_delete(conn, candidates)?;
+    let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
+    if let Some(op) = pending_fs_op.as_ref() {
+        super::insert_pending_fs_op(conn, op)?;
+    }
+    Ok(crate::db::DeletePathsResult {
+        paths: safe,
+        pending_fs_op_id: pending_fs_op.map(|op| op.id),
+    })
+}
+
+/// Delete a thread within an already-open transaction after authorization has
+/// been checked by the caller.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn delete_thread_verified(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+) -> crate::error::Result<crate::db::DeletePathsResult> {
+    delete_thread_in_tx(conn, thread_id)
+}
+
+/// Delete a thread and return on-disk paths that are now safe to remove.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
 pub fn delete_thread(
     conn: &rusqlite::Connection,
     thread_id: i64,
@@ -397,33 +444,8 @@ pub fn delete_thread(
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin delete_thread transaction")?;
 
-    let result: crate::error::Result<crate::db::DeletePathsResult> = (|| {
-        // Step 1: collect file paths from all posts in this thread.
-        let candidates = collect_thread_file_paths(conn, &[thread_id])?;
-
-        // Step 2: delete thread (CASCADE removes posts).
-        let deleted = conn
-            .execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
-            .context("Failed to delete thread")?;
-        if deleted == 0 {
-            return Err(crate::error::AppError::NotFound(format!(
-                "Thread id {thread_id} not found"
-            )));
-        }
-
-        // Step 3: determine which paths are now unreferenced.
-        // paths_safe_to_delete sees the post-delete state because we're still
-        // inside the same transaction.
-        let safe = super::paths_safe_to_delete(conn, candidates)?;
-        let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
-        if let Some(op) = pending_fs_op.as_ref() {
-            super::insert_pending_fs_op(conn, op)?;
-        }
-        Ok(crate::db::DeletePathsResult {
-            paths: safe,
-            pending_fs_op_id: pending_fs_op.map(|op| op.id),
-        })
-    })();
+    let result: crate::error::Result<crate::db::DeletePathsResult> =
+        delete_thread_in_tx(conn, thread_id);
 
     match result {
         Ok(safe) => {
