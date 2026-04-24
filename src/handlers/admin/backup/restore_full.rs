@@ -55,7 +55,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         ));
     }
     let live_tor_hidden_service_keys_dir =
-        match super::common::resolve_tor_hidden_service_keys_availability(
+        match super::common::resolve_tor_hidden_service_keys_restore_target(
             restore_tor_hidden_service_keys,
             live_tor_hidden_service_keys_dir.map(Path::to_path_buf),
             "Tor hidden service key restore is not available with the current configuration.",
@@ -949,6 +949,59 @@ mod tests {
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn full_restore_with_tor_key_opt_in_creates_missing_live_identity_dir() {
+        let _tor_permission_failure_guard = TOR_PERMISSION_FAILURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip(
+            &zip_path,
+            Some(&[
+                ("hs_ed25519_secret_key", "backup-secret"),
+                ("hs_ed25519_public_key", "backup-public"),
+            ]),
+            false,
+        );
+
+        let tor_keys_dir = temp_dir.path().join("runtime/tor/state/keystore");
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            Some(&tor_keys_dir),
+            true,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect("restore should create missing Tor identity dir");
+
+        assert_eq!(
+            read_tree(&tor_keys_dir),
+            BTreeMap::from([
+                (
+                    "hs_ed25519_public_key".to_string(),
+                    "backup-public".to_string()
+                ),
+                (
+                    "hs_ed25519_secret_key".to_string(),
+                    "backup-secret".to_string()
+                ),
+            ])
+        );
     }
 
     #[test]

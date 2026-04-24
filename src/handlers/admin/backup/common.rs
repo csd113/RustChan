@@ -47,6 +47,31 @@ pub(super) fn resolve_tor_hidden_service_keys_availability(
     Ok(TorHiddenServiceKeysAvailability::Available(dir))
 }
 
+pub(super) fn resolve_tor_hidden_service_keys_restore_target(
+    requested: bool,
+    configured_dir: Option<PathBuf>,
+    unavailable_message: &str,
+) -> Result<TorHiddenServiceKeysAvailability> {
+    if !requested {
+        return Ok(TorHiddenServiceKeysAvailability::Skipped);
+    }
+
+    let Some(dir) = configured_dir else {
+        return Err(AppError::BadRequest(unavailable_message.to_string()));
+    };
+
+    if let Ok(metadata) = std::fs::symlink_metadata(&dir) {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(AppError::BadRequest(format!(
+                "{unavailable_message} The configured identity path {} is not a directory.",
+                dir.display()
+            )));
+        }
+    }
+
+    Ok(TorHiddenServiceKeysAvailability::Available(dir))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct FullBackupManifest {
     pub version: u32,
