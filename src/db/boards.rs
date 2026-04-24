@@ -238,7 +238,7 @@ pub fn get_all_boards_with_stats(
     let out = stmt
         .query_map([], |row| {
             let board = map_board(row)?;
-            let thread_count: i64 = row.get(27)?;
+            let thread_count: i64 = row.get(28)?;
             Ok(crate::models::BoardStats {
                 board,
                 thread_count,
@@ -735,8 +735,40 @@ fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_board_with_media_flags, get_board_by_short, get_site_stats};
+    use super::{
+        create_board_with_media_flags, get_all_boards_with_stats, get_board_by_short,
+        get_site_stats,
+    };
     use rusqlite::Connection;
+
+    #[test]
+    fn board_stats_use_live_thread_count_instead_of_board_timestamp() {
+        let pool = crate::db::init_test_pool().expect("init test pool");
+        let conn = pool.get().expect("get test connection");
+
+        conn.execute(
+            "INSERT INTO boards (id, short_name, name, created_at)
+             VALUES (1, 'test', 'Test', 1_700_000_000)",
+            [],
+        )
+        .expect("insert board");
+        conn.execute(
+            "INSERT INTO threads (id, board_id, subject, archived) VALUES
+             (1, 1, 'visible one', 0),
+             (2, 1, 'visible two', 0),
+             (3, 1, 'archived', 1)",
+            [],
+        )
+        .expect("insert threads");
+
+        let stats = get_all_boards_with_stats(&conn).expect("load board stats");
+        let board_stats = stats
+            .first()
+            .expect("board stats should include test board");
+
+        assert_eq!(stats.len(), 1);
+        assert_eq!(board_stats.thread_count, 2);
+    }
 
     #[test]
     fn site_stats_count_audio_primary_and_combo_uploads() {
