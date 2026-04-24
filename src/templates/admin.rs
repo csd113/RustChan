@@ -1488,31 +1488,19 @@ pub fn admin_ip_history_page(
             board = escape_html(board_short),
         );
         let report_form = post.ip_hash.as_deref().map_or_else(String::new, |ip_hash| {
-            let history_path = format!("/admin/ip/{}", escape_html(ip_hash));
-            let history_return = return_to.unwrap_or("/admin/panel");
-            let history_url = format!(
-                "{history_path}?return_to={}",
-                urlencoding_simple(history_return)
-            );
             format!(
-                r#"<form method="POST" action="/admin/ip/report" style="display:inline">
-<input type="hidden" name="_csrf"   value="{csrf}">
-<input type="hidden" name="post_id" value="{pid}">
-<input type="hidden" name="thread_id" value="{tid}">
-<input type="hidden" name="board"   value="{board}">
-<input type="hidden" name="ip_hash" value="{ip_hash}">
-<input type="hidden" name="reason"   value="">
-<button type="button" class="admin-toolbar-btn" data-action="open-admin-ip-report"
-        data-report-label="Report post No.{pid} for hashed IP {ip_hash}"
-        data-report-history="{history_url}"
-        data-report-post="/{board}/thread/{tid}#p{pid}">report</button>
-</form>"#,
+                r#"<button type="button" class="admin-toolbar-btn" data-action="open-report"
+        data-pid="{pid}" data-tid="{tid}" data-board="{board}" data-csrf="{csrf}"
+        data-report-action="/admin/ip/report" data-report-ip-hash="{ip_hash}"
+        data-report-title="Report Hashed IP Post"
+        data-report-submit-label="Submit Admin Report"
+        data-report-reason-required="1"
+        data-report-label="Report post No.{pid} for hashed IP {ip_hash}">report</button>"#,
                 csrf = escape_html(csrf_token),
                 pid = post.id,
                 tid = post.thread_id,
                 board = escape_html(board_short),
                 ip_hash = escape_html(ip_hash),
-                history_url = escape_html(&history_url),
             )
         });
 
@@ -1582,10 +1570,10 @@ pub fn admin_ip_history_page(
     let pag_html = render_pagination(pagination, &pag_base);
 
     let return_buttons = return_to.filter(|value| !value.is_empty()).map_or_else(
-        || String::from(r#"<a class="admin-toolbar-btn" href="/admin/panel">&#8592; back to panel</a>"#),
+        || String::from(r#"<a class="admin-toolbar-btn" href="/admin/panel">Go to admin pannel</a>"#),
         |return_to| {
             format!(
-                r#"<a class="admin-toolbar-btn" href="{thread}">&#8592; back to thread</a> <a class="admin-toolbar-btn" href="/admin/panel">&#8592; back to panel</a>"#,
+                r#"<a class="admin-toolbar-btn" href="{thread}">Back to thread</a> <a class="admin-toolbar-btn" href="/admin/panel">Go to admin pannel</a>"#,
                 thread = escape_html(return_to)
             )
         },
@@ -1618,7 +1606,8 @@ pub fn admin_ip_history_page(
 </div>
 {pagination}
 </section>
-</div>"#,
+</div>
+{report_modal}"#,
         hash_display = escape_html(ip_hash),
         total = pagination.total,
         plural = if pagination.total == 1 { "" } else { "s" },
@@ -1626,6 +1615,7 @@ pub fn admin_ip_history_page(
         pagination = pag_html,
         identity_summary = identity_summary,
         return_buttons = return_buttons,
+        report_modal = super::report_modal_script(),
     );
 
     base_layout(
@@ -1746,6 +1736,38 @@ mod tests {
             post_ip_hash: Some(
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
             ),
+        }
+    }
+
+    fn sample_ip_history_post() -> crate::models::Post {
+        crate::models::Post {
+            id: 42,
+            thread_id: 9,
+            board_id: 7,
+            name: "mod scout".into(),
+            tripcode: Some("!trip".into()),
+            subject: None,
+            body: "Needs a closer look".into(),
+            body_html: "<p>Needs a closer look</p>".into(),
+            ip_hash: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            ),
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            created_at: 1_775_560_000,
+            deletion_token: "token".into(),
+            is_op: false,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            edited_at: None,
+            media_processing_state: None,
+            media_processing_error: None,
         }
     }
 
@@ -2041,5 +2063,30 @@ mod tests {
         assert!(without_tor.contains("no Tor hidden service keys"));
         assert!(!without_tor
             .contains("Replaces the current onion identity with the one from this backup."));
+    }
+
+    #[test]
+    fn admin_ip_history_page_uses_shared_report_modal_and_requested_button_text() {
+        let board = sample_board();
+        let post = sample_ip_history_post();
+        let pagination = crate::models::Pagination::new(1, 50, 1);
+        let ip_hash = post.ip_hash.clone().expect("hash");
+        let html = super::admin_ip_history_page(
+            &ip_hash,
+            &[(post, "tech".into())],
+            &pagination,
+            std::slice::from_ref(&board),
+            "csrf123",
+            Some("/tech/thread/9"),
+        );
+
+        assert!(html.contains(r#"id="report-modal""#));
+        assert!(html.contains(r#"data-action="open-report""#));
+        assert!(html.contains(r#"data-report-action="/admin/ip/report""#));
+        assert!(html.contains(
+            r#"data-report-ip-hash="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef""#
+        ));
+        assert!(html.contains("Go to admin pannel"));
+        assert!(html.contains("Back to thread"));
     }
 }

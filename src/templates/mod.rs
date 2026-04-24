@@ -315,12 +315,13 @@ pub const fn report_modal_script() -> &'static str {
     r#"
 <div id="report-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="report-modal-title">
   <div class="compress-modal-box">
-    <div class="compress-modal-title" id="report-modal-title">&#9873; Report Thread/Post</div>
+    <div class="compress-modal-title" id="report-modal-title">Report Thread/Post</div>
     <form method="POST" action="/report" id="report-form">
       <input type="hidden" name="_csrf"     id="report-csrf">
       <input type="hidden" name="post_id"   id="report-post-id">
       <input type="hidden" name="thread_id" id="report-thread-id">
       <input type="hidden" name="board"     id="report-board">
+      <input type="hidden" name="ip_hash"   id="report-ip-hash">
       <div class="compress-modal-info confirm-modal-info" id="report-info"></div>
       <input type="text" name="reason" id="report-reason"
              placeholder="reason (optional)" maxlength="256"
@@ -329,7 +330,7 @@ pub const fn report_modal_script() -> &'static str {
                     box-sizing:border-box;margin-bottom:0.75rem">
       <div class="compress-modal-actions">
         <button type="button" class="compress-cancel-btn" data-action="close-report">Cancel</button>
-        <button type="submit" class="compress-do-btn">&#9873; Submit Report</button>
+        <button type="submit" class="compress-do-btn" id="report-submit-btn">Submit Report</button>
       </div>
     </form>
   </div>

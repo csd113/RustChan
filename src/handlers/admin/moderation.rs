@@ -594,9 +594,9 @@ pub async fn admin_ip_report(
         .take(8)
         .collect::<String>();
 
-    tokio::task::spawn_blocking({
+    let submission = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<()> {
+        move || -> Result<db::ReportSubmission> {
             let conn = pool.get()?;
             let (admin_id, admin_name) =
                 super::require_admin_session_with_name(&conn, session_id.as_deref())?;
@@ -622,42 +622,99 @@ pub async fn admin_ip_report(
                 reason = reason,
                 ip_hash = form.ip_hash,
             );
-            let _ = db::file_report(&conn, form.post_id, &report_reason, &form.ip_hash)?;
-            let _ = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                "report",
-                "report",
-                Some(form.post_id),
-                &board.short_name,
-                &format!(
-                    "ip_hash={} report filed",
-                    &form.ip_hash[..form.ip_hash.len().min(16)]
-                ),
-            );
-            tracing::info!(
-                target: "admin",
-                post_id = form.post_id,
-                ip_hash = %form.ip_hash,
-                "Admin filed IP history report"
-            );
-            Ok(())
+            let reporter_hash = format!("admin:{admin_id}");
+            let submission =
+                db::file_report(&conn, form.post_id, &report_reason, &reporter_hash)?;
+            if matches!(submission, db::ReportSubmission::Filed) {
+                let _ = db::log_mod_action(
+                    &conn,
+                    admin_id,
+                    &admin_name,
+                    "report",
+                    "report",
+                    Some(form.post_id),
+                    &board.short_name,
+                    &format!(
+                        "ip_hash={} report filed",
+                        &form.ip_hash[..form.ip_hash.len().min(16)]
+                    ),
+                );
+                tracing::info!(
+                    target: "admin",
+                    post_id = form.post_id,
+                    ip_hash = %form.ip_hash,
+                    "Admin filed IP history report"
+                );
+            }
+            Ok(submission)
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(
-        super::admin_panel_redirect_anchor_open("Report filed.", "reports", "reports")
-            .into_response(),
-    )
+    let flash = match submission {
+        db::ReportSubmission::Filed => "Report filed.",
+        db::ReportSubmission::AlreadyFiled => "A matching report is already open.",
+    };
+
+    Ok(super::admin_panel_redirect_anchor_open(flash, "reports", "reports").into_response())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::admin_panel_redirect_anchor_open;
+    use super::super::{admin_panel_redirect_anchor_open, SESSION_COOKIE};
+    use super::*;
+    use axum::extract::State;
     use axum::response::IntoResponse;
+    use axum_extra::extract::cookie::{Cookie, CookieJar};
+
+    fn build_admin_jar() -> CookieJar {
+        CookieJar::new()
+            .add(Cookie::new(SESSION_COOKIE, "session123"))
+            .add(Cookie::new("csrf_token", "csrf123"))
+    }
+
+    fn sample_new_post(
+        board_id: i64,
+        thread_id: i64,
+        ip_hash: Option<&str>,
+        is_op: bool,
+    ) -> crate::db::NewPost {
+        crate::db::NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: if is_op {
+                "op body".to_string()
+            } else {
+                "reply body".to_string()
+            },
+            body_html: if is_op {
+                "<p>op body</p>".to_string()
+            } else {
+                "<p>reply body</p>".to_string()
+            },
+            ip_hash: ip_hash.map(str::to_string),
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: if is_op {
+                "token-op".to_string()
+            } else {
+                "token-reply".to_string()
+            },
+            is_op,
+        }
+    }
 
     #[test]
     fn resolve_report_redirect_reopens_moderation_section() {
@@ -671,6 +728,73 @@ mod tests {
 
         assert!(location.ends_with("#reports"));
         assert!(location.contains("open=reports"));
+    }
+
+    #[tokio::test]
+    async fn admin_ip_report_records_admin_as_reporter() {
+        let state = crate::test_support::app_state();
+        let target_ip =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+        let conn = state.db.get().expect("db connection");
+        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
+        let admin_id =
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+        crate::db::create_session(
+            &conn,
+            "session123",
+            admin_id,
+            chrono::Utc::now().timestamp() + 3600,
+        )
+        .expect("create session");
+        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        let board = crate::db::get_board_by_short(&conn, "test")
+            .expect("load board")
+            .expect("board exists");
+
+        let op = sample_new_post(board.id, 0, Some(&target_ip), true);
+        let (thread_id, _, _) =
+            crate::db::create_thread_with_optional_poll(&conn, board.id, None, &op, "", None, None)
+                .expect("create thread");
+        let reply = sample_new_post(board.id, thread_id, Some(&target_ip), false);
+        let reply_id = crate::db::create_reply_with_thread_update(&conn, &reply, "", true, None)
+            .expect("create reply");
+        drop(conn);
+
+        let response = admin_ip_report(
+            State(state.clone()),
+            build_admin_jar(),
+            Form(IpReportForm {
+                post_id: reply_id,
+                thread_id,
+                board: "test".to_string(),
+                ip_hash: target_ip.clone(),
+                reason: "Needs review".to_string(),
+                csrf: Some("csrf123".to_string()),
+            }),
+        )
+        .await
+        .expect("admin ip report response");
+
+        let location = response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("location header");
+        assert!(location.contains("open=reports"));
+        assert!(location.ends_with("#reports"));
+
+        let conn = state.db.get().expect("db connection");
+        let (reporter_hash, reason): (String, String) = conn
+            .query_row(
+                "SELECT reporter_hash, reason FROM reports WHERE post_id = ?1",
+                rusqlite::params![reply_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("saved report");
+        assert_eq!(reporter_hash, format!("admin:{admin_id}"));
+        assert!(reason.contains("Needs review"));
+        assert!(reason.contains("Hashed IP:"));
+        assert!(reason.contains(&target_ip));
     }
 }
 

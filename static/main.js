@@ -1488,36 +1488,31 @@ window.requestConfirmation = requestConfirmation;
 // ─── Report modal ─────────────────────────────────────────────────────────────
 
 function openReportModal(postId, threadId, board, csrf, label) {
+  var opts = arguments.length > 5 && arguments[5] ? arguments[5] : {};
+  var form = document.getElementById('report-form');
+  if (!form) return;
+  form.setAttribute('action', opts.action || '/report');
   document.getElementById('report-post-id').value = postId;
   document.getElementById('report-thread-id').value = threadId;
   document.getElementById('report-board').value = board;
   document.getElementById('report-csrf').value = csrf;
+  var ipHash = document.getElementById('report-ip-hash');
+  if (ipHash) ipHash.value = opts.ipHash || '';
+  var title = document.getElementById('report-modal-title');
+  if (title) title.textContent = opts.title || 'Report Thread/Post';
   var info = document.getElementById('report-info');
   if (info) info.textContent = label || ('Reporting post No.' + postId);
   var reason = document.getElementById('report-reason');
-  if (reason) reason.value = '';
+  if (reason) {
+    reason.value = '';
+    reason.required = !!opts.reasonRequired;
+    reason.placeholder = opts.reasonRequired ? 'reason (required)' : 'reason (optional)';
+  }
+  var submit = document.getElementById('report-submit-btn');
+  if (submit) submit.textContent = opts.submitLabel || 'Submit Report';
   var modal = document.getElementById('report-modal');
   if (modal) modal.style.display = 'flex';
   if (reason) reason.focus();
-}
-
-function openAdminIpReportPrompt(trigger) {
-  if (!trigger) return;
-  var form = trigger.closest('form');
-  if (!form) return;
-  var label = trigger.getAttribute('data-report-label') || 'Report this user?';
-  var historyLink = trigger.getAttribute('data-report-history') || '';
-  var postLink = trigger.getAttribute('data-report-post') || '';
-  var promptLabel = label;
-  if (historyLink) promptLabel += '\n' + historyLink;
-  if (postLink) promptLabel += '\n' + postLink;
-  var reason = window.prompt(promptLabel + '\n\nEnter a reason for the report:', '');
-  if (reason === null) return;
-  reason = reason.trim();
-  if (!reason) return;
-  var field = form.querySelector('input[name="reason"]');
-  if (field) field.value = reason;
-  requestFormSubmit(form, trigger);
 }
 
 function closeReportModal() {
@@ -2694,12 +2689,15 @@ document.addEventListener('click', function (e) {
       case 'collapse-media':      collapseMedia(t); break;
       case 'fetch-updates':       window.fetchUpdates && window.fetchUpdates(); break;
       case 'open-report':
-        closeThreadMenus();
-        openReportModal(t.dataset.pid, t.dataset.tid, t.dataset.board, t.dataset.csrf, t.dataset.reportLabel);
-        break;
-      case 'open-admin-ip-report':
         e.preventDefault();
-        openAdminIpReportPrompt(t);
+        closeThreadMenus();
+        openReportModal(t.dataset.pid, t.dataset.tid, t.dataset.board, t.dataset.csrf, t.dataset.reportLabel, {
+          action: t.dataset.reportAction,
+          ipHash: t.dataset.reportIpHash,
+          title: t.dataset.reportTitle,
+          submitLabel: t.dataset.reportSubmitLabel,
+          reasonRequired: t.dataset.reportReasonRequired === '1'
+        });
         break;
       case 'open-nsfw-disclaimer':
         e.preventDefault();
