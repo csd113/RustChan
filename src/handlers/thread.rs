@@ -1808,6 +1808,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn onion_host_thread_page_keeps_self_action_routes_internal() {
+        let state = crate::test_support::app_state();
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let router = Router::new()
+            .route("/{board}/thread/{id}", get(super::view_thread))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/test/thread/{thread_id}"))
+                    .header(header::HOST, "exampleonionservice1234567890.onion")
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+
+        assert!(body.contains(&format!(r#"action="/test/post/{post_id}/delete""#)));
+        assert!(body.contains(r#"id="edit-modal-form""#));
+        assert!(body.contains(r#"data-board="test""#));
+        assert!(body.contains(&format!(r#"data-edit-post-id="{post_id}""#)));
+        assert!(
+            !body.contains(r#"action="http"#),
+            "self-service forms should stay on internal relative routes"
+        );
+        assert!(
+            !body.contains(r#"fetch("http"#),
+            "inline feature JS should not hardcode an absolute host"
+        );
+    }
+
+    #[tokio::test]
+    async fn onion_host_edit_xhr_redirect_stays_relative() {
+        let state = crate::test_support::app_state();
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let router = Router::new()
+            .route("/{board}/post/{id}/edit", post(super::edit_post_post))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/test/post/{post_id}/edit"))
+                    .header(header::HOST, "exampleonionservice1234567890.onion")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from("body=edited+body&_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-rustchan-redirect")
+                .and_then(|value| value.to_str().ok()),
+            Some(format!("/test/thread/{thread_id}#p{post_id}").as_str())
+        );
+    }
+
+    #[tokio::test]
     async fn thread_page_edit_route_redirects_back_to_thread() {
         let state = crate::test_support::app_state();
         let (thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0);

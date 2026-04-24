@@ -614,3 +614,29 @@ pub async fn update_thread_preference(
 }
 
 // ─── POST /report ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::{owned_posts_cookie, OwnedPostGrant, SELF_DELETE_WINDOW_SECS};
+    use axum_extra::extract::cookie::SameSite;
+
+    #[test]
+    fn owned_posts_cookie_is_host_only_and_scoped_for_same_site_posts() {
+        let cookie = owned_posts_cookie(&[OwnedPostGrant {
+            post_id: 42,
+            thread_id: 7,
+            board_short: "test".to_string(),
+            deletion_token: "token".to_string(),
+            expires_at: chrono::Utc::now().timestamp() + SELF_DELETE_WINDOW_SECS,
+        }])
+        .expect("owned posts cookie");
+
+        assert_eq!(cookie.name(), "rustchan_owned_posts");
+        assert_eq!(cookie.path(), Some("/"));
+        assert_eq!(cookie.same_site(), Some(SameSite::Lax));
+        assert_eq!(cookie.http_only(), Some(true));
+        assert_eq!(cookie.secure(), Some(crate::config::CONFIG.https_cookies));
+        assert_eq!(cookie.domain(), None, "cookie should remain host-only");
+        assert_eq!(cookie.max_age(), Some(time::Duration::minutes(5)));
+    }
+}
