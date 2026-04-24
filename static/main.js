@@ -1722,6 +1722,9 @@ function submitEditModalForm(form) {
         navigateEditSuccess(redirect);
         return null;
       }
+      if (response.headers.get('x-rustchan-error-status')) {
+        return response.json().catch(function () { return {}; });
+      }
       if (response.ok) {
         navigateEditSuccess(response.url || window.location.href);
         return null;

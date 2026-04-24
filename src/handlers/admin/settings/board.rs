@@ -164,6 +164,9 @@ pub async fn update_board_settings(
                 CONFIG.enable_any_file_uploads_feature
                     && form.allow_any_files.as_deref() == Some("1"),
                 form.allow_tripcodes.as_deref() == Some("1"),
+                // The old board edit-window field is kept for schema/backup
+                // compatibility; self-service edits now share the fixed
+                // short ownership window used by deletes.
                 crate::handlers::board::SELF_DELETE_WINDOW_SECS,
                 form.allow_editing.as_deref() == Some("1"),
                 form.allow_self_delete.as_deref() == Some("1"),

@@ -895,10 +895,14 @@ pub async fn delete_own_post(
 
     let (thread_id, result) = outcome;
     match result {
-        crate::db::posts::SelfDeleteOutcome::DeletedReply
-        | crate::db::posts::SelfDeleteOutcome::DeletedThread => {
+        crate::db::posts::SelfDeleteOutcome::DeletedReply => {
             let jar = crate::handlers::board::forget_owned_post(jar, &board_short, post_id);
             let redirect_url = format!("/{board_short}/thread/{thread_id}");
+            Ok((jar, Redirect::to(&redirect_url)).into_response())
+        }
+        crate::db::posts::SelfDeleteOutcome::DeletedThread => {
+            let jar = crate::handlers::board::forget_owned_post(jar, &board_short, post_id);
+            let redirect_url = format!("/{board_short}/catalog");
             Ok((jar, Redirect::to(&redirect_url)).into_response())
         }
         crate::db::posts::SelfDeleteOutcome::NotFound => {
@@ -2075,7 +2079,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_succeeds_with_owned_cookie_inside_grace_window() {
+    async fn delete_op_succeeds_with_owned_cookie_inside_grace_window() {
         let state = crate::test_support::app_state();
         let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
         let router = Router::new()
@@ -2104,7 +2108,7 @@ mod tests {
                 .headers()
                 .get(header::LOCATION)
                 .and_then(|value| value.to_str().ok()),
-            Some(format!("/test/thread/{thread_id}").as_str())
+            Some("/test/catalog")
         );
 
         let conn = state.db.get().expect("db connection");

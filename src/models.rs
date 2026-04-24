@@ -276,8 +276,8 @@ pub struct Board {
     pub allow_tripcodes: bool,
     pub allow_editing: bool, // per-board post editing toggle (default: off)
     pub allow_self_delete: bool, // per-board self-delete toggle (default: off)
-    pub edit_window_secs: i64, // seconds users can edit their posts (0 = use board default 300)
-    pub allow_archive: bool, // when true, overflow threads are archived instead of deleted
+    pub edit_window_secs: i64, // legacy board edit-window value; self-actions use the fixed grace window
+    pub allow_archive: bool,   // when true, overflow threads are archived instead of deleted
     pub allow_video_embeds: bool, // per-board inline video embed unfurling (YouTube/Invidious/Streamable)
     pub allow_captcha: bool,      // per-board PoW CAPTCHA on threads and replies (hashcash-style)
     pub show_poster_ids: bool,    // per-board thread-local poster IDs in post headers
