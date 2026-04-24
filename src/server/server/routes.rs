@@ -118,6 +118,10 @@ pub(super) fn public_routes() -> Router<AppState> {
         )
         .route(
             "/{board}/post/{id}/delete",
+            get(crate::handlers::thread::delete_post_get),
+        )
+        .route(
+            "/{board}/post/{id}/delete",
             post(crate::handlers::thread::delete_own_post),
         )
         .route(

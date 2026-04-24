@@ -155,6 +155,7 @@ function bindExpiryCountdown(element, countdown, expiry, onExpire) {
     var remaining = Math.max(0, Math.ceil(expiry - Date.now() / 1000));
     if (remaining <= 0) {
       clearTimer();
+      countdown.textContent = renderExpiryCountdownValue(0);
       if (typeof onExpire === 'function') onExpire();
       return;
     }
@@ -174,16 +175,17 @@ function initSelfActionCountdowns(root) {
     if (element.dataset.countdownBound === '1') return;
     element.dataset.countdownBound = '1';
 
-    var countdown = element.querySelector('[data-role="self-action-countdown"]');
+    var countdown =
+      element.dataset.role === 'self-action-countdown'
+        ? element
+        : element.querySelector('[data-role="self-action-countdown"]');
     var expiry = Number(element.dataset.actionExpiry || '');
     if (!countdown || !isFinite(expiry)) {
       element.remove();
       return;
     }
 
-    bindExpiryCountdown(element, countdown, expiry, function () {
-      element.remove();
-    });
+    bindExpiryCountdown(element, countdown, expiry);
   });
 }
 
@@ -1138,6 +1140,27 @@ function requestFormSubmit(form, submitter) {
     return;
   }
   form.submit();
+}
+
+function submitSelfDeleteLink(link) {
+  if (!link || !link.href) return false;
+  var csrf = link.dataset.deleteCsrf;
+  if (!csrf) return false;
+
+  var form = document.createElement('form');
+  form.method = 'POST';
+  form.action = link.href;
+  form.style.display = 'none';
+
+  var csrfField = document.createElement('input');
+  csrfField.type = 'hidden';
+  csrfField.name = '_csrf';
+  csrfField.value = csrf;
+  form.appendChild(csrfField);
+
+  document.body.appendChild(form);
+  requestFormSubmit(form);
+  return true;
 }
 
 function isDangerousConfirmationTrigger(trigger, message) {
@@ -2934,6 +2957,9 @@ document.addEventListener('click', function (e) {
       if (!confirmed) return;
 
       if (confirmEl.tagName === 'A' && confirmEl.href) {
+        if (confirmEl.classList && confirmEl.classList.contains('del-btn') && submitSelfDeleteLink(confirmEl)) {
+          return;
+        }
         window.location.assign(confirmEl.href);
         return;
       }

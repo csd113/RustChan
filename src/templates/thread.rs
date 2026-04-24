@@ -19,6 +19,7 @@ use super::{
 };
 
 const SELF_ACTION_WINDOW_SECS: i64 = 60;
+const SELF_ACTION_WINDOW_HINT: &str = "available for up to 60 seconds after posting";
 
 #[derive(Debug, Clone)]
 pub struct OwnedPostControls {
@@ -30,6 +31,155 @@ pub struct EditOverlayState {
     pub post_id: i64,
     pub body: String,
     pub error: Option<String>,
+}
+
+fn render_self_action_window_hint(expires_at: i64) -> String {
+    format!(
+        r#"<span class="self-action-window-note self-delete-countdown" data-role="self-action-countdown" aria-live="polite" data-action-expiry="{expires_at}">{SELF_ACTION_WINDOW_HINT}</span>"#
+    )
+}
+
+fn render_post_preview(
+    post: &Post,
+    board_short: &str,
+    csrf_token: &str,
+    thread_op_id: Option<i64>,
+) -> String {
+    render_post(
+        post,
+        board_short,
+        csrf_token,
+        RenderPostOpts {
+            show_delete: false,
+            is_admin: false,
+            show_media: true,
+            allow_editing: false,
+            allow_self_delete: false,
+            owned_post_controls: None,
+            show_poster_ids: false,
+            collapse_greentext: true,
+            thread_state: None,
+            thread_op_id,
+        },
+        SELF_ACTION_WINDOW_SECS,
+    )
+}
+
+#[must_use]
+pub fn edit_post_page(
+    board: &Board,
+    thread: &Thread,
+    post: &Post,
+    csrf_token: &str,
+    boards: &[Board],
+    current_theme: Option<&str>,
+    error: Option<&str>,
+) -> String {
+    let mut body = String::new();
+    if let Some(msg) = error {
+        let _ = write!(
+            body,
+            r#"<div class="post-error-banner">&#9888; {}</div>"#,
+            escape_html(msg)
+        );
+    }
+
+    let _ = write!(
+        body,
+        r#"<div class="page-box self-action-page">
+<div class="board-thread-header">/{board}/ — edit post No.{pid}</div>
+<p class="self-action-page-note">{hint}</p>
+<p><a href="/{board}/thread/{tid}#p{pid}">back to the thread</a></p>
+<div class="self-action-preview">
+{preview}
+</div>
+<form class="post-form self-action-form" method="POST" action="/{board}/post/{pid}/edit">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <table>
+    <tr><td>body</td>
+        <td><textarea name="body" rows="8" maxlength="4096" required>{body_text}</textarea></td></tr>
+    <tr><td></td>
+        <td><button type="submit">save edit</button>
+            <a class="edit-btn" href="/{board}/thread/{tid}#p{pid}">cancel</a></td></tr>
+  </table>
+</form>
+</div>"#,
+        board = escape_html(&board.short_name),
+        pid = post.id,
+        tid = thread.id,
+        hint = SELF_ACTION_WINDOW_HINT,
+        preview = render_post_preview(post, &board.short_name, csrf_token, thread.op_id),
+        csrf = escape_html(csrf_token),
+        body_text = escape_html(&post.body),
+    );
+
+    base_layout(
+        &format!("/{}/edit post No.{}", board.short_name, post.id),
+        Some(&board.short_name),
+        &body,
+        csrf_token,
+        boards,
+        current_theme,
+        Some(&board.default_theme),
+        board.collapse_greentext,
+        &format!("/{}/post/{}/edit", board.short_name, post.id),
+    )
+}
+
+#[must_use]
+pub fn delete_post_page(
+    board: &Board,
+    thread: &Thread,
+    post: &Post,
+    csrf_token: &str,
+    boards: &[Board],
+    current_theme: Option<&str>,
+    error: Option<&str>,
+) -> String {
+    let mut body = String::new();
+    if let Some(msg) = error {
+        let _ = write!(
+            body,
+            r#"<div class="post-error-banner">&#9888; {}</div>"#,
+            escape_html(msg)
+        );
+    }
+
+    let _ = write!(
+        body,
+        r#"<div class="page-box self-action-page">
+<div class="board-thread-header">/{board}/ — delete post No.{pid}</div>
+<p class="self-action-page-note">{hint}</p>
+<p><a href="/{board}/thread/{tid}#p{pid}">back to the thread</a></p>
+<div class="self-action-preview">
+{preview}
+</div>
+<form class="post-form self-action-form" method="POST" action="/{board}/post/{pid}/delete">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <p class="self-action-confirm">delete this post permanently?</p>
+  <button type="submit" class="del-btn">delete post</button>
+  <a class="edit-btn" href="/{board}/thread/{tid}#p{pid}">cancel</a>
+</form>
+</div>"#,
+        board = escape_html(&board.short_name),
+        pid = post.id,
+        tid = thread.id,
+        hint = SELF_ACTION_WINDOW_HINT,
+        preview = render_post_preview(post, &board.short_name, csrf_token, thread.op_id),
+        csrf = escape_html(csrf_token),
+    );
+
+    base_layout(
+        &format!("/{}/delete post No.{}", board.short_name, post.id),
+        Some(&board.short_name),
+        &body,
+        csrf_token,
+        boards,
+        current_theme,
+        Some(&board.default_theme),
+        board.collapse_greentext,
+        &format!("/{}/post/{}/delete", board.short_name, post.id),
+    )
 }
 
 fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String {
@@ -1007,8 +1157,9 @@ pub fn render_post(
             .map_or_else(String::new, |controls| {
                 let edit_button = if allow_editing {
                     format!(
-                        r#"<button type="button" class="edit-btn" data-action="open-edit-modal" data-edit-post-id="{pid}" data-edit-expiry="{expires_at}" title="Edit post" aria-haspopup="dialog">edit</button>
+                        r#"<a class="edit-btn" href="/{board}/post/{pid}/edit" data-action="open-edit-modal" data-edit-post-id="{pid}" data-edit-expiry="{expires_at}" title="Edit post" aria-haspopup="dialog">edit</a>
 <textarea id="edit-body-{pid}" data-role="edit-body-source" hidden>{body}</textarea>"#,
+                        board = escape_html(board_short),
                         pid = post.id,
                         expires_at = controls.expires_at,
                         body = escape_html(&post.body),
@@ -1018,13 +1169,9 @@ pub fn render_post(
                 };
                 let delete_button = if allow_self_delete {
                     format!(
-                        r#"<form class="delete-form self-delete-form" method="POST" action="/{board}/post/{pid}/delete" data-delete-expiry="{expires_at}">
-<input type="hidden" name="_csrf" value="{csrf}">
-<button type="submit" class="del-btn" data-confirm="Delete your post No.{pid}?">delete</button>
-</form>"#,
+                        r#"<a class="del-btn" href="/{board}/post/{pid}/delete" data-confirm="Delete your post No.{pid}?" data-delete-csrf="{csrf}">delete</a>"#,
                         board = escape_html(board_short),
                         pid = post.id,
-                        expires_at = controls.expires_at,
                         csrf = escape_html(csrf_token),
                     )
                 } else {
@@ -1034,10 +1181,11 @@ pub fn render_post(
                     String::new()
                 } else {
                     format!(
-                        r#" <span class="self-action-controls" data-action-expiry="{expires_at}">{edit_button}{delete_button}<span class="self-delete-countdown" data-role="self-action-countdown" aria-live="polite"></span></span>"#,
+                        r#" <span class="self-action-controls" data-action-expiry="{expires_at}">{edit_button}{delete_button}{window_hint}</span>"#,
                         expires_at = controls.expires_at,
                         edit_button = edit_button,
                         delete_button = delete_button,
+                        window_hint = render_self_action_window_hint(controls.expires_at),
                     )
                 }
             });
@@ -1188,8 +1336,8 @@ fn render_edit_overlay(
 #[cfg(test)]
 mod tests {
     use super::{
-        display_file_name, render_post, thread_page, EditOverlayState, OwnedPostControls,
-        RenderPostOpts,
+        delete_post_page, display_file_name, edit_post_page, render_post, thread_page,
+        EditOverlayState, OwnedPostControls, RenderPostOpts,
     };
     use crate::models::{BoardAccessMode, MediaType, Post, Thread};
 
@@ -1598,6 +1746,7 @@ mod tests {
     fn render_post_uses_in_page_edit_action_without_tokenized_redirect() {
         let mut board = crate::test_fixtures::sample_board();
         board.allow_editing = true;
+        board.allow_self_delete = true;
         let mut post = sample_post();
         post.created_at = chrono::Utc::now().timestamp();
 
@@ -1624,11 +1773,74 @@ mod tests {
             true,
         );
 
+        assert!(html.contains(r#"href="/test/post/1/edit""#));
+        assert!(html.contains(r#"class="self-action-controls""#));
+        assert!(html.contains(r#"class="edit-btn""#));
+        assert!(html.contains(r#"class="del-btn""#));
         assert!(html.contains(r#"data-action="open-edit-modal""#));
         assert!(html.contains(r#"data-edit-expiry=""#));
+        assert!(html.contains(r#"data-delete-csrf=""#));
         assert!(html.contains(r#"data-role="self-action-countdown""#));
-        assert!(html.contains(r#"id="edit-modal""#));
+        assert!(html.contains(r#"href="/test/post/1/delete""#));
+        assert!(html.contains("available for up to 60 seconds after posting"));
         assert!(!html.contains("?token="));
+
+        let expiry_attr = r#"data-action-expiry=""#;
+        let expiry_start = html.find(expiry_attr).expect("expiry attr");
+        let expiry_value_start = expiry_start + expiry_attr.len();
+        let expiry_value_end = html[expiry_value_start..]
+            .find('"')
+            .map(|offset| expiry_value_start + offset)
+            .expect("expiry attr closing quote");
+        let expiry_value = &html[expiry_value_start..expiry_value_end];
+        let expiry = expiry_value.parse::<i64>().expect("parseable expiry");
+        assert!(expiry > 0);
+    }
+
+    #[test]
+    fn edit_post_page_renders_normal_form_and_fallback_hint() {
+        let board = crate::test_fixtures::sample_board();
+        let thread = sample_thread();
+        let post = sample_post();
+
+        let html = edit_post_page(
+            &board,
+            &thread,
+            &post,
+            "csrf",
+            std::slice::from_ref(&board),
+            None,
+            None,
+        );
+
+        assert!(html.contains(r#"method="POST" action="/test/post/1/edit""#));
+        assert!(html.contains(r#"name="_csrf" value="csrf""#));
+        assert!(html.contains(r#"name="body" rows="8" maxlength="4096" required"#));
+        assert!(html.contains("available for up to 60 seconds after posting"));
+        assert!(html.contains(r#"href="/test/thread/87#p1""#));
+    }
+
+    #[test]
+    fn delete_post_page_renders_normal_form_and_fallback_hint() {
+        let board = crate::test_fixtures::sample_board();
+        let thread = sample_thread();
+        let post = sample_post();
+
+        let html = delete_post_page(
+            &board,
+            &thread,
+            &post,
+            "csrf",
+            std::slice::from_ref(&board),
+            None,
+            None,
+        );
+
+        assert!(html.contains(r#"method="POST" action="/test/post/1/delete""#));
+        assert!(html.contains(r#"name="_csrf" value="csrf""#));
+        assert!(html.contains(r#"class="del-btn">delete post</button>"#));
+        assert!(html.contains("available for up to 60 seconds after posting"));
+        assert!(html.contains(r#"href="/test/thread/87#p1""#));
     }
 
     #[test]

@@ -1737,23 +1737,71 @@ html:not([data-theme]) .poster-id-btn {
 
 .post-controls .edit-btn,
 .post-controls .del-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--green-pale);
   text-decoration: none;
   font-size: 0.75rem;
   padding: 2px 8px;
   line-height: 1.2;
+  border-radius: 2px;
+}
+
+.self-action-form .del-btn,
+.self-action-form .edit-btn {
+  display: inline-block;
+  margin-right: 0.5rem;
+  margin-top: 0.25rem;
 }
 
 .self-delete-countdown {
   font-size: 0.72rem;
   color: var(--text-dim);
   margin-left: 0.35rem;
+  display: inline-block;
+  min-width: 4ch;
+  font-variant-numeric: tabular-nums;
+}
+
+.self-action-window-note {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  white-space: nowrap;
 }
 
 .self-action-controls {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.35rem;
   margin-left: 0;
+  flex-wrap: wrap;
+}
+
+.self-action-page {
+  max-width: 72rem;
+  margin: 1rem auto 2rem;
+  padding: 1rem;
+}
+
+.self-action-page-note {
+  margin: 0.35rem 0 0.75rem;
+  color: var(--text-dim);
+}
+
+.self-action-preview {
+  margin: 0.75rem 0 1rem;
+}
+
+.self-action-confirm {
+  margin: 0.5rem 0 0.75rem;
+  color: var(--text-dim);
+}
+
+.self-action-form {
+  margin-top: 1rem;
 }
 
 .self-delete-form {

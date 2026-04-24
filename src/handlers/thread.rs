@@ -21,7 +21,7 @@ use crate::{
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -356,84 +356,90 @@ pub struct ThreadPageQuery {
     pub reported: Option<String>,
 }
 
-fn owned_post_controls_for_thread(
-    owned_post_grants: Vec<crate::handlers::board::OwnedPostGrant>,
-    board_short: &str,
-    thread_id: i64,
-) -> std::collections::BTreeMap<i64, crate::templates::thread::OwnedPostControls> {
-    owned_post_grants
-        .into_iter()
-        .filter(|grant| grant.thread_id == thread_id && grant.board_short == board_short)
-        .map(|grant| {
-            (
-                grant.post_id,
-                crate::templates::thread::OwnedPostControls {
-                    expires_at: grant.expires_at,
-                },
-            )
-        })
-        .collect()
+struct SelfActionPostContext {
+    board: crate::models::Board,
+    thread: crate::models::Thread,
+    post: crate::models::Post,
+    can_post: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn render_thread_edit_error_page(
+async fn load_self_action_post_context(
     state: &AppState,
     board_short: &str,
-    thread_id: i64,
     post_id: i64,
-    jar: &CookieJar,
     admin_session_id: Option<String>,
-    identity_key: &str,
-    body: &str,
-    message: &str,
-) -> Result<Response> {
-    let csrf_token = jar
-        .get("csrf_token")
-        .map(|cookie| cookie.value().to_string())
-        .unwrap_or_default();
-    let current_theme = crate::handlers::board::current_theme_from_jar(jar);
-    let owned_post_grants = crate::handlers::board::owned_post_grants_from_jar(jar);
-    let body = body.to_string();
-    let message = message.to_string();
-    let html = tokio::task::spawn_blocking({
+    access_cookie: Option<String>,
+) -> Result<SelfActionPostContext> {
+    tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.to_string();
-        let identity_key = identity_key.to_string();
-        let current_theme = current_theme.clone();
-        move || -> Result<String> {
+        move || -> Result<SelfActionPostContext> {
             let conn = pool.get()?;
-            let mut page_data = render::load_thread_page_data(
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+            let post = db::get_post(&conn, post_id)?
+                .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
+            if post.board_id != board.id {
+                return Err(AppError::NotFound("Post not found in this board.".into()));
+            }
+            let thread = db::get_thread(&conn, post.thread_id)?
+                .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
+            if thread.board_id != board.id {
+                return Err(AppError::NotFound("Thread not found in this board.".into()));
+            }
+            let access_context = crate::handlers::board::load_board_access_context(
                 &conn,
                 &board_short,
-                thread_id,
-                &identity_key,
                 admin_session_id.as_deref(),
-                &CONFIG.cookie_secret,
+                access_cookie.as_deref(),
             )?;
-            page_data.owned_post_controls =
-                owned_post_controls_for_thread(owned_post_grants, &board_short, thread_id);
-            Ok(render::render_thread_page(
-                &page_data,
-                &csrf_token,
-                None,
-                None,
-                None,
-                Some(&crate::templates::thread::EditOverlayState {
-                    post_id,
-                    body: body.clone(),
-                    error: Some(message.clone()),
-                }),
-                current_theme.as_deref(),
-                true,
-            ))
+            Ok(SelfActionPostContext {
+                board,
+                thread,
+                post,
+                can_post: access_context.can_post,
+            })
         }
     })
     .await
-    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?
+}
+
+async fn render_edit_post_error_page(
+    state: &AppState,
+    board_short: &str,
+    post_id: i64,
+    jar: &CookieJar,
+    admin_session_id: Option<String>,
+    body: &str,
+    message: &str,
+) -> Result<Response> {
+    let (jar, csrf_token) = ensure_csrf(jar.clone());
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
+    let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, board_short);
+    let context =
+        load_self_action_post_context(state, board_short, post_id, admin_session_id, access_cookie)
+            .await?;
+    let mut post = context.post.clone();
+    post.body = body.to_string();
+    let boards = crate::templates::live_boards();
+    let html = crate::templates::thread::edit_post_page(
+        &context.board,
+        &context.thread,
+        &post,
+        &csrf_token,
+        boards.as_slice(),
+        current_theme.as_deref(),
+        Some(message),
+    );
 
     let mut response = Html(html).into_response();
     *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
-    Ok(response)
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-cache, must-revalidate"),
+    );
+    Ok((jar, response).into_response())
 }
 
 pub async fn edit_post_get(
@@ -447,30 +453,20 @@ pub async fn edit_post_get(
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
-    let return_to = format!("/{board_short}/post/{post_id}/edit");
-    let access_context = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        let board_short = board_short.clone();
-        let admin_session_id = admin_session_id.clone();
-        let access_cookie = access_cookie.clone();
-        move || -> Result<crate::handlers::board::BoardAccessContext> {
-            let conn = pool.get()?;
-            crate::handlers::board::load_board_access_context(
-                &conn,
-                &board_short,
-                admin_session_id.as_deref(),
-                access_cookie.as_deref(),
-            )
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    let context = load_self_action_post_context(
+        &state,
+        &board_short,
+        post_id,
+        admin_session_id.clone(),
+        access_cookie.clone(),
+    )
+    .await?;
 
-    if !access_context.can_post {
+    if !context.can_post {
         let html = crate::handlers::board::render_board_unlock_html(
-            &access_context.board,
+            &context.board,
             &csrf,
-            &return_to,
+            &format!("/{board_short}/thread/{}", context.thread.id),
             None,
             current_theme.as_deref(),
         );
@@ -479,28 +475,54 @@ pub async fn edit_post_get(
         ));
     }
 
-    let redirect_url = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<String> {
-            let conn = pool.get()?;
-            let post = db::get_post(&conn, post_id)?
-                .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
-            let board = db::get_board_by_short(&conn, &board_short)?
-                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-            if post.board_id != board.id {
-                return Err(AppError::NotFound("Post not found in this board.".into()));
-            }
-            Ok(format!(
-                "/{board_short}/thread/{}#p{post_id}",
-                post.thread_id
-            ))
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    if !context.board.allow_editing {
+        return Err(AppError::Forbidden(
+            "Users cannot edit their own posts on this board.".into(),
+        ));
+    }
 
-    let _ = (csrf, current_theme);
-    Ok((jar, Redirect::to(&redirect_url)).into_response())
+    let now = chrono::Utc::now().timestamp();
+    if now
+        > context
+            .post
+            .created_at
+            .saturating_add(crate::handlers::board::SELF_DELETE_WINDOW_SECS)
+    {
+        return Err(AppError::Forbidden(
+            "The 60-second edit window for this post has closed.".into(),
+        ));
+    }
+
+    let owned_grant =
+        crate::handlers::board::owned_post_grant_from_jar(&jar, &board_short, post_id).ok_or_else(
+            || {
+                AppError::Forbidden(
+                    "Edit permission for this post is no longer available in this browser.".into(),
+                )
+            },
+        )?;
+    if owned_grant.expires_at <= now {
+        return Err(AppError::Forbidden(
+            "Edit permission for this post is no longer available in this browser.".into(),
+        ));
+    }
+
+    let boards = crate::templates::live_boards();
+    let html = crate::templates::thread::edit_post_page(
+        &context.board,
+        &context.thread,
+        &context.post,
+        &csrf,
+        boards.as_slice(),
+        current_theme.as_deref(),
+        None,
+    );
+    let mut response = Html(html).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-cache, must-revalidate"),
+    );
+    Ok((jar, response).into_response())
 }
 
 // ─── POST /:board/post/:id/edit — submit edit ─────────────────────────────────
@@ -521,7 +543,6 @@ pub struct DeletePostForm {
 pub async fn edit_post_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
-    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
     Form(form): Form<EditForm>,
@@ -655,14 +676,12 @@ pub async fn edit_post_post(
                     &message,
                 )
             } else {
-                render_thread_edit_error_page(
+                render_edit_post_error_page(
                     &state,
                     &board_short,
-                    owned_grant.thread_id,
                     post_id,
                     &jar,
                     admin_session_id,
-                    &crate::handlers::board::identity_key(&client_ip, &jar),
                     &raw_body,
                     &message,
                 )
@@ -673,18 +692,7 @@ pub async fn edit_post_post(
             if xhr_request {
                 crate::handlers::board::xhr_handled_error_response(StatusCode::FORBIDDEN, &message)
             } else {
-                render_thread_edit_error_page(
-                    &state,
-                    &board_short,
-                    owned_grant.thread_id,
-                    post_id,
-                    &jar,
-                    admin_session_id,
-                    &crate::handlers::board::identity_key(&client_ip, &jar),
-                    &raw_body,
-                    &message,
-                )
-                .await
+                Err(AppError::Forbidden(message))
             }
         }
         Err(AppError::NotFound(message)) => {
@@ -696,6 +704,90 @@ pub async fn edit_post_post(
         }
         Err(error) => Err(error),
     }
+}
+
+pub async fn delete_post_get(
+    State(state): State<AppState>,
+    Path((board_short, post_id)): Path<(String, i64)>,
+    jar: CookieJar,
+) -> Result<Response> {
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
+    let (jar, csrf) = ensure_csrf(jar);
+    let admin_session_id = jar
+        .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+    let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
+    let context = load_self_action_post_context(
+        &state,
+        &board_short,
+        post_id,
+        admin_session_id.clone(),
+        access_cookie.clone(),
+    )
+    .await?;
+
+    if !context.can_post {
+        let html = crate::handlers::board::render_board_unlock_html(
+            &context.board,
+            &csrf,
+            &format!("/{board_short}/thread/{}", context.thread.id),
+            None,
+            current_theme.as_deref(),
+        );
+        return Ok(crate::handlers::board::board_access_required_response(
+            jar, html,
+        ));
+    }
+
+    if !context.board.allow_self_delete {
+        return Err(AppError::Forbidden(
+            "Users cannot delete their own posts on this board.".into(),
+        ));
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    if now
+        > context
+            .post
+            .created_at
+            .saturating_add(crate::handlers::board::SELF_DELETE_WINDOW_SECS)
+    {
+        return Err(AppError::Forbidden(
+            "The 60-second self-delete window for this post has closed.".into(),
+        ));
+    }
+
+    let owned_grant =
+        crate::handlers::board::owned_post_grant_from_jar(&jar, &board_short, post_id).ok_or_else(
+            || {
+                AppError::Forbidden(
+                    "Delete permission for this post is no longer available in this browser."
+                        .into(),
+                )
+            },
+        )?;
+    if owned_grant.expires_at <= now {
+        return Err(AppError::Forbidden(
+            "Delete permission for this post is no longer available in this browser.".into(),
+        ));
+    }
+
+    let boards = crate::templates::live_boards();
+    let html = crate::templates::thread::delete_post_page(
+        &context.board,
+        &context.thread,
+        &context.post,
+        &csrf,
+        boards.as_slice(),
+        current_theme.as_deref(),
+        None,
+    );
+    let mut response = Html(html).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-cache, must-revalidate"),
+    );
+    Ok((jar, response).into_response())
 }
 
 pub async fn delete_own_post(
@@ -1650,6 +1742,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_get_renders_usable_form_for_owned_post() {
+        let state = crate::test_support::app_state();
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let router = Router::new()
+            .route("/{board}/post/{id}/edit", get(super::edit_post_get))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/test/post/{post_id}/edit"))
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("private, no-cache, must-revalidate")
+        );
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains(&format!(r#"action="/test/post/{post_id}/edit""#)));
+        assert!(body.contains(r#"name="_csrf""#));
+        assert!(body.contains(r#"name="body" rows="8" maxlength="4096" required"#));
+        assert!(body.contains("available for up to 60 seconds after posting"));
+        assert!(body.contains(&format!(r#"href="/test/thread/{thread_id}#p{post_id}""#)));
+    }
+
+    #[tokio::test]
+    async fn edit_get_fails_without_owned_cookie() {
+        let state = crate::test_support::app_state();
+        let (_thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let router = Router::new()
+            .route("/{board}/post/{id}/edit", get(super::edit_post_get))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/test/post/{post_id}/edit"))
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn edit_fails_without_owned_cookie() {
         let state = crate::test_support::app_state();
         let (_thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0);
@@ -1666,6 +1828,38 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from("body=edited+body&_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn edit_get_fails_after_expiry() {
+        let state = crate::test_support::app_state();
+        let (_thread_id, post_id, owned_cookie) = seed_owned_post(
+            &state,
+            true,
+            true,
+            crate::handlers::board::SELF_DELETE_WINDOW_SECS + 1,
+        );
+        let router = Router::new()
+            .route("/{board}/post/{id}/edit", get(super::edit_post_get))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/test/post/{post_id}/edit"))
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
                     .expect("request"),
             )
             .await
@@ -1713,6 +1907,33 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some(StatusCode::FORBIDDEN.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn edit_get_fails_when_board_editing_is_disabled() {
+        let state = crate::test_support::app_state();
+        let (_thread_id, post_id, owned_cookie) = seed_owned_post(&state, false, true, 0);
+        let router = Router::new()
+            .route("/{board}/post/{id}/edit", get(super::edit_post_get))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/test/post/{post_id}/edit"))
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -1808,6 +2029,235 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_get_renders_usable_confirmation_form_for_owned_post() {
+        let state = crate::test_support::app_state();
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let router = Router::new()
+            .route("/{board}/post/{id}/delete", get(super::delete_post_get))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/test/post/{post_id}/delete"))
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("private, no-cache, must-revalidate")
+        );
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains(&format!(r#"action="/test/post/{post_id}/delete""#)));
+        assert!(body.contains(r#"name="_csrf""#));
+        assert!(body.contains("delete this post"));
+        assert!(body.contains("available for up to 60 seconds after posting"));
+        assert!(body.contains(&format!(r#"href="/test/thread/{thread_id}#p{post_id}""#)));
+    }
+
+    #[tokio::test]
+    async fn delete_succeeds_with_owned_cookie_inside_grace_window() {
+        let state = crate::test_support::app_state();
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let router = Router::new()
+            .route("/{board}/post/{id}/delete", post(super::delete_own_post))
+            .with_state(state.clone());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/test/post/{post_id}/delete"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .body(Body::from("_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some(format!("/test/thread/{thread_id}").as_str())
+        );
+
+        let conn = state.db.get().expect("db connection");
+        let remaining_posts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("remaining posts");
+        assert_eq!(remaining_posts, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_fails_without_owned_cookie() {
+        let state = crate::test_support::app_state();
+        let (_thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let router = Router::new()
+            .route("/{board}/post/{id}/delete", post(super::delete_own_post))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/test/post/{post_id}/delete"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .body(Body::from("_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_fails_after_grace_window() {
+        let state = crate::test_support::app_state();
+        let (_thread_id, post_id, owned_cookie) = seed_owned_post(
+            &state,
+            true,
+            true,
+            crate::handlers::board::SELF_DELETE_WINDOW_SECS + 1,
+        );
+        let router = Router::new()
+            .route("/{board}/post/{id}/delete", post(super::delete_own_post))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/test/post/{post_id}/delete"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .body(Body::from("_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_get_fails_without_owned_cookie() {
+        let state = crate::test_support::app_state();
+        let (_thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let router = Router::new()
+            .route("/{board}/post/{id}/delete", get(super::delete_post_get))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/test/post/{post_id}/delete"))
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_get_fails_after_expiry() {
+        let state = crate::test_support::app_state();
+        let (_thread_id, post_id, owned_cookie) = seed_owned_post(
+            &state,
+            true,
+            true,
+            crate::handlers::board::SELF_DELETE_WINDOW_SECS + 1,
+        );
+        let router = Router::new()
+            .route("/{board}/post/{id}/delete", get(super::delete_post_get))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/test/post/{post_id}/delete"))
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_get_fails_when_board_delete_is_disabled() {
+        let state = crate::test_support::app_state();
+        let (_thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, false, 0);
+        let router = Router::new()
+            .route("/{board}/post/{id}/delete", get(super::delete_post_get))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/test/post/{post_id}/delete"))
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn onion_host_thread_page_keeps_self_action_routes_internal() {
         let state = crate::test_support::app_state();
         let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
@@ -1842,10 +2292,11 @@ mod tests {
         )
         .expect("utf8 body");
 
-        assert!(body.contains(&format!(r#"action="/test/post/{post_id}/delete""#)));
+        assert!(body.contains(&format!(r#"href="/test/post/{post_id}/edit""#)));
         assert!(body.contains(r#"id="edit-modal-form""#));
         assert!(body.contains(r#"data-board="test""#));
         assert!(body.contains(&format!(r#"data-edit-post-id="{post_id}""#)));
+        assert!(body.contains(&format!(r#"href="/test/post/{post_id}/delete""#)));
         assert!(
             !body.contains(r#"action="http"#),
             "self-service forms should stay on internal relative routes"
@@ -1888,35 +2339,6 @@ mod tests {
             response
                 .headers()
                 .get("x-rustchan-redirect")
-                .and_then(|value| value.to_str().ok()),
-            Some(format!("/test/thread/{thread_id}#p{post_id}").as_str())
-        );
-    }
-
-    #[tokio::test]
-    async fn thread_page_edit_route_redirects_back_to_thread() {
-        let state = crate::test_support::app_state();
-        let (thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0);
-        let router = Router::new()
-            .route("/{board}/post/{id}/edit", get(super::edit_post_get))
-            .with_state(state);
-
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!("/test/post/{post_id}/edit"))
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::LOCATION)
                 .and_then(|value| value.to_str().ok()),
             Some(format!("/test/thread/{thread_id}#p{post_id}").as_str())
         );
