@@ -185,7 +185,9 @@ function initSelfActionCountdowns(root) {
       return;
     }
 
-    bindExpiryCountdown(element, countdown, expiry);
+    bindExpiryCountdown(element, countdown, expiry, function () {
+      element.remove();
+    });
   });
 }
 
