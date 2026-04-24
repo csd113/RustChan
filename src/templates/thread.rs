@@ -6,7 +6,9 @@
 //   render_poll  — poll widget (private, embedded in thread_page)
 
 use crate::models::{Board, Post, Thread};
-use crate::utils::{files::format_file_size, sanitize::escape_html};
+use crate::utils::{
+    files::format_file_size, redirect::encode_query_component, sanitize::escape_html,
+};
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
 
@@ -1013,9 +1015,10 @@ pub fn render_post(
         );
     }
 
-    // Admin delete button + IP history link
+    // Admin delete button + IP history/report links
     if is_admin {
         let is_op_val = if post.is_op { "1" } else { "0" };
+        let return_to = format!("/{}/thread/{}", board_short, post.thread_id);
         let _ = write!(
             html,
             r#"<div class="post-controls admin-post-controls">
@@ -1038,13 +1041,14 @@ pub fn render_post(
 <input type="hidden" name="duration_hours" id="ban-dur-{pid}" value="0">
 <button type="submit" class="admin-del-btn btn-danger">&#x26D4; ban+del</button>
 </form>
-<a class="admin-ip-link" href="/admin/ip/{ip_hash}" title="View all posts from this IP hash">&#x1F50D; ip</a>
+<a class="admin-ip-link" href="/admin/ip/{ip_hash}?return_to={return_to}" title="View all posts from this hashed IP">&#x1F50D; ip</a>
 </div>"#,
             csrf = escape_html(csrf_token),
             pid = post.id,
             board = escape_html(board_short),
             ip_hash = escape_html(post.ip_hash.as_deref().unwrap_or("")),
             tid = post.thread_id,
+            return_to = encode_query_component(&return_to),
             is_op = is_op_val
         );
     }

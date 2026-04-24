@@ -10,9 +10,10 @@ use crate::models::{
     BackupInfo, Ban, BannerAsset, BannerTargetType, Board, BoardBannerMode, WordFilter,
 };
 use crate::utils::{files::format_file_size, sanitize::escape_html};
+use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use super::{base_layout, fmt_ts, fmt_ts_short, render_pagination};
+use super::{base_layout, fmt_ts, fmt_ts_short, render_pagination, urlencoding_simple};
 
 // ─── Admin login ──────────────────────────────────────────────────────────────
 
@@ -1402,13 +1403,32 @@ pub fn admin_ip_history_page(
     pagination: &crate::models::Pagination,
     all_boards: &[Board],
     csrf_token: &str,
+    return_to: Option<&str>,
 ) -> String {
     use crate::models::MediaType;
 
     let mut rows = String::new();
+    let mut seen_names = BTreeSet::new();
+    let mut seen_tripcodes = BTreeSet::new();
+
+    for (post, _) in posts_with_boards {
+        let name = post.name.trim();
+        if !name.is_empty() && name != "Anonymous" {
+            seen_names.insert(name.to_string());
+        }
+
+        if let Some(tripcode) = post
+            .tripcode
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            seen_tripcodes.insert(tripcode.to_string());
+        }
+    }
 
     if posts_with_boards.is_empty() {
-        rows.push_str(r#"<tr><td colspan="6" style="color:var(--text-dim);text-align:center">no posts found for this IP hash</td></tr>"#);
+        rows.push_str(r#"<tr><td colspan="8" style="color:var(--text-dim);text-align:center">no posts found for this hashed IP</td></tr>"#);
     }
 
     for (post, board_short) in posts_with_boards {
@@ -1420,7 +1440,7 @@ pub fn admin_ip_history_page(
             None => "",
         };
         let thread_link = format!(
-            r#"<a href="/{board}/thread/{tid}#p{pid}">/{board}/ No.{pid}</a>"#,
+            r#"<a class="quotelink crosslink" href="/{board}/thread/{tid}#p{pid}" data-crossboard="{board}" data-pid="{pid}" title="hover to preview">/{board}/ No.{pid}</a>"#,
             board = escape_html(board_short),
             tid = post.thread_id,
             pid = post.id,
@@ -1440,6 +1460,20 @@ pub fn admin_ip_history_page(
         } else {
             escape_html(&body_preview)
         };
+        let name_html = {
+            let name = post.name.trim();
+            if name.is_empty() || name == "Anonymous" {
+                String::from("&mdash;")
+            } else {
+                escape_html(name)
+            }
+        };
+        let tripcode_html = post
+            .tripcode
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map_or_else(|| String::from("&mdash;"), escape_html);
 
         let del_form = format!(
             r#"<form method="POST" action="/admin/post/delete" style="display:inline">
@@ -1453,43 +1487,130 @@ pub fn admin_ip_history_page(
             pid = post.id,
             board = escape_html(board_short),
         );
+        let report_form = post.ip_hash.as_deref().map_or_else(String::new, |ip_hash| {
+            let history_path = format!("/admin/ip/{}", escape_html(ip_hash));
+            let history_return = return_to.unwrap_or("/admin/panel");
+            let history_url = format!(
+                "{history_path}?return_to={}",
+                urlencoding_simple(history_return)
+            );
+            format!(
+                r#"<form method="POST" action="/admin/ip/report" style="display:inline">
+<input type="hidden" name="_csrf"   value="{csrf}">
+<input type="hidden" name="post_id" value="{pid}">
+<input type="hidden" name="thread_id" value="{tid}">
+<input type="hidden" name="board"   value="{board}">
+<input type="hidden" name="ip_hash" value="{ip_hash}">
+<input type="hidden" name="reason"   value="">
+<button type="button" class="admin-toolbar-btn" data-action="open-admin-ip-report"
+        data-report-label="Report post No.{pid} for hashed IP {ip_hash}"
+        data-report-history="{history_url}"
+        data-report-post="/{board}/thread/{tid}#p{pid}">report</button>
+</form>"#,
+                csrf = escape_html(csrf_token),
+                pid = post.id,
+                tid = post.thread_id,
+                board = escape_html(board_short),
+                ip_hash = escape_html(ip_hash),
+                history_url = escape_html(&history_url),
+            )
+        });
 
         let _ = write!(
             rows,
             r#"<tr>
 <td style="white-space:nowrap;font-size:0.8rem">{time}</td>
 <td>{link}{op}</td>
+<td style="font-size:0.8rem">{name}</td>
+<td style="font-size:0.8rem">{tripcode}</td>
 <td style="font-size:0.8rem">{media}</td>
 <td style="max-width:480px;word-break:break-word;font-size:0.85rem">{body}</td>
+<td>{report}</td>
 <td>{del}</td>
 </tr>"#,
             time = fmt_ts_short(post.created_at),
             link = thread_link,
             op = op_badge,
+            name = name_html,
+            tripcode = tripcode_html,
             media = media_badge,
             body = body_preview,
+            report = report_form,
             del = del_form
         );
     }
 
-    let pag_html = render_pagination(pagination, &format!("/admin/ip/{}", escape_html(ip_hash)));
+    let identity_summary = {
+        let mut parts = Vec::new();
+        if !seen_names.is_empty() {
+            parts.push(format!(
+                "names: {}",
+                seen_names
+                    .iter()
+                    .map(|name| format!(r"<code>{}</code>", escape_html(name)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !seen_tripcodes.is_empty() {
+            parts.push(format!(
+                "tripcodes: {}",
+                seen_tripcodes
+                    .iter()
+                    .map(|tripcode| format!(r"<code>{}</code>", escape_html(tripcode)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if parts.is_empty() {
+            String::from(
+                r#"<span style="color:var(--text-dim)">no alternate names or tripcodes found on these posts.</span>"#,
+            )
+        } else {
+            format!(
+                r#"<span style="color:var(--text-dim)">{}</span>"#,
+                parts.join(" | ")
+            )
+        }
+    };
+
+    let mut pag_base = format!("/admin/ip/{}", escape_html(ip_hash));
+    if let Some(return_to) = return_to.filter(|value| !value.is_empty()) {
+        let sep = if pag_base.contains('?') { "&" } else { "?" };
+        let _ = write!(pag_base, "{sep}return_to={}", urlencoding_simple(return_to));
+    }
+    let pag_html = render_pagination(pagination, &pag_base);
+
+    let return_buttons = return_to.filter(|value| !value.is_empty()).map_or_else(
+        || String::from(r#"<a class="admin-toolbar-btn" href="/admin/panel">&#8592; back to panel</a>"#),
+        |return_to| {
+            format!(
+                r#"<a class="admin-toolbar-btn" href="{thread}">&#8592; back to thread</a> <a class="admin-toolbar-btn" href="/admin/panel">&#8592; back to panel</a>"#,
+                thread = escape_html(return_to)
+            )
+        },
+    );
 
     let body = format!(
         r#"<div class="admin-panel">
 <h1>[ IP history ]</h1>
 <section class="admin-section">
-<h2>// posts by <code style="font-size:0.9rem">{hash_display}</code></h2>
+<h2>// posts by Hashed IP <code style="font-size:0.9rem">{hash_display}</code></h2>
 <p style="color:var(--text-dim);font-size:0.85rem">
   {total} post{plural} found across all boards.
-  <a href="/admin/panel" style="margin-left:1rem">&#8592; back to panel</a>
 </p>
+<p style="color:var(--text-dim);font-size:0.82rem">{identity_summary}</p>
+<p style="margin:0.35rem 0 1rem 0">{return_buttons}</p>
 <div class="admin-table-wrap">
 <table class="admin-table" style="width:100%">
 <thead><tr>
   <th style="text-align:left">time</th>
   <th style="text-align:left">post</th>
+  <th style="text-align:left">name</th>
+  <th style="text-align:left">tripcode</th>
   <th>media</th>
   <th style="text-align:left">body</th>
+  <th>report</th>
   <th>del</th>
 </tr></thead>
 <tbody>{rows}</tbody>
@@ -1503,10 +1624,12 @@ pub fn admin_ip_history_page(
         plural = if pagination.total == 1 { "" } else { "s" },
         rows = rows,
         pagination = pag_html,
+        identity_summary = identity_summary,
+        return_buttons = return_buttons,
     );
 
     base_layout(
-        &format!("IP history — {}", &ip_hash[..ip_hash.len().min(12)]),
+        &format!("Hashed IP — {}", &ip_hash[..ip_hash.len().min(12)]),
         None,
         &body,
         csrf_token,
@@ -1514,7 +1637,7 @@ pub fn admin_ip_history_page(
         None,
         None,
         false,
-        &format!("/admin/ip/{ip_hash}"),
+        &pag_base,
     )
 }
 

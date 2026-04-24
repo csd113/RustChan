@@ -1501,6 +1501,25 @@ function openReportModal(postId, threadId, board, csrf, label) {
   if (reason) reason.focus();
 }
 
+function openAdminIpReportPrompt(trigger) {
+  if (!trigger) return;
+  var form = trigger.closest('form');
+  if (!form) return;
+  var label = trigger.getAttribute('data-report-label') || 'Report this user?';
+  var historyLink = trigger.getAttribute('data-report-history') || '';
+  var postLink = trigger.getAttribute('data-report-post') || '';
+  var promptLabel = label;
+  if (historyLink) promptLabel += '\n' + historyLink;
+  if (postLink) promptLabel += '\n' + postLink;
+  var reason = window.prompt(promptLabel + '\n\nEnter a reason for the report:', '');
+  if (reason === null) return;
+  reason = reason.trim();
+  if (!reason) return;
+  var field = form.querySelector('input[name="reason"]');
+  if (field) field.value = reason;
+  requestFormSubmit(form, trigger);
+}
+
 function closeReportModal() {
   var modal = document.getElementById('report-modal');
   if (modal) modal.style.display = 'none';
@@ -2677,6 +2696,10 @@ document.addEventListener('click', function (e) {
       case 'open-report':
         closeThreadMenus();
         openReportModal(t.dataset.pid, t.dataset.tid, t.dataset.board, t.dataset.csrf, t.dataset.reportLabel);
+        break;
+      case 'open-admin-ip-report':
+        e.preventDefault();
+        openAdminIpReportPrompt(t);
         break;
       case 'open-nsfw-disclaimer':
         e.preventDefault();

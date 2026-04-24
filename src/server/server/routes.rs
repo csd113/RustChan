@@ -301,6 +301,10 @@ fn admin_moderation_routes() -> Router<AppState> {
         )
         .route("/admin/vacuum", post(crate::handlers::admin::admin_vacuum))
         .route(
+            "/admin/ip/report",
+            post(crate::handlers::admin::admin_ip_report),
+        )
+        .route(
             "/admin/ip/{ip_hash}",
             get(crate::handlers::admin::admin_ip_history),
         )

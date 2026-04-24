@@ -437,6 +437,7 @@ pub async fn remove_filter(
 pub struct IpHistoryQuery {
     #[serde(default = "default_page")]
     pub page: i64,
+    pub return_to: Option<String>,
 }
 
 const fn default_page() -> i64 {
@@ -458,11 +459,14 @@ pub async fn admin_ip_history(
     // Sanitise the IP hash: must be exactly a SHA-256 hex string (64 hex chars).
     // The previous guard used `> 64` which accepted any string of 0–64 chars,
     // including an empty string.  Require exactly 64.
-    if ip_hash.len() != 64 || !ip_hash.chars().all(|c| c.is_ascii_alphanumeric()) {
+    if ip_hash.len() != 64 || !ip_hash.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(AppError::BadRequest("Invalid IP hash.".into()));
     }
 
     let page = params.page.max(1);
+    let return_to =
+        crate::utils::redirect::strict_safe_internal_path_or(params.return_to.as_deref(), "")
+            .to_string();
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -484,6 +488,11 @@ pub async fn admin_ip_history(
                 &pagination,
                 &all_boards,
                 &csrf_clone,
+                if return_to.is_empty() {
+                    None
+                } else {
+                    Some(return_to.as_str())
+                },
             ))
         }
     })
@@ -540,6 +549,107 @@ pub async fn resolve_report(
 
     Ok(
         super::admin_panel_redirect_anchor_open("Report resolved.", "reports", "reports")
+            .into_response(),
+    )
+}
+
+// ─── POST /admin/ip/report ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct IpReportForm {
+    post_id: i64,
+    thread_id: i64,
+    board: String,
+    ip_hash: String,
+    reason: String,
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+}
+
+pub async fn admin_ip_report(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<IpReportForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+
+    let reason = form.reason.trim().chars().take(512).collect::<String>();
+    if reason.is_empty() {
+        return Err(AppError::BadRequest(
+            "Report reason cannot be empty.".into(),
+        ));
+    }
+
+    if form.ip_hash.len() != 64 || !form.ip_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::BadRequest("Invalid IP hash.".into()));
+    }
+
+    let board_short = form
+        .board
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect::<String>();
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            let (admin_id, admin_name) =
+                super::require_admin_session_with_name(&conn, session_id.as_deref())?;
+            let post = db::get_post(&conn, form.post_id)?
+                .ok_or_else(|| AppError::BadRequest("Post not found.".into()))?;
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| AppError::BadRequest("Board not found.".into()))?;
+            let same_board = post.board_id == board.id;
+            let same_thread = post.thread_id == form.thread_id;
+            if !same_board || !same_thread {
+                return Err(AppError::BadRequest(
+                    "Reported post does not match the selected board/thread.".into(),
+                ));
+            }
+            if post.ip_hash.as_deref() != Some(form.ip_hash.as_str()) {
+                return Err(AppError::BadRequest(
+                    "Reported post does not match the selected IP hash.".into(),
+                ));
+            }
+
+            let report_reason = format!(
+                "{reason}\n\nHashed IP: {ip_hash}\nIP history: /admin/ip/{ip_hash}",
+                reason = reason,
+                ip_hash = form.ip_hash,
+            );
+            let _ = db::file_report(&conn, form.post_id, &report_reason, &form.ip_hash)?;
+            let _ = db::log_mod_action(
+                &conn,
+                admin_id,
+                &admin_name,
+                "report",
+                "report",
+                Some(form.post_id),
+                &board.short_name,
+                &format!(
+                    "ip_hash={} report filed",
+                    &form.ip_hash[..form.ip_hash.len().min(16)]
+                ),
+            );
+            tracing::info!(
+                target: "admin",
+                post_id = form.post_id,
+                ip_hash = %form.ip_hash,
+                "Admin filed IP history report"
+            );
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    Ok(
+        super::admin_panel_redirect_anchor_open("Report filed.", "reports", "reports")
             .into_response(),
     )
 }

@@ -91,17 +91,29 @@ fn render_report_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut report_rows = String::new();
     if view.moderation.reports.is_empty() {
         report_rows.push_str(
-            r#"<tr><td colspan="5" style="color:var(--text-dim);text-align:center">no open reports</td></tr>"#,
+            r#"<tr><td colspan="6" style="color:var(--text-dim);text-align:center">no open reports</td></tr>"#,
         );
     }
     for rc in view.moderation.reports {
         let preview = escape_html(rc.post_preview.trim());
         let reason = escape_html(&rc.report.reason);
         let age = fmt_ts(rc.report.created_at);
+        let user_info = rc.post_ip_hash.as_deref().map_or_else(
+            || String::from(r#"<span style="color:var(--text-dim)">n/a</span>"#),
+            |ip_hash| {
+                let short = ip_hash.get(..16).unwrap_or(ip_hash);
+                format!(
+                    r#"<a href="/admin/ip/{ip_hash}" title="View hashed IP history">{short}…</a>"#,
+                    ip_hash = escape_html(ip_hash),
+                    short = escape_html(short),
+                )
+            },
+        );
         let _ = write!(
             report_rows,
             r#"<tr>
 <td><a href="/{board}/thread/{tid}#p{pid}" title="view post">/{board}/ No.{pid}</a></td>
+<td>{user_info}</td>
 <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{preview}">{preview}</td>
 <td>{reason}</td>
 <td style="white-space:nowrap;font-size:0.78rem">{age}</td>
@@ -116,6 +128,7 @@ fn render_report_rows(view: &AdminPanelViewModel<'_>) -> String {
             board = escape_html(&rc.board_short),
             tid = rc.report.thread_id,
             pid = rc.report.post_id,
+            user_info = user_info,
             preview = preview,
             reason = reason,
             age = escape_html(&age),
@@ -213,7 +226,7 @@ fn render_admin_moderation_section(
       <h4>// report inbox{report_badge}</h4>
       <div class="admin-table-wrap">
       <table class="admin-table">
-        <thead><tr><th>post</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
+        <thead><tr><th>post</th><th>user</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
         <tbody>{report_rows}</tbody>
       </table>
       </div>
