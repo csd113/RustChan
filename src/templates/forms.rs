@@ -11,7 +11,6 @@ pub struct PostFormState {
     pub name: String,
     pub subject: String,
     pub body: String,
-    pub deletion_token: String,
     pub sage: bool,
 }
 
@@ -57,14 +56,6 @@ fn form_hint(text: &str) -> String {
 const fn render_uploads_disabled_row() -> &'static str {
     r#"    <tr><td>uploads</td>
         <td><span class="form-field-help">uploads are disabled on this board</span></td></tr>"#
-}
-
-fn render_edit_token_row(value: Option<&str>) -> String {
-    format!(
-        r#"    <tr><td>edit token</td>
-        <td><input type="text" name="deletion_token" value="{value}" placeholder="optional — lets you edit post" maxlength="64"><span class="form-field-help">keep it secret</span></td></tr>"#,
-        value = escape_html(value.unwrap_or("")),
-    )
 }
 
 fn render_captcha_row(board_short: &str, reply_suffix: &str) -> String {
@@ -214,11 +205,6 @@ pub(super) fn new_thread_form(
 
     // captcha JS block removed — logic lives in /static/main.js.
 
-    let edit_token_row = if board.allow_editing {
-        render_edit_token_row(prefill.map(|state| state.deletion_token.as_str()))
-    } else {
-        String::new()
-    };
     let poll_option_rows = [render_poll_option_row(1), render_poll_option_row(2)].concat();
     let name_value = prefill.map_or("", |state| state.name.as_str());
     let subject_value = prefill.map_or("", |state| state.subject.as_str());
@@ -251,7 +237,6 @@ pub(super) fn new_thread_form(
     {uploads_disabled_row}
     {upload_row}
     {upload_progress_row}
-    {edit_token_row}
     {captcha_row}
         <td colspan="2">
         <details class="poll-creator">
@@ -291,7 +276,6 @@ pub(super) fn new_thread_form(
         uploads_disabled_row = uploads_disabled_row,
         upload_row = upload_row,
         upload_progress_row = upload_progress_row(),
-        edit_token_row = edit_token_row,
         captcha_row = captcha_row,
         poll_option_max_length = POLL_OPTION_MAX_LENGTH,
         poll_option_max_count = POLL_OPTION_MAX_COUNT,
@@ -319,12 +303,6 @@ pub(super) fn reply_form(
         String::new()
     } else {
         render_uploads_disabled_row().to_string()
-    };
-
-    let edit_token_row = if board.allow_editing {
-        render_edit_token_row(prefill.map(|state| state.deletion_token.as_str()))
-    } else {
-        String::new()
     };
 
     // PoW CAPTCHA block — only rendered when the board has it enabled.
@@ -358,7 +336,6 @@ pub(super) fn reply_form(
     {upload_progress_row}
     <tr><td>options</td>
         <td><label class="sage-label"><input type="checkbox" name="sage" value="1"{sage_checked}> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
-    {edit_token_row}
     {captcha_row}
   </table>
 </form>
@@ -373,7 +350,6 @@ pub(super) fn reply_form(
         uploads_disabled_row = uploads_disabled_row,
         upload_row = upload_row,
         upload_progress_row = upload_progress_row(),
-        edit_token_row = edit_token_row,
         captcha_row = captcha_row,
     )
 }
@@ -500,7 +476,6 @@ mod tests {
             name: "anon".into(),
             subject: "subject".into(),
             body: "draft body".into(),
-            deletion_token: "secret".into(),
             sage: true,
         };
         let thread_html = new_thread_form("test", "csrf", &board, Some(&state));
@@ -509,11 +484,11 @@ mod tests {
         assert!(thread_html.contains(r#"name="name" value="anon""#));
         assert!(thread_html.contains(r#"name="subject" value="subject""#));
         assert!(thread_html.contains(">draft body</textarea>"));
-        assert!(thread_html.contains(r#"name="deletion_token" value="secret""#));
+        assert!(!thread_html.contains(r#"name="deletion_token""#));
 
         assert!(reply_html.contains(r#"name="name" value="anon""#));
         assert!(reply_html.contains(">draft body</textarea>"));
-        assert!(reply_html.contains(r#"name="deletion_token" value="secret""#));
+        assert!(!reply_html.contains(r#"name="deletion_token""#));
         assert!(reply_html.contains(r#"name="sage" value="1" checked"#));
     }
 

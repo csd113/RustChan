@@ -19,7 +19,7 @@ pub struct BoardSettingsForm {
     allow_any_files: Option<String>,
     allow_tripcodes: Option<String>,
     allow_editing: Option<String>,
-    edit_window_secs: Option<String>,
+    allow_self_delete: Option<String>,
     allow_archive: Option<String>,
     allow_video_embeds: Option<String>,
     allow_captcha: Option<String>,
@@ -93,12 +93,6 @@ pub async fn update_board_settings(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(150)
         .clamp(1, 10_000);
-    let edit_window_secs = form
-        .edit_window_secs
-        .as_deref()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(300)
-        .clamp(0, 86_400); // 0 = disabled, max 24 h
     let post_cooldown_secs = form
         .post_cooldown_secs
         .as_deref()
@@ -170,8 +164,9 @@ pub async fn update_board_settings(
                 CONFIG.enable_any_file_uploads_feature
                     && form.allow_any_files.as_deref() == Some("1"),
                 form.allow_tripcodes.as_deref() == Some("1"),
-                edit_window_secs,
+                crate::handlers::board::SELF_DELETE_WINDOW_SECS,
                 form.allow_editing.as_deref() == Some("1"),
+                form.allow_self_delete.as_deref() == Some("1"),
                 form.allow_archive.as_deref() == Some("1"),
                 form.allow_video_embeds.as_deref() == Some("1"),
                 form.allow_captcha.as_deref() == Some("1"),

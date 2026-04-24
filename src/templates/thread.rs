@@ -18,10 +18,18 @@ use super::{
     thread_autoupdate_script, TOGGLE_SCRIPT,
 };
 
+const SELF_ACTION_WINDOW_SECS: i64 = 60;
+
 #[derive(Debug, Clone)]
 pub struct OwnedPostControls {
-    pub deletion_token: String,
-    pub delete_expires_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditOverlayState {
+    pub post_id: i64,
+    pub body: String,
+    pub error: Option<String>,
 }
 
 fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String {
@@ -122,6 +130,7 @@ pub fn thread_page(
     error: Option<&str>,
     success: Option<&str>,
     reply_prefill: Option<&super::forms::PostFormState>,
+    edit_overlay_state: Option<&EditOverlayState>,
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
@@ -260,17 +269,26 @@ pub fn thread_page(
                 is_admin,
                 show_media: true,
                 allow_editing: board.allow_editing,
+                allow_self_delete: board.allow_self_delete,
                 owned_post_controls: owned_post_controls.get(&post.id).cloned(),
                 show_poster_ids: board.show_poster_ids,
                 collapse_greentext: board.collapse_greentext,
                 thread_state: Some((thread.sticky, thread.locked, thread.archived)),
                 thread_op_id: thread.op_id,
             },
-            board.edit_window_secs,
+            SELF_ACTION_WINDOW_SECS,
         ));
     }
 
     body.push_str("</div><!-- #thread-posts -->\n");
+    body.push_str(&render_edit_overlay(
+        board,
+        thread.id,
+        csrf_token,
+        posts,
+        owned_post_controls,
+        edit_overlay_state,
+    ));
 
     if !thread.locked && !thread.archived && can_post {
         let form_html = super::forms::reply_form(
@@ -477,6 +495,7 @@ pub struct RenderPostOpts {
     pub is_admin: bool,
     pub show_media: bool,
     pub allow_editing: bool,
+    pub allow_self_delete: bool,
     pub owned_post_controls: Option<OwnedPostControls>,
     pub show_poster_ids: bool,
     pub collapse_greentext: bool,
@@ -654,13 +673,14 @@ pub fn render_post(
     board_short: &str,
     csrf_token: &str,
     opts: RenderPostOpts,
-    edit_window_secs: i64,
+    _edit_window_secs: i64,
 ) -> String {
     let RenderPostOpts {
         show_delete,
         is_admin,
         show_media,
         allow_editing,
+        allow_self_delete,
         owned_post_controls,
         show_poster_ids,
         collapse_greentext,
@@ -681,19 +701,6 @@ pub fn render_post(
         .tripcode
         .as_ref()
         .map(|t| format!(r#"<span class="tripcode">!{}</span>"#, escape_html(t)))
-        .unwrap_or_default();
-
-    // "edited" badge — shown when the post body was modified after creation.
-    let edited_html = post
-        .edited_at
-        .map(|ts| {
-            format!(
-                r#" <span class="post-edited" data-utc="{utc}" title="last edited {full}">(edited {short})</span>"#,
-                utc = ts,
-                full = fmt_ts(ts),
-                short = fmt_ts_short(ts),
-            )
-        })
         .unwrap_or_default();
 
     let op_class = if post.is_op { " op" } else { " reply" };
@@ -745,7 +752,7 @@ pub fn render_post(
         r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}{media_processing_state_attr}>
 <div class="post-meta">
 {subject_html}<strong class="name">{name}</strong>{tripcode}{poster_id_html}
-<span class="post-time" data-utc="{ts}">{time}</span>{edited}
+<span class="post-time" data-utc="{ts}">{time}</span>
 <a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>{post_state_badges}{media_processing_badge}
 <span class="backrefs" id="backrefs-{id}"></span>
 </div>"##,
@@ -760,7 +767,6 @@ pub fn render_post(
         poster_id_html = poster_id_html,
         ts = post.created_at,
         time = fmt_ts_short(post.created_at),
-        edited = edited_html,
         post_state_badges = post_state_badges,
         media_processing_badge = media_processing_badge,
     );
@@ -995,42 +1001,45 @@ pub fn render_post(
     // Edit link + report button (only on thread pages where show_delete=true)
     if show_delete {
         let now = chrono::Utc::now().timestamp();
-        // edit_window_secs = 0 means no time restriction (always
-        // editable while allow_editing is true — matches the handler-layer fix).
-        // The previous guard had `> 0 && …` which suppressed the edit link
-        // entirely when the board used the no-limit setting.
-        let within_edit_window = edit_window_secs == 0
-            || (edit_window_secs > 0 && now.saturating_sub(post.created_at) <= edit_window_secs);
-        let edit_link = if allow_editing && within_edit_window {
-            owned_post_controls.as_ref().map_or_else(String::new, |controls| {
-                format!(
-                    r#" <a class="edit-btn" href="/{board}/post/{pid}/edit?token={token}" title="Edit post">edit</a>"#,
-                    board = escape_html(board_short),
-                    pid = post.id,
-                    token = encode_query_component(&controls.deletion_token),
-                )
-            })
-        } else {
-            String::new()
-        };
-
-        let delete_controls = owned_post_controls
+        let self_action_controls = owned_post_controls
             .as_ref()
-            .filter(|controls| controls.delete_expires_at > now)
+            .filter(|controls| controls.expires_at > now)
             .map_or_else(String::new, |controls| {
-                format!(
-                    r#" <form class="delete-form self-delete-form" method="POST" action="/{board}/post/{pid}/delete" data-delete-expiry="{expires_at}">
+                let edit_button = if allow_editing {
+                    format!(
+                        r#"<button type="button" class="edit-btn" data-action="open-edit-modal" data-edit-post-id="{pid}" data-edit-expiry="{expires_at}" title="Edit post" aria-haspopup="dialog">edit</button>
+<textarea id="edit-body-{pid}" data-role="edit-body-source" hidden>{body}</textarea>"#,
+                        pid = post.id,
+                        expires_at = controls.expires_at,
+                        body = escape_html(&post.body),
+                    )
+                } else {
+                    String::new()
+                };
+                let delete_button = if allow_self_delete {
+                    format!(
+                        r#"<form class="delete-form self-delete-form" method="POST" action="/{board}/post/{pid}/delete" data-delete-expiry="{expires_at}">
 <input type="hidden" name="_csrf" value="{csrf}">
-<input type="hidden" name="deletion_token" value="{token}">
 <button type="submit" class="del-btn" data-confirm="Delete your post No.{pid}?">delete</button>
-<span class="self-delete-countdown" data-role="self-delete-countdown" aria-live="polite"></span>
 </form>"#,
-                    board = escape_html(board_short),
-                    pid = post.id,
-                    expires_at = controls.delete_expires_at,
-                    csrf = escape_html(csrf_token),
-                    token = escape_html(&controls.deletion_token),
-                )
+                        board = escape_html(board_short),
+                        pid = post.id,
+                        expires_at = controls.expires_at,
+                        csrf = escape_html(csrf_token),
+                    )
+                } else {
+                    String::new()
+                };
+                if edit_button.is_empty() && delete_button.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        r#" <span class="self-action-controls" data-action-expiry="{expires_at}">{edit_button}{delete_button}<span class="self-delete-countdown" data-role="self-action-countdown" aria-live="polite"></span></span>"#,
+                        expires_at = controls.expires_at,
+                        edit_button = edit_button,
+                        delete_button = delete_button,
+                    )
+                }
             });
 
         let report_btn = format!(
@@ -1044,7 +1053,7 @@ pub fn render_post(
 
         let _ = write!(
             html,
-            r#"<div class="post-controls">{edit_link}{delete_controls}{report_btn}</div>"#
+            r#"<div class="post-controls">{self_action_controls}{report_btn}</div>"#
         );
     }
 
@@ -1090,86 +1099,98 @@ pub fn render_post(
     html
 }
 
-// ─── Edit post page ───────────────────────────────────────────────────────────
-
-#[must_use]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn edit_post_page(
+fn render_edit_overlay(
     board: &Board,
-    post: &Post,
+    thread_id: i64,
     csrf_token: &str,
-    boards: &[Board],
-    prefill_token: &str,
-    prefill_body: Option<&str>,
-    error: Option<&str>,
-    current_theme: Option<&str>,
-    collapse_greentext: bool,
+    posts: &[Post],
+    owned_post_controls: &BTreeMap<i64, OwnedPostControls>,
+    edit_overlay_state: Option<&EditOverlayState>,
 ) -> String {
-    let error_html = error
-        .map(|msg| {
-            format!(
-                r#"<div class="post-error-banner">&#9888; {}</div>"#,
-                escape_html(msg)
+    let (post_id, current_body, error_html, modal_class) = edit_overlay_state.map_or_else(
+        || {
+            (
+                0,
+                "",
+                String::from(
+                    r#"<div class="post-error-banner edit-modal-error" data-role="edit-modal-error" hidden></div>"#,
+                ),
+                "edit-modal",
             )
-        })
-        .unwrap_or_default();
-    let current_body = prefill_body.unwrap_or(&post.body);
+        },
+        |state| {
+            (
+            state.post_id,
+            state.body.as_str(),
+            state
+                .error
+                .as_deref()
+                .map(|msg| {
+                    format!(
+                        r#"<div class="post-error-banner edit-modal-error" data-role="edit-modal-error">&#9888; {}</div>"#,
+                        escape_html(msg)
+                    )
+                })
+                .unwrap_or_default(),
+            "edit-modal is-open",
+            )
+        },
+    );
+    let can_edit_any = posts.iter().any(|post| {
+        owned_post_controls.contains_key(&post.id)
+            && chrono::Utc::now()
+                .timestamp()
+                .saturating_sub(post.created_at)
+                <= SELF_ACTION_WINDOW_SECS
+    });
+    let aria_hidden = if edit_overlay_state.is_some() {
+        "false"
+    } else {
+        "true"
+    };
+    let hidden_attr = if can_edit_any || edit_overlay_state.is_some() {
+        ""
+    } else {
+        " hidden"
+    };
 
-    let body = format!(
-        r#"{error_html}
-<div class="board-header">
-  <a href="/{board}/thread/{tid}#p{pid}">[ return to thread ]</a>
-</div>
-<div class="page-box">
-<div class="post-form-container">
-<div class="post-form-title">[ edit post No.{pid} ]</div>
-<p style="font-size:0.8rem;color:var(--text-dim)">
-  You can edit this post within the board's edit window.<br>
-  Your edit token is required to confirm the edit.
-</p>
-<form class="post-form" method="POST" action="/{board}/post/{pid}/edit">
-  <input type="hidden" name="_csrf" value="{csrf}">
-  <table>
-    <tr><td>body</td>
-        <td><textarea name="body" rows="6" maxlength="4096">{current_body}</textarea></td></tr>
-    <tr><td>edit token</td>
-        <td><input type="text" name="deletion_token" value="{token}" placeholder="your edit token" maxlength="64"></td></tr>
-    <tr><td></td>
-        <td><button type="submit">save edit</button>
-            <a href="/{board}/thread/{tid}#p{pid}" style="margin-left:1rem">cancel</a></td></tr>
-  </table>
-</form>
-</div>
+    format!(
+        r#"<div id="edit-modal" class="{modal_class}" data-thread-id="{thread_id}" data-board="{board}" aria-hidden="{aria_hidden}"{hidden_attr}>
+  <div class="edit-modal-backdrop" data-action="close-edit-modal"></div>
+  <div class="edit-modal-box" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title">
+    <div class="post-form-title" id="edit-modal-title">[ edit your post <span class="self-delete-countdown" data-role="edit-modal-countdown" aria-live="polite"></span> ]</div>
+    {error_html}
+    <form id="edit-modal-form" class="post-form" method="POST" action="/{board}/post/{post_id}/edit">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <input type="hidden" name="thread_id" value="{thread_id}">
+      <table>
+        <tr><td>body</td>
+            <td><textarea id="edit-modal-body" name="body" rows="6" maxlength="4096">{current_body}</textarea></td></tr>
+        <tr><td></td>
+            <td><button type="submit">save edit</button>
+                <button type="button" class="edit-btn" data-action="close-edit-modal" style="margin-left:1rem">cancel</button></td></tr>
+      </table>
+    </form>
+  </div>
 </div>"#,
-        error_html = error_html,
+        modal_class = modal_class,
+        thread_id = thread_id,
         board = escape_html(&board.short_name),
-        tid = post.thread_id,
-        pid = post.id,
+        aria_hidden = aria_hidden,
+        hidden_attr = hidden_attr,
+        error_html = error_html,
+        post_id = post_id,
         csrf = escape_html(csrf_token),
         current_body = escape_html(current_body),
-        token = escape_html(prefill_token),
-    );
-
-    base_layout(
-        &format!("edit post No.{} — /{}/", post.id, board.short_name),
-        Some(&board.short_name),
-        &body,
-        csrf_token,
-        boards,
-        current_theme,
-        Some(&board.default_theme),
-        collapse_greentext,
-        &format!(
-            "/{}/thread/{}#p{}",
-            board.short_name, post.thread_id, post.id
-        ),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{display_file_name, edit_post_page, render_post, thread_page, RenderPostOpts};
+    use super::{
+        display_file_name, render_post, thread_page, EditOverlayState, OwnedPostControls,
+        RenderPostOpts,
+    };
     use crate::models::{BoardAccessMode, MediaType, Post, Thread};
 
     fn sample_post() -> Post {
@@ -1245,6 +1266,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
             true,
         );
@@ -1282,6 +1304,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
             false,
         );
@@ -1311,6 +1334,7 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                allow_self_delete: false,
                 owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
@@ -1348,6 +1372,7 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                allow_self_delete: false,
                 owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
@@ -1391,6 +1416,7 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                allow_self_delete: false,
                 owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
@@ -1418,6 +1444,7 @@ mod tests {
                 is_admin: false,
                 show_media: false,
                 allow_editing: false,
+                allow_self_delete: false,
                 owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
@@ -1448,6 +1475,7 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                allow_self_delete: false,
                 owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
@@ -1475,6 +1503,7 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                allow_self_delete: false,
                 owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
@@ -1515,6 +1544,7 @@ mod tests {
             None,
             Some(&reply_prefill),
             None,
+            None,
             false,
             true,
         );
@@ -1525,23 +1555,113 @@ mod tests {
     }
 
     #[test]
-    fn edit_post_page_prefers_submitted_body_when_re_rendered() {
+    fn thread_page_renders_edit_overlay_with_submitted_body_and_error() {
         let board = crate::test_fixtures::sample_board();
         let post = sample_post();
-
-        let html = edit_post_page(
-            &board,
-            &post,
-            "csrf",
-            std::slice::from_ref(&board),
-            "token",
-            Some("edited draft"),
-            Some("Incorrect edit token."),
-            None,
-            false,
+        let mut owned = std::collections::BTreeMap::new();
+        owned.insert(
+            post.id,
+            OwnedPostControls {
+                expires_at: i64::MAX,
+            },
         );
 
+        let html = thread_page(
+            &board,
+            &sample_thread(),
+            std::slice::from_ref(&post),
+            &owned,
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            None,
+            None,
+            None,
+            Some(&EditOverlayState {
+                post_id: post.id,
+                body: "edited draft".into(),
+                error: Some("Edit failed.".into()),
+            }),
+            None,
+            false,
+            true,
+        );
+
+        assert!(html.contains(r#"id="edit-modal""#));
+        assert!(html.contains(r#"class="edit-modal is-open""#));
         assert!(html.contains(">edited draft</textarea>"));
-        assert!(!html.contains(">body</textarea>"));
+        assert!(html.contains("Edit failed."));
+    }
+
+    #[test]
+    fn render_post_uses_in_page_edit_action_without_tokenized_redirect() {
+        let mut board = crate::test_fixtures::sample_board();
+        board.allow_editing = true;
+        let mut post = sample_post();
+        post.created_at = chrono::Utc::now().timestamp();
+
+        let html = thread_page(
+            &board,
+            &sample_thread(),
+            std::slice::from_ref(&post),
+            &std::collections::BTreeMap::from([(
+                post.id,
+                OwnedPostControls {
+                    expires_at: i64::MAX,
+                },
+            )]),
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+        );
+
+        assert!(html.contains(r#"data-action="open-edit-modal""#));
+        assert!(html.contains(r#"data-edit-expiry=""#));
+        assert!(html.contains(r#"data-role="self-action-countdown""#));
+        assert!(html.contains(r#"id="edit-modal""#));
+        assert!(!html.contains("?token="));
+    }
+
+    #[test]
+    fn render_post_hides_edited_badge_for_edited_posts() {
+        let mut board = crate::test_fixtures::sample_board();
+        board.allow_editing = true;
+        let mut post = sample_post();
+        post.created_at = chrono::Utc::now().timestamp();
+        post.edited_at = Some(post.created_at + 5);
+
+        let html = thread_page(
+            &board,
+            &sample_thread(),
+            std::slice::from_ref(&post),
+            &std::collections::BTreeMap::from([(
+                post.id,
+                OwnedPostControls {
+                    expires_at: i64::MAX,
+                },
+            )]),
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+        );
+
+        assert!(!html.contains("(edited"));
     }
 }

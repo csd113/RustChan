@@ -139,37 +139,51 @@ function upgradeLegacySpoilers(root) {
   });
 }
 
-function initSelfDeleteCountdowns(root) {
+function renderExpiryCountdownValue(remaining) {
+  return '(' + remaining + 's)';
+}
+
+function bindExpiryCountdown(element, countdown, expiry, onExpire) {
+  function clearTimer() {
+    if (element._selfActionTimer) {
+      window.clearInterval(element._selfActionTimer);
+      element._selfActionTimer = 0;
+    }
+  }
+
+  function render() {
+    var remaining = Math.max(0, Math.ceil(expiry - Date.now() / 1000));
+    if (remaining <= 0) {
+      clearTimer();
+      if (typeof onExpire === 'function') onExpire();
+      return;
+    }
+    countdown.textContent = renderExpiryCountdownValue(remaining);
+  }
+
+  render();
+  element._selfActionTimer = window.setInterval(render, 250);
+}
+
+function initSelfActionCountdowns(root) {
   var scope = root || document;
-  var forms = scope.querySelectorAll('.self-delete-form[data-delete-expiry]');
-  if (!forms.length) return;
+  var elements = scope.querySelectorAll('[data-action-expiry]');
+  if (!elements.length) return;
 
-  forms.forEach(function (form) {
-    if (form.dataset.countdownBound === '1') return;
-    form.dataset.countdownBound = '1';
+  elements.forEach(function (element) {
+    if (element.dataset.countdownBound === '1') return;
+    element.dataset.countdownBound = '1';
 
-    var countdown = form.querySelector('[data-role="self-delete-countdown"]');
-    var expiry = Number(form.dataset.deleteExpiry || '');
+    var countdown = element.querySelector('[data-role="self-action-countdown"]');
+    var expiry = Number(element.dataset.actionExpiry || '');
     if (!countdown || !isFinite(expiry)) {
-      form.remove();
+      element.remove();
       return;
     }
 
-    function render() {
-      var remaining = Math.max(0, Math.ceil(expiry - Date.now() / 1000));
-      if (remaining <= 0) {
-        if (form._selfDeleteTimer) {
-          window.clearInterval(form._selfDeleteTimer);
-          form._selfDeleteTimer = 0;
-        }
-        form.remove();
-        return;
-      }
-      countdown.textContent = '(' + remaining + 's)';
-    }
-
-    render();
-    form._selfDeleteTimer = window.setInterval(render, 250);
+    bindExpiryCountdown(element, countdown, expiry, function () {
+      element.remove();
+    });
   });
 }
 
@@ -177,7 +191,7 @@ document.addEventListener('DOMContentLoaded', function () {
   applyQueuedPostSubmitAnchor();
   localizePostTimes(document);
   upgradeLegacySpoilers(document);
-  initSelfDeleteCountdowns(document);
+  initSelfActionCountdowns(document);
   wireAudioMiniPlayers(document);
   wireMediaThumbFallbacks(document);
   syncMobileHeaderOffset();
@@ -199,7 +213,7 @@ window.addEventListener('resize', syncMobileHeaderOffset);
   window._onNewPostsInserted = function (container) {
     localizePostTimes(container);
     upgradeLegacySpoilers(container);
-    initSelfDeleteCountdowns(container);
+    initSelfActionCountdowns(container);
     wireAudioMiniPlayers(container);
     wireMediaThumbFallbacks(container);
     if (_origLocalize) _origLocalize(container);
@@ -1556,6 +1570,152 @@ function closeReportModal() {
   if (modal) modal.style.display = 'none';
 }
 
+function openEditModal(trigger) {
+  if (!trigger) return;
+  var modal = document.getElementById('edit-modal');
+  var form = document.getElementById('edit-modal-form');
+  var textarea = document.getElementById('edit-modal-body');
+  if (!modal || !form || !textarea) return;
+
+  var postId = trigger.dataset.editPostId;
+  if (!postId) return;
+  var source = document.getElementById('edit-body-' + postId);
+  var expiry = Number(trigger.dataset.editExpiry || '');
+  form.setAttribute('action', '/' + encodeURIComponent(trigger.closest('#thread-posts').dataset.board) + '/post/' + encodeURIComponent(postId) + '/edit');
+  if (isFinite(expiry)) {
+    form.dataset.actionExpiry = String(expiry);
+  } else {
+    delete form.dataset.actionExpiry;
+  }
+  modal.dataset.postId = postId;
+  textarea.value = source ? source.value : '';
+  var error = modal.querySelector('[data-role="edit-modal-error"]');
+  if (error) {
+    error.hidden = true;
+    error.textContent = '';
+  }
+  modal.hidden = false;
+  modal.classList.add('is-open');
+  modal.setAttribute('aria-hidden', 'false');
+  bindEditModalCountdown();
+  textarea.focus();
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+}
+
+function closeEditModal() {
+  var modal = document.getElementById('edit-modal');
+  if (!modal) return;
+  var form = document.getElementById('edit-modal-form');
+  if (form && form._selfActionTimer) {
+    window.clearInterval(form._selfActionTimer);
+    form._selfActionTimer = 0;
+  }
+  var countdown = modal.querySelector('[data-role="edit-modal-countdown"]');
+  if (countdown) countdown.textContent = '';
+  modal.classList.remove('is-open');
+  modal.setAttribute('aria-hidden', 'true');
+  modal.hidden = true;
+}
+
+function showEditModalError(message) {
+  var modal = document.getElementById('edit-modal');
+  var error = modal && modal.querySelector('[data-role="edit-modal-error"]');
+  if (!modal || !error) return;
+  if (!message) {
+    error.hidden = true;
+    error.textContent = '';
+    return;
+  }
+  error.hidden = false;
+  error.textContent = '\u26a0 ' + message;
+}
+
+function bindEditModalCountdown() {
+  var modal = document.getElementById('edit-modal');
+  var form = document.getElementById('edit-modal-form');
+  var countdown = modal && modal.querySelector('[data-role="edit-modal-countdown"]');
+  if (!modal || !form || !countdown) return;
+
+  if (form._selfActionTimer) {
+    window.clearInterval(form._selfActionTimer);
+    form._selfActionTimer = 0;
+  }
+
+  var expiry = Number(form.dataset.actionExpiry || '');
+  if (!isFinite(expiry)) {
+    countdown.textContent = '';
+    return;
+  }
+
+  bindExpiryCountdown(form, countdown, expiry, function () {
+    showEditModalError('The 60-second edit window for this post has closed.');
+    window.setTimeout(function () {
+      closeEditModal();
+    }, 900);
+  });
+}
+
+function navigateEditSuccess(url) {
+  closeEditModal();
+  if (!url) {
+    window.location.reload();
+    return;
+  }
+
+  var target = new URL(url, window.location.href);
+  if (isSameDocumentNavigationTarget(target.href)) {
+    queuePostSubmitAnchor(target);
+    window.location.assign(target.pathname + target.search);
+    return;
+  }
+
+  window.location.assign(target.href);
+}
+
+function submitEditModalForm(form) {
+  if (!window.fetch || !window.FormData) return false;
+
+  var modal = document.getElementById('edit-modal');
+  var textarea = document.getElementById('edit-modal-body');
+  if (!modal || !textarea) return false;
+
+  var submitter = form.querySelector('button[type="submit"]');
+  if (submitter) submitter.disabled = true;
+  showEditModalError('');
+  var error = modal.querySelector('[data-role="edit-modal-error"]');
+  if (error) error.hidden = true;
+
+  fetch(form.action, {
+    method: 'POST',
+    body: new URLSearchParams(new FormData(form)),
+    credentials: 'same-origin',
+    headers: { 'X-Requested-With': 'XMLHttpRequest' }
+  })
+    .then(function (response) {
+      var redirect = response.headers.get('x-rustchan-redirect');
+      if (redirect) {
+        navigateEditSuccess(redirect);
+        return null;
+      }
+      if (response.ok) {
+        navigateEditSuccess(response.url || window.location.href);
+        return null;
+      }
+      return response.json().catch(function () { return {}; });
+    })
+    .then(function (payload) {
+      if (!payload) return;
+      if (submitter) submitter.disabled = false;
+      showEditModalError(payload.error || 'Unable to save your edit.');
+    })
+    .catch(function () {
+      if (submitter) submitter.disabled = false;
+      showEditModalError('Unable to save your edit.');
+    });
+
+  return true;
+}
+
 function closeThreadMenus() {
   document.querySelectorAll('.catalog-thread-menu-toggle[aria-expanded="true"]').forEach(function (btn) {
     btn.setAttribute('aria-expanded', 'false');
@@ -2735,6 +2895,15 @@ document.addEventListener('click', function (e) {
           reasonRequired: t.dataset.reportReasonRequired === '1'
         });
         break;
+      case 'open-edit-modal':
+        e.preventDefault();
+        closeThreadMenus();
+        openEditModal(t);
+        break;
+      case 'close-edit-modal':
+        e.preventDefault();
+        closeEditModal();
+        break;
       case 'open-nsfw-disclaimer':
         e.preventDefault();
         openNsfwDisclaimer(t.dataset.returnTo, t.dataset.boardLabel);
@@ -2802,11 +2971,6 @@ document.addEventListener('change', function (e) {
   if (target.id === 'catalog-show-comment') {
     setCatalogCommentVisibility(target.value);
   }
-  // Allow-editing checkbox: show/hide edit-window row
-  if (target.name === 'allow_editing') {
-    var row = target.closest('form') && target.closest('form').querySelector('.edit-window-row');
-    if (row) row.style.display = target.checked ? '' : 'none';
-  }
 });
 
 document.addEventListener('submit', function (e) {
@@ -2824,6 +2988,12 @@ document.addEventListener('submit', function (e) {
       return;
     }
     if (submitPostFormWithProgress(form)) {
+      e.preventDefault();
+      return;
+    }
+  }
+  if (form.id === 'edit-modal-form') {
+    if (submitEditModalForm(form)) {
       e.preventDefault();
       return;
     }
@@ -2869,6 +3039,7 @@ document.addEventListener('keydown', function (e) {
       return;
     }
     closeThreadMenus();
+    closeEditModal();
   }
 });
 
@@ -3038,6 +3209,10 @@ document.addEventListener('keydown', function (e) {
 
 // ─── Report modal backdrop click ──────────────────────────────────────────────
 document.addEventListener('click', function (e) {
+  var editModal = document.getElementById('edit-modal');
+  if (editModal && e.target === editModal.querySelector('.edit-modal-backdrop')) {
+    closeEditModal();
+  }
   var modal = document.getElementById('report-modal');
   if (modal && e.target === modal) closeReportModal();
 });

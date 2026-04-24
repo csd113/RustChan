@@ -449,8 +449,9 @@ pub fn submit_post(
         });
     }
     if let Some(existing) = db::get_post_submission(conn, &submission_token, &ip_hash, board.id)? {
-        let stored_post = db::get_post(conn, existing.post_id)?
-            .ok_or_else(|| AppError::NotFound("Existing post submission target not found.".into()))?;
+        let stored_post = db::get_post(conn, existing.post_id)?.ok_or_else(|| {
+            AppError::NotFound("Existing post submission target not found.".into())
+        })?;
         return Ok(SubmitPostResult {
             redirect_url: format!(
                 "/{}/thread/{}#p{}",

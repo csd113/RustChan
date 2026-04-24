@@ -12,7 +12,7 @@ fn seed_post_password_board(state: &crate::middleware::AppState) -> (i64, i64, i
         crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
     let password_hash = crate::utils::crypto::hash_password("swordfish").expect("hash password");
     conn.execute(
-        "UPDATE boards SET access_mode = ?1, access_password_hash = ?2, allow_editing = 1 WHERE id = ?3",
+        "UPDATE boards SET access_mode = ?1, access_password_hash = ?2, allow_editing = 1, allow_self_delete = 1 WHERE id = ?3",
         rusqlite::params!["post_password", password_hash, board_id],
     )
     .expect("update board access");
@@ -210,10 +210,24 @@ async fn post_password_board_write_actions_require_unlock() {
                 .method("POST")
                 .uri(format!("/secret/post/{post_id}/edit"))
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header(header::COOKIE, "csrf_token=csrf123")
-                .body(Body::from(
-                    "deletion_token=edit-token&body=changed&_csrf=csrf123",
-                ))
+                .header(
+                    header::COOKIE,
+                    format!(
+                        "csrf_token=csrf123; rustchan_owned_posts={}",
+                        crate::handlers::board::remember_owned_post(
+                            axum_extra::extract::cookie::CookieJar::new(),
+                            "secret",
+                            thread_id,
+                            post_id,
+                            "edit-token",
+                        )
+                        .get("rustchan_owned_posts")
+                        .expect("owned posts cookie")
+                        .value()
+                    ),
+                )
+                .extension(crate::test_support::connect_info())
+                .body(Body::from("body=changed&_csrf=csrf123"))
                 .expect("request"),
         )
         .await
@@ -224,7 +238,7 @@ async fn post_password_board_write_actions_require_unlock() {
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok()),
-        Some(format!("/secret/unlock?return_to=%2Fsecret%2Fpost%2F{post_id}%2Fedit").as_str())
+        Some(format!("/secret/unlock?return_to=%2Fsecret%2Fthread%2F{thread_id}").as_str())
     );
 
     let vote_response = router
@@ -255,6 +269,11 @@ async fn self_delete_requires_owned_post_cookie() {
     let state = crate::test_support::app_state();
     let conn = state.db.get().expect("db connection");
     let board_id = crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+    conn.execute(
+        "UPDATE boards SET allow_self_delete = 1 WHERE id = ?1",
+        rusqlite::params![board_id],
+    )
+    .expect("enable self delete");
     let op = crate::db::NewPost {
         thread_id: 0,
         board_id,
@@ -321,7 +340,7 @@ async fn self_delete_requires_owned_post_cookie() {
                 .uri(format!("/test/post/{reply_id}/delete"))
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, "csrf_token=csrf123")
-                .body(Body::from("deletion_token=reply-token&_csrf=csrf123"))
+                .body(Body::from("_csrf=csrf123"))
                 .expect("request"),
         )
         .await
@@ -346,9 +365,12 @@ async fn self_delete_requires_owned_post_cookie() {
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(
                     header::COOKIE,
-                    format!("csrf_token=csrf123; rustchan_owned_posts={}", owned_cookie.value()),
+                    format!(
+                        "csrf_token=csrf123; rustchan_owned_posts={}",
+                        owned_cookie.value()
+                    ),
                 )
-                .body(Body::from("deletion_token=reply-token&_csrf=csrf123"))
+                .body(Body::from("_csrf=csrf123"))
                 .expect("request"),
         )
         .await
@@ -865,6 +887,7 @@ async fn create_thread_rejects_uploads_on_upload_disabled_board() {
             false,
             true,
             0,
+            false,
             false,
             true,
             false,

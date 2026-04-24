@@ -623,8 +623,7 @@ pub async fn admin_ip_report(
                 ip_hash = form.ip_hash,
             );
             let reporter_hash = format!("admin:{admin_id}");
-            let submission =
-                db::file_report(&conn, form.post_id, &report_reason, &reporter_hash)?;
+            let submission = db::file_report(&conn, form.post_id, &report_reason, &reporter_hash)?;
             if matches!(submission, db::ReportSubmission::Filed) {
                 let _ = db::log_mod_action(
                     &conn,

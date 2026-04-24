@@ -51,7 +51,6 @@ pub async fn create_thread(
         name: form.name.clone(),
         subject: form.subject.clone(),
         body: form.body.clone(),
-        deletion_token: form.deletion_token.clone(),
         sage: form.sage,
     };
 

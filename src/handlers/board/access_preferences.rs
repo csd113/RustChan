@@ -111,7 +111,11 @@ pub fn remember_owned_post(
         deletion_token: deletion_token.to_string(),
         expires_at: now + SELF_DELETE_WINDOW_SECS,
     });
-    grants.sort_by(|a, b| b.expires_at.cmp(&a.expires_at).then_with(|| b.post_id.cmp(&a.post_id)));
+    grants.sort_by(|a, b| {
+        b.expires_at
+            .cmp(&a.expires_at)
+            .then_with(|| b.post_id.cmp(&a.post_id))
+    });
     grants.truncate(OWNED_POSTS_COOKIE_MAX);
 
     if let Some(cookie) = owned_posts_cookie(&grants) {

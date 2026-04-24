@@ -640,12 +640,8 @@ fn render_board_settings_card(
     <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block for this board. Existing posts are not affected.">
       <input type="checkbox" name="collapse_greentext" value="1"{collapse_greentext_checked}> Collapse long greentext
     </label>
-    <label><input type="checkbox" name="allow_editing" value="1"{allow_editing_checked}> Allow post editing</label>
-  </div>
-  <div class="board-settings-grid edit-window-row" style="margin-top:0.4rem;{edit_window_display}">
-    <label title="How long (seconds) after posting a user may edit. 0 = use default (300 s).">
-      Edit window (s)<input type="number" name="edit_window_secs" value="{edit_window_secs}" min="0" max="86400">
-    </label>
+    <label><input type="checkbox" name="allow_editing" value="1"{allow_editing_checked}> Allow users to edit their own posts during the grace window</label>
+    <label><input type="checkbox" name="allow_self_delete" value="1"{allow_self_delete_checked}> Allow users to delete their own posts</label>
   </div>
 </div>
 <div class="admin-subsection">
@@ -751,14 +747,9 @@ fn render_board_settings_card(
         poster_ids_checked = checked(board.show_poster_ids),
         collapse_greentext_checked = checked(board.collapse_greentext),
         allow_editing_checked = checked(board.allow_editing),
+        allow_self_delete_checked = checked(board.allow_self_delete),
         any_files_toggle = any_files_toggle,
         open_attr = open_attr,
-        edit_window_display = if board.allow_editing {
-            ""
-        } else {
-            "display:none"
-        },
-        edit_window_secs = board.edit_window_secs,
     )
 }
 
@@ -1660,6 +1651,7 @@ mod tests {
             allow_any_files: false,
             allow_tripcodes: true,
             allow_editing: true,
+            allow_self_delete: true,
             edit_window_secs: 900,
             allow_archive: true,
             allow_video_embeds: true,
@@ -1898,6 +1890,27 @@ mod tests {
         );
 
         assert!(html.contains("A password is saved but unused while this board is public."));
+    }
+
+    #[test]
+    fn board_settings_card_renders_self_edit_and_self_delete_checkboxes_without_token_input() {
+        let board = sample_board();
+        let html = render_board_settings_card(
+            &board,
+            0,
+            std::slice::from_ref(&board),
+            "csrf",
+            &[sample_theme()],
+            &[],
+            None,
+        );
+
+        assert!(html.contains(r#"name="allow_editing" value="1""#));
+        assert!(html.contains("Allow users to edit their own posts during the grace window"));
+        assert!(html.contains(r#"name="allow_self_delete" value="1""#));
+        assert!(html.contains("Allow users to delete their own posts"));
+        assert!(!html.contains(r#"name="edit_window_secs""#));
+        assert!(!html.contains("edit token"));
     }
 
     #[test]

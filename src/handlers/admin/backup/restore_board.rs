@@ -337,11 +337,11 @@ where
                 "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                  max_threads=?4, max_archived_threads=?5, bump_limit=?6,
                  allow_images=?7, allow_video=?8, allow_audio=?9, allow_any_files=?10,
-                allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13,
-                 allow_archive=?14, allow_video_embeds=?15, allow_captcha=?16,
-                 show_poster_ids=?17, collapse_greentext=?18, post_cooldown_secs=?19,
-                 banner_mode=?20, access_mode=?21, access_password_hash=?22
-                 WHERE id=?23",
+                allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13, allow_self_delete=?14,
+                 allow_archive=?15, allow_video_embeds=?16, allow_captcha=?17,
+                 show_poster_ids=?18, collapse_greentext=?19, post_cooldown_secs=?20,
+                 banner_mode=?21, access_mode=?22, access_password_hash=?23
+                 WHERE id=?24",
                 params![
                     manifest.board.name,
                     manifest.board.description,
@@ -356,6 +356,7 @@ where
                     i64::from(manifest.board.allow_tripcodes),
                     manifest.board.edit_window_secs,
                     i64::from(manifest.board.allow_editing),
+                    i64::from(manifest.board.allow_self_delete),
                     i64::from(manifest.board.allow_archive),
                     i64::from(manifest.board.allow_video_embeds),
                     i64::from(manifest.board.allow_captcha),
@@ -380,10 +381,10 @@ where
                 conn,
                 "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
                  max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
-                 allow_tripcodes, edit_window_secs, allow_editing, allow_archive,
+                 allow_tripcodes, edit_window_secs, allow_editing, allow_self_delete, allow_archive,
                  allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext,
                  post_cooldown_secs, banner_mode, access_mode, access_password_hash, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
                  RETURNING id",
                 params![
                     manifest.board.short_name,
@@ -400,6 +401,7 @@ where
                     i64::from(manifest.board.allow_tripcodes),
                     manifest.board.edit_window_secs,
                     i64::from(manifest.board.allow_editing),
+                    i64::from(manifest.board.allow_self_delete),
                     i64::from(manifest.board.allow_archive),
                     i64::from(manifest.board.allow_video_embeds),
                     i64::from(manifest.board.allow_captcha),

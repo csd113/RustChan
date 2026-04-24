@@ -628,7 +628,7 @@ pub fn self_delete_post(
 
 /// Edit a post's body, verified against the deletion token and a per-board edit window.
 ///
-/// `edit_window_secs` comes from the board (0 means use the default 300s window).
+/// `edit_window_secs` comes from the caller (0 means use the default 60s window).
 /// The caller is responsible for checking `board.allow_editing` before calling this.
 /// Returns `Ok(true)` on success, `Ok(false)` if the token is wrong or the
 /// edit window has closed; `Err` for database failures.
@@ -654,7 +654,7 @@ pub fn edit_post(
     edit_window_secs: i64,
 ) -> Result<bool> {
     let window = if edit_window_secs <= 0 {
-        300
+        60
     } else {
         edit_window_secs
     };
@@ -1319,9 +1319,8 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 mod tests {
     use super::{
         count_posts_by_media_processing_state, count_search_results, get_post, get_post_submission,
-        get_posts_for_thread, record_post_submission, search_posts, search_terms,
-        self_delete_post, set_post_media_processing_state, to_fts_query, SelfDeleteOutcome,
-        MEDIA_PROCESSING_FAILED,
+        get_posts_for_thread, record_post_submission, search_posts, search_terms, self_delete_post,
+        set_post_media_processing_state, to_fts_query, SelfDeleteOutcome, MEDIA_PROCESSING_FAILED,
     };
     use crate::db::{
         create_board, create_reply_with_thread_update, create_thread_with_optional_poll,
@@ -1669,8 +1668,8 @@ mod tests {
     #[test]
     fn self_delete_post_deletes_reply_with_matching_token_inside_window() {
         let conn = test_conn();
-        let board_id = create_board(&conn, "selfdel", "Self Delete", "", false)
-            .expect("create board");
+        let board_id =
+            create_board(&conn, "selfdel", "Self Delete", "", false).expect("create board");
         let op = NewPost {
             thread_id: 0,
             board_id,
@@ -1802,6 +1801,8 @@ mod tests {
 
         assert_eq!(outcome, SelfDeleteOutcome::ThreadHasReplies);
         assert!(deleted.is_none());
-        assert!(get_thread(&conn, thread_id).expect("lookup thread").is_some());
+        assert!(get_thread(&conn, thread_id)
+            .expect("lookup thread")
+            .is_some());
     }
 }

@@ -1717,6 +1717,7 @@ html:not([data-theme]) .poster-id-btn {
   flex-wrap: wrap;
   gap: 4px;
   align-items: center;
+  justify-content: flex-start;
   clear: both;
 }
 
@@ -1734,11 +1735,31 @@ html:not([data-theme]) .poster-id-btn {
   outline: none;
 }
 
-.del-btn { font-size: 0.75rem; padding: 2px 8px; }
+.post-controls .edit-btn,
+.post-controls .del-btn {
+  text-decoration: none;
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  line-height: 1.2;
+}
 
 .self-delete-countdown {
   font-size: 0.72rem;
   color: var(--text-dim);
+  margin-left: 0.35rem;
+}
+
+.self-action-controls {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  margin-left: 0;
+}
+
+.self-delete-form {
+  display: inline-flex;
+  align-items: baseline;
+  margin: 0;
 }
 
 .admin-del-btn {
@@ -4773,14 +4794,61 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
 /* ── Edit post link ──────────────────────────────────────────────────────── */
 .edit-btn {
   margin-left: 0.6rem;
-  font-size: 0.78rem;
   color: var(--text-dim);
   text-decoration: none;
-  border-bottom: 1px dotted var(--border);
+}
+
+.post-controls .edit-btn {
+  margin-left: 0;
 }
 .edit-btn:hover {
   color: var(--green-bright);
-  border-bottom-color: var(--green-bright);
+}
+
+.edit-modal[hidden] {
+  display: none;
+}
+
+.edit-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.edit-modal.is-open {
+  display: flex;
+}
+
+.edit-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.72);
+}
+
+.edit-modal-box {
+  position: relative;
+  z-index: 1;
+  background: var(--bg-post);
+  border: 1px solid var(--green-bright);
+  border-radius: 4px;
+  padding: 1rem 1.1rem 0.9rem;
+  width: min(92vw, 720px);
+  box-shadow: 0 0 24px rgba(0,200,64,0.18);
+}
+
+.edit-modal-box .post-form {
+  margin: 0;
+}
+
+.edit-modal-box textarea {
+  min-height: 12rem;
+}
+
+.edit-modal-error {
+  margin-bottom: 0.8rem;
 }
 
 /* ── Auto-compress modal ──────────────────────────────────────────────────── */

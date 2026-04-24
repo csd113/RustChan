@@ -30,6 +30,8 @@ pub(super) mod board_backup_types {
         pub edit_window_secs: i64,
         #[serde(default)]
         pub allow_editing: bool,
+        #[serde(default)]
+        pub allow_self_delete: bool,
         #[serde(default = "default_true")]
         pub allow_archive: bool,
         #[serde(default)]

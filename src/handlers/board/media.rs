@@ -227,6 +227,7 @@ pub async fn api_post_preview(
                             is_admin: false,
                             show_media: true,
                             allow_editing: false, // no edit link in read-only preview
+                            allow_self_delete: false,
                             owned_post_controls: None,
                             show_poster_ids: false,
                             collapse_greentext: board.collapse_greentext,

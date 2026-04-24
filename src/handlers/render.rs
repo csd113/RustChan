@@ -167,12 +167,14 @@ pub fn load_thread_page_data(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_thread_page(
     data: &ThreadPageData,
     csrf_token: &str,
     error: Option<&str>,
     success: Option<&str>,
     reply_prefill: Option<&templates::forms::PostFormState>,
+    edit_overlay_state: Option<&templates::thread::EditOverlayState>,
     current_theme: Option<&str>,
     can_post: bool,
 ) -> String {
@@ -189,6 +191,7 @@ pub fn render_thread_page(
         error,
         success,
         reply_prefill,
+        edit_overlay_state,
         current_theme,
         data.board.collapse_greentext,
         can_post,

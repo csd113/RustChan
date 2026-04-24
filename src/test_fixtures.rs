@@ -16,6 +16,7 @@ pub fn sample_board() -> crate::models::Board {
         allow_any_files: false,
         allow_tripcodes: true,
         allow_editing: false,
+        allow_self_delete: false,
         edit_window_secs: 0,
         allow_archive: true,
         allow_video_embeds: false,

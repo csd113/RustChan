@@ -22,6 +22,7 @@ const BASE_SCHEMA_SQL: &str = "
         allow_any_files INTEGER NOT NULL DEFAULT 0,
         edit_window_secs    INTEGER NOT NULL DEFAULT 0,
         allow_editing       INTEGER NOT NULL DEFAULT 0,
+        allow_self_delete   INTEGER NOT NULL DEFAULT 0,
         allow_archive       INTEGER NOT NULL DEFAULT 1,
         allow_video_embeds  INTEGER NOT NULL DEFAULT 0,
         allow_captcha       INTEGER NOT NULL DEFAULT 0,
@@ -304,7 +305,7 @@ const INDEX_SCHEMA_SQL: &str = "
         ON post_submissions(created_at ASC);
 ";
 
-const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 28] = [
+const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 29] = [
     (
         "boards",
         "display_order",
@@ -349,6 +350,11 @@ const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 28] = [
         "boards",
         "allow_editing",
         "ALTER TABLE boards ADD COLUMN allow_editing INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "allow_self_delete",
+        "ALTER TABLE boards ADD COLUMN allow_self_delete INTEGER NOT NULL DEFAULT 0",
     ),
     (
         "boards",
@@ -472,6 +478,10 @@ fn install_post_squash_baseline(conn: &rusqlite::Connection) -> Result<()> {
 
 fn finish_baseline_schema(conn: &rusqlite::Connection) -> Result<()> {
     create_base_tables(conn)?;
+    // Post-squash databases can already be stamped at v1 while still missing
+    // additive baseline columns introduced later. Keep the baseline repair
+    // idempotent so existing installs receive new board/post/thread columns.
+    ensure_legacy_columns_for_baseline(conn)?;
     create_indexes(conn)?;
     ensure_reports_table_integrity(conn)?;
     ensure_posts_ip_hash_nullable(conn)?;
@@ -1072,6 +1082,108 @@ mod tests {
         .expect("insert invalid legacy data");
     }
 
+    fn create_partial_post_squash_schema(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            r"
+            CREATE TABLE boards (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_order        INTEGER NOT NULL DEFAULT 0,
+                short_name           TEXT NOT NULL UNIQUE,
+                name                 TEXT NOT NULL,
+                description          TEXT NOT NULL DEFAULT '',
+                nsfw                 INTEGER NOT NULL DEFAULT 0,
+                max_threads          INTEGER NOT NULL DEFAULT 150,
+                max_archived_threads INTEGER NOT NULL DEFAULT 150,
+                bump_limit           INTEGER NOT NULL DEFAULT 500,
+                allow_video          INTEGER NOT NULL DEFAULT 1,
+                allow_tripcodes      INTEGER NOT NULL DEFAULT 1,
+                allow_images         INTEGER NOT NULL DEFAULT 1,
+                allow_audio          INTEGER NOT NULL DEFAULT 0,
+                allow_any_files      INTEGER NOT NULL DEFAULT 0,
+                edit_window_secs     INTEGER NOT NULL DEFAULT 0,
+                allow_editing        INTEGER NOT NULL DEFAULT 0,
+                allow_video_embeds   INTEGER NOT NULL DEFAULT 0,
+                allow_captcha        INTEGER NOT NULL DEFAULT 0,
+                show_poster_ids      INTEGER NOT NULL DEFAULT 0,
+                collapse_greentext   INTEGER NOT NULL DEFAULT 0,
+                post_cooldown_secs   INTEGER NOT NULL DEFAULT 0,
+                default_theme        TEXT NOT NULL DEFAULT '',
+                banner_mode          TEXT NOT NULL DEFAULT 'inherit'
+                                         CHECK (banner_mode IN ('inherit', 'none', 'override')),
+                access_mode          TEXT NOT NULL DEFAULT 'public'
+                                         CHECK (access_mode IN ('public', 'view_password', 'post_password')),
+                access_password_hash TEXT NOT NULL DEFAULT '',
+                created_at           INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE threads (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                board_id    INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+                subject     TEXT,
+                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                bumped_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+                locked      INTEGER NOT NULL DEFAULT 0,
+                sticky      INTEGER NOT NULL DEFAULT 0,
+                archived    INTEGER NOT NULL DEFAULT 0,
+                reply_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE posts (
+                id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id              INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                board_id               INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+                name                   TEXT NOT NULL DEFAULT 'Anonymous',
+                tripcode               TEXT,
+                subject                TEXT,
+                body                   TEXT NOT NULL,
+                body_html              TEXT NOT NULL,
+                ip_hash                TEXT,
+                file_path              TEXT,
+                file_name              TEXT,
+                file_size              INTEGER,
+                thumb_path             TEXT,
+                mime_type              TEXT,
+                created_at             INTEGER NOT NULL DEFAULT (unixepoch()),
+                deletion_token         TEXT NOT NULL,
+                is_op                  INTEGER NOT NULL DEFAULT 0,
+                media_type             TEXT,
+                audio_file_path        TEXT,
+                audio_file_name        TEXT,
+                audio_file_size        INTEGER,
+                audio_mime_type        TEXT,
+                edited_at              INTEGER,
+                media_processing_state TEXT NOT NULL DEFAULT '',
+                media_processing_error TEXT
+            );
+            CREATE TABLE site_settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE banner_assets (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope_type      TEXT NOT NULL,
+                board_id        INTEGER REFERENCES boards(id) ON DELETE CASCADE,
+                storage_key     TEXT NOT NULL UNIQUE,
+                width           INTEGER NOT NULL,
+                height          INTEGER NOT NULL,
+                file_size       INTEGER NOT NULL,
+                enabled         INTEGER NOT NULL DEFAULT 1,
+                sort_order      INTEGER NOT NULL DEFAULT 0,
+                target_type     TEXT NOT NULL DEFAULT 'none',
+                target_value    TEXT NOT NULL DEFAULT '',
+                show_on_index   INTEGER NOT NULL DEFAULT 1,
+                show_on_catalog INTEGER NOT NULL DEFAULT 1,
+                created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE schema_version (
+                version INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(version)
+            );
+            INSERT INTO schema_version (version) VALUES (1);
+            INSERT INTO boards (id, short_name, name) VALUES (1, 'b', 'Random');
+            ",
+        )
+        .expect("create partial post-squash schema");
+    }
+
     #[test]
     fn fresh_database_installs_canonical_post_squash_baseline() {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
@@ -1262,6 +1374,27 @@ mod tests {
         assert!(table_has_column(&conn, "posts", "media_processing_state"));
         assert!(object_exists(&conn, "table", "banner_assets"));
         assert!(object_exists(&conn, "trigger", "posts_ai"));
+    }
+
+    #[test]
+    fn post_squash_database_repairs_missing_additive_board_columns() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+        create_partial_post_squash_schema(&conn);
+
+        install_or_migrate_schema(&conn).expect("repair partial post-squash schema");
+
+        assert_eq!(schema_version(&conn), POST_SQUASH_SCHEMA_VERSION);
+        assert!(table_has_column(&conn, "boards", "allow_self_delete"));
+        assert!(table_has_column(&conn, "boards", "allow_archive"));
+
+        let flags: (i64, i64) = conn
+            .query_row(
+                "SELECT allow_self_delete, allow_archive FROM boards WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read repaired board flags");
+        assert_eq!(flags, (0, 1));
     }
 
     #[test]
