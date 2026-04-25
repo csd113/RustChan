@@ -178,8 +178,12 @@ struct SettingsFile {
     forum_name: Option<String>,
     /// Home page subtitle shown below the site name.
     site_subtitle: Option<String>,
-    /// Initial state for browser-local new-activity badges.
+    /// Legacy initial state for browser-local new-activity badges.
     new_activity_notifications_enabled: Option<bool>,
+    /// Initial state for homepage board-card new-thread badges.
+    homepage_new_thread_badges_enabled: Option<bool>,
+    /// Initial state for board/catalog thread-card new-reply badges.
+    thread_new_reply_badges_enabled: Option<bool>,
     /// Default theme served to first-time visitors before they pick one.
     /// Valid values include built-ins and admin-created custom theme slugs.
     default_theme: Option<String>,
@@ -402,10 +406,14 @@ pub struct Config {
     /// Initial subtitle shown on the home page; seeds the DB on first run and
     /// then the Admin -> Site Settings DB value becomes the live source of truth.
     pub initial_site_subtitle: String,
-    /// Initial state for browser-local new-activity badges; seeds the DB on
-    /// first run and then the Admin -> Site Settings DB value becomes the live
-    /// source of truth.
-    pub initial_new_activity_notifications_enabled: bool,
+    /// Initial state for homepage board-card new-thread badges; seeds the DB
+    /// on first run and then the Admin -> Site Settings DB value becomes the
+    /// live source of truth.
+    pub initial_homepage_new_thread_badges_enabled: bool,
+    /// Initial state for board/catalog thread-card new-reply badges; seeds the
+    /// DB on first run and then the Admin -> Site Settings DB value becomes the
+    /// live source of truth.
+    pub initial_thread_new_reply_badges_enabled: bool,
     /// Initial default theme slug; seeds the DB on first run and later the
     /// Admin -> Site Settings DB value becomes the live source of truth.
     /// Valid: built-in or custom theme slug present in the themes table.
@@ -522,10 +530,23 @@ impl Config {
                 .as_deref()
                 .unwrap_or("select board to proceed"),
         );
-        let initial_new_activity_notifications_enabled = env_bool(
-            "CHAN_NEW_ACTIVITY_NOTIFICATIONS",
-            s.new_activity_notifications_enabled.unwrap_or(false),
-        );
+        let legacy_new_activity_notifications_enabled = env::var("CHAN_NEW_ACTIVITY_NOTIFICATIONS")
+            .ok()
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .or(s.new_activity_notifications_enabled);
+        let initial_homepage_new_thread_badges_enabled =
+            env::var("CHAN_HOMEPAGE_NEW_THREAD_BADGES")
+                .ok()
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .or(s.homepage_new_thread_badges_enabled)
+                .or(legacy_new_activity_notifications_enabled)
+                .unwrap_or(true);
+        let initial_thread_new_reply_badges_enabled = env::var("CHAN_THREAD_NEW_REPLY_BADGES")
+            .ok()
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .or(s.thread_new_reply_badges_enabled)
+            .or(legacy_new_activity_notifications_enabled)
+            .unwrap_or(true);
         let initial_default_theme = env_str(
             "CHAN_DEFAULT_THEME",
             s.default_theme
@@ -615,7 +636,8 @@ impl Config {
         Self {
             forum_name,
             initial_site_subtitle,
-            initial_new_activity_notifications_enabled,
+            initial_homepage_new_thread_badges_enabled,
+            initial_thread_new_reply_badges_enabled,
             initial_default_theme,
             initial_enabled_builtin_themes,
             port,
@@ -1093,7 +1115,8 @@ fn update_settings_file_entries(updates: &[(&str, String)], insert_missing_befor
 pub fn update_settings_file_site_settings(
     forum_name: &str,
     site_subtitle: &str,
-    new_activity_notifications_enabled: bool,
+    homepage_new_thread_badges_enabled: bool,
+    thread_new_reply_badges_enabled: bool,
     default_theme: &str,
 ) {
     update_settings_file_entries(
@@ -1101,8 +1124,12 @@ pub fn update_settings_file_site_settings(
             ("forum_name", toml_quote(forum_name)),
             ("site_subtitle", toml_quote(site_subtitle)),
             (
-                "new_activity_notifications_enabled",
-                new_activity_notifications_enabled.to_string(),
+                "homepage_new_thread_badges_enabled",
+                homepage_new_thread_badges_enabled.to_string(),
+            ),
+            (
+                "thread_new_reply_badges_enabled",
+                thread_new_reply_badges_enabled.to_string(),
             ),
             ("default_theme", toml_quote(default_theme)),
         ],
@@ -1284,7 +1311,8 @@ mod tests {
         Config {
             forum_name: "RustChan".to_string(),
             initial_site_subtitle: "select board to proceed".to_string(),
-            initial_new_activity_notifications_enabled: false,
+            initial_homepage_new_thread_badges_enabled: true,
+            initial_thread_new_reply_badges_enabled: true,
             initial_default_theme: crate::theme::HARD_DEFAULT_THEME.to_string(),
             initial_enabled_builtin_themes: crate::theme::builtin_theme_slugs()
                 .into_iter()
@@ -1354,7 +1382,8 @@ mod tests {
         let input = r#"# RustChan settings.toml
 forum_name = "RustChan"
 site_subtitle = "select board to proceed"
-new_activity_notifications_enabled = false
+homepage_new_thread_badges_enabled = true
+thread_new_reply_badges_enabled = true
 default_theme = "forest"
 auto_full_backup_interval_hours = 24
 auto_full_backup_copies_to_keep = 1
@@ -1378,7 +1407,8 @@ auto_full_backup_copies_to_keep = 1
         assert!(output.starts_with("# RustChan settings.toml\n"));
         assert!(output.contains("forum_name = \"BackupChan\"\n"));
         assert!(output.contains("site_subtitle = \"select board to proceed\"\n"));
-        assert!(output.contains("new_activity_notifications_enabled = false\n"));
+        assert!(output.contains("homepage_new_thread_badges_enabled = true\n"));
+        assert!(output.contains("thread_new_reply_badges_enabled = true\n"));
         assert!(output.contains("default_theme = \"terminal\"\n"));
         assert!(output.contains("auto_full_backup_interval_hours = 12\n"));
         assert!(output.contains("auto_full_backup_copies_to_keep = 3\n"));
@@ -1434,7 +1464,8 @@ enabled = true
         let input = r#"# RustChan settings.toml
 forum_name = "RustChan"
 site_subtitle = "select board to proceed"
-new_activity_notifications_enabled = false
+homepage_new_thread_badges_enabled = true
+thread_new_reply_badges_enabled = true
 
 # ── Network / web server ──────────────────────────────────────────────────────
 port = 8080
@@ -1445,7 +1476,8 @@ port = 8080
             &[
                 ("forum_name", "\"NewChan\"".to_string()),
                 ("site_subtitle", "\"new subtitle\"".to_string()),
-                ("new_activity_notifications_enabled", "true".to_string()),
+                ("homepage_new_thread_badges_enabled", "false".to_string()),
+                ("thread_new_reply_badges_enabled", "true".to_string()),
                 ("default_theme", "\"terminal\"".to_string()),
             ],
             Some("# ── Network / web server"),
@@ -1454,14 +1486,18 @@ port = 8080
         let theme_idx = output
             .find("default_theme = \"terminal\"")
             .expect("default_theme inserted");
-        let activity_idx = output
-            .find("new_activity_notifications_enabled = true")
-            .expect("new_activity_notifications_enabled inserted");
+        let homepage_activity_idx = output
+            .find("homepage_new_thread_badges_enabled = false")
+            .expect("homepage_new_thread_badges_enabled inserted");
+        let thread_activity_idx = output
+            .find("thread_new_reply_badges_enabled = true")
+            .expect("thread_new_reply_badges_enabled inserted");
         let network_idx = output
             .find("# ── Network / web server")
             .expect("network section present");
 
-        assert!(activity_idx < network_idx);
+        assert!(homepage_activity_idx < network_idx);
+        assert!(thread_activity_idx < network_idx);
         assert!(theme_idx < network_idx);
         assert!(output.contains("forum_name = \"NewChan\"\n"));
         assert!(output.contains("site_subtitle = \"new subtitle\"\n"));
@@ -1565,7 +1601,8 @@ port = 8080
     fn settings_template_uses_forest_and_featured_theme_order() {
         let template = settings_template("secret");
 
-        assert!(template.contains("new_activity_notifications_enabled = false"));
+        assert!(template.contains("homepage_new_thread_badges_enabled = true"));
+        assert!(template.contains("thread_new_reply_badges_enabled = true"));
         assert!(template.contains(r#"default_theme = "forest""#));
         assert!(template.contains(
             r#"enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]"#

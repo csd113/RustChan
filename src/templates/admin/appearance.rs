@@ -36,7 +36,8 @@ pub(super) fn render_site_settings(view: &AdminPanelViewModel<'_>) -> String {
         view.csrf_token,
         view.appearance.site_name,
         view.appearance.site_subtitle,
-        view.appearance.new_activity_notifications_enabled,
+        view.appearance.homepage_new_thread_badges_enabled,
+        view.appearance.thread_new_reply_badges_enabled,
         &render_enabled_theme_options(view),
         &global_favicon_preview,
         global_favicon_label,
@@ -281,7 +282,8 @@ fn render_admin_site_settings_section(
     csrf_token: &str,
     site_name_val: &str,
     site_subtitle_val: &str,
-    new_activity_notifications_enabled: bool,
+    homepage_new_thread_badges_enabled: bool,
+    thread_new_reply_badges_enabled: bool,
     enabled_theme_options: &str,
     global_favicon_preview: &str,
     global_favicon_label: &str,
@@ -311,11 +313,20 @@ fn render_admin_site_settings_section(
       {enabled_theme_options}
     </select>
   </label>
+</div>
+<div class="board-settings-checks">
   <label class="admin-inline-checkbox">
-    <input type="checkbox" name="new_activity_notifications_enabled" value="1"{new_activity_notifications_enabled_checked}>
-    Enable new-activity badges
+    <input type="checkbox" name="homepage_new_thread_badges_enabled" value="1"{homepage_new_thread_badges_enabled_checked}>
+    Homepage board-card new-thread badges
+  </label>
+  <label class="admin-inline-checkbox">
+    <input type="checkbox" name="thread_new_reply_badges_enabled" value="1"{thread_new_reply_badges_enabled_checked}>
+    Board/catalog thread-card new-reply badges
   </label>
 </div>
+<p class="admin-meta-note admin-meta-note-spaced">
+  Track newly created threads on the home page and new replies inside board index/catalog cards independently.
+</p>
 <div class="board-settings-actions">
   <button type="submit">save settings</button>
 </div>
@@ -339,7 +350,12 @@ fn render_admin_site_settings_section(
         csrf = escape_html(csrf_token),
         site_name_val = escape_html(site_name_val),
         site_subtitle_val = escape_html(site_subtitle_val),
-        new_activity_notifications_enabled_checked = if new_activity_notifications_enabled {
+        homepage_new_thread_badges_enabled_checked = if homepage_new_thread_badges_enabled {
+            " checked"
+        } else {
+            ""
+        },
+        thread_new_reply_badges_enabled_checked = if thread_new_reply_badges_enabled {
             " checked"
         } else {
             ""

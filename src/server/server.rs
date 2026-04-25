@@ -190,20 +190,39 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             });
             crate::templates::set_live_site_subtitle(&subtitle);
 
-            if crate::db::get_site_setting(&conn, "new_activity_notifications_enabled")
+            let legacy_new_activity =
+                crate::db::get_site_setting(&conn, "new_activity_notifications_enabled")
+                    .ok()
+                    .flatten();
+            if crate::db::get_site_setting(&conn, "homepage_new_thread_badges_enabled")
                 .ok()
                 .flatten()
                 .is_none()
             {
-                let _ = crate::db::set_site_setting(
-                    &conn,
-                    "new_activity_notifications_enabled",
-                    if CONFIG.initial_new_activity_notifications_enabled {
+                let value = legacy_new_activity.as_deref().unwrap_or(
+                    if CONFIG.initial_homepage_new_thread_badges_enabled {
                         "1"
                     } else {
                         "0"
                     },
                 );
+                let _ =
+                    crate::db::set_site_setting(&conn, "homepage_new_thread_badges_enabled", value);
+            }
+            if crate::db::get_site_setting(&conn, "thread_new_reply_badges_enabled")
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                let value = legacy_new_activity.as_deref().unwrap_or(
+                    if CONFIG.initial_thread_new_reply_badges_enabled {
+                        "1"
+                    } else {
+                        "0"
+                    },
+                );
+                let _ =
+                    crate::db::set_site_setting(&conn, "thread_new_reply_badges_enabled", value);
             }
 
             seed_initial_default_theme(&conn, &CONFIG.initial_default_theme);

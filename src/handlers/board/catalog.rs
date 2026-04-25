@@ -7,6 +7,7 @@ type CatalogLoadResult = (
     CatalogRenderData,
     crate::banner::BannerSelection,
     bool,
+    bool,
     Option<(i64, i64)>,
 );
 
@@ -93,7 +94,8 @@ pub async fn catalog(
                 crate::models::BannerPlacement::Catalog,
                 &format!("/{board_short}/catalog"),
             )?;
-            let new_activity_enabled = db::get_new_activity_notifications_enabled(&conn);
+            let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
+            let homepage_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
             Ok((
                 (
                     board.clone(),
@@ -103,8 +105,9 @@ pub async fn catalog(
                     etag_signature,
                 ),
                 banner_selection,
-                new_activity_enabled,
-                if new_activity_enabled {
+                thread_badges_enabled,
+                homepage_badges_enabled,
+                if homepage_badges_enabled {
                     db::get_latest_visible_thread_marker(&conn, board.id)?
                 } else {
                     None
@@ -119,10 +122,11 @@ pub async fn catalog(
     let (
         (board, threads, pinned_ids, hidden_count, etag_signature),
         banner_selection,
-        new_activity_enabled,
+        thread_badges_enabled,
+        homepage_badges_enabled,
         latest_thread_marker,
     ) = catalog_data;
-    let thread_badges = if new_activity_enabled {
+    let thread_badges = if thread_badges_enabled {
         thread_unread_counts(&threads, &thread_activity_markers)
     } else {
         HashMap::new()
@@ -134,7 +138,7 @@ pub async fn catalog(
     } else {
         "-cg0"
     };
-    let activity_tag = if new_activity_enabled {
+    let activity_tag = if thread_badges_enabled {
         let mut badge_parts = thread_badges
             .iter()
             .map(|(thread_id, count)| format!("{thread_id}:{count}"))
@@ -153,9 +157,13 @@ pub async fn catalog(
     );
     let (latest_created_at, latest_thread_id) =
         latest_visible_thread_marker_tuple(latest_thread_marker);
-    let jar = if new_activity_enabled {
+    let jar = if thread_badges_enabled {
         let defaults = threads.iter().map(|thread| (thread.id, thread.reply_count));
-        let jar = remember_thread_activity_defaults(jar, defaults);
+        remember_thread_activity_defaults(jar, defaults)
+    } else {
+        jar
+    };
+    let jar = if homepage_badges_enabled {
         remember_board_activity(jar, board.id, latest_created_at, latest_thread_id)
     } else {
         jar
@@ -200,7 +208,7 @@ pub async fn catalog(
         all_boards.as_slice(),
         access_context.is_admin,
         &thread_badges,
-        new_activity_enabled,
+        thread_badges_enabled,
         &banner_html,
         current_theme.as_deref(),
         board.collapse_greentext,

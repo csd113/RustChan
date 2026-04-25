@@ -83,7 +83,8 @@ pub struct AdminPanelModerationView<'a> {
 pub struct AdminPanelAppearanceView<'a> {
     pub site_name: &'a str,
     pub site_subtitle: &'a str,
-    pub new_activity_notifications_enabled: bool,
+    pub homepage_new_thread_badges_enabled: bool,
+    pub thread_new_reply_badges_enabled: bool,
     pub default_theme: &'a str,
     pub banner_rotation_interval_minutes: i64,
     pub banner_external_links_enabled: bool,
@@ -1804,7 +1805,8 @@ mod tests {
             appearance: AdminPanelAppearanceView {
                 site_name: "RustChan",
                 site_subtitle: "select board to proceed",
-                new_activity_notifications_enabled: false,
+                homepage_new_thread_badges_enabled: true,
+                thread_new_reply_badges_enabled: true,
                 default_theme: "terminal",
                 banner_rotation_interval_minutes: 0,
                 banner_external_links_enabled: false,
@@ -1913,6 +1915,36 @@ mod tests {
         assert!(html.contains("Allow users to delete their own posts"));
         assert!(!html.contains(r#"name="edit_window_secs""#));
         assert!(!html.contains("edit token"));
+    }
+
+    #[test]
+    fn admin_panel_site_settings_renders_split_new_activity_controls_in_order() {
+        let html = render_admin_panel_for_test(
+            &[sample_board()],
+            &[sample_report()],
+            &[sample_theme()],
+            Some("site-settings"),
+        );
+
+        assert!(html.contains(r#"<div class="board-settings-checks">"#));
+        assert!(html.contains(r#"name="homepage_new_thread_badges_enabled" value="1" checked"#));
+        assert!(html.contains("Homepage board-card new-thread badges"));
+        assert!(html.contains(r#"name="thread_new_reply_badges_enabled" value="1" checked"#));
+        assert!(html.contains("Board/catalog thread-card new-reply badges"));
+        assert!(html.contains(
+            "Track newly created threads on the home page and new replies inside board index/catalog cards independently."
+        ));
+
+        let theme_idx = html.find("Default theme").expect("theme control present");
+        let homepage_idx = html
+            .find("Homepage board-card new-thread badges")
+            .expect("homepage control present");
+        let thread_idx = html
+            .find("Board/catalog thread-card new-reply badges")
+            .expect("thread control present");
+
+        assert!(theme_idx < homepage_idx);
+        assert!(homepage_idx < thread_idx);
     }
 
     #[test]

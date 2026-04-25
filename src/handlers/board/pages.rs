@@ -17,6 +17,7 @@ type BoardIndexLoadResult = (
     render::BoardPageData,
     crate::banner::BannerSelection,
     bool,
+    bool,
     Option<(i64, i64)>,
 );
 
@@ -34,7 +35,7 @@ pub async fn index(
     let admin_session = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    let (board_stats, site_data, is_admin, home_banner_html, new_activity_enabled, board_badges) =
+    let (board_stats, site_data, is_admin, home_banner_html, homepage_badges_enabled, board_badges) =
         tokio::task::spawn_blocking({
             let pool = state.db.clone();
             let board_activity_markers = board_activity_markers.clone();
@@ -57,8 +58,8 @@ pub async fn index(
                     "home-banner-box",
                     "board-banner-image",
                 );
-                let new_activity_enabled = db::get_new_activity_notifications_enabled(&conn);
-                let board_badges = if new_activity_enabled {
+                let homepage_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+                let board_badges = if homepage_badges_enabled {
                     let inputs = boards
                         .iter()
                         .filter_map(|stats| {
@@ -80,14 +81,14 @@ pub async fn index(
                     site_data,
                     is_admin,
                     home_banner_html,
-                    new_activity_enabled,
+                    homepage_badges_enabled,
                     board_badges,
                 ))
             }
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    let board_badges = if new_activity_enabled {
+    let board_badges = if homepage_badges_enabled {
         board_stats
             .iter()
             .filter_map(|stats| {
@@ -102,7 +103,7 @@ pub async fn index(
     } else {
         HashMap::new()
     };
-    if new_activity_enabled {
+    if homepage_badges_enabled {
         let known_board_ids = board_stats
             .iter()
             .map(|stats| stats.board.id)
@@ -222,14 +223,16 @@ pub async fn board_index(
                 crate::models::BannerPlacement::Index,
                 &current_path,
             )?;
-            let new_activity_enabled = db::get_new_activity_notifications_enabled(&conn);
+            let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
+            let homepage_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
             let board_id = page_data.board.id;
             Ok((
                 render::board_page_etag_signature(&page_data),
                 page_data,
                 banner_selection,
-                new_activity_enabled,
-                if new_activity_enabled {
+                thread_badges_enabled,
+                homepage_badges_enabled,
+                if homepage_badges_enabled {
                     db::get_latest_visible_thread_marker(&conn, board_id)?
                 } else {
                     None
@@ -241,9 +244,15 @@ pub async fn board_index(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     let can_post = access_context.can_post;
-    let (page_sig, page_data, banner_selection, new_activity_enabled, latest_thread_marker) =
-        page_data;
-    let thread_badges = if new_activity_enabled {
+    let (
+        page_sig,
+        page_data,
+        banner_selection,
+        thread_badges_enabled,
+        homepage_badges_enabled,
+        latest_thread_marker,
+    ) = page_data;
+    let thread_badges = if thread_badges_enabled {
         page_data
             .summaries
             .iter()
@@ -267,7 +276,7 @@ pub async fn board_index(
         "-cg0"
     };
     let banner_tag = format!("-b{}", banner_selection.etag_fragment);
-    let activity_tag = if new_activity_enabled {
+    let activity_tag = if thread_badges_enabled {
         let mut badge_parts = thread_badges
             .iter()
             .map(|(thread_id, count)| format!("{thread_id}:{count}"))
@@ -286,12 +295,16 @@ pub async fn board_index(
     );
     let (latest_created_at, latest_thread_id) =
         latest_visible_thread_marker_tuple(latest_thread_marker);
-    let jar = if new_activity_enabled {
+    let jar = if thread_badges_enabled {
         let defaults = page_data
             .summaries
             .iter()
             .map(|summary| (summary.thread.id, summary.thread.reply_count));
-        let jar = remember_thread_activity_defaults(jar, defaults);
+        remember_thread_activity_defaults(jar, defaults)
+    } else {
+        jar
+    };
+    let jar = if homepage_badges_enabled {
         remember_board_activity(jar, page_data.board.id, latest_created_at, latest_thread_id)
     } else {
         jar
@@ -332,7 +345,7 @@ pub async fn board_index(
         None,
         None,
         &thread_badges,
-        new_activity_enabled,
+        thread_badges_enabled,
         &banner_html,
         current_theme.as_deref(),
         can_post,

@@ -448,23 +448,28 @@ fn render_catalog_card(
     let activity_badge = unread_reply_count
         .map(|count| render_new_activity_badge(count, "new-activity-badge catalog-activity-badge"))
         .unwrap_or_default();
+    let activity_row = if activity_badge.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<div class="catalog-activity-row">{activity_badge}</div>"#)
+    };
 
     format!(
         r#"<div class="catalog-item{sticky}{pinned_class}" data-replies="{replies}" data-created="{created}" data-bumped="{bumped}" data-sticky="{is_sticky}" data-pinned="{is_pinned}">
 <a class="catalog-card-link" href="/{board}/thread/{thread_id}">
   {thumb}
 </a>
-<div class="catalog-meta-row">
-  <span class="catalog-replies">R: {replies} / F: {images}</span>
-  {actions}
-</div>
 <a class="catalog-card-link" href="/{board}/thread/{thread_id}">
   <div class="catalog-info">
     {subject}
     {comment}
   </div>
 </a>
-{activity_badge}
+{activity_row}
+<div class="catalog-meta-row">
+  <span class="catalog-replies">R: {replies} / F: {images}</span>
+  {actions}
+</div>
 </div>"#,
         sticky = if thread.sticky { " sticky" } else { "" },
         pinned_class = if is_pinned { " is-pinned" } else { "" },
@@ -480,7 +485,7 @@ fn render_catalog_card(
         actions = actions_html,
         subject = subject_html,
         comment = comment_html,
-        activity_badge = activity_badge,
+        activity_row = activity_row,
     )
 }
 
@@ -981,10 +986,22 @@ fn render_thread_summary(
         let _ = write!(html, r#"<div class="post-body">{truncated}</div>"#);
     }
 
+    let activity_badge = unread_reply_count
+        .map(|count| {
+            render_new_activity_badge(count, "new-activity-badge thread-summary-activity-badge")
+        })
+        .unwrap_or_default();
+    if !activity_badge.is_empty() {
+        let _ = write!(
+            html,
+            r#"<div class="thread-summary-activity-row">{activity_badge}</div>"#
+        );
+    }
+
     let _ = write!(
         html,
         r#"<div class="thread-footer">
-<a href="/{board}/thread/{tid}">[reply] ({n} {word})</a>{activity_badge}"#,
+<a href="/{board}/thread/{tid}">[reply] ({n} {word})</a>"#,
         board = escape_html(board_short),
         tid = t.id,
         n = t.reply_count,
@@ -993,11 +1010,6 @@ fn render_thread_summary(
         } else {
             "replies"
         },
-        activity_badge = unread_reply_count
-            .map(|count| {
-                render_new_activity_badge(count, "new-activity-badge thread-summary-activity-badge")
-            })
-            .unwrap_or_default(),
     );
 
     if is_admin {
@@ -1456,8 +1468,9 @@ pub fn archive_page(
 mod tests {
     use super::{
         archive_page, board_cards, board_page, catalog_page, index_page, render_catalog_card,
+        render_thread_summary,
     };
-    use crate::models::{Board, BoardStats, SiteStats, Thread};
+    use crate::models::{Board, BoardStats, SiteStats, Thread, ThreadSummary};
     use crate::templates::forms::PostFormState;
     use std::collections::{HashMap, HashSet};
 
@@ -1491,6 +1504,14 @@ mod tests {
             op_name: Some("anon".into()),
             op_tripcode: None,
             op_id: Some(87),
+        }
+    }
+
+    fn sample_thread_summary() -> ThreadSummary {
+        ThreadSummary {
+            thread: sample_thread(),
+            preview_posts: Vec::new(),
+            omitted: 0,
         }
     }
 
@@ -1652,7 +1673,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_reply_counter_renders_between_thumbnail_and_body() {
+    fn catalog_reply_counter_renders_after_body_content() {
         let board = sample_board();
         let thread = sample_thread();
 
@@ -1672,15 +1693,79 @@ mod tests {
         let thumb_idx = html
             .find("catalog-card-media")
             .expect("thumbnail should exist");
+        let info_idx = html.find("catalog-info").expect("body block should exist");
         let meta_idx = html
             .find("catalog-meta-row")
             .expect("meta row should exist");
-        let info_idx = html.find("catalog-info").expect("body block should exist");
 
         assert!(
-            thumb_idx < meta_idx && meta_idx < info_idx,
-            "reply counter should render directly under the thumbnail before the body text"
+            thumb_idx < info_idx && info_idx < meta_idx,
+            "reply counter should render after the title/body block"
         );
+    }
+
+    #[test]
+    fn catalog_activity_badge_renders_between_body_and_reply_counter() {
+        let board = sample_board();
+        let thread = sample_thread();
+
+        let html = render_catalog_card(
+            &board,
+            &thread,
+            false,
+            Some(3),
+            "csrf",
+            "pin",
+            "Pin thread",
+            "hide",
+            "Hide thread",
+            "/test/catalog",
+        );
+
+        let info_idx = html.find("catalog-info").expect("body block should exist");
+        let badge_row_idx = html
+            .find("catalog-activity-row")
+            .expect("badge row should exist");
+        let badge_idx = html
+            .find("catalog-activity-badge")
+            .expect("badge should exist");
+        let replies_idx = html
+            .find("catalog-replies")
+            .expect("reply counter should exist");
+        let subject_idx = html.find("catalog-subject").expect("subject should exist");
+        let meta_idx = html
+            .find("catalog-meta-row")
+            .expect("reply counter container should exist");
+
+        assert!(info_idx < badge_row_idx && badge_row_idx < meta_idx);
+        assert!(subject_idx < badge_idx && badge_idx < replies_idx);
+        assert!(html.contains(r#"<div class="catalog-activity-row"><span class="new-activity-badge catalog-activity-badge">"#));
+        assert!(html.contains(r#"<div class="catalog-meta-row">"#));
+    }
+
+    #[test]
+    fn thread_summary_activity_badge_renders_between_title_area_and_footer() {
+        let summary = sample_thread_summary();
+
+        let html = render_thread_summary(&summary, "test", "csrf", false, true, false, Some(2));
+
+        let subject_idx = html
+            .find("class=\"subject\"")
+            .expect("subject should exist");
+        let badge_row_idx = html
+            .find("thread-summary-activity-row")
+            .expect("badge row should exist");
+        let badge_idx = html
+            .find("thread-summary-activity-badge")
+            .expect("badge should exist");
+        let footer_idx = html
+            .find("thread-footer")
+            .expect("reply counter/footer should exist");
+
+        assert!(subject_idx < badge_row_idx && badge_row_idx < footer_idx);
+        assert!(subject_idx < badge_idx && badge_idx < footer_idx);
+        assert!(html.contains(r#"<div class="thread-summary-activity-row"><span class="new-activity-badge thread-summary-activity-badge">"#));
+        assert!(html.contains(r#"<div class="thread-footer">"#));
     }
 
     #[test]

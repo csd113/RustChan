@@ -11,8 +11,10 @@ pub struct SiteSettingsForm {
     pub site_name: Option<String>,
     /// Custom home page subtitle line below the site name.
     pub site_subtitle: Option<String>,
-    /// Toggle browser-local new-activity badges.
-    pub new_activity_notifications_enabled: Option<String>,
+    /// Toggle homepage board-card new-thread badges.
+    pub homepage_new_thread_badges_enabled: Option<String>,
+    /// Toggle board/catalog thread-card new-reply badges.
+    pub thread_new_reply_badges_enabled: Option<String>,
     /// Default theme served to first-time visitors.
     pub default_theme: Option<String>,
     pub banner_rotation_interval_minutes: Option<String>,
@@ -30,7 +32,8 @@ pub async fn update_site_settings(
     super::check_csrf_jar(&jar, form.csrf.as_deref())?;
     let is_banner_settings_only = form.site_name.is_none()
         && form.site_subtitle.is_none()
-        && form.new_activity_notifications_enabled.is_none()
+        && form.homepage_new_thread_badges_enabled.is_none()
+        && form.thread_new_reply_badges_enabled.is_none()
         && form.default_theme.is_none()
         && (form.banner_rotation_interval_minutes.is_some()
             || form.banner_external_links_enabled.is_some());
@@ -42,8 +45,10 @@ pub async fn update_site_settings(
         .clamp(0, 43_200);
     let banner_external_links_enabled =
         checkbox_is_on(form.banner_external_links_enabled.as_deref());
-    let new_activity_notifications_enabled =
-        checkbox_is_on(form.new_activity_notifications_enabled.as_deref());
+    let homepage_new_thread_badges_enabled =
+        checkbox_is_on(form.homepage_new_thread_badges_enabled.as_deref());
+    let thread_new_reply_badges_enabled =
+        checkbox_is_on(form.thread_new_reply_badges_enabled.as_deref());
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -89,21 +94,31 @@ pub async fn update_site_settings(
 
             db::set_site_setting(
                 &conn,
-                "new_activity_notifications_enabled",
-                if new_activity_notifications_enabled {
+                "homepage_new_thread_badges_enabled",
+                if homepage_new_thread_badges_enabled {
                     "1"
                 } else {
                     "0"
                 },
             )?;
-            tracing::info!(target: "admin", "New-activity badge setting updated");
+            db::set_site_setting(
+                &conn,
+                "thread_new_reply_badges_enabled",
+                if thread_new_reply_badges_enabled {
+                    "1"
+                } else {
+                    "0"
+                },
+            )?;
+            tracing::info!(target: "admin", "New-activity badge settings updated");
 
             // Persist overlapping global settings back to settings.toml so
             // they survive a restart without requiring a manual file edit.
             crate::config::update_settings_file_site_settings(
                 &new_name,
                 &new_subtitle,
-                new_activity_notifications_enabled,
+                homepage_new_thread_badges_enabled,
+                thread_new_reply_badges_enabled,
                 &new_theme,
             );
             tracing::info!(target: "admin", "settings.toml updated");

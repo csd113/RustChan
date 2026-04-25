@@ -204,25 +204,57 @@ pub fn get_default_user_theme(conn: &rusqlite::Connection) -> String {
         .unwrap_or_default()
 }
 
-pub fn get_new_activity_notifications_enabled(conn: &rusqlite::Connection) -> bool {
-    get_site_setting(conn, "new_activity_notifications_enabled")
-        .unwrap_or_else(|error| {
+fn parse_site_bool(value: Option<String>) -> Option<bool> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        match trimmed {
+            "1" | "true" | "TRUE" | "True" => Some(true),
+            "0" | "false" | "FALSE" | "False" => Some(false),
+            _ => None,
+        }
+    })
+}
+
+fn get_site_bool_with_legacy_fallback(
+    conn: &rusqlite::Connection,
+    key: &str,
+    legacy_key: &str,
+    default: bool,
+) -> bool {
+    parse_site_bool(get_site_setting(conn, key).unwrap_or_else(|error| {
+        tracing::warn!(target: "db", %error, setting = key, "Failed to read site setting");
+        None
+    }))
+    .or_else(|| {
+        parse_site_bool(get_site_setting(conn, legacy_key).unwrap_or_else(|error| {
             tracing::warn!(
                 target: "db",
                 %error,
-                "Failed to read new_activity_notifications_enabled setting"
+                setting = legacy_key,
+                "Failed to read legacy site setting"
             );
             None
-        })
-        .and_then(|value| {
-            let trimmed = value.trim();
-            match trimmed {
-                "1" | "true" | "TRUE" | "True" => Some(true),
-                "0" | "false" | "FALSE" | "False" => Some(false),
-                _ => None,
-            }
-        })
-        .unwrap_or(crate::config::CONFIG.initial_new_activity_notifications_enabled)
+        }))
+    })
+    .unwrap_or(default)
+}
+
+pub fn get_homepage_new_thread_badges_enabled(conn: &rusqlite::Connection) -> bool {
+    get_site_bool_with_legacy_fallback(
+        conn,
+        "homepage_new_thread_badges_enabled",
+        "new_activity_notifications_enabled",
+        crate::config::CONFIG.initial_homepage_new_thread_badges_enabled,
+    )
+}
+
+pub fn get_thread_new_reply_badges_enabled(conn: &rusqlite::Connection) -> bool {
+    get_site_bool_with_legacy_fallback(
+        conn,
+        "thread_new_reply_badges_enabled",
+        "new_activity_notifications_enabled",
+        crate::config::CONFIG.initial_thread_new_reply_badges_enabled,
+    )
 }
 
 // ─── Board queries ────────────────────────────────────────────────────────────
