@@ -144,6 +144,8 @@ pub async fn create_thread(
                     &csrf_for_error,
                     Some(&msg),
                     Some(&post_form_state),
+                    &std::collections::HashMap::new(),
+                    false,
                     &banner_html,
                     current_theme.as_deref(),
                     true,

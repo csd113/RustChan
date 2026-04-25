@@ -27,6 +27,15 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 
+type ThreadViewLoadResult = (
+    String,
+    render::ThreadPageData,
+    bool,
+    bool,
+    bool,
+    Option<(i64, i64)>,
+);
+
 fn is_xml_http_request(headers: &HeaderMap) -> bool {
     headers
         .get("x-requested-with")
@@ -79,7 +88,7 @@ pub async fn view_thread(
         let pool = state.db.clone();
         let board_short = board_short.clone();
         let admin_session_id = admin_session_id.clone();
-        move || -> Result<(String, render::ThreadPageData, bool)> {
+        move || -> Result<ThreadViewLoadResult> {
             let conn = pool.get()?;
             let page_data = render::load_thread_page_data(
                 &conn,
@@ -90,10 +99,20 @@ pub async fn view_thread(
                 &crate::config::CONFIG.cookie_secret,
             )?;
             let is_admin = page_data.is_admin;
+            let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
+            let homepage_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let board_id = page_data.board.id;
             Ok((
                 render::thread_page_etag_signature(&page_data),
                 page_data,
                 is_admin,
+                thread_badges_enabled,
+                homepage_badges_enabled,
+                if homepage_badges_enabled {
+                    db::get_latest_visible_thread_marker(&conn, board_id)?
+                } else {
+                    None
+                },
             ))
         }
     })
@@ -101,7 +120,14 @@ pub async fn view_thread(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     let can_post = access_context.can_post;
-    let (thread_sig, mut page_data, _is_admin) = page_data;
+    let (
+        thread_sig,
+        mut page_data,
+        _is_admin,
+        thread_badges_enabled,
+        homepage_badges_enabled,
+        latest_thread_marker,
+    ) = page_data;
     page_data.owned_post_controls = owned_post_grants
         .into_iter()
         .filter(|grant| grant.thread_id == thread_id && grant.board_short == board_short)
@@ -134,6 +160,27 @@ pub async fn view_thread(
     let etag = format!(
         "\"{thread_sig}-b{boards_ver}{admin_tag}{post_tag}{greentext_tag}-o{ownership_sig}\""
     );
+    let (latest_created_at, latest_thread_id) =
+        crate::handlers::board::latest_visible_thread_marker_tuple(latest_thread_marker);
+    let jar = if thread_badges_enabled {
+        crate::handlers::board::remember_thread_activity(
+            jar,
+            page_data.thread.id,
+            page_data.thread.reply_count,
+        )
+    } else {
+        jar
+    };
+    let jar = if homepage_badges_enabled {
+        crate::handlers::board::remember_board_activity(
+            jar,
+            page_data.board.id,
+            latest_created_at,
+            latest_thread_id,
+        )
+    } else {
+        jar
+    };
 
     // 3.2: Return 304 Not Modified when client's cached copy is still current.
     let client_etag = req_headers

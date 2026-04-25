@@ -107,6 +107,25 @@ type CatalogRenderData = (
     String,
 );
 
+pub(crate) fn latest_visible_thread_marker_tuple(marker: Option<(i64, i64)>) -> (i64, i64) {
+    marker.unwrap_or((0, 0))
+}
+
+pub(crate) fn thread_unread_counts(
+    threads: &[crate::models::Thread],
+    markers: &HashMap<i64, crate::handlers::board::ThreadActivityMarker>,
+) -> HashMap<i64, i64> {
+    threads
+        .iter()
+        .filter_map(|thread| {
+            markers.get(&thread.id).and_then(|marker| {
+                let unread = (thread.reply_count - marker.seen_reply_count).max(0);
+                (unread > 0).then_some((thread.id, unread))
+            })
+        })
+        .collect()
+}
+
 fn is_xml_http_request(headers: &HeaderMap) -> bool {
     headers
         .get("x-requested-with")

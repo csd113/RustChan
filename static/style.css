@@ -1694,13 +1694,29 @@ html:not([data-theme]) .poster-id-btn {
 /* ── Thread footer / reply count ──────────────────────────────────────────── */
 
 .thread-footer {
-  margin-top: 6px;
+  margin-top: 4px;
   font-size: 0.8rem;
   color: var(--text-dim);
   clear: both;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  flex-wrap: wrap;
 }
 
 .thread-footer a { color: var(--green-pale); }
+
+.thread-summary-activity-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.thread-summary-activity-badge {
+  display: inline-flex;
+  max-width: 100%;
+}
 
 .omitted {
   margin: 4px 0 4px 28px;
@@ -1960,8 +1976,19 @@ html:not([data-theme]) .poster-id-btn {
   display: flex;
   justify-content: center;
   align-items: center;
-  margin-top: 0;
+  margin-top: 4px;
   min-height: 22px;
+}
+
+.catalog-activity-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.catalog-activity-badge {
+  max-width: 100%;
+  pointer-events: none;
 }
 
 .catalog-card-actions {
@@ -2202,6 +2229,38 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   flex-direction: column;
   color: inherit;
   text-decoration: none;
+}
+
+.new-activity-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--red) 52%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--red) 10%, var(--bg-panel));
+  color: var(--red);
+  font-size: 0.68rem;
+  line-height: 1.1;
+  font-weight: bold;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.new-activity-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 18%, transparent);
+  flex: 0 0 auto;
+}
+
+.board-card-activity-badge {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  pointer-events: none;
 }
 
 .board-card-short {

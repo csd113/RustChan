@@ -14,6 +14,14 @@ forum_name = "RustChan"
 # This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
 site_subtitle = "select board to proceed"
 
+# Enable per-browser homepage board-card badges for newly created threads.
+# This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
+homepage_new_thread_badges_enabled = true
+
+# Enable per-browser board/catalog thread-card badges for new replies.
+# This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
+thread_new_reply_badges_enabled = true
+
 # Default theme for first-time visitors before they pick their own.
 # This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
 # Valid values: built-in or admin-created custom theme slugs.

@@ -112,11 +112,14 @@ pub fn load_board_page_data(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_board_page(
     data: &BoardPageData,
     csrf_token: &str,
     error: Option<&str>,
     new_thread_prefill: Option<&templates::forms::PostFormState>,
+    thread_badges: &std::collections::HashMap<i64, i64>,
+    new_activity_enabled: bool,
     board_banner_html: &str,
     current_theme: Option<&str>,
     can_post: bool,
@@ -131,6 +134,8 @@ pub fn render_board_page(
         data.is_admin,
         error,
         new_thread_prefill,
+        thread_badges,
+        new_activity_enabled,
         board_banner_html,
         current_theme,
         data.board.collapse_greentext,

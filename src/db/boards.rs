@@ -6,7 +6,7 @@
 use crate::models::{Board, BoardAccessMode, BoardBannerMode};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const BOARD_ORDER_SQL: &str = "nsfw ASC, display_order ASC, id ASC";
 const BOARD_GROUP_ORDER_SQL: &str = "display_order ASC, id ASC";
@@ -204,6 +204,59 @@ pub fn get_default_user_theme(conn: &rusqlite::Connection) -> String {
         .unwrap_or_default()
 }
 
+fn parse_site_bool(value: Option<String>) -> Option<bool> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        match trimmed {
+            "1" | "true" | "TRUE" | "True" => Some(true),
+            "0" | "false" | "FALSE" | "False" => Some(false),
+            _ => None,
+        }
+    })
+}
+
+fn get_site_bool_with_legacy_fallback(
+    conn: &rusqlite::Connection,
+    key: &str,
+    legacy_key: &str,
+    default: bool,
+) -> bool {
+    parse_site_bool(get_site_setting(conn, key).unwrap_or_else(|error| {
+        tracing::warn!(target: "db", %error, setting = key, "Failed to read site setting");
+        None
+    }))
+    .or_else(|| {
+        parse_site_bool(get_site_setting(conn, legacy_key).unwrap_or_else(|error| {
+            tracing::warn!(
+                target: "db",
+                %error,
+                setting = legacy_key,
+                "Failed to read legacy site setting"
+            );
+            None
+        }))
+    })
+    .unwrap_or(default)
+}
+
+pub fn get_homepage_new_thread_badges_enabled(conn: &rusqlite::Connection) -> bool {
+    get_site_bool_with_legacy_fallback(
+        conn,
+        "homepage_new_thread_badges_enabled",
+        "new_activity_notifications_enabled",
+        crate::config::CONFIG.initial_homepage_new_thread_badges_enabled,
+    )
+}
+
+pub fn get_thread_new_reply_badges_enabled(conn: &rusqlite::Connection) -> bool {
+    get_site_bool_with_legacy_fallback(
+        conn,
+        "thread_new_reply_badges_enabled",
+        "new_activity_notifications_enabled",
+        crate::config::CONFIG.initial_thread_new_reply_badges_enabled,
+    )
+}
+
 // ─── Board queries ────────────────────────────────────────────────────────────
 
 /// # Errors
@@ -246,6 +299,79 @@ pub fn get_all_boards_with_stats(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(out)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoardActivityCountInput {
+    pub board_id: i64,
+    pub seen_thread_created_at: i64,
+    pub seen_thread_id: i64,
+}
+
+/// Count newly created, currently visible threads for each board marker.
+///
+/// Exact semantics: count non-archived threads whose `(created_at, id)` tuple is
+/// strictly newer than the per-board marker stored in the browser cookie.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn count_new_threads_for_boards(
+    conn: &rusqlite::Connection,
+    markers: &[BoardActivityCountInput],
+) -> Result<HashMap<i64, i64>> {
+    if markers.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let values_sql = markers
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let base = index * 3;
+            format!("(?{}, ?{}, ?{})", base + 1, base + 2, base + 3)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "WITH seen(board_id, seen_thread_created_at, seen_thread_id) AS (
+             VALUES {values_sql}
+         )
+         SELECT t.board_id, COUNT(*)
+         FROM threads t
+         JOIN seen s ON s.board_id = t.board_id
+         WHERE t.archived = 0
+           AND (
+               t.created_at > s.seen_thread_created_at
+               OR (
+                   t.created_at = s.seen_thread_created_at
+                   AND t.id > s.seen_thread_id
+               )
+           )
+         GROUP BY t.board_id"
+    );
+
+    let mut params = Vec::with_capacity(markers.len() * 3);
+    for marker in markers {
+        params.push(rusqlite::types::Value::Integer(marker.board_id));
+        params.push(rusqlite::types::Value::Integer(
+            marker.seen_thread_created_at.max(0),
+        ));
+        params.push(rusqlite::types::Value::Integer(
+            marker.seen_thread_id.max(0),
+        ));
+    }
+
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+
+    let mut counts = HashMap::new();
+    for row in rows {
+        let (board_id, count) = row?;
+        counts.insert(board_id, count);
+    }
+    Ok(counts)
 }
 
 /// # Errors

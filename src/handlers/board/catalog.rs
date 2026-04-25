@@ -3,6 +3,14 @@
 
 use super::*;
 
+type CatalogLoadResult = (
+    CatalogRenderData,
+    crate::banner::BannerSelection,
+    bool,
+    bool,
+    Option<(i64, i64)>,
+);
+
 pub async fn catalog(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
@@ -42,11 +50,12 @@ pub async fn catalog(
     // fetched up to 200 full thread rows and re-rendered the entire page
     // regardless of whether anything changed. The ETag is derived from the
     // most-recently-bumped thread, mirroring the board index handler.
+    let thread_activity_markers = thread_activity_markers_from_jar(&jar);
     let catalog_data = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
         let viewer_key = viewer_key.clone();
-        move || -> Result<(CatalogRenderData, crate::banner::BannerSelection)> {
+        move || -> Result<CatalogLoadResult> {
             let conn = pool.get()?;
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
@@ -85,15 +94,24 @@ pub async fn catalog(
                 crate::models::BannerPlacement::Catalog,
                 &format!("/{board_short}/catalog"),
             )?;
+            let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
+            let homepage_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
             Ok((
                 (
-                    board,
+                    board.clone(),
                     threads,
                     pinned_ids,
                     hidden_threads.len(),
                     etag_signature,
                 ),
                 banner_selection,
+                thread_badges_enabled,
+                homepage_badges_enabled,
+                if homepage_badges_enabled {
+                    db::get_latest_visible_thread_marker(&conn, board.id)?
+                } else {
+                    None
+                },
             ))
         }
     })
@@ -101,8 +119,18 @@ pub async fn catalog(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     let can_post = access_context.can_post;
-    let ((board, threads, pinned_ids, hidden_count, etag_signature), banner_selection) =
-        catalog_data;
+    let (
+        (board, threads, pinned_ids, hidden_count, etag_signature),
+        banner_selection,
+        thread_badges_enabled,
+        homepage_badges_enabled,
+        latest_thread_marker,
+    ) = catalog_data;
+    let thread_badges = if thread_badges_enabled {
+        thread_unread_counts(&threads, &thread_activity_markers)
+    } else {
+        HashMap::new()
+    };
     let admin_tag = if access_context.is_admin { "-a" } else { "" };
     let post_tag = if can_post { "-p1" } else { "-p0" };
     let greentext_tag = if board.collapse_greentext {
@@ -110,10 +138,36 @@ pub async fn catalog(
     } else {
         "-cg0"
     };
+    let activity_tag = if thread_badges_enabled {
+        let mut badge_parts = thread_badges
+            .iter()
+            .map(|(thread_id, count)| format!("{thread_id}:{count}"))
+            .collect::<Vec<_>>();
+        badge_parts.sort();
+        format!(
+            "-na{}",
+            crate::utils::crypto::sha256_hex(badge_parts.join("|").as_bytes())
+        )
+    } else {
+        "-na0".to_string()
+    };
     let etag = format!(
-        "\"{etag_signature}-catalog{admin_tag}{post_tag}{greentext_tag}-b{}\"",
+        "\"{etag_signature}-catalog{admin_tag}{post_tag}{greentext_tag}-b{}{activity_tag}\"",
         banner_selection.etag_fragment
     );
+    let (latest_created_at, latest_thread_id) =
+        latest_visible_thread_marker_tuple(latest_thread_marker);
+    let jar = if thread_badges_enabled {
+        let defaults = threads.iter().map(|thread| (thread.id, thread.reply_count));
+        remember_thread_activity_defaults(jar, defaults)
+    } else {
+        jar
+    };
+    let jar = if homepage_badges_enabled {
+        remember_board_activity(jar, board.id, latest_created_at, latest_thread_id)
+    } else {
+        jar
+    };
 
     let client_etag = req_headers
         .get("if-none-match")
@@ -153,6 +207,8 @@ pub async fn catalog(
         &csrf,
         all_boards.as_slice(),
         access_context.is_admin,
+        &thread_badges,
+        thread_badges_enabled,
         &banner_html,
         current_theme.as_deref(),
         board.collapse_greentext,
@@ -224,6 +280,8 @@ pub async fn hidden_threads(
                 &csrf,
                 all_boards.as_slice(),
                 access_context.is_admin,
+                &HashMap::new(),
+                false,
                 "",
                 current_theme.as_deref(),
                 board.collapse_greentext,
