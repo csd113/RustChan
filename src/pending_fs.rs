@@ -66,6 +66,79 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn safe_relative_path(relative_path: &str, context: &str) -> Result<PathBuf> {
+    let rel = Path::new(relative_path);
+    if relative_path.trim().is_empty() || rel.is_absolute() {
+        anyhow::bail!("{context} path {relative_path:?} must be relative");
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in rel.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                anyhow::bail!("{context} path {relative_path:?} contains unsafe components");
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        anyhow::bail!("{context} path {relative_path:?} is empty");
+    }
+    Ok(normalized)
+}
+
+fn validate_upload_finalize_payload(
+    upload_dir: &Path,
+    payload: &UploadFinalizePayload,
+) -> Result<()> {
+    let upload_root = validated_restore_path(upload_dir)?;
+    let pending_root = upload_root.join(".pending");
+    let stage_dir = validated_restore_path(Path::new(&payload.stage_dir))?;
+    if stage_dir == pending_root || !stage_dir.starts_with(&pending_root) {
+        anyhow::bail!(
+            "Upload finalize stage {} is outside {}",
+            stage_dir.display(),
+            pending_root.display()
+        );
+    }
+
+    for relative_path in &payload.relative_paths {
+        let rel = safe_relative_path(relative_path, "Upload finalize")?;
+        let target = upload_root.join(&rel);
+        if !target.starts_with(&upload_root) {
+            anyhow::bail!(
+                "Upload finalize target {} escapes {}",
+                target.display(),
+                upload_root.display()
+            );
+        }
+    }
+
+    for path in [
+        payload.primary_file_path.as_deref(),
+        payload.primary_thumb_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let rel = safe_relative_path(path, "Upload finalize metadata")?;
+        let target = upload_root.join(&rel);
+        if !target.starts_with(&upload_root) {
+            anyhow::bail!(
+                "Upload finalize metadata target {} escapes {}",
+                target.display(),
+                upload_root.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn move_stage_file(stage_dir: &Path, upload_dir: &Path, relative_path: &str) -> Result<()> {
     let source = stage_dir.join(relative_path);
     let target = upload_dir.join(relative_path);
@@ -185,6 +258,63 @@ fn validated_restore_path(path: &Path) -> Result<PathBuf> {
     Ok(parent.join(file_name))
 }
 
+fn validated_restore_path_allow_missing_parent(path: &Path) -> Result<PathBuf> {
+    let path = absolute_path_without_parent_traversal(path)?;
+    reject_existing_symlink(&path)?;
+    if path.exists() {
+        return path
+            .canonicalize()
+            .with_context(|| format!("Canonicalize restore swap path {}", path.display()));
+    }
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("Restore swap path {} has no parent", path.display());
+    };
+    reject_existing_symlink(parent)?;
+    if parent.exists() {
+        let parent = parent.canonicalize().with_context(|| {
+            format!(
+                "Canonicalize restore swap parent directory {}",
+                parent.display()
+            )
+        })?;
+        let file_name = path.file_name().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Restore swap path {} has no final component",
+                path.display()
+            )
+        })?;
+        return Ok(parent.join(file_name));
+    }
+    let mut missing_components = Vec::new();
+    let mut existing_ancestor = path.as_path();
+    while !existing_ancestor.exists() {
+        let Some(file_name) = existing_ancestor.file_name() else {
+            anyhow::bail!(
+                "Restore swap path {} has no existing ancestor",
+                path.display()
+            );
+        };
+        missing_components.push(file_name.to_os_string());
+        existing_ancestor = existing_ancestor.parent().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Restore swap path {} has no existing ancestor",
+                path.display()
+            )
+        })?;
+    }
+    reject_existing_symlink(existing_ancestor)?;
+    let mut normalized = existing_ancestor.canonicalize().with_context(|| {
+        format!(
+            "Canonicalize restore swap ancestor directory {}",
+            existing_ancestor.display()
+        )
+    })?;
+    for component in missing_components.iter().rev() {
+        normalized.push(component);
+    }
+    Ok(normalized)
+}
+
 fn expected_restore_path_name(live: &Path, label: &str) -> Result<String> {
     let live_name = live
         .file_name()
@@ -279,6 +409,95 @@ fn validate_full_restore_payload_paths(
         };
         validate_restore_swap_paths(swap, tor_hidden_service_keys_dir, true)?;
     }
+    Ok(())
+}
+
+fn validate_board_short_component(path: &Path) -> Result<String> {
+    let short = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!("Board restore path {} has no board name", path.display())
+        })?;
+    if short.is_empty()
+        || short.len() > 8
+        || !short.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        anyhow::bail!("Board restore target name {short:?} is invalid");
+    }
+    Ok(short.to_string())
+}
+
+fn validate_generated_suffix(file_name: &str, expected_prefix: &str) -> Result<()> {
+    let Some(suffix) = file_name.strip_prefix(expected_prefix) else {
+        anyhow::bail!("Board restore swap path {file_name:?} does not match expected prefix");
+    };
+    if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("Board restore swap path {file_name:?} has an invalid generated suffix");
+    }
+    Ok(())
+}
+
+fn validate_board_restore_payload_paths(
+    payload: &BoardRestoreSwapPayload,
+    upload_dir: &Path,
+) -> Result<()> {
+    let upload_root = validated_restore_path(upload_dir)?;
+    let upload_parent = upload_root
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Upload root {} has no parent", upload_root.display()))?;
+    let live = validated_restore_path(Path::new(&payload.live))?;
+    if live.parent() != Some(upload_root.as_path()) {
+        anyhow::bail!(
+            "Board restore live path {} is not an immediate child of {}",
+            live.display(),
+            upload_root.display()
+        );
+    }
+    let board_short = validate_board_short_component(&live)?;
+
+    let staged = validated_restore_path_allow_missing_parent(Path::new(&payload.staged))?;
+    if staged.file_name().and_then(|name| name.to_str()) != Some(board_short.as_str()) {
+        anyhow::bail!("Board restore staged path does not target /{board_short}/");
+    }
+    let staged_parent = staged.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Board restore staged path {} has no parent",
+            staged.display()
+        )
+    })?;
+    if staged_parent.parent() != Some(upload_parent) {
+        anyhow::bail!(
+            "Board restore staged path {} is outside the expected upload staging area",
+            staged.display()
+        );
+    }
+    let staged_parent_name = staged_parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Board restore staged parent has no UTF-8 name"))?;
+    let upload_name = upload_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Upload root {} has no name", upload_root.display()))?;
+    validate_generated_suffix(
+        staged_parent_name,
+        &format!(".{upload_name}.board-restore-stage."),
+    )?;
+
+    let previous = validated_restore_path(Path::new(&payload.previous))?;
+    if previous.parent() != Some(upload_root.as_path()) {
+        anyhow::bail!(
+            "Board restore previous path {} is outside {}",
+            previous.display(),
+            upload_root.display()
+        );
+    }
+    let previous_name = previous
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Board restore previous path has no UTF-8 name"))?;
+    validate_generated_suffix(previous_name, &format!(".{board_short}.restore-old."))?;
     Ok(())
 }
 
@@ -432,6 +651,7 @@ pub fn finalize_upload_payload(
 ) -> Result<()> {
     let upload_root = Path::new(upload_dir);
     let stage_dir = Path::new(&payload.stage_dir);
+    validate_upload_finalize_payload(upload_root, payload)?;
 
     for relative_path in &payload.relative_paths {
         move_stage_file(stage_dir, upload_root, relative_path)?;
@@ -485,7 +705,11 @@ pub fn finalize_full_restore_payload(
 /// # Errors
 /// Returns an error if the staged or backup directories cannot be moved or
 /// cleaned up.
-pub fn finalize_board_restore_payload(payload: &BoardRestoreSwapPayload) -> Result<()> {
+pub fn finalize_board_restore_payload(
+    payload: &BoardRestoreSwapPayload,
+    upload_dir: &Path,
+) -> Result<()> {
+    validate_board_restore_payload_paths(payload, upload_dir)?;
     finalize_swap(
         Path::new(&payload.staged),
         Path::new(&payload.live),
@@ -551,7 +775,7 @@ pub fn reconcile_pending_fs_ops(pool: &crate::db::DbPool, upload_dir: &str) -> R
             BOARD_RESTORE_SWAP_KIND => {
                 let payload: BoardRestoreSwapPayload = serde_json::from_str(&op.payload_json)
                     .with_context(|| format!("Parse board_restore_swap payload for {}", op.id))?;
-                finalize_board_restore_payload(&payload)?;
+                finalize_board_restore_payload(&payload, Path::new(upload_dir))?;
             }
             other => {
                 anyhow::bail!("Unknown pending_fs_op kind {other:?} for {}", op.id);
@@ -584,8 +808,9 @@ pub fn reconcile_pending_fs_ops(pool: &crate::db::DbPool, upload_dir: &str) -> R
 mod tests {
     use super::{
         finalize_board_restore_payload, finalize_delete_files_payload,
-        finalize_full_restore_payload, BoardRestoreSwapPayload, DeleteFilesPayload,
-        FullRestoreSwapPayload, RestorePathSwapPayload, DELETE_FILES_KIND, FULL_RESTORE_SWAP_KIND,
+        finalize_full_restore_payload, finalize_upload_payload, BoardRestoreSwapPayload,
+        DeleteFilesPayload, FullRestoreSwapPayload, RestorePathSwapPayload, UploadFinalizePayload,
+        DELETE_FILES_KIND, FULL_RESTORE_SWAP_KIND,
     };
     use crate::db::{init_test_pool, insert_pending_fs_op};
 
@@ -613,6 +838,35 @@ mod tests {
                 .display()
                 .to_string(),
             additional_swaps: Vec::new(),
+        }
+    }
+
+    fn board_restore_payload_for_live(live: &std::path::Path) -> BoardRestoreSwapPayload {
+        let upload_root = live.parent().expect("board live parent");
+        let upload_parent = upload_root.parent().expect("upload parent");
+        let upload_name = upload_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("upload name");
+        let board_short = live
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("board short");
+        BoardRestoreSwapPayload {
+            staged: upload_parent
+                .join(format!(
+                    ".{upload_name}.board-restore-stage.0123456789abcdef0123456789abcdef"
+                ))
+                .join(board_short)
+                .display()
+                .to_string(),
+            live: live.display().to_string(),
+            previous: upload_root
+                .join(format!(
+                    ".{board_short}.restore-old.0123456789abcdef0123456789abcdef"
+                ))
+                .display()
+                .to_string(),
         }
     }
 
@@ -682,20 +936,112 @@ mod tests {
     }
 
     #[test]
+    fn finalize_upload_payload_rejects_traversal_relative_path_before_mutation() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_dir = temp_dir.path().join("uploads");
+        let stage_dir = upload_dir.join(".pending").join("stage");
+        let sentinel = temp_dir.path().join("sentinel.txt");
+        std::fs::create_dir_all(&stage_dir).expect("create stage dir");
+        std::fs::write(&sentinel, "keep").expect("write sentinel");
+
+        let pool = init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+        let payload = UploadFinalizePayload {
+            stage_dir: stage_dir.display().to_string(),
+            relative_paths: vec!["../sentinel.txt".to_string()],
+            primary_hash: None,
+            primary_file_path: Some("../sentinel.txt".to_string()),
+            primary_thumb_path: None,
+            primary_mime_type: None,
+        };
+
+        let error = finalize_upload_payload(
+            &conn,
+            upload_dir.to_str().expect("utf8 upload dir"),
+            &payload,
+        )
+        .expect_err("traversal upload payload rejected");
+
+        assert!(error.to_string().contains("unsafe components"));
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).expect("read sentinel"),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn finalize_upload_payload_rejects_stage_dir_outside_pending_root() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_dir = temp_dir.path().join("uploads");
+        let stage_dir = temp_dir.path().join("outside-stage");
+        std::fs::create_dir_all(upload_dir.join(".pending")).expect("create pending root");
+        std::fs::create_dir_all(&stage_dir).expect("create outside stage");
+
+        let pool = init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+        let payload = UploadFinalizePayload {
+            stage_dir: stage_dir.display().to_string(),
+            relative_paths: vec!["tech/file.webp".to_string()],
+            primary_hash: None,
+            primary_file_path: Some("tech/file.webp".to_string()),
+            primary_thumb_path: None,
+            primary_mime_type: None,
+        };
+
+        let error = finalize_upload_payload(
+            &conn,
+            upload_dir.to_str().expect("utf8 upload dir"),
+            &payload,
+        )
+        .expect_err("outside stage rejected");
+
+        assert!(error.to_string().contains("outside"));
+        assert!(stage_dir.exists());
+    }
+
+    #[test]
+    fn finalize_board_restore_payload_rejects_arbitrary_live_path_before_mutation() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_dir = temp_dir.path().join("uploads");
+        let sentinel_dir = temp_dir.path().join("sentinel");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        create_dir_with_file(&sentinel_dir, "keep.txt", "keep");
+        let payload = BoardRestoreSwapPayload {
+            staged: temp_dir
+                .path()
+                .join(".uploads.board-restore-stage.0123456789abcdef0123456789abcdef")
+                .join("sentinel")
+                .display()
+                .to_string(),
+            live: sentinel_dir.display().to_string(),
+            previous: upload_dir
+                .join(".sentinel.restore-old.0123456789abcdef0123456789abcdef")
+                .display()
+                .to_string(),
+        };
+
+        let error = finalize_board_restore_payload(&payload, &upload_dir)
+            .expect_err("arbitrary board restore live rejected");
+
+        assert!(error.to_string().contains("not an immediate child"));
+        assert_eq!(
+            std::fs::read_to_string(sentinel_dir.join("keep.txt")).expect("read sentinel"),
+            "keep"
+        );
+    }
+
+    #[test]
     fn finalize_board_restore_payload_recovers_interrupted_swap() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let live = temp_dir.path().join("uploads").join("tech");
-        let staged = temp_dir.path().join(".pending").join("tech-stage");
-        let previous = temp_dir.path().join(".tech.restore-old");
-        create_dir_with_file(&staged, "new.txt", "new");
-        create_dir_with_file(&previous, "old.txt", "old");
+        let payload = board_restore_payload_for_live(&live);
+        let staged = std::path::Path::new(&payload.staged);
+        let previous = std::path::Path::new(&payload.previous);
+        create_dir_with_file(staged, "new.txt", "new");
+        create_dir_with_file(previous, "old.txt", "old");
 
-        finalize_board_restore_payload(&BoardRestoreSwapPayload {
-            staged: staged.display().to_string(),
-            live: live.display().to_string(),
-            previous: previous.display().to_string(),
-        })
-        .expect("finalize interrupted swap");
+        finalize_board_restore_payload(&payload, &temp_dir.path().join("uploads"))
+            .expect("finalize interrupted swap");
 
         assert_eq!(
             std::fs::read_to_string(live.join("new.txt")).expect("read live"),
@@ -708,17 +1054,14 @@ mod tests {
     fn finalize_board_restore_payload_cleans_leftover_previous_path() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let live = temp_dir.path().join("uploads").join("tech");
-        let staged = temp_dir.path().join(".pending").join("tech-stage");
-        let previous = temp_dir.path().join(".tech.restore-old");
+        let payload = board_restore_payload_for_live(&live);
+        let staged = std::path::Path::new(&payload.staged);
+        let previous = std::path::Path::new(&payload.previous);
         create_dir_with_file(&live, "new.txt", "new");
-        create_dir_with_file(&previous, "old.txt", "old");
+        create_dir_with_file(previous, "old.txt", "old");
 
-        finalize_board_restore_payload(&BoardRestoreSwapPayload {
-            staged: staged.display().to_string(),
-            live: live.display().to_string(),
-            previous: previous.display().to_string(),
-        })
-        .expect("cleanup completed swap");
+        finalize_board_restore_payload(&payload, &temp_dir.path().join("uploads"))
+            .expect("cleanup completed swap");
 
         assert_eq!(
             std::fs::read_to_string(live.join("new.txt")).expect("read live"),
@@ -732,17 +1075,14 @@ mod tests {
     fn finalize_board_restore_payload_swaps_live_and_stage() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let live = temp_dir.path().join("uploads").join("tech");
-        let staged = temp_dir.path().join(".pending").join("tech-stage");
-        let previous = temp_dir.path().join(".tech.restore-old");
+        let payload = board_restore_payload_for_live(&live);
+        let staged = std::path::Path::new(&payload.staged);
+        let previous = std::path::Path::new(&payload.previous);
         create_dir_with_file(&live, "old.txt", "old");
-        create_dir_with_file(&staged, "new.txt", "new");
+        create_dir_with_file(staged, "new.txt", "new");
 
-        finalize_board_restore_payload(&BoardRestoreSwapPayload {
-            staged: staged.display().to_string(),
-            live: live.display().to_string(),
-            previous: previous.display().to_string(),
-        })
-        .expect("swap live and stage");
+        finalize_board_restore_payload(&payload, &temp_dir.path().join("uploads"))
+            .expect("swap live and stage");
 
         assert_eq!(
             std::fs::read_to_string(live.join("new.txt")).expect("read live"),

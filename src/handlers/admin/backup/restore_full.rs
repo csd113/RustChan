@@ -33,6 +33,32 @@ pub(super) fn refresh_live_site_state_from_db(conn: &rusqlite::Connection) -> Re
     Ok(())
 }
 
+fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare("SELECT short_name FROM boards")
+        .map_err(|error| AppError::BadRequest(format!("Restored database is invalid: {error}")))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| AppError::BadRequest(format!("Restored database is invalid: {error}")))?;
+
+    for row in rows {
+        let short_name = row.map_err(|error| {
+            AppError::BadRequest(format!(
+                "Restored database has an invalid board row: {error}"
+            ))
+        })?;
+        validate_board_short_name(&short_name)?;
+    }
+
+    Ok(())
+}
+
+fn scrub_full_restore_runtime_state(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute("DELETE FROM admin_sessions", [])
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Clear restored sessions: {error}")))?;
+    Ok(())
+}
+
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
@@ -321,6 +347,8 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     let backup_result = (|| -> Result<()> {
         let src = rusqlite::Connection::open(&temp_db)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Open backup source: {error}")))?;
+        validate_full_restore_db_trust_boundary(&src)?;
+        scrub_full_restore_runtime_state(&src)?;
         db::rebuild_pending_fs_ops_for_restore(&src)?;
         db::insert_pending_fs_op(&src, &pending_restore_op)?;
         db::verify_pending_fs_op_present(&src, &pending_restore_id)?;
@@ -698,7 +726,16 @@ mod tests {
         legacy_manifest: bool,
     ) {
         let db_path = create_snapshot_db();
-        let db_bytes = std::fs::read(&db_path).expect("read db");
+        write_full_backup_zip_from_db(zip_path, &db_path, backup_tor_keys, legacy_manifest);
+    }
+
+    fn write_full_backup_zip_from_db(
+        zip_path: &std::path::Path,
+        db_path: &std::path::Path,
+        backup_tor_keys: Option<&[(&str, &str)]>,
+        legacy_manifest: bool,
+    ) {
+        let db_bytes = std::fs::read(db_path).expect("read db");
         let (tor_hidden_service_keys_included, tor_hidden_service_key_file_count) =
             backup_tor_keys.map_or((false, 0_u64), |files| (true, files.len() as u64));
         let manifest_json = if legacy_manifest {
@@ -752,6 +789,40 @@ mod tests {
             }
         }
         zip.finish().expect("finish zip");
+    }
+
+    fn restore_zip_into_temp_site(zip_path: &std::path::Path) -> (String, Vec<String>) {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        let fresh_sid = execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            None,
+            false,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect("restore should succeed");
+
+        let session_ids = live_conn
+            .prepare("SELECT id FROM admin_sessions ORDER BY id")
+            .expect("prepare session query")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query sessions")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect sessions");
+
+        (fresh_sid, session_ids)
     }
 
     fn read_tree(root: &std::path::Path) -> BTreeMap<String, String> {
@@ -907,6 +978,74 @@ mod tests {
             "Test restore",
         )
         .expect("restore should succeed without tor configuration");
+    }
+
+    #[test]
+    fn full_restore_purges_restored_admin_sessions_before_issuing_new_session() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = create_snapshot_db();
+        {
+            let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
+            conn.execute(
+                "INSERT INTO admin_users (id, username, password_hash)
+                 VALUES (1, 'restored-admin', 'restored-hash')",
+                [],
+            )
+            .expect("seed restored admin");
+            conn.execute(
+                "INSERT INTO admin_sessions (id, admin_id, expires_at)
+                 VALUES ('stale-session-from-backup', 1, unixepoch() + 86400)",
+                [],
+            )
+            .expect("seed stale session");
+        }
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip_from_db(&zip_path, &db_path, None, false);
+
+        let (fresh_sid, session_ids) = restore_zip_into_temp_site(&zip_path);
+
+        assert_eq!(session_ids, vec![fresh_sid]);
+    }
+
+    #[test]
+    fn full_restore_rejects_restored_board_short_name_that_would_escape_routes() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = create_snapshot_db();
+        {
+            let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
+            conn.execute("UPDATE boards SET short_name = '../admin'", [])
+                .expect("seed invalid board short name");
+        }
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip_from_db(&zip_path, &db_path, None, false);
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        let error = execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            None,
+            false,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect_err("restore should reject invalid restored board short name");
+
+        match error {
+            crate::error::AppError::BadRequest(message) => {
+                assert!(message.contains("Invalid board short name"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
     }
 
     #[test]

@@ -352,6 +352,10 @@ async fn worker_loop(
                                 )?;
                             }
                         }
+                        Err(ref e) if crate::db::is_stale_media_target_error(e) => {
+                            warn!("Worker {id}: job #{job_id} target is stale — {e}");
+                            crate::db::complete_job(&c, job_id)?;
+                        }
                         Err(ref e) => {
                             warn!("Worker {id}: job #{job_id} failed — {e}");
                             let failure_state = crate::db::fail_job(&c, job_id, &e.to_string())?;
@@ -807,7 +811,13 @@ fn transcode_video_finalise(
     };
 
     if let Err(e) = db_result {
-        let _ = std::fs::remove_file(webm_abs);
+        if let Err(cleanup_error) = std::fs::remove_file(webm_abs) {
+            warn!(
+                output = %webm_abs.display(),
+                error = %cleanup_error,
+                "VideoTranscode: failed to remove unattached WebM output"
+            );
+        }
         return Err(e);
     }
 
@@ -833,6 +843,7 @@ type WaveformPrepareParts = (
     PathBuf,
     String,
     PathBuf,
+    String,
     tempfile::NamedTempFile,
 );
 
@@ -851,7 +862,7 @@ async fn generate_waveform(
     let ffmpeg_timeout = Duration::from_secs(timeout_secs);
 
     // Phase 1: prepare (file I/O, temp file creation) — blocking.
-    let (args, png_abs, png_rel, src_path, tmp_png) = {
+    let (args, png_abs, png_rel, src_path, expected_file_path, tmp_png) = {
         let file_path2 = file_path.clone();
         let board_short2 = board_short.clone();
         tokio::task::spawn_blocking(move || waveform_prepare(&file_path2, &board_short2))
@@ -894,7 +905,15 @@ async fn generate_waveform(
 
     // Phase 3: persist + DB update — blocking.
     tokio::task::spawn_blocking(move || {
-        waveform_finalise(post_id, &png_abs, &png_rel, &src_path, tmp_png, &pool)
+        waveform_finalise(
+            post_id,
+            &png_abs,
+            &png_rel,
+            &src_path,
+            &expected_file_path,
+            tmp_png,
+            &pool,
+        )
     })
     .await
     .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform finalise: {e}"))?
@@ -956,7 +975,7 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
     .iter()
     .map(|s| (*s).to_string())
     .collect();
-    Ok((args, png_abs, png_rel, src, tmp_png))
+    Ok((args, png_abs, png_rel, src, file_path.to_string(), tmp_png))
 }
 
 /// Blocking finalise phase for [`generate_waveform`]: atomically persist the
@@ -966,6 +985,7 @@ fn waveform_finalise(
     png_abs: &std::path::Path,
     png_rel: &str,
     src_path: &std::path::Path,
+    expected_file_path: &str,
     tmp_png: tempfile::NamedTempFile,
     pool: &DbPool,
 ) -> Result<()> {
@@ -974,7 +994,18 @@ fn waveform_finalise(
         .persist(png_abs)
         .context("Failed to atomically rename waveform PNG into place")?;
     let conn = pool.get()?;
-    crate::db::update_post_thumb_path(&conn, post_id, png_rel)?;
+    if let Err(error) =
+        crate::db::update_post_thumb_path(&conn, post_id, expected_file_path, png_rel)
+    {
+        if let Err(cleanup_error) = std::fs::remove_file(png_abs) {
+            warn!(
+                output = %png_abs.display(),
+                error = %cleanup_error,
+                "AudioWaveform: failed to remove unattached waveform output"
+            );
+        }
+        return Err(error);
+    }
     // update dedup record with final thumb path.
     let audio_sha256 = sha256_file_hex(src_path)?;
     let _ = conn.execute(
@@ -1157,5 +1188,86 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
     }
     if deleted > 0 {
         tracing::info!(target: "workers", files_removed = deleted, freed_kib = deleted_bytes / 1024, remaining_kib = remaining / 1024, limit_kib = max_bytes / 1024, "Thumbnail cache eviction complete");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{transcode_video_finalise, waveform_finalise};
+    use std::io::Write;
+
+    fn file_hash_count(conn: &rusqlite::Connection, file_path: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM file_hashes WHERE file_path = ?1",
+            rusqlite::params![file_path],
+            |row| row.get(0),
+        )
+        .expect("file hash count")
+    }
+
+    #[test]
+    fn stale_transcode_finalise_removes_unattached_webm_and_writes_no_hash() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let board_dir = temp_dir.path().join("b");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        let src = board_dir.join("video.mp4");
+        std::fs::write(&src, b"source").expect("write source");
+        let webm_abs = board_dir.join("video.webm");
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".webm")
+            .tempfile_in(&board_dir)
+            .expect("temp webm");
+        tmp.write_all(b"webm").expect("write temp webm");
+        let pool = crate::db::init_test_pool().expect("test pool");
+
+        let error = transcode_video_finalise(
+            999,
+            "b/video.mp4",
+            &src,
+            &webm_abs,
+            "b/video.webm",
+            tmp,
+            &pool,
+        )
+        .expect_err("deleted transcode target rejected");
+
+        assert!(crate::db::is_stale_media_target_error(&error));
+        assert!(!webm_abs.exists());
+        let conn = pool.get().expect("db connection");
+        assert_eq!(file_hash_count(&conn, "b/video.webm"), 0);
+    }
+
+    #[test]
+    fn stale_waveform_finalise_removes_unattached_png_and_writes_no_hash() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let board_dir = temp_dir.path().join("b");
+        let thumbs_dir = board_dir.join("thumbs");
+        std::fs::create_dir_all(&thumbs_dir).expect("create thumbs dir");
+        let src = board_dir.join("audio.mp3");
+        std::fs::write(&src, b"source").expect("write source");
+        let png_abs = thumbs_dir.join("audio.png");
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".png")
+            .tempfile_in(&thumbs_dir)
+            .expect("temp png");
+        tmp.write_all(b"png").expect("write temp png");
+        let pool = crate::db::init_test_pool().expect("test pool");
+
+        let error = waveform_finalise(
+            999,
+            &png_abs,
+            "b/thumbs/audio.png",
+            &src,
+            "b/audio.mp3",
+            tmp,
+            &pool,
+        )
+        .expect_err("deleted waveform target rejected");
+
+        assert!(crate::db::is_stale_media_target_error(&error));
+        assert!(!png_abs.exists());
+        let conn = pool.get().expect("db connection");
+        assert_eq!(file_hash_count(&conn, "b/audio.mp3"), 0);
+        assert_eq!(file_hash_count(&conn, "b/thumbs/audio.png"), 0);
     }
 }

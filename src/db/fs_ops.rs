@@ -7,14 +7,6 @@ pub struct PendingFsOpRow {
     pub payload_json: String,
 }
 
-#[derive(Debug, Clone)]
-struct RestoredPendingFsOpRow {
-    id: String,
-    kind: String,
-    payload_json: String,
-    created_at: i64,
-}
-
 const CREATE_PENDING_FS_OPS_SQL: &str = r"
     CREATE TABLE IF NOT EXISTS pending_fs_ops (
         id           TEXT PRIMARY KEY,
@@ -107,15 +99,6 @@ pub fn rebuild_pending_fs_ops_for_restore(conn: &rusqlite::Connection) -> Result
         .context("Read pending_fs_ops objects failed")?;
     drop(object_stmt);
 
-    let preserved_rows = if object_types
-        .iter()
-        .any(|object_type| object_type == "table")
-    {
-        load_pending_fs_ops_for_restore(conn)?
-    } else {
-        Vec::new()
-    };
-
     for object_type in object_types {
         match object_type.as_str() {
             "table" => conn
@@ -132,46 +115,6 @@ pub fn rebuild_pending_fs_ops_for_restore(conn: &rusqlite::Connection) -> Result
     }
 
     ensure_pending_fs_ops_table(conn)?;
-    restore_pending_fs_ops_rows(conn, &preserved_rows)
-}
-
-fn load_pending_fs_ops_for_restore(
-    conn: &rusqlite::Connection,
-) -> Result<Vec<RestoredPendingFsOpRow>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, kind, payload_json, created_at
-             FROM pending_fs_ops
-             ORDER BY created_at ASC, id ASC",
-        )
-        .context("Prepare pending_fs_ops restore preservation failed")?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(RestoredPendingFsOpRow {
-                id: row.get(0)?,
-                kind: row.get(1)?,
-                payload_json: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })
-        .context("Query pending_fs_ops restore preservation failed")?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .context("Read pending_fs_ops restore preservation failed")?;
-    Ok(rows)
-}
-
-fn restore_pending_fs_ops_rows(
-    conn: &rusqlite::Connection,
-    rows: &[RestoredPendingFsOpRow],
-) -> Result<()> {
-    for row in rows {
-        conn.execute(
-            "INSERT INTO pending_fs_ops (id, kind, payload_json, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![&row.id, &row.kind, &row.payload_json, row.created_at],
-        )
-        .with_context(|| format!("Restore pending_fs_op {} failed", row.id))?;
-    }
     Ok(())
 }
 
@@ -228,8 +171,7 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn rebuild_pending_fs_ops_for_restore_preserves_legitimate_rows_and_allows_restore_swap_insert()
-    {
+    fn rebuild_pending_fs_ops_for_restore_discards_restored_rows_and_allows_restore_swap_insert() {
         let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
         conn.execute_batch(
             r#"
@@ -242,7 +184,8 @@ mod tests {
             INSERT INTO pending_fs_ops (id, kind, payload_json, created_at)
             VALUES
                 ('upload-finalize', 'upload_finalize', '{"stage_dir":"stage","relative_paths":["tech/file.webp"],"primary_hash":null,"primary_file_path":null,"primary_thumb_path":null,"primary_mime_type":null}', 10),
-                ('delete-files', 'delete_files', '{"paths":["tech/file.webp"]}', 20);
+                ('delete-files', 'delete_files', '{"paths":["tech/file.webp"]}', 20),
+                ('board-restore', 'board_restore_swap', '{"staged":"/tmp/evil-stage","live":"/tmp/evil-live","previous":"/tmp/evil-old"}', 30);
             CREATE TRIGGER pending_fs_ops_reseed
             AFTER INSERT ON pending_fs_ops
             BEGIN
@@ -255,16 +198,10 @@ mod tests {
 
         rebuild_pending_fs_ops_for_restore(&conn).expect("rebuild trusted table");
         let rebuilt_rows = list_pending_fs_ops(&conn).expect("list rebuilt ops");
-        let [upload_finalize, delete_files] = rebuilt_rows.as_slice() else {
-            panic!("expected two preserved pending ops");
-        };
-        assert_eq!(upload_finalize.id, "upload-finalize");
-        assert_eq!(
-            upload_finalize.kind,
-            crate::pending_fs::UPLOAD_FINALIZE_KIND
+        assert!(
+            rebuilt_rows.is_empty(),
+            "restored pending_fs_ops rows are untrusted and must be discarded"
         );
-        assert_eq!(delete_files.id, "delete-files");
-        assert_eq!(delete_files.kind, crate::pending_fs::DELETE_FILES_KIND);
 
         let restore_op = crate::pending_fs::PendingFsOpInsert {
             id: "expected-restore".into(),
@@ -275,19 +212,12 @@ mod tests {
 
         verify_pending_fs_op_present(&conn, &restore_op.id).expect("restore op present");
         let pending_ops = list_pending_fs_ops(&conn).expect("list ops");
-        assert_eq!(pending_ops.len(), 3);
+        assert_eq!(pending_ops.len(), 1);
         let unique_ids = pending_ops
             .iter()
             .map(|op| op.id.clone())
             .collect::<HashSet<_>>();
         assert_eq!(unique_ids.len(), pending_ops.len());
-        assert!(pending_ops
-            .iter()
-            .any(|op| op.id == "upload-finalize"
-                && op.kind == crate::pending_fs::UPLOAD_FINALIZE_KIND));
-        assert!(pending_ops
-            .iter()
-            .any(|op| op.id == "delete-files" && op.kind == crate::pending_fs::DELETE_FILES_KIND));
         assert!(pending_ops.iter().any(
             |op| op.id == restore_op.id && op.kind == crate::pending_fs::FULL_RESTORE_SWAP_KIND
         ));

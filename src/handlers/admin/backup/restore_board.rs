@@ -757,6 +757,7 @@ where
                 .map_err(|error| AppError::Internal(anyhow::anyhow!("Commit tx: {error}")))?;
             if let Err(error) = crate::pending_fs::finalize_board_restore_payload(
                 &workspace.pending_restore_payload,
+                Path::new(upload_dir),
             ) {
                 if let Err(restore_err) =
                     restore_db_from_snapshot(conn, &db_snapshot, restore_label)

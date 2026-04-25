@@ -15,7 +15,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn sanitize_board_short_value(board_short: &str) -> String {
     board_short
@@ -36,6 +36,53 @@ fn resolve_board_short_name(
             || sanitize_board_short_value(fallback_board),
             |board| board.short_name.clone(),
         )
+}
+
+fn validate_board_short_for_filesystem(short: &str) -> Result<()> {
+    let is_valid = !short.is_empty()
+        && short.len() <= 8
+        && short
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+    if !is_valid {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "Refusing to delete board upload directory for unsafe stored board short_name {short:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn checked_board_upload_dir(upload_dir: &str, short: &str) -> Result<PathBuf> {
+    validate_board_short_for_filesystem(short)?;
+    let upload_root = Path::new(upload_dir);
+    let checked_root = if upload_root.exists() {
+        upload_root.canonicalize().map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Canonicalize upload directory {} failed: {error}",
+                upload_root.display()
+            ))
+        })?
+    } else {
+        upload_root.to_path_buf()
+    };
+    let board_dir = checked_root.join(short);
+    if !board_dir.exists() {
+        return Ok(board_dir);
+    }
+    let canonical_board_dir = board_dir.canonicalize().map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Canonicalize board upload directory {} failed: {error}",
+            board_dir.display()
+        ))
+    })?;
+    if !canonical_board_dir.starts_with(&checked_root) {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "Refusing to delete board upload directory {} because it escapes upload root {}",
+            canonical_board_dir.display(),
+            checked_root.display()
+        )));
+    }
+    Ok(canonical_board_dir)
 }
 
 // ─── POST /admin/board/create ─────────────────────────────────────────────────
@@ -175,6 +222,10 @@ pub async fn delete_board(
                     )));
                 }
             }
+            let board_upload_dir = short_name
+                .as_deref()
+                .map(|short| checked_board_upload_dir(&upload_dir, short))
+                .transpose()?;
 
             // delete_board returns all file paths for posts in this board.
             let paths = db::delete_board(&conn, form.board_id).map_err(|error| {
@@ -201,8 +252,7 @@ pub async fn delete_board(
 
             // Remove the entire board upload directory — handles the thumbs/
             // sub-directory and any orphaned/untracked files too.
-            if let Some(short) = short_name {
-                let board_dir = PathBuf::from(&upload_dir).join(&short);
+            if let Some(board_dir) = board_upload_dir {
                 if board_dir.exists() {
                     if let Err(e) = std::fs::remove_dir_all(&board_dir) {
                         tracing::warn!("Could not remove board dir {:?}: {}", board_dir, e);
@@ -661,6 +711,49 @@ mod tests {
         assert_eq!(
             resolve_board_short_name(Some(std::slice::from_ref(&board)), 7, "fallback"),
             "tech"
+        );
+    }
+
+    #[test]
+    fn checked_board_upload_dir_rejects_traversal_short_name_without_touching_sentinel() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_dir = temp_dir.path().join("uploads");
+        let sentinel_dir = temp_dir.path().join("sentinel");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&sentinel_dir).expect("create sentinel");
+        std::fs::write(sentinel_dir.join("keep.txt"), "keep").expect("write sentinel");
+
+        let error =
+            checked_board_upload_dir(upload_dir.to_str().expect("utf8 upload dir"), "../sentinel")
+                .expect_err("traversal short name rejected");
+
+        assert!(error.to_string().contains("unsafe stored board short_name"));
+        assert_eq!(
+            std::fs::read_to_string(sentinel_dir.join("keep.txt")).expect("read sentinel"),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn checked_board_upload_dir_allows_valid_board_under_upload_root_only() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_dir = temp_dir.path().join("uploads");
+        let board_dir = upload_dir.join("tech");
+        let other_dir = upload_dir.join("other");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::create_dir_all(&other_dir).expect("create other dir");
+        std::fs::write(board_dir.join("old.txt"), "old").expect("write board file");
+        std::fs::write(other_dir.join("keep.txt"), "keep").expect("write other file");
+
+        let checked =
+            checked_board_upload_dir(upload_dir.to_str().expect("utf8 upload dir"), "tech")
+                .expect("valid board path");
+        std::fs::remove_dir_all(&checked).expect("remove checked board dir");
+
+        assert!(!board_dir.exists());
+        assert_eq!(
+            std::fs::read_to_string(other_dir.join("keep.txt")).expect("read other file"),
+            "keep"
         );
     }
 

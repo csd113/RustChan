@@ -168,6 +168,41 @@ fn restore_board_banner_inheritance_if_empty(
     Ok(())
 }
 
+fn delete_banner_asset_safely(
+    conn: &rusqlite::Connection,
+    banner_id: i64,
+) -> Result<crate::models::BannerAsset> {
+    let asset = db::get_banner_asset(conn, banner_id)?
+        .ok_or_else(|| AppError::BadRequest("Banner not found.".into()))?;
+    banner::delete_banner_asset_file(&asset)?;
+    db::delete_banner_asset(conn, banner_id)?;
+    if asset.scope == BannerScope::Board {
+        restore_board_banner_inheritance_if_empty(conn, asset.board_id)?;
+    }
+    Ok(asset)
+}
+
+fn clear_board_banner_assets_safely(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+) -> Result<(String, Vec<crate::models::BannerAsset>)> {
+    let board_short: String = conn.query_row(
+        "SELECT short_name FROM boards WHERE id = ?1",
+        rusqlite::params![board_id],
+        |row| row.get(0),
+    )?;
+    let assets = db::list_banner_assets_for_board(conn, board_id)?;
+    for asset in &assets {
+        banner::delete_banner_asset_file(asset)?;
+    }
+    db::delete_board_banner_assets(conn, board_id)?;
+    conn.execute(
+        "UPDATE boards SET banner_mode = 'inherit' WHERE id = ?1 AND banner_mode = 'override'",
+        rusqlite::params![board_id],
+    )?;
+    Ok((board_short, assets))
+}
+
 async fn upload_banner_for_scope(
     state: AppState,
     session_id: Option<String>,
@@ -476,11 +511,7 @@ pub async fn delete_banner(
         move || -> Result<String> {
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            let asset = db::delete_banner_asset(&conn, form.banner_id)?;
-            banner::delete_banner_asset_file(&asset)?;
-            if asset.scope == BannerScope::Board {
-                restore_board_banner_inheritance_if_empty(&conn, asset.board_id)?;
-            }
+            let asset = delete_banner_asset_safely(&conn, form.banner_id)?;
             Ok(banner::banner_admin_anchor(
                 asset.scope,
                 asset.board_short.as_deref(),
@@ -553,19 +584,7 @@ pub async fn clear_board_banner_override(
         move || -> Result<String> {
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            let board_short: String = conn.query_row(
-                "SELECT short_name FROM boards WHERE id = ?1",
-                rusqlite::params![form.board_id],
-                |row| row.get(0),
-            )?;
-            let assets = db::delete_board_banner_assets(&conn, form.board_id)?;
-            for asset in &assets {
-                banner::delete_banner_asset_file(asset)?;
-            }
-            conn.execute(
-                "UPDATE boards SET banner_mode = 'inherit' WHERE id = ?1 AND banner_mode = 'override'",
-                rusqlite::params![form.board_id],
-            )?;
+            let (board_short, _assets) = clear_board_banner_assets_safely(&conn, form.board_id)?;
             Ok(board_short)
         }
     })
@@ -581,7 +600,10 @@ pub async fn clear_board_banner_override(
 
 #[cfg(test)]
 mod tests {
-    use super::restore_board_banner_inheritance_if_empty;
+    use super::{
+        clear_board_banner_assets_safely, delete_banner_asset_safely,
+        restore_board_banner_inheritance_if_empty,
+    };
 
     fn board_banner_mode(conn: &rusqlite::Connection, board_id: i64) -> String {
         conn.query_row(
@@ -641,5 +663,104 @@ mod tests {
         restore_board_banner_inheritance_if_empty(&conn, Some(board_id)).expect("keep override");
 
         assert_eq!(board_banner_mode(&conn, board_id), "override");
+    }
+
+    fn banner_asset_path(
+        scope: crate::models::BannerScope,
+        board_short: Option<&str>,
+        storage_key: &str,
+    ) -> std::path::PathBuf {
+        crate::banner::banner_storage_path(scope, board_short, storage_key)
+            .expect("banner storage path")
+    }
+
+    #[test]
+    fn failed_global_banner_file_delete_keeps_db_row_for_retry() {
+        let state = crate::test_support::app_state();
+        let conn = state.db.get().expect("db connection");
+        let storage_key = uuid::Uuid::new_v4().simple().to_string();
+        let path = banner_asset_path(crate::models::BannerScope::Global, None, &storage_key);
+        std::fs::create_dir_all(path.parent().expect("banner parent")).expect("create parent");
+        std::fs::write(&path, b"webp").expect("write webp");
+        let gif_path = path.with_extension("gif");
+        std::fs::create_dir_all(&gif_path).expect("create undeletable gif dir");
+
+        let banner_id = crate::db::insert_banner_asset(
+            &conn,
+            crate::models::BannerScope::Global,
+            None,
+            &storage_key,
+            468,
+            60,
+            4,
+            true,
+            1,
+            crate::models::BannerTargetType::None,
+            "",
+            true,
+            true,
+        )
+        .expect("insert banner");
+
+        let error =
+            delete_banner_asset_safely(&conn, banner_id).expect_err("gif dir delete should fail");
+        assert!(error.to_string().contains("remove"));
+        assert!(crate::db::get_banner_asset(&conn, banner_id)
+            .expect("reload banner")
+            .is_some());
+
+        std::fs::remove_dir_all(&gif_path).expect("remove gif dir");
+        std::fs::write(&gif_path, b"gif").expect("write gif");
+        delete_banner_asset_safely(&conn, banner_id).expect("retry delete banner");
+        assert!(!path.exists());
+        assert!(!gif_path.exists());
+        assert!(crate::db::get_banner_asset(&conn, banner_id)
+            .expect("reload banner")
+            .is_none());
+    }
+
+    #[test]
+    fn failed_board_banner_clear_keeps_rows_for_retry() {
+        let state = crate::test_support::app_state();
+        let conn = state.db.get().expect("db connection");
+        let board_id =
+            crate::db::create_board(&conn, "bb", "Board", "", false).expect("create board");
+        let storage_key = uuid::Uuid::new_v4().simple().to_string();
+        let path = banner_asset_path(crate::models::BannerScope::Board, Some("bb"), &storage_key);
+        std::fs::create_dir_all(path.parent().expect("banner parent")).expect("create parent");
+        std::fs::write(&path, b"webp").expect("write webp");
+        let gif_path = path.with_extension("gif");
+        std::fs::create_dir_all(&gif_path).expect("create undeletable gif dir");
+
+        let banner_id = crate::db::insert_banner_asset(
+            &conn,
+            crate::models::BannerScope::Board,
+            Some(board_id),
+            &storage_key,
+            468,
+            60,
+            4,
+            true,
+            1,
+            crate::models::BannerTargetType::None,
+            "",
+            true,
+            true,
+        )
+        .expect("insert board banner");
+
+        clear_board_banner_assets_safely(&conn, board_id).expect_err("gif dir delete should fail");
+        assert!(crate::db::get_banner_asset(&conn, banner_id)
+            .expect("reload banner")
+            .is_some());
+
+        std::fs::remove_dir_all(&gif_path).expect("remove gif dir");
+        std::fs::write(&gif_path, b"gif").expect("write gif");
+        clear_board_banner_assets_safely(&conn, board_id).expect("retry clear board banners");
+        assert!(!path.exists());
+        assert!(!gif_path.exists());
+        assert!(crate::db::get_banner_asset(&conn, banner_id)
+            .expect("reload banner")
+            .is_none());
     }
 }

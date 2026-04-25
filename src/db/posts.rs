@@ -10,6 +10,7 @@ use crate::models::Post;
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 use std::collections::HashMap;
+use std::fmt;
 
 // ─── Retry budget constant ────────────────────────────────────────────────────
 
@@ -1272,12 +1273,19 @@ pub fn count_posts_by_media_processing_state(
 pub fn update_post_thumb_path(
     conn: &rusqlite::Connection,
     post_id: i64,
+    expected_file_path: &str,
     thumb_path: &str,
 ) -> Result<()> {
-    conn.execute(
-        "UPDATE posts SET thumb_path = ?1 WHERE id = ?2",
-        params![thumb_path, post_id],
+    let updated = conn.execute(
+        "UPDATE posts SET thumb_path = ?1 WHERE id = ?2 AND file_path = ?3",
+        params![thumb_path, post_id, expected_file_path],
     )?;
+    if updated == 0 {
+        return Err(anyhow::Error::new(StaleMediaTargetError {
+            post_id,
+            expected_path: expected_file_path.to_string(),
+        }));
+    }
     Ok(())
 }
 
@@ -1314,16 +1322,26 @@ pub fn replace_transcoded_media(
         .context("Failed to begin transcode media replacement transaction")?;
 
     let result: anyhow::Result<()> = (|| {
+        let target_exists = conn
+            .query_row(
+                "SELECT 1 FROM posts WHERE id = ?1 AND file_path = ?2 LIMIT 1",
+                params![post_id, old_path],
+                |_row| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !target_exists {
+            return Err(anyhow::Error::new(StaleMediaTargetError {
+                post_id,
+                expected_path: old_path.to_string(),
+            }));
+        }
+
         let updated = conn.execute(
             "UPDATE posts SET file_path = ?1, mime_type = ?2 WHERE file_path = ?3",
             params![new_path, new_mime, old_path],
         )?;
-        if updated == 0 {
-            conn.execute(
-                "UPDATE posts SET file_path = ?1, mime_type = ?2 WHERE id = ?3",
-                params![new_path, new_mime, post_id],
-            )?;
-        }
+        debug_assert!(updated > 0, "target_exists guarantees at least one update");
 
         let thumb_path = get_post_thumb_path(conn, post_id)?.unwrap_or_default();
         conn.execute(
@@ -1347,6 +1365,29 @@ pub fn replace_transcoded_media(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleMediaTargetError {
+    pub post_id: i64,
+    pub expected_path: String,
+}
+
+impl fmt::Display for StaleMediaTargetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "media target for post {} is stale or deleted; expected path {}",
+            self.post_id, self.expected_path
+        )
+    }
+}
+
+impl std::error::Error for StaleMediaTargetError {}
+
+#[must_use]
+pub fn is_stale_media_target_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<StaleMediaTargetError>().is_some()
+}
+
 /// Remove a file-hash record for a path that is being rolled back.
 ///
 /// # Errors
@@ -1363,8 +1404,10 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 mod tests {
     use super::{
         count_posts_by_media_processing_state, count_search_results, get_post, get_post_submission,
-        get_posts_for_thread, record_post_submission, search_posts, search_terms, self_delete_post,
-        set_post_media_processing_state, to_fts_query, SelfDeleteOutcome, MEDIA_PROCESSING_FAILED,
+        get_posts_for_thread, is_stale_media_target_error, record_post_submission,
+        replace_transcoded_media, search_posts, search_terms, self_delete_post,
+        set_post_media_processing_state, to_fts_query, update_post_thumb_path, SelfDeleteOutcome,
+        MEDIA_PROCESSING_FAILED,
     };
     use crate::db::{
         create_board, create_reply_with_thread_update, create_thread_with_optional_poll,
@@ -1410,6 +1453,39 @@ mod tests {
             create_thread_with_optional_poll(conn, board.id, None, &post, "", None, None)
                 .expect("create thread");
         assert!(thread_id > 0);
+        post_id
+    }
+
+    fn seed_media_post(conn: &Connection, board_short: &str, file_path: &str) -> i64 {
+        create_board(conn, board_short, board_short, "", false).expect("create board");
+        let board = get_board_by_short(conn, board_short)
+            .expect("load board")
+            .expect("board exists");
+        let post = NewPost {
+            thread_id: 0,
+            board_id: board.id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some(format!("{board_short} subject")),
+            body: "media body".to_string(),
+            body_html: "media body".to_string(),
+            ip_hash: None,
+            file_path: Some(file_path.to_string()),
+            file_name: Some("media".to_string()),
+            file_size: Some(10),
+            thumb_path: None,
+            mime_type: Some("video/mp4".to_string()),
+            media_type: Some("video".to_string()),
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: true,
+        };
+        let (_thread_id, post_id, _) =
+            create_thread_with_optional_poll(conn, board.id, None, &post, "", None, None)
+                .expect("create media thread");
         post_id
     }
 
@@ -1567,6 +1643,56 @@ mod tests {
                 .expect("count failed after clear"),
             0
         );
+    }
+
+    #[test]
+    fn update_post_thumb_path_requires_matching_post_and_file_path() {
+        let conn = test_conn();
+        let post_id = seed_media_post(&conn, "thumbz", "thumbz/audio.mp3");
+
+        let error = update_post_thumb_path(
+            &conn,
+            post_id,
+            "thumbz/deleted-or-replaced.mp3",
+            "thumbz/thumbs/audio.png",
+        )
+        .expect_err("stale thumb update rejected");
+
+        assert!(is_stale_media_target_error(&error));
+        let post = get_post(&conn, post_id)
+            .expect("lookup post")
+            .expect("post exists");
+        assert!(post.thumb_path.is_none());
+    }
+
+    #[test]
+    fn replace_transcoded_media_requires_matching_post_and_file_path() {
+        let conn = test_conn();
+        let post_id = seed_media_post(&conn, "trans", "trans/video.mp4");
+
+        let error = replace_transcoded_media(
+            &conn,
+            post_id,
+            "trans/deleted-or-replaced.mp4",
+            "trans/video.webm",
+            "video/webm",
+            "deadbeef",
+        )
+        .expect_err("stale transcode update rejected");
+
+        assert!(is_stale_media_target_error(&error));
+        let post = get_post(&conn, post_id)
+            .expect("lookup post")
+            .expect("post exists");
+        assert_eq!(post.file_path.as_deref(), Some("trans/video.mp4"));
+        let hash_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_hashes WHERE file_path = ?1",
+                rusqlite::params!["trans/video.webm"],
+                |row| row.get(0),
+            )
+            .expect("file hash count");
+        assert_eq!(hash_count, 0);
     }
 
     #[test]
