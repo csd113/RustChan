@@ -459,6 +459,10 @@ fn render_catalog_card(
 <a class="catalog-card-link" href="/{board}/thread/{thread_id}">
   {thumb}
 </a>
+<div class="catalog-meta-row">
+  <span class="catalog-replies">R: {replies} / F: {images}</span>
+  {actions}
+</div>
 <a class="catalog-card-link" href="/{board}/thread/{thread_id}">
   <div class="catalog-info">
     {subject}
@@ -466,10 +470,6 @@ fn render_catalog_card(
   </div>
 </a>
 {activity_row}
-<div class="catalog-meta-row">
-  <span class="catalog-replies">R: {replies} / F: {images}</span>
-  {actions}
-</div>
 </div>"#,
         sticky = if thread.sticky { " sticky" } else { "" },
         pinned_class = if is_pinned { " is-pinned" } else { "" },
@@ -1673,7 +1673,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_reply_counter_renders_after_body_content() {
+    fn catalog_reply_counter_renders_above_body_content() {
         let board = sample_board();
         let thread = sample_thread();
 
@@ -1699,13 +1699,13 @@ mod tests {
             .expect("meta row should exist");
 
         assert!(
-            thumb_idx < info_idx && info_idx < meta_idx,
-            "reply counter should render after the title/body block"
+            thumb_idx < meta_idx && meta_idx < info_idx,
+            "reply counter should render above the title/body block"
         );
     }
 
     #[test]
-    fn catalog_activity_badge_renders_between_body_and_reply_counter() {
+    fn catalog_activity_badge_renders_after_body_content() {
         let board = sample_board();
         let thread = sample_thread();
 
@@ -1729,16 +1729,13 @@ mod tests {
         let badge_idx = html
             .find("catalog-activity-badge")
             .expect("badge should exist");
-        let replies_idx = html
-            .find("catalog-replies")
-            .expect("reply counter should exist");
         let subject_idx = html.find("catalog-subject").expect("subject should exist");
         let meta_idx = html
             .find("catalog-meta-row")
             .expect("reply counter container should exist");
 
-        assert!(info_idx < badge_row_idx && badge_row_idx < meta_idx);
-        assert!(subject_idx < badge_idx && badge_idx < replies_idx);
+        assert!(meta_idx < info_idx && info_idx < badge_row_idx);
+        assert!(subject_idx < badge_idx);
         assert!(html.contains(r#"<div class="catalog-activity-row"><span class="new-activity-badge catalog-activity-badge">"#));
         assert!(html.contains(r#"<div class="catalog-meta-row">"#));
     }

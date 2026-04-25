@@ -999,6 +999,9 @@ async fn thread_badge_markup_sits_between_catalog_info_and_counters() {
         .await
         .expect("response");
     let body = response_body_string(response).await;
+    let meta_idx = body
+        .find("catalog-meta-row")
+        .expect("catalog meta row present");
     let info_idx = body.find("catalog-info").expect("catalog info present");
     let badge_row_idx = body
         .find("catalog-activity-row")
@@ -1006,16 +1009,10 @@ async fn thread_badge_markup_sits_between_catalog_info_and_counters() {
     let badge_idx = body
         .find("catalog-activity-badge")
         .expect("catalog badge present");
-    let replies_idx = body
-        .find("catalog-replies")
-        .expect("catalog replies present");
-    let meta_idx = body
-        .find("catalog-meta-row")
-        .expect("catalog meta row present");
 
+    assert!(meta_idx < info_idx);
     assert!(info_idx < badge_row_idx);
-    assert!(badge_row_idx < meta_idx);
-    assert!(badge_idx < replies_idx);
+    assert!(badge_idx > info_idx);
 }
 
 #[tokio::test]
