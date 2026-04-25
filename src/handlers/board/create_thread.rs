@@ -164,12 +164,13 @@ pub async fn create_thread(
         }
     };
 
-    let jar = remember_owned_post(
+    let jar = remember_owned_post_until(
         jar,
         &submit_result.board_short,
         submit_result.thread_id,
         submit_result.post_id,
         &submit_result.deletion_token,
+        submit_result.created_at + SELF_DELETE_WINDOW_SECS,
     );
 
     if xhr_request {

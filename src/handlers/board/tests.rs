@@ -218,12 +218,14 @@ async fn post_password_board_write_actions_require_unlock() {
                     header::COOKIE,
                     format!(
                         "csrf_token=csrf123; rustchan_owned_posts={}",
-                        crate::handlers::board::remember_owned_post(
+                        crate::handlers::board::remember_owned_post_until(
                             axum_extra::extract::cookie::CookieJar::new(),
                             "secret",
                             thread_id,
                             post_id,
                             "edit-token",
+                            chrono::Utc::now().timestamp()
+                                + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
                         )
                         .get("rustchan_owned_posts")
                         .expect("owned posts cookie")
@@ -351,12 +353,13 @@ async fn self_delete_requires_owned_post_cookie() {
         .expect("response");
     assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
 
-    let owned_cookie_jar = crate::handlers::board::remember_owned_post(
+    let owned_cookie_jar = crate::handlers::board::remember_owned_post_until(
         axum_extra::extract::cookie::CookieJar::new(),
         "test",
         thread_id,
         reply_id,
         "reply-token",
+        chrono::Utc::now().timestamp() + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
     );
     let owned_cookie = owned_cookie_jar
         .get("rustchan_owned_posts")

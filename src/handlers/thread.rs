@@ -332,12 +332,13 @@ pub async fn post_reply(
         }
     };
 
-    let jar = crate::handlers::board::remember_owned_post(
+    let jar = crate::handlers::board::remember_owned_post_until(
         jar,
         &submit_result.board_short,
         submit_result.thread_id,
         submit_result.post_id,
         &submit_result.deletion_token,
+        submit_result.created_at + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
     );
 
     if xhr_request {
@@ -361,6 +362,7 @@ struct SelfActionPostContext {
     thread: crate::models::Thread,
     post: crate::models::Post,
     can_post: bool,
+    thread_allows_self_actions: bool,
 }
 
 async fn load_self_action_post_context(
@@ -398,6 +400,9 @@ async fn load_self_action_post_context(
                 thread,
                 post,
                 can_post: access_context.can_post,
+                thread_allows_self_actions: db::posts::post_thread_allows_self_actions(
+                    &conn, post_id,
+                )?,
             })
         }
     })
@@ -478,6 +483,11 @@ pub async fn edit_post_get(
     if !context.board.allow_editing {
         return Err(AppError::Forbidden(
             "Users cannot edit their own posts on this board.".into(),
+        ));
+    }
+    if !context.thread_allows_self_actions {
+        return Err(AppError::Forbidden(
+            "Self-actions are not available after a thread is locked or archived.".into(),
         ));
     }
 
@@ -744,6 +754,11 @@ pub async fn delete_post_get(
             "Users cannot delete their own posts on this board.".into(),
         ));
     }
+    if !context.thread_allows_self_actions {
+        return Err(AppError::Forbidden(
+            "Self-actions are not available after a thread is locked or archived.".into(),
+        ));
+    }
 
     let now = chrono::Utc::now().timestamp();
     if now
@@ -913,6 +928,9 @@ pub async fn delete_own_post(
         )),
         crate::db::posts::SelfDeleteOutcome::WindowClosed => Err(AppError::Forbidden(
             "The 60-second self-delete window for this post has closed.".into(),
+        )),
+        crate::db::posts::SelfDeleteOutcome::ThreadClosed => Err(AppError::Forbidden(
+            "Self-actions are not available after a thread is locked or archived.".into(),
         )),
         crate::db::posts::SelfDeleteOutcome::ThreadHasReplies => Err(AppError::Forbidden(
             "You can only self-delete a thread starter before anyone replies.".into(),
@@ -1319,12 +1337,13 @@ mod tests {
         }
         drop(conn);
 
-        let jar = crate::handlers::board::remember_owned_post(
+        let jar = crate::handlers::board::remember_owned_post_until(
             axum_extra::extract::cookie::CookieJar::new(),
             "test",
             thread_id,
             post_id,
             "edit-token",
+            chrono::Utc::now().timestamp() + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
         );
         let cookie = jar
             .get("rustchan_owned_posts")
@@ -1332,6 +1351,20 @@ mod tests {
             .value()
             .to_string();
         (thread_id, post_id, cookie)
+    }
+
+    fn set_thread_state(
+        state: &crate::middleware::AppState,
+        thread_id: i64,
+        locked: bool,
+        archived: bool,
+    ) {
+        let conn = state.db.get().expect("db connection");
+        conn.execute(
+            "UPDATE threads SET locked = ?1, archived = ?2 WHERE id = ?3",
+            rusqlite::params![i64::from(locked), i64::from(archived), thread_id],
+        )
+        .expect("update thread state");
     }
 
     #[tokio::test]
@@ -1977,6 +2010,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_get_fails_when_thread_is_locked() {
+        let state = crate::test_support::app_state();
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        set_thread_state(&state, thread_id, true, false);
+        let router = Router::new()
+            .route("/{board}/post/{id}/edit", get(super::edit_post_get))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/test/post/{post_id}/edit"))
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn edit_fails_when_thread_is_archived() {
+        let state = crate::test_support::app_state();
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        set_thread_state(&state, thread_id, false, true);
+        let router = Router::new()
+            .route("/{board}/post/{id}/edit", post(super::edit_post_post))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/test/post/{post_id}/edit"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from("body=edited+body&_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-rustchan-error-status")
+                .and_then(|value| value.to_str().ok()),
+            Some(StatusCode::FORBIDDEN.as_str())
+        );
+    }
+
+    #[tokio::test]
     async fn edit_and_delete_toggles_are_independent() {
         let state = crate::test_support::app_state();
         let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, false, 0);
@@ -2259,6 +2357,71 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_get_fails_when_thread_is_locked() {
+        let state = crate::test_support::app_state();
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        set_thread_state(&state, thread_id, true, false);
+        let router = Router::new()
+            .route("/{board}/post/{id}/delete", get(super::delete_post_get))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/test/post/{post_id}/delete"))
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_fails_when_thread_is_archived() {
+        let state = crate::test_support::app_state();
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        set_thread_state(&state, thread_id, false, true);
+        let router = Router::new()
+            .route("/{board}/post/{id}/delete", post(super::delete_own_post))
+            .with_state(state.clone());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/test/post/{post_id}/delete"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(
+                        header::COOKIE,
+                        format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
+                    )
+                    .body(Body::from("_csrf=csrf123"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let conn = state.db.get().expect("db connection");
+        let remaining_posts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("remaining posts");
+        assert_eq!(remaining_posts, 1);
     }
 
     #[tokio::test]

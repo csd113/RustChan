@@ -544,7 +544,29 @@ pub enum SelfDeleteOutcome {
     NotFound,
     WrongToken,
     WindowClosed,
+    ThreadClosed,
     ThreadHasReplies,
+}
+
+/// Return whether a post's parent thread is currently open for self-actions.
+///
+/// # Errors
+/// Returns an error if the database query fails.
+pub fn post_thread_allows_self_actions(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+) -> crate::error::Result<bool> {
+    let flags: Option<(bool, bool)> = conn
+        .query_row(
+            "SELECT t.locked, t.archived
+             FROM posts p
+             JOIN threads t ON t.id = p.thread_id
+             WHERE p.id = ?1",
+            params![post_id],
+            |row| Ok((row.get::<_, i32>(0)? != 0, row.get::<_, i32>(1)? != 0)),
+        )
+        .optional()?;
+    Ok(flags.is_some_and(|(locked, archived)| !locked && !archived))
 }
 
 /// Delete a post owned by the caller during the short self-delete grace window.
@@ -565,11 +587,13 @@ pub fn self_delete_post(
 
     let result: crate::error::Result<(SelfDeleteOutcome, Option<crate::db::DeletePathsResult>)> =
         (|| {
-            let row: Option<(i64, bool, String, i64)> = conn
+            let row: Option<(i64, bool, String, i64, bool, bool)> = conn
                 .query_row(
-                    "SELECT thread_id, is_op, deletion_token, created_at
-                     FROM posts
-                     WHERE id = ?1",
+                    "SELECT p.thread_id, p.is_op, p.deletion_token, p.created_at,
+                            t.locked, t.archived
+                     FROM posts p
+                     JOIN threads t ON t.id = p.thread_id
+                     WHERE p.id = ?1",
                     params![post_id],
                     |r| {
                         Ok((
@@ -577,12 +601,14 @@ pub fn self_delete_post(
                             r.get::<_, i32>(1)? != 0,
                             r.get::<_, String>(2)?,
                             r.get::<_, i64>(3)?,
+                            r.get::<_, i32>(4)? != 0,
+                            r.get::<_, i32>(5)? != 0,
                         ))
                     },
                 )
                 .optional()?;
 
-            let Some((thread_id, is_op, stored_token, created_at)) = row else {
+            let Some((thread_id, is_op, stored_token, created_at, locked, archived)) = row else {
                 return Ok((SelfDeleteOutcome::NotFound, None));
             };
 
@@ -593,6 +619,10 @@ pub fn self_delete_post(
             let now = chrono::Utc::now().timestamp();
             if now.saturating_sub(created_at) > delete_window_secs {
                 return Ok((SelfDeleteOutcome::WindowClosed, None));
+            }
+
+            if locked || archived {
+                return Ok((SelfDeleteOutcome::ThreadClosed, None));
             }
 
             if is_op {
@@ -666,15 +696,25 @@ pub fn edit_post(
 
     let result: Result<bool> = (|| {
         // Fetch token and created_at in a single round-trip.
-        let row: Option<(String, i64)> = conn
+        let row: Option<(String, i64, bool, bool)> = conn
             .query_row(
-                "SELECT deletion_token, created_at FROM posts WHERE id = ?1",
+                "SELECT p.deletion_token, p.created_at, t.locked, t.archived
+                 FROM posts p
+                 JOIN threads t ON t.id = p.thread_id
+                 WHERE p.id = ?1",
                 params![post_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get::<_, i32>(2)? != 0,
+                        r.get::<_, i32>(3)? != 0,
+                    ))
+                },
             )
             .optional()?;
 
-        let Some((stored_token, created_at)) = row else {
+        let Some((stored_token, created_at, locked, archived)) = row else {
             return Ok(false); // post does not exist
         };
 
@@ -684,6 +724,10 @@ pub fn edit_post(
 
         let now = chrono::Utc::now().timestamp();
         if now.saturating_sub(created_at) > window {
+            return Ok(false);
+        }
+
+        if locked || archived {
             return Ok(false);
         }
 

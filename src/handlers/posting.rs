@@ -59,6 +59,7 @@ pub struct SubmitPostResult {
     pub thread_id: i64,
     pub post_id: i64,
     pub deletion_token: String,
+    pub created_at: i64,
 }
 
 pub struct UploadConfig<'a> {
@@ -461,6 +462,7 @@ pub fn submit_post(
             thread_id: existing.thread_id,
             post_id: existing.post_id,
             deletion_token: stored_post.deletion_token,
+            created_at: stored_post.created_at,
         });
     }
 
@@ -661,12 +663,16 @@ pub fn submit_post(
         tracing::info!(target: "board", post_id = post_id, thread_id = thread_id, board = %board.short_name, "Reply posted");
     }
 
+    let stored_post = db::get_post(conn, post_id)?
+        .ok_or_else(|| AppError::NotFound("Posted row not found.".into()))?;
+
     Ok(SubmitPostResult {
         redirect_url,
         board_short: board.short_name,
         thread_id,
         post_id,
         deletion_token,
+        created_at: stored_post.created_at,
     })
 }
 
@@ -1125,6 +1131,14 @@ mod tests {
         )
         .expect("first submission");
 
+        let original_created_at =
+            chrono::Utc::now().timestamp() - crate::handlers::board::SELF_DELETE_WINDOW_SECS - 1;
+        conn.execute(
+            "UPDATE posts SET created_at = ?1",
+            rusqlite::params![original_created_at],
+        )
+        .expect("age original post");
+
         let duplicate = submit_post(
             &conn,
             state.job_queue.as_ref(),
@@ -1157,6 +1171,12 @@ mod tests {
         assert_eq!(
             duplicate.redirect_url,
             format!("/{TEST_BOARD}/thread/{thread_id}#p{op_post_id}")
+        );
+        assert_eq!(duplicate.created_at, original_created_at);
+        assert!(
+            duplicate.created_at + crate::handlers::board::SELF_DELETE_WINDOW_SECS
+                <= chrono::Utc::now().timestamp(),
+            "duplicate self-action expiry should stay tied to the original post"
         );
         assert_eq!(thread_count, 1);
         assert_eq!(post_count, 1);

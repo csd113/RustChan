@@ -92,14 +92,18 @@ pub fn owned_post_grant_from_jar(
         .find(|grant| grant.post_id == post_id && grant.board_short == board_short)
 }
 
-pub fn remember_owned_post(
+pub fn remember_owned_post_until(
     jar: CookieJar,
     board_short: &str,
     thread_id: i64,
     post_id: i64,
     deletion_token: &str,
+    expires_at: i64,
 ) -> CookieJar {
-    let now = chrono::Utc::now().timestamp();
+    if expires_at <= chrono::Utc::now().timestamp() {
+        return forget_owned_post(jar, board_short, post_id);
+    }
+
     let mut grants = owned_post_grants_from_jar(&jar)
         .into_iter()
         .filter(|grant| grant.post_id != post_id)
@@ -109,7 +113,7 @@ pub fn remember_owned_post(
         thread_id,
         board_short: board_short.to_string(),
         deletion_token: deletion_token.to_string(),
-        expires_at: now + SELF_DELETE_WINDOW_SECS,
+        expires_at,
     });
     grants.sort_by(|a, b| {
         b.expires_at
@@ -617,7 +621,10 @@ pub async fn update_thread_preference(
 
 #[cfg(test)]
 mod tests {
-    use super::{owned_posts_cookie, OwnedPostGrant, SELF_DELETE_WINDOW_SECS};
+    use super::{
+        owned_post_grants_from_jar, owned_posts_cookie, remember_owned_post_until, OwnedPostGrant,
+        SELF_DELETE_WINDOW_SECS,
+    };
     use axum_extra::extract::cookie::SameSite;
 
     #[test]
@@ -638,5 +645,19 @@ mod tests {
         assert_eq!(cookie.secure(), Some(crate::config::CONFIG.https_cookies));
         assert_eq!(cookie.domain(), None, "cookie should remain host-only");
         assert_eq!(cookie.max_age(), Some(time::Duration::minutes(5)));
+    }
+
+    #[test]
+    fn expired_owned_post_replay_does_not_mint_fresh_grant() {
+        let jar = remember_owned_post_until(
+            axum_extra::extract::cookie::CookieJar::new(),
+            "test",
+            1,
+            2,
+            "token",
+            chrono::Utc::now().timestamp() - 1,
+        );
+
+        assert!(owned_post_grants_from_jar(&jar).is_empty());
     }
 }
