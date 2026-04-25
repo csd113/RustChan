@@ -178,6 +178,8 @@ struct SettingsFile {
     forum_name: Option<String>,
     /// Home page subtitle shown below the site name.
     site_subtitle: Option<String>,
+    /// Initial state for browser-local new-activity badges.
+    new_activity_notifications_enabled: Option<bool>,
     /// Default theme served to first-time visitors before they pick one.
     /// Valid values include built-ins and admin-created custom theme slugs.
     default_theme: Option<String>,
@@ -400,6 +402,10 @@ pub struct Config {
     /// Initial subtitle shown on the home page; seeds the DB on first run and
     /// then the Admin -> Site Settings DB value becomes the live source of truth.
     pub initial_site_subtitle: String,
+    /// Initial state for browser-local new-activity badges; seeds the DB on
+    /// first run and then the Admin -> Site Settings DB value becomes the live
+    /// source of truth.
+    pub initial_new_activity_notifications_enabled: bool,
     /// Initial default theme slug; seeds the DB on first run and later the
     /// Admin -> Site Settings DB value becomes the live source of truth.
     /// Valid: built-in or custom theme slug present in the themes table.
@@ -516,6 +522,10 @@ impl Config {
                 .as_deref()
                 .unwrap_or("select board to proceed"),
         );
+        let initial_new_activity_notifications_enabled = env_bool(
+            "CHAN_NEW_ACTIVITY_NOTIFICATIONS",
+            s.new_activity_notifications_enabled.unwrap_or(false),
+        );
         let initial_default_theme = env_str(
             "CHAN_DEFAULT_THEME",
             s.default_theme
@@ -605,6 +615,7 @@ impl Config {
         Self {
             forum_name,
             initial_site_subtitle,
+            initial_new_activity_notifications_enabled,
             initial_default_theme,
             initial_enabled_builtin_themes,
             port,
@@ -1082,12 +1093,17 @@ fn update_settings_file_entries(updates: &[(&str, String)], insert_missing_befor
 pub fn update_settings_file_site_settings(
     forum_name: &str,
     site_subtitle: &str,
+    new_activity_notifications_enabled: bool,
     default_theme: &str,
 ) {
     update_settings_file_entries(
         &[
             ("forum_name", toml_quote(forum_name)),
             ("site_subtitle", toml_quote(site_subtitle)),
+            (
+                "new_activity_notifications_enabled",
+                new_activity_notifications_enabled.to_string(),
+            ),
             ("default_theme", toml_quote(default_theme)),
         ],
         Some("# ── Network / web server"),
@@ -1268,6 +1284,7 @@ mod tests {
         Config {
             forum_name: "RustChan".to_string(),
             initial_site_subtitle: "select board to proceed".to_string(),
+            initial_new_activity_notifications_enabled: false,
             initial_default_theme: crate::theme::HARD_DEFAULT_THEME.to_string(),
             initial_enabled_builtin_themes: crate::theme::builtin_theme_slugs()
                 .into_iter()
@@ -1337,6 +1354,7 @@ mod tests {
         let input = r#"# RustChan settings.toml
 forum_name = "RustChan"
 site_subtitle = "select board to proceed"
+new_activity_notifications_enabled = false
 default_theme = "forest"
 auto_full_backup_interval_hours = 24
 auto_full_backup_copies_to_keep = 1
@@ -1360,6 +1378,7 @@ auto_full_backup_copies_to_keep = 1
         assert!(output.starts_with("# RustChan settings.toml\n"));
         assert!(output.contains("forum_name = \"BackupChan\"\n"));
         assert!(output.contains("site_subtitle = \"select board to proceed\"\n"));
+        assert!(output.contains("new_activity_notifications_enabled = false\n"));
         assert!(output.contains("default_theme = \"terminal\"\n"));
         assert!(output.contains("auto_full_backup_interval_hours = 12\n"));
         assert!(output.contains("auto_full_backup_copies_to_keep = 3\n"));
@@ -1415,6 +1434,7 @@ enabled = true
         let input = r#"# RustChan settings.toml
 forum_name = "RustChan"
 site_subtitle = "select board to proceed"
+new_activity_notifications_enabled = false
 
 # ── Network / web server ──────────────────────────────────────────────────────
 port = 8080
@@ -1425,6 +1445,7 @@ port = 8080
             &[
                 ("forum_name", "\"NewChan\"".to_string()),
                 ("site_subtitle", "\"new subtitle\"".to_string()),
+                ("new_activity_notifications_enabled", "true".to_string()),
                 ("default_theme", "\"terminal\"".to_string()),
             ],
             Some("# ── Network / web server"),
@@ -1433,10 +1454,14 @@ port = 8080
         let theme_idx = output
             .find("default_theme = \"terminal\"")
             .expect("default_theme inserted");
+        let activity_idx = output
+            .find("new_activity_notifications_enabled = true")
+            .expect("new_activity_notifications_enabled inserted");
         let network_idx = output
             .find("# ── Network / web server")
             .expect("network section present");
 
+        assert!(activity_idx < network_idx);
         assert!(theme_idx < network_idx);
         assert!(output.contains("forum_name = \"NewChan\"\n"));
         assert!(output.contains("site_subtitle = \"new subtitle\"\n"));
@@ -1540,6 +1565,7 @@ port = 8080
     fn settings_template_uses_forest_and_featured_theme_order() {
         let template = settings_template("secret");
 
+        assert!(template.contains("new_activity_notifications_enabled = false"));
         assert!(template.contains(r#"default_theme = "forest""#));
         assert!(template.contains(
             r#"enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]"#

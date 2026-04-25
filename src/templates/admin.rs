@@ -83,6 +83,7 @@ pub struct AdminPanelModerationView<'a> {
 pub struct AdminPanelAppearanceView<'a> {
     pub site_name: &'a str,
     pub site_subtitle: &'a str,
+    pub new_activity_notifications_enabled: bool,
     pub default_theme: &'a str,
     pub banner_rotation_interval_minutes: i64,
     pub banner_external_links_enabled: bool,
@@ -1803,6 +1804,7 @@ mod tests {
             appearance: AdminPanelAppearanceView {
                 site_name: "RustChan",
                 site_subtitle: "select board to proceed",
+                new_activity_notifications_enabled: false,
                 default_theme: "terminal",
                 banner_rotation_interval_minutes: 0,
                 banner_external_links_enabled: false,

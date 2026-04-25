@@ -1698,9 +1698,18 @@ html:not([data-theme]) .poster-id-btn {
   font-size: 0.8rem;
   color: var(--text-dim);
   clear: both;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  flex-wrap: wrap;
 }
 
 .thread-footer a { color: var(--green-pale); }
+
+.thread-summary-activity-badge {
+  margin-left: auto;
+}
 
 .omitted {
   margin: 4px 0 4px 28px;
@@ -1886,6 +1895,14 @@ html:not([data-theme]) .poster-id-btn {
 .catalog-item:hover { border-color: var(--border-glow); }
 .catalog-item.sticky { border-color: var(--amber); }
 .catalog-item.is-pinned { border-color: #7d7d7d; box-shadow: inset 0 0 0 1px #555; }
+
+.catalog-activity-badge {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  z-index: 2;
+  pointer-events: none;
+}
 
 .catalog-card-link {
   color: var(--text);
@@ -2202,6 +2219,38 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   flex-direction: column;
   color: inherit;
   text-decoration: none;
+}
+
+.new-activity-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--red) 52%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--red) 10%, var(--bg-panel));
+  color: var(--red);
+  font-size: 0.68rem;
+  line-height: 1.1;
+  font-weight: bold;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.new-activity-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 18%, transparent);
+  flex: 0 0 auto;
+}
+
+.board-card-activity-badge {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  pointer-events: none;
 }
 
 .board-card-short {

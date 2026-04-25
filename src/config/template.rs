@@ -14,6 +14,10 @@ forum_name = "RustChan"
 # This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
 site_subtitle = "select board to proceed"
 
+# Enable per-browser new-activity badges for boards and threads.
+# This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
+new_activity_notifications_enabled = false
+
 # Default theme for first-time visitors before they pick their own.
 # This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
 # Valid values: built-in or admin-created custom theme slugs.

@@ -155,6 +155,27 @@ pub fn count_threads_for_board(conn: &rusqlite::Connection, board_id: i64) -> Re
     )?)
 }
 
+/// Latest currently visible thread on a board, ordered by `(created_at, id)`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn get_latest_visible_thread_marker(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+) -> Result<Option<(i64, i64)>> {
+    conn.query_row(
+        "SELECT created_at, id
+         FROM threads
+         WHERE board_id = ?1 AND archived = 0
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1",
+        params![board_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<Thread>> {

@@ -3,11 +3,21 @@
 
 use super::*;
 use axum::http::Uri;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 const OWNED_POSTS_COOKIE: &str = "rustchan_owned_posts";
 const OWNED_POSTS_COOKIE_MAX: usize = 16;
 pub(crate) const SELF_DELETE_WINDOW_SECS: i64 = 60;
+const BOARD_ACTIVITY_COOKIE: &str = "rustchan_board_activity";
+const THREAD_ACTIVITY_COOKIE: &str = "rustchan_thread_activity";
+const ACTIVITY_COOKIE_VERSION: &str = "v1";
+const BOARD_ACTIVITY_COOKIE_MAX: usize = 64;
+const THREAD_ACTIVITY_COOKIE_MAX: usize = 96;
+const ACTIVITY_COOKIE_MAX_LEN: usize = 3_800;
+const ACTIVITY_COOKIE_MAX_AGE_DAYS: i64 = 180;
+const BOARD_ACTIVITY_TTL_SECS: i64 = 180 * 24 * 60 * 60;
+const THREAD_ACTIVITY_TTL_SECS: i64 = 90 * 24 * 60 * 60;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OwnedPostGrant {
@@ -21,6 +31,21 @@ pub struct OwnedPostGrant {
 #[derive(Serialize, Deserialize)]
 struct OwnedPostsCookiePayload {
     grants: Vec<OwnedPostGrant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoardActivityMarker {
+    pub board_id: i64,
+    pub seen_thread_created_at: i64,
+    pub seen_thread_id: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadActivityMarker {
+    pub thread_id: i64,
+    pub seen_reply_count: i64,
+    pub updated_at: i64,
 }
 
 fn owned_posts_cookie_signature(payload_hex: &str) -> String {
@@ -138,6 +163,260 @@ pub fn forget_owned_post(jar: CookieJar, board_short: &str, post_id: i64) -> Coo
         jar.add(cookie)
     } else {
         jar.remove(Cookie::from(OWNED_POSTS_COOKIE))
+    }
+}
+
+fn now_ts() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+fn parse_activity_cookie_entries(raw: &str) -> impl Iterator<Item = &str> {
+    raw.strip_prefix(&format!("{ACTIVITY_COOKIE_VERSION}|"))
+        .into_iter()
+        .flat_map(|payload| payload.split('|'))
+        .filter(|entry| !entry.is_empty())
+}
+
+fn parse_board_activity_marker(entry: &str, now: i64) -> Option<BoardActivityMarker> {
+    let mut parts = entry.split('.');
+    let board_id = parts.next()?.parse::<i64>().ok()?;
+    let seen_thread_created_at = parts.next()?.parse::<i64>().ok()?;
+    let seen_thread_id = parts.next()?.parse::<i64>().ok()?;
+    let updated_at = parts.next()?.parse::<i64>().ok()?;
+    if parts.next().is_some() || board_id <= 0 || updated_at <= 0 {
+        return None;
+    }
+    if now.saturating_sub(updated_at) > BOARD_ACTIVITY_TTL_SECS {
+        return None;
+    }
+    Some(BoardActivityMarker {
+        board_id,
+        seen_thread_created_at: seen_thread_created_at.max(0),
+        seen_thread_id: seen_thread_id.max(0),
+        updated_at,
+    })
+}
+
+fn parse_thread_activity_marker(entry: &str, now: i64) -> Option<ThreadActivityMarker> {
+    let mut parts = entry.split('.');
+    let thread_id = parts.next()?.parse::<i64>().ok()?;
+    let seen_reply_count = parts.next()?.parse::<i64>().ok()?;
+    let updated_at = parts.next()?.parse::<i64>().ok()?;
+    if parts.next().is_some() || thread_id <= 0 || updated_at <= 0 {
+        return None;
+    }
+    if now.saturating_sub(updated_at) > THREAD_ACTIVITY_TTL_SECS {
+        return None;
+    }
+    Some(ThreadActivityMarker {
+        thread_id,
+        seen_reply_count: seen_reply_count.max(0),
+        updated_at,
+    })
+}
+
+fn parse_board_activity_cookie(value: &str) -> HashMap<i64, BoardActivityMarker> {
+    if value.len() > ACTIVITY_COOKIE_MAX_LEN {
+        return HashMap::new();
+    }
+    let now = now_ts();
+    let mut markers = HashMap::new();
+    for entry in parse_activity_cookie_entries(value) {
+        if let Some(marker) = parse_board_activity_marker(entry, now) {
+            markers.insert(marker.board_id, marker);
+        }
+    }
+    markers
+}
+
+fn parse_thread_activity_cookie(value: &str) -> HashMap<i64, ThreadActivityMarker> {
+    if value.len() > ACTIVITY_COOKIE_MAX_LEN {
+        return HashMap::new();
+    }
+    let now = now_ts();
+    let mut markers = HashMap::new();
+    for entry in parse_activity_cookie_entries(value) {
+        if let Some(marker) = parse_thread_activity_marker(entry, now) {
+            markers.insert(marker.thread_id, marker);
+        }
+    }
+    markers
+}
+
+fn board_activity_cookie(markers: &[BoardActivityMarker]) -> Option<Cookie<'static>> {
+    if markers.is_empty() {
+        return None;
+    }
+    let mut sorted = markers.to_vec();
+    sorted.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.board_id.cmp(&a.board_id))
+    });
+    sorted.truncate(BOARD_ACTIVITY_COOKIE_MAX);
+    let payload = sorted
+        .iter()
+        .map(|marker| {
+            format!(
+                "{}.{}.{}.{}",
+                marker.board_id,
+                marker.seen_thread_created_at,
+                marker.seen_thread_id,
+                marker.updated_at
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let value = format!("{ACTIVITY_COOKIE_VERSION}|{payload}");
+    if value.len() > ACTIVITY_COOKIE_MAX_LEN {
+        return None;
+    }
+    let mut cookie = Cookie::new(BOARD_ACTIVITY_COOKIE, value);
+    cookie.set_http_only(true);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_max_age(Duration::days(ACTIVITY_COOKIE_MAX_AGE_DAYS));
+    Some(cookie)
+}
+
+fn thread_activity_cookie(markers: &[ThreadActivityMarker]) -> Option<Cookie<'static>> {
+    if markers.is_empty() {
+        return None;
+    }
+    let mut sorted = markers.to_vec();
+    sorted.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.thread_id.cmp(&a.thread_id))
+    });
+    sorted.truncate(THREAD_ACTIVITY_COOKIE_MAX);
+    let payload = sorted
+        .iter()
+        .map(|marker| {
+            format!(
+                "{}.{}.{}",
+                marker.thread_id, marker.seen_reply_count, marker.updated_at
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let value = format!("{ACTIVITY_COOKIE_VERSION}|{payload}");
+    if value.len() > ACTIVITY_COOKIE_MAX_LEN {
+        return None;
+    }
+    let mut cookie = Cookie::new(THREAD_ACTIVITY_COOKIE, value);
+    cookie.set_http_only(true);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_max_age(Duration::days(ACTIVITY_COOKIE_MAX_AGE_DAYS));
+    Some(cookie)
+}
+
+pub fn board_activity_markers_from_jar(jar: &CookieJar) -> HashMap<i64, BoardActivityMarker> {
+    jar.get(BOARD_ACTIVITY_COOKIE)
+        .map(Cookie::value)
+        .map(parse_board_activity_cookie)
+        .unwrap_or_default()
+}
+
+pub fn thread_activity_markers_from_jar(jar: &CookieJar) -> HashMap<i64, ThreadActivityMarker> {
+    jar.get(THREAD_ACTIVITY_COOKIE)
+        .map(Cookie::value)
+        .map(parse_thread_activity_cookie)
+        .unwrap_or_default()
+}
+
+pub fn remember_board_activity(
+    jar: CookieJar,
+    board_id: i64,
+    seen_thread_created_at: i64,
+    seen_thread_id: i64,
+) -> CookieJar {
+    if board_id <= 0 {
+        return jar;
+    }
+    let mut markers = board_activity_markers_from_jar(&jar)
+        .into_values()
+        .filter(|marker| marker.board_id != board_id)
+        .collect::<Vec<_>>();
+    markers.push(BoardActivityMarker {
+        board_id,
+        seen_thread_created_at: seen_thread_created_at.max(0),
+        seen_thread_id: seen_thread_id.max(0),
+        updated_at: now_ts(),
+    });
+    if let Some(cookie) = board_activity_cookie(&markers) {
+        jar.add(cookie)
+    } else {
+        jar.remove(Cookie::from(BOARD_ACTIVITY_COOKIE))
+    }
+}
+
+pub fn prune_board_activity_markers(jar: CookieJar, known_board_ids: &HashSet<i64>) -> CookieJar {
+    let markers = board_activity_markers_from_jar(&jar)
+        .into_values()
+        .filter(|marker| known_board_ids.contains(&marker.board_id))
+        .collect::<Vec<_>>();
+    if let Some(cookie) = board_activity_cookie(&markers) {
+        jar.add(cookie)
+    } else {
+        jar.remove(Cookie::from(BOARD_ACTIVITY_COOKIE))
+    }
+}
+
+pub fn remember_thread_activity(
+    jar: CookieJar,
+    thread_id: i64,
+    seen_reply_count: i64,
+) -> CookieJar {
+    if thread_id <= 0 {
+        return jar;
+    }
+    let mut markers = thread_activity_markers_from_jar(&jar)
+        .into_values()
+        .filter(|marker| marker.thread_id != thread_id)
+        .collect::<Vec<_>>();
+    markers.push(ThreadActivityMarker {
+        thread_id,
+        seen_reply_count: seen_reply_count.max(0),
+        updated_at: now_ts(),
+    });
+    if let Some(cookie) = thread_activity_cookie(&markers) {
+        jar.add(cookie)
+    } else {
+        jar.remove(Cookie::from(THREAD_ACTIVITY_COOKIE))
+    }
+}
+
+pub fn remember_thread_activity_defaults<I>(jar: CookieJar, defaults: I) -> CookieJar
+where
+    I: IntoIterator<Item = (i64, i64)>,
+{
+    let mut markers = thread_activity_markers_from_jar(&jar)
+        .into_values()
+        .collect::<Vec<_>>();
+    let mut known_threads = markers
+        .iter()
+        .map(|marker| marker.thread_id)
+        .collect::<HashSet<_>>();
+    let now = now_ts();
+    for (thread_id, seen_reply_count) in defaults {
+        if thread_id <= 0 || known_threads.contains(&thread_id) {
+            continue;
+        }
+        markers.push(ThreadActivityMarker {
+            thread_id,
+            seen_reply_count: seen_reply_count.max(0),
+            updated_at: now,
+        });
+        known_threads.insert(thread_id);
+    }
+    if let Some(cookie) = thread_activity_cookie(&markers) {
+        jar.add(cookie)
+    } else {
+        jar.remove(Cookie::from(THREAD_ACTIVITY_COOKIE))
     }
 }
 
@@ -622,10 +901,12 @@ pub async fn update_thread_preference(
 #[cfg(test)]
 mod tests {
     use super::{
-        owned_post_grants_from_jar, owned_posts_cookie, remember_owned_post_until, OwnedPostGrant,
-        SELF_DELETE_WINDOW_SECS,
+        board_activity_markers_from_jar, owned_post_grants_from_jar, owned_posts_cookie,
+        prune_board_activity_markers, remember_owned_post_until, thread_activity_markers_from_jar,
+        OwnedPostGrant, BOARD_ACTIVITY_COOKIE, SELF_DELETE_WINDOW_SECS, THREAD_ACTIVITY_COOKIE,
     };
     use axum_extra::extract::cookie::SameSite;
+    use std::collections::HashSet;
 
     #[test]
     fn owned_posts_cookie_is_host_only_and_scoped_for_same_site_posts() {
@@ -659,5 +940,56 @@ mod tests {
         );
 
         assert!(owned_post_grants_from_jar(&jar).is_empty());
+    }
+
+    #[test]
+    fn malformed_activity_cookies_are_ignored_safely() {
+        let jar = axum_extra::extract::cookie::CookieJar::new()
+            .add(axum_extra::extract::cookie::Cookie::new(
+                BOARD_ACTIVITY_COOKIE,
+                "v2|1.2.3.4",
+            ))
+            .add(axum_extra::extract::cookie::Cookie::new(
+                THREAD_ACTIVITY_COOKIE,
+                "v1|bad-entry",
+            ));
+
+        assert!(board_activity_markers_from_jar(&jar).is_empty());
+        assert!(thread_activity_markers_from_jar(&jar).is_empty());
+    }
+
+    #[test]
+    fn oversized_and_stale_activity_cookies_are_dropped() {
+        let oversized = "x".repeat(4_096);
+        let stale_ts = chrono::Utc::now().timestamp() - (200 * 24 * 60 * 60);
+        let jar = axum_extra::extract::cookie::CookieJar::new()
+            .add(axum_extra::extract::cookie::Cookie::new(
+                BOARD_ACTIVITY_COOKIE,
+                oversized,
+            ))
+            .add(axum_extra::extract::cookie::Cookie::new(
+                THREAD_ACTIVITY_COOKIE,
+                format!("v1|7.3.{stale_ts}"),
+            ));
+
+        assert!(board_activity_markers_from_jar(&jar).is_empty());
+        assert!(thread_activity_markers_from_jar(&jar).is_empty());
+    }
+
+    #[test]
+    fn pruning_board_activity_cookie_removes_unknown_board_ids() {
+        let now = chrono::Utc::now().timestamp();
+        let jar = axum_extra::extract::cookie::CookieJar::new().add(
+            axum_extra::extract::cookie::Cookie::new(
+                BOARD_ACTIVITY_COOKIE,
+                format!("v1|1.10.20.{now}|2.10.21.{now}"),
+            ),
+        );
+        let pruned = prune_board_activity_markers(jar, &HashSet::from([2_i64]));
+        let markers = board_activity_markers_from_jar(&pruned);
+
+        assert_eq!(markers.len(), 1);
+        assert!(markers.contains_key(&2));
+        assert!(!markers.contains_key(&1));
     }
 }

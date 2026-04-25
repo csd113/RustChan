@@ -190,6 +190,22 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             });
             crate::templates::set_live_site_subtitle(&subtitle);
 
+            if crate::db::get_site_setting(&conn, "new_activity_notifications_enabled")
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                let _ = crate::db::set_site_setting(
+                    &conn,
+                    "new_activity_notifications_enabled",
+                    if CONFIG.initial_new_activity_notifications_enabled {
+                        "1"
+                    } else {
+                        "0"
+                    },
+                );
+            }
+
             seed_initial_default_theme(&conn, &CONFIG.initial_default_theme);
             let _ = crate::db::sync_live_theme_state(&conn);
 

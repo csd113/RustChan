@@ -36,6 +36,7 @@ pub(super) fn render_site_settings(view: &AdminPanelViewModel<'_>) -> String {
         view.csrf_token,
         view.appearance.site_name,
         view.appearance.site_subtitle,
+        view.appearance.new_activity_notifications_enabled,
         &render_enabled_theme_options(view),
         &global_favicon_preview,
         global_favicon_label,
@@ -280,6 +281,7 @@ fn render_admin_site_settings_section(
     csrf_token: &str,
     site_name_val: &str,
     site_subtitle_val: &str,
+    new_activity_notifications_enabled: bool,
     enabled_theme_options: &str,
     global_favicon_preview: &str,
     global_favicon_label: &str,
@@ -309,6 +311,10 @@ fn render_admin_site_settings_section(
       {enabled_theme_options}
     </select>
   </label>
+  <label class="admin-inline-checkbox">
+    <input type="checkbox" name="new_activity_notifications_enabled" value="1"{new_activity_notifications_enabled_checked}>
+    Enable new-activity badges
+  </label>
 </div>
 <div class="board-settings-actions">
   <button type="submit">save settings</button>
@@ -333,6 +339,11 @@ fn render_admin_site_settings_section(
         csrf = escape_html(csrf_token),
         site_name_val = escape_html(site_name_val),
         site_subtitle_val = escape_html(site_subtitle_val),
+        new_activity_notifications_enabled_checked = if new_activity_notifications_enabled {
+            " checked"
+        } else {
+            ""
+        },
         enabled_theme_options = enabled_theme_options,
         global_favicon_preview = global_favicon_preview,
         global_favicon_label = global_favicon_label,

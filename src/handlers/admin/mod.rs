@@ -362,6 +362,7 @@ pub struct LiveLogQuery {
     pub bytes: Option<usize>,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct AdminPanelSnapshot {
     boards: Vec<crate::models::Board>,
     bans: Vec<crate::models::Ban>,
@@ -370,6 +371,7 @@ struct AdminPanelSnapshot {
     appeals: Vec<crate::models::BanAppeal>,
     site_name: String,
     site_subtitle: String,
+    new_activity_notifications_enabled: bool,
     default_theme: String,
     banner_rotation_interval_minutes: i64,
     banner_external_links_enabled: bool,
@@ -411,6 +413,7 @@ struct ModerationDomainData {
 struct AppearanceDomainData {
     site_name: String,
     site_subtitle: String,
+    new_activity_notifications_enabled: bool,
     default_theme: String,
     banner_rotation_interval_minutes: i64,
     banner_external_links_enabled: bool,
@@ -467,6 +470,7 @@ fn load_appearance_domain_data(
     Ok(AppearanceDomainData {
         site_name: db::get_site_name(conn),
         site_subtitle: db::get_site_subtitle(conn),
+        new_activity_notifications_enabled: db::get_new_activity_notifications_enabled(conn),
         default_theme: db::get_default_user_theme(conn),
         banner_rotation_interval_minutes: db::get_banner_rotation_interval_minutes(conn),
         banner_external_links_enabled: db::get_banner_external_links_enabled(conn),
@@ -520,6 +524,8 @@ fn load_admin_panel_snapshot(
             appeals: moderation_domain.appeals,
             site_name: appearance_domain.site_name,
             site_subtitle: appearance_domain.site_subtitle,
+            new_activity_notifications_enabled: appearance_domain
+                .new_activity_notifications_enabled,
             default_theme: appearance_domain.default_theme,
             banner_rotation_interval_minutes: appearance_domain.banner_rotation_interval_minutes,
             banner_external_links_enabled: appearance_domain.banner_external_links_enabled,
@@ -611,6 +617,7 @@ fn render_admin_panel_from_snapshot(
         appearance: crate::templates::AdminPanelAppearanceView {
             site_name: &snapshot.site_name,
             site_subtitle: &snapshot.site_subtitle,
+            new_activity_notifications_enabled: snapshot.new_activity_notifications_enabled,
             default_theme: &snapshot.default_theme,
             banner_rotation_interval_minutes: snapshot.banner_rotation_interval_minutes,
             banner_external_links_enabled: snapshot.banner_external_links_enabled,
