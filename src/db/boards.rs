@@ -12,22 +12,24 @@ const BOARD_ORDER_SQL: &str = "nsfw ASC, display_order ASC, id ASC";
 const BOARD_GROUP_ORDER_SQL: &str = "display_order ASC, id ASC";
 const BOARD_SELECT_COLUMNS: &str = "id, display_order, short_name, name, description, nsfw, \
     max_threads, max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, \
-    allow_pdf, allow_any_files, allow_tripcodes, edit_window_secs, allow_editing, allow_self_delete, allow_archive, \
+    max_image_size, max_video_size, max_audio_size, allow_pdf, allow_any_files, allow_tripcodes, \
+    edit_window_secs, allow_editing, allow_self_delete, allow_archive, \
     allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext, \
     post_cooldown_secs, default_theme, banner_mode, access_mode, access_password_hash, created_at";
 const BOARD_SELECT_COLUMNS_WITH_ALIAS: &str = "b.id, b.display_order, b.short_name, b.name, \
     b.description, b.nsfw, b.max_threads, b.max_archived_threads, b.bump_limit, \
-    b.allow_images, b.allow_video, b.allow_audio, b.allow_pdf, b.allow_any_files, b.allow_tripcodes, \
-    b.edit_window_secs, b.allow_editing, b.allow_self_delete, b.allow_archive, b.allow_video_embeds, \
-    b.allow_captcha, b.show_poster_ids, b.collapse_greentext, b.post_cooldown_secs, \
+    b.allow_images, b.allow_video, b.allow_audio, b.max_image_size, b.max_video_size, b.max_audio_size, \
+    b.allow_pdf, b.allow_any_files, b.allow_tripcodes, b.edit_window_secs, b.allow_editing, \
+    b.allow_self_delete, b.allow_archive, b.allow_video_embeds, b.allow_captcha, \
+    b.show_poster_ids, b.collapse_greentext, b.post_cooldown_secs, \
     b.default_theme, b.banner_mode, b.access_mode, b.access_password_hash, b.created_at";
 
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
 pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
     let short_name: String = row.get(2)?;
-    let banner_mode_raw: String = row.get(25)?;
-    let access_mode_raw: String = row.get(26)?;
+    let banner_mode_raw: String = row.get(28)?;
+    let access_mode_raw: String = row.get(29)?;
     let banner_mode = BoardBannerMode::from_db_str(&banner_mode_raw).unwrap_or_else(|| {
         tracing::warn!(
             target: "db",
@@ -59,23 +61,26 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         allow_images: row.get::<_, i32>(9)? != 0,
         allow_video: row.get::<_, i32>(10)? != 0,
         allow_audio: row.get::<_, i32>(11)? != 0,
-        allow_pdf: row.get::<_, i32>(12)? != 0,
-        allow_any_files: row.get::<_, i32>(13)? != 0,
-        allow_tripcodes: row.get::<_, i32>(14)? != 0,
-        edit_window_secs: row.get(15)?,
-        allow_editing: row.get::<_, i32>(16)? != 0,
-        allow_self_delete: row.get::<_, i32>(17)? != 0,
-        allow_archive: row.get::<_, i32>(18)? != 0,
-        allow_video_embeds: row.get::<_, i32>(19)? != 0,
-        allow_captcha: row.get::<_, i32>(20)? != 0,
-        show_poster_ids: row.get::<_, i32>(21)? != 0,
-        collapse_greentext: row.get::<_, i32>(22)? != 0,
-        post_cooldown_secs: row.get(23)?,
-        default_theme: row.get(24)?,
+        max_image_size: row.get(12)?,
+        max_video_size: row.get(13)?,
+        max_audio_size: row.get(14)?,
+        allow_pdf: row.get::<_, i32>(15)? != 0,
+        allow_any_files: row.get::<_, i32>(16)? != 0,
+        allow_tripcodes: row.get::<_, i32>(17)? != 0,
+        edit_window_secs: row.get(18)?,
+        allow_editing: row.get::<_, i32>(19)? != 0,
+        allow_self_delete: row.get::<_, i32>(20)? != 0,
+        allow_archive: row.get::<_, i32>(21)? != 0,
+        allow_video_embeds: row.get::<_, i32>(22)? != 0,
+        allow_captcha: row.get::<_, i32>(23)? != 0,
+        show_poster_ids: row.get::<_, i32>(24)? != 0,
+        collapse_greentext: row.get::<_, i32>(25)? != 0,
+        post_cooldown_secs: row.get(26)?,
+        default_theme: row.get(27)?,
         banner_mode,
         access_mode,
-        access_password_hash: row.get(27)?,
-        created_at: row.get(28)?,
+        access_password_hash: row.get(30)?,
+        created_at: row.get(31)?,
     })
 }
 
@@ -292,7 +297,7 @@ pub fn get_all_boards_with_stats(
     let out = stmt
         .query_map([], |row| {
             let board = map_board(row)?;
-            let thread_count: i64 = row.get(29)?;
+            let thread_count: i64 = row.get(32)?;
             Ok(crate::models::BoardStats {
                 board,
                 thread_count,
@@ -400,10 +405,26 @@ pub fn create_board(
     let display_order = next_board_display_order(conn, nsfw, None)?;
     let id: i64 = conn
         .query_row(
-            "INSERT INTO boards (display_order, short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 0)
+            "INSERT INTO boards (
+                 display_order, short_name, name, description, nsfw,
+                 allow_images, allow_video, allow_audio,
+                 max_image_size, max_video_size, max_audio_size
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 0, ?6, ?7, ?8)
              RETURNING id",
-            params![display_order, short, name, description, i32::from(nsfw)],
+            params![
+                display_order,
+                short,
+                name,
+                description,
+                i32::from(nsfw),
+                i64::try_from(crate::config::CONFIG.max_image_size)
+                    .context("max_image_size does not fit in i64")?,
+                i64::try_from(crate::config::CONFIG.max_video_size)
+                    .context("max_video_size does not fit in i64")?,
+                i64::try_from(crate::config::CONFIG.max_audio_size)
+                    .context("max_audio_size does not fit in i64")?,
+            ],
             |r| r.get(0),
         )
         .context("Failed to create board")?;
@@ -433,12 +454,28 @@ pub fn create_board_with_media_flags(
     let display_order = next_board_display_order(conn, nsfw, None)?;
     let id: i64 = conn
         .query_row(
-            "INSERT INTO boards (display_order, short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO boards (
+                 display_order, short_name, name, description, nsfw,
+                 allow_images, allow_video, allow_audio,
+                 max_image_size, max_video_size, max_audio_size
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              RETURNING id",
             params![
-                display_order, short, name, description, i32::from(nsfw),
-                i32::from(allow_images), i32::from(allow_video), i32::from(allow_audio),
+                display_order,
+                short,
+                name,
+                description,
+                i32::from(nsfw),
+                i32::from(allow_images),
+                i32::from(allow_video),
+                i32::from(allow_audio),
+                i64::try_from(crate::config::CONFIG.max_image_size)
+                    .context("max_image_size does not fit in i64")?,
+                i64::try_from(crate::config::CONFIG.max_video_size)
+                    .context("max_video_size does not fit in i64")?,
+                i64::try_from(crate::config::CONFIG.max_audio_size)
+                    .context("max_audio_size does not fit in i64")?,
             ],
             |r| r.get(0),
         )
@@ -506,6 +543,8 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
 #[allow(clippy::fn_params_excessive_bools)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
+// Keeping the SQL branches inline makes the nsfw reorder/update behavior easier to verify in one place.
+#[allow(clippy::too_many_lines)]
 pub fn update_board_settings(
     conn: &mut rusqlite::Connection,
     id: i64,
@@ -518,6 +557,9 @@ pub fn update_board_settings(
     allow_images: bool,
     allow_video: bool,
     allow_audio: bool,
+    max_image_size: i64,
+    max_video_size: i64,
+    max_audio_size: i64,
     allow_pdf: bool,
     allow_any_files: bool,
     allow_tripcodes: bool,
@@ -546,12 +588,13 @@ pub fn update_board_settings(
         tx.execute(
             "UPDATE boards SET name=?1, description=?2, nsfw=?3,
              bump_limit=?4, max_threads=?5, max_archived_threads=?6,
-             allow_images=?7, allow_video=?8, allow_audio=?9, allow_pdf=?10, allow_any_files=?11,
-             allow_tripcodes=?12, edit_window_secs=?13, allow_editing=?14, allow_self_delete=?15,
-             allow_archive=?16, allow_video_embeds=?17, allow_captcha=?18,
-             show_poster_ids=?19, collapse_greentext=?20, post_cooldown_secs=?21,
-             default_theme=?22, banner_mode=?23, access_mode=?24, access_password_hash=?25
-             WHERE id=?26",
+             allow_images=?7, allow_video=?8, allow_audio=?9,
+             max_image_size=?10, max_video_size=?11, max_audio_size=?12,
+             allow_pdf=?13, allow_any_files=?14, allow_tripcodes=?15, edit_window_secs=?16,
+             allow_editing=?17, allow_self_delete=?18, allow_archive=?19, allow_video_embeds=?20,
+             allow_captcha=?21, show_poster_ids=?22, collapse_greentext=?23, post_cooldown_secs=?24,
+             default_theme=?25, banner_mode=?26, access_mode=?27, access_password_hash=?28
+             WHERE id=?29",
             params![
                 name,
                 description,
@@ -562,6 +605,9 @@ pub fn update_board_settings(
                 i32::from(allow_images),
                 i32::from(allow_video),
                 i32::from(allow_audio),
+                max_image_size,
+                max_video_size,
+                max_audio_size,
                 i32::from(allow_pdf),
                 i32::from(allow_any_files),
                 i32::from(allow_tripcodes),
@@ -586,12 +632,13 @@ pub fn update_board_settings(
         tx.execute(
             "UPDATE boards SET name=?1, description=?2, nsfw=?3, display_order=?4,
              bump_limit=?5, max_threads=?6, max_archived_threads=?7,
-             allow_images=?8, allow_video=?9, allow_audio=?10, allow_pdf=?11, allow_any_files=?12,
-             allow_tripcodes=?13, edit_window_secs=?14, allow_editing=?15, allow_self_delete=?16,
-             allow_archive=?17, allow_video_embeds=?18, allow_captcha=?19,
-             show_poster_ids=?20, collapse_greentext=?21, post_cooldown_secs=?22,
-             default_theme=?23, banner_mode=?24, access_mode=?25, access_password_hash=?26
-             WHERE id=?27",
+             allow_images=?8, allow_video=?9, allow_audio=?10,
+             max_image_size=?11, max_video_size=?12, max_audio_size=?13,
+             allow_pdf=?14, allow_any_files=?15, allow_tripcodes=?16, edit_window_secs=?17,
+             allow_editing=?18, allow_self_delete=?19, allow_archive=?20, allow_video_embeds=?21,
+             allow_captcha=?22, show_poster_ids=?23, collapse_greentext=?24, post_cooldown_secs=?25,
+             default_theme=?26, banner_mode=?27, access_mode=?28, access_password_hash=?29
+             WHERE id=?30",
             params![
                 name,
                 description,
@@ -603,6 +650,9 @@ pub fn update_board_settings(
                 i32::from(allow_images),
                 i32::from(allow_video),
                 i32::from(allow_audio),
+                max_image_size,
+                max_video_size,
+                max_audio_size,
                 i32::from(allow_pdf),
                 i32::from(allow_any_files),
                 i32::from(allow_tripcodes),

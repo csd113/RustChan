@@ -482,8 +482,8 @@ pub fn thread_page(
 
     body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
-        crate::config::CONFIG.max_image_size,
-        crate::config::CONFIG.max_video_size,
+        board.max_image_size_bytes(),
+        board.max_video_size_bytes(),
     ));
     body.push_str(report_modal_script());
     body.push_str(thread_autoupdate_script());

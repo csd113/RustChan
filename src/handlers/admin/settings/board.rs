@@ -16,6 +16,9 @@ pub struct BoardSettingsForm {
     allow_images: Option<String>,
     allow_video: Option<String>,
     allow_audio: Option<String>,
+    max_image_size_mb: Option<String>,
+    max_video_size_mb: Option<String>,
+    max_audio_size_mb: Option<String>,
     allow_pdf: Option<String>,
     allow_any_files: Option<String>,
     allow_tripcodes: Option<String>,
@@ -33,6 +36,27 @@ pub struct BoardSettingsForm {
     banner_mode: Option<String>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
+}
+
+fn parse_board_upload_limit_bytes(
+    raw_value: Option<&str>,
+    fallback_bytes: i64,
+    global_max_bytes: usize,
+) -> Result<i64> {
+    const MIB: i64 = 1024 * 1024;
+
+    let fallback_mb = (fallback_bytes / MIB).max(1);
+    let parsed_mb = raw_value
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(fallback_mb);
+    let global_max_mb = i64::try_from(global_max_bytes / (1024 * 1024)).map_err(|_| {
+        AppError::Internal(anyhow::anyhow!("Global upload limit does not fit in i64"))
+    })?;
+    let clamped_mb = parsed_mb.clamp(1, global_max_mb.max(1));
+
+    clamped_mb
+        .checked_mul(MIB)
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Board upload limit overflowed i64")))
 }
 
 fn resolve_board_access_password_hash(
@@ -127,11 +151,8 @@ pub async fn update_board_settings(
                 rusqlite::params![board_id],
                 |row| row.get(0),
             )?;
-            let existing_password_hash: String = conn.query_row(
-                "SELECT access_password_hash FROM boards WHERE id = ?1",
-                rusqlite::params![board_id],
-                |row| row.get(0),
-            )?;
+            let current_board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
             let resolved_default_theme = form
                 .default_theme
                 .as_deref()
@@ -146,9 +167,24 @@ pub async fn update_board_settings(
                 .unwrap_or_default();
             let access_password_hash = resolve_board_access_password_hash(
                 access_mode,
-                existing_password_hash,
+                current_board.access_password_hash.clone(),
                 &access_password,
                 form.clear_access_password.as_deref() == Some("1"),
+            )?;
+            let max_image_size = parse_board_upload_limit_bytes(
+                form.max_image_size_mb.as_deref(),
+                current_board.max_image_size,
+                CONFIG.max_image_size,
+            )?;
+            let max_video_size = parse_board_upload_limit_bytes(
+                form.max_video_size_mb.as_deref(),
+                current_board.max_video_size,
+                CONFIG.max_video_size,
+            )?;
+            let max_audio_size = parse_board_upload_limit_bytes(
+                form.max_audio_size_mb.as_deref(),
+                current_board.max_audio_size,
+                CONFIG.max_audio_size,
             )?;
             db::update_board_settings(
                 &mut conn,
@@ -162,6 +198,9 @@ pub async fn update_board_settings(
                 form.allow_images.as_deref() == Some("1"),
                 form.allow_video.as_deref() == Some("1"),
                 form.allow_audio.as_deref() == Some("1"),
+                max_image_size,
+                max_video_size,
+                max_audio_size,
                 form.allow_pdf.as_deref() == Some("1"),
                 CONFIG.enable_any_file_uploads_feature
                     && form.allow_any_files.as_deref() == Some("1"),

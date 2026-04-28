@@ -19,6 +19,9 @@ const BASE_SCHEMA_SQL: &str = "
         allow_tripcodes INTEGER NOT NULL DEFAULT 1,
         allow_images    INTEGER NOT NULL DEFAULT 1,
         allow_audio     INTEGER NOT NULL DEFAULT 0,
+        max_image_size  INTEGER NOT NULL DEFAULT 8388608,
+        max_video_size  INTEGER NOT NULL DEFAULT 52428800,
+        max_audio_size  INTEGER NOT NULL DEFAULT 157286400,
         allow_pdf       INTEGER NOT NULL DEFAULT 0,
         allow_any_files INTEGER NOT NULL DEFAULT 0,
         edit_window_secs    INTEGER NOT NULL DEFAULT 0,
@@ -306,7 +309,7 @@ const INDEX_SCHEMA_SQL: &str = "
         ON post_submissions(created_at ASC);
 ";
 
-const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 30] = [
+const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 33] = [
     (
         "boards",
         "display_order",
@@ -336,6 +339,21 @@ const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 30] = [
         "boards",
         "allow_audio",
         "ALTER TABLE boards ADD COLUMN allow_audio INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "max_image_size",
+        "ALTER TABLE boards ADD COLUMN max_image_size INTEGER NOT NULL DEFAULT 8388608",
+    ),
+    (
+        "boards",
+        "max_video_size",
+        "ALTER TABLE boards ADD COLUMN max_video_size INTEGER NOT NULL DEFAULT 52428800",
+    ),
+    (
+        "boards",
+        "max_audio_size",
+        "ALTER TABLE boards ADD COLUMN max_audio_size INTEGER NOT NULL DEFAULT 157286400",
     ),
     (
         "boards",

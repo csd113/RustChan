@@ -538,6 +538,14 @@ fn render_board_settings_card(
     open_section: Option<&str>,
 ) -> String {
     let checked = |value: bool| if value { " checked" } else { "" };
+    let bytes_to_mib = |bytes: i64, fallback: usize| -> usize {
+        usize::try_from(bytes)
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(fallback)
+            / 1024
+            / 1024
+    };
     let prev_same_group = index
         .checked_sub(1)
         .and_then(|prev| boards.get(prev))
@@ -629,8 +637,20 @@ fn render_board_settings_card(
 <div class="admin-subsection">
   <div class="admin-card-header">
     <h3>// uploads &amp; post features</h3>
-    <p>Control accepted media types, poster identity tools, embeds, and editing behavior.</p>
+    <p>Control accepted media types, per-board upload caps, poster identity tools, embeds, and editing behavior.</p>
   </div>
+  <div class="board-settings-grid">
+    <label title="Per-board image upload size cap. Cannot exceed the site-wide image limit.">
+      Image size limit (MiB)<input type="number" name="max_image_size_mb" value="{max_image_size_mb}" min="1" max="{global_max_image_size_mb}">
+    </label>
+    <label title="Per-board video upload size cap. Cannot exceed the site-wide video limit.">
+      Video size limit (MiB)<input type="number" name="max_video_size_mb" value="{max_video_size_mb}" min="1" max="{global_max_video_size_mb}">
+    </label>
+    <label title="Per-board audio upload size cap. Cannot exceed the site-wide audio limit.">
+      Audio size limit (MiB)<input type="number" name="max_audio_size_mb" value="{max_audio_size_mb}" min="1" max="{global_max_audio_size_mb}">
+    </label>
+  </div>
+  <p class="admin-meta-note">PDF and any-file uploads still use the largest enabled cap for this board.</p>
   <div class="board-settings-checks">
     <label><input type="checkbox" name="allow_images" value="1"{images_checked}> Allow images</label>
     <label><input type="checkbox" name="allow_video" value="1"{video_checked}> Allow video</label>
@@ -745,6 +765,15 @@ fn render_board_settings_card(
         images_checked = checked(board.allow_images),
         video_checked = checked(board.allow_video),
         audio_checked = checked(board.allow_audio),
+        max_image_size_mb =
+            bytes_to_mib(board.max_image_size, crate::config::CONFIG.max_image_size),
+        max_video_size_mb =
+            bytes_to_mib(board.max_video_size, crate::config::CONFIG.max_video_size),
+        max_audio_size_mb =
+            bytes_to_mib(board.max_audio_size, crate::config::CONFIG.max_audio_size),
+        global_max_image_size_mb = crate::config::CONFIG.max_image_size / 1024 / 1024,
+        global_max_video_size_mb = crate::config::CONFIG.max_video_size / 1024 / 1024,
+        global_max_audio_size_mb = crate::config::CONFIG.max_audio_size / 1024 / 1024,
         pdf_checked = checked(board.allow_pdf),
         tripcodes_checked = checked(board.allow_tripcodes),
         video_embeds_checked = checked(board.allow_video_embeds),
@@ -1653,6 +1682,9 @@ mod tests {
             allow_images: true,
             allow_video: true,
             allow_audio: true,
+            max_image_size: 8 * 1024 * 1024,
+            max_video_size: 50 * 1024 * 1024,
+            max_audio_size: 150 * 1024 * 1024,
             allow_pdf: false,
             allow_any_files: false,
             allow_tripcodes: true,
@@ -1922,6 +1954,28 @@ mod tests {
             .contains("Allow users to delete their own posts during the 60-second grace window"));
         assert!(!html.contains(r#"name="edit_window_secs""#));
         assert!(!html.contains("edit token"));
+    }
+
+    #[test]
+    fn board_settings_card_renders_per_board_upload_limits() {
+        let board = sample_board();
+        let html = render_board_settings_card(
+            &board,
+            0,
+            std::slice::from_ref(&board),
+            "csrf",
+            &[sample_theme()],
+            &[],
+            None,
+        );
+
+        assert!(html.contains(r#"name="max_image_size_mb""#));
+        assert!(html.contains(r#"name="max_video_size_mb""#));
+        assert!(html.contains(r#"name="max_audio_size_mb""#));
+        assert!(html.contains(r#"value="8""#));
+        assert!(html.contains(r#"value="50""#));
+        assert!(html.contains(r#"value="150""#));
+        assert!(html.contains("PDF and any-file uploads still use the largest enabled cap"));
     }
 
     #[test]

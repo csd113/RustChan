@@ -84,15 +84,13 @@ fn render_poll_option_row(option_number: usize) -> String {
 }
 
 fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
-    let image_mb = CONFIG.max_image_size / 1024 / 1024;
-    let video_mb = CONFIG.max_video_size / 1024 / 1024;
-    let audio_mb = CONFIG.max_audio_size / 1024 / 1024;
-    let generic_upload_mb = CONFIG
-        .max_image_size
-        .max(CONFIG.max_video_size)
-        .max(CONFIG.max_audio_size)
-        / 1024
-        / 1024;
+    let image_max_bytes = board.max_image_size_bytes();
+    let video_max_bytes = board.max_video_size_bytes();
+    let audio_max_bytes = board.max_audio_size_bytes();
+    let image_mb = image_max_bytes / 1024 / 1024;
+    let video_mb = video_max_bytes / 1024 / 1024;
+    let audio_mb = audio_max_bytes / 1024 / 1024;
+    let generic_upload_mb = board.max_generic_upload_size_bytes() / 1024 / 1024;
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
     let audio_image_dual_mode = board.allow_audio
         && board.allow_images

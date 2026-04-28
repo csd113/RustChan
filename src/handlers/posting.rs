@@ -420,6 +420,9 @@ pub fn submit_post(
 
     let board = db::get_board_by_short(conn, &board_short)?
         .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+    let effective_max_image_size = max_image_size.min(board.max_image_size_bytes());
+    let effective_max_video_size = max_video_size.min(board.max_video_size_bytes());
+    let effective_max_audio_size = max_audio_size.min(board.max_audio_size_bytes());
 
     let reply_context = match &mode {
         SubmitPostMode::Reply { thread_id, sage } => {
@@ -512,9 +515,9 @@ pub fn submit_post(
         &UploadConfig {
             upload_dir: &upload_dir,
             thumb_size,
-            max_image_size,
-            max_video_size,
-            max_audio_size,
+            max_image_size: effective_max_image_size,
+            max_video_size: effective_max_video_size,
+            max_audio_size: effective_max_audio_size,
             ffmpeg_available,
             ffmpeg_webp_available,
         },
@@ -1059,6 +1062,41 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+    }
+
+    #[test]
+    fn submit_post_enforces_board_specific_image_limit() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET max_image_size = ?1 WHERE short_name = ?2",
+            rusqlite::params![64_i64, TEST_BOARD],
+        )
+        .expect("shrink image limit");
+        let mut command = thread_command(
+            TEST_BOARD,
+            "board-image-cap",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.file_data = Some(temp_upload("cover.png", &one_pixel_png()));
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!(
+                "board-specific image cap should reject upload, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::UploadTooLarge(message) => {
+                assert!(message.contains("Maximum image size is 0 MiB."));
+            }
+            other => panic!("expected UploadTooLarge, got {other:?}"),
+        }
     }
 
     #[test]

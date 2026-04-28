@@ -865,8 +865,8 @@ pub fn board_page(
 
     body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
-        crate::config::CONFIG.max_image_size,
-        crate::config::CONFIG.max_video_size,
+        board.max_image_size_bytes(),
+        board.max_video_size_bytes(),
     ));
 
     base_layout(
@@ -1279,8 +1279,8 @@ pub fn catalog_page(
     // sortCatalog moved to /static/main.js
     body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
-        crate::config::CONFIG.max_image_size,
-        crate::config::CONFIG.max_video_size,
+        board.max_image_size_bytes(),
+        board.max_video_size_bytes(),
     ));
     base_layout(
         &format!(
