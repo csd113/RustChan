@@ -623,6 +623,9 @@ fn restrict_private_path_permissions(path: &Path) -> Result<()> {
         }
     }
 
+    #[cfg(not(unix))]
+    let _ = path;
+
     Ok(())
 }
 

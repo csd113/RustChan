@@ -162,7 +162,11 @@ mod tests {
         body::Body, http::Request, middleware::from_fn, response::IntoResponse, routing::get,
         Router,
     };
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        fs,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        path::{Path, PathBuf},
+    };
     use tower::ServiceExt;
 
     #[test]
@@ -188,21 +192,39 @@ mod tests {
 
     #[test]
     fn served_templates_do_not_embed_inline_script_bodies() {
-        let served_sources = [
-            include_str!("../../../src/templates/mod.rs"),
-            include_str!("../../../src/templates/board.rs"),
-            include_str!("../../../src/templates/thread.rs"),
-            include_str!("../../../src/templates/admin.rs"),
-            include_str!("../../../src/templates/forms.rs"),
-            include_str!("../../../src/middleware/rate_limit.rs"),
-            include_str!("../../../src/handlers/board/reports.rs"),
-        ];
-
-        for source in served_sources {
+        for source_path in served_html_source_files() {
+            let source = fs::read_to_string(&source_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", source_path.display()));
             assert!(
-                !contains_inline_script_body(source),
-                "served HTML source reintroduced an inline <script> body"
+                !contains_inline_script_body(&source),
+                "served HTML source reintroduced an inline <script> body: {}",
+                source_path.display()
             );
+        }
+    }
+
+    fn served_html_source_files() -> Vec<PathBuf> {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for relative_dir in ["src/templates", "src/middleware", "src/handlers"] {
+            collect_rust_files(&repo_root.join(relative_dir), &mut files);
+        }
+        files.sort();
+        files
+    }
+
+    fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
+        let entries =
+            fs::read_dir(dir).unwrap_or_else(|error| panic!("read dir {}: {error}", dir.display()));
+        for entry in entries {
+            let entry =
+                entry.unwrap_or_else(|error| panic!("read entry under {}: {error}", dir.display()));
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rust_files(&path, files);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
         }
     }
 

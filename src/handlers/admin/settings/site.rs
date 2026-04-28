@@ -21,8 +21,21 @@ pub struct SiteSettingsForm {
     pub banner_external_links_enabled: Option<String>,
 }
 
-fn resolved_checkbox_setting(field: Option<&str>, current: bool) -> bool {
-    field.map_or(current, |value| checkbox_is_on(Some(value)))
+fn resolved_checkbox_setting(
+    field: Option<&str>,
+    current: bool,
+    preserve_missing_value: bool,
+) -> bool {
+    field.map_or_else(
+        || {
+            if preserve_missing_value {
+                current
+            } else {
+                false
+            }
+        },
+        |value| checkbox_is_on(Some(value)),
+    )
 }
 
 pub async fn update_site_settings(
@@ -49,6 +62,7 @@ pub async fn update_site_settings(
         .clamp(0, 43_200);
     let banner_external_links_enabled =
         checkbox_is_on(form.banner_external_links_enabled.as_deref());
+    let preserve_missing_badge_settings = is_banner_settings_only;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -58,10 +72,12 @@ pub async fn update_site_settings(
             let homepage_new_thread_badges_enabled = resolved_checkbox_setting(
                 form.homepage_new_thread_badges_enabled.as_deref(),
                 db::get_homepage_new_thread_badges_enabled(&conn),
+                preserve_missing_badge_settings,
             );
             let thread_new_reply_badges_enabled = resolved_checkbox_setting(
                 form.thread_new_reply_badges_enabled.as_deref(),
                 db::get_thread_new_reply_badges_enabled(&conn),
+                preserve_missing_badge_settings,
             );
 
             // Save the custom site name (trimmed, max 64 chars).
@@ -171,14 +187,20 @@ mod tests {
 
     #[test]
     fn resolved_checkbox_setting_preserves_existing_value_when_field_is_omitted() {
-        assert!(resolved_checkbox_setting(None, true));
-        assert!(!resolved_checkbox_setting(None, false));
+        assert!(resolved_checkbox_setting(None, true, true));
+        assert!(!resolved_checkbox_setting(None, false, true));
+    }
+
+    #[test]
+    fn resolved_checkbox_setting_treats_missing_field_as_disabled_on_full_submit() {
+        assert!(!resolved_checkbox_setting(None, true, false));
+        assert!(!resolved_checkbox_setting(None, false, false));
     }
 
     #[test]
     fn resolved_checkbox_setting_respects_explicit_checkbox_submissions() {
-        assert!(resolved_checkbox_setting(Some("1"), false));
-        assert!(resolved_checkbox_setting(Some("on"), false));
-        assert!(!resolved_checkbox_setting(Some("0"), true));
+        assert!(resolved_checkbox_setting(Some("1"), false, true));
+        assert!(resolved_checkbox_setting(Some("on"), false, false));
+        assert!(!resolved_checkbox_setting(Some("0"), true, true));
     }
 }

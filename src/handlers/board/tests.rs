@@ -4,7 +4,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use axum_extra::extract::cookie::{Cookie, CookieJar};
+use axum_extra::extract::cookie::CookieJar;
 use std::collections::HashMap;
 use tower::ServiceExt as _;
 
@@ -1498,7 +1498,14 @@ async fn catalog_baseline_tracks_only_highest_priority_threads_within_cookie_lim
                 })
         })
         .expect("thread activity cookie");
-    let jar = CookieJar::new().add(Cookie::new("rustchan_thread_activity", cookie_value));
+    let mut cookie_headers = HeaderMap::new();
+    cookie_headers.insert(
+        header::COOKIE,
+        format!("rustchan_thread_activity={cookie_value}")
+            .parse()
+            .expect("cookie header"),
+    );
+    let jar = CookieJar::from_headers(&cookie_headers);
     let markers = super::thread_activity_markers_from_jar(&jar);
 
     assert_eq!(markers.len(), super::THREAD_ACTIVITY_MARKER_LIMIT);

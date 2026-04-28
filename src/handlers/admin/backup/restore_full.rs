@@ -467,6 +467,9 @@ fn restrict_private_key_material_permissions(path: &Path) -> Result<()> {
         }
     }
 
+    #[cfg(not(unix))]
+    let _ = path;
+
     Ok(())
 }
 
