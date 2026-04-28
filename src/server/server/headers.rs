@@ -16,7 +16,7 @@ pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      media-src 'self' blob:; \
      font-src 'self'; \
      connect-src 'self'; \
-     frame-src https://www.youtube-nocookie.com https://streamable.com; \
+     frame-src 'self' https://www.youtube-nocookie.com https://streamable.com; \
      frame-ancestors 'none'; \
      object-src 'none'; \
      base-uri 'self'";
@@ -180,7 +180,7 @@ mod tests {
         assert!(CONTENT_SECURITY_POLICY.contains("media-src 'self' blob:"));
         assert!(CONTENT_SECURITY_POLICY.contains("connect-src 'self'"));
         assert!(CONTENT_SECURITY_POLICY
-            .contains("frame-src https://www.youtube-nocookie.com https://streamable.com"));
+            .contains("frame-src 'self' https://www.youtube-nocookie.com https://streamable.com"));
     }
 
     #[test]

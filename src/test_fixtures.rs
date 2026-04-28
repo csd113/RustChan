@@ -13,6 +13,7 @@ pub fn sample_board() -> crate::models::Board {
         allow_images: true,
         allow_video: true,
         allow_audio: true,
+        allow_pdf: false,
         allow_any_files: false,
         allow_tripcodes: true,
         allow_editing: false,

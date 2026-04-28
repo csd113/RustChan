@@ -492,6 +492,7 @@ pub fn submit_post(
     let board_allows_media = board.allow_images
         || board.allow_video
         || board.allow_audio
+        || board.allow_pdf
         || (crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files);
     let has_file = file_data.is_some() || audio_file_data.is_some() || image_file_data.is_some();
     let (body_text, body_html) = build_post_body(

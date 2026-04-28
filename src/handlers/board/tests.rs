@@ -1748,6 +1748,7 @@ async fn create_thread_rejects_uploads_on_upload_disabled_board() {
             false,
             false,
             false,
+            false,
             true,
             0,
             false,

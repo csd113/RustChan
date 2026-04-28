@@ -3,6 +3,9 @@
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, GenericImageView, ImageFormat};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::ffmpeg;
 
@@ -89,6 +92,9 @@ pub fn generate_thumbnail(
         "image/svg+xml" => write_placeholder(output_path, PlaceholderKind::Video)
             .map(|()| output_path.to_path_buf()),
         m if m.starts_with("audio/") => write_placeholder(output_path, PlaceholderKind::Audio)
+            .map(|()| output_path.to_path_buf()),
+
+        "application/pdf" => pdf_first_page_thumbnail(input_path, output_path, max_dim)
             .map(|()| output_path.to_path_buf()),
 
         // ── Video (WebM, MP4, and any other video/*): requires ffmpeg AND libwebp ─────────────────────
@@ -245,6 +251,138 @@ fn image_crate_thumbnail(
     thumb
         .save_with_format(output_path, ImageFormat::WebP)
         .with_context(|| format!("failed to save WebP thumbnail to {}", output_path.display()))
+}
+
+fn pdf_first_page_thumbnail(input_path: &Path, output_path: &Path, max_dim: u32) -> Result<()> {
+    let parent = output_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("PDF thumbnail output has no parent"))?;
+    let temp_dir = tempfile::Builder::new()
+        .prefix("rustchan-pdf-thumb-")
+        .tempdir_in(parent)
+        .with_context(|| {
+            format!(
+                "failed to create temp PDF thumbnail dir in {}",
+                parent.display()
+            )
+        })?;
+    let png_path = temp_dir.path().join("page1.png");
+
+    if render_pdf_with_pdftoppm(input_path, &png_path, max_dim)
+        .or_else(|_| render_pdf_with_mutool(input_path, &png_path))
+        .or_else(|_| render_pdf_with_qlmanage(input_path, &png_path, max_dim, temp_dir.path()))
+        .is_err()
+    {
+        anyhow::bail!(
+            "PDF thumbnail generation requires a local PDF renderer (pdftoppm, mutool, or macOS qlmanage)."
+        );
+    }
+
+    let image = image::open(&png_path)
+        .with_context(|| format!("failed to decode PDF thumbnail {}", png_path.display()))?;
+    let thumb = image.thumbnail(max_dim, max_dim);
+    thumb
+        .save_with_format(output_path, ImageFormat::WebP)
+        .with_context(|| {
+            format!(
+                "failed to save PDF WebP thumbnail to {}",
+                output_path.display()
+            )
+        })
+}
+
+fn render_pdf_with_pdftoppm(input_path: &Path, png_path: &Path, max_dim: u32) -> Result<()> {
+    let prefix = png_path.with_extension("");
+    let status = run_pdf_renderer_with_timeout(Command::new("pdftoppm").args([
+        "-f",
+        "1",
+        "-l",
+        "1",
+        "-singlefile",
+        "-png",
+        "-scale-to",
+        &max_dim.to_string(),
+        path_to_str(input_path)?,
+        path_to_str(&prefix)?,
+    ]))
+    .context("failed to run pdftoppm")?;
+    if status.success() && png_path.exists() {
+        Ok(())
+    } else {
+        anyhow::bail!("pdftoppm failed")
+    }
+}
+
+fn render_pdf_with_mutool(input_path: &Path, png_path: &Path) -> Result<()> {
+    let status = run_pdf_renderer_with_timeout(Command::new("mutool").args([
+        "draw",
+        "-q",
+        "-o",
+        path_to_str(png_path)?,
+        path_to_str(input_path)?,
+        "1",
+    ]))
+    .context("failed to run mutool")?;
+    if status.success() && png_path.exists() {
+        Ok(())
+    } else {
+        anyhow::bail!("mutool failed")
+    }
+}
+
+fn render_pdf_with_qlmanage(
+    input_path: &Path,
+    png_path: &Path,
+    max_dim: u32,
+    temp_dir: &Path,
+) -> Result<()> {
+    let status = run_pdf_renderer_with_timeout(Command::new("qlmanage").args([
+        "-t",
+        "-s",
+        &max_dim.to_string(),
+        "-o",
+        path_to_str(temp_dir)?,
+        path_to_str(input_path)?,
+    ]))
+    .context("failed to run qlmanage")?;
+    let ql_path = input_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| temp_dir.join(format!("{name}.png")))
+        .ok_or_else(|| anyhow::anyhow!("PDF input path has no UTF-8 filename"))?;
+    if status.success() && ql_path.exists() {
+        std::fs::rename(&ql_path, png_path)
+            .with_context(|| format!("failed to move qlmanage thumbnail {}", ql_path.display()))?;
+        Ok(())
+    } else {
+        anyhow::bail!("qlmanage failed")
+    }
+}
+
+fn path_to_str(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| anyhow::anyhow!("path contains non-UTF-8 characters: {}", path.display()))
+}
+
+fn run_pdf_renderer_with_timeout(command: &mut Command) -> Result<std::process::ExitStatus> {
+    let timeout = Duration::from_secs(10);
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to spawn PDF renderer")?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("PDF renderer timed out after {}s", timeout.as_secs());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Map a MIME type to an `image::ImageFormat` for decoding.

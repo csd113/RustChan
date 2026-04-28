@@ -26,6 +26,7 @@ fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
         Some("wav") => Some("audio/wav"),
         Some("m4a") => Some("audio/mp4"),
         Some("aac") => Some("audio/aac"),
+        Some("pdf") => Some("application/pdf"),
         _ => None,
     }
 }

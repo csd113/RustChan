@@ -635,6 +635,7 @@ fn render_board_settings_card(
     <label><input type="checkbox" name="allow_images" value="1"{images_checked}> Allow images</label>
     <label><input type="checkbox" name="allow_video" value="1"{video_checked}> Allow video</label>
     <label><input type="checkbox" name="allow_audio" value="1"{audio_checked}> Allow audio</label>
+    <label><input type="checkbox" name="allow_pdf" value="1"{pdf_checked}> Allow PDF uploads</label>
     {any_files_toggle}
     <label><input type="checkbox" name="allow_tripcodes" value="1"{tripcodes_checked}> Allow tripcodes</label>
     <label><input type="checkbox" name="allow_video_embeds" value="1"{video_embeds_checked}> Embed video links (YouTube)</label>
@@ -744,6 +745,7 @@ fn render_board_settings_card(
         images_checked = checked(board.allow_images),
         video_checked = checked(board.allow_video),
         audio_checked = checked(board.allow_audio),
+        pdf_checked = checked(board.allow_pdf),
         tripcodes_checked = checked(board.allow_tripcodes),
         video_embeds_checked = checked(board.allow_video_embeds),
         poster_ids_checked = checked(board.show_poster_ids),
@@ -1429,6 +1431,7 @@ pub fn admin_ip_history_page(
             Some(MediaType::Image) => r#"<span style="color:var(--green-bright)">[img]</span>"#,
             Some(MediaType::Video) => r#"<span style="color:var(--text-dim)">[vid]</span>"#,
             Some(MediaType::Audio) => r#"<span style="color:var(--text-dim)">[aud]</span>"#,
+            Some(MediaType::Pdf) => r#"<span style="color:var(--text-dim)">[pdf]</span>"#,
             Some(MediaType::Other) => r#"<span style="color:var(--text-dim)">[file]</span>"#,
             None => "",
         };
@@ -1650,6 +1653,7 @@ mod tests {
             allow_images: true,
             allow_video: true,
             allow_audio: true,
+            allow_pdf: false,
             allow_any_files: false,
             allow_tripcodes: true,
             allow_editing: true,
@@ -2006,6 +2010,7 @@ mod tests {
         assert!(html.contains("// board directory"));
         assert!(html.contains("// create board"));
         assert!(html.contains(r#"name="allow_audio" value="1"> Enable audio uploads"#));
+        assert!(html.contains(r#"name="allow_pdf" value="1"> Allow PDF uploads"#));
         assert!(html.contains("// board appearance overrides"));
         assert!(html.contains("id=\"board-appearance-tech\""));
         assert!(html.contains("save board appearance"));

@@ -935,6 +935,7 @@ pub fn render_post(
                 .unwrap_or("application/octet-stream");
             let is_audio = matches!(primary_media_type, crate::models::MediaType::Audio);
             let is_video = matches!(primary_media_type, crate::models::MediaType::Video);
+            let is_pdf = matches!(primary_media_type, crate::models::MediaType::Pdf);
 
             let combo_audio = if matches!(primary_media_type, crate::models::MediaType::Image) {
                 match (&post.audio_file_path, &post.audio_mime_type) {
@@ -1009,6 +1010,33 @@ pub fn render_post(
                     ),
                     sz = escape_html(&size_str),
                     mime = escape_html(mime)
+                );
+            } else if is_pdf {
+                let _ = write!(
+                    html,
+                    r#"<div class="file-container pdf-container">
+<div class="file-info">
+  File: {file_link} ({sz}) <span class="post-edited">Open PDF</span>
+  <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
+</div>
+<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="open PDF inline">
+  {thumb_html}
+  <div class="media-expand-overlay">PDF</div>
+</a>
+<iframe class="media-expanded media-expanded-pdf" src="about:blank" data-src="/boards/{f}" title="{orig}" style="display:none"></iframe>
+</div>"#,
+                    file_link = file_link,
+                    f = escape_html(file),
+                    thumb_html = render_media_thumb(
+                        "thumb",
+                        "thumb",
+                        thumb,
+                        "PDF thumbnail",
+                        "eager",
+                        "Open PDF",
+                    ),
+                    sz = escape_html(&size_str),
+                    orig = escape_html(name_str)
                 );
             } else {
                 // Image
@@ -1663,6 +1691,43 @@ mod tests {
 
         assert!(html.contains(r#"data-media-thumb="1""#));
         assert!(html.contains("media-thumb-fallback"));
+    }
+
+    #[test]
+    fn pdf_post_renders_thumbnail_direct_link_and_inline_hooks() {
+        let mut post = sample_post();
+        post.file_path = Some("test/doc.pdf".into());
+        post.file_name = Some("doc.pdf".into());
+        post.thumb_path = Some("test/thumbs/doc.webp".into());
+        post.mime_type = Some("application/pdf".into());
+        post.media_type = Some(MediaType::Pdf);
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html.contains(r#"href="/boards/test/doc.pdf""#));
+        assert!(html.contains(r#"src="/boards/test/thumbs/doc.webp""#));
+        assert!(html.contains(r#"data-action="expand-media""#));
+        assert!(html.contains(r#"data-action="collapse-media""#));
+        assert!(html.contains(r#"<iframe class="media-expanded media-expanded-pdf""#));
+        assert!(html.contains(r#"data-src="/boards/test/doc.pdf""#));
+        assert!(html.contains("Open PDF"));
     }
 
     #[test]

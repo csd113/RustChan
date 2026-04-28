@@ -880,9 +880,9 @@ function expandMedia(preview) {
   var container = preview.closest('.file-container');
   var expanded = container.querySelector('.media-expanded');
   var closeBtn = container.querySelector('.media-close-btn');
-  if (expanded.tagName === 'IMG' && expanded.dataset.src) {
+  if ((expanded.tagName === 'IMG' || expanded.tagName === 'IFRAME') && expanded.dataset.src) {
     expanded.src = expanded.dataset.src;
-    delete expanded.dataset.src;
+    if (expanded.tagName === 'IMG') delete expanded.dataset.src;
   }
   preview.style.display = 'none';
   expanded.style.display = 'block';

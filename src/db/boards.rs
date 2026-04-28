@@ -12,12 +12,12 @@ const BOARD_ORDER_SQL: &str = "nsfw ASC, display_order ASC, id ASC";
 const BOARD_GROUP_ORDER_SQL: &str = "display_order ASC, id ASC";
 const BOARD_SELECT_COLUMNS: &str = "id, display_order, short_name, name, description, nsfw, \
     max_threads, max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, \
-    allow_any_files, allow_tripcodes, edit_window_secs, allow_editing, allow_self_delete, allow_archive, \
+    allow_pdf, allow_any_files, allow_tripcodes, edit_window_secs, allow_editing, allow_self_delete, allow_archive, \
     allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext, \
     post_cooldown_secs, default_theme, banner_mode, access_mode, access_password_hash, created_at";
 const BOARD_SELECT_COLUMNS_WITH_ALIAS: &str = "b.id, b.display_order, b.short_name, b.name, \
     b.description, b.nsfw, b.max_threads, b.max_archived_threads, b.bump_limit, \
-    b.allow_images, b.allow_video, b.allow_audio, b.allow_any_files, b.allow_tripcodes, \
+    b.allow_images, b.allow_video, b.allow_audio, b.allow_pdf, b.allow_any_files, b.allow_tripcodes, \
     b.edit_window_secs, b.allow_editing, b.allow_self_delete, b.allow_archive, b.allow_video_embeds, \
     b.allow_captcha, b.show_poster_ids, b.collapse_greentext, b.post_cooldown_secs, \
     b.default_theme, b.banner_mode, b.access_mode, b.access_password_hash, b.created_at";
@@ -26,8 +26,8 @@ const BOARD_SELECT_COLUMNS_WITH_ALIAS: &str = "b.id, b.display_order, b.short_na
 
 pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
     let short_name: String = row.get(2)?;
-    let banner_mode_raw: String = row.get(24)?;
-    let access_mode_raw: String = row.get(25)?;
+    let banner_mode_raw: String = row.get(25)?;
+    let access_mode_raw: String = row.get(26)?;
     let banner_mode = BoardBannerMode::from_db_str(&banner_mode_raw).unwrap_or_else(|| {
         tracing::warn!(
             target: "db",
@@ -59,22 +59,23 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         allow_images: row.get::<_, i32>(9)? != 0,
         allow_video: row.get::<_, i32>(10)? != 0,
         allow_audio: row.get::<_, i32>(11)? != 0,
-        allow_any_files: row.get::<_, i32>(12)? != 0,
-        allow_tripcodes: row.get::<_, i32>(13)? != 0,
-        edit_window_secs: row.get(14)?,
-        allow_editing: row.get::<_, i32>(15)? != 0,
-        allow_self_delete: row.get::<_, i32>(16)? != 0,
-        allow_archive: row.get::<_, i32>(17)? != 0,
-        allow_video_embeds: row.get::<_, i32>(18)? != 0,
-        allow_captcha: row.get::<_, i32>(19)? != 0,
-        show_poster_ids: row.get::<_, i32>(20)? != 0,
-        collapse_greentext: row.get::<_, i32>(21)? != 0,
-        post_cooldown_secs: row.get(22)?,
-        default_theme: row.get(23)?,
+        allow_pdf: row.get::<_, i32>(12)? != 0,
+        allow_any_files: row.get::<_, i32>(13)? != 0,
+        allow_tripcodes: row.get::<_, i32>(14)? != 0,
+        edit_window_secs: row.get(15)?,
+        allow_editing: row.get::<_, i32>(16)? != 0,
+        allow_self_delete: row.get::<_, i32>(17)? != 0,
+        allow_archive: row.get::<_, i32>(18)? != 0,
+        allow_video_embeds: row.get::<_, i32>(19)? != 0,
+        allow_captcha: row.get::<_, i32>(20)? != 0,
+        show_poster_ids: row.get::<_, i32>(21)? != 0,
+        collapse_greentext: row.get::<_, i32>(22)? != 0,
+        post_cooldown_secs: row.get(23)?,
+        default_theme: row.get(24)?,
         banner_mode,
         access_mode,
-        access_password_hash: row.get(26)?,
-        created_at: row.get(27)?,
+        access_password_hash: row.get(27)?,
+        created_at: row.get(28)?,
     })
 }
 
@@ -291,7 +292,7 @@ pub fn get_all_boards_with_stats(
     let out = stmt
         .query_map([], |row| {
             let board = map_board(row)?;
-            let thread_count: i64 = row.get(28)?;
+            let thread_count: i64 = row.get(29)?;
             Ok(crate::models::BoardStats {
                 board,
                 thread_count,
@@ -517,6 +518,7 @@ pub fn update_board_settings(
     allow_images: bool,
     allow_video: bool,
     allow_audio: bool,
+    allow_pdf: bool,
     allow_any_files: bool,
     allow_tripcodes: bool,
     edit_window_secs: i64,
@@ -544,12 +546,12 @@ pub fn update_board_settings(
         tx.execute(
             "UPDATE boards SET name=?1, description=?2, nsfw=?3,
              bump_limit=?4, max_threads=?5, max_archived_threads=?6,
-             allow_images=?7, allow_video=?8, allow_audio=?9, allow_any_files=?10,
-            allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13, allow_self_delete=?14,
-             allow_archive=?15, allow_video_embeds=?16, allow_captcha=?17,
-             show_poster_ids=?18, collapse_greentext=?19, post_cooldown_secs=?20,
-             default_theme=?21, banner_mode=?22, access_mode=?23, access_password_hash=?24
-             WHERE id=?25",
+             allow_images=?7, allow_video=?8, allow_audio=?9, allow_pdf=?10, allow_any_files=?11,
+             allow_tripcodes=?12, edit_window_secs=?13, allow_editing=?14, allow_self_delete=?15,
+             allow_archive=?16, allow_video_embeds=?17, allow_captcha=?18,
+             show_poster_ids=?19, collapse_greentext=?20, post_cooldown_secs=?21,
+             default_theme=?22, banner_mode=?23, access_mode=?24, access_password_hash=?25
+             WHERE id=?26",
             params![
                 name,
                 description,
@@ -560,6 +562,7 @@ pub fn update_board_settings(
                 i32::from(allow_images),
                 i32::from(allow_video),
                 i32::from(allow_audio),
+                i32::from(allow_pdf),
                 i32::from(allow_any_files),
                 i32::from(allow_tripcodes),
                 edit_window_secs,
@@ -583,12 +586,12 @@ pub fn update_board_settings(
         tx.execute(
             "UPDATE boards SET name=?1, description=?2, nsfw=?3, display_order=?4,
              bump_limit=?5, max_threads=?6, max_archived_threads=?7,
-             allow_images=?8, allow_video=?9, allow_audio=?10, allow_any_files=?11,
-             allow_tripcodes=?12, edit_window_secs=?13, allow_editing=?14, allow_self_delete=?15,
-             allow_archive=?16, allow_video_embeds=?17, allow_captcha=?18,
-             show_poster_ids=?19, collapse_greentext=?20, post_cooldown_secs=?21,
-             default_theme=?22, banner_mode=?23, access_mode=?24, access_password_hash=?25
-             WHERE id=?26",
+             allow_images=?8, allow_video=?9, allow_audio=?10, allow_pdf=?11, allow_any_files=?12,
+             allow_tripcodes=?13, edit_window_secs=?14, allow_editing=?15, allow_self_delete=?16,
+             allow_archive=?17, allow_video_embeds=?18, allow_captcha=?19,
+             show_poster_ids=?20, collapse_greentext=?21, post_cooldown_secs=?22,
+             default_theme=?23, banner_mode=?24, access_mode=?25, access_password_hash=?26
+             WHERE id=?27",
             params![
                 name,
                 description,
@@ -600,6 +603,7 @@ pub fn update_board_settings(
                 i32::from(allow_images),
                 i32::from(allow_video),
                 i32::from(allow_audio),
+                i32::from(allow_pdf),
                 i32::from(allow_any_files),
                 i32::from(allow_tripcodes),
                 edit_window_secs,
@@ -1041,5 +1045,6 @@ mod tests {
         assert!(board.allow_images);
         assert!(board.allow_video);
         assert!(board.allow_audio);
+        assert!(!board.allow_pdf);
     }
 }

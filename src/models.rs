@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 // ─── Media type classification ────────────────────────────────────────────────
 
-/// Classifies an uploaded file as image, video, audio, or a generic download.
-/// Stored as a TEXT column in posts ("image", "video", "audio", "other").
+/// Classifies an uploaded file as image, video, audio, PDF, or a generic download.
+/// Stored as a TEXT column in posts ("image", "video", "audio", "pdf", "other").
 ///
 /// The serde `rename_all = "lowercase"` representation **must** stay in sync
 /// with `as_str()` / `from_db_str()`.  Add a round-trip unit test whenever a
@@ -16,6 +16,7 @@ pub enum MediaType {
     Image,
     Video,
     Audio,
+    Pdf,
     Other,
 }
 
@@ -29,6 +30,8 @@ impl MediaType {
             Self::Video
         } else if mime.starts_with("audio/") {
             Self::Audio
+        } else if mime == "application/pdf" {
+            Self::Pdf
         } else {
             Self::Other
         }
@@ -44,6 +47,7 @@ impl MediaType {
             | "svg" => Self::Image,
             "mp4" | "webm" => Self::Video,
             "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "opus" => Self::Audio,
+            "pdf" => Self::Pdf,
             _ => Self::Other,
         }
     }
@@ -55,6 +59,7 @@ impl MediaType {
             Self::Image => "image",
             Self::Video => "video",
             Self::Audio => "audio",
+            Self::Pdf => "pdf",
             Self::Other => "other",
         }
     }
@@ -66,6 +71,7 @@ impl MediaType {
             "image" => Some(Self::Image),
             "video" => Some(Self::Video),
             "audio" => Some(Self::Audio),
+            "pdf" => Some(Self::Pdf),
             "other" => Some(Self::Other),
             _ => None,
         }
@@ -272,6 +278,7 @@ pub struct Board {
     pub allow_images: bool,    // per-board image upload toggle (default: true)
     pub allow_video: bool,     // per-board video upload toggle (default: true)
     pub allow_audio: bool,     // per-board audio upload toggle (default: true)
+    pub allow_pdf: bool,       // per-board PDF upload toggle (default: off)
     pub allow_any_files: bool, // per-board arbitrary file upload toggle (default: off)
     pub allow_tripcodes: bool,
     pub allow_editing: bool, // per-board post editing toggle (default: off)
@@ -700,6 +707,7 @@ mod tests {
             MediaType::Image,
             MediaType::Video,
             MediaType::Audio,
+            MediaType::Pdf,
             MediaType::Other,
         ] {
             let json =
@@ -724,6 +732,7 @@ mod tests {
             MediaType::Image,
             MediaType::Video,
             MediaType::Audio,
+            MediaType::Pdf,
             MediaType::Other,
         ] {
             assert_eq!(format!("{mt}"), mt.as_str());
@@ -735,6 +744,7 @@ mod tests {
         assert_eq!(MediaType::from_mime("image/png"), MediaType::Image);
         assert_eq!(MediaType::from_mime("video/mp4"), MediaType::Video);
         assert_eq!(MediaType::from_mime("audio/ogg"), MediaType::Audio);
+        assert_eq!(MediaType::from_mime("application/pdf"), MediaType::Pdf);
         assert_eq!(MediaType::from_mime("application/json"), MediaType::Other);
     }
 
@@ -744,6 +754,7 @@ mod tests {
         assert_eq!(MediaType::from_ext("heic"), MediaType::Image);
         assert_eq!(MediaType::from_ext("mp4"), MediaType::Video);
         assert_eq!(MediaType::from_ext("flac"), MediaType::Audio);
+        assert_eq!(MediaType::from_ext("pdf"), MediaType::Pdf);
         assert_eq!(MediaType::from_ext("exe"), MediaType::Other);
     }
 

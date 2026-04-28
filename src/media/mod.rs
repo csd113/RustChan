@@ -172,6 +172,11 @@ impl MediaProcessor {
         ) {
             Ok(p) => p,
             Err(e) => {
+                if conv.final_mime == "application/pdf" {
+                    let _ = std::fs::remove_file(&conv.final_path);
+                    let _ = std::fs::remove_file(&thumb_path);
+                    return Err(e).context("PDF thumbnail generation failed");
+                }
                 // Thumbnail failure must never abort an upload.  Log and fall
                 // back to the pre-computed path (the thumbnail will be missing,
                 // but the upload still succeeds).

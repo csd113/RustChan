@@ -311,6 +311,8 @@ fn validate_upload(
     }
     if media_type == crate::models::MediaType::Image {
         validate_decodable_image(input_path, &mime_type)?;
+    } else if media_type == crate::models::MediaType::Pdf {
+        validate_pdf_structure(input_path)?;
     }
 
     let jpeg_orientation = if mime_type == "image/jpeg" {
@@ -426,7 +428,7 @@ fn max_size_for_media(
         crate::models::MediaType::Video => options.max_video_size,
         crate::models::MediaType::Audio => options.max_audio_size,
         crate::models::MediaType::Image => options.max_image_size,
-        crate::models::MediaType::Other => options
+        crate::models::MediaType::Pdf | crate::models::MediaType::Other => options
             .max_image_size
             .max(options.max_video_size)
             .max(options.max_audio_size),
@@ -438,6 +440,7 @@ const fn media_label(media_type: crate::models::MediaType) -> &'static str {
         crate::models::MediaType::Video => "video",
         crate::models::MediaType::Audio => "audio",
         crate::models::MediaType::Image => "image",
+        crate::models::MediaType::Pdf => "PDF",
         crate::models::MediaType::Other => "file",
     }
 }
@@ -481,6 +484,20 @@ fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
     image::load_from_memory_with_format(&data, format).with_context(|| {
         format!("File appears to be {mime_type}, but the image data could not be decoded.")
     })?;
+    Ok(())
+}
+
+fn validate_pdf_structure(input_path: &Path) -> Result<()> {
+    let data = std::fs::read(input_path)
+        .with_context(|| format!("Failed to read {} for PDF validation", input_path.display()))?;
+    if !data.starts_with(b"%PDF-") {
+        anyhow::bail!("File appears to be application/pdf, but its header is malformed.");
+    }
+    let tail_start = data.len().saturating_sub(4096);
+    let tail = data.get(tail_start..).unwrap_or(&data);
+    if !tail.windows(5).any(|window| window == b"%%EOF") {
+        anyhow::bail!("File appears to be application/pdf, but its trailer is missing.");
+    }
     Ok(())
 }
 
@@ -640,6 +657,7 @@ fn mime_to_ext(mime: &str) -> &'static str {
         "audio/wav" => "wav",
         "audio/mp4" => "m4a",
         "audio/aac" => "aac",
+        "application/pdf" => "pdf",
         _ => "bin",
     }
 }
@@ -647,6 +665,7 @@ fn mime_to_ext(mime: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{save_audio_with_image_thumb_from_path, save_upload_from_path, SaveUploadOptions};
+    use std::process::{Command, Stdio};
 
     fn one_pixel_png() -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -685,6 +704,30 @@ mod tests {
             allow_any_files: true,
             ..test_upload_options(root, original_filename)
         }
+    }
+
+    fn valid_pdf() -> &'static [u8] {
+        b"%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >> endobj
+4 0 obj << /Length 0 >> stream
+
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF
+"
+    }
+
+    fn pdf_renderer_available() -> bool {
+        ["pdftoppm", "mutool", "qlmanage"].iter().any(|program| {
+            Command::new(program)
+                .arg("-h")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok()
+        })
     }
 
     #[test]
@@ -816,5 +859,76 @@ mod tests {
         assert_eq!(uploaded.original_name, "renamed.txt");
         assert!(tempdir.path().join(&uploaded.file_path).exists());
         assert!(tempdir.path().join(&uploaded.thumb_path).exists());
+    }
+
+    #[test]
+    fn valid_pdf_upload_saves_original_and_page_thumbnail_when_renderer_exists() {
+        if !pdf_renderer_available() {
+            eprintln!("skipping PDF thumbnail test: no local PDF renderer found");
+            return;
+        }
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input = tempfile::Builder::new()
+            .suffix(".pdf")
+            .tempfile_in(tempdir.path())
+            .expect("temp file");
+        let pdf = valid_pdf();
+        std::fs::write(input.path(), pdf).expect("write pdf");
+
+        let uploaded = save_upload_from_path(
+            input.path(),
+            pdf,
+            pdf.len(),
+            &test_upload_options(tempdir.path(), "doc.pdf"),
+        )
+        .expect("valid PDF saves");
+
+        assert_eq!(uploaded.mime_type, "application/pdf");
+        assert_eq!(uploaded.media_type, crate::models::MediaType::Pdf);
+        assert!(std::path::Path::new(&uploaded.file_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")));
+        assert!(std::path::Path::new(&uploaded.thumb_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("webp")));
+        assert!(tempdir.path().join(&uploaded.file_path).exists());
+        assert!(tempdir.path().join(&uploaded.thumb_path).exists());
+    }
+
+    #[test]
+    fn pdf_thumbnail_failure_cleans_original_and_thumbnail_paths() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input = tempfile::Builder::new()
+            .suffix(".pdf")
+            .tempfile_in(tempdir.path())
+            .expect("temp file");
+        let invalid_but_plausible = b"%PDF-1.4\nthis is not renderable\n%%EOF\n";
+        std::fs::write(input.path(), invalid_but_plausible).expect("write pdf");
+
+        let result = save_upload_from_path(
+            input.path(),
+            invalid_but_plausible,
+            invalid_but_plausible.len(),
+            &test_upload_options(tempdir.path(), "broken.pdf"),
+        );
+
+        if result.is_ok() {
+            eprintln!("renderer accepted minimal PDF-like fixture; cleanup path not exercised");
+            return;
+        }
+
+        let board_dir = tempdir.path().join("test");
+        if board_dir.exists() {
+            let entries = std::fs::read_dir(&board_dir)
+                .expect("read board dir")
+                .collect::<std::io::Result<Vec<_>>>()
+                .expect("collect entries");
+            assert!(
+                entries.iter().all(|entry| entry.path().is_dir()),
+                "failed PDF upload left files in {}",
+                board_dir.display()
+            );
+        }
     }
 }

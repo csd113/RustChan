@@ -19,6 +19,7 @@ const BASE_SCHEMA_SQL: &str = "
         allow_tripcodes INTEGER NOT NULL DEFAULT 1,
         allow_images    INTEGER NOT NULL DEFAULT 1,
         allow_audio     INTEGER NOT NULL DEFAULT 0,
+        allow_pdf       INTEGER NOT NULL DEFAULT 0,
         allow_any_files INTEGER NOT NULL DEFAULT 0,
         edit_window_secs    INTEGER NOT NULL DEFAULT 0,
         allow_editing       INTEGER NOT NULL DEFAULT 0,
@@ -305,7 +306,7 @@ const INDEX_SCHEMA_SQL: &str = "
         ON post_submissions(created_at ASC);
 ";
 
-const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 29] = [
+const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 30] = [
     (
         "boards",
         "display_order",
@@ -335,6 +336,11 @@ const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 29] = [
         "boards",
         "allow_audio",
         "ALTER TABLE boards ADD COLUMN allow_audio INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "boards",
+        "allow_pdf",
+        "ALTER TABLE boards ADD COLUMN allow_pdf INTEGER NOT NULL DEFAULT 0",
     ),
     (
         "boards",
@@ -947,6 +953,7 @@ fn backfill_media_type(conn: &rusqlite::Connection) -> Result<()> {
                       file_path LIKE '%.flac' OR file_path LIKE '%.wav'  OR
                       file_path LIKE '%.m4a'  OR file_path LIKE '%.aac'  OR
                       file_path LIKE '%.opus' THEN 'audio'
+                 WHEN file_path LIKE '%.pdf' THEN 'pdf'
                  ELSE 'other'
              END
              WHERE media_type IS NULL AND file_path IS NOT NULL;",
@@ -1386,15 +1393,16 @@ mod tests {
         assert_eq!(schema_version(&conn), POST_SQUASH_SCHEMA_VERSION);
         assert!(table_has_column(&conn, "boards", "allow_self_delete"));
         assert!(table_has_column(&conn, "boards", "allow_archive"));
+        assert!(table_has_column(&conn, "boards", "allow_pdf"));
 
-        let flags: (i64, i64) = conn
+        let flags: (i64, i64, i64) = conn
             .query_row(
-                "SELECT allow_self_delete, allow_archive FROM boards WHERE id = 1",
+                "SELECT allow_self_delete, allow_archive, allow_pdf FROM boards WHERE id = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("read repaired board flags");
-        assert_eq!(flags, (0, 1));
+        assert_eq!(flags, (0, 1, 0));
     }
 
     #[test]

@@ -69,6 +69,9 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     if header.starts_with(b"\x89PNG\r\n\x1A\n") {
         return Ok("image/png");
     }
+    if header.starts_with(b"%PDF-") {
+        return Ok("application/pdf");
+    }
     if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
         return Ok("image/gif");
     }
@@ -103,7 +106,7 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
 
     Err(anyhow::anyhow!(
         "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, HEIC, HEIF, BMP, TIFF, \
-         MP4, WebM, MP3, OGG, FLAC, WAV, M4A, AAC"
+         MP4, WebM, MP3, OGG, FLAC, WAV, M4A, AAC, PDF"
     ))
 }
 

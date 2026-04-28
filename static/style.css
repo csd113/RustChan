@@ -1610,6 +1610,13 @@ html:not([data-theme]) .poster-id-btn {
   height: auto;
 }
 
+.media-expanded-pdf {
+  width: min(100%, 900px);
+  height: min(78vh, 900px);
+  min-height: 520px;
+  overflow: auto;
+}
+
 .media-close-btn {
   display: none; /* shown via JS as inline-flex */
   align-items: center;

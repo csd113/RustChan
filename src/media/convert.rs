@@ -53,11 +53,6 @@ pub fn conversion_action(mime: &str) -> ConversionAction {
             ConversionAction::ToWebp
         }
         "image/png" => ConversionAction::ToWebpIfSmaller,
-        // Keep these formats as-is
-        "image/svg+xml" | "image/webp" | "video/webm" | "audio/webm" | "video/mp4"
-        | "audio/mpeg" | "audio/ogg" | "audio/flac" | "audio/wav" | "audio/mp4" | "audio/aac" => {
-            ConversionAction::KeepAsIs
-        }
         _ => ConversionAction::KeepAsIs,
     }
 }
@@ -287,6 +282,7 @@ fn ext_for_original_mime(path: &Path) -> &'static str {
         Some("webp") => "webp",
         Some("webm") => "webm",
         Some("svg") => "svg",
+        Some("pdf") => "pdf",
         _ => "bin",
     }
 }
@@ -303,6 +299,7 @@ fn ext_to_static_mime(ext: &str) -> &'static str {
         "tiff" | "tif" => "image/tiff",
         "webp" => "image/webp",
         "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
         "webm" => "video/webm",
         "mp4" => "video/mp4",
         "mp3" => "audio/mpeg",

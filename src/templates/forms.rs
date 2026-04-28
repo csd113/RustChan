@@ -43,8 +43,11 @@ const POLL_OPTION_MAX_COUNT: usize = 20;
 fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
 
-    let uploads_enabled =
-        board.allow_images || board.allow_audio || board.allow_video || allow_any_files;
+    let uploads_enabled = board.allow_images
+        || board.allow_audio
+        || board.allow_video
+        || board.allow_pdf
+        || allow_any_files;
 
     UploadFormPolicy { uploads_enabled }
 }
@@ -91,8 +94,11 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
         / 1024
         / 1024;
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
-    let audio_image_dual_mode =
-        board.allow_audio && board.allow_images && !board.allow_video && !allow_any_files;
+    let audio_image_dual_mode = board.allow_audio
+        && board.allow_images
+        && !board.allow_video
+        && !board.allow_pdf
+        && !allow_any_files;
 
     let mut accept_parts: Vec<&str> = Vec::new();
     let mut hint_parts: Vec<String> = Vec::new();
@@ -108,6 +114,10 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
     if board.allow_audio {
         accept_parts.push(AUDIO_ACCEPT);
         hint_parts.push(format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB"));
+    }
+    if board.allow_pdf {
+        accept_parts.push("application/pdf,.pdf");
+        hint_parts.push(format!("pdf · max {generic_upload_mb} MiB"));
     }
 
     let file_accept = if allow_any_files {

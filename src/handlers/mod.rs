@@ -381,14 +381,20 @@ pub fn process_primary_upload(
                 "Audio uploads are disabled on this board.".into(),
             ))
         }
+        crate::models::MediaType::Pdf if !board.allow_pdf => {
+            return Err(AppError::BadRequest(
+                "PDF uploads are disabled on this board.".into(),
+            ))
+        }
         crate::models::MediaType::Other if !allow_any_files => {
             return Err(AppError::BadRequest(
-                "This board only accepts image, video, or audio uploads.".into(),
+                "This board only accepts image, video, audio, or PDF uploads.".into(),
             ))
         }
         crate::models::MediaType::Image
         | crate::models::MediaType::Video
         | crate::models::MediaType::Audio
+        | crate::models::MediaType::Pdf
         | crate::models::MediaType::Other => {}
     }
 
@@ -660,7 +666,9 @@ pub fn enqueue_post_jobs(
                     file_path: up.file_path.clone(),
                     board_short: board_short.to_string(),
                 }),
-                crate::models::MediaType::Image | crate::models::MediaType::Other => None,
+                crate::models::MediaType::Image
+                | crate::models::MediaType::Pdf
+                | crate::models::MediaType::Other => None,
             };
             if let Some(j) = job {
                 match job_queue.enqueue(&j) {
@@ -748,6 +756,30 @@ mod tests {
             },
             name.to_string(),
         )
+    }
+
+    fn valid_pdf() -> &'static [u8] {
+        b"%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >> endobj
+4 0 obj << /Length 0 >> stream
+
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF
+"
+    }
+
+    fn pdf_renderer_available() -> bool {
+        ["pdftoppm", "mutool", "qlmanage"].iter().any(|program| {
+            std::process::Command::new(program)
+                .arg("-h")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        })
     }
 
     fn create_file_hash_table(conn: &rusqlite::Connection) {
@@ -853,5 +885,107 @@ mod tests {
             Ok(_) => panic!("malformed image should be rejected before dedup reuse"),
             Err(error) => assert!(error.to_string().contains("image header is malformed")),
         }
+    }
+
+    #[test]
+    fn primary_upload_rejects_pdf_when_board_disables_pdf() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        create_file_hash_table(&conn);
+
+        let board = crate::models::Board {
+            allow_pdf: false,
+            ..crate::test_fixtures::sample_board()
+        };
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
+        let save_root = tempfile::tempdir().expect("save root");
+        let result = super::process_primary_upload(
+            Some(temp_upload("doc.pdf", valid_pdf())),
+            &board,
+            &conn,
+            uploads_dir.path().to_str().expect("uploads dir path"),
+            save_root.path().to_str().expect("save root path"),
+            64,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            false,
+            false,
+        );
+
+        match result {
+            Ok(_) => panic!("PDF upload should be rejected when disabled"),
+            Err(error) => assert!(error.to_string().contains("PDF uploads are disabled")),
+        }
+        assert!(!save_root.path().join(&board.short_name).exists());
+    }
+
+    #[test]
+    fn primary_upload_rejects_renamed_non_pdf() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        create_file_hash_table(&conn);
+
+        let board = crate::models::Board {
+            allow_pdf: true,
+            ..crate::test_fixtures::sample_board()
+        };
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
+        let save_root = tempfile::tempdir().expect("save root");
+        let result = super::process_primary_upload(
+            Some(temp_upload("not-really.pdf", b"plain text")),
+            &board,
+            &conn,
+            uploads_dir.path().to_str().expect("uploads dir path"),
+            save_root.path().to_str().expect("save root path"),
+            64,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            false,
+            false,
+        );
+
+        match result {
+            Ok(_) => panic!("renamed non-PDF should be rejected"),
+            Err(error) => assert!(error.to_string().contains("File type not allowed")),
+        }
+        assert!(!save_root.path().join(&board.short_name).exists());
+    }
+
+    #[test]
+    fn primary_upload_accepts_pdf_when_board_enables_pdf() {
+        if !pdf_renderer_available() {
+            eprintln!("skipping PDF board upload test: no local PDF renderer found");
+            return;
+        }
+
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        create_file_hash_table(&conn);
+
+        let board = crate::models::Board {
+            allow_pdf: true,
+            ..crate::test_fixtures::sample_board()
+        };
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
+        let save_root = tempfile::tempdir().expect("save root");
+        let (uploaded, _) = super::process_primary_upload(
+            Some(temp_upload("doc.pdf", valid_pdf())),
+            &board,
+            &conn,
+            uploads_dir.path().to_str().expect("uploads dir path"),
+            save_root.path().to_str().expect("save root path"),
+            64,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            false,
+            false,
+        )
+        .expect("PDF upload accepted");
+        let uploaded = uploaded.expect("uploaded PDF");
+
+        assert_eq!(uploaded.mime_type, "application/pdf");
+        assert_eq!(uploaded.media_type, crate::models::MediaType::Pdf);
+        assert!(save_root.path().join(uploaded.file_path).exists());
+        assert!(save_root.path().join(uploaded.thumb_path).exists());
     }
 }
