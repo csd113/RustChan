@@ -2,7 +2,7 @@
 
 All notable changes to RustChan will be documented in this file.
 
-## [1.1.5]
+## [1.1.5-indev]
 
 ### Added
 
@@ -24,7 +24,7 @@ All notable changes to RustChan will be documented in this file.
 - Banner exports from the standalone editor no longer include editing guide overlays, and the export flow better matches the screenshots and README examples.
 - Tor bootstrap and runtime logs are humanized into clearer status messages so operators can understand connection progress without reading raw Arti output.
 - Built-in self-signed TLS is now gated behind an explicit feature flag, keeping production builds slimmer unless the development certificate path is needed.
-- Rust dependencies, GitHub Actions release tooling, and lockfile contents were refreshed for the `1.1.5` cycle.
+- Rust dependencies, GitHub Actions release tooling, and lockfile contents were refreshed for the `1.1.5-indev` cycle.
 - Release artifacts now focus on current Apple Silicon macOS builds instead of publishing a separate macOS x86 archive.
 - Blue Sky and Deep Orbit theme palettes were refined for better contrast and fuller coverage across normal and admin surfaces.
 
@@ -41,7 +41,7 @@ All notable changes to RustChan will be documented in this file.
 
 ### Documentation
 
-- `README.md`, `SETUP.md`, and the release notes were cleaned up for the `1.1.5` release, with plainer wording and less filler.
+- `README.md`, `SETUP.md`, and the release notes were cleaned up for the `1.1.5-indev` cycle, with plainer wording and less filler.
 - The README was rewritten for clearer structure and refreshed with banner-maker screenshots and current feature wording.
 
 ### Internal

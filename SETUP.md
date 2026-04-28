@@ -2,6 +2,8 @@
 
 Current setup and deployment guide for Linux, macOS, and Windows.
 
+Current development version: `1.1.5-indev`.
+
 This guide reflects the current RustChan architecture:
 
 - Tor onion hosting is built in via Arti. You do not install or manage a separate `tor` service.
@@ -262,7 +264,7 @@ rustchan-data/
 
 ## Banner Artwork Requirements
 
-RustChan `1.1.5` adds board banners plus a separate home-page announcement banner.
+RustChan `1.1.5-indev` adds board banners plus a separate home-page announcement banner.
 
 Banner upload requirements:
 
