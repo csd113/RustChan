@@ -1016,12 +1016,12 @@ pub fn render_post(
                     html,
                     r#"<div class="file-container pdf-container">
 <div class="file-info">
-  File: {file_link} ({sz}) <span class="post-edited">Open PDF</span>
+  File: {file_link} ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="open PDF inline">
+<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
   {thumb_html}
-  <div class="media-expand-overlay">PDF</div>
+  <div class="media-expand-overlay">&#x2922;</div>
 </a>
 <iframe class="media-expanded media-expanded-pdf" src="about:blank" data-src="/boards/{f}" title="{orig}" style="display:none"></iframe>
 </div>"#,
@@ -1031,7 +1031,7 @@ pub fn render_post(
                         "thumb",
                         "thumb",
                         thumb,
-                        "PDF thumbnail",
+                        "pdf preview",
                         "eager",
                         "Open PDF",
                     ),
@@ -1728,6 +1728,8 @@ mod tests {
         assert!(html.contains(r#"<iframe class="media-expanded media-expanded-pdf""#));
         assert!(html.contains(r#"data-src="/boards/test/doc.pdf""#));
         assert!(html.contains("Open PDF"));
+        assert!(!html.contains(">PDF</div>"));
+        assert!(!html.contains("post-edited\">Open PDF"));
     }
 
     #[test]

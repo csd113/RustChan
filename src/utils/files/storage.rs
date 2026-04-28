@@ -665,7 +665,6 @@ fn mime_to_ext(mime: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{save_audio_with_image_thumb_from_path, save_upload_from_path, SaveUploadOptions};
-    use std::process::{Command, Stdio};
 
     fn one_pixel_png() -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -717,17 +716,6 @@ endstream endobj
 trailer << /Root 1 0 R >>
 %%EOF
 "
-    }
-
-    fn pdf_renderer_available() -> bool {
-        ["pdftoppm", "mutool", "qlmanage"].iter().any(|program| {
-            Command::new(program)
-                .arg("-h")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok()
-        })
     }
 
     #[test]
@@ -862,12 +850,7 @@ trailer << /Root 1 0 R >>
     }
 
     #[test]
-    fn valid_pdf_upload_saves_original_and_page_thumbnail_when_renderer_exists() {
-        if !pdf_renderer_available() {
-            eprintln!("skipping PDF thumbnail test: no local PDF renderer found");
-            return;
-        }
-
+    fn valid_pdf_upload_saves_generic_thumbnail_when_renderer_is_unavailable() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let input = tempfile::Builder::new()
             .suffix(".pdf")
@@ -875,6 +858,9 @@ trailer << /Root 1 0 R >>
             .expect("temp file");
         let pdf = valid_pdf();
         std::fs::write(input.path(), pdf).expect("write pdf");
+        let _override = crate::media::thumbnail::override_pdf_renderer_mode(
+            crate::media::thumbnail::TestPdfRendererMode::Unavailable,
+        );
 
         let uploaded = save_upload_from_path(
             input.path(),
@@ -891,44 +877,77 @@ trailer << /Root 1 0 R >>
             .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")));
         assert!(std::path::Path::new(&uploaded.thumb_path)
             .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("webp")));
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")));
         assert!(tempdir.path().join(&uploaded.file_path).exists());
         assert!(tempdir.path().join(&uploaded.thumb_path).exists());
+        let thumb = std::fs::read_to_string(tempdir.path().join(&uploaded.thumb_path))
+            .expect("read generic pdf thumbnail");
+        assert!(thumb.contains("PDF"));
     }
 
     #[test]
-    fn pdf_thumbnail_failure_cleans_original_and_thumbnail_paths() {
+    fn pdf_thumbnail_renderer_failure_keeps_pdf_and_uses_generic_thumbnail() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let input = tempfile::Builder::new()
             .suffix(".pdf")
             .tempfile_in(tempdir.path())
             .expect("temp file");
-        let invalid_but_plausible = b"%PDF-1.4\nthis is not renderable\n%%EOF\n";
-        std::fs::write(input.path(), invalid_but_plausible).expect("write pdf");
-
-        let result = save_upload_from_path(
-            input.path(),
-            invalid_but_plausible,
-            invalid_but_plausible.len(),
-            &test_upload_options(tempdir.path(), "broken.pdf"),
+        let pdf = valid_pdf();
+        std::fs::write(input.path(), pdf).expect("write pdf");
+        let _override = crate::media::thumbnail::override_pdf_renderer_mode(
+            crate::media::thumbnail::TestPdfRendererMode::Fail,
         );
 
-        if result.is_ok() {
-            eprintln!("renderer accepted minimal PDF-like fixture; cleanup path not exercised");
-            return;
-        }
+        let uploaded = save_upload_from_path(
+            input.path(),
+            pdf,
+            pdf.len(),
+            &test_upload_options(tempdir.path(), "broken.pdf"),
+        )
+        .expect("save pdf with fallback thumbnail");
+
+        assert!(tempdir.path().join(&uploaded.file_path).exists());
+        assert!(tempdir.path().join(&uploaded.thumb_path).exists());
+        assert!(std::path::Path::new(&uploaded.thumb_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")));
+    }
+
+    #[test]
+    fn pdf_thumbnail_timeout_cleans_tempdirs_and_partial_files() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input = tempfile::Builder::new()
+            .suffix(".pdf")
+            .tempfile_in(tempdir.path())
+            .expect("temp file");
+        let pdf = valid_pdf();
+        std::fs::write(input.path(), pdf).expect("write pdf");
+        let _override = crate::media::thumbnail::override_pdf_renderer_mode(
+            crate::media::thumbnail::TestPdfRendererMode::Timeout,
+        );
+
+        let uploaded = save_upload_from_path(
+            input.path(),
+            pdf,
+            pdf.len(),
+            &test_upload_options(tempdir.path(), "slow.pdf"),
+        )
+        .expect("save pdf after thumbnail timeout");
 
         let board_dir = tempdir.path().join("test");
-        if board_dir.exists() {
-            let entries = std::fs::read_dir(&board_dir)
-                .expect("read board dir")
-                .collect::<std::io::Result<Vec<_>>>()
-                .expect("collect entries");
-            assert!(
-                entries.iter().all(|entry| entry.path().is_dir()),
-                "failed PDF upload left files in {}",
-                board_dir.display()
-            );
-        }
+        let thumb_path = tempdir.path().join(&uploaded.thumb_path);
+        assert!(tempdir.path().join(&uploaded.file_path).exists());
+        assert!(thumb_path.exists());
+        assert!(thumb_path.extension().is_some_and(|ext| ext == "svg"));
+
+        let stray_entries = std::fs::read_dir(board_dir.join("thumbs"))
+            .expect("read thumbs dir")
+            .collect::<std::io::Result<Vec<_>>>()
+            .expect("collect thumbs entries");
+        assert!(stray_entries.iter().all(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            !name.starts_with("rustchan-pdf-thumb-")
+        }));
     }
 }

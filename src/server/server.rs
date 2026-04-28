@@ -249,6 +249,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // WebM/AV1→VP9 re-encoding.  Checked independently so that a build missing
     // only these codecs still enables image conversion and thumbnail generation.
     let ffmpeg_vp9_available = crate::detect::detect_webm_encoder(ffmpeg_available);
+    let _pdf_thumbnail_renderers = crate::detect::detect_pdf_thumbnail_renderers();
 
     // Derive bind_port from `bind_addr` (which already incorporates port_override).
     // rsplit_once(':') handles both IPv4 ("0.0.0.0:9000") and IPv6 ("[::1]:9000").

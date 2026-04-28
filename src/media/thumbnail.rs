@@ -11,6 +11,12 @@ use super::ffmpeg;
 
 const MAX_IMAGE_THUMBNAIL_PIXELS: u64 = 100_000_000;
 
+#[cfg(test)]
+static PDF_RENDERER_TEST_MODE: std::sync::RwLock<Option<TestPdfRendererMode>> =
+    std::sync::RwLock::new(None);
+#[cfg(test)]
+static PDF_RENDERER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // ─── Static placeholder SVGs ──────────────────────────────────────────────────
 
 // Note: these SVG strings contain `"#` sequences (e.g. fill="#0a0f0a") which
@@ -31,6 +37,18 @@ const AUDIO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" 
   <text x="125" y="215" text-anchor="middle" fill="#3a4a3a" font-family="monospace" font-size="12">AUDIO</text>
 </svg>"##;
 
+const PDF_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="250" height="250" viewBox="0 0 250 250">
+  <rect width="250" height="250" rx="20" fill="#0a0f0a"/>
+  <rect x="48" y="26" width="154" height="198" rx="14" fill="#f2f0ea" stroke="#203020" stroke-width="4"/>
+  <path d="M161 26v44h41" fill="#d7d2c5"/>
+  <path d="M161 26v44h41" fill="none" stroke="#203020" stroke-width="4" stroke-linejoin="round"/>
+  <rect x="68" y="86" width="114" height="50" rx="9" fill="#8f2328"/>
+  <text x="125" y="119" text-anchor="middle" fill="#fff7f2" font-family="monospace" font-size="30" font-weight="700">PDF</text>
+  <rect x="72" y="154" width="106" height="8" rx="4" fill="#9aa29a"/>
+  <rect x="72" y="170" width="86" height="8" rx="4" fill="#9aa29a"/>
+  <rect x="72" y="186" width="96" height="8" rx="4" fill="#9aa29a"/>
+</svg>"##;
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// What kind of static placeholder to write when the real thumbnail cannot be
@@ -39,6 +57,64 @@ const AUDIO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" 
 pub enum PlaceholderKind {
     Video,
     Audio,
+    Pdf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfRenderer {
+    Pdftoppm,
+    Mutool,
+    Qlmanage,
+}
+
+impl PdfRenderer {
+    #[must_use]
+    pub const fn binary_name(self) -> &'static str {
+        match self {
+            Self::Pdftoppm => "pdftoppm",
+            Self::Mutool => "mutool",
+            Self::Qlmanage => "qlmanage",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfThumbnailOutcome {
+    Rendered { renderer: PdfRenderer },
+    Placeholder,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestPdfRendererMode {
+    Unavailable,
+    Fail,
+    Timeout,
+}
+
+#[cfg(test)]
+pub struct PdfRendererTestGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for PdfRendererTestGuard {
+    fn drop(&mut self) {
+        *PDF_RENDERER_TEST_MODE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+#[cfg(test)]
+pub fn override_pdf_renderer_mode(mode: TestPdfRendererMode) -> PdfRendererTestGuard {
+    let guard = PDF_RENDERER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *PDF_RENDERER_TEST_MODE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mode);
+    PdfRendererTestGuard { _lock: guard }
 }
 
 /// Generate a thumbnail for a media file and write it to `output_path`.
@@ -94,8 +170,20 @@ pub fn generate_thumbnail(
         m if m.starts_with("audio/") => write_placeholder(output_path, PlaceholderKind::Audio)
             .map(|()| output_path.to_path_buf()),
 
-        "application/pdf" => pdf_first_page_thumbnail(input_path, output_path, max_dim)
-            .map(|()| output_path.to_path_buf()),
+        "application/pdf" => {
+            let placeholder_path = pdf_placeholder_output_path(output_path);
+            let _ = std::fs::remove_file(output_path);
+            let _ = std::fs::remove_file(&placeholder_path);
+            match pdf_first_page_thumbnail(input_path, output_path, max_dim) {
+                Ok(PdfThumbnailOutcome::Rendered { .. }) => Ok(output_path.to_path_buf()),
+                Ok(PdfThumbnailOutcome::Placeholder) => Ok(placeholder_path),
+                Err(error) => {
+                    let _ = std::fs::remove_file(output_path);
+                    let _ = std::fs::remove_file(&placeholder_path);
+                    Err(error)
+                }
+            }
+        }
 
         // ── Video (WebM, MP4, and any other video/*): requires ffmpeg AND libwebp ─────────────────────
         // `thumbnail_output_path` pre-selects `.webp` when both are present.
@@ -187,6 +275,7 @@ pub fn write_placeholder(output_path: &Path, kind: PlaceholderKind) -> Result<()
     let svg = match kind {
         PlaceholderKind::Video => VIDEO_PLACEHOLDER_SVG,
         PlaceholderKind::Audio => AUDIO_PLACEHOLDER_SVG,
+        PlaceholderKind::Pdf => PDF_PLACEHOLDER_SVG,
     };
     std::fs::write(output_path, svg).with_context(|| {
         format!(
@@ -253,7 +342,11 @@ fn image_crate_thumbnail(
         .with_context(|| format!("failed to save WebP thumbnail to {}", output_path.display()))
 }
 
-fn pdf_first_page_thumbnail(input_path: &Path, output_path: &Path, max_dim: u32) -> Result<()> {
+fn pdf_first_page_thumbnail(
+    input_path: &Path,
+    output_path: &Path,
+    max_dim: u32,
+) -> Result<PdfThumbnailOutcome> {
     let parent = output_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("PDF thumbnail output has no parent"))?;
@@ -268,30 +361,81 @@ fn pdf_first_page_thumbnail(input_path: &Path, output_path: &Path, max_dim: u32)
         })?;
     let png_path = temp_dir.path().join("page1.png");
 
-    if render_pdf_with_pdftoppm(input_path, &png_path, max_dim)
-        .or_else(|_| render_pdf_with_mutool(input_path, &png_path))
-        .or_else(|_| render_pdf_with_qlmanage(input_path, &png_path, max_dim, temp_dir.path()))
-        .is_err()
-    {
-        anyhow::bail!(
-            "PDF thumbnail generation requires a local PDF renderer (pdftoppm, mutool, or macOS qlmanage)."
+    let render_result = match render_pdf_with_pdftoppm(input_path, &png_path, max_dim) {
+        Ok(()) => Some(PdfRenderer::Pdftoppm),
+        Err(pdftoppm_error) => match render_pdf_with_mutool(input_path, &png_path) {
+            Ok(()) => Some(PdfRenderer::Mutool),
+            Err(mutool_error) => {
+                match render_pdf_with_qlmanage(input_path, &png_path, max_dim, temp_dir.path()) {
+                    Ok(()) => Some(PdfRenderer::Qlmanage),
+                    Err(qlmanage_error) => {
+                        tracing::warn!(
+                            pdftoppm = %pdftoppm_error,
+                            mutool = %mutool_error,
+                            qlmanage = %qlmanage_error,
+                            "PDF thumbnail rendering failed; using built-in generic thumbnail"
+                        );
+                        write_placeholder(
+                            &pdf_placeholder_output_path(output_path),
+                            PlaceholderKind::Pdf,
+                        )?;
+                        return Ok(PdfThumbnailOutcome::Placeholder);
+                    }
+                }
+            }
+        },
+    };
+
+    let Some(renderer) = render_result else {
+        write_placeholder(
+            &pdf_placeholder_output_path(output_path),
+            PlaceholderKind::Pdf,
+        )?;
+        return Ok(PdfThumbnailOutcome::Placeholder);
+    };
+
+    let image = match image::open(&png_path) {
+        Ok(image) => image,
+        Err(error) => {
+            tracing::warn!(
+                renderer = renderer.binary_name(),
+                path = %png_path.display(),
+                %error,
+                "Rendered PDF thumbnail could not be decoded; using built-in generic thumbnail"
+            );
+            write_placeholder(
+                &pdf_placeholder_output_path(output_path),
+                PlaceholderKind::Pdf,
+            )?;
+            return Ok(PdfThumbnailOutcome::Placeholder);
+        }
+    };
+    let thumb = image.thumbnail(max_dim, max_dim);
+    if let Err(error) = thumb.save_with_format(output_path, ImageFormat::WebP) {
+        tracing::warn!(
+            renderer = renderer.binary_name(),
+            output = %output_path.display(),
+            %error,
+            "Saving PDF thumbnail failed; using built-in generic thumbnail"
         );
+        let _ = std::fs::remove_file(output_path);
+        write_placeholder(
+            &pdf_placeholder_output_path(output_path),
+            PlaceholderKind::Pdf,
+        )?;
+        return Ok(PdfThumbnailOutcome::Placeholder);
     }
 
-    let image = image::open(&png_path)
-        .with_context(|| format!("failed to decode PDF thumbnail {}", png_path.display()))?;
-    let thumb = image.thumbnail(max_dim, max_dim);
-    thumb
-        .save_with_format(output_path, ImageFormat::WebP)
-        .with_context(|| {
-            format!(
-                "failed to save PDF WebP thumbnail to {}",
-                output_path.display()
-            )
-        })
+    Ok(PdfThumbnailOutcome::Rendered { renderer })
 }
 
 fn render_pdf_with_pdftoppm(input_path: &Path, png_path: &Path, max_dim: u32) -> Result<()> {
+    #[cfg(test)]
+    {
+        if let Some(result) = test_renderer_override(PdfRenderer::Pdftoppm) {
+            return result;
+        }
+    }
     let prefix = png_path.with_extension("");
     let status = run_pdf_renderer_with_timeout(Command::new("pdftoppm").args([
         "-f",
@@ -314,6 +458,12 @@ fn render_pdf_with_pdftoppm(input_path: &Path, png_path: &Path, max_dim: u32) ->
 }
 
 fn render_pdf_with_mutool(input_path: &Path, png_path: &Path) -> Result<()> {
+    #[cfg(test)]
+    {
+        if let Some(result) = test_renderer_override(PdfRenderer::Mutool) {
+            return result;
+        }
+    }
     let status = run_pdf_renderer_with_timeout(Command::new("mutool").args([
         "draw",
         "-q",
@@ -336,6 +486,12 @@ fn render_pdf_with_qlmanage(
     max_dim: u32,
     temp_dir: &Path,
 ) -> Result<()> {
+    #[cfg(test)]
+    {
+        if let Some(result) = test_renderer_override(PdfRenderer::Qlmanage) {
+            return result;
+        }
+    }
     let status = run_pdf_renderer_with_timeout(Command::new("qlmanage").args([
         "-t",
         "-s",
@@ -382,6 +538,63 @@ fn run_pdf_renderer_with_timeout(command: &mut Command) -> Result<std::process::
             anyhow::bail!("PDF renderer timed out after {}s", timeout.as_secs());
         }
         thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn pdf_placeholder_output_path(output_path: &Path) -> PathBuf {
+    output_path.with_extension("svg")
+}
+
+#[must_use]
+pub fn detect_pdf_renderers() -> Vec<PdfRenderer> {
+    [
+        PdfRenderer::Pdftoppm,
+        PdfRenderer::Mutool,
+        PdfRenderer::Qlmanage,
+    ]
+    .into_iter()
+    .filter(|renderer| probe_renderer(*renderer))
+    .collect()
+}
+
+fn probe_renderer(renderer: PdfRenderer) -> bool {
+    #[cfg(test)]
+    if matches!(
+        *PDF_RENDERER_TEST_MODE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        Some(TestPdfRendererMode::Unavailable)
+    ) {
+        return false;
+    }
+
+    Command::new(renderer.binary_name())
+        .arg("-h")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
+#[cfg(test)]
+fn test_renderer_override(renderer: PdfRenderer) -> Option<Result<()>> {
+    let mode = *PDF_RENDERER_TEST_MODE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match mode {
+        Some(TestPdfRendererMode::Unavailable) => Some(Err(anyhow::anyhow!(
+            "{} unavailable in test override",
+            renderer.binary_name()
+        ))),
+        Some(TestPdfRendererMode::Fail) => Some(Err(anyhow::anyhow!(
+            "{} failed in test override",
+            renderer.binary_name()
+        ))),
+        Some(TestPdfRendererMode::Timeout) => Some(Err(anyhow::anyhow!(
+            "{} timed out in test override",
+            renderer.binary_name()
+        ))),
+        None => None,
     }
 }
 
@@ -472,5 +685,27 @@ mod tests {
     fn thumbnail_ext_is_svg_for_svg_source() {
         assert_eq!(thumbnail_extension("image/svg+xml", true, true), "svg");
         assert_eq!(thumbnail_extension("image/svg+xml", false, false), "svg");
+    }
+
+    #[test]
+    fn pdf_thumbnail_prefers_svg_sibling_for_placeholder_paths() {
+        let output = Path::new("/tmp/example.webp");
+        assert_eq!(
+            pdf_placeholder_output_path(output),
+            Path::new("/tmp/example.svg")
+        );
+
+        let svg = Path::new("/tmp/example.svg");
+        assert_eq!(pdf_placeholder_output_path(svg), svg);
+    }
+
+    #[test]
+    fn write_pdf_placeholder_outputs_svg() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let output = tempdir.path().join("thumb.svg");
+        write_placeholder(&output, PlaceholderKind::Pdf).expect("write pdf placeholder");
+        let svg = std::fs::read_to_string(&output).expect("read placeholder");
+        assert!(svg.contains("PDF"));
+        assert!(svg.contains("<svg"));
     }
 }

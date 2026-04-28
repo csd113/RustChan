@@ -771,17 +771,6 @@ trailer << /Root 1 0 R >>
 "
     }
 
-    fn pdf_renderer_available() -> bool {
-        ["pdftoppm", "mutool", "qlmanage"].iter().any(|program| {
-            std::process::Command::new(program)
-                .arg("-h")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok()
-        })
-    }
-
     fn create_file_hash_table(conn: &rusqlite::Connection) {
         conn.execute(
             "CREATE TABLE file_hashes (
@@ -953,11 +942,6 @@ trailer << /Root 1 0 R >>
 
     #[test]
     fn primary_upload_accepts_pdf_when_board_enables_pdf() {
-        if !pdf_renderer_available() {
-            eprintln!("skipping PDF board upload test: no local PDF renderer found");
-            return;
-        }
-
         let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
         create_file_hash_table(&conn);
 
@@ -967,6 +951,9 @@ trailer << /Root 1 0 R >>
         };
         let uploads_dir = tempfile::tempdir().expect("uploads dir");
         let save_root = tempfile::tempdir().expect("save root");
+        let _override = crate::media::thumbnail::override_pdf_renderer_mode(
+            crate::media::thumbnail::TestPdfRendererMode::Unavailable,
+        );
         let (uploaded, _) = super::process_primary_upload(
             Some(temp_upload("doc.pdf", valid_pdf())),
             &board,
@@ -986,6 +973,9 @@ trailer << /Root 1 0 R >>
         assert_eq!(uploaded.mime_type, "application/pdf");
         assert_eq!(uploaded.media_type, crate::models::MediaType::Pdf);
         assert!(save_root.path().join(uploaded.file_path).exists());
-        assert!(save_root.path().join(uploaded.thumb_path).exists());
+        assert!(std::path::Path::new(&uploaded.thumb_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")));
+        assert!(save_root.path().join(&uploaded.thumb_path).exists());
     }
 }

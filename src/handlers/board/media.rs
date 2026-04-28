@@ -2,6 +2,10 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
+use axum::http::header::{
+    HeaderValue, CONTENT_DISPOSITION, CONTENT_SECURITY_POLICY, CONTENT_TYPE,
+    X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
+};
 
 fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
     match path.extension().and_then(|e| e.to_str()) {
@@ -95,6 +99,10 @@ pub async fn serve_board_media(
         .components()
         .nth(1)
         .is_some_and(|part| part.as_os_str() == "_favicon");
+    let is_pdf = target
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
 
     // Verify the resolved path is still inside the upload directory.
     // This catches any edge cases that slip past the string checks above
@@ -113,9 +121,6 @@ pub async fn serve_board_media(
         ServeFile::new(&target).oneshot(req).await.map_or_else(
             |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             |resp| {
-                use axum::http::header::{
-                    HeaderValue, CONTENT_DISPOSITION, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS,
-                };
                 let mut resp = resp.map(axum::body::Body::new);
                 if is_board_favicon {
                     resp.headers_mut().insert(
@@ -144,6 +149,9 @@ pub async fn serve_board_media(
                         resp.headers_mut().insert(CONTENT_DISPOSITION, value);
                     }
                 }
+                if is_pdf {
+                    apply_pdf_embed_headers(resp.headers_mut());
+                }
                 resp.into_response()
             },
         )
@@ -170,6 +178,16 @@ const fn board_media_cache_control(has_version: bool) -> &'static str {
     } else {
         "no-cache, must-revalidate"
     }
+}
+
+fn apply_pdf_embed_headers(headers: &mut axum::http::HeaderMap) {
+    headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
+    headers.insert(
+        CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; frame-ancestors 'self'; sandbox allow-same-origin allow-scripts",
+        ),
+    );
 }
 
 // ─── GET /api/post/{board}/{post_id} ──────────────────────────────────────────

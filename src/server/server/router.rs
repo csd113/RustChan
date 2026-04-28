@@ -38,18 +38,22 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
             header::HeaderName::from_static("x-content-type-options"),
             header::HeaderValue::from_static("nosniff"),
         ))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-            header::HeaderName::from_static("x-frame-options"),
-            header::HeaderValue::from_static("SAMEORIGIN"),
-        ))
+        .layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                header::HeaderName::from_static("x-frame-options"),
+                header::HeaderValue::from_static("SAMEORIGIN"),
+            ),
+        )
         .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
             header::HeaderName::from_static("referrer-policy"),
             header::HeaderValue::from_static("same-origin"),
         ))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-            header::HeaderName::from_static("content-security-policy"),
-            header::HeaderValue::from_static(CONTENT_SECURITY_POLICY),
-        ))
+        .layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                header::HeaderName::from_static("content-security-policy"),
+                header::HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+            ),
+        )
         .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
             header::HeaderName::from_static("permissions-policy"),
             header::HeaderValue::from_static(
@@ -97,9 +101,24 @@ mod tests {
     use super::build_router;
     use axum::{
         body::{to_bytes, Body},
-        http::{Request, StatusCode},
+        http::{header, Request, StatusCode},
     };
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt as _;
+
+    fn seed_public_media_board(state: &crate::middleware::AppState, short_name: &str) {
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, short_name, "Board", "", false).expect("create board");
+        crate::templates::set_live_boards(crate::db::get_all_boards(&conn).expect("load boards"));
+    }
+
+    fn unique_test_board(prefix: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        format!("{prefix}{nanos:x}")
+    }
 
     #[tokio::test]
     async fn health_endpoints_emit_request_id_and_metrics() {
@@ -146,5 +165,80 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).expect("utf8 metrics");
         assert!(body.contains("rustchan_requests_total"));
         assert!(body.contains("rustchan_job_queue_pending"));
+    }
+
+    #[tokio::test]
+    async fn uploaded_pdf_route_allows_same_origin_embedding_only() {
+        let state = crate::test_support::app_state();
+        let board = unique_test_board("pdfhdr");
+        seed_public_media_board(&state, &board);
+
+        let board_dir = std::path::Path::new(&crate::config::CONFIG.upload_dir).join(&board);
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        let pdf_path = board_dir.join("doc.pdf");
+        std::fs::write(
+            &pdf_path,
+            b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n",
+        )
+        .expect("write pdf");
+
+        let router = build_router(state, false);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/boards/{board}/doc.pdf"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::X_FRAME_OPTIONS),
+            Some(&header::HeaderValue::from_static("SAMEORIGIN"))
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_SECURITY_POLICY),
+            Some(&header::HeaderValue::from_static(
+                "default-src 'none'; frame-ancestors 'self'; sandbox allow-same-origin allow-scripts"
+            ))
+        );
+
+        let _ = std::fs::remove_file(pdf_path);
+        let _ = std::fs::remove_dir(board_dir);
+    }
+
+    #[tokio::test]
+    async fn pages_keep_remote_framing_blocked() {
+        let router = build_router(crate::test_support::app_state(), false);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::X_FRAME_OPTIONS),
+            Some(&header::HeaderValue::from_static("SAMEORIGIN"))
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_SECURITY_POLICY),
+            Some(&header::HeaderValue::from_static(
+                super::super::headers::CONTENT_SECURITY_POLICY
+            ))
+        );
+        let csp = response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .expect("csp")
+            .to_str()
+            .expect("utf8 csp");
+        assert!(csp.contains("frame-ancestors 'none'"));
     }
 }

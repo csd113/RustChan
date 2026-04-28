@@ -98,6 +98,41 @@ pub fn detect_webp_encoder(ffmpeg_ok: bool) -> bool {
     has_webp
 }
 
+pub fn detect_pdf_thumbnail_renderers() -> Vec<crate::media::thumbnail::PdfRenderer> {
+    let renderers = crate::media::thumbnail::detect_pdf_renderers();
+
+    if renderers.is_empty() {
+        tracing::warn!(
+            target: "rustchan::detect",
+            available = false,
+            "no PDF thumbnail renderer detected — PDF uploads still work and will use the built-in generic PDF thumbnail. Install Poppler pdftoppm, MuPDF mutool, or use macOS qlmanage to enable real first-page thumbnails"
+        );
+        if crate::logging::is_tty() {
+            crate::logging::console_print_raw(
+                "  PDF uploads still work with a built-in generic thumbnail.\n  Install Poppler `pdftoppm`, MuPDF `mutool`, or use macOS `qlmanage` for real first-page thumbnails.\n\n",
+            );
+        }
+    } else {
+        let detected = renderers
+            .iter()
+            .map(|renderer| renderer.binary_name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let selected = renderers
+            .first()
+            .map_or("unknown", |renderer| renderer.binary_name());
+        tracing::info!(
+            target: "rustchan::detect",
+            available = true,
+            renderers = %detected,
+            selected = selected,
+            "PDF thumbnail renderer detected"
+        );
+    }
+
+    renderers
+}
+
 fn webp_install_hint() -> String {
     let mut s = String::new();
 
