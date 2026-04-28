@@ -1910,13 +1910,12 @@ mod tests {
         );
 
         assert!(html.contains(r#"name="allow_editing" value="1""#));
-        assert!(html.contains(
-            "Allow users to edit their own posts during the 60-second grace window"
-        ));
+        assert!(
+            html.contains("Allow users to edit their own posts during the 60-second grace window")
+        );
         assert!(html.contains(r#"name="allow_self_delete" value="1""#));
-        assert!(html.contains(
-            "Allow users to delete their own posts during the 60-second grace window"
-        ));
+        assert!(html
+            .contains("Allow users to delete their own posts during the 60-second grace window"));
         assert!(!html.contains(r#"name="edit_window_secs""#));
         assert!(!html.contains("edit token"));
     }

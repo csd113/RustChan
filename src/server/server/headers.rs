@@ -9,6 +9,8 @@ use std::net::{IpAddr, SocketAddr};
 
 pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      script-src 'self'; \
+     script-src-elem 'self'; \
+     script-src-attr 'none'; \
      style-src 'self' 'unsafe-inline'; \
      img-src 'self' data: blob: https://img.youtube.com; \
      media-src 'self' blob:; \
@@ -166,6 +168,8 @@ mod tests {
     #[test]
     fn csp_allows_core_end_user_media_features() {
         assert!(CONTENT_SECURITY_POLICY.contains("script-src 'self'"));
+        assert!(CONTENT_SECURITY_POLICY.contains("script-src-elem 'self'"));
+        assert!(CONTENT_SECURITY_POLICY.contains("script-src-attr 'none'"));
         assert!(
             CONTENT_SECURITY_POLICY.contains("img-src 'self' data: blob: https://img.youtube.com")
         );
@@ -180,6 +184,57 @@ mod tests {
         assert!(!CONTENT_SECURITY_POLICY.contains("script-src 'unsafe-inline'"));
         assert!(CONTENT_SECURITY_POLICY.contains("object-src 'none'"));
         assert!(CONTENT_SECURITY_POLICY.contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn served_templates_do_not_embed_inline_script_bodies() {
+        let served_sources = [
+            include_str!("../../../src/templates/mod.rs"),
+            include_str!("../../../src/templates/board.rs"),
+            include_str!("../../../src/templates/thread.rs"),
+            include_str!("../../../src/templates/admin.rs"),
+            include_str!("../../../src/templates/forms.rs"),
+            include_str!("../../../src/middleware/rate_limit.rs"),
+            include_str!("../../../src/handlers/board/reports.rs"),
+        ];
+
+        for source in served_sources {
+            assert!(
+                !contains_inline_script_body(source),
+                "served HTML source reintroduced an inline <script> body"
+            );
+        }
+    }
+
+    fn contains_inline_script_body(source: &str) -> bool {
+        let mut search_from = 0;
+        let script_open = "<script";
+        let script_close = "</script>";
+
+        while let Some(relative_open) = source[search_from..].find(script_open) {
+            let open = search_from + relative_open;
+            let after_open = &source[open..];
+            let Some(tag_end_relative) = after_open.find('>') else {
+                break;
+            };
+            let tag_end = open + tag_end_relative;
+            let tag = &source[open..=tag_end];
+            let body_start = tag_end + 1;
+
+            let Some(close_relative) = source[body_start..].find(script_close) else {
+                break;
+            };
+            let body_end = body_start + close_relative;
+            let body = source[body_start..body_end].trim();
+
+            if !tag.contains("src=") && !body.is_empty() {
+                return true;
+            }
+
+            search_from = body_end + script_close.len();
+        }
+
+        false
     }
 
     #[tokio::test]
