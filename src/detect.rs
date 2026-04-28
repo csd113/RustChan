@@ -659,7 +659,6 @@ fn hsid_to_onion_address(hsid: HsId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     /// Verify the v3 onion address encoder against a Python-computed reference
     /// value for the all-zeros Ed25519 key.
@@ -704,16 +703,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probe_tool_uses_the_explicit_binary_path() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::symlink;
 
         let tempdir = tempfile::tempdir().expect("tempdir");
         let script = tempdir.path().join("ffprobe");
-        let mut file = std::fs::File::create(&script).expect("create script");
-        file.write_all(b"#!/bin/sh\nexit 0\n")
-            .expect("write script");
-        let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).expect("chmod");
+        symlink("/usr/bin/true", &script).expect("symlink true");
 
         assert!(probe_tool(script.to_str().expect("utf8 path")));
         assert!(!probe_tool("/definitely/not/a/real/ffprobe"));
