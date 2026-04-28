@@ -10,6 +10,7 @@ All notable changes to RustChan will be documented in this file.
 - The admin panel now ships with its own dedicated `admin.css` and `admin.js` assets instead of leaning on the shared site bundle.
 - HEIC and HEIF image uploads are now accepted by the media pipeline, including MIME detection, thumbnail generation, backup metadata, form copy, and documentation updates.
 - Two new built-in themes, Blue Sky and Deep Orbit, are available across normal pages, admin views, theme seeding, defaults, and setup documentation.
+- Users can now self-delete their own posts within a 60-second grace window after posting, with server-side expiry checks and UI countdown hints.
 
 ### Improved
 
@@ -19,6 +20,7 @@ All notable changes to RustChan will be documented in this file.
 - Admin login and banner-serving internals were tightened up, with cleaner helper paths for session handling, banner access checks, and post-query lookups.
 - Backup and restore actions now use a more consistent redirect path, which keeps the progress modal and post-restore navigation on the rails after full-site and board restore requests.
 - Thread rendering and post state handling are more resilient around post lookups, moderation actions, pending filesystem cleanup, media storage, worker updates, and console board setup.
+- The post edit form and self-delete flow now surface the shared 60-second self-action window more clearly.
 - Post rendering now sanitizes formatting more consistently and poll submission validation is stricter on both server-rendered and live-updated pages.
 - Media rendering now prefers recorded MIME type information over filename guessing, improving how attached media is displayed in thread views.
 - Banner exports from the standalone editor no longer include editing guide overlays, and the export flow better matches the screenshots and README examples.

@@ -8,6 +8,7 @@ This guide reflects the current RustChan architecture:
 
 - Tor onion hosting is built in via Arti. You do not install or manage a separate `tor` service.
 - `ffmpeg` is optional, but strongly recommended if you want WebP thumbnails, WebM transcoding, video thumbnails, and audio waveforms.
+- The post edit form and self-delete flow share a 60-second self-action window after posting.
 
 ## Contents
 

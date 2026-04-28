@@ -67,7 +67,7 @@ RustChan is for people who want a forum they can actually understand and keep ru
 
 - Multiple boards with per-board settings and access controls
 - Threads, replies, catalog view, archive view, and search
-- Polls, tripcodes, sage, spoiler tags, poster IDs, and edit windows
+- Polls, tripcodes, sage, spoiler tags, poster IDs, edit windows, and a 60-second self-delete timer for your own posts
 - Board-specific media rules, cooldowns, captcha, and archive behavior
 - Mobile-friendly layouts that still make sense on a phone
 
