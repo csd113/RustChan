@@ -158,7 +158,13 @@ pub async fn catalog(
     let (latest_created_at, latest_thread_id) =
         latest_visible_thread_marker_tuple(latest_thread_marker);
     let jar = if thread_badges_enabled {
-        let defaults = threads.iter().map(|thread| (thread.id, thread.reply_count));
+        // Seed only the highest-priority catalog cards we can actually retain in
+        // the activity cookie, so the persisted baseline matches the visible
+        // ordering instead of being truncated later by cookie serialization.
+        let defaults = threads
+            .iter()
+            .take(THREAD_ACTIVITY_MARKER_LIMIT)
+            .map(|thread| (thread.id, thread.reply_count));
         remember_thread_activity_defaults(jar, defaults)
     } else {
         jar

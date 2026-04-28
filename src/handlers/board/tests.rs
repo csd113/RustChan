@@ -4,6 +4,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use axum_extra::extract::cookie::{Cookie, CookieJar};
 use std::collections::HashMap;
 use tower::ServiceExt as _;
 
@@ -1452,6 +1453,71 @@ async fn new_activity_pages_keep_private_cache_headers() {
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok()),
         Some(super::HTML_CACHE_CONTROL)
+    );
+}
+
+#[tokio::test]
+async fn catalog_baseline_tracks_only_highest_priority_threads_within_cookie_limit() {
+    let state = crate::test_support::app_state();
+    set_new_activity_settings(&state, true, true);
+    let (board_id, first_thread_id) = seed_board_with_thread(&state, "tech", "op");
+    let mut created_thread_ids = vec![first_thread_id];
+    for index in 0..120 {
+        created_thread_ids.push(create_thread_on_board(
+            &state,
+            board_id,
+            &format!("thread {index}"),
+        ));
+    }
+    let router = activity_router(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tech/catalog")
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    let cookie_value = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|value| {
+            value
+                .split(';')
+                .next()
+                .and_then(|pair| pair.split_once('='))
+                .and_then(|(name, cookie_value)| {
+                    (name == "rustchan_thread_activity").then(|| cookie_value.to_string())
+                })
+        })
+        .expect("thread activity cookie");
+    let jar = CookieJar::new().add(Cookie::new("rustchan_thread_activity", cookie_value));
+    let markers = super::thread_activity_markers_from_jar(&jar);
+
+    assert_eq!(markers.len(), super::THREAD_ACTIVITY_MARKER_LIMIT);
+
+    let expected_tracked = created_thread_ids
+        .iter()
+        .rev()
+        .take(super::THREAD_ACTIVITY_MARKER_LIMIT)
+        .copied()
+        .collect::<Vec<_>>();
+    for thread_id in expected_tracked {
+        assert!(
+            markers.contains_key(&thread_id),
+            "expected tracked thread marker for {thread_id}"
+        );
+    }
+    assert!(
+        !markers.contains_key(&first_thread_id),
+        "oldest catalog thread should not displace newer visible threads"
     );
 }
 

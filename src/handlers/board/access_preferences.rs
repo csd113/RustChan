@@ -48,6 +48,8 @@ pub struct ThreadActivityMarker {
     pub updated_at: i64,
 }
 
+pub(crate) const THREAD_ACTIVITY_MARKER_LIMIT: usize = THREAD_ACTIVITY_COOKIE_MAX;
+
 fn owned_posts_cookie_signature(payload_hex: &str) -> String {
     crate::utils::crypto::sha256_hex(
         format!("{}:owned-posts:{payload_hex}", CONFIG.cookie_secret).as_bytes(),

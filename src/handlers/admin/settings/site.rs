@@ -21,6 +21,10 @@ pub struct SiteSettingsForm {
     pub banner_external_links_enabled: Option<String>,
 }
 
+fn resolved_checkbox_setting(field: Option<&str>, current: bool) -> bool {
+    field.map_or(current, |value| checkbox_is_on(Some(value)))
+}
+
 pub async fn update_site_settings(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -45,16 +49,20 @@ pub async fn update_site_settings(
         .clamp(0, 43_200);
     let banner_external_links_enabled =
         checkbox_is_on(form.banner_external_links_enabled.as_deref());
-    let homepage_new_thread_badges_enabled =
-        checkbox_is_on(form.homepage_new_thread_badges_enabled.as_deref());
-    let thread_new_reply_badges_enabled =
-        checkbox_is_on(form.thread_new_reply_badges_enabled.as_deref());
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            let homepage_new_thread_badges_enabled = resolved_checkbox_setting(
+                form.homepage_new_thread_badges_enabled.as_deref(),
+                db::get_homepage_new_thread_badges_enabled(&conn),
+            );
+            let thread_new_reply_badges_enabled = resolved_checkbox_setting(
+                form.thread_new_reply_badges_enabled.as_deref(),
+                db::get_thread_new_reply_badges_enabled(&conn),
+            );
 
             // Save the custom site name (trimmed, max 64 chars).
             let new_name = form.site_name.as_deref().map_or_else(
@@ -154,5 +162,23 @@ pub async fn update_site_settings(
         .into_response())
     } else {
         Ok(Redirect::to("/admin/panel?settings_saved=1").into_response())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolved_checkbox_setting;
+
+    #[test]
+    fn resolved_checkbox_setting_preserves_existing_value_when_field_is_omitted() {
+        assert!(resolved_checkbox_setting(None, true));
+        assert!(!resolved_checkbox_setting(None, false));
+    }
+
+    #[test]
+    fn resolved_checkbox_setting_respects_explicit_checkbox_submissions() {
+        assert!(resolved_checkbox_setting(Some("1"), false));
+        assert!(resolved_checkbox_setting(Some("on"), false));
+        assert!(!resolved_checkbox_setting(Some("0"), true));
     }
 }
