@@ -781,6 +781,8 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
     let has_audio_file_path = columns.contains("audio_file_path");
     let has_audio_file_size = columns.contains("audio_file_size");
     let has_mime_type = columns.contains("mime_type");
+    let thread_columns = table_columns(conn, "threads")?;
+    let has_thread_archive_flag = thread_columns.contains("archived");
 
     let total_images_expr = if has_media_type {
         "SUM(CASE WHEN media_type = 'image' THEN 1 ELSE 0 END)"
@@ -812,11 +814,28 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
         )
     };
 
-    let active_audio_bytes_expr = if has_audio_file_path && has_audio_file_size {
-        "SUM(CASE WHEN audio_file_path IS NOT NULL AND audio_file_size IS NOT NULL
-                  THEN audio_file_size ELSE 0 END)"
+    let active_content_join = if has_thread_archive_flag {
+        " LEFT JOIN threads t ON t.id = posts.thread_id"
     } else {
-        "0"
+        ""
+    };
+    let active_file_bytes_filter = if has_thread_archive_flag {
+        " AND COALESCE(t.archived, 0) = 0"
+    } else {
+        ""
+    };
+    let active_audio_bytes_filter = if has_thread_archive_flag {
+        " AND COALESCE(t.archived, 0) = 0"
+    } else {
+        ""
+    };
+    let active_audio_bytes_expr = if has_audio_file_path && has_audio_file_size {
+        format!(
+            "SUM(CASE WHEN audio_file_path IS NOT NULL AND audio_file_size IS NOT NULL{active_audio_bytes_filter}
+                  THEN audio_file_size ELSE 0 END)"
+        )
+    } else {
+        "0".to_string()
     };
 
     let query = format!(
@@ -826,14 +845,14 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
              {total_videos_expr}                                                AS total_videos,
              {total_audio_expr}                                                 AS total_audio,
              COALESCE(
-                 SUM(CASE WHEN file_path IS NOT NULL AND file_size IS NOT NULL
+                 SUM(CASE WHEN file_path IS NOT NULL AND file_size IS NOT NULL{active_file_bytes_filter}
                           THEN file_size ELSE 0 END),
                  0
              ) + COALESCE(
                  {active_audio_bytes_expr},
                  0
              )                                                                  AS active_bytes
-         FROM posts"
+         FROM posts{active_content_join}"
     );
 
     conn.query_row(&query, [], |r| {
@@ -848,15 +867,19 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
     .context("Failed to query site stats")
 }
 
-fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
+fn table_columns(conn: &rusqlite::Connection, table_name: &str) -> Result<HashSet<String>> {
     let mut stmt = conn
-        .prepare_cached("PRAGMA table_info(posts)")
-        .context("Prepare posts table info query")?;
+        .prepare(&format!("PRAGMA table_info({table_name})"))
+        .with_context(|| format!("Prepare {table_name} table info query"))?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<HashSet<_>>>()
-        .context("Read posts table columns")?;
+        .with_context(|| format!("Read {table_name} table columns"))?;
     Ok(columns)
+}
+
+fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
+    table_columns(conn, "posts")
 }
 
 #[cfg(test)]
@@ -937,6 +960,38 @@ mod tests {
 
         let stats = get_site_stats(&conn).expect("load stats");
         assert_eq!(stats.total_audio, 2);
+    }
+
+    #[test]
+    fn site_stats_active_bytes_exclude_archived_thread_media() {
+        let pool = crate::db::init_test_pool().expect("init test pool");
+        let conn = pool.get().expect("get test connection");
+
+        conn.execute(
+            "INSERT INTO boards (id, short_name, name) VALUES (1, 'test', 'Test')",
+            [],
+        )
+        .expect("insert board");
+        conn.execute(
+            "INSERT INTO threads (id, board_id, subject, archived) VALUES
+             (1, 1, 'live thread', 0),
+             (2, 1, 'archived thread', 1)",
+            [],
+        )
+        .expect("insert threads");
+        conn.execute(
+            "INSERT INTO posts (
+                 id, thread_id, board_id, body, body_html, deletion_token, is_op,
+                 file_path, file_name, file_size
+             ) VALUES
+             (1, 1, 1, 'live', '<p>live</p>', 'tok1', 0, 'live.webp', 'live.webp', 100),
+             (2, 2, 1, 'archived', '<p>archived</p>', 'tok2', 0, 'archived.webp', 'archived.webp', 900)",
+            [],
+        )
+        .expect("insert posts");
+
+        let stats = get_site_stats(&conn).expect("load stats");
+        assert_eq!(stats.active_bytes, 100);
     }
 
     #[test]

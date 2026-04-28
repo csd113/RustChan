@@ -642,8 +642,8 @@ fn render_board_settings_card(
     <label title="When enabled, 3 or more consecutive greentext lines are wrapped in a collapsible block for this board. Existing posts are not affected.">
       <input type="checkbox" name="collapse_greentext" value="1"{collapse_greentext_checked}> Collapse long greentext
     </label>
-    <label><input type="checkbox" name="allow_editing" value="1"{allow_editing_checked}> Allow users to edit their own posts during the grace window</label>
-    <label><input type="checkbox" name="allow_self_delete" value="1"{allow_self_delete_checked}> Allow users to delete their own posts</label>
+    <label><input type="checkbox" name="allow_editing" value="1"{allow_editing_checked}> Allow users to edit their own posts during the 60-second grace window</label>
+    <label><input type="checkbox" name="allow_self_delete" value="1"{allow_self_delete_checked}> Allow users to delete their own posts during the 60-second grace window</label>
   </div>
 </div>
 <div class="admin-subsection">
@@ -1910,9 +1910,13 @@ mod tests {
         );
 
         assert!(html.contains(r#"name="allow_editing" value="1""#));
-        assert!(html.contains("Allow users to edit their own posts during the grace window"));
+        assert!(html.contains(
+            "Allow users to edit their own posts during the 60-second grace window"
+        ));
         assert!(html.contains(r#"name="allow_self_delete" value="1""#));
-        assert!(html.contains("Allow users to delete their own posts"));
+        assert!(html.contains(
+            "Allow users to delete their own posts during the 60-second grace window"
+        ));
         assert!(!html.contains(r#"name="edit_window_secs""#));
         assert!(!html.contains("edit token"));
     }

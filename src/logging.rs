@@ -634,16 +634,28 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
     }
 }
 
-fn write_event_fields(
-    writer: &mut Writer<'_>,
+fn should_suppress_event(target: &str, fields: &LogEventFields) -> bool {
+    matches!(
+        (extract_component(target), fields.message.as_deref()),
+        (
+            "hspool",
+            Some("Tor onion-service circuits are failing; waiting before retrying")
+        )
+    )
+}
+
+fn prepare_event_fields(
     target: &str,
     file: Option<&str>,
     event: &Event<'_>,
-) -> fmt::Result {
+) -> Option<LogEventFields> {
     let mut fields = LogEventFields::default();
     event.record(&mut fields);
     rewrite_message(target, file, &mut fields);
+    (!should_suppress_event(target, &fields)).then_some(fields)
+}
 
+fn write_event_fields(writer: &mut Writer<'_>, fields: &LogEventFields) -> fmt::Result {
     let has_message = fields.message.is_some();
 
     if let Some(message) = fields.message.as_deref() {
@@ -692,6 +704,10 @@ where
         event: &Event<'_>,
     ) -> fmt::Result {
         let tty = IS_TTY.load(Ordering::Relaxed);
+        let meta = event.metadata();
+        let Some(fields) = prepare_event_fields(meta.target(), meta.file(), event) else {
+            return Ok(());
+        };
 
         // ── Timestamp (with milliseconds) ─────────────────────────────────────
         if tty {
@@ -703,17 +719,16 @@ where
         }
 
         // ── Level + component columns ─────────────────────────────────────────
-        let level = *event.metadata().level();
+        let level = *meta.level();
         write_level_tag(&mut writer, level, tty)?;
-        write_component_tag(&mut writer, event.metadata().target(), tty)?;
+        write_component_tag(&mut writer, meta.target(), tty)?;
 
         // ── Message and structured fields ─────────────────────────────────────
         // tracing_subscriber writes the `message` field first, then all other
         // key=value fields separated by spaces — e.g.:
         //   "Request received  method=GET path=/b/ latency_ms=4"
         let _ = ctx;
-        let meta = event.metadata();
-        write_event_fields(&mut writer, meta.target(), meta.file(), event)?;
+        write_event_fields(&mut writer, &fields)?;
         writeln!(writer)
     }
 }
@@ -744,19 +759,23 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> fmt::Result {
+        let meta = event.metadata();
+        let _ = ctx;
+        let Some(fields) = prepare_event_fields(meta.target(), meta.file(), event) else {
+            return Ok(());
+        };
+
         // ── Timestamp — UTC, full date, millisecond precision ─────────────────
         let now = chrono::Utc::now();
         write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
 
         // ── Level + component columns (no colour) ─────────────────────────────
         let level = *event.metadata().level();
-        let meta = event.metadata();
         write_level_tag(&mut writer, level, false)?;
         write_component_tag(&mut writer, meta.target(), false)?;
 
         // ── Message and structured key=value fields ───────────────────────────
-        let _ = ctx;
-        write_event_fields(&mut writer, meta.target(), meta.file(), event)?;
+        write_event_fields(&mut writer, &fields)?;
 
         // ── Source location suffix for WARN and ERROR ─────────────────────────
         // Only attached at these levels because:
@@ -1130,5 +1149,17 @@ mod tests {
             fields.fields,
             vec![("reason".to_string(), "closed".to_string())]
         );
+    }
+
+    #[test]
+    fn suppresses_repetitive_onion_retry_warning() {
+        let mut fields = LogEventFields {
+            message: Some(
+                "Too many preemptive onion service circuits failed; waiting a while.".to_string(),
+            ),
+            fields: Vec::new(),
+        };
+        rewrite_message("tor_circmgr::hspool", Some("src/logging.rs"), &mut fields);
+        assert!(super::should_suppress_event("tor_circmgr::hspool", &fields));
     }
 }
