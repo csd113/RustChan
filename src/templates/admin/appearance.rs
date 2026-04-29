@@ -1,6 +1,10 @@
 use super::{
     escape_html, render_banner_asset_list, render_banner_upload_form, render_board_appearance_card,
-    theme_css_starter, AdminPanelViewModel,
+    AdminPanelViewModel,
+};
+use crate::theme_builder::{
+    builder_defaults_for_preset, parse_builder_config, ThemeBuilderConfig, ThemeDensity,
+    ThemeFontFamily, BUILDER_PRESETS,
 };
 use std::fmt::Write;
 
@@ -68,7 +72,6 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     } else {
         ""
     };
-    let new_theme_starter_css = escape_html(&theme_css_starter("your-theme", "#7ab84e"));
     let global_banner_upload_form = render_banner_upload_form(
         "/admin/site/banner",
         view.csrf_token,
@@ -119,7 +122,6 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
         theme_catalog_open_attr,
         &builtin_theme_cards,
         &custom_theme_cards_or_empty,
-        &new_theme_starter_css,
     )
 }
 
@@ -167,33 +169,371 @@ fn render_board_appearance_cards(view: &AdminPanelViewModel<'_>) -> String {
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
+fn render_preset_options(selected_slug: &str) -> String {
+    let mut out = String::new();
+    for preset in BUILDER_PRESETS {
+        let _ = write!(
+            out,
+            r#"<option value="{slug}"{selected}>{label}</option>"#,
+            slug = escape_html(preset.slug),
+            selected = if preset.slug == selected_slug {
+                " selected"
+            } else {
+                ""
+            },
+            label = escape_html(preset.label),
+        );
+    }
+    out
+}
+
+fn render_color_control(label: &str, name: &str, value: &str, help: &str) -> String {
+    format!(
+        r#"<label class="theme-builder-color-field">{label}
+  <input type="color" name="{name}" value="{value}" data-theme-builder-field="{name}">
+  <span class="theme-builder-color-value" data-theme-builder-value-for="{name}">{value}</span>
+  <small>{help}</small>
+</label>"#,
+        label = escape_html(label),
+        name = escape_html(name),
+        value = escape_html(value),
+        help = escape_html(help),
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_builder_sections(config: &ThemeBuilderConfig) -> String {
+    let basics = format!(
+        r#"<details class="theme-builder-section" open>
+  <summary>Basics</summary>
+  <div class="theme-builder-section-body board-settings-grid">
+    <label>Starting preset
+      <select name="base_preset" data-theme-builder-field="base_preset">{preset_options}</select>
+      <small>Pick the built-in theme that is closest to what you want, then tune from there.</small>
+    </label>
+    <label>Compactness
+      <select name="density" data-theme-builder-field="density">
+        <option value="cozy"{cozy_selected}>Cozy</option>
+        <option value="compact"{compact_selected}>Compact</option>
+      </select>
+      <small>Compact reduces padding and spacing around posts and cards.</small>
+    </label>
+    <label>Font family
+      <select name="font_family" data-theme-builder-field="font_family">
+        <option value="system_sans"{sans_selected}>System Sans</option>
+        <option value="system_serif"{serif_selected}>System Serif</option>
+        <option value="system_mono"{mono_selected}>System Mono</option>
+      </select>
+      <small>System fonts only, so saved themes stay lightweight and safe.</small>
+    </label>
+    <label>Border radius
+      <input type="range" name="border_radius_px" min="0" max="24" step="1" value="{radius}" data-theme-builder-field="border_radius_px">
+      <span class="theme-builder-range-value" data-theme-builder-range-value="border_radius_px">{radius}px</span>
+      <small>Lower values feel sharper. Higher values feel softer.</small>
+    </label>
+  </div>
+</details>"#,
+        preset_options = render_preset_options(&config.base_preset),
+        cozy_selected = if config.density == ThemeDensity::Cozy {
+            " selected"
+        } else {
+            ""
+        },
+        compact_selected = if config.density == ThemeDensity::Compact {
+            " selected"
+        } else {
+            ""
+        },
+        sans_selected = if config.font_family == ThemeFontFamily::Sans {
+            " selected"
+        } else {
+            ""
+        },
+        serif_selected = if config.font_family == ThemeFontFamily::Serif {
+            " selected"
+        } else {
+            ""
+        },
+        mono_selected = if config.font_family == ThemeFontFamily::Mono {
+            " selected"
+        } else {
+            ""
+        },
+        radius = config.border_radius_px,
+    );
+    let colors = format!(
+        r#"<details class="theme-builder-section" open>
+  <summary>Colors</summary>
+  <div class="theme-builder-section-body theme-builder-colors-grid">
+    {background}{panel}{text}{muted}{link}{link_hover}{border}{quote}{meta}{success}{danger}
+  </div>
+</details>"#,
+        background = render_color_control(
+            "Background",
+            "background_color",
+            &config.background_color,
+            "Main page background.",
+        ),
+        panel = render_color_control(
+            "Panel/Card",
+            "panel_color",
+            &config.panel_color,
+            "Boxes like cards and panels.",
+        ),
+        text = render_color_control(
+            "Text",
+            "text_color",
+            &config.text_color,
+            "Main readable text."
+        ),
+        muted = render_color_control(
+            "Muted Text",
+            "muted_text_color",
+            &config.muted_text_color,
+            "Helper text and softer labels.",
+        ),
+        link = render_color_control(
+            "Link",
+            "link_color",
+            &config.link_color,
+            "Standard link color."
+        ),
+        link_hover = render_color_control(
+            "Link Hover",
+            "link_hover_color",
+            &config.link_hover_color,
+            "Link color when hovered.",
+        ),
+        border = render_color_control(
+            "Border",
+            "border_color",
+            &config.border_color,
+            "General outline and divider color.",
+        ),
+        quote = render_color_control(
+            "Quote",
+            "quote_color",
+            &config.quote_color,
+            "Greentext and quotes."
+        ),
+        meta = render_color_control(
+            "Metadata",
+            "meta_text_color",
+            &config.meta_text_color,
+            "Timestamps, post numbers, and secondary post info.",
+        ),
+        success = render_color_control(
+            "Success/OK",
+            "success_color",
+            &config.success_color,
+            "Positive notices and success accents.",
+        ),
+        danger = render_color_control(
+            "Error/Alert",
+            "danger_color",
+            &config.danger_color,
+            "Warnings and error accents.",
+        ),
+    );
+    let posts = format!(
+        r#"<details class="theme-builder-section">
+  <summary>Posts &amp; Cards</summary>
+  <div class="theme-builder-section-body theme-builder-colors-grid">
+    {card}{op_card}{header_bg}{header_text}{header_border}
+  </div>
+</details>"#,
+        card = render_color_control(
+            "Post Background",
+            "card_color",
+            &config.card_color,
+            "Reply cards and regular post boxes.",
+        ),
+        op_card = render_color_control(
+            "Thread Starter",
+            "op_card_color",
+            &config.op_card_color,
+            "Original post card background.",
+        ),
+        header_bg = render_color_control(
+            "Header/Nav Background",
+            "header_background_color",
+            &config.header_background_color,
+            "Top site bar background.",
+        ),
+        header_text = render_color_control(
+            "Header/Nav Text",
+            "header_text_color",
+            &config.header_text_color,
+            "Top site bar links and labels.",
+        ),
+        header_border = render_color_control(
+            "Header/Nav Border",
+            "header_border_color",
+            &config.header_border_color,
+            "Top site bar bottom border.",
+        ),
+    );
+    let forms = format!(
+        r#"<details class="theme-builder-section">
+  <summary>Forms &amp; Buttons</summary>
+  <div class="theme-builder-section-body theme-builder-colors-grid">
+    {input_bg}{input_text}{input_border}{button_bg}{button_text}{button_border}{button_hover}
+  </div>
+</details>"#,
+        input_bg = render_color_control(
+            "Input Background",
+            "input_background_color",
+            &config.input_background_color,
+            "Text fields and textarea background.",
+        ),
+        input_text = render_color_control(
+            "Input Text",
+            "input_text_color",
+            &config.input_text_color,
+            "Text inside inputs and textareas.",
+        ),
+        input_border = render_color_control(
+            "Input Border",
+            "input_border_color",
+            &config.input_border_color,
+            "Outline for form fields.",
+        ),
+        button_bg = render_color_control(
+            "Button Background",
+            "button_background_color",
+            &config.button_background_color,
+            "Default button background.",
+        ),
+        button_text = render_color_control(
+            "Button Text",
+            "button_text_color",
+            &config.button_text_color,
+            "Button label color.",
+        ),
+        button_border = render_color_control(
+            "Button Border",
+            "button_border_color",
+            &config.button_border_color,
+            "Button outline color.",
+        ),
+        button_hover = render_color_control(
+            "Button Hover",
+            "button_hover_color",
+            &config.button_hover_color,
+            "Button background on hover.",
+        ),
+    );
+    let advanced = format!(
+        r#"<details class="theme-builder-section">
+  <summary>Advanced</summary>
+  <div class="theme-builder-section-body">
+    <label>Optional advanced CSS
+      <textarea name="advanced_css" rows="8" spellcheck="false" data-theme-builder-field="advanced_css">{advanced_css}</textarea>
+      <small>Optional. Use this only for small finishing touches after the guided controls. Imports and script-like URLs are rejected.</small>
+    </label>
+  </div>
+</details>"#,
+        advanced_css = escape_html(&config.advanced_css),
+    );
+
+    format!("{basics}{colors}{posts}{forms}{advanced}")
+}
+
+fn render_builder_preview(config: &ThemeBuilderConfig, slug: &str) -> String {
+    format!(
+        r##"<section class="theme-builder-preview-card">
+  <div class="admin-card-header">
+    <h4>Preview</h4>
+    <p>Representative surfaces update as you change values when JavaScript is available. Saved themes still render server-side without JavaScript.</p>
+  </div>
+  <style data-theme-preview-style></style>
+  <div class="theme-preview-shell" data-theme-preview data-theme-preview-slug="{slug}" data-theme-preview-preset="{preset}">
+    <div class="theme-preview-header">
+      <span class="theme-preview-title">RustChan</span>
+      <nav class="theme-preview-nav"><a href="#">/tech/</a> <a href="#">/art/</a> <a href="#">/mu/</a></nav>
+    </div>
+    <div class="theme-preview-panels">
+      <article class="theme-preview-panel">
+        <h5>Homepage card</h5>
+        <p class="theme-preview-muted">Board subtitle and secondary text.</p>
+        <a href="#">open board</a>
+      </article>
+      <article class="theme-preview-post theme-preview-op">
+        <div class="theme-preview-meta">OP 04/29/2026 No.101</div>
+        <p><span class="theme-preview-quote">&gt; quoted line</span><br>Starter post content with a <a href="#">link</a>.</p>
+      </article>
+      <article class="theme-preview-post">
+        <div class="theme-preview-meta">Reply No.102</div>
+        <p>Reply card with metadata, links, and regular body text.</p>
+      </article>
+      <form class="theme-preview-form">
+        <input type="text" value="Name">
+        <textarea rows="3">Body text</textarea>
+        <div class="theme-preview-actions">
+          <button type="button">Post</button>
+          <button type="button" class="theme-preview-secondary">Preview</button>
+        </div>
+      </form>
+      <div class="theme-preview-flashes">
+        <div class="admin-flash flash-ok">Saved theme preview</div>
+        <div class="admin-flash flash-error">Validation message preview</div>
+      </div>
+    </div>
+  </div>
+</section>"##,
+        slug = escape_html(slug),
+        preset = escape_html(&config.base_preset),
+    )
+}
+
+fn render_builder_editor(theme_slug: &str, config: &ThemeBuilderConfig) -> String {
+    format!(
+        r#"<input type="hidden" name="theme_mode" value="builder">
+<div class="theme-builder-shell" data-theme-builder>
+  <div class="theme-builder-controls">
+    {sections}
+  </div>
+  {preview}
+</div>"#,
+        sections = render_builder_sections(config),
+        preview = render_builder_preview(config, theme_slug),
+    )
+}
+
+fn render_legacy_editor(theme_slug: &str, custom_css: &str) -> String {
+    format!(
+        r#"<input type="hidden" name="theme_mode" value="legacy">
+<div class="theme-editor-built-in-note">
+  <p>This is a legacy custom CSS theme. RustChan will keep loading it as-is for compatibility. You can still edit the raw CSS below, or create a new guided theme if you want the simpler builder.</p>
+</div>
+<div class="theme-editor-css-panel">
+  <div class="theme-editor-panel-header">
+    <h4>Legacy custom CSS</h4>
+    <p>Scope everything to <code>html[data-theme="{slug}"]</code>. This is the advanced escape hatch.</p>
+  </div>
+  <textarea name="custom_css" rows="18" spellcheck="false">{custom_css}</textarea>
+  <p class="theme-editor-code-note">Legacy themes continue to work without migration. New guided themes use the builder above instead of requiring raw CSS.</p>
+</div>"#,
+        slug = escape_html(theme_slug),
+        custom_css = escape_html(custom_css),
+    )
+}
+
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#[allow(clippy::too_many_lines)]
 fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
     let mut builtin_theme_cards = String::new();
     let mut custom_theme_cards = String::new();
     for theme in view.appearance.themes {
-        let theme_css_value = if theme.custom_css.trim().is_empty() {
-            theme_css_starter(&theme.slug, &theme.swatch_hex)
-        } else {
-            theme.custom_css.clone()
-        };
         let theme_editor = if theme.is_builtin {
             r#"<div class="theme-editor-built-in-note">
-<p>Built-in themes are maintained in <code>static/style.css</code>. You can toggle them here for the picker, but custom CSS is reserved for custom themes.</p>
+<p>Built-in themes are maintained in <code>static/style.css</code>. You can toggle them here for the picker, but guided editing is reserved for custom themes so the shipped presets stay stable.</p>
 </div>"#
                 .to_string()
+        } else if let Some(builder_config) = parse_builder_config(&theme.custom_css) {
+            render_builder_editor(&theme.slug, &builder_config)
         } else {
-            format!(
-                r#"<div class="theme-editor-css-panel">
-  <div class="theme-editor-panel-header">
-    <h4>Custom CSS</h4>
-    <p>Scope everything to <code>html[data-theme="{slug}"]</code>. This textarea accepts full CSS, not just variables.</p>
-  </div>
-  <textarea name="custom_css" rows="18" spellcheck="false">{custom_css}</textarea>
-  <p class="theme-editor-code-note">Tip: start by changing the variables block, then add selector overrides for <code>body</code>, <code>.site-header</code>, <code>.page-box</code>, <code>.op</code>, <code>.reply</code>, and buttons if you need more personality.</p>
-</div>"#,
-                slug = escape_html(&theme.slug),
-                custom_css = escape_html(&theme_css_value),
-            )
+            render_legacy_editor(&theme.slug, &theme.custom_css)
         };
         let card_markup = format!(
             r#"<details class="board-settings-card theme-editor-card" id="theme-{slug}">
@@ -213,7 +553,7 @@ fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
       <div class="board-settings-grid">
         <label>Display name<input type="text" name="display_name" value="{name}" maxlength="64" required></label>
         <label>Slug<input type="text" name="slug" value="{slug}" maxlength="32"{slug_readonly}></label>
-        <label>Swatch<input type="text" name="swatch_hex" value="{swatch}" maxlength="7"></label>
+        <label>Swatch<input type="color" name="swatch_hex" value="{swatch}"></label>
       </div>
       <div class="board-settings-grid" style="margin-top:0.65rem">
         <label>Description<input type="text" name="description" value="{description_raw}" maxlength="256"></label>
@@ -385,10 +725,10 @@ fn render_admin_appearance_section(
     theme_catalog_open_attr: &str,
     builtin_theme_cards: &str,
     custom_theme_cards_or_empty: &str,
-    new_theme_starter_css: &str,
 ) -> String {
+    let starter_builder = builder_defaults_for_preset("forest");
     format!(
-        r#"<div class="admin-panel-appearance" id="appearance">
+        r##"<div class="admin-panel-appearance" id="appearance">
 <section class="admin-section admin-section-collapsible" id="board-banners">
 <details class="admin-dropdown" data-admin-dropdown-key="board-banners"{banner_settings_open_attr}>
 <summary>// board banners &amp; favicons</summary>
@@ -457,59 +797,38 @@ fn render_admin_appearance_section(
 <div class="theme-manager-shell">
   <section class="theme-guide-card">
     <div class="admin-card-header">
-      <h3>// how RustChan themes work</h3>
-      <p>Every theme is just CSS scoped to <code>html[data-theme="slug"]</code>. Most of the site styling comes from shared variables first, then optional selector overrides for the pieces you want to customize.</p>
+      <h3>// guided theme builder</h3>
+      <p>Build a theme with presets, color pickers, spacing controls, and safe system-font choices. RustChan still saves the final theme as regular server-rendered CSS, so Tor and no-JS visitors see the saved result normally.</p>
     </div>
     <div class="theme-guide-grid">
       <div class="theme-guide-block">
-        <h4>Core variables</h4>
-        <pre class="theme-guide-code">--bg
---bg-panel
---bg-post
---bg-op
---bg-input
---border
---border-glow
---green
---green-dim
---green-bright
---green-pale
---amber
---red
---gray
---gray-light
---text
---text-dim
---font
---font-display</pre>
+        <h4>Main flow</h4>
+        <p>1. Pick a built-in preset.</p>
+        <p>2. Adjust basics, colors, posts, and forms.</p>
+        <p>3. Preview the result.</p>
+        <p>4. Save it as a custom theme.</p>
       </div>
       <div class="theme-guide-block">
-        <h4>Common selectors</h4>
-        <pre class="theme-guide-code">body
-.site-header
-.admin-section
-.page-box
-.post-form-container
-.op
-.reply
-a / a:hover
-button / button:hover</pre>
+        <h4>Compatibility</h4>
+        <p>Built-in themes stay untouched.</p>
+        <p>Saved custom themes from older versions still load.</p>
+        <p>Older raw-CSS themes are shown as legacy advanced themes instead of being auto-migrated.</p>
       </div>
     </div>
-    <p class="theme-guide-note">Use the starter below for new themes. Built-in theme source lives in <code>static/style.css</code> if you want examples of complete themes.</p>
+    <p class="theme-guide-note">Need full control? Guided themes include a smaller advanced CSS box for finishing touches, while older raw CSS themes remain editable in legacy mode.</p>
   </section>
 
   <section class="theme-create-card">
     <div class="admin-card-header">
       <h3>// create custom theme</h3>
-      <p>Start from a working scaffold instead of a blank textarea, then tune variables and add overrides where needed.</p>
+      <p>Start from a preset, tweak the friendly fields, and RustChan will generate the scoped theme CSS internally.</p>
     </div>
     <form method="POST" action="/admin/theme/create" class="theme-create-form">
       <input type="hidden" name="_csrf" value="{csrf}">
       <div class="board-settings-grid">
         <label>Display name<input type="text" name="display_name" maxlength="64" required></label>
         <label>Slug<input type="text" name="slug" maxlength="32" required placeholder="mytheme"></label>
-        <label>Swatch<input type="text" name="swatch_hex" maxlength="7" placeholder="7ab84e"></label>
+        <label>Theme picker swatch<input type="color" name="swatch_hex" value="#7ab84e"></label>
       </div>
       <div class="board-settings-grid" style="margin-top:0.65rem">
         <label>Description<input type="text" name="description" maxlength="256" placeholder="What makes this theme distinct?"></label>
@@ -517,14 +836,7 @@ button / button:hover</pre>
       <div class="board-settings-checks">
         <label><input type="checkbox" name="enabled" value="1" checked> Shown in theme picker</label>
       </div>
-      <div class="theme-editor-css-panel">
-        <div class="theme-editor-panel-header">
-          <h4>Starter CSS</h4>
-          <p>Replace <code>your-theme</code> in the selector with the slug above before saving.</p>
-        </div>
-        <textarea name="custom_css" rows="22" spellcheck="false" required>{new_theme_starter_css}</textarea>
-        <p class="theme-editor-code-note">You can keep this file variable-driven and only add selector overrides where the default site structure needs extra styling.</p>
-      </div>
+      {starter_builder_form}
       <div class="board-settings-actions">
         <button type="submit">create theme</button>
       </div>
@@ -545,14 +857,14 @@ button / button:hover</pre>
 <section class="theme-manager-group">
   <div class="theme-manager-group-header">
     <h3>// custom themes</h3>
-    <p>Edit your own themes with a full CSS editor and swatch metadata.</p>
+    <p>Guided themes reopen in the builder. Older themes without builder metadata stay available as legacy advanced CSS themes.</p>
   </div>
   <div class="theme-card-grid">{custom_theme_cards_or_empty}</div>
 </section>
 </div>
 </details>
 </section>
-</div>"#,
+</div>"##,
         csrf = escape_html(csrf_token),
         banner_rotation_interval_minutes = banner_rotation_interval_minutes,
         banner_external_links_enabled_checked = banner_external_links_enabled_checked,
@@ -565,6 +877,6 @@ button / button:hover</pre>
         theme_catalog_open_attr = theme_catalog_open_attr,
         builtin_theme_cards = builtin_theme_cards,
         custom_theme_cards_or_empty = custom_theme_cards_or_empty,
-        new_theme_starter_css = new_theme_starter_css,
+        starter_builder_form = render_builder_editor("new-theme-preview", &starter_builder),
     )
 }

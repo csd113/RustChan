@@ -179,7 +179,7 @@ pub fn update_theme(
     let css_to_save = if current.is_builtin {
         current.custom_css
     } else {
-        custom_css.unwrap_or("").to_string()
+        custom_css.unwrap_or(&current.custom_css).to_string()
     };
     conn.execute(
         "UPDATE themes
@@ -314,6 +314,8 @@ pub fn is_builtin_slug(slug: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::theme_builder::{build_theme_css, builder_defaults_for_preset};
+
     #[test]
     fn legacy_default_builtin_list_is_upgraded_with_new_featured_themes() {
         let enabled_builtin_slugs = super::configured_enabled_builtin_slugs();
@@ -370,5 +372,31 @@ mod tests {
             .expect("deep orbit theme");
         assert_eq!(deep_orbit.display_name, "Deep Orbit");
         assert!(deep_orbit.enabled);
+    }
+
+    #[test]
+    fn builder_theme_css_response_serves_saved_generated_css() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+        let config = builder_defaults_for_preset("forest");
+        let css = build_theme_css("guided-forest", &config);
+
+        super::create_custom_theme(
+            &conn,
+            "guided-forest",
+            "Guided Forest",
+            "builder theme",
+            "#7ab84e",
+            &css,
+            true,
+        )
+        .expect("create theme");
+
+        let served = super::theme_css_response(&conn, "guided-forest")
+            .expect("theme response")
+            .expect("css body");
+
+        assert!(served.contains("html[data-theme=\"guided-forest\"]"));
+        assert!(served.contains("--rustchan-builder-data:"));
     }
 }

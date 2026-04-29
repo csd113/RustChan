@@ -117,63 +117,6 @@ pub struct AdminPanelFlash<'a> {
     pub message: &'a str,
 }
 
-fn theme_css_starter(slug: &str, swatch_hex: &str) -> String {
-    format!(
-        r#"/* RustChan theme starter.
-   Keep everything scoped to html[data-theme="{slug}"].
-   Start with variables, then add selector overrides underneath as needed. */
-
-html[data-theme="{slug}"] {{
-  color-scheme: dark;
-  --bg:           #11161a;
-  --bg-panel:     rgba(20, 26, 32, 0.92);
-  --bg-post:      rgba(24, 32, 40, 0.92);
-  --bg-op:        rgba(28, 37, 47, 0.95);
-  --bg-input:     #0d1216;
-  --border:       #2d3d49;
-  --border-glow:  {swatch_hex};
-  --green:        {swatch_hex};
-  --green-dim:    #6f8291;
-  --green-bright: #d7f0ff;
-  --green-pale:   #9fc5da;
-  --amber:        #d5a35b;
-  --red:          #d06b6b;
-  --gray:         #5c6670;
-  --gray-light:   #88949f;
-  --text:         #dce6ee;
-  --text-dim:     #90a0ad;
-  --font:         'IBM Plex Sans', 'Segoe UI', sans-serif;
-  --font-display: 'IBM Plex Sans', 'Segoe UI', sans-serif;
-}}
-
-html[data-theme="{slug}"] body {{
-  background: var(--bg);
-  background-image:
-    radial-gradient(circle at top, rgba(255,255,255,0.04), transparent 32%),
-    linear-gradient(180deg, rgba(255,255,255,0.02), transparent 45%);
-}}
-
-html[data-theme="{slug}"] .site-header,
-html[data-theme="{slug}"] .admin-section,
-html[data-theme="{slug}"] .page-box,
-html[data-theme="{slug}"] .post-form-container,
-html[data-theme="{slug}"] .op,
-html[data-theme="{slug}"] .reply {{
-  border-color: var(--border);
-  background: var(--bg-panel);
-}}
-
-html[data-theme="{slug}"] a {{
-  color: var(--green);
-}}
-
-html[data-theme="{slug}"] a:hover {{
-  color: var(--green-bright);
-}}
-"#
-    )
-}
-
 fn banner_target_type_options(selected: BannerTargetType) -> String {
     let options = [
         (BannerTargetType::None, "No link"),
@@ -1668,6 +1611,7 @@ mod tests {
         BackupBoardSummary, BackupInfo, Board, BoardAccessMode, BoardBannerMode, Report,
         ReportWithContext, Theme,
     };
+    use crate::theme_builder::{build_theme_css, builder_defaults_for_preset};
 
     fn sample_board() -> Board {
         Board {
@@ -1716,6 +1660,33 @@ mod tests {
             sort_order: 1,
             is_builtin: true,
             custom_css: String::new(),
+        }
+    }
+
+    fn sample_builder_theme() -> Theme {
+        let config = builder_defaults_for_preset("forest");
+        Theme {
+            slug: "guided-forest".into(),
+            display_name: "Guided Forest".into(),
+            description: "Builder-backed theme".into(),
+            swatch_hex: "#7ab84e".into(),
+            enabled: true,
+            sort_order: 1000,
+            is_builtin: false,
+            custom_css: build_theme_css("guided-forest", &config),
+        }
+    }
+
+    fn sample_legacy_theme() -> Theme {
+        Theme {
+            slug: "legacy-sunset".into(),
+            display_name: "Legacy Sunset".into(),
+            description: "Older raw CSS theme".into(),
+            swatch_hex: "#cc7744".into(),
+            enabled: true,
+            sort_order: 1010,
+            is_builtin: false,
+            custom_css: "html[data-theme=\"legacy-sunset\"] { --bg: #211; }".into(),
         }
     }
 
@@ -1932,6 +1903,27 @@ mod tests {
         );
 
         assert!(html.contains("A password is saved but unused while this board is public."));
+    }
+
+    #[test]
+    fn admin_panel_theme_workshop_handles_guided_and_legacy_custom_themes() {
+        let board = sample_board();
+        let html = render_admin_panel_for_test(
+            &[board],
+            &[],
+            &[
+                sample_theme(),
+                sample_builder_theme(),
+                sample_legacy_theme(),
+            ],
+            Some("theme-catalog"),
+        );
+
+        assert!(html.contains("guided theme builder"));
+        assert!(html.contains("Optional advanced CSS"));
+        assert!(html.contains("legacy custom CSS theme"));
+        assert!(html.contains("Guided Forest"));
+        assert!(html.contains("Legacy Sunset"));
     }
 
     #[test]

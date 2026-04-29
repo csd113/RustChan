@@ -43,6 +43,7 @@ mod test_fixtures;
 #[cfg(test)]
 mod test_support;
 mod theme;
+mod theme_builder;
 pub(crate) mod tls;
 mod utils;
 mod workers;
