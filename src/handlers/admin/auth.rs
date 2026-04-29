@@ -720,6 +720,7 @@ mod tests {
     #[tokio::test]
     async fn admin_login_marks_session_cookie_secure_for_https_tunnel_origin() {
         let state = crate::test_support::app_state();
+        clear_login_fails(&login_ip_key("127.0.0.1"));
         {
             let conn = state.db.get().expect("db connection");
             let password_hash =
@@ -736,7 +737,7 @@ mod tests {
             let origin = format!("https://{host}");
             (host, origin)
         } else {
-            ("localhost".to_string(), "http://localhost".to_string())
+            ("localhost".to_string(), TEST_ADMIN_ORIGIN.to_string())
         };
         let response = router
             .oneshot(

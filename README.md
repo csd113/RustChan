@@ -159,7 +159,7 @@ enable_tor_support = true
 require_ffmpeg = false
 
 [tls]
-enabled = true
+enabled = false
 port = 8443
 ```
 

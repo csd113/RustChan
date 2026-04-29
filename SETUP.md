@@ -326,10 +326,10 @@ enable_tor_support = true
 require_ffmpeg = false
 # ffmpeg_path = "/usr/local/bin/ffmpeg"
 # ffprobe_path = "/usr/local/bin/ffprobe"
-ffmpeg_timeout_secs = 120
+ffmpeg_timeout_secs = 600
 
 [tls]
-enabled = true
+enabled = false
 port = 8443
 # redirect_http = true
 # http_port = 8080
@@ -340,8 +340,8 @@ port = 8443
 - `enable_tor_support = true`: built-in onion service is on
 - `tor_only = true`: bind RustChan to loopback and serve only through Tor
 - `require_ffmpeg = true`: fail startup if ffmpeg is missing
-- `[tls].enabled = true`: enable RustChan's native HTTPS listener
-- `ffmpeg_timeout_secs = 120`: max runtime for a single ffmpeg job
+- `[tls].enabled = true`: explicitly enable RustChan's native HTTPS listener
+- `ffmpeg_timeout_secs = 600`: max runtime for a single ffmpeg job
 
 ## Tor Onion Service
 
@@ -403,15 +403,51 @@ The generated `settings.toml` currently includes:
 
 ```toml
 [tls]
-enabled = true
+enabled = false
 port = 8443
 ```
 
 This means:
 
 - HTTP is available on the main app port
-- HTTPS is available on `8443`
-- on first run, RustChan can generate a local self-signed development certificate
+- HTTPS support is configured but disabled until you turn it on
+- when enabled, RustChan can generate a local self-signed development certificate
+
+## Default Settings
+
+| # | Setting | Scope | Default | Enabled by default? | Admin? | Config? | Notes |
+|---|---|---|---|---|---|---|---|
+| 3 | Homepage board-card new-thread badges | site-wide | `true` | true | Yes | Yes | First boot seeds DB from `settings.toml`; later admin-owned. |
+| 4 | Board/catalog thread-card new-reply badges | site-wide | `true` | true | Yes | Yes | First boot seeds DB from `settings.toml`; later admin-owned. |
+| 9 | Allow external banner links after warning page | banner | `false` | false | Yes | No | DB-backed admin setting only. |
+| 12 | Board NSFW flag | per-board | `false` | false | Yes | No | New-board create form leaves this unchecked. |
+| 16 | Archive overflow threads | per-board | `true` | true | Yes | No | Global prune config can still override hard-delete behavior. |
+| 20 | PoW CAPTCHA on threads and replies | per-board | `false` | false | Yes | No | Per-board admin toggle. |
+| 24 | Allow images | per-board | `true` | true | Yes | No | New boards start with image uploads enabled. |
+| 25 | Allow video | per-board | `true` | true | Yes | No | New boards start with video uploads enabled. |
+| 26 | Allow audio | per-board | `false` | false | Yes | No | New-board create form leaves this unchecked. |
+| 27 | Allow PDF uploads | per-board | `false` | false | Yes | No | Per-board admin toggle. |
+| 28 | Allow any file uploads | per-board | `false` | false | Yes | No | Only available when the global arbitrary-file gate is enabled. |
+| 29 | Allow tripcodes | per-board | `true` | true | Yes | No | Per-board admin toggle. |
+| 30 | Embed video links (YouTube) | per-board | `true` | true | Yes | No | New-board default for fresh and existing installs. |
+| 31 | Show thread-local poster IDs | per-board | `true` | true | Yes | No | New-board default for fresh and existing installs. |
+| 32 | Collapse long greentext | per-board | `false` | false | Yes | No | Per-board render behavior toggle. |
+| 33 | Allow users to edit their own posts during the 60-second grace window | per-board | `true` | true | Yes | No | New-board default for fresh and existing installs. |
+| 34 | Allow users to delete their own posts during the 60-second grace window | per-board | `true` | true | Yes | No | New-board default for fresh and existing installs. |
+| 38 | Master arbitrary-file upload gate | media | `false` | false | Indirect | Yes | When off, boards cannot enable generic file uploads. |
+| 39 | Require ffmpeg at startup | media | `false` | false | No | Yes | When off, RustChan degrades gracefully where possible. |
+| 46 | TLS enabled | TLS | `false` | false | No | Yes | Generated `settings.toml` keeps native HTTPS off until explicitly enabled. |
+| 48 | Redirect HTTP to HTTPS | TLS | `false` | false | No | Yes | Only relevant when native TLS is enabled. |
+| 50 | ACME enabled | TLS | `false` | false | No | Yes | The ACME section stays commented out by default. |
+| 51 | ACME staging | TLS | `true` | true | No | Yes | Applies if the ACME section is enabled and the field is omitted. |
+| 53 | Built-in Tor support | Tor | `true` | true | No | Yes | Generated config enables Tor support by default. |
+| 54 | Tor-only mode | Tor | `false` | false | No | Yes | Keeps clearnet access on unless you explicitly disable it. |
+| 60 | Include Tor hidden-service keys in automatic full backups | backup / Tor | `true` | true | Yes | Yes | Admin saves rewrite `settings.toml`; existing installs keep their current configured value until changed. |
+| 66 | Archive before prune | maintenance / archive | `true` | true | No | Yes | Global override: prune archives instead of hard-deletes. |
+| 72 | ChanNet API key set | ChanNet | `""` | false | No | Yes | Empty disables the protected ChanNet endpoints. |
+| 75 | New banner enabled flag | banner | `true` | true | Yes | No | Applies to newly uploaded global, board, and home banners. |
+| 76 | New global/board banner shows on board index | banner | `true` | true | Yes | No | Home banners do not use this placement flag. |
+| 77 | New global/board banner shows on catalog | banner | `true` | true | Yes | No | Home banners do not use this placement flag. |
 
 ### Common Modes
 

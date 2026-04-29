@@ -25,12 +25,12 @@ const BASE_SCHEMA_SQL: &str = "
         allow_pdf       INTEGER NOT NULL DEFAULT 0,
         allow_any_files INTEGER NOT NULL DEFAULT 0,
         edit_window_secs    INTEGER NOT NULL DEFAULT 0,
-        allow_editing       INTEGER NOT NULL DEFAULT 0,
-        allow_self_delete   INTEGER NOT NULL DEFAULT 0,
+        allow_editing       INTEGER NOT NULL DEFAULT 1,
+        allow_self_delete   INTEGER NOT NULL DEFAULT 1,
         allow_archive       INTEGER NOT NULL DEFAULT 1,
-        allow_video_embeds  INTEGER NOT NULL DEFAULT 0,
+        allow_video_embeds  INTEGER NOT NULL DEFAULT 1,
         allow_captcha       INTEGER NOT NULL DEFAULT 0,
-        show_poster_ids     INTEGER NOT NULL DEFAULT 0,
+        show_poster_ids     INTEGER NOT NULL DEFAULT 1,
         collapse_greentext  INTEGER NOT NULL DEFAULT 0,
         post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
         default_theme       TEXT NOT NULL DEFAULT '',
@@ -1421,6 +1421,28 @@ mod tests {
             )
             .expect("read repaired board flags");
         assert_eq!(flags, (0, 1, 0));
+    }
+
+    #[test]
+    fn fresh_schema_uses_new_board_feature_defaults() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+
+        install_or_migrate_schema(&conn).expect("install schema");
+        conn.execute(
+            "INSERT INTO boards (short_name, name) VALUES ('fresh', 'Fresh Board')",
+            [],
+        )
+        .expect("insert board with schema defaults");
+
+        let flags: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT allow_video_embeds, show_poster_ids, allow_editing, allow_self_delete
+                 FROM boards WHERE short_name = 'fresh'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read fresh-schema board defaults");
+        assert_eq!(flags, (1, 1, 1, 1));
     }
 
     #[test]

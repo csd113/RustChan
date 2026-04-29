@@ -244,7 +244,7 @@ struct SettingsFile {
     /// than accepted. Default: 1000.
     job_queue_capacity: Option<u64>,
     /// Maximum seconds to allow a single `FFmpeg` transcode or waveform job to
-    /// run before it is killed. Default: 120.
+    /// run before it is killed. Default: 600.
     ffmpeg_timeout_secs: Option<u64>,
     /// Explicit proxy CIDR allowlist for trusted forwarding headers.
     /// Examples include `127.0.0.1/32`, `::1/128`, and `10.0.0.0/8`.
@@ -728,7 +728,7 @@ impl Config {
             ),
             ffmpeg_timeout_secs: env_parse(
                 "CHAN_FFMPEG_TIMEOUT_SECS",
-                s.ffmpeg_timeout_secs.unwrap_or(120),
+                s.ffmpeg_timeout_secs.unwrap_or(600),
             ),
             archive_before_prune: env_bool(
                 "CHAN_ARCHIVE_BEFORE_PRUNE",
@@ -1423,7 +1423,7 @@ forum_name = "RustChan"
 
 # ── Federation / ChanNet gateway ──────────────────────────────────────────────
 [tls]
-enabled = true
+enabled = false
 "#;
 
         let output = rewrite_settings_file_lines(
@@ -1433,7 +1433,7 @@ enabled = true
                 ("auto_full_backup_copies_to_keep", "1".to_string()),
                 (
                     "auto_full_backup_include_tor_hidden_service_keys",
-                    "false".to_string(),
+                    "true".to_string(),
                 ),
             ],
             Some("# ── Federation / ChanNet gateway"),
@@ -1446,7 +1446,7 @@ enabled = true
             .find("auto_full_backup_copies_to_keep = 1")
             .expect("backup copies key inserted");
         let backup_tor_idx = output
-            .find("auto_full_backup_include_tor_hidden_service_keys = false")
+            .find("auto_full_backup_include_tor_hidden_service_keys = true")
             .expect("backup Tor key option inserted");
         let anchor_idx = output
             .find("# ── Federation / ChanNet gateway")
@@ -1604,6 +1604,8 @@ port = 8080
         assert!(template.contains("homepage_new_thread_badges_enabled = true"));
         assert!(template.contains("thread_new_reply_badges_enabled = true"));
         assert!(template.contains(r#"default_theme = "forest""#));
+        assert!(template.contains("enabled = false\nport = 8443"));
+        assert!(template.contains("auto_full_backup_include_tor_hidden_service_keys = true"));
         assert!(template.contains(
             r#"enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]"#
         ));

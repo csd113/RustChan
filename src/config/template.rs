@@ -48,7 +48,7 @@ trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
 # generated automatically in rustchan-data/runtime/tls/dev/.
 # For production, configure [tls.acme] (Let's Encrypt) or [tls.manual_cert].
 [tls]
-enabled = true
+enabled = false
 port = 8443
 redirect_http = false
 http_port = 8080
@@ -122,7 +122,7 @@ require_ffmpeg = false
 
 # Maximum seconds a single FFmpeg transcode or waveform job may run before
 # it is killed. Prevents pathological media files from stalling the worker pool.
-ffmpeg_timeout_secs = 120
+ffmpeg_timeout_secs = 600
 
 # Optional explicit ffmpeg binary path. Leave unset to use PATH lookup.
 # ffmpeg_path = "/usr/local/bin/ffmpeg"
@@ -151,8 +151,8 @@ auto_full_backup_interval_hours = 24
 auto_full_backup_copies_to_keep = 1
 
 # Whether automatic full-site backups include Tor hidden service identity keys.
-# Anyone with these keys can impersonate the onion service. Default: false.
-auto_full_backup_include_tor_hidden_service_keys = false
+# Anyone with these keys can impersonate the onion service. Default: true.
+auto_full_backup_include_tor_hidden_service_keys = true
 
 # How often (in hours) to purge vote records for polls that have expired.
 # The poll question and options are kept for display; only per-IP vote rows

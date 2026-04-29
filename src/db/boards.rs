@@ -457,9 +457,18 @@ pub fn create_board_with_media_flags(
             "INSERT INTO boards (
                  display_order, short_name, name, description, nsfw,
                  allow_images, allow_video, allow_audio,
-                 max_image_size, max_video_size, max_audio_size
+                 max_image_size, max_video_size, max_audio_size,
+                 allow_tripcodes, allow_editing, allow_self_delete, allow_archive,
+                 allow_video_embeds, allow_captcha, show_poster_ids,
+                 collapse_greentext, post_cooldown_secs, default_theme,
+                 banner_mode, access_mode, access_password_hash
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             VALUES (
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                 1, 1, 1, 1,
+                 1, 0, 1,
+                 0, 0, '', 'inherit', 'public', ''
+             )
              RETURNING id",
             params![
                 display_order,
@@ -1096,5 +1105,9 @@ mod tests {
         assert!(board.allow_video);
         assert!(board.allow_audio);
         assert!(!board.allow_pdf);
+        assert!(board.allow_video_embeds);
+        assert!(board.show_poster_ids);
+        assert!(board.allow_editing);
+        assert!(board.allow_self_delete);
     }
 }
