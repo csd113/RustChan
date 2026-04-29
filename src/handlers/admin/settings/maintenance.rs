@@ -66,6 +66,7 @@ pub async fn admin_vacuum(
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
+    let _maintenance_guard = state.maintenance_gate.try_begin("Database VACUUM")?;
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -524,7 +525,7 @@ fn render_db_repair_status_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_db_repair, admin_db_repair_status, PRE_REPAIR_BACKUP_FAILURE};
+    use super::{admin_db_repair, admin_db_repair_status, admin_vacuum, PRE_REPAIR_BACKUP_FAILURE};
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -623,6 +624,12 @@ mod tests {
                 "/admin/db/repair/progress",
                 get(super::admin_db_repair_progress_json),
             )
+            .with_state(state)
+    }
+
+    fn vacuum_router(state: crate::middleware::AppState) -> Router {
+        Router::new()
+            .route("/admin/vacuum", post(admin_vacuum))
             .with_state(state)
     }
 
@@ -1024,5 +1031,40 @@ mod tests {
         let body = response_body(response).await;
         assert!(body.contains("[ database repair ]"));
         assert!(body.contains(&format!("<strong>Run id:</strong> <code>{job_id}</code>")));
+    }
+
+    #[tokio::test]
+    async fn admin_vacuum_is_blocked_while_other_maintenance_is_active() {
+        let _guard = REPAIR_TEST_LOCK.lock().await;
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let router = vacuum_router(state.clone());
+        let _maintenance_guard = state
+            .maintenance_gate
+            .try_begin("Full backup creation")
+            .expect("maintenance guard");
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/vacuum")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(
+                        header::COOKIE,
+                        "csrf_token=csrf123; chan_admin_session=session123",
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!("_csrf={}", admin_signed_csrf())))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_body(response).await;
+        assert!(body.contains("Full backup creation is already running"));
     }
 }
