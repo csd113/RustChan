@@ -124,6 +124,12 @@ pub(super) fn require_same_origin_request(
         .port_u16()
         .unwrap_or(if request_scheme == "https" { 443 } else { 80 });
 
+    // Browsers and HTTPS tunnels can omit Origin in legitimate same-origin
+    // admin form posts. We accept two narrow fallbacks instead of broadly
+    // allowing headerless requests:
+    //   1. Origin: null with a same-origin Referer (seen in some tunnel/webview flows)
+    //   2. Missing Origin/Referer with Sec-Fetch-Site: same-origin
+    // Cross-site and malformed cases still fail closed below.
     let Some(source) = effective_same_origin_source(headers, request_authority.host()) else {
         if request_has_same_origin_fetch_metadata(headers) {
             return Ok(());
