@@ -9,6 +9,7 @@ All notable changes to RustChan will be documented in this file.
 - The bundled banner builder in `docs/rustchan-banner-maker.html` has been rebuilt into a layered editor with stacked image uploads, per-layer controls, drag-and-resize handles, live preview, and export tools for both supported banner sizes.
 - The admin panel now ships with its own dedicated `admin.css` and `admin.js` assets instead of leaning on the shared site bundle.
 - HEIC and HEIF image uploads are now accepted by the media pipeline, including MIME detection, thumbnail generation, backup metadata, form copy, and documentation updates.
+- Boards can now enforce their own upload size limits for images, video, and audio, with caps that stay within the site-wide maxima.
 - Two new built-in themes, Blue Sky and Deep Orbit, are available across normal pages, admin views, theme seeding, defaults, and setup documentation.
 - Users can now self-delete their own posts within a 60-second grace window after posting, with server-side expiry checks and UI countdown hints.
 
@@ -18,13 +19,15 @@ All notable changes to RustChan will be documented in this file.
 - Banner editing in the admin UI is smoother: target pickers behave more predictably, external-link warnings show up inline before save, and the banner forms are laid out more cleanly.
 - The board appearance editor now shows each board's NSFW tag state directly in the appearance card.
 - Admin login and banner-serving internals were tightened up, with cleaner helper paths for session handling, banner access checks, and post-query lookups.
+- Site settings now preserve the badge toggles more reliably when saving banner-only changes, avoiding accidental resets on partial submits.
 - Backup and restore actions now use a more consistent redirect path, which keeps the progress modal and post-restore navigation on the rails after full-site and board restore requests.
 - Thread rendering and post state handling are more resilient around post lookups, moderation actions, pending filesystem cleanup, media storage, worker updates, and console board setup.
 - The post edit form and self-delete flow now surface the shared 60-second self-action window more clearly.
 - Post rendering now sanitizes formatting more consistently and poll submission validation is stricter on both server-rendered and live-updated pages.
 - Media rendering now prefers recorded MIME type information over filename guessing, improving how attached media is displayed in thread views.
 - Banner exports from the standalone editor no longer include editing guide overlays, and the export flow better matches the screenshots and README examples.
-- Tor bootstrap and runtime logs are humanized into clearer status messages so operators can understand connection progress without reading raw Arti output.
+- Tor bootstrap and runtime logs are humanized into clearer status messages so operators can understand connection progress without reading raw Arti output, and repeat onion-service retry spam is suppressed.
+- Site stats now account for archived thread media more accurately, so admin totals reflect active content instead of counting archived bytes.
 - Built-in self-signed TLS is now gated behind an explicit feature flag, keeping production builds slimmer unless the development certificate path is needed.
 - Rust dependencies, GitHub Actions release tooling, and lockfile contents were refreshed for the `1.1.5-indev` cycle.
 - Release artifacts now focus on current Apple Silicon macOS builds instead of publishing a separate macOS x86 archive.
@@ -50,6 +53,7 @@ All notable changes to RustChan will be documented in this file.
 
 - Removed dead code, unused API paths, and stale helper branches that were no longer part of the live request flow.
 - Admin backup, settings, board, posting, and thread handlers were split into smaller modules, with focused regression coverage for posting flows, restore redirects, banner behavior, board redirects, and live thread updates.
+- The ffprobe probe test now uses a symlinked binary path to verify explicit tool resolution more faithfully on Unix-like systems.
 - Clippy warnings were cleaned up across the refactored modules, theme code, logging, storage, templates, and banner handling to keep strict lint compliance.
 - Comments and documentation were trimmed to remove leftover AI-generated phrasing and stale implementation notes.
 
