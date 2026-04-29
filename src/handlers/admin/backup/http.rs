@@ -316,11 +316,12 @@ pub(super) async fn restore_auth_preflight(
     state: &AppState,
     headers: &HeaderMap,
     jar: &CookieJar,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<Option<String>> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    super::require_same_origin_request(headers)?;
+    super::require_same_origin_request(headers, peer)?;
 
     {
         let pool = state.db.clone();
@@ -407,6 +408,11 @@ pub(super) async fn stream_restore_upload_to_tempfile(
                 {
                     uploaded_bytes = uploaded_bytes
                         .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                    ensure_restore_upload_within_budget(
+                        kind,
+                        uploaded_bytes,
+                        super::common::RESTORE_UPLOAD_MAX_BYTES,
+                    )?;
                     writer.write_all(&chunk).await.map_err(|error| {
                         AppError::Internal(anyhow::anyhow!("Write chunk: {error}"))
                     })?;
@@ -449,7 +455,7 @@ pub(super) fn validate_streamed_restore_upload(
     upload: &StreamedRestoreUpload,
 ) -> Result<u64> {
     let has_csrf_cookie = jar.get("csrf_token").is_some();
-    if super::check_csrf_jar(jar, upload.form_csrf.as_deref()).is_err() {
+    if super::check_admin_csrf_jar(jar, upload.form_csrf.as_deref()).is_err() {
         tracing::warn!(
             target: "admin",
             route = kind.route(),
@@ -471,6 +477,7 @@ pub(super) fn validate_streamed_restore_upload(
             "Uploaded backup file is empty.".into(),
         ));
     }
+    ensure_restore_upload_within_budget(kind, file_size, super::common::RESTORE_UPLOAD_MAX_BYTES)?;
 
     tracing::info!(
         target: "admin",
@@ -502,6 +509,22 @@ pub(super) fn sanitize_backup_zip_filename(filename: &str) -> Result<String> {
     Ok(safe_filename)
 }
 
+fn ensure_restore_upload_within_budget(
+    kind: RestoreKind,
+    uploaded_bytes: u64,
+    budget: u64,
+) -> Result<()> {
+    if uploaded_bytes > budget {
+        return Err(AppError::UploadTooLarge(format!(
+            "{} upload exceeds the {} MiB restore budget.",
+            kind.title(),
+            budget / 1024 / 1024
+        )));
+    }
+
+    Ok(())
+}
+
 pub(super) fn sanitize_board_short_value(board_short: &str) -> Result<String> {
     let safe_board = board_short
         .chars()
@@ -512,4 +535,17 @@ pub(super) fn sanitize_board_short_value(board_short: &str) -> Result<String> {
         return Err(AppError::BadRequest("Invalid board name.".into()));
     }
     Ok(safe_board)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_restore_upload_within_budget, RestoreKind};
+
+    #[test]
+    fn restore_upload_budget_rejects_oversized_upload() {
+        let error = ensure_restore_upload_within_budget(RestoreKind::Full, 6, 5)
+            .expect_err("oversized restore upload rejected");
+
+        assert!(error.to_string().contains("restore budget"));
+    }
 }

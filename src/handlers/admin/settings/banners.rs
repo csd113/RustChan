@@ -318,14 +318,15 @@ pub async fn upload_global_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    super::require_same_origin_request(&headers)?;
+    super::require_same_origin_request(&headers, Some(peer))?;
     let parsed = parse_banner_upload(multipart).await?;
-    super::check_csrf_jar(&jar, parsed.csrf.as_deref())?;
+    super::check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
     match upload_banner_for_scope(state, session_id, BannerScope::Global, None, parsed).await {
         Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
             "Global banner uploaded.",
@@ -353,14 +354,15 @@ pub async fn upload_home_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    super::require_same_origin_request(&headers)?;
+    super::require_same_origin_request(&headers, Some(peer))?;
     let parsed = parse_banner_upload(multipart).await?;
-    super::check_csrf_jar(&jar, parsed.csrf.as_deref())?;
+    super::check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
     match upload_banner_for_scope(state, session_id, BannerScope::Home, None, parsed).await {
         Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
             "Home page banner uploaded.",
@@ -388,14 +390,15 @@ pub async fn upload_board_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    super::require_same_origin_request(&headers)?;
+    super::require_same_origin_request(&headers, Some(peer))?;
     let parsed = parse_banner_upload(multipart).await?;
-    super::check_csrf_jar(&jar, parsed.csrf.as_deref())?;
+    super::check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
     let board_id = parsed
         .board_id
         .ok_or_else(|| AppError::BadRequest("Missing board id.".into()))?;
@@ -434,12 +437,14 @@ pub async fn upload_board_banner(
 pub async fn update_banner_meta(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<BannerMetaForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
@@ -500,12 +505,14 @@ pub async fn update_banner_meta(
 pub async fn delete_banner(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<DeleteBannerForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let anchor = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
@@ -531,12 +538,14 @@ pub async fn delete_banner(
 pub async fn move_banner(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<MoveBannerForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let move_up = match form.direction.as_str() {
         "up" => true,
         "down" => false,
@@ -573,12 +582,14 @@ pub async fn move_banner(
 pub async fn clear_board_banner_override(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<ClearBoardBannerForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let board_short = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {

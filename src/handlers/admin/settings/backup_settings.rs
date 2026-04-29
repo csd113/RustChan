@@ -15,12 +15,14 @@ pub struct FullBackupSettingsForm {
 pub async fn update_full_backup_settings(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<FullBackupSettingsForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let interval_hours = form
         .auto_full_backup_interval_hours

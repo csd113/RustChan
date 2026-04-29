@@ -44,6 +44,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, OnceLock};
+use std::time::{Duration, Instant};
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
@@ -93,6 +94,14 @@ pub fn is_tty() -> bool {
 /// address box in detect.rs) must check this and skip its output — the TUI
 /// dashboard owns the screen and will display the information itself.
 static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+const TOR_DESCRIPTOR_TIMEOUT_SUPPRESSION_WINDOW: Duration = Duration::from_secs(10 * 60);
+static TOR_DESCRIPTOR_TIMEOUT_LIMITER: LazyLock<parking_lot::Mutex<TorDescriptorTimeoutLimiter>> =
+    LazyLock::new(|| {
+        parking_lot::Mutex::new(TorDescriptorTimeoutLimiter::new(
+            TOR_DESCRIPTOR_TIMEOUT_SUPPRESSION_WINDOW,
+        ))
+    });
 
 pub fn set_tui_active(v: bool) {
     TUI_ACTIVE.store(v, Ordering::SeqCst);
@@ -503,6 +512,110 @@ fn short_tor_error(error: &str) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TorDescriptorTimeoutDecision {
+    EmitOriginal,
+    Suppress,
+    EmitSummary { suppressed: u64, window: Duration },
+}
+
+#[derive(Debug)]
+struct TorDescriptorTimeoutLimiter {
+    window: Duration,
+    window_started_at: Option<Instant>,
+    suppressed: u64,
+    duplicate_formatter_decision: Option<TorDescriptorTimeoutDecision>,
+}
+
+impl TorDescriptorTimeoutLimiter {
+    const fn new(window: Duration) -> Self {
+        Self {
+            window,
+            window_started_at: None,
+            suppressed: 0,
+            duplicate_formatter_decision: None,
+        }
+    }
+
+    fn decide(&mut self, now: Instant) -> TorDescriptorTimeoutDecision {
+        // The terminal and file formatters both see the same tracing event.
+        // Reuse one decision for the second formatter so the limiter counts
+        // the event once while keeping both outputs consistent.
+        if let Some(decision) = self.duplicate_formatter_decision.take() {
+            return decision;
+        }
+
+        let decision = self.decide_once(now);
+        self.duplicate_formatter_decision = Some(decision);
+        decision
+    }
+
+    fn decide_once(&mut self, now: Instant) -> TorDescriptorTimeoutDecision {
+        let Some(window_started_at) = self.window_started_at else {
+            self.window_started_at = Some(now);
+            return TorDescriptorTimeoutDecision::EmitOriginal;
+        };
+
+        if now.duration_since(window_started_at) >= self.window {
+            let suppressed = self.suppressed;
+            self.window_started_at = Some(now);
+            self.suppressed = 0;
+            if suppressed == 0 {
+                TorDescriptorTimeoutDecision::EmitOriginal
+            } else {
+                TorDescriptorTimeoutDecision::EmitSummary {
+                    suppressed,
+                    window: self.window,
+                }
+            }
+        } else {
+            self.suppressed = self.suppressed.saturating_add(1);
+            TorDescriptorTimeoutDecision::Suppress
+        }
+    }
+}
+
+fn is_tor_descriptor_upload_timeout_event(target: &str, fields: &LogEventFields) -> bool {
+    if !is_tor_target(target) {
+        return false;
+    }
+
+    let message = fields.message.as_deref().unwrap_or_default();
+    let message_lower = message.to_ascii_lowercase();
+    let joined_fields = fields
+        .fields
+        .iter()
+        .map(|(_, value)| value.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let haystack = format!("{message_lower} {joined_fields}");
+
+    haystack.contains("descriptor")
+        && (haystack.contains("failed to upload descriptor")
+            || haystack.contains("unable to upload")
+            || haystack.contains("descriptor upload"))
+        && (haystack.contains("timeout exceeded")
+            || haystack.contains("timed out")
+            || haystack.contains("network timeout"))
+}
+
+fn apply_tor_descriptor_timeout_rate_limit(fields: &mut LogEventFields) -> bool {
+    let decision = TOR_DESCRIPTOR_TIMEOUT_LIMITER.lock().decide(Instant::now());
+    match decision {
+        TorDescriptorTimeoutDecision::EmitOriginal => true,
+        TorDescriptorTimeoutDecision::Suppress => false,
+        TorDescriptorTimeoutDecision::EmitSummary { suppressed, window } => {
+            fields.message = Some(format!(
+                "Tor descriptor upload timeouts are still occurring; suppressed {suppressed} repeated warnings in the last {} minutes",
+                window.as_secs() / 60
+            ));
+            fields.fields.clear();
+            true
+        }
+    }
+}
+
 fn normalize_message_text(message: &str) -> String {
     let mut cleaned = message.trim().replace('—', "-").replace('…', "...");
     if cleaned.contains('→') {
@@ -652,6 +765,12 @@ fn prepare_event_fields(
     let mut fields = LogEventFields::default();
     event.record(&mut fields);
     rewrite_message(target, file, &mut fields);
+    if *event.metadata().level() == Level::WARN
+        && is_tor_descriptor_upload_timeout_event(target, &fields)
+        && !apply_tor_descriptor_timeout_rate_limit(&mut fields)
+    {
+        return None;
+    }
     (!should_suppress_event(target, &fields)).then_some(fields)
 }
 
@@ -980,9 +1099,11 @@ pub fn console_prompt(msg: &str) {
 mod tests {
     use super::{
         display_component, extract_component, humanize_field_name, is_external_source,
-        normalize_duration, normalize_field_value, normalize_message_text,
-        parse_formatted_duration, rewrite_message, LogEventFields,
+        is_tor_descriptor_upload_timeout_event, normalize_duration, normalize_field_value,
+        normalize_message_text, parse_formatted_duration, rewrite_message, LogEventFields,
+        TorDescriptorTimeoutDecision, TorDescriptorTimeoutLimiter,
     };
+    use std::time::{Duration, Instant};
 
     fn rewrite_for_test(target: &str, message: &str, fields: &[(&str, &str)]) -> LogEventFields {
         let mut event_fields = LogEventFields {
@@ -1161,5 +1282,92 @@ mod tests {
         };
         rewrite_message("tor_circmgr::hspool", Some("src/logging.rs"), &mut fields);
         assert!(super::should_suppress_event("tor_circmgr::hspool", &fields));
+    }
+
+    #[test]
+    fn detects_tor_descriptor_upload_timeout_warning_only() {
+        let fields = rewrite_for_test(
+            "tor_hsservice::publish",
+            "Failed to upload descriptor for service rustchan (redacted) - error: Timeout exceeded",
+            &[],
+        );
+        assert!(is_tor_descriptor_upload_timeout_event(
+            "tor_hsservice::publish",
+            &fields
+        ));
+
+        let non_timeout = rewrite_for_test(
+            "tor_hsservice::publish",
+            "Failed to upload descriptor for service rustchan (redacted) - error: permission denied",
+            &[],
+        );
+        assert!(!is_tor_descriptor_upload_timeout_event(
+            "tor_hsservice::publish",
+            &non_timeout
+        ));
+
+        let unrelated_tor_warning = rewrite_for_test(
+            "tor_circmgr::mgr",
+            "All tunnel attempts failed due to timeout",
+            &[],
+        );
+        assert!(!is_tor_descriptor_upload_timeout_event(
+            "tor_circmgr::mgr",
+            &unrelated_tor_warning
+        ));
+    }
+
+    #[test]
+    fn rate_limits_repeated_tor_descriptor_upload_timeout_warnings() {
+        let mut limiter = TorDescriptorTimeoutLimiter::new(Duration::from_secs(600));
+        let start = Instant::now();
+
+        assert_eq!(
+            limiter.decide_once(start),
+            TorDescriptorTimeoutDecision::EmitOriginal
+        );
+        assert_eq!(
+            limiter.decide_once(start + Duration::from_secs(1)),
+            TorDescriptorTimeoutDecision::Suppress
+        );
+        assert_eq!(
+            limiter.decide_once(start + Duration::from_secs(2)),
+            TorDescriptorTimeoutDecision::Suppress
+        );
+        assert_eq!(
+            limiter.decide_once(start + Duration::from_secs(601)),
+            TorDescriptorTimeoutDecision::EmitSummary {
+                suppressed: 2,
+                window: Duration::from_secs(600),
+            }
+        );
+        assert_eq!(
+            limiter.decide_once(start + Duration::from_secs(602)),
+            TorDescriptorTimeoutDecision::Suppress
+        );
+    }
+
+    #[test]
+    fn rate_limiter_reuses_decision_for_second_formatter() {
+        let mut limiter = TorDescriptorTimeoutLimiter::new(Duration::from_secs(600));
+        let start = Instant::now();
+
+        assert_eq!(
+            limiter.decide(start),
+            TorDescriptorTimeoutDecision::EmitOriginal
+        );
+        assert_eq!(
+            limiter.decide(start),
+            TorDescriptorTimeoutDecision::EmitOriginal
+        );
+        assert_eq!(
+            limiter.decide(start + Duration::from_secs(1)),
+            TorDescriptorTimeoutDecision::Suppress
+        );
+        assert_eq!(
+            limiter.decide(start + Duration::from_secs(1)),
+            TorDescriptorTimeoutDecision::Suppress
+        );
+        assert_eq!(limiter.suppressed, 1);
     }
 }

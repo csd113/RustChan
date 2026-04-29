@@ -243,12 +243,14 @@ pub async fn backup_progress_json(
 pub async fn delete_backup(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<DeleteBackupForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
 

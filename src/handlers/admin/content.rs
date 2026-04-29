@@ -101,13 +101,15 @@ pub struct CreateBoardForm {
 pub async fn create_board(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<CreateBoardForm>,
 ) -> Result<Response> {
     // auth + DB write in spawn_blocking
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let short = form
         .short_name
@@ -186,12 +188,14 @@ fn safe_return_to(path: Option<&str>) -> &str {
 pub async fn delete_board(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<BoardIdForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let upload_dir = CONFIG.upload_dir.clone();
 
@@ -278,12 +282,14 @@ pub async fn delete_board(
 pub async fn reorder_board(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<ReorderBoardForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let move_up = match form.direction.as_str() {
         "up" => true,
@@ -327,12 +333,14 @@ pub struct ThreadActionForm {
 pub async fn thread_action(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<ThreadActionForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     // Validate action before spawning to give early error
     match form.action.as_str() {
@@ -357,7 +365,7 @@ pub async fn thread_action(
                 "archive" => db::set_thread_archived(&conn, thread_id, true)?,
                 _ => {}
             }
-            let _ = db::log_mod_action(
+            if let Err(error) = db::log_mod_action(
                 &conn,
                 admin_id,
                 &admin_name,
@@ -366,7 +374,17 @@ pub async fn thread_action(
                 Some(thread_id),
                 &board_for_log,
                 "",
-            );
+            ) {
+                tracing::error!(
+                    target: "admin",
+                    admin_id,
+                    action = %action,
+                    thread_id,
+                    board = %board_for_log,
+                    error = %error,
+                    "Privileged thread action completed without audit-log record"
+                );
+            }
             tracing::info!(target: "admin", action = %action, thread_id = thread_id, "Thread action");
             Ok(())
         }
@@ -420,12 +438,14 @@ pub struct AdminDeletePostForm {
 pub async fn admin_delete_post(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<AdminDeletePostForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let upload_dir = CONFIG.upload_dir.clone();
     let post_id = form.post_id;
@@ -474,7 +494,7 @@ pub async fn admin_delete_post(
             } else {
                 "delete_post"
             };
-            let _ = db::log_mod_action(
+            if let Err(error) = db::log_mod_action(
                 &conn,
                 admin_id,
                 &admin_name,
@@ -483,7 +503,17 @@ pub async fn admin_delete_post(
                 Some(post_id),
                 &board_name,
                 &post.body.chars().take(80).collect::<String>(),
-            );
+            ) {
+                tracing::error!(
+                    target: "admin",
+                    admin_id,
+                    action,
+                    post_id,
+                    board = %board_name,
+                    error = %error,
+                    "Privileged post deletion completed without audit-log record"
+                );
+            }
             tracing::info!(target: "admin", post_id = post_id, "Post deleted");
             // Return board_name + thread context so we can redirect back to the thread.
             // If the post was an OP, redirect to the board index (thread is gone).
@@ -513,12 +543,14 @@ pub struct AdminDeleteThreadForm {
 pub async fn admin_delete_thread(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<AdminDeleteThreadForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let upload_dir = CONFIG.upload_dir.clone();
     let thread_id = form.thread_id;
@@ -563,7 +595,7 @@ pub async fn admin_delete_thread(
                 );
             }
 
-            let _ = db::log_mod_action(
+            if let Err(error) = db::log_mod_action(
                 &conn,
                 admin_id,
                 &admin_name,
@@ -572,7 +604,16 @@ pub async fn admin_delete_thread(
                 Some(thread_id),
                 &board_name,
                 "",
-            );
+            ) {
+                tracing::error!(
+                    target: "admin",
+                    admin_id,
+                    thread_id,
+                    board = %board_name,
+                    error = %error,
+                    "Privileged thread deletion completed without audit-log record"
+                );
+            }
             tracing::info!(target: "admin", thread_id = thread_id, "Thread deleted");
             Ok(board_name)
         }
@@ -589,10 +630,31 @@ mod tests {
     use axum::http::{header, StatusCode};
     use axum_extra::extract::cookie::{Cookie, CookieJar};
 
+    fn admin_signed_csrf() -> String {
+        crate::utils::crypto::make_scoped_csrf_form_token(
+            "csrf123",
+            &crate::config::CONFIG.cookie_secret,
+            "session123",
+        )
+    }
+
     fn build_admin_jar() -> CookieJar {
         CookieJar::new()
             .add(Cookie::new(super::super::SESSION_COOKIE, "session123"))
             .add(Cookie::new("csrf_token", "csrf123"))
+    }
+
+    fn admin_headers() -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            axum::http::HeaderValue::from_static("localhost"),
+        );
+        headers.insert(
+            header::ORIGIN,
+            axum::http::HeaderValue::from_static("http://localhost"),
+        );
+        headers
     }
 
     fn seed_admin_data() -> (crate::middleware::AppState, i64, i64, i64) {
@@ -771,10 +833,12 @@ mod tests {
         let response = admin_delete_post(
             State(state),
             build_admin_jar(),
+            admin_headers(),
+            crate::test_support::connect_info(),
             Form(AdminDeletePostForm {
                 post_id: reply_id,
                 board: "fallback".to_string(),
-                csrf: Some("csrf123".to_string()),
+                csrf: Some(admin_signed_csrf()),
             }),
         )
         .await
@@ -799,11 +863,13 @@ mod tests {
         let response = thread_action(
             State(state),
             build_admin_jar(),
+            admin_headers(),
+            crate::test_support::connect_info(),
             Form(ThreadActionForm {
                 thread_id,
                 board: "fallback".to_string(),
                 action: "lock".to_string(),
-                csrf: Some("csrf123".to_string()),
+                csrf: Some(admin_signed_csrf()),
             }),
         )
         .await

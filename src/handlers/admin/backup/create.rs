@@ -286,13 +286,20 @@ pub struct FullBackupCreateForm {
 pub async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<FullBackupCreateForm>,
 ) -> Result<Response> {
     let _maintenance_guard = state.maintenance_gate.try_begin("Full backup creation")?;
     let session_id = jar
         .get(super::super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    super::super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        Some(peer),
+        form.csrf.as_deref(),
+    )?;
     let progress = state.backup_progress.clone();
     let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
     let include_tor_hidden_service_keys = form.include_tor_hidden_service_keys;
@@ -330,6 +337,7 @@ pub async fn create_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<BoardBackupCreateForm>,
 ) -> Result<Response> {
     let _maintenance_guard = state.maintenance_gate.try_begin("Board backup creation")?;
@@ -337,7 +345,12 @@ pub async fn create_board_backup(
     let session_id = jar
         .get(super::super::SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    super::super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        Some(peer),
+        form.csrf.as_deref(),
+    )?;
 
     let board_short = form
         .board_short

@@ -444,6 +444,18 @@ mod tests {
         .expect("create session");
     }
 
+    fn admin_signed_csrf() -> String {
+        crate::utils::crypto::make_scoped_csrf_form_token(
+            "csrf123",
+            &crate::config::CONFIG.cookie_secret,
+            "session123",
+        )
+    }
+
+    fn admin_cookie_header() -> &'static str {
+        "csrf_token=csrf123; chan_admin_session=session123"
+    }
+
     fn board_settings_form_body(
         board_id: i64,
         access_mode: &str,
@@ -451,7 +463,8 @@ mod tests {
         clear_access_password: bool,
     ) -> String {
         let mut body = format!(
-            "board_id={board_id}&name=Test&description=&access_mode={access_mode}&access_password={access_password}&_csrf=csrf123"
+            "board_id={board_id}&name=Test&description=&access_mode={access_mode}&access_password={access_password}&_csrf={}",
+            admin_signed_csrf()
         );
         if clear_access_password {
             body.push_str("&clear_access_password=1");
@@ -469,10 +482,10 @@ mod tests {
                 .method("POST")
                 .uri("/admin/board/settings")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header(
-                    header::COOKIE,
-                    "csrf_token=csrf123; chan_admin_session=session123",
-                )
+                .header(header::HOST, "localhost")
+                .header(header::ORIGIN, "http://localhost")
+                .header(header::COOKIE, admin_cookie_header())
+                .extension(crate::test_support::connect_info())
                 .body(Body::from(body))
                 .expect("request"),
         )
@@ -647,7 +660,7 @@ mod tests {
         let app = admin_routes().with_state(crate::test_support::app_state());
         let file_bytes = vec![b'a'; 60 * 1024 * 1024];
         let (boundary, body) = crate::test_support::multipart_body(
-            &[("_csrf", "csrf123")],
+            &[("_csrf", &admin_signed_csrf())],
             Some(("backup_file", "board.zip", &file_bytes, "application/zip")),
         );
 
@@ -660,6 +673,9 @@ mod tests {
                         header::CONTENT_TYPE,
                         format!("multipart/form-data; boundary={boundary}"),
                     )
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .extension(crate::test_support::connect_info())
                     .body(Body::from(body))
                     .expect("request"),
             )
@@ -721,7 +737,7 @@ mod tests {
         let app = admin_routes().with_state(state);
         let zip_bytes = board_backup_zip_bytes();
         let (boundary, body) = crate::test_support::multipart_body(
-            &[("_csrf", "csrf123")],
+            &[("_csrf", &admin_signed_csrf())],
             Some(("backup_file", "board.zip", &zip_bytes, "application/zip")),
         );
 
@@ -735,10 +751,8 @@ mod tests {
                         format!("multipart/form-data; boundary={boundary}"),
                     )
                     .header(header::HOST, "localhost")
-                    .header(
-                        header::COOKIE,
-                        "csrf_token=csrf123; chan_admin_session=session123",
-                    )
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(header::COOKIE, admin_cookie_header())
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(body))
                     .expect("request"),
@@ -779,12 +793,14 @@ mod tests {
                     .method("POST")
                     .uri("/admin/backup/restore-saved")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .header(
-                        header::COOKIE,
-                        "csrf_token=csrf123; chan_admin_session=session123",
-                    )
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(header::COOKIE, admin_cookie_header())
                     .extension(crate::test_support::connect_info())
-                    .body(Body::from("filename=missing.zip&_csrf=csrf123"))
+                    .body(Body::from(format!(
+                        "filename=missing.zip&_csrf={}",
+                        admin_signed_csrf()
+                    )))
                     .expect("request"),
             )
             .await
@@ -814,11 +830,14 @@ mod tests {
                     .method("POST")
                     .uri("/admin/board/backup/restore-saved")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .header(
-                        header::COOKIE,
-                        "csrf_token=csrf123; chan_admin_session=session123",
-                    )
-                    .body(Body::from("filename=missing.zip&_csrf=csrf123"))
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(header::COOKIE, admin_cookie_header())
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "filename=missing.zip&_csrf={}",
+                        admin_signed_csrf()
+                    )))
                     .expect("request"),
             )
             .await
@@ -842,7 +861,7 @@ mod tests {
         install_admin_session(&state);
         let app = admin_routes().with_state(state);
         let (boundary, body) = crate::test_support::multipart_body(
-            &[("_csrf", "csrf123")],
+            &[("_csrf", &admin_signed_csrf())],
             Some(("backup_file", "broken.zip", b"not-a-zip", "application/zip")),
         );
 
@@ -856,10 +875,8 @@ mod tests {
                         format!("multipart/form-data; boundary={boundary}"),
                     )
                     .header(header::HOST, "localhost")
-                    .header(
-                        header::COOKIE,
-                        "csrf_token=csrf123; chan_admin_session=session123",
-                    )
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(header::COOKIE, admin_cookie_header())
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(body))
                     .expect("request"),

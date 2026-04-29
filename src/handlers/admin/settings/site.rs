@@ -41,12 +41,14 @@ fn resolved_checkbox_setting(
 pub async fn update_site_settings(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<SiteSettingsForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let is_banner_settings_only = form.site_name.is_none()
         && form.site_subtitle.is_none()
         && form.homepage_new_thread_badges_enabled.is_none()

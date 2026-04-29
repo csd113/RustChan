@@ -47,9 +47,9 @@ use tokio_util::io::ReaderStream;
 use tracing::warn;
 
 use super::{
-    admin_panel_redirect_anchor_open, check_csrf_jar, require_admin_session_sid,
-    require_same_origin_request, should_set_secure_cookie, AdminPanelTarget,
-    ADMIN_COOKIE_SAME_SITE, SESSION_COOKIE,
+    admin_panel_redirect_anchor_open, check_admin_csrf_jar, require_admin_post_origin_and_csrf,
+    require_admin_session_sid, require_same_origin_request, should_set_secure_cookie,
+    AdminPanelTarget, ADMIN_COOKIE_SAME_SITE, SESSION_COOKIE,
 };
 
 mod archive;
@@ -678,6 +678,14 @@ mod tests {
         .expect("create session");
     }
 
+    fn admin_signed_csrf() -> String {
+        crate::utils::crypto::make_scoped_csrf_form_token(
+            "csrf123",
+            &crate::config::CONFIG.cookie_secret,
+            "session123",
+        )
+    }
+
     fn admin_cookie_jar() -> CookieJar {
         CookieJar::new()
             .add(Cookie::new("csrf_token", "csrf123"))
@@ -806,6 +814,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("localhost"));
+        headers.insert(header::ORIGIN, HeaderValue::from_static("http://localhost"));
 
         let response = super::restore_saved_full_backup(
             axum::extract::State(state),
@@ -815,7 +824,7 @@ mod tests {
             axum::extract::Form(super::RestoreSavedForm {
                 filename,
                 restore_tor_hidden_service_keys: false,
-                csrf: Some("csrf123".to_string()),
+                csrf: Some(admin_signed_csrf()),
             }),
         )
         .await
@@ -885,12 +894,16 @@ mod tests {
                     .method("POST")
                     .uri("/admin/board/backup/create")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
                     .header(
                         header::COOKIE,
                         "csrf_token=csrf123; chan_admin_session=session123",
                     )
+                    .extension(crate::test_support::connect_info())
                     .body(Body::from(format!(
-                        "_csrf=csrf123&board_short={board_short}"
+                        "_csrf={}&board_short={board_short}",
+                        admin_signed_csrf()
                     )))
                     .expect("request"),
             )
@@ -930,11 +943,17 @@ mod tests {
                     .method("POST")
                     .uri("/admin/board/backup/restore-saved")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
                     .header(
                         header::COOKIE,
                         "csrf_token=csrf123; chan_admin_session=session123",
                     )
-                    .body(Body::from(format!("_csrf=csrf123&filename={filename}")))
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "_csrf={}&filename={filename}",
+                        admin_signed_csrf()
+                    )))
                     .expect("request"),
             )
             .await
@@ -1002,10 +1021,17 @@ mod tests {
         let response = super::restore_saved_board_backup(
             axum::extract::State(state),
             admin_cookie_jar(),
+            {
+                let mut headers = HeaderMap::new();
+                headers.insert(header::HOST, HeaderValue::from_static("localhost"));
+                headers.insert(header::ORIGIN, HeaderValue::from_static("http://localhost"));
+                headers
+            },
+            crate::test_support::connect_info(),
             axum::extract::Form(super::RestoreSavedForm {
                 filename,
                 restore_tor_hidden_service_keys: false,
-                csrf: Some("csrf123".to_string()),
+                csrf: Some(admin_signed_csrf()),
             }),
         )
         .await
@@ -1063,12 +1089,16 @@ mod tests {
                     .method("POST")
                     .uri("/admin/backup/extract-board")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
                     .header(
                         header::COOKIE,
                         "csrf_token=csrf123; chan_admin_session=session123",
                     )
+                    .extension(crate::test_support::connect_info())
                     .body(Body::from(format!(
-                        "filename={filename}&board_short=tech&action=download&_csrf=csrf123"
+                        "filename={filename}&board_short=tech&action=download&_csrf={}",
+                        admin_signed_csrf()
                     )))
                     .expect("request"),
             )

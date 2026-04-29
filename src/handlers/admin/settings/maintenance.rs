@@ -56,14 +56,16 @@ fn pre_repair_backup_include_tor_hidden_service_keys() -> bool {
 pub async fn admin_vacuum(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<VacuumForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -104,14 +106,16 @@ pub async fn admin_vacuum(
 pub async fn admin_db_check(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<DbMaintenanceForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
@@ -145,14 +149,16 @@ pub async fn admin_db_check(
 pub async fn admin_db_repair(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<DbMaintenanceForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
@@ -395,7 +401,7 @@ pub async fn admin_db_repair_status(
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
 
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
@@ -544,6 +550,14 @@ mod tests {
         .expect("create session");
     }
 
+    fn admin_signed_csrf() -> String {
+        crate::utils::crypto::make_scoped_csrf_form_token(
+            "csrf123",
+            &crate::config::CONFIG.cookie_secret,
+            "session123",
+        )
+    }
+
     fn posts_ai_trigger_sql(state: &crate::middleware::AppState) -> String {
         let conn = state.db.get().expect("db connection");
         conn.query_row(
@@ -683,11 +697,14 @@ mod tests {
                     .method("POST")
                     .uri("/admin/db/repair")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
                     .header(
                         header::COOKIE,
                         "csrf_token=csrf123; chan_admin_session=session123",
                     )
-                    .body(Body::from("_csrf=csrf123"))
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!("_csrf={}", admin_signed_csrf())))
                     .expect("request"),
             )
             .await
@@ -761,11 +778,14 @@ mod tests {
                     .method("POST")
                     .uri("/admin/db/check")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
                     .header(
                         header::COOKIE,
                         "csrf_token=csrf123; chan_admin_session=session123",
                     )
-                    .body(Body::from("_csrf=csrf123"))
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!("_csrf={}", admin_signed_csrf())))
                     .expect("request"),
             )
             .await
@@ -785,11 +805,14 @@ mod tests {
                     .method("POST")
                     .uri("/admin/db/repair")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
                     .header(
                         header::COOKIE,
                         "csrf_token=csrf123; chan_admin_session=session123",
                     )
-                    .body(Body::from("_csrf=csrf123"))
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!("_csrf={}", admin_signed_csrf())))
                     .expect("request"),
             )
             .await

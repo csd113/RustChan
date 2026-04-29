@@ -864,12 +864,14 @@ enum ExtractBoardFromFullBackupOutcome {
 pub async fn extract_board_from_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<ExtractBoardFromFullBackupForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
     let safe_board = sanitize_board_short_value(&form.board_short)?;
@@ -980,12 +982,14 @@ pub async fn extract_board_from_full_backup(
 pub async fn restore_saved_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
 
@@ -1048,6 +1052,7 @@ pub async fn board_restore(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     request: Request,
 ) -> Response {
     let xhr_request = is_xml_http_request(&headers);
@@ -1073,7 +1078,7 @@ pub async fn board_restore(
         }
     };
     let result: Result<String> = async {
-        let session_id = restore_auth_preflight(&state, &headers, &jar).await?;
+        let session_id = restore_auth_preflight(&state, &headers, &jar, Some(peer)).await?;
         let upload_dir = CONFIG.upload_dir.clone();
 
         let upload = stream_restore_upload_to_tempfile(RestoreKind::Board, &mut multipart).await?;

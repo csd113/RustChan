@@ -8,7 +8,7 @@ mod rate_limit;
 mod state;
 
 pub use backup_progress::{backup_phase, BackupProgress};
-pub use csrf::validate_csrf;
+pub use csrf::{validate_csrf, validate_signed_csrf};
 
 // Public re-exports here match the module layout and keep paths stable for callers.
 #[allow(clippy::redundant_pub_crate)]

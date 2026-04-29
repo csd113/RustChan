@@ -30,12 +30,14 @@ pub struct AddBanForm {
 pub async fn add_ban(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<AddBanForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let expires_at = form
         .duration_hours
@@ -53,7 +55,7 @@ pub async fn add_ban(
             let (admin_id, admin_name) =
                 super::require_admin_session_with_name(&conn, session_id.as_deref())?;
             db::add_ban(&conn, &form.ip_hash, &form.reason, expires_at)?;
-            let _ = db::log_mod_action(
+            if let Err(error) = db::log_mod_action(
                 &conn,
                 admin_id,
                 &admin_name,
@@ -62,7 +64,15 @@ pub async fn add_ban(
                 None,
                 "",
                 &format!("ip_hash={}… reason={}", &ip_hash_log, form.reason),
-            );
+            ) {
+                tracing::error!(
+                    target: "admin",
+                    admin_id,
+                    ip_hash_prefix = %ip_hash_log,
+                    error = %error,
+                    "Ban completed without audit-log record"
+                );
+            }
             tracing::info!(target: "admin", "Ban added");
             Ok(())
         }
@@ -85,12 +95,14 @@ pub struct BanIdForm {
 pub async fn remove_ban(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<BanIdForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -130,12 +142,14 @@ pub struct BanDeleteForm {
 pub async fn admin_ban_and_delete(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<BanDeleteForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let reason = form
         .reason
@@ -177,7 +191,7 @@ pub async fn admin_ban_and_delete(
 
             // Ban first so the IP cannot re-post before the delete lands
             db::add_ban(&conn, &form.ip_hash, &reason, expires_at)?;
-            let _ = db::log_mod_action(
+            if let Err(error) = db::log_mod_action(
                 &conn,
                 admin_id,
                 &admin_name,
@@ -186,7 +200,16 @@ pub async fn admin_ban_and_delete(
                 None,
                 &board_short,
                 &format!("inline ban — ip_hash={}… reason={reason}", &ip_hash_log),
-            );
+            ) {
+                tracing::error!(
+                    target: "admin",
+                    admin_id,
+                    board = %board_short,
+                    ip_hash_prefix = %ip_hash_log,
+                    error = %error,
+                    "Inline ban completed without audit-log record"
+                );
+            }
 
             // Delete post (or whole thread if OP)
             if is_op {
@@ -204,7 +227,7 @@ pub async fn admin_ban_and_delete(
                         "ban-delete thread cleanup did not fully complete"
                     );
                 }
-                let _ = db::log_mod_action(
+                if let Err(error) = db::log_mod_action(
                     &conn,
                     admin_id,
                     &admin_name,
@@ -213,7 +236,16 @@ pub async fn admin_ban_and_delete(
                     Some(thread_id),
                     &board_short,
                     "",
-                );
+                ) {
+                    tracing::error!(
+                        target: "admin",
+                        admin_id,
+                        thread_id,
+                        board = %board_short,
+                        error = %error,
+                        "Ban-delete thread action completed without audit-log record"
+                    );
+                }
             } else {
                 let deleted = db::delete_post(&conn, post_id)?;
                 if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
@@ -229,7 +261,7 @@ pub async fn admin_ban_and_delete(
                         "ban-delete post cleanup did not fully complete"
                     );
                 }
-                let _ = db::log_mod_action(
+                if let Err(error) = db::log_mod_action(
                     &conn,
                     admin_id,
                     &admin_name,
@@ -238,7 +270,16 @@ pub async fn admin_ban_and_delete(
                     Some(post_id),
                     &board_short,
                     "",
-                );
+                ) {
+                    tracing::error!(
+                        target: "admin",
+                        admin_id,
+                        post_id,
+                        board = %board_short,
+                        error = %error,
+                        "Ban-delete post action completed without audit-log record"
+                    );
+                }
             }
 
             tracing::info!(target: "admin", post_id = post_id, board = %board_short, "Ban and delete");
@@ -278,12 +319,14 @@ pub struct AppealActionForm {
 pub async fn dismiss_appeal(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<AppealActionForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -308,12 +351,14 @@ pub async fn dismiss_appeal(
 pub async fn accept_appeal(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<AppealActionForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -323,7 +368,7 @@ pub async fn accept_appeal(
                 super::require_admin_session_with_name(&conn, session_id.as_deref())?;
             let ip = form.ip_hash.as_deref().unwrap_or("");
             db::accept_ban_appeal(&conn, form.appeal_id, ip)?;
-            let _ = db::log_mod_action(
+            if let Err(error) = db::log_mod_action(
                 &conn,
                 admin_id,
                 &admin_name,
@@ -332,7 +377,15 @@ pub async fn accept_appeal(
                 None,
                 "",
                 &format!("appeal {} — ip unban", form.appeal_id),
-            );
+            ) {
+                tracing::error!(
+                    target: "admin",
+                    admin_id,
+                    appeal_id = form.appeal_id,
+                    error = %error,
+                    "Appeal acceptance completed without audit-log record"
+                );
+            }
             Ok(())
         }
     })
@@ -360,12 +413,14 @@ pub struct AddFilterForm {
 pub async fn add_filter(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<AddFilterForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     if form.pattern.trim().is_empty() {
         return Err(AppError::BadRequest("Pattern cannot be empty.".into()));
@@ -406,12 +461,14 @@ pub struct FilterIdForm {
 pub async fn remove_filter(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<FilterIdForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -453,7 +510,7 @@ pub async fn admin_ip_history(
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    let (jar, csrf) = crate::handlers::board::ensure_csrf(jar);
+    let (jar, csrf) = super::ensure_admin_csrf(jar)?;
     let csrf_clone = csrf.clone();
 
     // Sanitise the IP hash: must be exactly a SHA-256 hex string (64 hex chars).
@@ -514,12 +571,14 @@ pub struct ResolveReportForm {
 pub async fn resolve_report(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<ResolveReportForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -530,7 +589,7 @@ pub async fn resolve_report(
 
             db::resolve_report(&conn, form.report_id, admin_id)?;
 
-            let _ = db::log_mod_action(
+            if let Err(error) = db::log_mod_action(
                 &conn,
                 admin_id,
                 &admin_name,
@@ -539,7 +598,15 @@ pub async fn resolve_report(
                 Some(form.report_id),
                 "",
                 "",
-            );
+            ) {
+                tracing::error!(
+                    target: "admin",
+                    admin_id,
+                    report_id = form.report_id,
+                    error = %error,
+                    "Report resolution completed without audit-log record"
+                );
+            }
             tracing::info!(target: "admin", report_id = form.report_id, "Report resolved");
             Ok(())
         }
@@ -569,12 +636,14 @@ pub struct IpReportForm {
 pub async fn admin_ip_report(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<IpReportForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let reason = form.reason.trim().chars().take(512).collect::<String>();
     if reason.is_empty() {
@@ -625,7 +694,7 @@ pub async fn admin_ip_report(
             let reporter_hash = format!("admin:{admin_id}");
             let submission = db::file_report(&conn, form.post_id, &report_reason, &reporter_hash)?;
             if matches!(submission, db::ReportSubmission::Filed) {
-                let _ = db::log_mod_action(
+                if let Err(error) = db::log_mod_action(
                     &conn,
                     admin_id,
                     &admin_name,
@@ -637,7 +706,16 @@ pub async fn admin_ip_report(
                         "ip_hash={} report filed",
                         &form.ip_hash[..form.ip_hash.len().min(16)]
                     ),
-                );
+                ) {
+                    tracing::error!(
+                        target: "admin",
+                        admin_id,
+                        post_id = form.post_id,
+                        board = %board.short_name,
+                        error = %error,
+                        "IP history report completed without audit-log record"
+                    );
+                }
                 tracing::info!(
                     target: "admin",
                     post_id = form.post_id,
@@ -667,10 +745,31 @@ mod tests {
     use axum::response::IntoResponse;
     use axum_extra::extract::cookie::{Cookie, CookieJar};
 
+    fn admin_signed_csrf() -> String {
+        crate::utils::crypto::make_scoped_csrf_form_token(
+            "csrf123",
+            &crate::config::CONFIG.cookie_secret,
+            "session123",
+        )
+    }
+
     fn build_admin_jar() -> CookieJar {
         CookieJar::new()
             .add(Cookie::new(SESSION_COOKIE, "session123"))
             .add(Cookie::new("csrf_token", "csrf123"))
+    }
+
+    fn admin_headers() -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static("localhost"),
+        );
+        headers.insert(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_static("http://localhost"),
+        );
+        headers
     }
 
     fn sample_new_post(
@@ -762,13 +861,15 @@ mod tests {
         let response = admin_ip_report(
             State(state.clone()),
             build_admin_jar(),
+            admin_headers(),
+            crate::test_support::connect_info(),
             Form(IpReportForm {
                 post_id: reply_id,
                 thread_id,
                 board: "test".to_string(),
                 ip_hash: target_ip.clone(),
                 reason: "Needs review".to_string(),
-                csrf: Some("csrf123".to_string()),
+                csrf: Some(admin_signed_csrf()),
             }),
         )
         .await
@@ -817,7 +918,7 @@ pub async fn mod_log_page(
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    let (jar, csrf) = crate::handlers::board::ensure_csrf(jar);
+    let (jar, csrf) = super::ensure_admin_csrf(jar)?;
     let csrf_clone = csrf.clone();
     let page = params.page.max(1);
 

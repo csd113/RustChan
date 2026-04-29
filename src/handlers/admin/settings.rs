@@ -17,7 +17,6 @@ use crate::{
     config::CONFIG,
     db,
     error::{AppError, Result},
-    handlers::board::ensure_csrf,
     middleware::AppState,
     models::{BannerScope, BannerTargetType, BoardAccessMode, BoardBannerMode},
     utils::crypto::hash_password,
@@ -32,8 +31,9 @@ use serde::Deserialize;
 
 use super::{
     admin_panel_error_redirect_anchor, admin_panel_error_redirect_anchor_open,
-    admin_panel_redirect_anchor, admin_panel_redirect_anchor_open, check_csrf_jar,
-    require_admin_session_sid, require_same_origin_request, SESSION_COOKIE,
+    admin_panel_redirect_anchor, admin_panel_redirect_anchor_open, check_admin_csrf_jar,
+    require_admin_post_origin_and_csrf, require_admin_session_sid, require_same_origin_request,
+    SESSION_COOKIE,
 };
 
 mod appearance;

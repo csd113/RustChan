@@ -13,12 +13,14 @@ pub struct ClearBoardFaviconForm {
 pub async fn clear_board_favicon_override(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<ClearBoardFaviconForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let board_short = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -49,12 +51,13 @@ pub async fn update_site_favicon(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     mut multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::require_same_origin_request(&headers)?;
+    super::require_same_origin_request(&headers, Some(peer))?;
 
     let mut csrf = None;
     let mut favicon_bytes: Option<Vec<u8>> = None;
@@ -76,7 +79,7 @@ pub async fn update_site_favicon(
         }
     }
 
-    super::check_csrf_jar(&jar, csrf.as_deref())?;
+    super::check_admin_csrf_jar(&jar, csrf.as_deref())?;
     let favicon_bytes =
         favicon_bytes.ok_or_else(|| AppError::BadRequest("No favicon file uploaded.".into()))?;
 
@@ -114,12 +117,13 @@ pub async fn update_board_favicon(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     mut multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::require_same_origin_request(&headers)?;
+    super::require_same_origin_request(&headers, Some(peer))?;
 
     let mut csrf = None;
     let mut board_id = None;
@@ -145,7 +149,7 @@ pub async fn update_board_favicon(
         }
     }
 
-    super::check_csrf_jar(&jar, csrf.as_deref())?;
+    super::check_admin_csrf_jar(&jar, csrf.as_deref())?;
     let board_id = board_id.ok_or_else(|| AppError::BadRequest("Missing board id.".into()))?;
     let favicon_bytes =
         favicon_bytes.ok_or_else(|| AppError::BadRequest("No favicon file uploaded.".into()))?;

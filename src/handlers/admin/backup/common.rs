@@ -13,6 +13,10 @@ pub(super) const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub(super) const BOARD_MANIFEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const BANNER_RESTORE_ENTRY_MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const BANNER_RESTORE_TOTAL_MAX_BYTES: u64 = 64 * 1024 * 1024;
+// Keep restore writes within an application-level disk budget instead of relying
+// only on the router's coarse 20 GiB body cap.
+pub(super) const RESTORE_UPLOAD_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub(super) const RESTORE_TOTAL_EXTRACTED_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(super) const FULL_BACKUP_MANIFEST_NAME: &str = "backup.json";
 pub(super) const FULL_BACKUP_TOR_KEYS_PREFIX: &str = "tor/keys";
 pub(super) const FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX: &str = "tor/keys/";
@@ -260,6 +264,28 @@ pub(super) fn copy_limited<R: std::io::Read, W: std::io::Write>(
     Ok(total)
 }
 
+pub(super) fn copy_limited_with_total_budget<R: std::io::Read, W: std::io::Write>(
+    reader: &mut R,
+    writer: &mut W,
+    max_bytes: u64,
+    total_written: &mut u64,
+    total_budget: u64,
+    label: &str,
+) -> std::io::Result<u64> {
+    let copied = copy_limited(reader, writer, max_bytes)?;
+    *total_written = total_written.saturating_add(copied);
+    if *total_written > total_budget {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{label} exceeds the {} MiB extracted restore budget",
+                total_budget / 1024 / 1024
+            ),
+        ));
+    }
+    Ok(copied)
+}
+
 pub(super) fn create_staging_dir(base_path: &Path, label: &str) -> Result<PathBuf> {
     let parent = base_path
         .parent()
@@ -306,6 +332,7 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     destination_root: &Path,
 ) -> Result<()> {
+    let mut extracted_bytes = 0u64;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
@@ -328,8 +355,15 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
         }
         let mut out = std::fs::File::create(&target)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Create {}: {e}", target.display())))?;
-        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {e}", target.display())))?;
+        copy_limited_with_total_budget(
+            &mut entry,
+            &mut out,
+            ZIP_ENTRY_MAX_BYTES,
+            &mut extracted_bytes,
+            RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+            "Restored uploads",
+        )
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {e}", target.display())))?;
     }
     Ok(())
 }
@@ -507,8 +541,8 @@ pub(super) fn verify_board_backup_zip(
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_uploads_to_dir, remap_body_quotelinks, validate_board_short_name,
-        validate_restore_safe_entry_name, validate_restored_media_path,
+        copy_limited_with_total_budget, extract_uploads_to_dir, remap_body_quotelinks,
+        validate_board_short_name, validate_restore_safe_entry_name, validate_restored_media_path,
         validate_restored_media_path_for_board, verify_board_backup_zip, verify_full_backup_zip,
         FullBackupManifest, FULL_BACKUP_MANIFEST_NAME,
     };
@@ -588,6 +622,52 @@ mod tests {
         assert!(dest.join("test/ok.txt").exists());
         assert!(!dest.join("escape.txt").exists());
         assert!(error.to_string().contains("suspicious path"));
+    }
+
+    #[test]
+    fn restore_extraction_budget_rejects_archive_that_exceeds_total_limit() {
+        let mut reader = std::io::Cursor::new(vec![b'x'; 6]);
+        let mut writer = Vec::new();
+        let mut total_written = 0;
+
+        let error = copy_limited_with_total_budget(
+            &mut reader,
+            &mut writer,
+            16,
+            &mut total_written,
+            5,
+            "Test restore archive",
+        )
+        .expect_err("oversized extracted archive rejected");
+
+        assert!(error.to_string().contains("extracted restore budget"));
+    }
+
+    #[test]
+    fn extract_uploads_to_dir_accepts_valid_archive_within_budget() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("uploads-ok.zip");
+        {
+            let file = std::fs::File::create(&zip_path).expect("zip file");
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("uploads/test/ok.txt", options)
+                .expect("start valid file");
+            std::io::Write::write_all(&mut zip, b"ok").expect("write valid file");
+            zip.finish().expect("finish zip");
+        }
+
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let dest = temp_dir.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("dest dir");
+
+        extract_uploads_to_dir(&mut archive, &dest).expect("extract valid uploads archive");
+
+        assert_eq!(
+            std::fs::read(dest.join("test/ok.txt")).expect("read extracted file"),
+            b"ok"
+        );
     }
 
     #[test]

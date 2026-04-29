@@ -42,27 +42,24 @@ use crate::{
     config::CONFIG,
     db,
     error::{AppError, Result},
-    handlers::board::ensure_csrf,
+    middleware::validate_signed_csrf,
     middleware::AppState,
     models::BackupInfo,
+    utils::crypto::{make_scoped_csrf_form_token, new_csrf_token},
 };
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, Uri},
     response::{Html, IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::cookie::CookieJar;
-use axum_extra::extract::cookie::SameSite;
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use dashmap::DashMap;
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom};
-use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-pub(super) use crate::handlers::board::check_csrf_jar;
 
 // ─── Shared constant ──────────────────────────────────────────────────────────
 
@@ -105,67 +102,142 @@ fn require_admin_session_sid(conn: &rusqlite::Connection, session_id: Option<&st
     Ok(session.admin_id)
 }
 
-fn require_same_origin_request(headers: &HeaderMap) -> Result<()> {
-    let request_host = headers
+pub(super) fn require_same_origin_request(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+) -> Result<()> {
+    let request_authority = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
-        .map(|authority| authority.host().to_string())
         .ok_or_else(|| AppError::Forbidden("Missing Host header.".into()))?;
+    let request_scheme =
+        if crate::middleware::forwarded_proto_is_https(headers, peer, CONFIG.behind_proxy)
+            || (CONFIG.tls.enabled && host_header_uses_https_port(headers))
+        {
+            "https"
+        } else {
+            "http"
+        };
+    let request_port = request_authority
+        .port_u16()
+        .unwrap_or(if request_scheme == "https" { 443 } else { 80 });
 
-    let Some(source) = headers
+    let source = headers
         .get(header::ORIGIN)
         .or_else(|| headers.get(header::REFERER))
         .and_then(|value| value.to_str().ok())
-    else {
-        // Some browsers omit Origin/Referer on same-origin multipart uploads,
-        // especially on localhost. The admin endpoints already require a valid
-        // CSRF token, so treat missing headers as an allowed fallback.
-        return Ok(());
-    };
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::Forbidden("Missing Origin/Referer header.".into()))?;
     if source.eq_ignore_ascii_case("null") {
-        // Firefox and some privacy-restricted/local contexts can send
-        // `Origin: null` on multipart form submissions from localhost. The
-        // admin endpoints still require a valid session + CSRF token, so
-        // treat this the same as a missing Origin/Referer fallback.
-        return Ok(());
+        return Err(AppError::Forbidden(
+            "Origin/Referer header must be same-origin.".into(),
+        ));
     }
     let source_uri = source
         .parse::<Uri>()
         .map_err(|_| AppError::Forbidden("Invalid Origin/Referer header.".into()))?;
-    let source_host = source_uri
+    let source_scheme = source_uri
+        .scheme_str()
+        .ok_or_else(|| AppError::Forbidden("Origin/Referer header has no scheme.".into()))?;
+    let source_authority = source_uri
         .authority()
-        .map(axum::http::uri::Authority::host)
         .ok_or_else(|| AppError::Forbidden("Origin/Referer header has no authority.".into()))?;
+    let source_port = source_authority.port_u16().unwrap_or_else(|| {
+        if source_scheme.eq_ignore_ascii_case("https") {
+            443
+        } else {
+            80
+        }
+    });
 
-    if hosts_match_for_same_origin(source_host, &request_host) {
+    if source_scheme.eq_ignore_ascii_case(request_scheme)
+        && source_authority
+            .host()
+            .eq_ignore_ascii_case(request_authority.host())
+        && source_port == request_port
+    {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        target: "admin",
+        request_scheme,
+        request_host = %request_authority.host(),
+        request_port,
+        source_scheme,
+        source_host = %source_authority.host(),
+        source_port,
+        source = %source,
+        "Admin same-origin validation rejected request"
+    );
+    Err(AppError::Forbidden(
+        "Origin/Referer origin mismatch.".into(),
+    ))
+}
+
+pub(super) fn check_admin_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
+    let csrf_cookie = jar
+        .get("csrf_token")
+        .map(axum_extra::extract::cookie::Cookie::value);
+    let session_id = jar
+        .get(SESSION_COOKIE)
+        .map(axum_extra::extract::cookie::Cookie::value);
+    if validate_signed_csrf(csrf_cookie, session_id, form_token.unwrap_or("")) {
         Ok(())
     } else {
-        tracing::warn!(
-            target: "admin",
-            request_host = %request_host,
-            source_host = %source_host,
-            source = %source,
-            "Admin same-origin validation rejected request"
-        );
-        Err(AppError::Forbidden("Origin/Referer host mismatch.".into()))
+        Err(AppError::Forbidden("CSRF token mismatch.".into()))
     }
 }
 
-fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
-    if source_host.eq_ignore_ascii_case(request_host) {
-        return true;
-    }
-
-    is_loopback_alias(source_host) && is_loopback_alias(request_host)
+pub(super) fn require_admin_post_origin_and_csrf(
+    jar: &CookieJar,
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    form_token: Option<&str>,
+) -> Result<()> {
+    require_same_origin_request(headers, peer)?;
+    check_admin_csrf_jar(jar, form_token)
 }
 
-fn is_loopback_alias(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
+fn admin_csrf_cookie(raw_token: String) -> Cookie<'static> {
+    let mut cookie = Cookie::new("csrf_token", raw_token);
+    cookie.set_http_only(false);
+    cookie.set_same_site(SameSite::Strict);
+    cookie.set_path("/");
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie
+}
 
-    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+pub(super) fn refresh_admin_csrf_cookie(jar: CookieJar) -> CookieJar {
+    let cookie = admin_csrf_cookie(new_csrf_token());
+    jar.add(cookie)
+}
+
+pub(super) fn ensure_admin_csrf(jar: CookieJar) -> Result<(CookieJar, String)> {
+    let raw = jar
+        .get("csrf_token")
+        .map(axum_extra::extract::cookie::Cookie::value)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut jar = jar;
+    let raw = if let Some(raw) = raw {
+        raw
+    } else {
+        let raw = new_csrf_token();
+        jar = jar.add(admin_csrf_cookie(raw.clone()));
+        raw
+    };
+    let session_id = jar
+        .get(SESSION_COOKIE)
+        .map(axum_extra::extract::cookie::Cookie::value)
+        .ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
+    let session_id = session_id.to_string();
+    Ok((
+        jar,
+        make_scoped_csrf_form_token(&raw, &CONFIG.cookie_secret, &session_id),
+    ))
 }
 
 pub(super) use crate::utils::redirect::encode_query_component;
@@ -234,6 +306,23 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
     request_host
         .as_deref()
         .is_some_and(|request_host| hosts_match_for_same_origin(source_host, request_host))
+}
+
+fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
+    if source_host.eq_ignore_ascii_case(request_host) {
+        return true;
+    }
+
+    is_loopback_alias(source_host) && is_loopback_alias(request_host)
+}
+
+fn is_loopback_alias(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
 }
 
 fn admin_panel_redirect_with_status(
@@ -683,7 +772,7 @@ pub async fn admin_panel(
             }
         }
     }
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_admin_csrf(jar)?;
     let csrf_clone = csrf.clone();
 
     // Build the flash message from query params before entering spawn_blocking.
@@ -881,7 +970,7 @@ mod tests {
     }
 
     #[test]
-    fn null_origin_is_handled_by_caller_fallback() {
+    fn null_origin_is_not_considered_same_origin() {
         assert!(!hosts_match_for_same_origin("null", "localhost"));
     }
 

@@ -113,8 +113,27 @@ pub fn sign_csrf_token(raw_token: &str, secret: &str) -> String {
 }
 
 #[must_use]
+pub fn sign_scoped_csrf_token(raw_token: &str, secret: &str, scope: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(secret.as_bytes());
+    hasher.update(b":csrf:");
+    hasher.update(scope.as_bytes());
+    hasher.update(b":");
+    hasher.update(raw_token.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+#[must_use]
 pub fn make_csrf_form_token(raw_token: &str, secret: &str) -> String {
     format!("{raw_token}.{}", sign_csrf_token(raw_token, secret))
+}
+
+#[must_use]
+pub fn make_scoped_csrf_form_token(raw_token: &str, secret: &str, scope: &str) -> String {
+    format!(
+        "{raw_token}.{}",
+        sign_scoped_csrf_token(raw_token, secret, scope)
+    )
 }
 
 /// Hash an IP address with a secret salt. Output is a 64-char hex string.

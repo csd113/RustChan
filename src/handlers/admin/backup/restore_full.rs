@@ -2,6 +2,9 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
+use crate::handlers::admin::backup::common::{
+    copy_limited_with_total_budget, RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+};
 
 pub(super) fn restore_db_from_snapshot(
     live_conn: &mut rusqlite::Connection,
@@ -213,6 +216,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     let mut favicon_extracted = false;
     let mut banner_extracted = false;
     let mut tor_hidden_service_key_files_extracted = 0u64;
+    let mut extracted_bytes = 0u64;
     let previous_upload_root = upload_root.parent().map_or_else(
         || PathBuf::from(format!("{}.restore-old", upload_root.display())),
         |parent| {
@@ -255,8 +259,15 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         if name == "chan.db" {
             let mut out = std::fs::File::create(&temp_db)
                 .map_err(|error| AppError::Internal(anyhow::anyhow!("Create temp DB: {error}")))?;
-            copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-                .map_err(|error| AppError::Internal(anyhow::anyhow!("Write temp DB: {error}")))?;
+            copy_limited_with_total_budget(
+                &mut entry,
+                &mut out,
+                ZIP_ENTRY_MAX_BYTES,
+                &mut extracted_bytes,
+                RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+                "Full restore archive",
+            )
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Write temp DB: {error}")))?;
 
             let mut header = [0u8; 16];
             {
@@ -293,7 +304,15 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
                 let mut out = std::fs::File::create(&target).map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("Create {}: {error}", target.display()))
                 })?;
-                copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(|error| {
+                copy_limited_with_total_budget(
+                    &mut entry,
+                    &mut out,
+                    ZIP_ENTRY_MAX_BYTES,
+                    &mut extracted_bytes,
+                    RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+                    "Full restore archive",
+                )
+                .map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
                 })?;
             }
@@ -313,7 +332,15 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
                 let mut out = std::fs::File::create(&target).map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("Create {}: {error}", target.display()))
                 })?;
-                copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(|error| {
+                copy_limited_with_total_budget(
+                    &mut entry,
+                    &mut out,
+                    ZIP_ENTRY_MAX_BYTES,
+                    &mut extracted_bytes,
+                    RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+                    "Full restore archive",
+                )
+                .map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
                 })?;
             }
@@ -342,9 +369,17 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             let mut out = std::fs::File::create(&target).map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Create {}: {error}", target.display()))
             })?;
-            copy_limited(&mut entry, &mut out, BANNER_RESTORE_ENTRY_MAX_BYTES).map_err(
-                |error| AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display())),
-            )?;
+            copy_limited_with_total_budget(
+                &mut entry,
+                &mut out,
+                BANNER_RESTORE_ENTRY_MAX_BYTES,
+                &mut extracted_bytes,
+                RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+                "Full restore archive",
+            )
+            .map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
+            })?;
         } else if let (Some(rel_path), Some(staged_tor_hidden_service_keys_dir)) = (
             restore_safe_relative_path_under_prefix(
                 &name,
@@ -366,7 +401,15 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
                 let mut out = std::fs::File::create(&target).map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("Create {}: {error}", target.display()))
                 })?;
-                copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES).map_err(|error| {
+                copy_limited_with_total_budget(
+                    &mut entry,
+                    &mut out,
+                    ZIP_ENTRY_MAX_BYTES,
+                    &mut extracted_bytes,
+                    RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+                    "Full restore archive",
+                )
+                .map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
                 })?;
                 tor_hidden_service_key_files_extracted =
@@ -643,7 +686,7 @@ pub async fn admin_restore(
     };
 
     let result: Result<String> = async {
-        let session_id = restore_auth_preflight(&state, &headers, &jar).await?;
+        let session_id = restore_auth_preflight(&state, &headers, &jar, Some(peer)).await?;
         let upload = stream_restore_upload_to_tempfile(RestoreKind::Full, &mut multipart).await?;
         validate_streamed_restore_upload(RestoreKind::Full, &jar, &upload)?;
         let zip_tmp = upload.temp_file;
@@ -736,7 +779,7 @@ pub async fn restore_saved_full_backup(
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
 
