@@ -1089,4 +1089,40 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
     }
+
+    #[tokio::test]
+    async fn admin_login_accepts_missing_origin_and_referer_with_same_origin_fetch_metadata() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "demo.serveo.net")
+                    .header("sec-fetch-site", "same-origin")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "username=admin&password=hunter2&_csrf={}",
+                        signed_admin_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
 }

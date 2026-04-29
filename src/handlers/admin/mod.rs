@@ -124,8 +124,12 @@ pub(super) fn require_same_origin_request(
         .port_u16()
         .unwrap_or(if request_scheme == "https" { 443 } else { 80 });
 
-    let source = effective_same_origin_source(headers, request_authority.host())
-        .ok_or_else(|| AppError::Forbidden("Missing Origin/Referer header.".into()))?;
+    let Some(source) = effective_same_origin_source(headers, request_authority.host()) else {
+        if request_has_same_origin_fetch_metadata(headers) {
+            return Ok(());
+        }
+        return Err(AppError::Forbidden("Missing Origin/Referer header.".into()));
+    };
     if source.eq_ignore_ascii_case("null") {
         if is_loopback_alias(request_authority.host()) {
             return Ok(());
@@ -196,6 +200,13 @@ fn header_value_trimmed(headers: &HeaderMap, name: header::HeaderName) -> Option
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn request_has_same_origin_fetch_metadata(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("same-origin"))
 }
 
 pub(super) fn check_admin_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
@@ -1090,6 +1101,20 @@ mod tests {
             HeaderValue::from_static("http://127.0.0.1:8080/admin"),
         );
         assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_missing_origin_and_referer_with_same_origin_fetch_metadata() {
+        let mut headers = same_origin_headers("demo.serveo.net");
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_rejects_missing_origin_and_referer_with_cross_site_fetch_metadata() {
+        let mut headers = same_origin_headers("demo.serveo.net");
+        headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        assert!(require_same_origin_request(&headers, None).is_err());
     }
 
     #[test]
