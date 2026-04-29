@@ -131,6 +131,9 @@ pub(super) fn require_same_origin_request(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::Forbidden("Missing Origin/Referer header.".into()))?;
     if source.eq_ignore_ascii_case("null") {
+        if is_loopback_alias(request_authority.host()) {
+            return Ok(());
+        }
         return Err(AppError::Forbidden(
             "Origin/Referer header must be same-origin.".into(),
         ));
@@ -144,6 +147,11 @@ pub(super) fn require_same_origin_request(
     let source_authority = source_uri
         .authority()
         .ok_or_else(|| AppError::Forbidden("Origin/Referer header has no authority.".into()))?;
+    if source_authority.as_str().contains('@') {
+        return Err(AppError::Forbidden(
+            "Origin/Referer header contains invalid authority.".into(),
+        ));
+    }
     let source_port = source_authority.port_u16().unwrap_or_else(|| {
         if source_scheme.eq_ignore_ascii_case("https") {
             443
@@ -153,9 +161,7 @@ pub(super) fn require_same_origin_request(
     });
 
     if source_scheme.eq_ignore_ascii_case(request_scheme)
-        && source_authority
-            .host()
-            .eq_ignore_ascii_case(request_authority.host())
+        && hosts_match_for_same_origin(source_authority.host(), request_authority.host())
         && source_port == request_port
     {
         return Ok(());
@@ -309,6 +315,9 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
 }
 
 fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
+    let source_host = normalize_same_origin_host(source_host);
+    let request_host = normalize_same_origin_host(request_host);
+
     if source_host.eq_ignore_ascii_case(request_host) {
         return true;
     }
@@ -316,7 +325,24 @@ fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
     is_loopback_alias(source_host) && is_loopback_alias(request_host)
 }
 
+fn normalize_same_origin_host(host: &str) -> &str {
+    let Some(inner) = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    else {
+        return host;
+    };
+
+    if inner.parse::<std::net::Ipv6Addr>().is_ok() {
+        inner
+    } else {
+        host
+    }
+}
+
 fn is_loopback_alias(host: &str) -> bool {
+    let host = normalize_same_origin_host(host);
+
     if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
@@ -946,9 +972,18 @@ mod tests {
     use super::{
         consume_admin_session_bootstrap, create_admin_session_bootstrap,
         host_header_uses_https_port, hosts_match_for_same_origin, latest_log_file, read_log_tail,
-        request_origin_uses_https,
+        request_origin_uses_https, require_same_origin_request,
     };
     use axum::http::{header, HeaderMap, HeaderValue};
+
+    fn same_origin_headers(host: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_str(host).expect("host header"),
+        );
+        headers
+    }
 
     #[test]
     fn same_origin_accepts_exact_host_match() {
@@ -972,6 +1007,144 @@ mod tests {
     #[test]
     fn null_origin_is_not_considered_same_origin() {
         assert!(!hosts_match_for_same_origin("null", "localhost"));
+    }
+
+    #[test]
+    fn same_origin_request_accepts_loopback_aliases_with_matching_port() {
+        let mut headers = same_origin_headers("127.0.0.1:8080");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://localhost:8080"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+
+        let mut headers = same_origin_headers("[::1]:8080");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:8080"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_ipv6_loopback_bracket_format() {
+        let mut headers = same_origin_headers("[::1]:8080");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://[::1]:8080"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_referer_when_origin_is_missing() {
+        let mut headers = same_origin_headers("localhost:8080");
+        headers.insert(
+            header::REFERER,
+            HeaderValue::from_static("http://127.0.0.1:8080/admin"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_rejects_null_origin_for_non_loopback_targets() {
+        let mut headers = same_origin_headers("192.168.1.20:8080");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        assert!(require_same_origin_request(&headers, None).is_err());
+
+        let mut headers = same_origin_headers("board-admin-exampleonion123.onion");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        assert!(require_same_origin_request(&headers, None).is_err());
+    }
+
+    #[test]
+    fn same_origin_request_rejects_scheme_mismatch_for_non_loopback_host() {
+        let mut headers = same_origin_headers("example.test");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://example.test"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_err());
+    }
+
+    #[test]
+    fn same_origin_request_rejects_port_mismatch_even_for_loopback_aliases() {
+        let mut headers = same_origin_headers("localhost:8080");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:3000"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_err());
+    }
+
+    #[test]
+    fn same_origin_request_does_not_treat_private_lan_ips_as_loopback_aliases() {
+        assert!(!hosts_match_for_same_origin("192.168.1.20", "127.0.0.1"));
+        assert!(!hosts_match_for_same_origin("10.0.0.5", "localhost"));
+        assert!(!hosts_match_for_same_origin("172.16.0.8", "::1"));
+    }
+
+    #[test]
+    fn same_origin_request_rejects_loopback_lookalike_hostnames() {
+        assert!(!hosts_match_for_same_origin(
+            "127.0.0.1.evil.com",
+            "127.0.0.1"
+        ));
+        assert!(!hosts_match_for_same_origin(
+            "localhost.evil.com",
+            "localhost"
+        ));
+        assert!(!hosts_match_for_same_origin("::1.evil.com", "::1"));
+        assert!(!hosts_match_for_same_origin("localhost.", "localhost"));
+    }
+
+    #[test]
+    fn same_origin_request_rejects_weird_loopback_encodings() {
+        assert!(!hosts_match_for_same_origin("%5B::1%5D", "::1"));
+        assert!(!hosts_match_for_same_origin("127.000.000.001", "127.0.0.1"));
+        assert!(!hosts_match_for_same_origin("2130706433", "127.0.0.1"));
+        assert!(!hosts_match_for_same_origin("0x7f000001", "127.0.0.1"));
+    }
+
+    #[test]
+    fn same_origin_request_rejects_malformed_bracketed_loopback_forms() {
+        assert!(!hosts_match_for_same_origin("[::1", "::1"));
+        assert!(!hosts_match_for_same_origin("::1]", "::1"));
+        assert!(!hosts_match_for_same_origin("[127.0.0.1]", "127.0.0.1"));
+        assert!(!hosts_match_for_same_origin("[localhost]", "localhost"));
+        assert!(!hosts_match_for_same_origin("[[::1]]", "::1"));
+    }
+
+    #[test]
+    fn same_origin_request_rejects_userinfo_bypass_shapes() {
+        let mut headers = same_origin_headers("127.0.0.1:8080");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1@evil.com:8080"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_err());
+
+        let mut headers = same_origin_headers("127.0.0.1:8080");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://evil.com@127.0.0.1:8080"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_err());
+    }
+
+    #[test]
+    fn same_origin_request_rejects_non_loopback_null_origin_lookalikes() {
+        let mut headers = same_origin_headers("localhost.evil.com:8080");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        assert!(require_same_origin_request(&headers, None).is_err());
+
+        let mut headers = same_origin_headers("192.168.1.20:8080");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        assert!(require_same_origin_request(&headers, None).is_err());
+
+        let mut headers = same_origin_headers("examplehiddenservice.onion");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        assert!(require_same_origin_request(&headers, None).is_err());
     }
 
     #[test]
