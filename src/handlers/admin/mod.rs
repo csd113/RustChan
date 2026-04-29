@@ -114,6 +114,7 @@ pub(super) fn require_same_origin_request(
     let request_scheme =
         if crate::middleware::forwarded_proto_is_https(headers, peer, CONFIG.behind_proxy)
             || (CONFIG.tls.enabled && host_header_uses_https_port(headers))
+            || request_referer_indicates_https_tunnel(headers)
         {
             "https"
         } else {
@@ -123,12 +124,7 @@ pub(super) fn require_same_origin_request(
         .port_u16()
         .unwrap_or(if request_scheme == "https" { 443 } else { 80 });
 
-    let source = headers
-        .get(header::ORIGIN)
-        .or_else(|| headers.get(header::REFERER))
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let source = effective_same_origin_source(headers, request_authority.host())
         .ok_or_else(|| AppError::Forbidden("Missing Origin/Referer header.".into()))?;
     if source.eq_ignore_ascii_case("null") {
         if is_loopback_alias(request_authority.host()) {
@@ -181,6 +177,25 @@ pub(super) fn require_same_origin_request(
     Err(AppError::Forbidden(
         "Origin/Referer origin mismatch.".into(),
     ))
+}
+
+fn effective_same_origin_source<'a>(headers: &'a HeaderMap, request_host: &str) -> Option<&'a str> {
+    let origin = header_value_trimmed(headers, header::ORIGIN);
+    let referer = header_value_trimmed(headers, header::REFERER);
+
+    match origin {
+        Some(origin) if !origin.eq_ignore_ascii_case("null") => Some(origin),
+        Some(origin) if is_loopback_alias(request_host) => Some(origin),
+        Some(_) | None => referer,
+    }
+}
+
+fn header_value_trimmed(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 pub(super) fn check_admin_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
@@ -289,11 +304,10 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
         .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
         .map(|authority| authority.host().to_string());
 
-    let Some(source) = headers
-        .get(header::ORIGIN)
-        .or_else(|| headers.get(header::REFERER))
-        .and_then(|value| value.to_str().ok())
-    else {
+    let Some(request_host) = request_host.as_deref() else {
+        return false;
+    };
+    let Some(source) = effective_same_origin_source(headers, request_host) else {
         return false;
     };
 
@@ -309,9 +323,41 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
         return false;
     };
 
-    request_host
-        .as_deref()
-        .is_some_and(|request_host| hosts_match_for_same_origin(source_host, request_host))
+    hosts_match_for_same_origin(source_host, request_host)
+}
+
+fn request_referer_indicates_https_tunnel(headers: &HeaderMap) -> bool {
+    let origin = header_value_trimmed(headers, header::ORIGIN);
+    if origin.is_some_and(|value| !value.eq_ignore_ascii_case("null")) {
+        return false;
+    }
+
+    let request_host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+        .map(|authority| authority.host().to_string());
+    let Some(request_host) = request_host.as_deref() else {
+        return false;
+    };
+
+    let Some(referer) = header_value_trimmed(headers, header::REFERER) else {
+        return false;
+    };
+    let Ok(referer_uri) = referer.parse::<Uri>() else {
+        return false;
+    };
+    if referer_uri.scheme_str() != Some("https") {
+        return false;
+    }
+    let Some(referer_host) = referer_uri
+        .authority()
+        .map(axum::http::uri::Authority::host)
+    else {
+        return false;
+    };
+
+    hosts_match_for_same_origin(referer_host, request_host)
 }
 
 fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
@@ -1042,6 +1088,17 @@ mod tests {
         headers.insert(
             header::REFERER,
             HeaderValue::from_static("http://127.0.0.1:8080/admin"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_null_origin_with_same_origin_referer_on_https_tunnel() {
+        let mut headers = same_origin_headers("demo.serveo.net");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        headers.insert(
+            header::REFERER,
+            HeaderValue::from_static("https://demo.serveo.net/admin"),
         );
         assert!(require_same_origin_request(&headers, None).is_ok());
     }
