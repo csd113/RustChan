@@ -120,8 +120,10 @@ tor_service_nickname = "rustchan"
 # When false, the server still starts and video thumbnails fall back to placeholders.
 require_ffmpeg = false
 
-# Maximum seconds a single FFmpeg transcode or waveform job may run before
-# it is killed. Prevents pathological media files from stalling the worker pool.
+# Maximum seconds RustChan lets ffmpeg run for video re-encoding and other
+# long-running media jobs before it is killed.
+# Slow systems such as Raspberry Pi devices may need a higher value, especially
+# for MP4 -> WebM/VP9 conversion without useful hardware acceleration.
 ffmpeg_timeout_secs = 600
 
 # Optional explicit ffmpeg binary path. Leave unset to use PATH lookup.

@@ -295,6 +295,10 @@ fn admin_moderation_routes() -> Router<AppState> {
             post(crate::handlers::admin::admin_db_check),
         )
         .route(
+            "/admin/media/settings",
+            post(crate::handlers::admin::update_media_settings),
+        )
+        .route(
             "/admin/db/repair",
             get(crate::handlers::admin::admin_db_repair_status)
                 .post(crate::handlers::admin::admin_db_repair),

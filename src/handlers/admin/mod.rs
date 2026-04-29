@@ -565,6 +565,7 @@ struct AdminPanelSnapshot {
     board_backups: Vec<crate::models::BackupInfo>,
     db_size_bytes: i64,
     db_size_warning: bool,
+    ffmpeg_timeout_secs: u64,
     backup_summary: BackupSummary,
 }
 
@@ -611,6 +612,7 @@ struct BackupsDomainData {
 struct MaintenanceDomainData {
     db_size_bytes: i64,
     db_size_warning: bool,
+    ffmpeg_timeout_secs: u64,
 }
 
 fn load_overview_domain_data(full_backups: &[BackupInfo]) -> OverviewDomainData {
@@ -682,6 +684,7 @@ fn load_maintenance_domain_data(conn: &rusqlite::Connection) -> MaintenanceDomai
     MaintenanceDomainData {
         db_size_bytes,
         db_size_warning,
+        ffmpeg_timeout_secs: crate::config::ffmpeg_timeout_secs(),
     }
 }
 
@@ -723,6 +726,7 @@ fn load_admin_panel_snapshot(
             board_backups: backups_domain.board_backups,
             db_size_bytes: maintenance_domain.db_size_bytes,
             db_size_warning: maintenance_domain.db_size_warning,
+            ffmpeg_timeout_secs: maintenance_domain.ffmpeg_timeout_secs,
             backup_summary: overview_domain.backup_summary,
         },
         onion_address_val,
@@ -824,6 +828,7 @@ fn render_admin_panel_from_snapshot(
         maintenance: crate::templates::AdminPanelMaintenanceView {
             db_size_bytes: snapshot.db_size_bytes,
             db_size_warning: snapshot.db_size_warning,
+            ffmpeg_timeout_secs: snapshot.ffmpeg_timeout_secs,
         },
         tor_address: tor_address.as_deref(),
         flash: flash_ref,

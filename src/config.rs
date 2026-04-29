@@ -3,6 +3,7 @@ use rand_core::{OsRng, RngCore};
 use serde::Deserialize;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 
 mod template;
@@ -397,6 +398,49 @@ fn default_acme_dir() -> String {
 
 // ─── Runtime config ───────────────────────────────────────────────────────────
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
+static LIVE_FFMPEG_TIMEOUT_SECS: LazyLock<AtomicU64> =
+    LazyLock::new(|| AtomicU64::new(CONFIG.ffmpeg_timeout_secs));
+
+pub const DEFAULT_FFMPEG_TIMEOUT_SECS: u64 = 600;
+pub const MIN_FFMPEG_TIMEOUT_SECS: u64 = 30;
+pub const MAX_FFMPEG_TIMEOUT_SECS: u64 = 86_400;
+
+#[must_use]
+pub fn ffmpeg_timeout_secs() -> u64 {
+    LIVE_FFMPEG_TIMEOUT_SECS.load(Ordering::Relaxed)
+}
+
+/// # Errors
+/// Returns an error when `timeout_secs` falls outside the supported range.
+pub fn set_live_ffmpeg_timeout_secs(timeout_secs: u64) -> anyhow::Result<()> {
+    let timeout_secs = validate_ffmpeg_timeout_secs(timeout_secs)?;
+    LIVE_FFMPEG_TIMEOUT_SECS.store(timeout_secs, Ordering::Relaxed);
+    Ok(())
+}
+
+/// # Errors
+/// Returns an error when `timeout_secs` falls outside the supported range.
+pub fn validate_ffmpeg_timeout_secs(timeout_secs: u64) -> anyhow::Result<u64> {
+    if !(MIN_FFMPEG_TIMEOUT_SECS..=MAX_FFMPEG_TIMEOUT_SECS).contains(&timeout_secs) {
+        anyhow::bail!(
+            "CONFIG ERROR: ffmpeg_timeout_secs must be between {MIN_FFMPEG_TIMEOUT_SECS} and {MAX_FFMPEG_TIMEOUT_SECS} seconds."
+        );
+    }
+    Ok(timeout_secs)
+}
+
+#[must_use]
+pub fn describe_timeout_secs(timeout_secs: u64) -> String {
+    let minutes = timeout_secs / 60;
+    let seconds = timeout_secs % 60;
+    match (minutes, seconds) {
+        (0, secs) => format!("{secs} seconds"),
+        (1, 0) => "1 minute".to_string(),
+        (mins, 0) => format!("{mins} minutes"),
+        (1, secs) => format!("1 minute {secs} seconds"),
+        (mins, secs) => format!("{mins} minutes {secs} seconds"),
+    }
+}
 
 // This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
 #[allow(clippy::struct_excessive_bools)]
@@ -728,7 +772,7 @@ impl Config {
             ),
             ffmpeg_timeout_secs: env_parse(
                 "CHAN_FFMPEG_TIMEOUT_SECS",
-                s.ffmpeg_timeout_secs.unwrap_or(600),
+                s.ffmpeg_timeout_secs.unwrap_or(DEFAULT_FFMPEG_TIMEOUT_SECS),
             ),
             archive_before_prune: env_bool(
                 "CHAN_ARCHIVE_BEFORE_PRUNE",
@@ -962,6 +1006,7 @@ impl Config {
                 self.rustwave_url
             );
         }
+        validate_ffmpeg_timeout_secs(self.ffmpeg_timeout_secs)?;
         Ok(())
     }
 
@@ -1161,6 +1206,14 @@ pub fn update_settings_file_auto_full_backup(
     );
 }
 
+pub fn update_settings_file_ffmpeg_timeout(timeout_secs: u64) {
+    let timeout_secs = timeout_secs.clamp(MIN_FFMPEG_TIMEOUT_SECS, MAX_FFMPEG_TIMEOUT_SECS);
+    update_settings_file_entries(
+        &[("ffmpeg_timeout_secs", timeout_secs.to_string())],
+        Some("# Optional explicit ffmpeg binary path."),
+    );
+}
+
 // ─── Cookie secret rotation check ────────────────────────────────────────────
 /// Check whether the `cookie_secret` has changed since the last run by comparing
 /// a SHA-256 hash stored in the DB against the currently loaded secret.
@@ -1302,9 +1355,15 @@ fn port_from_bind_addr(addr: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        rewrite_settings_file_lines, runtime_tor_hidden_service_keys_dir,
-        template::settings_template, Config, TlsConfig,
+        describe_timeout_secs, ffmpeg_timeout_secs, rewrite_settings_file_lines,
+        runtime_tor_hidden_service_keys_dir, set_live_ffmpeg_timeout_secs, settings_file_path,
+        template::settings_template, update_settings_file_ffmpeg_timeout,
+        validate_ffmpeg_timeout_secs, Config, TlsConfig, DEFAULT_FFMPEG_TIMEOUT_SECS,
+        MAX_FFMPEG_TIMEOUT_SECS, MIN_FFMPEG_TIMEOUT_SECS,
     };
+    use std::sync::Mutex;
+
+    static SETTINGS_FILE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn valid_config() -> Config {
         const MIB: usize = 1024 * 1024;
@@ -1501,6 +1560,71 @@ port = 8080
         assert!(theme_idx < network_idx);
         assert!(output.contains("forum_name = \"NewChan\"\n"));
         assert!(output.contains("site_subtitle = \"new subtitle\"\n"));
+    }
+
+    #[test]
+    fn validate_rejects_ffmpeg_timeout_below_minimum() {
+        let error = validate_ffmpeg_timeout_secs(MIN_FFMPEG_TIMEOUT_SECS - 1)
+            .expect_err("timeout below minimum should fail")
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "CONFIG ERROR: ffmpeg_timeout_secs must be between {MIN_FFMPEG_TIMEOUT_SECS} and {MAX_FFMPEG_TIMEOUT_SECS} seconds."
+            )
+        );
+    }
+
+    #[test]
+    fn validate_rejects_ffmpeg_timeout_above_maximum() {
+        let error = validate_ffmpeg_timeout_secs(MAX_FFMPEG_TIMEOUT_SECS + 1)
+            .expect_err("timeout above maximum should fail")
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "CONFIG ERROR: ffmpeg_timeout_secs must be between {MIN_FFMPEG_TIMEOUT_SECS} and {MAX_FFMPEG_TIMEOUT_SECS} seconds."
+            )
+        );
+    }
+
+    #[test]
+    fn update_settings_file_ffmpeg_timeout_persists_and_reloads() {
+        let _guard = SETTINGS_FILE_TEST_LOCK.lock().expect("settings test lock");
+        let path = settings_file_path();
+        let previous = std::fs::read_to_string(&path).ok();
+        let parent = path.parent().expect("settings parent").to_path_buf();
+        std::fs::create_dir_all(&parent).expect("create settings dir");
+        std::fs::write(
+            &path,
+            format!(
+                "forum_name = \"RustChan\"\nffmpeg_timeout_secs = {DEFAULT_FFMPEG_TIMEOUT_SECS}\n"
+            ),
+        )
+        .expect("write settings fixture");
+
+        update_settings_file_ffmpeg_timeout(1_800);
+        let updated = std::fs::read_to_string(&path).expect("read updated settings");
+        assert!(updated.contains("ffmpeg_timeout_secs = 1800\n"));
+
+        let reloaded = Config::from_env();
+        assert_eq!(reloaded.ffmpeg_timeout_secs, 1_800);
+
+        match previous {
+            Some(contents) => std::fs::write(&path, contents).expect("restore settings file"),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    #[test]
+    fn live_ffmpeg_timeout_setting_updates_and_formats_human_text() {
+        let original = ffmpeg_timeout_secs();
+        set_live_ffmpeg_timeout_secs(90).expect("set live timeout");
+        assert_eq!(ffmpeg_timeout_secs(), 90);
+        assert_eq!(describe_timeout_secs(90), "1 minute 30 seconds");
+        set_live_ffmpeg_timeout_secs(original).expect("restore live timeout");
     }
 
     #[test]

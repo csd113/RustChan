@@ -108,6 +108,7 @@ pub struct AdminPanelBackupsView<'a> {
 pub struct AdminPanelMaintenanceView {
     pub db_size_bytes: i64,
     pub db_size_warning: bool,
+    pub ffmpeg_timeout_secs: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -1864,6 +1865,7 @@ mod tests {
             maintenance: AdminPanelMaintenanceView {
                 db_size_bytes: 4096,
                 db_size_warning: false,
+                ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
             },
             tor_address: None,
             flash: None,

@@ -29,7 +29,16 @@ old boards to prevent query performance degradation.
         addresses
     };
     let db_size_str = format_file_size(view.maintenance.db_size_bytes);
-    render_admin_maintenance_section(view.csrf_token, &db_warn_banner, &db_size_str, &tor_section)
+    let ffmpeg_timeout_help =
+        crate::config::describe_timeout_secs(view.maintenance.ffmpeg_timeout_secs);
+    render_admin_maintenance_section(
+        view.csrf_token,
+        &db_warn_banner,
+        &db_size_str,
+        &tor_section,
+        view.maintenance.ffmpeg_timeout_secs,
+        &ffmpeg_timeout_help,
+    )
 }
 
 fn render_admin_maintenance_section(
@@ -37,6 +46,8 @@ fn render_admin_maintenance_section(
     db_warn_banner: &str,
     db_size_str: &str,
     tor_section: &str,
+    ffmpeg_timeout_secs: u64,
+    ffmpeg_timeout_help: &str,
 ) -> String {
     format!(
         r#"<div class="admin-panel-maintenance" id="maintenance">
@@ -68,6 +79,32 @@ fn render_admin_maintenance_section(
 </div>
 </section>
 
+<section class="admin-section">
+<h2>// media processing</h2>
+<p style="color:var(--text-dim);font-size:0.85rem">
+  RustChan currently allows ffmpeg to run for <strong>{ffmpeg_timeout_help}</strong> before a long-running media job is killed.
+  This primarily affects uploaded video re-encoding, especially slow MP4 to WebM/VP9 conversion.
+</p>
+<form method="POST" action="/admin/media/settings" class="admin-site-settings-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <div class="board-settings-grid admin-settings-grid">
+    <label title="Slow systems may need a higher value for ffmpeg video conversion jobs.">
+      Video re-encoding timeout (seconds)
+      <input type="number" name="ffmpeg_timeout_secs" value="{ffmpeg_timeout_secs}" min="{ffmpeg_timeout_min}" max="{ffmpeg_timeout_max}" step="1" inputmode="numeric" style="font-family:inherit" required>
+    </label>
+  </div>
+  <p class="admin-meta-note admin-meta-note-spaced">
+    This controls how long RustChan lets ffmpeg run while converting uploaded videos.
+    Slow systems such as Raspberry Pi devices may need a higher value.
+    MP4 to WebM/VP9 encoding can be especially slow without hardware acceleration.
+    If videos fail to convert because of timeouts, increase this value.
+  </p>
+  <div class="board-settings-actions">
+    <button type="submit">save media processing settings</button>
+  </div>
+</form>
+</section>
+
 <!-- ═══════════════════════════════════════════════════════════════════════════
      // active onion address
      ═══════════════════════════════════════════════════════════════════════════ -->
@@ -76,6 +113,10 @@ fn render_admin_maintenance_section(
         csrf = escape_html(csrf_token),
         db_warn_banner = db_warn_banner,
         db_size_str = db_size_str,
+        ffmpeg_timeout_secs = ffmpeg_timeout_secs,
+        ffmpeg_timeout_help = escape_html(ffmpeg_timeout_help),
+        ffmpeg_timeout_min = crate::config::MIN_FFMPEG_TIMEOUT_SECS,
+        ffmpeg_timeout_max = crate::config::MAX_FFMPEG_TIMEOUT_SECS,
         tor_section = tor_section,
     )
 }

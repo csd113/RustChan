@@ -1059,7 +1059,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // given up to (ffmpeg_timeout + 10)s to finish its in-flight job.
     tracing::info!(target: "server", "Signalling background workers to shut down…");
     worker_cancel.cancel();
-    let shutdown_timeout = Duration::from_secs(CONFIG.ffmpeg_timeout_secs + 10);
+    let shutdown_timeout = Duration::from_secs(crate::config::ffmpeg_timeout_secs() + 10);
     for handle in worker_handles {
         let _ = tokio::time::timeout(shutdown_timeout, handle).await;
     }

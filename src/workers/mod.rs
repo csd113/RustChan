@@ -578,7 +578,7 @@ const fn media_job_post_id(job: &Job) -> Option<i64> {
 /// is dropped, and `kill_on_drop` ensures the OS process receives SIGKILL
 /// immediately. No blocking thread is held during the wait.
 ///
-/// A hard timeout of `CONFIG.ffmpeg_timeout_secs` is applied.
+/// A hard timeout of the live `ffmpeg_timeout_secs` setting is applied.
 async fn transcode_video(
     post_id: i64,
     file_path: String,
@@ -600,7 +600,7 @@ async fn transcode_video(
         return Ok(());
     }
 
-    let timeout_secs = CONFIG.ffmpeg_timeout_secs;
+    let timeout_secs = crate::config::ffmpeg_timeout_secs();
     let ffmpeg_timeout = Duration::from_secs(timeout_secs);
 
     // Phase 1: prepare (file checks, codec probe, temp file creation) — blocking.
@@ -643,9 +643,7 @@ async fn transcode_video(
         Ok(Err(e)) => return Err(anyhow::anyhow!("ffmpeg I/O error: {e}")),
         Err(_elapsed) => {
             // Child is dropped here; kill_on_drop fires SIGKILL on the OS process.
-            warn!(
-                "VideoTranscode: job for post {post_id} timed out after                  {timeout_secs}s — ffmpeg process killed"
-            );
+            warn!("{}", video_reencode_timeout_warning(post_id, timeout_secs));
             return Err(anyhow::anyhow!(
                 "ffmpeg transcode timed out after {timeout_secs}s"
             ));
@@ -858,7 +856,7 @@ async fn generate_waveform(
         return Ok(());
     }
 
-    let timeout_secs = CONFIG.ffmpeg_timeout_secs;
+    let timeout_secs = crate::config::ffmpeg_timeout_secs();
     let ffmpeg_timeout = Duration::from_secs(timeout_secs);
 
     // Phase 1: prepare (file I/O, temp file creation) — blocking.
@@ -917,6 +915,13 @@ async fn generate_waveform(
     })
     .await
     .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform finalise: {e}"))?
+}
+
+fn video_reencode_timeout_warning(post_id: i64, timeout_secs: u64) -> String {
+    let human_timeout = crate::config::describe_timeout_secs(timeout_secs);
+    format!(
+        "VideoTranscode: ffmpeg video re-encoding/conversion timed out for post {post_id} after {human_timeout} ({timeout_secs}s); slow systems such as Raspberry Pi devices may need a higher timeout. Increase the video re-encoding timeout in the admin panel or settings.toml."
+    )
 }
 
 /// Blocking prepare phase for [`generate_waveform`]: validate the source,
@@ -1193,7 +1198,7 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{transcode_video_finalise, waveform_finalise};
+    use super::{transcode_video_finalise, video_reencode_timeout_warning, waveform_finalise};
     use std::io::Write;
 
     fn file_hash_count(conn: &rusqlite::Connection, file_path: &str) -> i64 {
@@ -1269,5 +1274,16 @@ mod tests {
         let conn = pool.get().expect("db connection");
         assert_eq!(file_hash_count(&conn, "b/audio.mp3"), 0);
         assert_eq!(file_hash_count(&conn, "b/thumbs/audio.png"), 0);
+    }
+
+    #[test]
+    fn video_reencode_timeout_warning_mentions_admin_guidance() {
+        let warning = video_reencode_timeout_warning(42, 600);
+        assert!(warning.contains("ffmpeg video re-encoding/conversion timed out"));
+        assert!(warning.contains("10 minutes"));
+        assert!(warning.contains("(600s)"));
+        assert!(warning.contains("Raspberry Pi"));
+        assert!(warning.contains("admin panel"));
+        assert!(warning.contains("settings.toml"));
     }
 }

@@ -465,7 +465,7 @@ fn run_command_with_timeout(
     program: &str,
     label: &str,
 ) -> Result<std::process::Output> {
-    let timeout = Duration::from_secs(crate::config::CONFIG.ffmpeg_timeout_secs);
+    let timeout = Duration::from_secs(crate::config::ffmpeg_timeout_secs());
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -19,6 +19,13 @@ pub struct DbMaintenanceForm {
     pub csrf: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct MediaSettingsForm {
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+    pub ffmpeg_timeout_secs: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 pub struct DbRepairStatusQuery {
     pub job_id: Option<u64>,
@@ -51,6 +58,64 @@ fn create_pre_repair_backup(
 
 fn pre_repair_backup_include_tor_hidden_service_keys() -> bool {
     crate::config::configured_tor_hidden_service_keys_dir().is_some_and(|path| path.is_dir())
+}
+
+fn parse_ffmpeg_timeout_secs_input(input: Option<&str>) -> Result<u64> {
+    let raw = input
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("Video re-encoding timeout is required.".into()))?;
+    let timeout_secs = raw.parse::<u64>().map_err(|_| {
+        AppError::BadRequest("Video re-encoding timeout must be a whole number of seconds.".into())
+    })?;
+    crate::config::validate_ffmpeg_timeout_secs(timeout_secs)
+        .map_err(|error| AppError::BadRequest(error.to_string()))
+}
+
+pub async fn update_media_settings(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Form(form): Form<MediaSettingsForm>,
+) -> Result<Response> {
+    let session_id = jar
+        .get(super::SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+
+    let timeout_secs = match parse_ffmpeg_timeout_secs_input(form.ffmpeg_timeout_secs.as_deref()) {
+        Ok(timeout_secs) => timeout_secs,
+        Err(AppError::BadRequest(message)) => {
+            return Ok(
+                super::admin_panel_error_redirect_anchor(&message, "maintenance").into_response(),
+            );
+        }
+        Err(error) => return Err(error),
+    };
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            crate::config::set_live_ffmpeg_timeout_secs(timeout_secs)?;
+            crate::config::update_settings_file_ffmpeg_timeout(timeout_secs);
+            tracing::info!(
+                target: "admin",
+                ffmpeg_timeout_secs = timeout_secs,
+                "FFmpeg media timeout updated"
+            );
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+
+    Ok(
+        super::admin_panel_redirect_anchor("Media processing settings saved.", "maintenance")
+            .into_response(),
+    )
 }
 
 pub async fn admin_vacuum(
@@ -525,7 +590,10 @@ fn render_db_repair_status_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_db_repair, admin_db_repair_status, admin_vacuum, PRE_REPAIR_BACKUP_FAILURE};
+    use super::{
+        admin_db_repair, admin_db_repair_status, admin_vacuum, parse_ffmpeg_timeout_secs_input,
+        update_media_settings, PRE_REPAIR_BACKUP_FAILURE,
+    };
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -536,6 +604,7 @@ mod tests {
     use tower::ServiceExt as _;
 
     static REPAIR_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    static MEDIA_SETTINGS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn install_admin_session(state: &crate::middleware::AppState) {
         let conn = state.db.get().expect("db connection");
@@ -633,6 +702,12 @@ mod tests {
             .with_state(state)
     }
 
+    fn media_settings_router(state: crate::middleware::AppState) -> Router {
+        Router::new()
+            .route("/admin/media/settings", post(update_media_settings))
+            .with_state(state)
+    }
+
     async fn admin_get(router: &Router, uri: &str) -> Response {
         router
             .clone()
@@ -673,6 +748,84 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         panic!("database repair did not finish");
+    }
+
+    #[test]
+    fn parse_ffmpeg_timeout_secs_rejects_blank_or_out_of_range_values() {
+        assert!(parse_ffmpeg_timeout_secs_input(None).is_err());
+        assert!(parse_ffmpeg_timeout_secs_input(Some("")).is_err());
+        assert!(parse_ffmpeg_timeout_secs_input(Some("29")).is_err());
+        assert!(parse_ffmpeg_timeout_secs_input(Some("86401")).is_err());
+        assert_eq!(
+            parse_ffmpeg_timeout_secs_input(Some("600")).expect("valid timeout"),
+            600
+        );
+    }
+
+    #[tokio::test]
+    async fn media_settings_save_updates_live_timeout_and_settings_file() {
+        let _guard = MEDIA_SETTINGS_TEST_LOCK.lock().await;
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+
+        let settings_path = crate::config::data_dir().join("settings.toml");
+        let previous_settings = std::fs::read_to_string(&settings_path).ok();
+        let previous_timeout = crate::config::ffmpeg_timeout_secs();
+        let parent = settings_path.parent().expect("settings parent");
+        std::fs::create_dir_all(parent).expect("create settings parent");
+        std::fs::write(
+            &settings_path,
+            format!("forum_name = \"RustChan\"\nffmpeg_timeout_secs = {previous_timeout}\n"),
+        )
+        .expect("write settings fixture");
+
+        let router = media_settings_router(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/media/settings")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(
+                        header::COOKIE,
+                        "csrf_token=csrf123; chan_admin_session=session123",
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "_csrf={}&ffmpeg_timeout_secs=1800",
+                        admin_signed_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("location");
+        assert!(location.contains("flash="));
+        assert!(location.contains("Media"));
+        assert!(location.contains("processing"));
+        assert!(location.contains("#maintenance"));
+
+        assert_eq!(crate::config::ffmpeg_timeout_secs(), 1_800);
+        let updated_settings = std::fs::read_to_string(&settings_path).expect("read settings");
+        assert!(updated_settings.contains("ffmpeg_timeout_secs = 1800\n"));
+        let reloaded = crate::config::Config::from_env();
+        assert_eq!(reloaded.ffmpeg_timeout_secs, 1_800);
+
+        crate::config::set_live_ffmpeg_timeout_secs(previous_timeout).expect("restore timeout");
+        match previous_settings {
+            Some(contents) => std::fs::write(&settings_path, contents).expect("restore settings"),
+            None => {
+                let _ = std::fs::remove_file(&settings_path);
+            }
+        }
     }
 
     #[tokio::test]
