@@ -342,6 +342,7 @@ fn image_crate_thumbnail(
         .with_context(|| format!("failed to save WebP thumbnail to {}", output_path.display()))
 }
 
+#[allow(clippy::too_many_lines)]
 fn pdf_first_page_thumbnail(
     input_path: &Path,
     output_path: &Path,
@@ -363,7 +364,7 @@ fn pdf_first_page_thumbnail(
 
     let render_result = match render_pdf_with_pdftoppm(input_path, &png_path, max_dim) {
         Ok(()) => Some(PdfRenderer::Pdftoppm),
-        Err(pdftoppm_error) => match render_pdf_with_mutool(input_path, &png_path) {
+        Err(pdftoppm_error) => match render_pdf_with_mutool(input_path, &png_path, max_dim) {
             Ok(()) => Some(PdfRenderer::Mutool),
             Err(mutool_error) => {
                 match render_pdf_with_qlmanage(input_path, &png_path, max_dim, temp_dir.path()) {
@@ -393,6 +394,37 @@ fn pdf_first_page_thumbnail(
         )?;
         return Ok(PdfThumbnailOutcome::Placeholder);
     };
+
+    let (width, height) = match image::image_dimensions(&png_path) {
+        Ok(dimensions) => dimensions,
+        Err(error) => {
+            tracing::warn!(
+                renderer = renderer.binary_name(),
+                path = %png_path.display(),
+                %error,
+                "Rendered PDF thumbnail dimensions could not be inspected; using built-in generic thumbnail"
+            );
+            write_placeholder(
+                &pdf_placeholder_output_path(output_path),
+                PlaceholderKind::Pdf,
+            )?;
+            return Ok(PdfThumbnailOutcome::Placeholder);
+        }
+    };
+    if u64::from(width).saturating_mul(u64::from(height)) > MAX_IMAGE_THUMBNAIL_PIXELS {
+        tracing::warn!(
+            renderer = renderer.binary_name(),
+            path = %png_path.display(),
+            width,
+            height,
+            "Rendered PDF thumbnail exceeds safety pixel limit; using built-in generic thumbnail"
+        );
+        write_placeholder(
+            &pdf_placeholder_output_path(output_path),
+            PlaceholderKind::Pdf,
+        )?;
+        return Ok(PdfThumbnailOutcome::Placeholder);
+    }
 
     let image = match image::open(&png_path) {
         Ok(image) => image,
@@ -457,27 +489,37 @@ fn render_pdf_with_pdftoppm(input_path: &Path, png_path: &Path, max_dim: u32) ->
     }
 }
 
-fn render_pdf_with_mutool(input_path: &Path, png_path: &Path) -> Result<()> {
+fn render_pdf_with_mutool(input_path: &Path, png_path: &Path, max_dim: u32) -> Result<()> {
     #[cfg(test)]
     {
         if let Some(result) = test_renderer_override(PdfRenderer::Mutool) {
             return result;
         }
     }
-    let status = run_pdf_renderer_with_timeout(Command::new("mutool").args([
-        "draw",
-        "-q",
-        "-o",
-        path_to_str(png_path)?,
-        path_to_str(input_path)?,
-        "1",
-    ]))
-    .context("failed to run mutool")?;
+    let mut command = build_mutool_command(input_path, png_path, max_dim)?;
+    let status = run_pdf_renderer_with_timeout(&mut command).context("failed to run mutool")?;
     if status.success() && png_path.exists() {
         Ok(())
     } else {
         anyhow::bail!("mutool failed")
     }
+}
+
+fn build_mutool_command(input_path: &Path, png_path: &Path, max_dim: u32) -> Result<Command> {
+    let mut command = Command::new("mutool");
+    command.args([
+        "draw",
+        "-q",
+        "-w",
+        &max_dim.to_string(),
+        "-h",
+        &max_dim.to_string(),
+        "-o",
+        path_to_str(png_path)?,
+        path_to_str(input_path)?,
+        "1",
+    ]);
+    Ok(command)
 }
 
 fn render_pdf_with_qlmanage(
@@ -707,5 +749,35 @@ mod tests {
         let svg = std::fs::read_to_string(&output).expect("read placeholder");
         assert!(svg.contains("PDF"));
         assert!(svg.contains("<svg"));
+    }
+
+    #[test]
+    fn mutool_command_caps_render_dimensions() {
+        let command = build_mutool_command(
+            Path::new("/tmp/input.pdf"),
+            Path::new("/tmp/page1.png"),
+            250,
+        )
+        .expect("build mutool command");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            vec![
+                "draw",
+                "-q",
+                "-w",
+                "250",
+                "-h",
+                "250",
+                "-o",
+                "/tmp/page1.png",
+                "/tmp/input.pdf",
+                "1",
+            ]
+        );
     }
 }

@@ -34,20 +34,127 @@ pub(super) fn refresh_live_site_state_from_db(conn: &rusqlite::Connection) -> Re
 }
 
 fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Result<()> {
+    let mut valid_board_shorts = std::collections::HashSet::new();
+    let mut board_ids_to_shorts = std::collections::HashMap::new();
     let mut stmt = conn
-        .prepare("SELECT short_name FROM boards")
+        .prepare("SELECT id, short_name FROM boards")
         .map_err(|error| AppError::BadRequest(format!("Restored database is invalid: {error}")))?;
     let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|error| AppError::BadRequest(format!("Restored database is invalid: {error}")))?;
 
     for row in rows {
-        let short_name = row.map_err(|error| {
+        let (board_id, short_name) = row.map_err(|error| {
             AppError::BadRequest(format!(
                 "Restored database has an invalid board row: {error}"
             ))
         })?;
         validate_board_short_name(&short_name)?;
+        valid_board_shorts.insert(short_name.clone());
+        board_ids_to_shorts.insert(board_id, short_name);
+    }
+
+    let mut post_stmt = conn
+        .prepare(
+            "SELECT id, board_id, file_path, thumb_path, audio_file_path
+             FROM posts
+             WHERE file_path IS NOT NULL OR thumb_path IS NOT NULL OR audio_file_path IS NOT NULL",
+        )
+        .map_err(|error| AppError::BadRequest(format!("Restored database is invalid: {error}")))?;
+    let post_rows = post_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(|error| AppError::BadRequest(format!("Restored database is invalid: {error}")))?;
+
+    for row in post_rows {
+        let (post_id, board_id, file_path, thumb_path, audio_file_path) = row.map_err(|error| {
+            AppError::BadRequest(format!(
+                "Restored database has an invalid post media row: {error}"
+            ))
+        })?;
+        let expected_board_short = board_ids_to_shorts.get(&board_id).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "Restored post {post_id} points to unknown board_id {board_id}."
+            ))
+        })?;
+        for (label, path) in [
+            ("file_path", file_path.as_deref()),
+            ("thumb_path", thumb_path.as_deref()),
+            ("audio_file_path", audio_file_path.as_deref()),
+        ] {
+            let Some(path) = path else {
+                continue;
+            };
+            let board_short = super::common::validate_restored_media_path(
+                path,
+                &format!("Restored post {post_id} {label}"),
+            )?;
+            if !valid_board_shorts.contains(&board_short) {
+                return Err(AppError::BadRequest(format!(
+                    "Restored post {post_id} {label} points to unknown board /{board_short}/."
+                )));
+            }
+            if &board_short != expected_board_short {
+                return Err(AppError::BadRequest(format!(
+                    "Restored post {post_id} {label} escapes its board /{expected_board_short}/."
+                )));
+            }
+        }
+    }
+
+    let mut file_hash_stmt = conn
+        .prepare("SELECT sha256, file_path, thumb_path FROM file_hashes")
+        .map_err(|error| AppError::BadRequest(format!("Restored database is invalid: {error}")))?;
+    let file_hash_rows = file_hash_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| AppError::BadRequest(format!("Restored database is invalid: {error}")))?;
+
+    for row in file_hash_rows {
+        let (sha256, file_path, thumb_path) = row.map_err(|error| {
+            AppError::BadRequest(format!(
+                "Restored database has an invalid file_hash row: {error}"
+            ))
+        })?;
+        let file_board_short = super::common::validate_restored_media_path(
+            &file_path,
+            &format!("Restored file_hash {sha256} file_path"),
+        )?;
+        if !valid_board_shorts.contains(&file_board_short) {
+            return Err(AppError::BadRequest(format!(
+                "Restored file_hash {sha256} file_path points to unknown board /{file_board_short}/."
+            )));
+        }
+        if !thumb_path.is_empty() {
+            let thumb_board_short = super::common::validate_restored_media_path(
+                &thumb_path,
+                &format!("Restored file_hash {sha256} thumb_path"),
+            )?;
+            if !valid_board_shorts.contains(&thumb_board_short) {
+                return Err(AppError::BadRequest(format!(
+                    "Restored file_hash {sha256} thumb_path points to unknown board /{thumb_board_short}/."
+                )));
+            }
+            if thumb_board_short != file_board_short {
+                return Err(AppError::BadRequest(format!(
+                    "Restored file_hash {sha256} mixes boards between file_path and thumb_path."
+                )));
+            }
+        }
     }
 
     Ok(())
@@ -695,7 +802,10 @@ pub async fn restore_saved_full_backup(
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_full_restore, full_restore_success_response};
+    use super::{
+        execute_full_restore, full_restore_success_response,
+        validate_full_restore_db_trust_boundary,
+    };
     use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
     use axum_extra::extract::cookie::CookieJar;
     use std::collections::BTreeMap;
@@ -1046,6 +1156,181 @@ mod tests {
         match error {
             crate::error::AppError::BadRequest(message) => {
                 assert!(message.contains("Invalid board short name"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn full_restore_rejects_restored_post_media_path_pointing_to_unknown_board() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = create_snapshot_db();
+        {
+            let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
+            let board_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM boards WHERE short_name = 'tech'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("tech board id");
+            conn.execute(
+                "INSERT INTO threads (id, board_id, subject, created_at, bumped_at, locked, sticky, archived, reply_count)
+                 VALUES (1, ?1, 'ghost', unixepoch(), unixepoch(), 0, 0, 0, 0)",
+                [board_id],
+            )
+            .expect("seed thread");
+            conn.execute(
+                "INSERT INTO posts
+                 (id, thread_id, board_id, name, body, body_html, file_path, file_name, file_size,
+                  thumb_path, mime_type, media_type, created_at, deletion_token, is_op)
+                 VALUES
+                 (1, 1, ?1, 'anon', 'body', '<p>body</p>', 'ghost/doc.pdf', 'doc.pdf', 1,
+                  'ghost/thumbs/doc.svg', 'application/pdf', 'pdf', unixepoch(), 'token', 1)",
+                [board_id],
+            )
+            .expect("seed invalid restored media path");
+            conn.execute(
+                "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type, created_at)
+                 VALUES ('ghost-hash', 'ghost/doc.pdf', 'ghost/thumbs/doc.svg', 'application/pdf', unixepoch())",
+                [],
+            )
+            .expect("seed invalid restored file hash path");
+        }
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip_from_db(&zip_path, &db_path, None, false);
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        let error = execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            None,
+            false,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect_err("restore should reject invalid restored media paths");
+
+        match error {
+            crate::error::AppError::BadRequest(message) => {
+                assert!(message.contains("points to unknown board /ghost/"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn full_restore_rejects_cross_board_thumb_path_on_restored_post() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = create_snapshot_db();
+        {
+            let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
+            crate::db::create_board(&conn, "b", "Random", "", false).expect("create second board");
+            let tech_board_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM boards WHERE short_name = 'tech'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("tech board id");
+            conn.execute(
+                "INSERT INTO threads (id, board_id, subject, created_at, bumped_at, locked, sticky, archived, reply_count)
+                 VALUES (1, ?1, 'doc', unixepoch(), unixepoch(), 0, 0, 0, 0)",
+                [tech_board_id],
+            )
+            .expect("seed thread");
+            conn.execute(
+                "INSERT INTO posts
+                 (id, thread_id, board_id, name, body, body_html, file_path, file_name, file_size,
+                  thumb_path, mime_type, media_type, created_at, deletion_token, is_op)
+                 VALUES
+                 (1, 1, ?1, 'anon', 'body', '<p>body</p>', 'tech/doc.pdf', 'doc.pdf', 1,
+                  'b/thumbs/doc.svg', 'application/pdf', 'pdf', unixepoch(), 'token', 1)",
+                [tech_board_id],
+            )
+            .expect("seed cross-board thumb path");
+            conn.execute(
+                "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type, created_at)
+                 VALUES ('cross-board-hash', 'tech/doc.pdf', 'b/thumbs/doc.svg', 'application/pdf', unixepoch())",
+                [],
+            )
+            .expect("seed cross-board file hash");
+        }
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip_from_db(&zip_path, &db_path, None, false);
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        let error = execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            None,
+            false,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect_err("restore should reject cross-board thumb paths");
+
+        match error {
+            crate::error::AppError::BadRequest(message) => {
+                assert!(message.contains("escapes its board /tech/"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn full_restore_trust_boundary_allows_empty_file_hash_thumb_path() {
+        let db_path = create_snapshot_db();
+        let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
+        conn.execute(
+            "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type, created_at)
+             VALUES ('generic-hash', 'tech/file.bin', '', 'application/octet-stream', unixepoch())",
+            [],
+        )
+        .expect("seed generic file hash");
+
+        validate_full_restore_db_trust_boundary(&conn)
+            .expect("empty file-hash thumb path should remain allowed");
+    }
+
+    #[test]
+    fn full_restore_trust_boundary_rejects_cross_board_file_hash_pairing() {
+        let db_path = create_snapshot_db();
+        let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
+        crate::db::create_board(&conn, "b", "Random", "", false).expect("create second board");
+        conn.execute(
+            "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type, created_at)
+             VALUES ('cross-board-hash', 'tech/doc.pdf', 'b/thumbs/doc.svg', 'application/pdf', unixepoch())",
+            [],
+        )
+        .expect("seed cross-board file hash");
+
+        let error = validate_full_restore_db_trust_boundary(&conn)
+            .expect_err("cross-board file_hash should be rejected");
+
+        match error {
+            crate::error::AppError::BadRequest(message) => {
+                assert!(message.contains("mixes boards between file_path and thumb_path"));
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }

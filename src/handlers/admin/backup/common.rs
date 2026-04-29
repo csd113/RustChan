@@ -145,6 +145,40 @@ pub(super) fn validate_board_short_name(short_name: &str) -> Result<()> {
     }
 }
 
+fn validated_media_upload_relative_path(path: &str, context: &str) -> Result<Vec<String>> {
+    validate_restore_safe_entry_name(path)?;
+    let components = path.split('/').map(str::to_string).collect::<Vec<_>>();
+    if components.len() < 2 {
+        return Err(AppError::BadRequest(format!(
+            "{context} must include a board directory and file name."
+        )));
+    }
+    Ok(components)
+}
+
+pub(super) fn validate_restored_media_path(path: &str, context: &str) -> Result<String> {
+    let components = validated_media_upload_relative_path(path, context)?;
+    let board_short = components
+        .first()
+        .ok_or_else(|| AppError::BadRequest(format!("{context} is missing a board directory.")))?;
+    validate_board_short_name(board_short)?;
+    Ok(board_short.clone())
+}
+
+pub(super) fn validate_restored_media_path_for_board(
+    path: &str,
+    expected_board_short: &str,
+    context: &str,
+) -> Result<()> {
+    let board_short = validate_restored_media_path(path, context)?;
+    if board_short != expected_board_short {
+        return Err(AppError::BadRequest(format!(
+            "{context} must stay within /{expected_board_short}/ uploads."
+        )));
+    }
+    Ok(())
+}
+
 fn remap_numeric_references(body: &str, prefix: &str, pairs: &[(String, String)]) -> String {
     let mut result = body.to_string();
     for (old, new) in pairs {
@@ -474,7 +508,8 @@ pub(super) fn verify_board_backup_zip(
 mod tests {
     use super::{
         extract_uploads_to_dir, remap_body_quotelinks, validate_board_short_name,
-        validate_restore_safe_entry_name, verify_board_backup_zip, verify_full_backup_zip,
+        validate_restore_safe_entry_name, validate_restored_media_path,
+        validate_restored_media_path_for_board, verify_board_backup_zip, verify_full_backup_zip,
         FullBackupManifest, FULL_BACKUP_MANIFEST_NAME,
     };
     use serde_json::json;
@@ -575,6 +610,28 @@ mod tests {
         }
 
         assert!(validate_restore_safe_entry_name("uploads/board/file.txt").is_ok());
+    }
+
+    #[test]
+    fn restored_media_path_validation_requires_safe_board_scoped_paths() {
+        assert_eq!(
+            validate_restored_media_path("tech/thumbs/doc.svg", "test media path")
+                .expect("valid media path"),
+            "tech"
+        );
+        assert!(
+            validate_restored_media_path("../tech/doc.pdf", "test media path").is_err(),
+            "parent traversal must be rejected"
+        );
+        assert!(
+            validate_restored_media_path("tech", "test media path").is_err(),
+            "board-only path must be rejected"
+        );
+        assert!(
+            validate_restored_media_path_for_board("b/doc.pdf", "tech", "board restore path")
+                .is_err(),
+            "cross-board media path must be rejected for board restores"
+        );
     }
 
     #[test]

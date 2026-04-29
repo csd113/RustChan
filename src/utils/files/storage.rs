@@ -488,13 +488,30 @@ fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
 }
 
 fn validate_pdf_structure(input_path: &Path) -> Result<()> {
-    let data = std::fs::read(input_path)
-        .with_context(|| format!("Failed to read {} for PDF validation", input_path.display()))?;
-    if !data.starts_with(b"%PDF-") {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(input_path)
+        .with_context(|| format!("Failed to open {} for PDF validation", input_path.display()))?;
+
+    let mut header = [0u8; 5];
+    file.read_exact(&mut header)
+        .with_context(|| format!("Failed to read PDF header from {}", input_path.display()))?;
+    if header != *b"%PDF-" {
         anyhow::bail!("File appears to be application/pdf, but its header is malformed.");
     }
-    let tail_start = data.len().saturating_sub(4096);
-    let tail = data.get(tail_start..).unwrap_or(&data);
+
+    let file_len = file
+        .metadata()
+        .with_context(|| format!("Inspect {} for PDF validation", input_path.display()))?
+        .len();
+    let tail_len_u64 = file_len.min(4096);
+    let tail_len = usize::try_from(tail_len_u64).context("PDF tail length overflows usize")?;
+    let tail_start = file_len.saturating_sub(tail_len_u64);
+    file.seek(SeekFrom::Start(tail_start))
+        .with_context(|| format!("Seek to PDF trailer window in {}", input_path.display()))?;
+    let mut tail = vec![0u8; tail_len];
+    file.read_exact(&mut tail)
+        .with_context(|| format!("Read PDF trailer window from {}", input_path.display()))?;
     if !tail.windows(5).any(|window| window == b"%%EOF") {
         anyhow::bail!("File appears to be application/pdf, but its trailer is missing.");
     }
@@ -949,5 +966,27 @@ trailer << /Root 1 0 R >>
             let name = name.to_string_lossy();
             !name.starts_with("rustchan-pdf-thumb-")
         }));
+    }
+
+    #[test]
+    fn pdf_without_eof_marker_is_rejected_before_storage() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input = tempfile::Builder::new()
+            .suffix(".pdf")
+            .tempfile_in(tempdir.path())
+            .expect("temp file");
+        let malformed_pdf = b"%PDF-1.4\n1 0 obj <<>> endobj\ntrailer <<>>\n";
+        std::fs::write(input.path(), malformed_pdf).expect("write malformed pdf");
+
+        let Err(error) = save_upload_from_path(
+            input.path(),
+            malformed_pdf,
+            malformed_pdf.len(),
+            &test_upload_options(tempdir.path(), "broken.pdf"),
+        ) else {
+            panic!("missing EOF marker should be rejected");
+        };
+
+        assert!(error.to_string().contains("trailer is missing"));
     }
 }

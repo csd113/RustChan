@@ -3,6 +3,46 @@
 
 use super::*;
 
+fn validate_board_restore_media_metadata(
+    manifest: &board_backup_types::BoardBackupManifest,
+) -> Result<()> {
+    let board_short = manifest.board.short_name.as_str();
+
+    for post in &manifest.posts {
+        if let Some(file_path) = post.file_path.as_deref() {
+            super::common::validate_restored_media_path_for_board(
+                file_path,
+                board_short,
+                "Board backup post file_path",
+            )?;
+        }
+        if let Some(thumb_path) = post.thumb_path.as_deref() {
+            super::common::validate_restored_media_path_for_board(
+                thumb_path,
+                board_short,
+                "Board backup post thumb_path",
+            )?;
+        }
+    }
+
+    for file_hash in &manifest.file_hashes {
+        super::common::validate_restored_media_path_for_board(
+            &file_hash.file_path,
+            board_short,
+            "Board backup file_hash file_path",
+        )?;
+        if !file_hash.thumb_path.is_empty() {
+            super::common::validate_restored_media_path_for_board(
+                &file_hash.thumb_path,
+                board_short,
+                "Board backup file_hash thumb_path",
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_board_backup_access_settings(
     manifest: &mut board_backup_types::BoardBackupManifest,
 ) -> Result<()> {
@@ -297,6 +337,7 @@ where
     let board_short = manifest.board.short_name.clone();
     validate_board_short_name(&board_short)?;
     validate_board_backup_access_settings(&mut manifest)?;
+    validate_board_restore_media_metadata(&manifest)?;
     let workspace = BoardRestoreWorkspace::prepare(upload_dir, &board_short)?;
     extract_uploads(&workspace.staged_upload_root)?;
 
@@ -1201,5 +1242,120 @@ pub async fn board_restore(
             );
             restore_failure_response(RestoreKind::Board, xhr_request, &e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_board_restore_media_metadata;
+    use crate::handlers::admin::backup::types::board_backup_types::{
+        BannerRow, BoardBackupManifest, BoardRow, FileHashRow, PollOptionRow, PollRow, PollVoteRow,
+        PostRow, ThreadRow,
+    };
+
+    fn sample_manifest() -> BoardBackupManifest {
+        BoardBackupManifest {
+            version: 1,
+            board: BoardRow {
+                id: 1,
+                short_name: "tech".into(),
+                name: "Technology".into(),
+                description: String::new(),
+                nsfw: false,
+                max_threads: 100,
+                max_archived_threads: 150,
+                bump_limit: 300,
+                allow_images: true,
+                allow_video: true,
+                allow_audio: true,
+                allow_any_files: false,
+                allow_tripcodes: true,
+                edit_window_secs: 300,
+                allow_editing: true,
+                allow_self_delete: true,
+                allow_archive: true,
+                allow_video_embeds: true,
+                allow_captcha: false,
+                show_poster_ids: false,
+                collapse_greentext: false,
+                post_cooldown_secs: 0,
+                banner_mode: "inherit".into(),
+                access_mode: "public".into(),
+                access_password_hash: String::new(),
+                created_at: 1_700_000_000,
+            },
+            threads: vec![ThreadRow {
+                id: 1,
+                board_id: 1,
+                subject: Some("doc".into()),
+                created_at: 1_700_000_000,
+                bumped_at: 1_700_000_000,
+                locked: false,
+                sticky: false,
+                archived: false,
+                reply_count: 0,
+            }],
+            posts: vec![PostRow {
+                id: 1,
+                thread_id: 1,
+                board_id: 1,
+                name: "anon".into(),
+                tripcode: None,
+                subject: None,
+                body: "body".into(),
+                body_html: "<p>body</p>".into(),
+                ip_hash: None,
+                file_path: Some("tech/doc.pdf".into()),
+                file_name: Some("doc.pdf".into()),
+                file_size: Some(123),
+                thumb_path: Some("tech/thumbs/doc.svg".into()),
+                mime_type: Some("application/pdf".into()),
+                media_type: Some("pdf".into()),
+                created_at: 1_700_000_000,
+                deletion_token: "token".into(),
+                is_op: true,
+                media_processing_state: None,
+                media_processing_error: None,
+            }],
+            polls: Vec::<PollRow>::new(),
+            poll_options: Vec::<PollOptionRow>::new(),
+            poll_votes: Vec::<PollVoteRow>::new(),
+            file_hashes: vec![FileHashRow {
+                sha256: "abc".into(),
+                file_path: "tech/doc.pdf".into(),
+                thumb_path: "tech/thumbs/doc.svg".into(),
+                mime_type: "application/pdf".into(),
+                created_at: 1_700_000_000,
+            }],
+            banners: Vec::<BannerRow>::new(),
+        }
+    }
+
+    #[test]
+    fn board_restore_rejects_cross_board_media_paths_in_manifest() {
+        let mut manifest = sample_manifest();
+        let Some(post) = manifest.posts.get_mut(0) else {
+            panic!("sample manifest should include one post");
+        };
+        post.file_path = Some("other/doc.pdf".into());
+
+        let error = validate_board_restore_media_metadata(&manifest)
+            .expect_err("cross-board path rejected");
+
+        assert!(error
+            .to_string()
+            .contains("must stay within /tech/ uploads"));
+    }
+
+    #[test]
+    fn board_restore_allows_empty_file_hash_thumb_for_generic_uploads() {
+        let mut manifest = sample_manifest();
+        let Some(file_hash) = manifest.file_hashes.get_mut(0) else {
+            panic!("sample manifest should include one file hash");
+        };
+        file_hash.thumb_path.clear();
+
+        validate_board_restore_media_metadata(&manifest)
+            .expect("empty file-hash thumb path should remain allowed");
     }
 }
