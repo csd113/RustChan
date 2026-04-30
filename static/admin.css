@@ -786,6 +786,64 @@ html:not([data-theme]) .admin-panel h1 {
   min-width: 0;
 }
 
+.admin-detection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.85rem;
+}
+
+.admin-detection-card {
+  background: color-mix(in srgb, var(--bg-elevated, var(--bg-panel)) 84%, transparent);
+  border: 1px solid var(--border);
+  padding: 0.85rem 0.95rem;
+  min-width: 0;
+}
+
+.admin-detection-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: 0.5rem;
+}
+
+.admin-detection-card-header h3 {
+  margin: 0;
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+}
+
+.admin-detection-card p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.admin-detection-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  padding: 0.14rem 0.5rem;
+  border: 1px solid var(--border);
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.admin-detection-pill-ok {
+  border-color: color-mix(in srgb, var(--green) 55%, var(--border));
+  background: rgba(0, 255, 65, 0.08);
+  color: var(--green-bright);
+}
+
+.admin-detection-pill-missing {
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
+  background: rgba(255, 78, 78, 0.08);
+  color: var(--red);
+}
+
 #theme-catalog .admin-dropdown-content {
   padding-top: 1.15rem;
 }

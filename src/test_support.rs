@@ -10,7 +10,10 @@ pub fn app_state() -> crate::middleware::AppState {
     crate::middleware::AppState {
         db: pool,
         ffmpeg_available: false,
+        ffprobe_available: false,
         ffmpeg_webp_available: false,
+        ffmpeg_vp9_available: false,
+        pdf_thumbnail_renderer: None,
         job_queue,
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
         auto_full_backup_settings: crate::middleware::AutoFullBackupSettings::new(24, 1, false),

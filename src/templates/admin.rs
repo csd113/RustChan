@@ -109,6 +109,11 @@ pub struct AdminPanelMaintenanceView {
     pub db_size_bytes: i64,
     pub db_size_warning: bool,
     pub ffmpeg_timeout_secs: u64,
+    pub ffmpeg_available: bool,
+    pub ffprobe_available: bool,
+    pub ffmpeg_webp_available: bool,
+    pub ffmpeg_vp9_available: bool,
+    pub pdf_thumbnail_renderer: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -1837,6 +1842,11 @@ mod tests {
                 db_size_bytes: 4096,
                 db_size_warning: false,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
+                ffmpeg_available: true,
+                ffprobe_available: true,
+                ffmpeg_webp_available: true,
+                ffmpeg_vp9_available: true,
+                pdf_thumbnail_renderer: Some("pdftoppm".to_string()),
             },
             tor_address: None,
             flash: None,
@@ -2077,6 +2087,9 @@ mod tests {
         assert!(html.contains(r#"data-admin-dropdown-key="media-settings""#));
         assert!(html.contains(r#"data-admin-dropdown-key="database-maintenance""#));
         assert!(html.contains("// media settings"));
+        assert!(html.contains("// media pipeline detection"));
+        assert!(html.contains("video thumbnails, waveform jobs, and transcoding entrypoint"));
+        assert!(html.contains("selected renderer: pdftoppm"));
         assert!(html.contains("save media settings"));
     }
 
@@ -2150,6 +2163,61 @@ mod tests {
         assert!(media_html.contains(
             r#"<details class="admin-dropdown" data-admin-dropdown-key="media-settings" open>"#
         ));
+    }
+
+    #[test]
+    fn admin_panel_media_detection_statuses_render_missing_states() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = admin_panel_page(&AdminPanelViewModel {
+            csrf_token: "csrf",
+            boards: std::slice::from_ref(&board),
+            moderation: AdminPanelModerationView {
+                bans: &[],
+                filters: &[],
+                reports: &[],
+                appeals: &[],
+            },
+            appearance: AdminPanelAppearanceView {
+                site_name: "RustChan",
+                site_subtitle: "select board to proceed",
+                homepage_new_thread_badges_enabled: true,
+                thread_new_reply_badges_enabled: true,
+                default_theme: "terminal",
+                banner_rotation_interval_minutes: 0,
+                banner_external_links_enabled: false,
+                themes: &themes,
+                global_banners: &[],
+                home_banners: &[],
+                board_banners: &[],
+            },
+            backups: AdminPanelBackupsView {
+                full_backups: &[],
+                board_backups: &[],
+                backup_status_line: "Latest full backup: none saved.",
+                backup_warning: None,
+                auto_full_backup_interval_hours: 24,
+                auto_full_backup_copies_to_keep: 7,
+                auto_full_backup_include_tor_hidden_service_keys: false,
+                tor_hidden_service_key_backup_available: false,
+            },
+            maintenance: AdminPanelMaintenanceView {
+                db_size_bytes: 4096,
+                db_size_warning: false,
+                ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
+                ffmpeg_available: false,
+                ffprobe_available: false,
+                ffmpeg_webp_available: false,
+                ffmpeg_vp9_available: false,
+                pdf_thumbnail_renderer: None,
+            },
+            tor_address: None,
+            flash: None,
+            open_section: Some("media-settings"),
+        });
+
+        assert!(html.contains("using built-in generic PDF placeholder thumbnail"));
+        assert!(html.contains(r#"admin-detection-pill admin-detection-pill-missing">missing"#));
     }
 
     #[test]

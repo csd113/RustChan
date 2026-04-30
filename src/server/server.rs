@@ -240,7 +240,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     let ffmpeg_available = ffmpeg_status == crate::detect::ToolStatus::Available;
     // ffprobe is used lazily for WebM codec inspection, so probe it at startup
     // to make explicit configured paths authoritative and catch bogus paths early.
-    let _ffprobe_available = crate::detect::detect_ffprobe();
+    let ffprobe_available = crate::detect::detect_ffprobe();
     // libwebp encoder: needed for image→WebP conversion.  Checked independently
     // so that a stock ffmpeg build (missing libwebp) still enables video/audio
     // features while image conversion degrades gracefully.
@@ -249,7 +249,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // WebM/AV1→VP9 re-encoding.  Checked independently so that a build missing
     // only these codecs still enables image conversion and thumbnail generation.
     let ffmpeg_vp9_available = crate::detect::detect_webm_encoder(ffmpeg_available);
-    let _pdf_thumbnail_renderers = crate::detect::detect_pdf_thumbnail_renderers();
+    let pdf_thumbnail_renderers = crate::detect::detect_pdf_thumbnail_renderers();
 
     // Derive bind_port from `bind_addr` (which already incorporates port_override).
     // rsplit_once(':') handles both IPv4 ("0.0.0.0:9000") and IPv6 ("[::1]:9000").
@@ -287,7 +287,12 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     let state = AppState {
         db: pool.clone(),
         ffmpeg_available,
+        ffprobe_available,
         ffmpeg_webp_available,
+        ffmpeg_vp9_available,
+        pdf_thumbnail_renderer: pdf_thumbnail_renderers
+            .first()
+            .map(|renderer| renderer.binary_name()),
         job_queue: worker_queue,
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
         auto_full_backup_settings: crate::middleware::AutoFullBackupSettings::new(

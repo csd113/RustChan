@@ -255,7 +255,10 @@ impl Drop for MaintenanceGuard {
 pub struct AppState {
     pub db: crate::db::DbPool,
     pub ffmpeg_available: bool,
+    pub ffprobe_available: bool,
     pub ffmpeg_webp_available: bool,
+    pub ffmpeg_vp9_available: bool,
+    pub pdf_thumbnail_renderer: Option<&'static str>,
     pub job_queue: std::sync::Arc<crate::workers::JobQueue>,
     pub backup_progress: std::sync::Arc<crate::middleware::BackupProgress>,
     pub auto_full_backup_settings: AutoFullBackupSettings,

@@ -566,6 +566,11 @@ struct AdminPanelSnapshot {
     db_size_bytes: i64,
     db_size_warning: bool,
     ffmpeg_timeout_secs: u64,
+    ffmpeg_available: bool,
+    ffprobe_available: bool,
+    ffmpeg_webp_available: bool,
+    ffmpeg_vp9_available: bool,
+    pdf_thumbnail_renderer: Option<String>,
     backup_summary: BackupSummary,
 }
 
@@ -613,6 +618,11 @@ struct MaintenanceDomainData {
     db_size_bytes: i64,
     db_size_warning: bool,
     ffmpeg_timeout_secs: u64,
+    ffmpeg_available: bool,
+    ffprobe_available: bool,
+    ffmpeg_webp_available: bool,
+    ffmpeg_vp9_available: bool,
+    pdf_thumbnail_renderer: Option<String>,
 }
 
 fn load_overview_domain_data(full_backups: &[BackupInfo]) -> OverviewDomainData {
@@ -671,7 +681,10 @@ fn load_backups_domain_data() -> BackupsDomainData {
     }
 }
 
-fn load_maintenance_domain_data(conn: &rusqlite::Connection) -> MaintenanceDomainData {
+fn load_maintenance_domain_data(
+    conn: &rusqlite::Connection,
+    state: &AppState,
+) -> MaintenanceDomainData {
     let db_size_bytes = db::get_db_size_bytes(conn).unwrap_or(0);
     let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
         let file_size = std::fs::metadata(&CONFIG.database_path)
@@ -685,11 +698,17 @@ fn load_maintenance_domain_data(conn: &rusqlite::Connection) -> MaintenanceDomai
         db_size_bytes,
         db_size_warning,
         ffmpeg_timeout_secs: crate::config::ffmpeg_timeout_secs(),
+        ffmpeg_available: state.ffmpeg_available,
+        ffprobe_available: state.ffprobe_available,
+        ffmpeg_webp_available: state.ffmpeg_webp_available,
+        ffmpeg_vp9_available: state.ffmpeg_vp9_available,
+        pdf_thumbnail_renderer: state.pdf_thumbnail_renderer.map(str::to_string),
     }
 }
 
 fn load_admin_panel_snapshot(
     conn: &rusqlite::Connection,
+    state: &AppState,
     onion_address_val: Option<String>,
     auto_full_backup_settings: crate::middleware::AutoFullBackupSettingsSnapshot,
 ) -> Result<(AdminPanelSnapshot, Option<String>)> {
@@ -698,7 +717,7 @@ fn load_admin_panel_snapshot(
     let appearance_domain = load_appearance_domain_data(conn, &boards_domain.boards)?;
     let backups_domain = load_backups_domain_data();
     let overview_domain = load_overview_domain_data(&backups_domain.full_backups);
-    let maintenance_domain = load_maintenance_domain_data(conn);
+    let maintenance_domain = load_maintenance_domain_data(conn, state);
     Ok((
         AdminPanelSnapshot {
             boards: boards_domain.boards,
@@ -727,6 +746,11 @@ fn load_admin_panel_snapshot(
             db_size_bytes: maintenance_domain.db_size_bytes,
             db_size_warning: maintenance_domain.db_size_warning,
             ffmpeg_timeout_secs: maintenance_domain.ffmpeg_timeout_secs,
+            ffmpeg_available: maintenance_domain.ffmpeg_available,
+            ffprobe_available: maintenance_domain.ffprobe_available,
+            ffmpeg_webp_available: maintenance_domain.ffmpeg_webp_available,
+            ffmpeg_vp9_available: maintenance_domain.ffmpeg_vp9_available,
+            pdf_thumbnail_renderer: maintenance_domain.pdf_thumbnail_renderer,
             backup_summary: overview_domain.backup_summary,
         },
         onion_address_val,
@@ -829,6 +853,11 @@ fn render_admin_panel_from_snapshot(
             db_size_bytes: snapshot.db_size_bytes,
             db_size_warning: snapshot.db_size_warning,
             ffmpeg_timeout_secs: snapshot.ffmpeg_timeout_secs,
+            ffmpeg_available: snapshot.ffmpeg_available,
+            ffprobe_available: snapshot.ffprobe_available,
+            ffmpeg_webp_available: snapshot.ffmpeg_webp_available,
+            ffmpeg_vp9_available: snapshot.ffmpeg_vp9_available,
+            pdf_thumbnail_renderer: snapshot.pdf_thumbnail_renderer,
         },
         tor_address: tor_address.as_deref(),
         flash: flash_ref,
@@ -909,8 +938,12 @@ pub async fn admin_panel(
             db::get_session(&conn, &sid)?
                 .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
 
-            let (snapshot, tor_address) =
-                load_admin_panel_snapshot(&conn, onion_address_val, auto_full_backup_settings)?;
+            let (snapshot, tor_address) = load_admin_panel_snapshot(
+                &conn,
+                &state,
+                onion_address_val,
+                auto_full_backup_settings,
+            )?;
             Ok(render_admin_panel_from_snapshot(
                 snapshot,
                 &csrf_clone,

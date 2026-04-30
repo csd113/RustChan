@@ -41,6 +41,7 @@ old boards to prevent query performance degradation.
     let db_size_str = format_file_size(view.maintenance.db_size_bytes);
     let ffmpeg_timeout_help =
         crate::config::describe_timeout_secs(view.maintenance.ffmpeg_timeout_secs);
+    let media_detection_cards = render_media_detection_cards(view);
     render_admin_maintenance_section(
         view.csrf_token,
         &db_warn_banner,
@@ -48,9 +49,73 @@ old boards to prevent query performance degradation.
         &tor_section,
         view.maintenance.ffmpeg_timeout_secs,
         &ffmpeg_timeout_help,
+        &media_detection_cards,
         media_settings_open_attr,
         database_maintenance_open_attr,
     )
+}
+
+fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
+    let pdf_renderer = view
+        .maintenance
+        .pdf_thumbnail_renderer
+        .as_deref()
+        .unwrap_or("none");
+    let pdf_detail = if view.maintenance.pdf_thumbnail_renderer.is_some() {
+        format!("selected renderer: {pdf_renderer}")
+    } else {
+        "using built-in generic PDF placeholder thumbnail".to_string()
+    };
+
+    [
+        (
+            "ffmpeg",
+            view.maintenance.ffmpeg_available,
+            "video thumbnails, waveform jobs, and transcoding entrypoint",
+        ),
+        (
+            "ffprobe",
+            view.maintenance.ffprobe_available,
+            "WebM codec inspection for uploads that need it",
+        ),
+        (
+            "WebP encoder",
+            view.maintenance.ffmpeg_webp_available,
+            "image to WebP conversion",
+        ),
+        (
+            "VP9/WebM pipeline",
+            view.maintenance.ffmpeg_vp9_available,
+            "MP4 to WebM transcoding with VP9 + Opus",
+        ),
+        (
+            "PDF thumbnails",
+            view.maintenance.pdf_thumbnail_renderer.is_some(),
+            &pdf_detail,
+        ),
+    ]
+    .into_iter()
+    .map(|(label, ok, detail)| {
+        format!(
+            r#"<article class="admin-detection-card">
+  <div class="admin-detection-card-header">
+    <h3>{label}</h3>
+    <span class="admin-detection-pill {pill_class}">{status}</span>
+  </div>
+  <p>{detail}</p>
+</article>"#,
+            label = escape_html(label),
+            pill_class = if ok {
+                "admin-detection-pill-ok"
+            } else {
+                "admin-detection-pill-missing"
+            },
+            status = if ok { "detected" } else { "missing" },
+            detail = escape_html(detail),
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("")
 }
 
 fn render_admin_maintenance_section(
@@ -60,6 +125,7 @@ fn render_admin_maintenance_section(
     tor_section: &str,
     ffmpeg_timeout_secs: u64,
     ffmpeg_timeout_help: &str,
+    media_detection_cards: &str,
     media_settings_open_attr: &str,
     database_maintenance_open_attr: &str,
 ) -> String {
@@ -72,6 +138,18 @@ fn render_admin_maintenance_section(
 <details class="admin-dropdown" data-admin-dropdown-key="media-settings"{media_settings_open_attr}>
 <summary><span>// media settings</span></summary>
 <div class="admin-dropdown-content">
+<div class="admin-subsection admin-subsection-tight">
+  <div class="admin-card-header">
+    <h3>// media pipeline detection</h3>
+    <p>Boot-time checks for the main external media tooling.</p>
+  </div>
+  <div class="admin-detection-grid">{media_detection_cards}</div>
+</div>
+<div class="admin-subsection admin-subsection-tight">
+  <div class="admin-card-header">
+    <h3>// ffmpeg timeout</h3>
+    <p>Adjust how long RustChan waits before killing a slow video conversion job.</p>
+  </div>
 <p style="color:var(--text-dim);font-size:0.85rem">
   RustChan currently allows ffmpeg to run for <strong>{ffmpeg_timeout_help}</strong> before a long-running media job is killed.
   This primarily affects uploaded video re-encoding, especially slow MP4 to WebM/VP9 conversion.
@@ -94,6 +172,7 @@ fn render_admin_maintenance_section(
     <button type="submit">save media settings</button>
   </div>
 </form>
+</div>
 </div>
 </details>
 </section>
@@ -140,6 +219,7 @@ fn render_admin_maintenance_section(
         db_size_str = db_size_str,
         ffmpeg_timeout_secs = ffmpeg_timeout_secs,
         ffmpeg_timeout_help = escape_html(ffmpeg_timeout_help),
+        media_detection_cards = media_detection_cards,
         ffmpeg_timeout_min = crate::config::MIN_FFMPEG_TIMEOUT_SECS,
         ffmpeg_timeout_max = crate::config::MAX_FFMPEG_TIMEOUT_SECS,
         media_settings_open_attr = media_settings_open_attr,
