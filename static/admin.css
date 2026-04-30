@@ -1728,6 +1728,10 @@ html:not([data-theme]) .admin-panel h1 {
   max-width: 100%;
 }
 
+.board-settings-grid .admin-input-compact {
+  max-width: 10rem;
+}
+
 .board-settings-grid input:focus {
   border-color: var(--border-glow);
 }

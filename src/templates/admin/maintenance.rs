@@ -170,7 +170,7 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
   <div class="board-settings-grid admin-settings-grid">
     <label title="Slow systems may need a higher value for ffmpeg video conversion jobs.">
       Video re-encoding timeout (seconds)
-      <input type="number" name="ffmpeg_timeout_secs" value="{ffmpeg_timeout_secs}" min="{ffmpeg_timeout_min}" max="{ffmpeg_timeout_max}" step="1" inputmode="numeric" style="font-family:inherit" required>
+      <input type="number" name="ffmpeg_timeout_secs" value="{ffmpeg_timeout_secs}" min="{ffmpeg_timeout_min}" max="{ffmpeg_timeout_max}" step="1" inputmode="numeric" class="admin-input-compact" style="font-family:inherit" required>
     </label>
   </div>
   <p class="admin-meta-note admin-meta-note-spaced">
