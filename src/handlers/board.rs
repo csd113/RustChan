@@ -30,7 +30,9 @@ use crate::{
     middleware::{validate_csrf, AppState},
     models::{Board, Pagination, SearchQuery, SEARCH_QUERY_MAX_CHARS},
     templates,
-    utils::crypto::{hash_ip, new_csrf_token, sha256_hex, verify_password},
+    utils::crypto::{
+        hash_ip, make_scoped_csrf_form_token, new_csrf_token, sha256_hex, verify_password,
+    },
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
@@ -250,6 +252,26 @@ pub fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
     } else {
         Err(AppError::Forbidden("CSRF token mismatch.".into()))
     }
+}
+
+pub(crate) fn admin_scoped_csrf_token(
+    jar: &CookieJar,
+    admin_session_id: Option<&str>,
+    is_admin: bool,
+) -> Option<String> {
+    if !is_admin {
+        return None;
+    }
+    let raw = jar
+        .get("csrf_token")
+        .map(axum_extra::extract::cookie::Cookie::value)
+        .filter(|value| !value.is_empty())?;
+    let session_id = admin_session_id.filter(|value| !value.is_empty())?;
+    Some(make_scoped_csrf_form_token(
+        raw,
+        &CONFIG.cookie_secret,
+        session_id,
+    ))
 }
 
 pub fn has_nsfw_consent(jar: &CookieJar) -> bool {

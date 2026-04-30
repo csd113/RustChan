@@ -13,7 +13,7 @@ use crate::{
     db::{self},
     error::{AppError, Result},
     handlers::{
-        board::{check_csrf_jar, ensure_csrf},
+        board::{admin_scoped_csrf_token, check_csrf_jar, ensure_csrf},
         parse_post_multipart, posting, render,
     },
     middleware::AppState,
@@ -141,7 +141,16 @@ pub async fn view_thread(
         })
         .collect::<std::collections::BTreeMap<_, _>>();
     let boards_ver = crate::templates::live_boards_version();
-    let admin_tag = if page_data.is_admin { "-a" } else { "" };
+    let admin_csrf = admin_scoped_csrf_token(&jar, admin_session_id.as_deref(), page_data.is_admin);
+    let admin_tag = admin_csrf.as_deref().map_or_else(String::new, |token| {
+        format!(
+            "-a{}",
+            crate::utils::crypto::sha256_hex(token.as_bytes())
+                .chars()
+                .take(12)
+                .collect::<String>()
+        )
+    });
     let post_tag = if can_post { "-p1" } else { "-p0" };
     let greentext_tag = if page_data.board.collapse_greentext {
         "-cg1"
@@ -214,6 +223,7 @@ pub async fn view_thread(
     let html = render::render_thread_page(
         &page_data,
         &csrf,
+        admin_csrf.as_deref(),
         None,
         success_message,
         None,
@@ -353,9 +363,21 @@ pub async fn post_reply(
                     admin_session_err.as_deref(),
                     &CONFIG.cookie_secret,
                 )?;
+                let admin_csrf_for_error = if page_data.is_admin {
+                    admin_session_err.as_deref().map(|session_id| {
+                        crate::utils::crypto::make_scoped_csrf_form_token(
+                            &csrf_for_error,
+                            &CONFIG.cookie_secret,
+                            session_id,
+                        )
+                    })
+                } else {
+                    None
+                };
                 Ok(render::render_thread_page(
                     &page_data,
                     &csrf_for_error,
+                    admin_csrf_for_error.as_deref(),
                     Some(&msg),
                     None,
                     Some(&post_form_state),
@@ -1237,6 +1259,7 @@ pub async fn thread_updates(
                         crate::templates::thread::RenderPostOpts {
                             show_delete: false,
                             is_admin: false,
+                            admin_csrf_token: None,
                             show_media: true,
                             allow_editing: false, // no edit link in auto-appended HTML; reload restores it
                             allow_self_delete: false,
@@ -1262,6 +1285,7 @@ pub async fn thread_updates(
                                 crate::templates::thread::RenderPostOpts {
                                     show_delete: false,
                                     is_admin: false,
+                                    admin_csrf_token: None,
                                     show_media: true,
                                     allow_editing: false,
                                     allow_self_delete: false,

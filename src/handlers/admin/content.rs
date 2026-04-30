@@ -657,6 +657,33 @@ mod tests {
         headers
     }
 
+    fn tunneled_admin_headers() -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            axum::http::HeaderValue::from_static("demo.serveo.net"),
+        );
+        headers.insert(header::ORIGIN, axum::http::HeaderValue::from_static("null"));
+        headers.insert(
+            header::REFERER,
+            axum::http::HeaderValue::from_static("https://demo.serveo.net/test/thread/1"),
+        );
+        headers
+    }
+
+    fn cross_origin_headers() -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            axum::http::HeaderValue::from_static("demo.serveo.net"),
+        );
+        headers.insert(
+            header::ORIGIN,
+            axum::http::HeaderValue::from_static("https://attacker.test"),
+        );
+        headers
+    }
+
     fn seed_admin_data() -> (crate::middleware::AppState, i64, i64, i64) {
         let state = crate::test_support::app_state();
         let conn = state.db.get().expect("db connection");
@@ -851,6 +878,106 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .expect("location header");
         assert_eq!(location, format!("/fallback/thread/{thread_id}"));
+    }
+
+    #[tokio::test]
+    async fn admin_delete_post_accepts_session_scoped_csrf_over_https_tunnel() {
+        let (state, thread_id, reply_id, _board_id) = seed_admin_data();
+
+        let response = admin_delete_post(
+            State(state),
+            build_admin_jar(),
+            tunneled_admin_headers(),
+            crate::test_support::connect_info(),
+            Form(AdminDeletePostForm {
+                post_id: reply_id,
+                board: "test".to_string(),
+                csrf: Some(admin_signed_csrf()),
+            }),
+        )
+        .await
+        .expect("handler response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("location header");
+        assert_eq!(location, format!("/test/thread/{thread_id}"));
+    }
+
+    #[tokio::test]
+    async fn admin_delete_thread_accepts_session_scoped_csrf_over_https_tunnel() {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data();
+
+        let response = admin_delete_thread(
+            State(state),
+            build_admin_jar(),
+            tunneled_admin_headers(),
+            crate::test_support::connect_info(),
+            Form(AdminDeleteThreadForm {
+                thread_id,
+                board: "test".to_string(),
+                csrf: Some(admin_signed_csrf()),
+            }),
+        )
+        .await
+        .expect("handler response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("location header");
+        assert_eq!(location, "/test");
+    }
+
+    #[tokio::test]
+    async fn admin_delete_post_rejects_generic_public_csrf_token() {
+        let (state, _thread_id, reply_id, _board_id) = seed_admin_data();
+        let generic_csrf = crate::utils::crypto::make_csrf_form_token(
+            "csrf123",
+            &crate::config::CONFIG.cookie_secret,
+        );
+
+        let error = admin_delete_post(
+            State(state),
+            build_admin_jar(),
+            tunneled_admin_headers(),
+            crate::test_support::connect_info(),
+            Form(AdminDeletePostForm {
+                post_id: reply_id,
+                board: "test".to_string(),
+                csrf: Some(generic_csrf),
+            }),
+        )
+        .await
+        .expect_err("generic token rejected");
+
+        assert!(error.to_string().contains("CSRF token mismatch"));
+    }
+
+    #[tokio::test]
+    async fn admin_delete_thread_rejects_cross_origin_request() {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data();
+
+        let error = admin_delete_thread(
+            State(state),
+            build_admin_jar(),
+            cross_origin_headers(),
+            crate::test_support::connect_info(),
+            Form(AdminDeleteThreadForm {
+                thread_id,
+                board: "test".to_string(),
+                csrf: Some(admin_signed_csrf()),
+            }),
+        )
+        .await
+        .expect_err("cross-origin request rejected");
+
+        assert!(error.to_string().contains("Origin/Referer origin mismatch"));
     }
 
     #[tokio::test]
