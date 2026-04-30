@@ -26,7 +26,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     };
     let db_warn_banner = if view.maintenance.db_size_warning {
         format!(
-            r#"<div class="admin-flash flash-error" style="margin-bottom:0.75rem">
+            r#"<div class="admin-flash flash-error admin-flash-spaced">
 &#9888; <strong>Database size warning:</strong> The database file has exceeded the configured
 warning threshold ({size}). Consider running <strong>VACUUM</strong> below or archiving
 old boards to prevent query performance degradation.

@@ -53,6 +53,21 @@
     }
   }
 
+  function firstChildDetails(node) {
+    if (!node || !node.children) return null;
+    for (var i = 0; i < node.children.length; i += 1) {
+      var child = node.children[i];
+      if (child.tagName && child.tagName.toLowerCase() === 'details') {
+        return child;
+      }
+      if (child.tagName && child.tagName.toLowerCase() === 'section') {
+        var nested = firstChildDetails(child);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  }
+
   function openHashTargetDetails() {
     if (!window.location.hash || window.location.hash.length < 2) return;
     var id = decodeURIComponent(window.location.hash.slice(1));
@@ -60,6 +75,8 @@
     var target = document.getElementById(id);
     if (!target) return;
     openDetailsAncestors(target);
+    var dropdown = firstChildDetails(target);
+    if (dropdown) dropdown.open = true;
     if (typeof target.scrollIntoView === 'function') {
       target.scrollIntoView({ block: 'start' });
     }

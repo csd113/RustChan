@@ -68,6 +68,10 @@
   color: #ff9090;
 }
 
+.admin-flash-spaced {
+  margin-bottom: 0.75rem;
+}
+
 .admin-panel h1 {
   color: var(--green-bright);
   font-size: 1.1rem;

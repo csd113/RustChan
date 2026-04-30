@@ -7,7 +7,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
         .backup_warning
         .map_or_else(String::new, |message| {
             format!(
-                r#"<div class="error" style="margin-bottom:0.75rem">{}</div>"#,
+                r#"<div class="admin-flash flash-error admin-flash-spaced">{}</div>"#,
                 escape_html(message)
             )
         });
