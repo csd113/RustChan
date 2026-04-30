@@ -357,12 +357,28 @@
     updateFieldMirrors(form, input);
   }
 
+  function isHexColor(value) {
+    return /^#[0-9a-fA-F]{6}$/.test(value || '');
+  }
+
   function updateFieldMirrors(form, input) {
     if (!input || !input.name) return;
     var colorMirror = form.querySelector('[data-theme-builder-value-for="' + input.name + '"]');
     if (colorMirror) colorMirror.textContent = input.value;
+    var colorPicker = form.querySelector('[data-theme-builder-color-for="' + input.name + '"]');
+    if (colorPicker && isHexColor(input.value)) colorPicker.value = input.value;
     var rangeMirror = form.querySelector('[data-theme-builder-range-value="' + input.name + '"]');
     if (rangeMirror) rangeMirror.textContent = input.value + 'px';
+  }
+
+  function syncColorPickerField(form, picker) {
+    var fieldName = picker.getAttribute('data-theme-builder-color-for');
+    if (!fieldName) return null;
+    var input = form.querySelector('[name="' + fieldName + '"]');
+    if (!input) return null;
+    input.value = picker.value;
+    updateFieldMirrors(form, input);
+    return input;
   }
 
   function applyPreset(form, presetName) {
@@ -428,12 +444,20 @@
       syncPreview(builder);
       builder.addEventListener('input', function (event) {
         var target = event.target;
+        if (!target) return;
+        if (target.hasAttribute('data-theme-builder-color-for')) {
+          target = syncColorPickerField(builder, target);
+        }
         if (!target || !target.name) return;
         updateFieldMirrors(builder, target);
         syncPreview(builder);
       });
       builder.addEventListener('change', function (event) {
         var target = event.target;
+        if (!target) return;
+        if (target.hasAttribute('data-theme-builder-color-for')) {
+          target = syncColorPickerField(builder, target);
+        }
         if (!target || !target.name) return;
         if (target.name === 'base_preset') {
           applyPreset(builder, target.value);

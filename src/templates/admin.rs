@@ -1950,7 +1950,11 @@ mod tests {
         );
 
         assert!(html.contains("guided theme builder"));
-        assert!(html.contains("Optional advanced CSS"));
+        assert!(html.contains("Page and background"));
+        assert!(html.contains("Posts/cards"));
+        assert!(html.contains("Forms/buttons"));
+        assert!(html.contains("Advanced/legacy CSS"));
+        assert!(html.contains("data-theme-builder-color-for=\"background_color\""));
         assert!(html.contains("legacy custom CSS theme"));
         assert!(html.contains("Guided Forest"));
         assert!(html.contains("Legacy Sunset"));

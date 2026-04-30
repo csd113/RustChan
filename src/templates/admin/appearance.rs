@@ -189,11 +189,14 @@ fn render_preset_options(selected_slug: &str) -> String {
 
 fn render_color_control(label: &str, name: &str, value: &str, help: &str) -> String {
     format!(
-        r#"<label class="theme-builder-color-field">{label}
-  <input type="color" name="{name}" value="{value}" data-theme-builder-field="{name}">
-  <span class="theme-builder-color-value" data-theme-builder-value-for="{name}">{value}</span>
+        r##"<div class="theme-builder-color-field">
+  <span class="theme-builder-field-label">{label}</span>
+  <span class="theme-builder-color-row">
+    <input type="color" value="{value}" data-theme-builder-color-for="{name}" aria-label="{label} color picker">
+    <label class="theme-builder-hex-field"><span>Hex</span><input type="text" name="{name}" value="{value}" maxlength="7" pattern="#[0-9A-Fa-f]{{6}}" spellcheck="false" data-theme-builder-field="{name}"></label>
+  </span>
   <small>{help}</small>
-</label>"#,
+</div>"##,
         label = escape_html(label),
         name = escape_html(name),
         value = escape_html(value),
@@ -201,11 +204,26 @@ fn render_color_control(label: &str, name: &str, value: &str, help: &str) -> Str
     )
 }
 
+fn render_color_group(title: &str, description: &str, controls: &str) -> String {
+    format!(
+        r#"<div class="theme-builder-color-group">
+  <div class="theme-builder-group-header">
+    <h4>{title}</h4>
+    <p>{description}</p>
+  </div>
+  <div class="theme-builder-colors-grid">{controls}</div>
+</div>"#,
+        title = escape_html(title),
+        description = escape_html(description),
+        controls = controls,
+    )
+}
+
 #[allow(clippy::too_many_lines)]
 fn render_builder_sections(config: &ThemeBuilderConfig) -> String {
     let basics = format!(
         r#"<details class="theme-builder-section" open>
-  <summary>Basics</summary>
+  <summary><span>Basics</span><small>Preset, density, type, and corner shape.</small></summary>
   <div class="theme-builder-section-body board-settings-grid">
     <label>Starting preset
       <select name="base_preset" data-theme-builder-field="base_preset">{preset_options}</select>
@@ -261,175 +279,224 @@ fn render_builder_sections(config: &ThemeBuilderConfig) -> String {
         },
         radius = config.border_radius_px,
     );
-    let colors = format!(
-        r#"<details class="theme-builder-section" open>
-  <summary>Colors</summary>
-  <div class="theme-builder-section-body theme-builder-colors-grid">
-    {background}{panel}{text}{muted}{link}{link_hover}{border}{quote}{meta}{success}{danger}
-  </div>
-</details>"#,
+    let page_colors = format!(
+        "{background}{panel}{border}",
         background = render_color_control(
-            "Background",
+            "Page background",
             "background_color",
             &config.background_color,
-            "Main page background.",
+            "The main page background behind boards, threads, and admin surfaces.",
         ),
         panel = render_color_control(
-            "Panel/Card",
+            "Panel background",
             "panel_color",
             &config.panel_color,
-            "Boxes like cards and panels.",
-        ),
-        text = render_color_control(
-            "Text",
-            "text_color",
-            &config.text_color,
-            "Main readable text."
-        ),
-        muted = render_color_control(
-            "Muted Text",
-            "muted_text_color",
-            &config.muted_text_color,
-            "Helper text and softer labels.",
-        ),
-        link = render_color_control(
-            "Link",
-            "link_color",
-            &config.link_color,
-            "Standard link color."
-        ),
-        link_hover = render_color_control(
-            "Link Hover",
-            "link_hover_color",
-            &config.link_hover_color,
-            "Link color when hovered.",
+            "Board cards, admin sections, and larger content boxes.",
         ),
         border = render_color_control(
-            "Border",
+            "Borders and dividers",
             "border_color",
             &config.border_color,
-            "General outline and divider color.",
+            "General outlines, dividers, and subtle separation lines.",
+        ),
+    );
+    let text_colors = format!(
+        "{text}{muted}{link}{link_hover}{quote}{meta}",
+        text = render_color_control(
+            "Main text",
+            "text_color",
+            &config.text_color,
+            "Primary readable text.",
+        ),
+        muted = render_color_control(
+            "Secondary text",
+            "muted_text_color",
+            &config.muted_text_color,
+            "Helper text, softer labels, and quiet details.",
+        ),
+        link = render_color_control(
+            "Links",
+            "link_color",
+            &config.link_color,
+            "Normal link color.",
+        ),
+        link_hover = render_color_control(
+            "Links on hover",
+            "link_hover_color",
+            &config.link_hover_color,
+            "Link color while the pointer is over it.",
         ),
         quote = render_color_control(
-            "Quote",
+            "Quoted text",
             "quote_color",
             &config.quote_color,
-            "Greentext and quotes."
+            "Greentext and quoted lines.",
         ),
         meta = render_color_control(
-            "Metadata",
+            "Post details",
             "meta_text_color",
             &config.meta_text_color,
             "Timestamps, post numbers, and secondary post info.",
         ),
+    );
+    let status_colors = format!(
+        "{success}{danger}",
         success = render_color_control(
-            "Success/OK",
+            "Success status",
             "success_color",
             &config.success_color,
             "Positive notices and success accents.",
         ),
         danger = render_color_control(
-            "Error/Alert",
+            "Warning status",
             "danger_color",
             &config.danger_color,
-            "Warnings and error accents.",
+            "Warnings, validation messages, and error accents.",
         ),
     );
-    let posts = format!(
-        r#"<details class="theme-builder-section">
-  <summary>Posts &amp; Cards</summary>
-  <div class="theme-builder-section-body theme-builder-colors-grid">
-    {card}{op_card}{header_bg}{header_text}{header_border}
+    let colors = format!(
+        r#"<details class="theme-builder-section" open>
+  <summary><span>Colors</span><small>Core page, text, link, and status colors.</small></summary>
+  <div class="theme-builder-section-body theme-builder-group-stack">
+    {page_group}{text_group}{status_group}
   </div>
 </details>"#,
+        page_group = render_color_group(
+            "Page and background",
+            "The broad surfaces that frame the site.",
+            &page_colors,
+        ),
+        text_group = render_color_group(
+            "Text and links",
+            "Readable text, links, quotes, and post metadata.",
+            &text_colors,
+        ),
+        status_group = render_color_group(
+            "Alerts and status",
+            "Feedback colors used by success and validation messages.",
+            &status_colors,
+        ),
+    );
+    let post_colors = format!(
+        "{card}{op_card}{header_bg}{header_text}{header_border}",
         card = render_color_control(
-            "Post Background",
+            "Reply card background",
             "card_color",
             &config.card_color,
-            "Reply cards and regular post boxes.",
+            "Regular reply cards and post boxes.",
         ),
         op_card = render_color_control(
-            "Thread Starter",
+            "Thread starter background",
             "op_card_color",
             &config.op_card_color,
             "Original post card background.",
         ),
         header_bg = render_color_control(
-            "Header/Nav Background",
+            "Site header background",
             "header_background_color",
             &config.header_background_color,
             "Top site bar background.",
         ),
         header_text = render_color_control(
-            "Header/Nav Text",
+            "Site header text",
             "header_text_color",
             &config.header_text_color,
             "Top site bar links and labels.",
         ),
         header_border = render_color_control(
-            "Header/Nav Border",
+            "Site header border",
             "header_border_color",
             &config.header_border_color,
             "Top site bar bottom border.",
         ),
     );
-    let forms = format!(
+    let posts = format!(
         r#"<details class="theme-builder-section">
-  <summary>Forms &amp; Buttons</summary>
-  <div class="theme-builder-section-body theme-builder-colors-grid">
-    {input_bg}{input_text}{input_border}{button_bg}{button_text}{button_border}{button_hover}
+  <summary><span>Posts/cards</span><small>Cards, replies, thread starters, and the site header.</small></summary>
+  <div class="theme-builder-section-body theme-builder-group-stack">
+    {post_group}
   </div>
 </details>"#,
+        post_group = render_color_group(
+            "Cards and navigation",
+            "Post surfaces plus the header that frames them.",
+            &post_colors,
+        ),
+    );
+    let input_colors = format!(
+        "{input_bg}{input_text}{input_border}",
         input_bg = render_color_control(
-            "Input Background",
+            "Field background",
             "input_background_color",
             &config.input_background_color,
             "Text fields and textarea background.",
         ),
         input_text = render_color_control(
-            "Input Text",
+            "Field text",
             "input_text_color",
             &config.input_text_color,
             "Text inside inputs and textareas.",
         ),
         input_border = render_color_control(
-            "Input Border",
+            "Field border",
             "input_border_color",
             &config.input_border_color,
             "Outline for form fields.",
         ),
+    );
+    let button_colors = format!(
+        "{button_bg}{button_text}{button_border}{button_hover}",
         button_bg = render_color_control(
-            "Button Background",
+            "Button background",
             "button_background_color",
             &config.button_background_color,
             "Default button background.",
         ),
         button_text = render_color_control(
-            "Button Text",
+            "Button text",
             "button_text_color",
             &config.button_text_color,
             "Button label color.",
         ),
         button_border = render_color_control(
-            "Button Border",
+            "Button border",
             "button_border_color",
             &config.button_border_color,
             "Button outline color.",
         ),
         button_hover = render_color_control(
-            "Button Hover",
+            "Button hover background",
             "button_hover_color",
             &config.button_hover_color,
             "Button background on hover.",
         ),
     );
+    let forms = format!(
+        r#"<details class="theme-builder-section">
+  <summary><span>Forms/buttons</span><small>Inputs, textareas, and action buttons.</small></summary>
+  <div class="theme-builder-section-body theme-builder-group-stack">
+    {input_group}{button_group}
+  </div>
+</details>"#,
+        input_group = render_color_group(
+            "Form fields",
+            "Inputs and textareas used for posting and admin forms.",
+            &input_colors,
+        ),
+        button_group = render_color_group(
+            "Buttons",
+            "Primary action buttons and their hover state.",
+            &button_colors,
+        ),
+    );
     let advanced = format!(
         r#"<details class="theme-builder-section">
-  <summary>Advanced</summary>
+  <summary><span>Advanced/legacy CSS</span><small>Manual CSS for legacy themes or small finishing touches.</small></summary>
   <div class="theme-builder-section-body">
-    <label>Optional advanced CSS
+    <div class="theme-builder-warning">Guided builder fields are safer and easier to maintain. Use manual CSS only for legacy/manual themes or small scoped overrides; imports and script-like URLs are rejected.</div>
+    <label>Manual CSS overrides
       <textarea name="advanced_css" rows="8" spellcheck="false" data-theme-builder-field="advanced_css">{advanced_css}</textarea>
-      <small>Optional. Use this only for small finishing touches after the guided controls. Imports and script-like URLs are rejected.</small>
+      <small>Optional. Keep overrides scoped to this theme so they do not leak into built-in themes.</small>
     </label>
   </div>
 </details>"#,
@@ -443,8 +510,8 @@ fn render_builder_preview(config: &ThemeBuilderConfig, slug: &str) -> String {
     format!(
         r##"<section class="theme-builder-preview-card">
   <div class="admin-card-header">
-    <h4>Preview</h4>
-    <p>Representative surfaces update as you change values when JavaScript is available. Saved themes still render server-side without JavaScript.</p>
+    <h4>Theme preview</h4>
+    <p>Representative RustChan surfaces update when JavaScript is available. Saving still posts the form normally.</p>
   </div>
   <style data-theme-preview-style></style>
   <div class="theme-preview-shell" data-theme-preview data-theme-preview-slug="{slug}" data-theme-preview-preset="{preset}">
@@ -454,17 +521,17 @@ fn render_builder_preview(config: &ThemeBuilderConfig, slug: &str) -> String {
     </div>
     <div class="theme-preview-panels">
       <article class="theme-preview-panel">
-        <h5>Homepage card</h5>
-        <p class="theme-preview-muted">Board subtitle and secondary text.</p>
+        <div class="theme-preview-card-title">/tech/</div>
+        <p class="theme-preview-muted">Board subtitle and home card summary.</p>
         <a href="#">open board</a>
       </article>
       <article class="theme-preview-post theme-preview-op">
-        <div class="theme-preview-meta">OP 04/29/2026 No.101</div>
-        <p><span class="theme-preview-quote">&gt; quoted line</span><br>Starter post content with a <a href="#">link</a>.</p>
+        <div class="theme-preview-meta">OP 04/29/2026 No.101 <a href="#">>>102</a></div>
+        <p><span class="theme-preview-quote">&gt; quoted line</span><br>Thread starter content with a <a href="#">link</a>.</p>
       </article>
       <article class="theme-preview-post">
-        <div class="theme-preview-meta">Reply No.102</div>
-        <p>Reply card with metadata, links, and regular body text.</p>
+        <div class="theme-preview-meta">Reply No.102 <a href="#">>>101</a></div>
+        <p>Reply card with metadata, quotelinks, and regular body text.</p>
       </article>
       <form class="theme-preview-form">
         <input type="text" value="Name">
@@ -504,11 +571,11 @@ fn render_legacy_editor(theme_slug: &str, custom_css: &str) -> String {
     format!(
         r#"<input type="hidden" name="theme_mode" value="legacy">
 <div class="theme-editor-built-in-note">
-  <p>This is a legacy custom CSS theme. RustChan will keep loading it as-is for compatibility. You can still edit the raw CSS below, or create a new guided theme if you want the simpler builder.</p>
+  <p>This is a legacy custom CSS theme. RustChan will keep loading it as-is for compatibility. Guided builder themes are safer and easier to maintain; this editor is for legacy/manual CSS only.</p>
 </div>
 <div class="theme-editor-css-panel">
   <div class="theme-editor-panel-header">
-    <h4>Legacy custom CSS</h4>
+    <h4>Advanced/legacy CSS</h4>
     <p>Scope everything to <code>html[data-theme="{slug}"]</code>. This is the advanced escape hatch.</p>
   </div>
   <textarea name="custom_css" rows="18" spellcheck="false">{custom_css}</textarea>
@@ -541,7 +608,7 @@ fn render_theme_metadata_fields(theme: &crate::models::Theme) -> String {
             r#"<div class="board-settings-grid">
         <label>Display name<input type="text" name="display_name" value="{name}" maxlength="64" required></label>
         <label>Slug<input type="text" name="slug" value="{slug}" maxlength="32"></label>
-        <label>Swatch<input type="color" name="swatch_hex" value="{swatch}"></label>
+        <label>Theme picker swatch<input type="color" name="swatch_hex" value="{swatch}"></label>
       </div>
       <div class="board-settings-grid" style="margin-top:0.65rem">
         <label>Description<input type="text" name="description" value="{description}" maxlength="256"></label>
@@ -825,24 +892,19 @@ fn render_admin_appearance_section(
   <section class="theme-guide-card">
     <div class="admin-card-header">
       <h3>// guided theme builder</h3>
-      <p>Build a theme with presets, color pickers, spacing controls, and safe system-font choices. RustChan still saves the final theme as regular server-rendered CSS, so Tor and no-JS visitors see the saved result normally.</p>
+      <p>Build a custom theme with friendly controls, paired hex fields, and a representative preview. RustChan still saves the result as regular server-rendered CSS.</p>
     </div>
     <div class="theme-guide-grid">
       <div class="theme-guide-block">
-        <h4>Main flow</h4>
-        <p>1. Pick a built-in preset.</p>
-        <p>2. Adjust basics, colors, posts, and forms.</p>
-        <p>3. Preview the result.</p>
-        <p>4. Save it as a custom theme.</p>
+        <h4>Builder flow</h4>
+        <p>Start with a preset, tune the grouped controls, then save a custom theme.</p>
       </div>
       <div class="theme-guide-block">
         <h4>Compatibility</h4>
-        <p>Built-in themes stay untouched.</p>
-        <p>Saved custom themes from older versions still load.</p>
-        <p>Older raw-CSS themes are shown as legacy advanced themes instead of being auto-migrated.</p>
+        <p>Built-in themes stay untouched, and older raw-CSS themes remain editable in legacy mode.</p>
       </div>
     </div>
-    <p class="theme-guide-note">Need full control? Guided themes include a smaller advanced CSS box for finishing touches, while older raw CSS themes remain editable in legacy mode.</p>
+    <p class="theme-guide-note">Manual CSS is clearly separated in Advanced/legacy CSS so the primary builder stays easy to scan.</p>
   </section>
 
   <section class="theme-create-card">
