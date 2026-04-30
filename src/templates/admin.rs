@@ -20,19 +20,27 @@ use super::{base_layout, fmt_ts, fmt_ts_short, render_pagination, urlencoding_si
 #[must_use]
 pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board]) -> String {
     let err_html = error
-        .map(|e| format!(r#"<div class="error">{}</div>"#, escape_html(e)))
+        .map(|e| {
+            format!(
+                r#"<div class="error admin-login-error" role="alert">{}</div>"#,
+                escape_html(e)
+            )
+        })
         .unwrap_or_default();
 
     let body = format!(
         r#"<div class="page-box admin-login">
-<h2>[ admin login ]</h2>
+<div class="admin-login-header">
+  <h1>Admin Login</h1>
+  <p>Sign in to manage boards, moderation, backups, and site settings.</p>
+</div>
 {err}
 <form method="POST" action="/admin/login" class="admin-login-form">
 <input type="hidden" name="_csrf" value="{csrf}">
-<label class="admin-login-field">username
+<label class="admin-login-field">Username
   <input type="text" name="username" autofocus required autocomplete="username">
 </label>
-<label class="admin-login-field">password
+<label class="admin-login-field">Password
   <input type="password" name="password" required autocomplete="current-password">
 </label>
 <div class="admin-login-actions">
@@ -984,15 +992,15 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
 <section class="admin-section">
 <h2>// result</h2>
 <div class="admin-table-wrap admin-table-wrap-compact">
-<table class="admin-table" style="max-width:420px">
+<table class="admin-table admin-result-table">
 <tbody>
   <tr><td>Before</td><td><strong>{before}</strong></td></tr>
   <tr><td>After</td><td><strong>{after}</strong></td></tr>
-  <tr><td>Reclaimed</td><td><strong style="color:var(--green-bright)">{saved}</strong> ({pct}%)</td></tr>
+  <tr><td>Reclaimed</td><td><strong class="admin-status-ok">{saved}</strong> ({pct}%)</td></tr>
 </tbody>
 </table>
 </div>
-<p style="margin-top:1rem">
+<p class="admin-result-actions">
   <a href="/admin/panel">&#8592; back to admin panel</a>
 </p>
 </section>
@@ -1241,8 +1249,8 @@ pub fn admin_db_repair_running_page(csrf_token: &str, job_id: u64, started_at: i
 <h2>// maintenance rebuild running</h2>
 <div class="admin-result-card">
 <p>Maintenance rebuild started at <code>{started_at}</code>.</p>
-<div class="compress-progress" data-db-repair-progress data-db-repair-job-id="{job_id}" data-db-repair-progress-url="{progress_url}" style="display:block;margin:0.75rem 0">
-  <div class="compress-progress-track"><div class="compress-progress-bar" data-db-repair-progress-bar style="width:5%"></div></div>
+<div class="compress-progress admin-progress-spaced" data-db-repair-progress data-db-repair-job-id="{job_id}" data-db-repair-progress-url="{progress_url}">
+  <div class="compress-progress-track"><div class="compress-progress-bar admin-progress-bar-start" data-db-repair-progress-bar></div></div>
   <div class="compress-progress-text" data-db-repair-progress-text>Starting maintenance rebuild...</div>
 </div>
 <p class="admin-meta-note">This page updates live while the backup and database rebuild finish.</p>
@@ -2077,10 +2085,16 @@ mod tests {
         assert!(
             html.contains(r#"<form method="POST" action="/admin/login" class="admin-login-form">"#)
         );
+        assert!(html.contains("<h1>Admin Login</h1>"));
+        assert!(
+            html.contains(r#"<div class="error admin-login-error" role="alert">bad login</div>"#)
+        );
         assert!(html.contains(r#"<input type="hidden" name="_csrf" value="csrf">"#));
+        assert!(html.contains(r#"<label class="admin-login-field">Username"#));
         assert!(html.contains(
             r#"<input type="text" name="username" autofocus required autocomplete="username">"#
         ));
+        assert!(html.contains(r#"<label class="admin-login-field">Password"#));
         assert!(html.contains(
             r#"<input type="password" name="password" required autocomplete="current-password">"#
         ));

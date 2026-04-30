@@ -56,20 +56,19 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut full_backup_rows = String::new();
     if view.backups.full_backups.is_empty() {
-        full_backup_rows.push_str(
-            "<tr><td colspan=\"5\" style=\"color:var(--text-dim);text-align:center\">no backups yet</td></tr>",
-        );
+        full_backup_rows
+            .push_str(r#"<tr><td colspan="5" class="admin-table-empty">no backups yet</td></tr>"#);
     }
     for bf in view.backups.full_backups {
         let size_fmt = format_file_size(bf.size_bytes.cast_signed());
         let status_html = if bf.verified {
             format!(
-                r#"<span style="color:var(--green)">{}</span>"#,
+                r#"<span class="backup-verification-ok">{}</span>"#,
                 escape_html(&bf.verification_note)
             )
         } else {
             format!(
-                r#"<span style="color:var(--red)" title="{title}">verification failed</span>"#,
+                r#"<span class="backup-verification-error" title="{title}">verification failed</span>"#,
                 title = escape_html(&bf.verification_note)
             )
         };
@@ -262,19 +261,19 @@ fn render_board_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut board_backup_rows = String::new();
     if view.backups.board_backups.is_empty() {
         board_backup_rows.push_str(
-            "<tr><td colspan=\"5\" style=\"color:var(--text-dim);text-align:center\">no board backups yet</td></tr>",
+            r#"<tr><td colspan="5" class="admin-table-empty">no board backups yet</td></tr>"#,
         );
     }
     for bf in view.backups.board_backups {
         let size_fmt = format_file_size(bf.size_bytes.cast_signed());
         let status_html = if bf.verified {
             format!(
-                r#"<span style="color:var(--green)">{}</span>"#,
+                r#"<span class="backup-verification-ok">{}</span>"#,
                 escape_html(&bf.verification_note)
             )
         } else {
             format!(
-                r#"<span style="color:var(--red)" title="{title}">verification failed</span>"#,
+                r#"<span class="backup-verification-error" title="{title}">verification failed</span>"#,
                 title = escape_html(&bf.verification_note)
             )
         };
@@ -358,11 +357,11 @@ fn render_admin_backups_section(
   <div class="board-settings-grid admin-settings-grid">
     <label title="0 disables scheduled full backups.">
       Hours between automated backups
-      <input type="number" name="auto_full_backup_interval_hours" value="{auto_full_backup_interval_hours}" min="0" max="8760" style="font-family:inherit">
+      <input type="number" name="auto_full_backup_interval_hours" value="{auto_full_backup_interval_hours}" min="0" max="8760">
     </label>
     <label title="When a saved full backup completes, the oldest saved full backups beyond this limit are deleted.">
       Full backups to keep
-      <input type="number" name="auto_full_backup_copies_to_keep" value="{auto_full_backup_copies_to_keep}" min="1" max="1000" style="font-family:inherit">
+      <input type="number" name="auto_full_backup_copies_to_keep" value="{auto_full_backup_copies_to_keep}" min="1" max="1000">
     </label>
   </div>
   <div class="backup-form-options full-backup-options">
@@ -409,8 +408,8 @@ fn render_admin_backups_section(
     <p>Download, restore, delete, or extract a single board from any saved full-site archive.</p>
   </div>
   <div class="admin-table-wrap">
-  <table class="admin-table backup-table" style="width:100%;border-collapse:collapse;font-size:0.85rem">
-  <thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th style="text-align:left">status</th><th></th></tr></thead>
+  <table class="admin-table backup-table">
+  <thead><tr><th>filename</th><th>size</th><th>created</th><th>status</th><th></th></tr></thead>
   <tbody>{full_backup_rows}</tbody>
   </table>
   </div>
@@ -454,8 +453,8 @@ fn render_admin_backups_section(
     <p>Board-level backups are usually created from the board cards above, then downloaded, restored, or deleted here.</p>
   </div>
   <div class="admin-table-wrap">
-  <table class="admin-table backup-table" style="width:100%;border-collapse:collapse;font-size:0.85rem">
-  <thead><tr style="color:var(--text-dim)"><th style="text-align:left">filename</th><th style="text-align:left">size</th><th style="text-align:left">created</th><th style="text-align:left">status</th><th></th></tr></thead>
+  <table class="admin-table backup-table">
+  <thead><tr><th>filename</th><th>size</th><th>created</th><th>status</th><th></th></tr></thead>
   <tbody>{board_backup_rows}</tbody>
   </table>
   </div>
