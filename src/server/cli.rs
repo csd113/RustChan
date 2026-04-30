@@ -62,7 +62,7 @@ pub enum AdminAction {
         /// Disable video uploads on this board (default: video allowed)
         #[arg(long = "no-videos")]
         no_videos: bool,
-        /// Disable audio uploads on this board (default: audio allowed)
+        /// Disable audio uploads on this board (default: audio disabled)
         #[arg(long = "no-audio")]
         no_audio: bool,
     },

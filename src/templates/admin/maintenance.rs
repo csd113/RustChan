@@ -1,6 +1,18 @@
 use super::{escape_html, format_file_size, AdminPanelViewModel};
 use std::fmt::Write;
 
+struct MaintenanceSectionView<'a> {
+    csrf_token: &'a str,
+    db_warn_banner: &'a str,
+    db_size_str: &'a str,
+    tor_section: &'a str,
+    ffmpeg_timeout_secs: u64,
+    ffmpeg_timeout_help: &'a str,
+    media_detection_cards: &'a str,
+    media_settings_open_attr: &'a str,
+    database_maintenance_open_attr: &'a str,
+}
+
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let media_settings_open_attr = if view.open_section == Some("media-settings") {
         " open"
@@ -42,61 +54,71 @@ old boards to prevent query performance degradation.
     let ffmpeg_timeout_help =
         crate::config::describe_timeout_secs(view.maintenance.ffmpeg_timeout_secs);
     let media_detection_cards = render_media_detection_cards(view);
-    render_admin_maintenance_section(
-        view.csrf_token,
-        &db_warn_banner,
-        &db_size_str,
-        &tor_section,
-        view.maintenance.ffmpeg_timeout_secs,
-        &ffmpeg_timeout_help,
-        &media_detection_cards,
+    let section_view = MaintenanceSectionView {
+        csrf_token: view.csrf_token,
+        db_warn_banner: &db_warn_banner,
+        db_size_str: &db_size_str,
+        tor_section: &tor_section,
+        ffmpeg_timeout_secs: view.maintenance.ffmpeg_timeout_secs,
+        ffmpeg_timeout_help: &ffmpeg_timeout_help,
+        media_detection_cards: &media_detection_cards,
         media_settings_open_attr,
         database_maintenance_open_attr,
-    )
+    };
+    render_admin_maintenance_section(&section_view)
 }
 
 fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
     let pdf_renderer = view
         .maintenance
+        .media_detection
         .pdf_thumbnail_renderer
         .as_deref()
         .unwrap_or("none");
-    let pdf_detail = if view.maintenance.pdf_thumbnail_renderer.is_some() {
+    let pdf_detail = if view
+        .maintenance
+        .media_detection
+        .pdf_thumbnail_renderer
+        .is_some()
+    {
         format!("selected renderer: {pdf_renderer}")
     } else {
         "using built-in generic PDF placeholder thumbnail".to_string()
     };
 
-    [
+    let mut cards = String::new();
+    for (label, ok, detail) in [
         (
             "ffmpeg",
-            view.maintenance.ffmpeg_available,
+            view.maintenance.media_detection.ffmpeg.is_detected(),
             "video thumbnails, waveform jobs, and transcoding entrypoint",
         ),
         (
             "ffprobe",
-            view.maintenance.ffprobe_available,
+            view.maintenance.media_detection.ffprobe.is_detected(),
             "WebM codec inspection for uploads that need it",
         ),
         (
             "WebP encoder",
-            view.maintenance.ffmpeg_webp_available,
+            view.maintenance.media_detection.webp_encoder.is_detected(),
             "image to WebP conversion",
         ),
         (
             "VP9/WebM pipeline",
-            view.maintenance.ffmpeg_vp9_available,
+            view.maintenance.media_detection.vp9_pipeline.is_detected(),
             "MP4 to WebM transcoding with VP9 + Opus",
         ),
         (
             "PDF thumbnails",
-            view.maintenance.pdf_thumbnail_renderer.is_some(),
+            view.maintenance
+                .media_detection
+                .pdf_thumbnail_renderer
+                .is_some(),
             &pdf_detail,
         ),
-    ]
-    .into_iter()
-    .map(|(label, ok, detail)| {
-        format!(
+    ] {
+        let _ = write!(
+            cards,
             r#"<article class="admin-detection-card">
   <div class="admin-detection-card-header">
     <h3>{label}</h3>
@@ -112,23 +134,12 @@ fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
             },
             status = if ok { "detected" } else { "missing" },
             detail = escape_html(detail),
-        )
-    })
-    .collect::<Vec<_>>()
-    .join("")
+        );
+    }
+    cards
 }
 
-fn render_admin_maintenance_section(
-    csrf_token: &str,
-    db_warn_banner: &str,
-    db_size_str: &str,
-    tor_section: &str,
-    ffmpeg_timeout_secs: u64,
-    ffmpeg_timeout_help: &str,
-    media_detection_cards: &str,
-    media_settings_open_attr: &str,
-    database_maintenance_open_attr: &str,
-) -> String {
+fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String {
     format!(
         r#"<div class="admin-panel-maintenance" id="maintenance">
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -214,16 +225,16 @@ fn render_admin_maintenance_section(
      ═══════════════════════════════════════════════════════════════════════════ -->
 {tor_section}
 </div>"#,
-        csrf = escape_html(csrf_token),
-        db_warn_banner = db_warn_banner,
-        db_size_str = db_size_str,
-        ffmpeg_timeout_secs = ffmpeg_timeout_secs,
-        ffmpeg_timeout_help = escape_html(ffmpeg_timeout_help),
-        media_detection_cards = media_detection_cards,
+        csrf = escape_html(view.csrf_token),
+        db_warn_banner = view.db_warn_banner,
+        db_size_str = view.db_size_str,
+        ffmpeg_timeout_secs = view.ffmpeg_timeout_secs,
+        ffmpeg_timeout_help = escape_html(view.ffmpeg_timeout_help),
+        media_detection_cards = view.media_detection_cards,
         ffmpeg_timeout_min = crate::config::MIN_FFMPEG_TIMEOUT_SECS,
         ffmpeg_timeout_max = crate::config::MAX_FFMPEG_TIMEOUT_SECS,
-        media_settings_open_attr = media_settings_open_attr,
-        database_maintenance_open_attr = database_maintenance_open_attr,
-        tor_section = tor_section,
+        media_settings_open_attr = view.media_settings_open_attr,
+        database_maintenance_open_attr = view.database_maintenance_open_attr,
+        tor_section = view.tor_section,
     )
 }

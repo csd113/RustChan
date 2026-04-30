@@ -614,6 +614,8 @@ struct BackupsDomainData {
     board_backups: Vec<BackupInfo>,
 }
 
+#[allow(clippy::struct_excessive_bools)]
+// This is a flat snapshot of independent maintenance capability flags read from app state.
 struct MaintenanceDomainData {
     db_size_bytes: i64,
     db_size_warning: bool,
@@ -853,11 +855,29 @@ fn render_admin_panel_from_snapshot(
             db_size_bytes: snapshot.db_size_bytes,
             db_size_warning: snapshot.db_size_warning,
             ffmpeg_timeout_secs: snapshot.ffmpeg_timeout_secs,
-            ffmpeg_available: snapshot.ffmpeg_available,
-            ffprobe_available: snapshot.ffprobe_available,
-            ffmpeg_webp_available: snapshot.ffmpeg_webp_available,
-            ffmpeg_vp9_available: snapshot.ffmpeg_vp9_available,
-            pdf_thumbnail_renderer: snapshot.pdf_thumbnail_renderer,
+            media_detection: crate::templates::AdminMediaDetectionView {
+                ffmpeg: if snapshot.ffmpeg_available {
+                    crate::templates::AdminDetectionStatus::Detected
+                } else {
+                    crate::templates::AdminDetectionStatus::Missing
+                },
+                ffprobe: if snapshot.ffprobe_available {
+                    crate::templates::AdminDetectionStatus::Detected
+                } else {
+                    crate::templates::AdminDetectionStatus::Missing
+                },
+                webp_encoder: if snapshot.ffmpeg_webp_available {
+                    crate::templates::AdminDetectionStatus::Detected
+                } else {
+                    crate::templates::AdminDetectionStatus::Missing
+                },
+                vp9_pipeline: if snapshot.ffmpeg_vp9_available {
+                    crate::templates::AdminDetectionStatus::Detected
+                } else {
+                    crate::templates::AdminDetectionStatus::Missing
+                },
+                pdf_thumbnail_renderer: snapshot.pdf_thumbnail_renderer,
+            },
         },
         tor_address: tor_address.as_deref(),
         flash: flash_ref,

@@ -948,7 +948,7 @@ fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_board_with_media_flags, get_all_boards_with_stats, get_board_by_short,
+        create_board, create_board_with_media_flags, get_all_boards_with_stats, get_board_by_short,
         get_site_stats,
     };
     use rusqlite::Connection;
@@ -1109,5 +1109,37 @@ mod tests {
         assert!(board.show_poster_ids);
         assert!(board.allow_editing);
         assert!(board.allow_self_delete);
+    }
+
+    #[test]
+    fn create_board_uses_standardized_defaults() {
+        let pool = crate::db::init_test_pool().expect("init test pool");
+        let conn = pool.get().expect("get test connection");
+
+        create_board(&conn, "fresh", "Fresh", "", false).expect("create board");
+
+        let board = get_board_by_short(&conn, "fresh")
+            .expect("load board")
+            .expect("board exists");
+        assert_eq!(
+            board.allow_audio,
+            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_AUDIO
+        );
+        assert_eq!(
+            board.allow_video_embeds,
+            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_VIDEO_EMBEDS
+        );
+        assert_eq!(
+            board.show_poster_ids,
+            crate::test_fixtures::DEFAULT_NEW_BOARD_SHOW_POSTER_IDS
+        );
+        assert_eq!(
+            board.allow_editing,
+            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_EDITING
+        );
+        assert_eq!(
+            board.allow_self_delete,
+            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_SELF_DELETE
+        );
     }
 }

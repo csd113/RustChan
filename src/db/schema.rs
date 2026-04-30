@@ -1126,10 +1126,10 @@ mod tests {
                 allow_audio          INTEGER NOT NULL DEFAULT 0,
                 allow_any_files      INTEGER NOT NULL DEFAULT 0,
                 edit_window_secs     INTEGER NOT NULL DEFAULT 0,
-                allow_editing        INTEGER NOT NULL DEFAULT 0,
-                allow_video_embeds   INTEGER NOT NULL DEFAULT 0,
+                allow_editing        INTEGER NOT NULL DEFAULT 1,
+                allow_video_embeds   INTEGER NOT NULL DEFAULT 1,
                 allow_captcha        INTEGER NOT NULL DEFAULT 0,
-                show_poster_ids      INTEGER NOT NULL DEFAULT 0,
+                show_poster_ids      INTEGER NOT NULL DEFAULT 1,
                 collapse_greentext   INTEGER NOT NULL DEFAULT 0,
                 post_cooldown_secs   INTEGER NOT NULL DEFAULT 0,
                 default_theme        TEXT NOT NULL DEFAULT '',
@@ -1434,15 +1434,32 @@ mod tests {
         )
         .expect("insert board with schema defaults");
 
-        let flags: (i64, i64, i64, i64) = conn
+        let flags: (i64, i64, i64, i64, i64) = conn
             .query_row(
-                "SELECT allow_video_embeds, show_poster_ids, allow_editing, allow_self_delete
+                "SELECT allow_audio, allow_video_embeds, show_poster_ids, allow_editing, allow_self_delete
                  FROM boards WHERE short_name = 'fresh'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .expect("read fresh-schema board defaults");
-        assert_eq!(flags, (1, 1, 1, 1));
+        assert_eq!(
+            flags,
+            (
+                i64::from(crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_AUDIO),
+                i64::from(crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_VIDEO_EMBEDS),
+                i64::from(crate::test_fixtures::DEFAULT_NEW_BOARD_SHOW_POSTER_IDS),
+                i64::from(crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_EDITING),
+                i64::from(crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_SELF_DELETE),
+            )
+        );
     }
 
     #[test]

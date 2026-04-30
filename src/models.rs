@@ -277,23 +277,23 @@ pub struct Board {
     pub bump_limit: i64,
     pub allow_images: bool,    // per-board image upload toggle (default: true)
     pub allow_video: bool,     // per-board video upload toggle (default: true)
-    pub allow_audio: bool,     // per-board audio upload toggle (default: true)
+    pub allow_audio: bool,     // per-board audio upload toggle (default: false)
     pub max_image_size: i64,   // per-board image upload size limit in bytes
     pub max_video_size: i64,   // per-board video upload size limit in bytes
     pub max_audio_size: i64,   // per-board audio upload size limit in bytes
     pub allow_pdf: bool,       // per-board PDF upload toggle (default: off)
     pub allow_any_files: bool, // per-board arbitrary file upload toggle (default: off)
     pub allow_tripcodes: bool,
-    pub allow_editing: bool, // per-board post editing toggle (default: off)
-    pub allow_self_delete: bool, // per-board self-delete toggle (default: off)
+    pub allow_editing: bool, // per-board post editing toggle (default: true)
+    pub allow_self_delete: bool, // per-board self-delete toggle (default: true)
     pub edit_window_secs: i64, // legacy board edit-window value; self-actions use the fixed grace window
     pub allow_archive: bool,   // when true, overflow threads are archived instead of deleted
-    pub allow_video_embeds: bool, // per-board inline video embed unfurling (YouTube/Invidious/Streamable)
-    pub allow_captcha: bool,      // per-board PoW CAPTCHA on threads and replies (hashcash-style)
-    pub show_poster_ids: bool,    // per-board thread-local poster IDs in post headers
+    pub allow_video_embeds: bool, // per-board inline video embed unfurling (default: true)
+    pub allow_captcha: bool,   // per-board PoW CAPTCHA on threads and replies (hashcash-style)
+    pub show_poster_ids: bool, // per-board thread-local poster IDs in post headers (default: true)
     pub collapse_greentext: bool, // per-board long greentext auto-collapse toggle
-    pub post_cooldown_secs: i64,  // seconds a user must wait between posts (0 = disabled)
-    pub default_theme: String,    // blank = inherit site default
+    pub post_cooldown_secs: i64, // seconds a user must wait between posts (0 = disabled)
+    pub default_theme: String, // blank = inherit site default
     pub banner_mode: BoardBannerMode,
     pub access_mode: BoardAccessMode,
     pub access_password_hash: String,

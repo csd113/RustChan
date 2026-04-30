@@ -109,10 +109,27 @@ pub struct AdminPanelMaintenanceView {
     pub db_size_bytes: i64,
     pub db_size_warning: bool,
     pub ffmpeg_timeout_secs: u64,
-    pub ffmpeg_available: bool,
-    pub ffprobe_available: bool,
-    pub ffmpeg_webp_available: bool,
-    pub ffmpeg_vp9_available: bool,
+    pub media_detection: AdminMediaDetectionView,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum AdminDetectionStatus {
+    Detected,
+    Missing,
+}
+
+impl AdminDetectionStatus {
+    #[must_use]
+    pub const fn is_detected(self) -> bool {
+        matches!(self, Self::Detected)
+    }
+}
+
+pub struct AdminMediaDetectionView {
+    pub ffmpeg: AdminDetectionStatus,
+    pub ffprobe: AdminDetectionStatus,
+    pub webp_encoder: AdminDetectionStatus,
+    pub vp9_pipeline: AdminDetectionStatus,
     pub pdf_thumbnail_renderer: Option<String>,
 }
 
@@ -1609,8 +1626,9 @@ pub fn admin_ip_history_page(
 mod tests {
     use super::{
         admin_panel_page, render_board_appearance_card, render_board_settings_card,
-        AdminPanelAppearanceView, AdminPanelBackupsView, AdminPanelMaintenanceView,
-        AdminPanelModerationView, AdminPanelViewModel,
+        AdminDetectionStatus, AdminMediaDetectionView, AdminPanelAppearanceView,
+        AdminPanelBackupsView, AdminPanelMaintenanceView, AdminPanelModerationView,
+        AdminPanelViewModel,
     };
     use crate::models::{
         BackupBoardSummary, BackupInfo, Board, BoardAccessMode, BoardBannerMode, Report,
@@ -1842,11 +1860,13 @@ mod tests {
                 db_size_bytes: 4096,
                 db_size_warning: false,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
-                ffmpeg_available: true,
-                ffprobe_available: true,
-                ffmpeg_webp_available: true,
-                ffmpeg_vp9_available: true,
-                pdf_thumbnail_renderer: Some("pdftoppm".to_string()),
+                media_detection: AdminMediaDetectionView {
+                    ffmpeg: AdminDetectionStatus::Detected,
+                    ffprobe: AdminDetectionStatus::Detected,
+                    webp_encoder: AdminDetectionStatus::Detected,
+                    vp9_pipeline: AdminDetectionStatus::Detected,
+                    pdf_thumbnail_renderer: Some("pdftoppm".to_string()),
+                },
             },
             tor_address: None,
             flash: None,
@@ -2094,6 +2114,25 @@ mod tests {
     }
 
     #[test]
+    fn admin_quick_create_board_form_matches_standardized_defaults() {
+        let board = sample_board();
+        let html =
+            render_admin_panel_for_test(std::slice::from_ref(&board), &[], &[sample_theme()], None);
+
+        let form_start = html
+            .find(r#"action="/admin/board/create""#)
+            .expect("quick-create form present");
+        let form_end = html[form_start..]
+            .find("</form>")
+            .map(|offset| form_start + offset)
+            .expect("quick-create form closes");
+        let form_html = &html[form_start..form_end];
+
+        assert!(form_html.contains(r#"name="allow_audio" value="1"> Enable audio uploads"#));
+        assert!(!form_html.contains(r#"name="allow_audio" value="1" checked"#));
+    }
+
+    #[test]
     fn admin_panel_reports_only_render_resolve_action() {
         let board = sample_board();
         let themes = vec![sample_theme()];
@@ -2205,11 +2244,13 @@ mod tests {
                 db_size_bytes: 4096,
                 db_size_warning: false,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
-                ffmpeg_available: false,
-                ffprobe_available: false,
-                ffmpeg_webp_available: false,
-                ffmpeg_vp9_available: false,
-                pdf_thumbnail_renderer: None,
+                media_detection: AdminMediaDetectionView {
+                    ffmpeg: AdminDetectionStatus::Missing,
+                    ffprobe: AdminDetectionStatus::Missing,
+                    webp_encoder: AdminDetectionStatus::Missing,
+                    vp9_pipeline: AdminDetectionStatus::Missing,
+                    pdf_thumbnail_renderer: None,
+                },
             },
             tor_address: None,
             flash: None,

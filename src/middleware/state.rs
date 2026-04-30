@@ -252,6 +252,8 @@ impl Drop for MaintenanceGuard {
 }
 
 #[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)]
+// These booleans are independent runtime capability toggles shared across handlers.
 pub struct AppState {
     pub db: crate::db::DbPool,
     pub ffmpeg_available: bool,
