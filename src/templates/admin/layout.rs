@@ -3,6 +3,7 @@ use super::{AdminPanelFlash, AdminPanelViewModel};
 
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let flash_html = render_flash(view.flash);
+    let section_index = render_admin_section_index();
     let overview_section = render_admin_overview_section();
     let site_settings_section = appearance::render_site_settings(view);
     let boards_section = boards::render(view);
@@ -25,6 +26,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
   </form>
 </div>
 
+{section_index}
 {overview_section}
 {site_settings_section}
 {boards_section}
@@ -47,6 +49,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
   </div>
 </div>"#,
         flash = flash_html,
+        section_index = section_index,
         csrf = escape_html(view.csrf_token),
     );
 
@@ -76,6 +79,18 @@ fn render_flash(flash: Option<AdminPanelFlash<'_>>) -> String {
             msg = escape_html(flash.message),
         )
     })
+}
+
+const fn render_admin_section_index() -> &'static str {
+    r##"<nav class="admin-section-index" aria-label="Admin panel sections">
+  <span>jump to</span>
+  <a href="#site-settings">site settings</a>
+  <a href="#boards">boards</a>
+  <a href="#moderation">moderation</a>
+  <a href="#appearance">appearance</a>
+  <a href="#backups">backups</a>
+  <a href="#maintenance">maintenance</a>
+</nav>"##
 }
 
 fn render_admin_overview_section() -> String {

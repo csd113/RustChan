@@ -27,13 +27,17 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
         r#"<div class="page-box admin-login">
 <h2>[ admin login ]</h2>
 {err}
-<form method="POST" action="/admin/login">
+<form method="POST" action="/admin/login" class="admin-login-form">
 <input type="hidden" name="_csrf" value="{csrf}">
-<table class="admin-login-table">
-<tr><td>username</td><td><input type="text" name="username" autofocus required autocomplete="username"></td></tr>
-<tr><td>password</td><td><input type="password" name="password" required autocomplete="current-password"></td></tr>
-<tr><td></td><td><button type="submit">authenticate</button></td></tr>
-</table>
+<label class="admin-login-field">username
+  <input type="text" name="username" autofocus required autocomplete="username">
+</label>
+<label class="admin-login-field">password
+  <input type="password" name="password" required autocomplete="current-password">
+</label>
+<div class="admin-login-actions">
+  <button type="submit">authenticate</button>
+</div>
 </form>
 </div>"#,
         err = err_html,
@@ -1032,7 +1036,7 @@ pub fn admin_db_health_result_page(
         } else {
             match report.after.as_ref().map(crate::db::DbHealthSnapshot::ok) {
                 Some(true) => {
-                    r#"<p style="color:var(--green-bright)">Maintenance completed. Database health checks passed afterward.</p>"#
+                    r#"<p class="admin-result-status admin-status-ok">Maintenance completed. Database health checks passed afterward.</p>"#
                 }
                 Some(false) => {
                     r#"<p class="error">Repair finished, but the database still reports a problem. Restoring a known-good full backup is recommended.</p>"#
@@ -1043,7 +1047,7 @@ pub fn admin_db_health_result_page(
             }
         }
     } else if report.before.ok() {
-        r#"<p style="color:var(--green-bright)">Database health checks passed.</p>"#
+        r#"<p class="admin-result-status admin-status-ok">Database health checks passed.</p>"#
     } else {
         r#"<p class="error">Database health checks found a problem.</p>"#
     };
@@ -1062,7 +1066,7 @@ pub fn admin_db_health_result_page(
             )
         };
         format!(
-            r#"<form method="POST" action="/admin/db/repair" style="margin-top:1rem">
+            r#"<form method="POST" action="/admin/db/repair" class="admin-result-action-form">
   <input type="hidden" name="_csrf" value="{csrf}">
   <button type="submit"
           data-confirm="{confirm}">{label}</button>
@@ -1076,7 +1080,7 @@ pub fn admin_db_health_result_page(
     let mut repair_summary_html = String::new();
     if report.repair_summary.is_empty() {
         repair_summary_html
-            .push_str(r#"<li style="color:var(--text-dim)">No repairs were run.</li>"#);
+            .push_str(r#"<li class="admin-muted-list-item">No repairs were run.</li>"#);
     } else {
         for line in &report.repair_summary {
             let _ = write!(
@@ -1090,7 +1094,7 @@ pub fn admin_db_health_result_page(
     let mut repair_steps_html = String::new();
     if report.repair_steps.is_empty() {
         repair_steps_html
-            .push_str(r#"<li style="color:var(--text-dim)">No maintenance steps were run.</li>"#);
+            .push_str(r#"<li class="admin-muted-list-item">No maintenance steps were run.</li>"#);
     } else {
         for step in &report.repair_steps {
             let _ = write!(
@@ -1107,7 +1111,7 @@ pub fn admin_db_health_result_page(
                 || r"<p><strong>Pre-repair backup:</strong> Not run</p>".to_string(),
                 |error| {
                     format!(
-                        r#"<p><strong>Pre-repair backup:</strong> <span style="color:var(--red-bright)">Failed</span> <code>{}</code></p>"#,
+                        r#"<p><strong>Pre-repair backup:</strong> <span class="admin-status-error">Failed</span> <code>{}</code></p>"#,
                         escape_html(error)
                     )
                 },
@@ -1132,7 +1136,7 @@ pub fn admin_db_health_result_page(
 <section class="admin-section">
 <h2>// summary</h2>
 {status_line}
-<div class="page-box" style="margin-top:0.75rem;max-width:760px">
+<div class="admin-result-card">
 <p><strong>Before:</strong> {before_status}</p>
 {before_checks}
 <p><strong>Repair run:</strong> {repair_attempted}</p>
@@ -1141,20 +1145,20 @@ pub fn admin_db_health_result_page(
 <p><strong>After:</strong> {after_status}</p>
 {after_checks}
 </div>
-<h2 style="margin-top:1rem">// repair outcome</h2>
-<ul style="margin:0.75rem 0 0 1.25rem;max-width:760px">
+<h2 class="admin-result-heading">// repair outcome</h2>
+<ul class="admin-result-list">
 {repair_summary}
 </ul>
-<h2 style="margin-top:1rem">// maintenance actions run</h2>
-<ul style="margin:0.75rem 0 0 1.25rem;max-width:760px">
+<h2 class="admin-result-heading">// maintenance actions run</h2>
+<ul class="admin-result-list">
 {repair_steps}
 </ul>
 {repair_action}
-<p style="margin-top:1rem;color:var(--text-dim)">
+<p class="admin-result-note">
   Run checks after restores or large deletes. Take a backup before repair; this repair flow creates one automatically before making changes.
   This tool can repair index and search-index issues, but true SQLite file corruption may still require restoring a known-good full backup.
 </p>
-<p style="margin-top:1rem">
+<p class="admin-result-actions">
   <a href="/admin/panel">&#8592; back to admin panel</a>
 </p>
 </section>
@@ -1162,9 +1166,9 @@ pub fn admin_db_health_result_page(
         title = title,
         status_line = status_line,
         before_status = if report.before.ok() {
-            r#"<span style="color:var(--green-bright)">Passed</span>"#
+            r#"<span class="admin-status-ok">Passed</span>"#
         } else {
-            r#"<span style="color:var(--red-bright)">Problem found</span>"#
+            r#"<span class="admin-status-error">Problem found</span>"#
         },
         before_checks = before_checks_html,
         repair_attempted = if report.repair_attempted { "Yes" } else { "No" },
@@ -1173,8 +1177,8 @@ pub fn admin_db_health_result_page(
         }),
         backup = backup_html,
         after_status = match report.after.as_ref().map(crate::db::DbHealthSnapshot::ok) {
-            Some(true) => r#"<span style="color:var(--green-bright)">Passed</span>"#,
-            Some(false) => r#"<span style="color:var(--red-bright)">Problem found</span>"#,
+            Some(true) => r#"<span class="admin-status-ok">Passed</span>"#,
+            Some(false) => r#"<span class="admin-status-error">Problem found</span>"#,
             None => "Not run",
         },
         after_checks = after_checks_html,
@@ -1202,11 +1206,11 @@ pub fn admin_db_repair_idle_page(csrf_token: &str) -> String {
 <h1>[ database repair ]</h1>
 <section class="admin-section">
 <h2>// maintenance rebuild</h2>
-<div class="page-box" style="margin-top:0.75rem;max-width:760px">
+<div class="admin-result-card">
 <p>No maintenance rebuild is running.</p>
-<p style="color:var(--text-dim)">Start a new maintenance rebuild from the admin panel when you need to create a backup and rebuild indexes.</p>
+<p class="admin-meta-note">Start a new maintenance rebuild from the admin panel when you need to create a backup and rebuild indexes.</p>
 </div>
-<p style="margin-top:1rem">
+<p class="admin-result-actions">
   <a href="/admin/panel">&#8592; back to admin panel</a>
 </p>
 </section>
@@ -1235,15 +1239,15 @@ pub fn admin_db_repair_running_page(csrf_token: &str, job_id: u64, started_at: i
 <h1>[ database repair ]</h1>
 <section class="admin-section">
 <h2>// maintenance rebuild running</h2>
-<div class="page-box" style="margin-top:0.75rem;max-width:760px">
+<div class="admin-result-card">
 <p>Maintenance rebuild started at <code>{started_at}</code>.</p>
 <div class="compress-progress" data-db-repair-progress data-db-repair-job-id="{job_id}" data-db-repair-progress-url="{progress_url}" style="display:block;margin:0.75rem 0">
   <div class="compress-progress-track"><div class="compress-progress-bar" data-db-repair-progress-bar style="width:5%"></div></div>
   <div class="compress-progress-text" data-db-repair-progress-text>Starting maintenance rebuild...</div>
 </div>
-<p style="color:var(--text-dim)">This page updates live while the backup and database rebuild finish.</p>
+<p class="admin-meta-note">This page updates live while the backup and database rebuild finish.</p>
 </div>
-<p style="margin-top:1rem">
+<p class="admin-result-actions">
   <a href="{status_url}">refresh status</a> · <a href="/admin/panel">back to admin panel</a>
 </p>
 </section>
@@ -1274,11 +1278,11 @@ pub fn admin_db_repair_stale_page(
 <h1>[ database repair ]</h1>
 <section class="admin-section">
 <h2>// maintenance rebuild status</h2>
-<div class="page-box" style="margin-top:0.75rem;max-width:760px">
+<div class="admin-result-card">
 <p class="error">This page is for maintenance rebuild <code>{requested_job_id}</code>, but that run is no longer the current status.</p>
 {current_job_html}
 </div>
-<p style="margin-top:1rem">
+<p class="admin-result-actions">
   <a href="/admin/db/repair/status">current status</a> · <a href="/admin/panel">back to admin panel</a>
 </p>
 </section>
@@ -1318,13 +1322,13 @@ pub fn admin_db_repair_failed_page(
 <h1>[ database repair ]</h1>
 <section class="admin-section">
 <h2>// maintenance rebuild failed</h2>
-<div class="page-box" style="margin-top:0.75rem;max-width:760px">
+<div class="admin-result-card">
 <p class="error">The background maintenance rebuild failed.</p>
 <p><strong>Run id:</strong> <code>{job_id}</code></p>
 <p><strong>Finished:</strong> <code>{finished_at}</code></p>
 <p><strong>Error:</strong> <code>{message}</code></p>
 </div>
-<p style="margin-top:1rem">
+<p class="admin-result-actions">
   <a href="/admin/panel">&#8592; back to admin panel</a>
 </p>
 </section>
@@ -1356,9 +1360,9 @@ fn render_db_health_snapshot(snapshot: &crate::db::DbHealthSnapshot) -> String {
 
 fn render_db_check_result(label: &str, result: &crate::db::DbCheckResult) -> String {
     let status = if result.ok {
-        r#"<span style="color:var(--green-bright)">Passed</span>"#
+        r#"<span class="admin-status-ok">Passed</span>"#
     } else {
-        r#"<span style="color:var(--red-bright)">Problem found</span>"#
+        r#"<span class="admin-status-error">Problem found</span>"#
     };
     let output = result.output();
     if result.ok || result.messages.len() <= 1 {
@@ -1372,9 +1376,9 @@ fn render_db_check_result(label: &str, result: &crate::db::DbCheckResult) -> Str
 
     format!(
         r#"<p><strong>{label}:</strong> {status}. Found {count} issues.</p>
-<details style="margin:0.35rem 0 0.6rem">
+<details class="admin-result-details">
   <summary>show full {label} output</summary>
-  <pre style="white-space:pre-wrap;margin-top:0.5rem">{output}</pre>
+  <pre>{output}</pre>
 </details>"#,
         label = label,
         status = status,
@@ -1625,11 +1629,12 @@ pub fn admin_ip_history_page(
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_panel_page, render_board_appearance_card, render_board_settings_card,
-        AdminDetectionStatus, AdminMediaDetectionView, AdminPanelAppearanceView,
-        AdminPanelBackupsView, AdminPanelMaintenanceView, AdminPanelModerationView,
-        AdminPanelViewModel,
+        admin_db_health_result_page, admin_db_repair_idle_page, admin_login_page, admin_panel_page,
+        render_board_appearance_card, render_board_settings_card, AdminDetectionStatus,
+        AdminMediaDetectionView, AdminPanelAppearanceView, AdminPanelBackupsView,
+        AdminPanelMaintenanceView, AdminPanelModerationView, AdminPanelViewModel,
     };
+    use crate::db::{DbCheckResult, DbHealthReport, DbHealthSnapshot};
     use crate::models::{
         BackupBoardSummary, BackupInfo, Board, BoardAccessMode, BoardBannerMode, Report,
         ReportWithContext, Theme,
@@ -2062,6 +2067,86 @@ mod tests {
         assert!(html.contains(
             r#"<summary>/tech/ — Technology <span class="tag nsfw-tag">NSFW</span></summary>"#
         ));
+    }
+
+    #[test]
+    fn admin_login_page_uses_semantic_form_layout() {
+        let board = sample_board();
+        let html = admin_login_page(Some("bad login"), "csrf", std::slice::from_ref(&board));
+
+        assert!(
+            html.contains(r#"<form method="POST" action="/admin/login" class="admin-login-form">"#)
+        );
+        assert!(html.contains(r#"<input type="hidden" name="_csrf" value="csrf">"#));
+        assert!(html.contains(
+            r#"<input type="text" name="username" autofocus required autocomplete="username">"#
+        ));
+        assert!(html.contains(
+            r#"<input type="password" name="password" required autocomplete="current-password">"#
+        ));
+        assert!(html.contains(r#"<button type="submit">authenticate</button>"#));
+        assert!(!html.contains("admin-login-table"));
+    }
+
+    #[test]
+    fn admin_panel_renders_compact_section_index_before_sections() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
+
+        let index = html
+            .find(r#"<nav class="admin-section-index" aria-label="Admin panel sections">"#)
+            .expect("section index");
+        let overview = html
+            .find(r#"class="admin-panel-overview" id="overview""#)
+            .expect("overview section");
+
+        assert!(index < overview);
+        for target in [
+            "#site-settings",
+            "#boards",
+            "#moderation",
+            "#appearance",
+            "#backups",
+            "#maintenance",
+        ] {
+            assert!(html.contains(&format!(r#"href="{target}""#)));
+        }
+    }
+
+    #[test]
+    fn admin_db_result_pages_use_shared_status_surfaces() {
+        let report = DbHealthReport {
+            before: DbHealthSnapshot {
+                integrity: DbCheckResult {
+                    ok: false,
+                    messages: vec!["row 1".into(), "row 2".into()],
+                },
+                foreign_keys: DbCheckResult {
+                    ok: true,
+                    messages: Vec::new(),
+                },
+            },
+            repair_attempted: false,
+            repair_backup: None,
+            repair_backup_error: None,
+            repair_summary: Vec::new(),
+            repair_steps: Vec::new(),
+            after: None,
+        };
+        let html = admin_db_health_result_page(&report, false, "csrf", None);
+        let idle_html = admin_db_repair_idle_page("csrf");
+
+        assert!(html.contains(r#"class="admin-result-card""#));
+        assert!(html.contains(r#"class="admin-result-details""#));
+        assert!(html.contains(r#"class="admin-status-error">Problem found"#));
+        assert!(html.contains(r#"class="admin-muted-list-item">No repairs were run."#));
+        assert!(idle_html.contains(r#"class="admin-result-card""#));
+        assert!(
+            !html.contains(r#"<div class="page-box" style="margin-top:0.75rem;max-width:760px">"#)
+        );
+        assert!(!idle_html
+            .contains(r#"<div class="page-box" style="margin-top:0.75rem;max-width:760px">"#));
     }
 
     #[test]
