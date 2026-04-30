@@ -2,6 +2,16 @@ use super::{escape_html, format_file_size, AdminPanelViewModel};
 use std::fmt::Write;
 
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
+    let media_settings_open_attr = if view.open_section == Some("media-settings") {
+        " open"
+    } else {
+        ""
+    };
+    let database_maintenance_open_attr = if view.open_section == Some("database-maintenance") {
+        " open"
+    } else {
+        ""
+    };
     let db_warn_banner = if view.maintenance.db_size_warning {
         format!(
             r#"<div class="admin-flash flash-error" style="margin-bottom:0.75rem">
@@ -38,6 +48,8 @@ old boards to prevent query performance degradation.
         &tor_section,
         view.maintenance.ffmpeg_timeout_secs,
         &ffmpeg_timeout_help,
+        media_settings_open_attr,
+        database_maintenance_open_attr,
     )
 }
 
@@ -48,14 +60,51 @@ fn render_admin_maintenance_section(
     tor_section: &str,
     ffmpeg_timeout_secs: u64,
     ffmpeg_timeout_help: &str,
+    media_settings_open_attr: &str,
+    database_maintenance_open_attr: &str,
 ) -> String {
     format!(
         r#"<div class="admin-panel-maintenance" id="maintenance">
 <!-- ═══════════════════════════════════════════════════════════════════════════
+     // media settings
+     ═══════════════════════════════════════════════════════════════════════════ -->
+<section class="admin-section admin-section-collapsible" id="media-settings">
+<details class="admin-dropdown" data-admin-dropdown-key="media-settings"{media_settings_open_attr}>
+<summary><span>// media settings</span></summary>
+<div class="admin-dropdown-content">
+<p style="color:var(--text-dim);font-size:0.85rem">
+  RustChan currently allows ffmpeg to run for <strong>{ffmpeg_timeout_help}</strong> before a long-running media job is killed.
+  This primarily affects uploaded video re-encoding, especially slow MP4 to WebM/VP9 conversion.
+</p>
+<form method="POST" action="/admin/media/settings" class="admin-site-settings-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <div class="board-settings-grid admin-settings-grid">
+    <label title="Slow systems may need a higher value for ffmpeg video conversion jobs.">
+      Video re-encoding timeout (seconds)
+      <input type="number" name="ffmpeg_timeout_secs" value="{ffmpeg_timeout_secs}" min="{ffmpeg_timeout_min}" max="{ffmpeg_timeout_max}" step="1" inputmode="numeric" style="font-family:inherit" required>
+    </label>
+  </div>
+  <p class="admin-meta-note admin-meta-note-spaced">
+    This controls how long RustChan lets ffmpeg run while converting uploaded videos.
+    Slow systems such as Raspberry Pi devices may need a higher value.
+    MP4 to WebM/VP9 encoding can be especially slow without hardware acceleration.
+    If videos fail to convert because of timeouts, increase this value.
+  </p>
+  <div class="board-settings-actions">
+    <button type="submit">save media settings</button>
+  </div>
+</form>
+</div>
+</details>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
      // database maintenance
      ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section">
-<h2>// database maintenance</h2>
+<section class="admin-section admin-section-collapsible" id="database-maintenance">
+<details class="admin-dropdown" data-admin-dropdown-key="database-maintenance"{database_maintenance_open_attr}>
+<summary><span>// database maintenance</span></summary>
+<div class="admin-dropdown-content">
 {db_warn_banner}<p style="color:var(--text-dim);font-size:0.85rem">
   Current database size: <strong>{db_size_str}</strong>.
   Running <strong>VACUUM</strong> rewrites the database file compactly, reclaiming space left after
@@ -77,32 +126,8 @@ fn render_admin_maintenance_section(
           data-confirm="Run VACUUM? This will briefly block the database while it rebuilds. Continue?">&#x1F9F9; run VACUUM</button>
 </form>
 </div>
-</section>
-
-<section class="admin-section">
-<h2>// media processing</h2>
-<p style="color:var(--text-dim);font-size:0.85rem">
-  RustChan currently allows ffmpeg to run for <strong>{ffmpeg_timeout_help}</strong> before a long-running media job is killed.
-  This primarily affects uploaded video re-encoding, especially slow MP4 to WebM/VP9 conversion.
-</p>
-<form method="POST" action="/admin/media/settings" class="admin-site-settings-form">
-  <input type="hidden" name="_csrf" value="{csrf}">
-  <div class="board-settings-grid admin-settings-grid">
-    <label title="Slow systems may need a higher value for ffmpeg video conversion jobs.">
-      Video re-encoding timeout (seconds)
-      <input type="number" name="ffmpeg_timeout_secs" value="{ffmpeg_timeout_secs}" min="{ffmpeg_timeout_min}" max="{ffmpeg_timeout_max}" step="1" inputmode="numeric" style="font-family:inherit" required>
-    </label>
-  </div>
-  <p class="admin-meta-note admin-meta-note-spaced">
-    This controls how long RustChan lets ffmpeg run while converting uploaded videos.
-    Slow systems such as Raspberry Pi devices may need a higher value.
-    MP4 to WebM/VP9 encoding can be especially slow without hardware acceleration.
-    If videos fail to convert because of timeouts, increase this value.
-  </p>
-  <div class="board-settings-actions">
-    <button type="submit">save media processing settings</button>
-  </div>
-</form>
+</div>
+</details>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -117,6 +142,8 @@ fn render_admin_maintenance_section(
         ffmpeg_timeout_help = escape_html(ffmpeg_timeout_help),
         ffmpeg_timeout_min = crate::config::MIN_FFMPEG_TIMEOUT_SECS,
         ffmpeg_timeout_max = crate::config::MAX_FFMPEG_TIMEOUT_SECS,
+        media_settings_open_attr = media_settings_open_attr,
+        database_maintenance_open_attr = database_maintenance_open_attr,
         tor_section = tor_section,
     )
 }

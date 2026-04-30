@@ -2059,6 +2059,7 @@ mod tests {
         assert!(html.contains("// create board"));
         assert!(html.contains(r#"name="allow_audio" value="1"> Enable audio uploads"#));
         assert!(html.contains(r#"name="allow_pdf" value="1"> Allow PDF uploads"#));
+        assert!(html.contains(r#"data-admin-dropdown-key="boards""#));
         assert!(html.contains("// board appearance overrides"));
         assert!(html.contains("id=\"board-appearance-tech\""));
         assert!(html.contains("save board appearance"));
@@ -2073,6 +2074,10 @@ mod tests {
         assert!(html.contains("// saved board backups"));
         assert!(html.contains("data-admin-dropdown-key=\"board-backup-restore\""));
         assert!(html.contains("single-board snapshot"));
+        assert!(html.contains(r#"data-admin-dropdown-key="media-settings""#));
+        assert!(html.contains(r#"data-admin-dropdown-key="database-maintenance""#));
+        assert!(html.contains("// media settings"));
+        assert!(html.contains("save media settings"));
     }
 
     #[test]
@@ -2107,6 +2112,43 @@ mod tests {
 
         assert!(html.contains(
             r#"<details class="admin-dropdown" data-admin-dropdown-key="reports" open>"#
+        ));
+    }
+
+    #[test]
+    fn admin_panel_maintenance_orders_media_before_database() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
+
+        let media = html
+            .find("// media settings")
+            .expect("media settings section");
+        let database = html
+            .find("// database maintenance")
+            .expect("database maintenance section");
+
+        assert!(media < database);
+    }
+
+    #[test]
+    fn admin_panel_boards_and_media_sections_honor_open_target() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+
+        let boards_html =
+            render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, Some("boards"));
+        assert!(boards_html
+            .contains(r#"<details class="admin-dropdown" data-admin-dropdown-key="boards" open>"#));
+
+        let media_html = render_admin_panel_for_test(
+            std::slice::from_ref(&board),
+            &[],
+            &themes,
+            Some("media-settings"),
+        );
+        assert!(media_html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="media-settings" open>"#
         ));
     }
 

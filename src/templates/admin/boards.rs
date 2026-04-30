@@ -1,6 +1,15 @@
 use super::{escape_html, render_board_settings_card, AdminPanelViewModel};
 
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
+    let boards_open_attr = if view.open_section == Some("boards")
+        || view
+            .open_section
+            .is_some_and(|section| section.starts_with("board-"))
+    {
+        " open"
+    } else {
+        ""
+    };
     let mut board_cards = String::new();
     for (index, board) in view.boards.iter().enumerate() {
         let board_assets = view
@@ -23,17 +32,23 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
         ));
     }
 
-    render_admin_boards_section(view.csrf_token, &board_cards)
+    render_admin_boards_section(view.csrf_token, &board_cards, boards_open_attr)
 }
 
-fn render_admin_boards_section(csrf_token: &str, board_cards: &str) -> String {
+fn render_admin_boards_section(
+    csrf_token: &str,
+    board_cards: &str,
+    boards_open_attr: &str,
+) -> String {
     format!(
         r#"<div class="admin-panel-boards" id="boards">
 <!-- ═══════════════════════════════════════════════════════════════════════════
      // boards
      ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section">
-<h2>// boards</h2>
+<section class="admin-section admin-section-collapsible">
+<details class="admin-dropdown" data-admin-dropdown-key="boards"{boards_open_attr}>
+<summary><span>// boards</span></summary>
+<div class="admin-dropdown-content">
 <div class="admin-subsection">
   <div class="admin-card-header">
     <h3>// board directory</h3>
@@ -63,9 +78,12 @@ fn render_admin_boards_section(csrf_token: &str, board_cards: &str) -> String {
   <button type="submit">create</button>
   </form>
 </div>
+</div>
+</details>
 </section>
 </div>"#,
         board_cards = board_cards,
         csrf = escape_html(csrf_token),
+        boards_open_attr = boards_open_attr,
     )
 }
