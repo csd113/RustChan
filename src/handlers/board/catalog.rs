@@ -131,7 +131,17 @@ pub async fn catalog(
     } else {
         HashMap::new()
     };
-    let admin_tag = if access_context.is_admin { "-a" } else { "" };
+    let admin_csrf =
+        admin_scoped_csrf_token(&jar, admin_session_id.as_deref(), access_context.is_admin);
+    let admin_tag = admin_csrf.as_deref().map_or_else(String::new, |token| {
+        format!(
+            "-a{}",
+            crate::utils::crypto::sha256_hex(token.as_bytes())
+                .chars()
+                .take(12)
+                .collect::<String>()
+        )
+    });
     let post_tag = if can_post { "-p1" } else { "-p0" };
     let greentext_tag = if board.collapse_greentext {
         "-cg1"
@@ -213,6 +223,7 @@ pub async fn catalog(
         &csrf,
         all_boards.as_slice(),
         access_context.is_admin,
+        admin_csrf.as_deref(),
         &thread_badges,
         thread_badges_enabled,
         &banner_html,
@@ -265,9 +276,12 @@ pub async fn hidden_threads(
         }
     };
 
+    let admin_csrf =
+        admin_scoped_csrf_token(&jar, admin_session_id.as_deref(), access_context.is_admin);
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
+        let admin_csrf = admin_csrf.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
             let board = db::get_board_by_short(&conn, &board_short)?
@@ -286,6 +300,7 @@ pub async fn hidden_threads(
                 &csrf,
                 all_boards.as_slice(),
                 access_context.is_admin,
+                admin_csrf.as_deref(),
                 &HashMap::new(),
                 false,
                 "",

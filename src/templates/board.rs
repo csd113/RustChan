@@ -71,12 +71,13 @@ fn render_new_activity_badge(count: i64, class_name: &str) -> String {
 }
 
 // These flags map directly to render or DB inputs, so bundling them would make the call sites less clear.
-#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 fn render_board_card(
     stats: &crate::models::BoardStats,
     unread_thread_count: Option<i64>,
     nsfw_consent: bool,
     csrf_token: &str,
+    admin_csrf_token: Option<&str>,
     show_reorder_controls: bool,
     is_first: bool,
     is_last: bool,
@@ -122,7 +123,13 @@ fn render_board_card(
         "threads"
     };
     let reorder_controls = if show_reorder_controls {
-        board_reorder_controls(board, csrf_token, "/", is_first, is_last)
+        board_reorder_controls(
+            board,
+            admin_csrf_token.unwrap_or(csrf_token),
+            "/",
+            is_first,
+            is_last,
+        )
     } else {
         String::new()
     };
@@ -537,6 +544,7 @@ fn board_cards(
     board_badges: &HashMap<i64, i64>,
     nsfw_consent: bool,
     csrf_token: &str,
+    admin_csrf_token: Option<&str>,
     show_reorder_controls: bool,
 ) -> String {
     let mut out = String::new();
@@ -546,6 +554,7 @@ fn board_cards(
             board_badges.get(&s.board.id).copied(),
             nsfw_consent,
             csrf_token,
+            admin_csrf_token,
             show_reorder_controls,
             index == 0,
             index + 1 == list.len(),
@@ -563,6 +572,7 @@ pub fn index_page(
     board_stats: &[crate::models::BoardStats],
     site_stats: Option<&crate::models::SiteStats>,
     csrf_token: &str,
+    admin_csrf_token: Option<&str>,
     onion_address: Option<&str>,
     home_banner_html: &str,
     board_badges: &HashMap<i64, i64>,
@@ -583,7 +593,7 @@ pub fn index_page(
     } else {
         format!(
             "<div class=\"index-section\"><h2 class=\"index-section-title\">// Boards</h2><div class=\"board-cards\">{}</div></div>",
-            board_cards(&sfw, board_badges, nsfw_consent, csrf_token, is_admin)
+            board_cards(&sfw, board_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin)
         )
     };
 
@@ -592,7 +602,7 @@ pub fn index_page(
     } else {
         format!(
             "<div class=\"index-section\"><h2 class=\"index-section-title\">// Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2><div class=\"board-cards\">{}</div></div>",
-            board_cards(&nsfw, board_badges, nsfw_consent, csrf_token, is_admin)
+            board_cards(&nsfw, board_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin)
         )
     };
 
@@ -757,6 +767,7 @@ pub fn board_page(
     csrf_token: &str,
     boards: &[Board],
     is_admin: bool,
+    admin_csrf_token: Option<&str>,
     error: Option<&str>,
     new_thread_prefill: Option<&super::forms::PostFormState>,
     thread_badges: &HashMap<i64, i64>,
@@ -767,6 +778,7 @@ pub fn board_page(
     can_post: bool,
 ) -> String {
     let mut body = String::new();
+    let admin_form_csrf = admin_csrf_token.unwrap_or(csrf_token);
 
     if let Some(msg) = error {
         let _ = write!(
@@ -787,7 +799,7 @@ pub fn board_page(
 <button type="submit" class="admin-toolbar-btn">logout</button>
 </form>
 </div>"#,
-            csrf = escape_html(csrf_token),
+            csrf = escape_html(admin_form_csrf),
             board = escape_html(&board.short_name)
         );
     }
@@ -846,6 +858,7 @@ pub fn board_page(
             summary,
             &board.short_name,
             csrf_token,
+            admin_csrf_token,
             is_admin,
             board.show_poster_ids,
             board.collapse_greentext,
@@ -884,11 +897,12 @@ pub fn board_page(
 
 // ─── Thread summary (used by board_page) ─────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn render_thread_summary(
     summary: &ThreadSummary,
     board_short: &str,
     csrf_token: &str,
+    admin_csrf_token: Option<&str>,
     is_admin: bool,
     show_poster_ids: bool,
     collapse_greentext: bool,
@@ -896,6 +910,7 @@ fn render_thread_summary(
 ) -> String {
     let t = &summary.thread;
     let mut html = String::new();
+    let admin_form_csrf = admin_csrf_token.unwrap_or(csrf_token);
 
     let sticky_label = if t.sticky {
         r#"<span class="tag sticky">STICKY</span> "#
@@ -1048,7 +1063,7 @@ fn render_thread_summary(
 <button type="submit" class="admin-del-btn"
         data-confirm="Delete thread No.{tid} and all its posts?">&#x2715; del</button>
 </form>"#,
-            csrf = escape_html(csrf_token),
+            csrf = escape_html(admin_form_csrf),
             tid = t.id,
             board = escape_html(board_short),
             sticky_act = sticky_act,
@@ -1078,6 +1093,7 @@ fn render_thread_summary(
             super::thread::RenderPostOpts {
                 show_delete: false,
                 is_admin,
+                admin_csrf_token: admin_csrf_token.map(str::to_string),
                 show_media: true,
                 allow_editing: false, // no edit link on board index previews
                 allow_self_delete: false,
@@ -1115,6 +1131,7 @@ pub fn catalog_page(
     csrf_token: &str,
     boards: &[Board],
     is_admin: bool,
+    admin_csrf_token: Option<&str>,
     thread_badges: &HashMap<i64, i64>,
     new_activity_enabled: bool,
     board_banner_html: &str,
@@ -1126,6 +1143,7 @@ pub fn catalog_page(
     let bn = escape_html(&board.name);
 
     let mut body = String::new();
+    let admin_form_csrf = admin_csrf_token.unwrap_or(csrf_token);
 
     if is_admin {
         let _ = write!(
@@ -1138,7 +1156,7 @@ pub fn catalog_page(
 <button type="submit" class="admin-toolbar-btn">logout</button>
 </form>
 </div>"#,
-            csrf = escape_html(csrf_token),
+            csrf = escape_html(admin_form_csrf),
             board = escape_html(&board.short_name)
         );
     }
@@ -1364,6 +1382,7 @@ pub fn search_page(
                 super::thread::RenderPostOpts {
                     show_delete: false,
                     is_admin: false,
+                    admin_csrf_token: None,
                     show_media: true,
                     allow_editing: false, // no edit link on search results
                     allow_self_delete: false,
@@ -1523,12 +1542,21 @@ mod tests {
             thread_count: 4,
         };
 
-        let html_without_controls = board_cards(&[&stats], &HashMap::new(), true, "csrf", false);
+        let html_without_controls =
+            board_cards(&[&stats], &HashMap::new(), true, "csrf", None, false);
         assert!(html_without_controls.contains("board-card-link"));
         assert!(!html_without_controls.contains("board-reorder-menu"));
 
-        let html_with_controls = board_cards(&[&stats], &HashMap::new(), true, "csrf", true);
+        let html_with_controls = board_cards(
+            &[&stats],
+            &HashMap::new(),
+            true,
+            "csrf",
+            Some("admin-csrf"),
+            true,
+        );
         assert!(html_with_controls.contains("board-reorder-menu"));
+        assert!(html_with_controls.contains(r#"name="_csrf" value="admin-csrf""#));
     }
 
     #[test]
@@ -1540,6 +1568,7 @@ mod tests {
             &[],
             None,
             "csrf",
+            None,
             None,
             "",
             &HashMap::new(),
@@ -1572,6 +1601,7 @@ mod tests {
             Some(&stats),
             "csrf",
             None,
+            None,
             "",
             &HashMap::new(),
             None,
@@ -1601,6 +1631,7 @@ mod tests {
             "csrf",
             std::slice::from_ref(&board),
             false,
+            None,
             &HashMap::new(),
             false,
             "",
@@ -1744,7 +1775,8 @@ mod tests {
     fn thread_summary_activity_badge_renders_between_title_area_and_footer() {
         let summary = sample_thread_summary();
 
-        let html = render_thread_summary(&summary, "test", "csrf", false, true, false, Some(2));
+        let html =
+            render_thread_summary(&summary, "test", "csrf", None, false, true, false, Some(2));
 
         let subject_idx = html
             .find("class=\"subject\"")
@@ -1763,6 +1795,26 @@ mod tests {
         assert!(subject_idx < badge_idx && badge_idx < footer_idx);
         assert!(html.contains(r#"<div class="thread-summary-activity-row"><span class="new-activity-badge thread-summary-activity-badge">"#));
         assert!(html.contains(r#"<div class="thread-footer">"#));
+    }
+
+    #[test]
+    fn thread_summary_admin_forms_use_admin_csrf_token() {
+        let summary = sample_thread_summary();
+
+        let html = render_thread_summary(
+            &summary,
+            "test",
+            "public-csrf",
+            Some("admin-csrf"),
+            true,
+            true,
+            false,
+            None,
+        );
+
+        assert!(html.contains(r#"action="/admin/thread/delete""#));
+        assert!(html.contains(r#"name="_csrf"      value="admin-csrf""#));
+        assert!(!html.contains(r#"name="_csrf"      value="public-csrf""#));
     }
 
     #[test]
@@ -1802,6 +1854,7 @@ mod tests {
             "csrf",
             std::slice::from_ref(&board),
             false,
+            None,
             Some("Post must include either text or an attached file."),
             Some(&state),
             &HashMap::new(),
