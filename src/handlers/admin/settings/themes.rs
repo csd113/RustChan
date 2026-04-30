@@ -133,6 +133,18 @@ fn sanitize_builder_advanced_css(raw_value: Option<&str>) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
+fn resolve_builder_swatch(raw_value: Option<&str>, fallback: &str) -> String {
+    let trimmed = raw_value.unwrap_or("").trim();
+    if trimmed.len() == 7
+        && trimmed.starts_with('#')
+        && trimmed.chars().skip(1).all(|ch| ch.is_ascii_hexdigit())
+    {
+        db::sanitize_theme_swatch(trimmed)
+    } else {
+        db::sanitize_theme_swatch(fallback)
+    }
+}
+
 fn parse_radius(raw_value: Option<&str>, fallback: u8) -> Result<u8> {
     raw_value
         .unwrap_or("")
@@ -324,7 +336,10 @@ fn resolved_theme_css_for_create(form: &CreateThemeForm, slug: &str) -> Result<(
         ThemeEditorMode::Builder => {
             let config = resolve_builder_config(&form.builder, None)?;
             let css = build_theme_css(slug, &config);
-            Ok((db::sanitize_theme_swatch(&config.link_color), css))
+            Ok((
+                resolve_builder_swatch(form.swatch_hex.as_deref(), &config.link_color),
+                css,
+            ))
         }
         ThemeEditorMode::Legacy => {
             let css = db::sanitize_theme_css(form.custom_css.as_deref().unwrap_or(""));
@@ -343,7 +358,10 @@ fn resolved_theme_css_for_update(
         ThemeEditorMode::Builder => {
             let config = resolve_builder_config(&form.builder, Some(theme))?;
             let css = build_theme_css(new_slug, &config);
-            Ok((db::sanitize_theme_swatch(&config.link_color), Some(css)))
+            Ok((
+                resolve_builder_swatch(form.swatch_hex.as_deref(), &config.link_color),
+                Some(css),
+            ))
         }
         ThemeEditorMode::Legacy => {
             let swatch = db::sanitize_theme_swatch(form.swatch_hex.as_deref().unwrap_or(""));
@@ -423,7 +441,7 @@ pub async fn update_theme(
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
-            let conn = pool.get()?;
+            let mut conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             let existing_slug = db::sanitize_theme_slug(&form.existing_slug);
             let theme = db::get_theme(&conn, &existing_slug)?
@@ -436,19 +454,29 @@ pub async fn update_theme(
                 return Err(AppError::BadRequest("Theme slug is required.".into()));
             }
             let (swatch_hex, custom_css) = if theme.is_builtin {
-                (
-                    db::sanitize_theme_swatch(form.swatch_hex.as_deref().unwrap_or("")),
-                    None,
-                )
+                (theme.swatch_hex.clone(), None)
             } else {
                 resolved_theme_css_for_update(&form, &theme, &new_slug)?
             };
+            let (display_name, description) = if theme.is_builtin {
+                let builtin = crate::theme::builtin_theme(&existing_slug)
+                    .ok_or_else(|| AppError::BadRequest("Theme not found.".into()))?;
+                (
+                    builtin.display_name.to_string(),
+                    builtin.description.to_string(),
+                )
+            } else {
+                (
+                    db::sanitize_theme_name(&form.display_name),
+                    db::sanitize_theme_description(form.description.as_deref().unwrap_or("")),
+                )
+            };
             db::update_theme(
-                &conn,
+                &mut conn,
                 &existing_slug,
                 &new_slug,
-                &db::sanitize_theme_name(&form.display_name),
-                &db::sanitize_theme_description(form.description.as_deref().unwrap_or("")),
+                &display_name,
+                &description,
                 &swatch_hex,
                 form.enabled.as_deref() == Some("1"),
                 custom_css.as_deref(),
@@ -495,10 +523,10 @@ pub async fn delete_theme(
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
-            let conn = pool.get()?;
+            let mut conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             let slug = db::sanitize_theme_slug(&form.slug);
-            db::delete_custom_theme(&conn, &slug)?;
+            db::delete_custom_theme(&mut conn, &slug)?;
             db::sync_live_theme_state(&conn)?;
             Ok(())
         }
@@ -519,10 +547,12 @@ pub async fn delete_theme(
 #[cfg(test)]
 mod tests {
     use crate::error::AppError;
+    use crate::models::Theme;
 
     use super::{
-        resolved_theme_css_for_create, sanitize_builder_advanced_css, CreateThemeForm,
-        ThemeBuilderFields, ThemeEditorMode,
+        resolved_theme_css_for_create, resolved_theme_css_for_update,
+        sanitize_builder_advanced_css, CreateThemeForm, ThemeBuilderFields, ThemeEditorMode,
+        UpdateThemeForm,
     };
 
     fn builder_fields() -> ThemeBuilderFields {
@@ -567,7 +597,7 @@ mod tests {
             slug: "builder-test".into(),
             display_name: "Builder Test".into(),
             description: Some("Generated in tests".into()),
-            swatch_hex: None,
+            swatch_hex: Some("#224466".into()),
             theme_mode: Some("builder".into()),
             custom_css: None,
             builder: builder_fields(),
@@ -576,10 +606,63 @@ mod tests {
 
         let (swatch, css) = resolved_theme_css_for_create(&form, "builder-test").expect("css");
 
-        assert_eq!(swatch, "#77aa55");
+        assert_eq!(swatch, "#224466");
         assert!(css.contains("html[data-theme=\"builder-test\"]"));
         assert!(css.contains("--rustchan-builder-data:"));
         assert!(css.contains(".subject { font-style: italic; }"));
+    }
+
+    #[test]
+    fn builder_theme_form_falls_back_to_link_color_for_invalid_swatch() {
+        let form = CreateThemeForm {
+            csrf: None,
+            slug: "builder-test".into(),
+            display_name: "Builder Test".into(),
+            description: Some("Generated in tests".into()),
+            swatch_hex: Some("not-a-color".into()),
+            theme_mode: Some("builder".into()),
+            custom_css: None,
+            builder: builder_fields(),
+            enabled: Some("1".into()),
+        };
+
+        let (swatch, _) = resolved_theme_css_for_create(&form, "builder-test").expect("css");
+
+        assert_eq!(swatch, "#77aa55");
+    }
+
+    #[test]
+    fn builder_theme_update_uses_explicit_swatch_instead_of_link_color() {
+        let existing_theme = Theme {
+            slug: "builder-test".into(),
+            display_name: "Builder Test".into(),
+            description: "Generated in tests".into(),
+            swatch_hex: "#111111".into(),
+            enabled: true,
+            sort_order: 1000,
+            is_builtin: false,
+            custom_css: String::new(),
+        };
+        let form = UpdateThemeForm {
+            csrf: None,
+            existing_slug: "builder-test".into(),
+            slug: "builder-test".into(),
+            display_name: "Builder Test".into(),
+            description: Some("Generated in tests".into()),
+            swatch_hex: Some("#335577".into()),
+            theme_mode: Some("builder".into()),
+            custom_css: None,
+            builder: builder_fields(),
+            enabled: Some("1".into()),
+        };
+
+        let (swatch, css) =
+            resolved_theme_css_for_update(&form, &existing_theme, "builder-test").expect("css");
+
+        assert_eq!(swatch, "#335577");
+        assert!(css
+            .expect("builder css")
+            .contains("--rustchan-builder-data:"));
     }
 
     #[test]

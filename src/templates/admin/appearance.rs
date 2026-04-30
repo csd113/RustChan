@@ -519,6 +519,41 @@ fn render_legacy_editor(theme_slug: &str, custom_css: &str) -> String {
     )
 }
 
+fn render_theme_metadata_fields(theme: &crate::models::Theme) -> String {
+    if theme.is_builtin {
+        format!(
+            r#"<div class="board-settings-grid">
+        <label>Display name<input type="text" value="{name}" maxlength="64" readonly aria-readonly="true"></label>
+        <label>Slug<input type="text" value="{slug}" maxlength="32" readonly aria-readonly="true"></label>
+        <label>Swatch<input type="color" value="{swatch}" disabled></label>
+      </div>
+      <div class="board-settings-grid" style="margin-top:0.65rem">
+        <label>Description<input type="text" value="{description}" maxlength="256" readonly aria-readonly="true"></label>
+      </div>
+      <p class="admin-meta-note">Built-in theme metadata is managed by RustChan and cannot be edited here. Only picker visibility can be changed.</p>"#,
+            name = escape_html(&theme.display_name),
+            slug = escape_html(&theme.slug),
+            swatch = escape_html(&theme.swatch_hex),
+            description = escape_html(&theme.description),
+        )
+    } else {
+        format!(
+            r#"<div class="board-settings-grid">
+        <label>Display name<input type="text" name="display_name" value="{name}" maxlength="64" required></label>
+        <label>Slug<input type="text" name="slug" value="{slug}" maxlength="32"></label>
+        <label>Swatch<input type="color" name="swatch_hex" value="{swatch}"></label>
+      </div>
+      <div class="board-settings-grid" style="margin-top:0.65rem">
+        <label>Description<input type="text" name="description" value="{description}" maxlength="256"></label>
+      </div>"#,
+            name = escape_html(&theme.display_name),
+            slug = escape_html(&theme.slug),
+            swatch = escape_html(&theme.swatch_hex),
+            description = escape_html(&theme.description),
+        )
+    }
+}
+
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
@@ -550,14 +585,7 @@ fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
   <input type="hidden" name="existing_slug" value="{slug}">
   <div class="theme-editor-layout">
     <div class="theme-editor-basics">
-      <div class="board-settings-grid">
-        <label>Display name<input type="text" name="display_name" value="{name}" maxlength="64" required></label>
-        <label>Slug<input type="text" name="slug" value="{slug}" maxlength="32"{slug_readonly}></label>
-        <label>Swatch<input type="color" name="swatch_hex" value="{swatch}"></label>
-      </div>
-      <div class="board-settings-grid" style="margin-top:0.65rem">
-        <label>Description<input type="text" name="description" value="{description_raw}" maxlength="256"></label>
-      </div>
+      {metadata_fields}
       <div class="board-settings-checks">
         <label><input type="checkbox" name="enabled" value="1"{enabled_ck}> Enabled in theme picker</label>
       </div>
@@ -589,9 +617,8 @@ fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
             } else {
                 escape_html(&theme.description)
             },
-            description_raw = escape_html(&theme.description),
-            slug_readonly = if theme.is_builtin { " readonly" } else { "" },
             enabled_ck = if theme.enabled { " checked" } else { "" },
+            metadata_fields = render_theme_metadata_fields(theme),
             theme_editor = theme_editor,
             delete_form = if theme.is_builtin {
                 String::new()

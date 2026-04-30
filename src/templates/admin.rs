@@ -1957,6 +1957,16 @@ mod tests {
     }
 
     #[test]
+    fn admin_panel_builtin_theme_metadata_is_read_only() {
+        let board = sample_board();
+        let html = render_admin_panel_for_test(&[board], &[], &[sample_theme()], None);
+
+        assert!(html.contains("Built-in theme metadata is managed by RustChan"));
+        assert!(html.contains(r#"value="Terminal" maxlength="64" readonly aria-readonly="true""#));
+        assert!(html.contains(r##"value="#7ab84e" disabled"##));
+    }
+
+    #[test]
     fn board_settings_card_renders_self_edit_and_self_delete_checkboxes_without_token_input() {
         let board = sample_board();
         let html = render_board_settings_card(

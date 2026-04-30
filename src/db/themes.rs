@@ -165,7 +165,7 @@ pub fn create_custom_theme(
 /// Returns an error if the theme is missing or the update fails.
 #[allow(clippy::too_many_arguments)]
 pub fn update_theme(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     existing_slug: &str,
     new_slug: &str,
     display_name: &str,
@@ -181,7 +181,8 @@ pub fn update_theme(
     } else {
         custom_css.unwrap_or(&current.custom_css).to_string()
     };
-    conn.execute(
+    let tx = conn.transaction()?;
+    tx.execute(
         "UPDATE themes
          SET slug = ?1,
              display_name = ?2,
@@ -202,18 +203,19 @@ pub fn update_theme(
     )
     .context("Failed to update theme")?;
     if existing_slug != new_slug {
-        conn.execute(
+        tx.execute(
             "UPDATE boards SET default_theme = ?1 WHERE lower(default_theme) = lower(?2)",
             params![new_slug, existing_slug],
         )
         .context("Failed to update board theme references")?;
-        conn.execute(
+        tx.execute(
             "UPDATE site_settings SET value = ?1
              WHERE key = 'default_theme' AND lower(value) = lower(?2)",
             params![new_slug, existing_slug],
         )
         .context("Failed to update site default theme reference")?;
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -221,21 +223,23 @@ pub fn update_theme(
 ///
 /// # Errors
 /// Returns an error if the theme is missing or cannot be deleted.
-pub fn delete_custom_theme(conn: &rusqlite::Connection, slug: &str) -> Result<()> {
+pub fn delete_custom_theme(conn: &mut rusqlite::Connection, slug: &str) -> Result<()> {
     let theme = get_theme(conn, slug)?.ok_or_else(|| anyhow::anyhow!("Theme not found"))?;
     if theme.is_builtin {
         anyhow::bail!("Built-in themes cannot be deleted");
     }
-    conn.execute("DELETE FROM themes WHERE slug = ?1", params![slug])?;
-    conn.execute(
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM themes WHERE slug = ?1", params![slug])?;
+    tx.execute(
         "UPDATE boards SET default_theme = '' WHERE lower(default_theme) = lower(?1)",
         params![slug],
     )?;
-    conn.execute(
+    tx.execute(
         "UPDATE site_settings SET value = ?2
          WHERE key = 'default_theme' AND lower(value) = lower(?1)",
         params![slug, crate::theme::HARD_DEFAULT_THEME],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -315,6 +319,7 @@ pub fn is_builtin_slug(slug: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::theme_builder::{build_theme_css, builder_defaults_for_preset};
+    use rusqlite::params;
 
     #[test]
     fn legacy_default_builtin_list_is_upgraded_with_new_featured_themes() {
@@ -398,5 +403,101 @@ mod tests {
 
         assert!(served.contains("html[data-theme=\"guided-forest\"]"));
         assert!(served.contains("--rustchan-builder-data:"));
+    }
+
+    #[test]
+    fn update_theme_renames_board_and_site_default_references() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut conn = pool.get().expect("db connection");
+        let board_short = "theme-update";
+        crate::db::boards::create_board(&conn, board_short, "Theme Update", "", false)
+            .expect("create board");
+        super::create_custom_theme(
+            &conn,
+            "guided-forest",
+            "Guided Forest",
+            "builder theme",
+            "#7ab84e",
+            "html[data-theme=\"guided-forest\"] { --bg: #111; }",
+            true,
+        )
+        .expect("create theme");
+        conn.execute(
+            "UPDATE boards SET default_theme = 'guided-forest' WHERE short_name = ?1",
+            params![board_short],
+        )
+        .expect("set board default");
+        crate::db::set_site_setting(&conn, "default_theme", "guided-forest")
+            .expect("set site default");
+
+        super::update_theme(
+            &mut conn,
+            "guided-forest",
+            "guided-grove",
+            "Guided Grove",
+            "renamed",
+            "#6aa44c",
+            true,
+            Some("html[data-theme=\"guided-grove\"] { --bg: #222; }"),
+        )
+        .expect("rename theme");
+
+        let board_default: String = conn
+            .query_row(
+                "SELECT default_theme FROM boards WHERE short_name = ?1",
+                params![board_short],
+                |row| row.get(0),
+            )
+            .expect("read board default");
+        assert_eq!(board_default, "guided-grove");
+        assert_eq!(
+            crate::db::get_site_setting(&conn, "default_theme")
+                .expect("read site default")
+                .as_deref(),
+            Some("guided-grove")
+        );
+    }
+
+    #[test]
+    fn delete_custom_theme_clears_dependent_references() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut conn = pool.get().expect("db connection");
+        let board_short = "theme-delete";
+        crate::db::boards::create_board(&conn, board_short, "Theme Delete", "", false)
+            .expect("create board");
+        super::create_custom_theme(
+            &conn,
+            "guided-forest",
+            "Guided Forest",
+            "builder theme",
+            "#7ab84e",
+            "html[data-theme=\"guided-forest\"] { --bg: #111; }",
+            true,
+        )
+        .expect("create theme");
+        conn.execute(
+            "UPDATE boards SET default_theme = 'guided-forest' WHERE short_name = ?1",
+            params![board_short],
+        )
+        .expect("set board default");
+        crate::db::set_site_setting(&conn, "default_theme", "guided-forest")
+            .expect("set site default");
+
+        super::delete_custom_theme(&mut conn, "guided-forest").expect("delete theme");
+
+        let board_default: String = conn
+            .query_row(
+                "SELECT default_theme FROM boards WHERE short_name = ?1",
+                params![board_short],
+                |row| row.get(0),
+            )
+            .expect("read board default");
+        assert!(board_default.is_empty());
+        assert_eq!(
+            crate::db::get_site_setting(&conn, "default_theme")
+                .expect("read site default")
+                .as_deref(),
+            Some(crate::theme::HARD_DEFAULT_THEME)
+        );
     }
 }
