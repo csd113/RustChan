@@ -12,7 +12,7 @@ One binary. One data folder. SQLite only. The rest is features.
 
 RustChan is built in Rust, ships with bundled SQLite, and is designed to be understandable, movable, and fun to run.
 
-Current development version: `1.1.5-indev`.
+Current development version: `1.1.6-development`.
 
 [What is RustChan?](#what-is-rustchan) ·
 [Why it exists](#why-it-exists) ·

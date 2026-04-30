@@ -137,7 +137,7 @@ fn render_board_card(
         r#"<div class="board-card">
   {reorder_controls}
   <a class="board-card-link" href="{href}"{action_attr}{return_to_attr}>
-    <div class="board-card-short">/{sh}/{nsfw}{access_badge}</div>
+    <div class="board-card-short"><span class="board-card-slug">/{sh}/</span><span class="board-card-badges">{nsfw}{access_badge}</span></div>
     <div class="board-card-name">{name}</div>
     <div class="board-card-desc">{description}</div>
     <div class="board-card-stats">{thread_count} {thread_word}</div>
@@ -1529,6 +1529,33 @@ mod tests {
 
         let html_with_controls = board_cards(&[&stats], &HashMap::new(), true, "csrf", true);
         assert!(html_with_controls.contains("board-reorder-menu"));
+    }
+
+    #[test]
+    fn board_card_activity_badge_renders_after_stats_in_card_flow() {
+        let board = sample_board();
+        let stats = BoardStats {
+            board,
+            thread_count: 4,
+        };
+        let mut badges = HashMap::new();
+        badges.insert(stats.board.id, 2);
+
+        let html = board_cards(&[&stats], &badges, true, "csrf", false);
+
+        let stats_idx = html
+            .find("board-card-stats")
+            .expect("board-card stats should render");
+        let badge_idx = html
+            .find("board-card-activity-badge")
+            .expect("activity badge should render");
+        let link_close_idx = html
+            .find("</a>")
+            .expect("card link should close after its content");
+
+        assert!(stats_idx < badge_idx && badge_idx < link_close_idx);
+        assert!(html.contains(r#"<span class="board-card-slug">/test/</span>"#));
+        assert!(html.contains("2 New"));
     }
 
     #[test]

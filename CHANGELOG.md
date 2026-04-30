@@ -2,7 +2,9 @@
 
 All notable changes to RustChan will be documented in this file.
 
-## [1.1.5-indev]
+## [1.1.6-development]
+
+## [1.1.5]
 
 ### Added
 

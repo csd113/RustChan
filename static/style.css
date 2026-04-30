@@ -1098,9 +1098,10 @@ html.no-js .post-form-wrap {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 6px;
-  margin-bottom: 4px;
+  gap: 4px 7px;
+  margin-bottom: 6px;
   font-size: 0.8rem;
+  min-width: 0;
 }
 
 .name { color: var(--green-bright); font-weight: bold; }
@@ -1306,6 +1307,9 @@ html:not([data-theme]) .poster-id-btn {
   align-items: baseline;
   gap: 0.45rem;
   margin-right: 0.1rem;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .subject a { color: var(--green-bright); }
@@ -1371,6 +1375,10 @@ html:not([data-theme]) .poster-id-btn {
   text-decoration: none;
   margin-right: 0.25rem;
   cursor: pointer;
+}
+.backrefs {
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .backrefs .backref:hover { color: var(--green-bright); text-decoration: underline; }
 
@@ -1485,6 +1493,7 @@ html:not([data-theme]) .poster-id-btn {
   margin-bottom: 3px;
   line-height: 1.35;
   overflow-wrap: anywhere;
+  max-width: min(100%, 42rem);
 }
 
 .file-info a { color: var(--green-pale); }
@@ -1792,7 +1801,7 @@ html:not([data-theme]) .poster-id-btn {
 .self-action-window-note {
   font-size: 0.72rem;
   color: var(--text-dim);
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .self-action-controls {
@@ -1888,8 +1897,8 @@ html:not([data-theme]) .poster-id-btn {
 
 .catalog-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 10px;
   margin-top: 10px;
 }
 
@@ -1903,12 +1912,16 @@ html:not([data-theme]) .poster-id-btn {
   padding: 6px;
   text-align: center;
   transition: border-color 0.2s;
-  aspect-ratio: 1 / 1;
+  min-height: 184px;
 }
 
-.catalog-item:hover { border-color: var(--border-glow); }
+.catalog-item:hover,
+.catalog-item:focus-within { border-color: var(--border-glow); }
 .catalog-item.sticky { border-color: var(--amber); }
-.catalog-item.is-pinned { border-color: #7d7d7d; box-shadow: inset 0 0 0 1px #555; }
+.catalog-item.is-pinned {
+  border-color: var(--amber);
+  box-shadow: inset 0 0 0 1px var(--amber);
+}
 
 .catalog-card-link {
   color: var(--text);
@@ -1984,13 +1997,16 @@ html:not([data-theme]) .poster-id-btn {
   justify-content: center;
   align-items: center;
   margin-top: 4px;
-  min-height: 22px;
+  min-height: 24px;
+  padding: 0 24px;
 }
 
 .catalog-activity-row {
   display: flex;
   justify-content: flex-end;
-  margin-top: 4px;
+  margin-top: auto;
+  padding-top: 5px;
+  min-height: 21px;
 }
 
 .catalog-activity-badge {
@@ -2023,8 +2039,8 @@ html:not([data-theme]) .poster-id-btn {
 
 .catalog-thread-menu-toggle {
   border: 1px solid transparent;
-  background: rgba(89, 168, 255, 0.06);
-  color: #59a8ff;
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+  color: var(--green-dim);
   cursor: pointer;
   width: 22px;
   height: 22px;
@@ -2056,9 +2072,9 @@ html:not([data-theme]) .poster-id-btn {
 
 .catalog-thread-menu-toggle:hover,
 .catalog-thread-menu-toggle:focus-visible {
-  color: #8cc4ff;
-  border-color: rgba(89, 168, 255, 0.32);
-  background: rgba(89, 168, 255, 0.12);
+  color: var(--green-bright);
+  border-color: color-mix(in srgb, var(--green) 38%, transparent);
+  background: color-mix(in srgb, var(--green) 14%, transparent);
 }
 
 .catalog-thread-menu {
@@ -2092,7 +2108,7 @@ html:not([data-theme]) .poster-id-btn {
 
 .catalog-thread-menu-item:hover,
 .catalog-thread-menu-item:focus-visible {
-  background: rgba(89, 168, 255, 0.12);
+  background: color-mix(in srgb, var(--green) 14%, transparent);
   color: var(--green-bright);
 }
 
@@ -2148,6 +2164,7 @@ html:not([data-theme]) .poster-id-btn {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
+  overflow-wrap: anywhere;
 }
 .catalog-comment {
   color: var(--text);
@@ -2218,7 +2235,7 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   padding: 8px 10px;
   color: var(--text);
   transition: all 0.15s;
-  aspect-ratio: 1 / 1;
+  min-height: 150px;
 }
 
 .board-card:hover {
@@ -2236,6 +2253,7 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   flex-direction: column;
   color: inherit;
   text-decoration: none;
+  gap: 3px;
 }
 
 .new-activity-badge {
@@ -2264,25 +2282,58 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
 }
 
 .board-card-activity-badge {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
+  align-self: flex-end;
+  margin-top: 6px;
+  max-width: 100%;
   pointer-events: none;
 }
 
 .board-card-short {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
   font-size: 1rem;
   color: var(--green-bright);
   font-weight: bold;
   letter-spacing: 0.05em;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
-.board-card-name { font-size: 0.85rem; color: var(--text); margin-top: 2px; }
+.board-card-badges {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px;
+  min-width: 0;
+}
+
+.board-card-badges .tag,
+.board-card-badges .nsfw-badge {
+  margin-left: 0;
+}
+
+.board-card-name {
+  font-size: 0.85rem;
+  color: var(--text);
+  margin-top: 1px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
 .board-card-desc {
   font-size: 0.84rem;
   color: var(--text-dim);
-  margin-top: 4px;
+  margin-top: 2px;
   overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
 }
 
 .nsfw-badge {
@@ -2423,7 +2474,8 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   margin-top: auto;
   font-weight: bold;
   letter-spacing: 0.03em;
-  padding-top: 4px;
+  padding-top: 6px;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 700px) {
@@ -2452,6 +2504,7 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
 
   .board-card {
     padding: 7px 8px;
+    min-height: 142px;
   }
 
   .catalog-replies,
@@ -2471,7 +2524,7 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   }
 
   .nsfw-badge {
-    margin-left: 3px;
+    margin-left: 0;
     padding: 1px 3px;
     font-size: 0.58rem;
   }
