@@ -1,23 +1,10 @@
-// detect.rs — Startup detection for optional external tools.
-//
-// All terminal output goes through crate::logging helpers so it is
-// serialised with the tracing terminal layer (CONSOLE_MUTEX).  This
-// prevents interleaving with concurrent log events during startup.
-//
-// Structured events (info!/warn!/error!) capture the detection result in
-// the JSON log file with structured fields.  Human-readable install
-// instructions are written via console_print_raw so they appear only
-// on TTY-mode terminals and never pollute piped / systemd output.
+// Startup detection for optional external tools.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 /// Result of probing for a tool at startup.
-///
-/// Note: the `Spawning` variant that existed in v1.0 has been removed.
-/// `detect_tor` now returns `Option<JoinHandle<()>>` directly; it no longer
-/// uses this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     /// Tool is ready for use immediately (e.g. ffmpeg).
@@ -28,13 +15,7 @@ pub enum ToolStatus {
 // ─── ffmpeg ───────────────────────────────────────────────────────────────────
 
 pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
-    let ok = Command::new(&crate::config::CONFIG.ffmpeg_path)
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let ok = probe_tool(&crate::config::CONFIG.ffmpeg_path);
 
     if ok {
         tracing::info!(target: "rustchan::detect", available = true, "ffmpeg detected — video thumbnails and transcoding enabled");
@@ -66,6 +47,29 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
     }
 }
 
+/// Probe the configured `ffprobe` path at startup so bogus explicit paths are
+/// detected immediately instead of only failing later on the first `WebM` probe.
+pub fn detect_ffprobe() -> bool {
+    let ok = probe_tool(&crate::config::CONFIG.ffprobe_path);
+
+    if ok {
+        tracing::info!(
+            target: "rustchan::detect",
+            available = true,
+            "ffprobe detected — WebM codec inspection enabled"
+        );
+    } else {
+        tracing::warn!(
+            target: "rustchan::detect",
+            available = false,
+            ffprobe_path = %crate::config::CONFIG.ffprobe_path,
+            "ffprobe not detected — WebM codec inspection will fail for uploads that need it"
+        );
+    }
+
+    ok
+}
+
 /// Probe whether the detected ffmpeg has `libwebp` compiled in.
 pub fn detect_webp_encoder(ffmpeg_ok: bool) -> bool {
     if !ffmpeg_ok {
@@ -92,6 +96,41 @@ pub fn detect_webp_encoder(ffmpeg_ok: bool) -> bool {
     }
 
     has_webp
+}
+
+pub fn detect_pdf_thumbnail_renderers() -> Vec<crate::media::thumbnail::PdfRenderer> {
+    let renderers = crate::media::thumbnail::detect_pdf_renderers();
+
+    if renderers.is_empty() {
+        tracing::warn!(
+            target: "rustchan::detect",
+            available = false,
+            "no PDF thumbnail renderer detected — PDF uploads still work and will use the built-in generic PDF thumbnail. Install Poppler pdftoppm, MuPDF mutool, or use macOS qlmanage to enable real first-page thumbnails"
+        );
+        if crate::logging::is_tty() {
+            crate::logging::console_print_raw(
+                "  PDF uploads still work with a built-in generic thumbnail.\n  Install Poppler `pdftoppm`, MuPDF `mutool`, or use macOS `qlmanage` for real first-page thumbnails.\n\n",
+            );
+        }
+    } else {
+        let detected = renderers
+            .iter()
+            .map(|renderer| renderer.binary_name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let selected = renderers
+            .first()
+            .map_or("unknown", |renderer| renderer.binary_name());
+        tracing::info!(
+            target: "rustchan::detect",
+            available = true,
+            renderers = %detected,
+            selected = selected,
+            "PDF thumbnail renderer detected"
+        );
+    }
+
+    renderers
 }
 
 fn webp_install_hint() -> String {
@@ -127,6 +166,15 @@ fn webp_install_hint() -> String {
         s.retain(|c| c != '\x1b');
     }
     s
+}
+
+fn probe_tool(program: &str) -> bool {
+    Command::new(program)
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Probe whether the detected ffmpeg has `libvpx-vp9` + `libopus` compiled in.
@@ -347,16 +395,6 @@ pub fn detect_tor(
     Some(handle)
 }
 
-/// Previously killed the tor subprocess.
-/// The [`TorClient`] is owned by the `tokio::spawn` task; dropping the runtime
-/// closes all circuits cleanly. This function is a no-op and should not be called.
-#[deprecated(
-    since = "1.1.0",
-    note = "Arti lifecycle is managed by the runtime. Dropping TorClient closes circuits cleanly. This fn is a no-op."
-)]
-#[allow(dead_code)]
-pub const fn kill_tor() {}
-
 // ─── Core Arti task ───────────────────────────────────────────────────────────
 
 async fn run_arti(
@@ -365,7 +403,7 @@ async fn run_arti(
     onion_address: Arc<RwLock<Option<String>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // runtime/tor/cache/ — consensus cache (safe to delete; re-fetched on next start).
-    // runtime/tor/state/ — service keypair. Back this up.
+    // runtime/tor/state/keystore/ — service keypair. Back this up.
     //   Delete it only if you want a new .onion address.
     //
     // NOTE: TorClientConfigBuilder::from_directories takes AsRef<Path> directly.
@@ -563,7 +601,7 @@ async fn proxy_tor_stream(
     // local port. axum's ConnectInfo sees this port as the peer port on the
     // incoming socket, so ClientIp / extract_ip can retrieve the token without
     // any HTTP parsing, through keep-alive, across all content types.
-    let local_port = local.local_addr().map(|a| a.port()).unwrap_or(0);
+    let local_port = local.local_addr().map_or(0, |a| a.port());
     let token: Arc<str> = {
         let mut bytes = [0u8; 16];
         OsRng.fill_bytes(&mut bytes);
@@ -660,5 +698,18 @@ mod tests {
                 .all(|c| matches!(c, 'a'..='z' | '2'..='7')),
             "base32 part must be lowercase a-z2-7 only"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_tool_uses_the_explicit_binary_path() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let script = tempdir.path().join("ffprobe");
+        symlink("/usr/bin/true", &script).expect("symlink true");
+
+        assert!(probe_tool(script.to_str().expect("utf8 path")));
+        assert!(!probe_tool("/definitely/not/a/real/ffprobe"));
     }
 }

@@ -1,19 +1,9 @@
-// config.rs — Runtime configuration.
-//
-// Priority (highest → lowest):
-// 1. Environment variables (CHAN_BIND, CHAN_DB, …)
-// 2. settings.toml (<exe-dir>/rustchan-data/settings.toml)
-// 3. Hard-coded defaults
-//
-// On first run, settings.toml is generated next to the binary with all
-// default values and explanatory comments. Edit it, restart the server.
-//
-// SECURITY: The cookie_secret is auto-generated on first run and persisted
-// to settings.toml. It is never left at a well-known default value.
+// Runtime configuration and settings-file loading.
 use rand_core::{OsRng, RngCore};
 use serde::Deserialize;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 
 mod template;
@@ -34,7 +24,10 @@ fn binary_dir() -> PathBuf {
 }
 
 fn settings_file_path() -> PathBuf {
-    // Store settings.toml in rustchan-data/ alongside the database.
+    // Resolve settings.toml next to the running executable, inside
+    // <exe-dir>/rustchan-data/. This is the config source of truth for the live
+    // process; `CHAN_*` environment variables still override selected fields
+    // after the file is loaded.
     // rustchan-data/ is created by run_server before CONFIG is first accessed,
     // so this directory always exists by the time settings are read.
     let data_dir = binary_dir().join("rustchan-data");
@@ -89,6 +82,18 @@ pub fn runtime_tor_dir() -> PathBuf {
 #[must_use]
 pub fn runtime_tor_state_dir() -> PathBuf {
     runtime_tor_dir().join("state")
+}
+
+#[must_use]
+pub fn runtime_tor_hidden_service_keys_dir() -> PathBuf {
+    runtime_tor_state_dir().join("keystore")
+}
+
+#[must_use]
+pub fn configured_tor_hidden_service_keys_dir() -> Option<PathBuf> {
+    CONFIG
+        .enable_tor_support
+        .then(runtime_tor_hidden_service_keys_dir)
 }
 
 #[must_use]
@@ -174,6 +179,12 @@ struct SettingsFile {
     forum_name: Option<String>,
     /// Home page subtitle shown below the site name.
     site_subtitle: Option<String>,
+    /// Legacy initial state for browser-local new-activity badges.
+    new_activity_notifications_enabled: Option<bool>,
+    /// Initial state for homepage board-card new-thread badges.
+    homepage_new_thread_badges_enabled: Option<bool>,
+    /// Initial state for board/catalog thread-card new-reply badges.
+    thread_new_reply_badges_enabled: Option<bool>,
     /// Default theme served to first-time visitors before they pick one.
     /// Valid values include built-ins and admin-created custom theme slugs.
     default_theme: Option<String>,
@@ -220,6 +231,9 @@ struct SettingsFile {
     /// How many saved full-site backups to keep on disk after a new saved
     /// backup completes. Minimum 1. Default: 1.
     auto_full_backup_copies_to_keep: Option<u64>,
+    /// Whether automatic full-site backups should include Tor hidden service
+    /// identity keys. Default: false.
+    auto_full_backup_include_tor_hidden_service_keys: Option<bool>,
     /// How often to purge vote records for expired polls, in hours.
     /// Set to 0 to disable. Default: 72 (every 3 days).
     poll_cleanup_interval_hours: Option<u64>,
@@ -231,7 +245,7 @@ struct SettingsFile {
     /// than accepted. Default: 1000.
     job_queue_capacity: Option<u64>,
     /// Maximum seconds to allow a single `FFmpeg` transcode or waveform job to
-    /// run before it is killed. Default: 120.
+    /// run before it is killed. Default: 600.
     ffmpeg_timeout_secs: Option<u64>,
     /// Explicit proxy CIDR allowlist for trusted forwarding headers.
     /// Examples include `127.0.0.1/32`, `::1/128`, and `10.0.0.0/8`.
@@ -340,16 +354,22 @@ pub struct AcmeConfig {
     // (the Let's Encrypt implementation lives in a separate module).
     // They are intentionally kept here so the `[tls.acme]` section in
     // settings.toml deserializes cleanly even when the feature is off.
+    // The dead-code allow exists because the config shape is stable even when
+    // this build cannot act on the fields.
     #[serde(default)]
+    // Feature-gated, but still part of the stable settings shape.
     #[allow(dead_code)]
     pub domains: Vec<String>,
     #[serde(default)]
+    // Feature-gated, but still part of the stable settings shape.
     #[allow(dead_code)]
     pub email: Option<String>,
     #[serde(default = "default_true")]
+    // Feature-gated, but still part of the stable settings shape.
     #[allow(dead_code)]
     pub staging: bool,
     #[serde(default = "default_acme_dir")]
+    // Feature-gated, but still part of the stable settings shape.
     #[allow(dead_code)]
     pub cache_dir: String,
 }
@@ -378,19 +398,73 @@ fn default_acme_dir() -> String {
 
 // ─── Runtime config ───────────────────────────────────────────────────────────
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
+static LIVE_FFMPEG_TIMEOUT_SECS: LazyLock<AtomicU64> =
+    LazyLock::new(|| AtomicU64::new(CONFIG.ffmpeg_timeout_secs));
 
+pub const DEFAULT_FFMPEG_TIMEOUT_SECS: u64 = 600;
+pub const MIN_FFMPEG_TIMEOUT_SECS: u64 = 30;
+pub const MAX_FFMPEG_TIMEOUT_SECS: u64 = 86_400;
+
+#[must_use]
+pub fn ffmpeg_timeout_secs() -> u64 {
+    LIVE_FFMPEG_TIMEOUT_SECS.load(Ordering::Relaxed)
+}
+
+/// # Errors
+/// Returns an error when `timeout_secs` falls outside the supported range.
+pub fn set_live_ffmpeg_timeout_secs(timeout_secs: u64) -> anyhow::Result<()> {
+    let timeout_secs = validate_ffmpeg_timeout_secs(timeout_secs)?;
+    LIVE_FFMPEG_TIMEOUT_SECS.store(timeout_secs, Ordering::Relaxed);
+    Ok(())
+}
+
+/// # Errors
+/// Returns an error when `timeout_secs` falls outside the supported range.
+pub fn validate_ffmpeg_timeout_secs(timeout_secs: u64) -> anyhow::Result<u64> {
+    if !(MIN_FFMPEG_TIMEOUT_SECS..=MAX_FFMPEG_TIMEOUT_SECS).contains(&timeout_secs) {
+        anyhow::bail!(
+            "CONFIG ERROR: ffmpeg_timeout_secs must be between {MIN_FFMPEG_TIMEOUT_SECS} and {MAX_FFMPEG_TIMEOUT_SECS} seconds."
+        );
+    }
+    Ok(timeout_secs)
+}
+
+#[must_use]
+pub fn describe_timeout_secs(timeout_secs: u64) -> String {
+    let minutes = timeout_secs / 60;
+    let seconds = timeout_secs % 60;
+    match (minutes, seconds) {
+        (0, secs) => format!("{secs} seconds"),
+        (1, 0) => "1 minute".to_string(),
+        (mins, 0) => format!("{mins} minutes"),
+        (1, secs) => format!("1 minute {secs} seconds"),
+        (mins, secs) => format!("{mins} minutes {secs} seconds"),
+    }
+}
+
+// This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     // ── Loaded from settings.toml (env vars still override) ──────────────────
     pub forum_name: String,
-    /// Initial subtitle shown on the home page (seeds the DB on first run).
+    /// Initial subtitle shown on the home page; seeds the DB on first run and
+    /// then the Admin -> Site Settings DB value becomes the live source of truth.
     pub initial_site_subtitle: String,
-    /// Initial default theme slug (seeds the DB on first run).
+    /// Initial state for homepage board-card new-thread badges; seeds the DB
+    /// on first run and then the Admin -> Site Settings DB value becomes the
+    /// live source of truth.
+    pub initial_homepage_new_thread_badges_enabled: bool,
+    /// Initial state for board/catalog thread-card new-reply badges; seeds the
+    /// DB on first run and then the Admin -> Site Settings DB value becomes the
+    /// live source of truth.
+    pub initial_thread_new_reply_badges_enabled: bool,
+    /// Initial default theme slug; seeds the DB on first run and later the
+    /// Admin -> Site Settings DB value becomes the live source of truth.
     /// Valid: built-in or custom theme slug present in the themes table.
     pub initial_default_theme: String,
     /// Built-in themes enabled by default when the site seeds its theme catalog.
+    /// After seeding, the theme catalog in the DB owns the enabled/disabled set.
     pub initial_enabled_builtin_themes: Vec<String>,
-    #[allow(dead_code)] // read by CLI subcommands and printed at startup
     pub port: u16,
     pub max_image_size: usize, // bytes
     pub max_video_size: usize, // bytes
@@ -421,10 +495,6 @@ pub struct Config {
     pub database_path: String,
     pub upload_dir: String,
     pub thumb_size: u32,
-    #[allow(dead_code)] // used as default when creating boards via CLI/admin
-    pub default_bump_limit: u32,
-    #[allow(dead_code)] // used as default when creating boards via CLI/admin
-    pub max_threads_per_board: u32,
     /// Maximum GET requests per IP per `rate_limit_window`.
     pub rate_limit_gets: u32,
     pub rate_limit_window: u64,
@@ -445,6 +515,8 @@ pub struct Config {
     /// Maximum number of saved full backups kept on disk after each new saved
     /// full backup completes. Minimum 1.
     pub auto_full_backup_copies_to_keep: u64,
+    /// Whether automatic saved full backups include Tor hidden service identity keys.
+    pub auto_full_backup_include_tor_hidden_service_keys: bool,
     /// Interval in hours between expired poll vote cleanup runs. 0 = disabled.
     pub poll_cleanup_interval_hours: u64,
     /// DB file size threshold in bytes above which admin panel shows a warning.
@@ -484,6 +556,7 @@ pub struct Config {
 
 impl Config {
     #[must_use]
+    // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
     #[allow(clippy::too_many_lines)]
     pub fn from_env() -> Self {
         let s = load_settings_file();
@@ -501,9 +574,28 @@ impl Config {
                 .as_deref()
                 .unwrap_or("select board to proceed"),
         );
+        let legacy_new_activity_notifications_enabled = env::var("CHAN_NEW_ACTIVITY_NOTIFICATIONS")
+            .ok()
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .or(s.new_activity_notifications_enabled);
+        let initial_homepage_new_thread_badges_enabled =
+            env::var("CHAN_HOMEPAGE_NEW_THREAD_BADGES")
+                .ok()
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .or(s.homepage_new_thread_badges_enabled)
+                .or(legacy_new_activity_notifications_enabled)
+                .unwrap_or(true);
+        let initial_thread_new_reply_badges_enabled = env::var("CHAN_THREAD_NEW_REPLY_BADGES")
+            .ok()
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .or(s.thread_new_reply_badges_enabled)
+            .or(legacy_new_activity_notifications_enabled)
+            .unwrap_or(true);
         let initial_default_theme = env_str(
             "CHAN_DEFAULT_THEME",
-            s.default_theme.as_deref().unwrap_or("fluorogrid"),
+            s.default_theme
+                .as_deref()
+                .unwrap_or(crate::theme::HARD_DEFAULT_THEME),
         );
         let initial_enabled_builtin_themes = s.enabled_builtin_themes.unwrap_or_else(|| {
             crate::theme::builtin_theme_slugs()
@@ -522,8 +614,9 @@ impl Config {
         let tor_only = env_bool("CHAN_TOR_ONLY", s.tor_only.unwrap_or(false));
         let enable_tor_support = env_bool("CHAN_TOR_SUPPORT", s.enable_tor_support.unwrap_or(true));
         // When tor_only=true, force the bind host to loopback while preserving
-        // the configured address family and port.
-        let bind_addr = if tor_only && enable_tor_support {
+        // the configured address family and port. Validation later rejects a
+        // tor-only request if Tor support itself is disabled.
+        let bind_addr = if tor_only {
             let port_num = port_from_bind_addr(&bind_addr).unwrap_or(8080);
             let tor_bind_addr = loopback_addr_for_family(&bind_addr, port_num);
             tracing::info!(
@@ -587,6 +680,8 @@ impl Config {
         Self {
             forum_name,
             initial_site_subtitle,
+            initial_homepage_new_thread_badges_enabled,
+            initial_thread_new_reply_badges_enabled,
             initial_default_theme,
             initial_enabled_builtin_themes,
             port,
@@ -600,7 +695,7 @@ impl Config {
                 .saturating_mul(1024)
                 .saturating_mul(1024),
             enable_tor_support,
-            tor_only: tor_only && enable_tor_support,
+            tor_only,
             tor_bootstrap_timeout_secs: env_parse(
                 "CHAN_TOR_BOOTSTRAP_TIMEOUT",
                 s.tor_bootstrap_timeout_secs.unwrap_or(120),
@@ -630,8 +725,6 @@ impl Config {
             database_path: env_str("CHAN_DB", &default_db),
             upload_dir: env_str("CHAN_UPLOADS", &default_uploads),
             thumb_size: env_parse("CHAN_THUMB_SIZE", 250),
-            default_bump_limit: env_parse("CHAN_BUMP_LIMIT", 500),
-            max_threads_per_board: env_parse("CHAN_MAX_THREADS", 150),
             rate_limit_gets: env_parse("CHAN_RATE_GETS", 60),
             rate_limit_window: env_parse("CHAN_RATE_WINDOW", 60),
             cookie_secret,
@@ -657,6 +750,11 @@ impl Config {
                 s.auto_full_backup_copies_to_keep.unwrap_or(1),
             )
             .max(1),
+            auto_full_backup_include_tor_hidden_service_keys: env_bool(
+                "CHAN_AUTO_FULL_BACKUP_INCLUDE_TOR_KEYS",
+                s.auto_full_backup_include_tor_hidden_service_keys
+                    .unwrap_or(false),
+            ),
             poll_cleanup_interval_hours: env_parse(
                 "CHAN_POLL_CLEANUP_HOURS",
                 s.poll_cleanup_interval_hours.unwrap_or(72),
@@ -674,7 +772,7 @@ impl Config {
             ),
             ffmpeg_timeout_secs: env_parse(
                 "CHAN_FFMPEG_TIMEOUT_SECS",
-                s.ffmpeg_timeout_secs.unwrap_or(120),
+                s.ffmpeg_timeout_secs.unwrap_or(DEFAULT_FFMPEG_TIMEOUT_SECS),
             ),
             archive_before_prune: env_bool(
                 "CHAN_ARCHIVE_BEFORE_PRUNE",
@@ -688,9 +786,7 @@ impl Config {
                 mb.saturating_mul(1024).saturating_mul(1024)
             },
             blocking_threads: {
-                let cpus = std::thread::available_parallelism()
-                    .map(std::num::NonZero::get)
-                    .unwrap_or(4);
+                let cpus = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
                 let configured =
                     env_parse("CHAN_BLOCKING_THREADS", s.blocking_threads.unwrap_or(0));
                 if configured == 0 {
@@ -778,11 +874,36 @@ impl Config {
                  Add `port = 8443` under [tls] in settings.toml, or remove the explicit `port = 0`."
             );
         }
-        if port_from_bind_addr(&self.bind_addr).is_none() {
+        let Some(http_port) = port_from_bind_addr(&self.bind_addr) else {
             anyhow::bail!(
                 "CONFIG ERROR: bind_addr '{}' is not a valid host:port address.",
                 self.bind_addr
             );
+        };
+        if self.tls.enabled && self.tls.port == http_port {
+            anyhow::bail!(
+                "CONFIG ERROR: tls.port ({}) must differ from the main HTTP port ({}).",
+                self.tls.port,
+                http_port
+            );
+        }
+        if self.tls.enabled && self.tls.redirect_http {
+            if self.tls.http_port == http_port {
+                anyhow::bail!(
+                    "CONFIG ERROR: tls.http_port ({}) must differ from the main HTTP port ({}) \
+                     when tls.redirect_http=true.",
+                    self.tls.http_port,
+                    http_port
+                );
+            }
+            if self.tls.http_port == self.tls.port {
+                anyhow::bail!(
+                    "CONFIG ERROR: tls.http_port ({}) must differ from tls.port ({}) \
+                     when tls.redirect_http=true.",
+                    self.tls.http_port,
+                    self.tls.port
+                );
+            }
         }
         for cidr in &self.trusted_proxy_cidrs {
             cidr.parse::<ipnet::IpNet>().map_err(|error| {
@@ -854,6 +975,18 @@ impl Config {
                 self.rustwave_url
             ));
         }
+        if !self.chan_net_api_key.is_empty() && self.chan_net_api_key.len() < 32 {
+            anyhow::bail!(
+                "CONFIG ERROR: chan_net_api_key must be empty to disable ChanNet auth-protected endpoints \
+                 or at least 32 characters long."
+            );
+        }
+        if self.tor_only && !self.enable_tor_support {
+            anyhow::bail!(
+                "CONFIG ERROR: tor_only=true requires enable_tor_support=true. \
+                 Tor-only mode needs the built-in onion service to be active."
+            );
+        }
         if self.enable_tor_support && !self.tor_only {
             tracing::warn!(
                 target: "config",
@@ -873,6 +1006,7 @@ impl Config {
                 self.rustwave_url
             );
         }
+        validate_ffmpeg_timeout_secs(self.ffmpeg_timeout_secs)?;
         Ok(())
     }
 
@@ -887,17 +1021,16 @@ impl Config {
     }
 }
 
-/// Update `forum_name` and `site_subtitle` in `settings.toml` in-place,
+/// Update site identity fields in `settings.toml` in-place,
 /// preserving all other lines and comments.
 ///
 /// Called by the admin site-settings handler so that changes made via the
 /// panel are reflected in the file and survive a restart without the operator
 /// needing to hand-edit `settings.toml`.
 ///
-/// If the key is not yet present in the file the function is a no-op for that
-/// key (it won't append new lines — the file is only updated if the key already
-/// exists). On a fresh install `generate_settings_file_if_missing` always
-/// writes both keys, so this is only a concern for manually-crafted files.
+/// If a key is not yet present in the file, it is inserted before the requested
+/// anchor section. On a fresh install `generate_settings_file_if_missing`
+/// already writes these keys, so insertion mainly covers manually-crafted files.
 fn toml_quote(s: &str) -> String {
     let inner = s.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{inner}\"")
@@ -1024,17 +1157,36 @@ fn update_settings_file_entries(updates: &[(&str, String)], insert_missing_befor
     }
 }
 
-pub fn update_settings_file_site_names(forum_name: &str, site_subtitle: &str) {
+pub fn update_settings_file_site_settings(
+    forum_name: &str,
+    site_subtitle: &str,
+    homepage_new_thread_badges_enabled: bool,
+    thread_new_reply_badges_enabled: bool,
+    default_theme: &str,
+) {
     update_settings_file_entries(
         &[
             ("forum_name", toml_quote(forum_name)),
             ("site_subtitle", toml_quote(site_subtitle)),
+            (
+                "homepage_new_thread_badges_enabled",
+                homepage_new_thread_badges_enabled.to_string(),
+            ),
+            (
+                "thread_new_reply_badges_enabled",
+                thread_new_reply_badges_enabled.to_string(),
+            ),
+            ("default_theme", toml_quote(default_theme)),
         ],
         Some("# ── Network / web server"),
     );
 }
 
-pub fn update_settings_file_auto_full_backup(interval_hours: u64, copies_to_keep: u64) {
+pub fn update_settings_file_auto_full_backup(
+    interval_hours: u64,
+    copies_to_keep: u64,
+    include_tor_hidden_service_keys: bool,
+) {
     update_settings_file_entries(
         &[
             (
@@ -1045,8 +1197,20 @@ pub fn update_settings_file_auto_full_backup(interval_hours: u64, copies_to_keep
                 "auto_full_backup_copies_to_keep",
                 copies_to_keep.max(1).to_string(),
             ),
+            (
+                "auto_full_backup_include_tor_hidden_service_keys",
+                include_tor_hidden_service_keys.to_string(),
+            ),
         ],
         Some("# ── Federation / ChanNet gateway"),
+    );
+}
+
+pub fn update_settings_file_ffmpeg_timeout(timeout_secs: u64) {
+    let timeout_secs = timeout_secs.clamp(MIN_FFMPEG_TIMEOUT_SECS, MAX_FFMPEG_TIMEOUT_SECS);
+    update_settings_file_entries(
+        &[("ffmpeg_timeout_secs", timeout_secs.to_string())],
+        Some("# Optional explicit ffmpeg binary path."),
     );
 }
 
@@ -1105,9 +1269,7 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
 }
 
 fn env_bool(key: &str, default: bool) -> bool {
-    env::var(key)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(default)
+    env::var(key).map_or(default, |v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 fn env_list(key: &str, file_value: Option<Vec<String>>, default: &[&str]) -> Vec<String> {
@@ -1192,13 +1354,96 @@ fn port_from_bind_addr(addr: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_settings_file_lines;
+    use super::{
+        describe_timeout_secs, ffmpeg_timeout_secs, rewrite_settings_file_lines,
+        runtime_tor_hidden_service_keys_dir, set_live_ffmpeg_timeout_secs, settings_file_path,
+        template::settings_template, update_settings_file_ffmpeg_timeout,
+        validate_ffmpeg_timeout_secs, Config, TlsConfig, DEFAULT_FFMPEG_TIMEOUT_SECS,
+        MAX_FFMPEG_TIMEOUT_SECS, MIN_FFMPEG_TIMEOUT_SECS,
+    };
+    use std::sync::Mutex;
+
+    static SETTINGS_FILE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn valid_config() -> Config {
+        const MIB: usize = 1024 * 1024;
+        Config {
+            forum_name: "RustChan".to_string(),
+            initial_site_subtitle: "select board to proceed".to_string(),
+            initial_homepage_new_thread_badges_enabled: true,
+            initial_thread_new_reply_badges_enabled: true,
+            initial_default_theme: crate::theme::HARD_DEFAULT_THEME.to_string(),
+            initial_enabled_builtin_themes: crate::theme::builtin_theme_slugs()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            port: 8080,
+            max_image_size: 8 * MIB,
+            max_video_size: 50 * MIB,
+            max_audio_size: 150 * MIB,
+            enable_tor_support: false,
+            tor_only: false,
+            tor_bootstrap_timeout_secs: 120,
+            tor_max_concurrent_streams: 512,
+            tor_service_nickname: "rustchan".to_string(),
+            require_ffmpeg: false,
+            ffmpeg_path: "ffmpeg".to_string(),
+            ffprobe_path: "ffprobe".to_string(),
+            enable_any_file_uploads_feature: false,
+            bind_addr: "0.0.0.0:8080".to_string(),
+            database_path: "chan.db".to_string(),
+            upload_dir: "__rustchan_test_uploads_does_not_exist__".to_string(),
+            thumb_size: 250,
+            rate_limit_gets: 60,
+            rate_limit_window: 60,
+            cookie_secret: "a".repeat(64),
+            session_duration: 8 * 3600,
+            behind_proxy: false,
+            trusted_proxy_cidrs: vec!["127.0.0.1/32".to_string(), "::1/128".to_string()],
+            https_cookies: false,
+            public_hosts: Vec::new(),
+            wal_checkpoint_interval: 3600,
+            auto_vacuum_interval_hours: 24,
+            auto_full_backup_interval_hours: 24,
+            auto_full_backup_copies_to_keep: 1,
+            auto_full_backup_include_tor_hidden_service_keys: false,
+            poll_cleanup_interval_hours: 72,
+            db_warn_threshold_bytes: 2048 * MIB as u64,
+            job_queue_capacity: 1000,
+            ffmpeg_timeout_secs: 120,
+            archive_before_prune: true,
+            waveform_cache_max_bytes: 200 * MIB as u64,
+            blocking_threads: 4,
+            db_pool_size: 8,
+            rustwave_url: "http://localhost:7071".to_string(),
+            chan_net_bind: "127.0.0.1:7070".to_string(),
+            chan_net_max_body: 10 * MIB,
+            chan_net_command_max_body: 8 * 1024,
+            chan_net_api_key: String::new(),
+            tls: TlsConfig::default(),
+        }
+    }
+
+    fn validation_error(config: &Config) -> String {
+        config
+            .validate()
+            .expect_err("config should fail validation")
+            .to_string()
+    }
+
+    #[test]
+    fn tor_hidden_service_keys_dir_matches_arti_native_keystore_location() {
+        assert!(runtime_tor_hidden_service_keys_dir().ends_with("runtime/tor/state/keystore"));
+    }
 
     #[test]
     fn rewrite_settings_file_lines_updates_requested_keys_and_preserves_comments() {
         let input = r#"# RustChan settings.toml
 forum_name = "RustChan"
 site_subtitle = "select board to proceed"
+homepage_new_thread_badges_enabled = true
+thread_new_reply_badges_enabled = true
+default_theme = "forest"
 auto_full_backup_interval_hours = 24
 auto_full_backup_copies_to_keep = 1
 "#;
@@ -1207,8 +1452,13 @@ auto_full_backup_copies_to_keep = 1
             input,
             &[
                 ("forum_name", "\"BackupChan\"".to_string()),
+                ("default_theme", "\"terminal\"".to_string()),
                 ("auto_full_backup_interval_hours", "12".to_string()),
                 ("auto_full_backup_copies_to_keep", "3".to_string()),
+                (
+                    "auto_full_backup_include_tor_hidden_service_keys",
+                    "true".to_string(),
+                ),
             ],
             None,
         );
@@ -1216,8 +1466,12 @@ auto_full_backup_copies_to_keep = 1
         assert!(output.starts_with("# RustChan settings.toml\n"));
         assert!(output.contains("forum_name = \"BackupChan\"\n"));
         assert!(output.contains("site_subtitle = \"select board to proceed\"\n"));
+        assert!(output.contains("homepage_new_thread_badges_enabled = true\n"));
+        assert!(output.contains("thread_new_reply_badges_enabled = true\n"));
+        assert!(output.contains("default_theme = \"terminal\"\n"));
         assert!(output.contains("auto_full_backup_interval_hours = 12\n"));
         assert!(output.contains("auto_full_backup_copies_to_keep = 3\n"));
+        assert!(output.contains("auto_full_backup_include_tor_hidden_service_keys = true\n"));
         assert!(output.ends_with('\n'));
     }
 
@@ -1228,7 +1482,7 @@ forum_name = "RustChan"
 
 # ── Federation / ChanNet gateway ──────────────────────────────────────────────
 [tls]
-enabled = true
+enabled = false
 "#;
 
         let output = rewrite_settings_file_lines(
@@ -1236,6 +1490,10 @@ enabled = true
             &[
                 ("auto_full_backup_interval_hours", "24".to_string()),
                 ("auto_full_backup_copies_to_keep", "1".to_string()),
+                (
+                    "auto_full_backup_include_tor_hidden_service_keys",
+                    "true".to_string(),
+                ),
             ],
             Some("# ── Federation / ChanNet gateway"),
         );
@@ -1246,6 +1504,9 @@ enabled = true
         let backup_copies_idx = output
             .find("auto_full_backup_copies_to_keep = 1")
             .expect("backup copies key inserted");
+        let backup_tor_idx = output
+            .find("auto_full_backup_include_tor_hidden_service_keys = true")
+            .expect("backup Tor key option inserted");
         let anchor_idx = output
             .find("# ── Federation / ChanNet gateway")
             .expect("anchor comment present");
@@ -1253,6 +1514,236 @@ enabled = true
 
         assert!(backup_hours_idx < anchor_idx);
         assert!(backup_copies_idx < anchor_idx);
+        assert!(backup_tor_idx < anchor_idx);
         assert!(anchor_idx < tls_idx);
+    }
+
+    #[test]
+    fn rewrite_settings_file_lines_inserts_missing_default_theme_before_network_section() {
+        let input = r#"# RustChan settings.toml
+forum_name = "RustChan"
+site_subtitle = "select board to proceed"
+homepage_new_thread_badges_enabled = true
+thread_new_reply_badges_enabled = true
+
+# ── Network / web server ──────────────────────────────────────────────────────
+port = 8080
+"#;
+
+        let output = rewrite_settings_file_lines(
+            input,
+            &[
+                ("forum_name", "\"NewChan\"".to_string()),
+                ("site_subtitle", "\"new subtitle\"".to_string()),
+                ("homepage_new_thread_badges_enabled", "false".to_string()),
+                ("thread_new_reply_badges_enabled", "true".to_string()),
+                ("default_theme", "\"terminal\"".to_string()),
+            ],
+            Some("# ── Network / web server"),
+        );
+
+        let theme_idx = output
+            .find("default_theme = \"terminal\"")
+            .expect("default_theme inserted");
+        let homepage_activity_idx = output
+            .find("homepage_new_thread_badges_enabled = false")
+            .expect("homepage_new_thread_badges_enabled inserted");
+        let thread_activity_idx = output
+            .find("thread_new_reply_badges_enabled = true")
+            .expect("thread_new_reply_badges_enabled inserted");
+        let network_idx = output
+            .find("# ── Network / web server")
+            .expect("network section present");
+
+        assert!(homepage_activity_idx < network_idx);
+        assert!(thread_activity_idx < network_idx);
+        assert!(theme_idx < network_idx);
+        assert!(output.contains("forum_name = \"NewChan\"\n"));
+        assert!(output.contains("site_subtitle = \"new subtitle\"\n"));
+    }
+
+    #[test]
+    fn validate_rejects_ffmpeg_timeout_below_minimum() {
+        let error = validate_ffmpeg_timeout_secs(MIN_FFMPEG_TIMEOUT_SECS - 1)
+            .expect_err("timeout below minimum should fail")
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "CONFIG ERROR: ffmpeg_timeout_secs must be between {MIN_FFMPEG_TIMEOUT_SECS} and {MAX_FFMPEG_TIMEOUT_SECS} seconds."
+            )
+        );
+    }
+
+    #[test]
+    fn validate_rejects_ffmpeg_timeout_above_maximum() {
+        let error = validate_ffmpeg_timeout_secs(MAX_FFMPEG_TIMEOUT_SECS + 1)
+            .expect_err("timeout above maximum should fail")
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "CONFIG ERROR: ffmpeg_timeout_secs must be between {MIN_FFMPEG_TIMEOUT_SECS} and {MAX_FFMPEG_TIMEOUT_SECS} seconds."
+            )
+        );
+    }
+
+    #[test]
+    fn update_settings_file_ffmpeg_timeout_persists_and_reloads() {
+        let _guard = SETTINGS_FILE_TEST_LOCK.lock().expect("settings test lock");
+        let path = settings_file_path();
+        let previous = std::fs::read_to_string(&path).ok();
+        let parent = path.parent().expect("settings parent").to_path_buf();
+        std::fs::create_dir_all(&parent).expect("create settings dir");
+        std::fs::write(
+            &path,
+            format!(
+                "forum_name = \"RustChan\"\nffmpeg_timeout_secs = {DEFAULT_FFMPEG_TIMEOUT_SECS}\n"
+            ),
+        )
+        .expect("write settings fixture");
+
+        update_settings_file_ffmpeg_timeout(1_800);
+        let updated = std::fs::read_to_string(&path).expect("read updated settings");
+        assert!(updated.contains("ffmpeg_timeout_secs = 1800\n"));
+
+        let reloaded = Config::from_env();
+        assert_eq!(reloaded.ffmpeg_timeout_secs, 1_800);
+
+        match previous {
+            Some(contents) => std::fs::write(&path, contents).expect("restore settings file"),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    #[test]
+    fn live_ffmpeg_timeout_setting_updates_and_formats_human_text() {
+        let original = ffmpeg_timeout_secs();
+        set_live_ffmpeg_timeout_secs(90).expect("set live timeout");
+        assert_eq!(ffmpeg_timeout_secs(), 90);
+        assert_eq!(describe_timeout_secs(90), "1 minute 30 seconds");
+        set_live_ffmpeg_timeout_secs(original).expect("restore live timeout");
+    }
+
+    #[test]
+    fn validate_rejects_tls_port_matching_main_http_port() {
+        let mut config = valid_config();
+        config.tls.enabled = true;
+        config.tls.port = 8080;
+
+        let error = validation_error(&config);
+
+        assert_eq!(
+            error,
+            "CONFIG ERROR: tls.port (8080) must differ from the main HTTP port (8080)."
+        );
+    }
+
+    #[test]
+    fn validate_rejects_redirect_http_port_matching_main_http_port() {
+        let mut config = valid_config();
+        config.tls.enabled = true;
+        config.tls.port = 8443;
+        config.tls.redirect_http = true;
+        config.tls.http_port = 8080;
+
+        let error = validation_error(&config);
+
+        assert_eq!(
+            error,
+            "CONFIG ERROR: tls.http_port (8080) must differ from the main HTTP port (8080) when tls.redirect_http=true."
+        );
+    }
+
+    #[test]
+    fn validate_rejects_redirect_http_port_matching_tls_port() {
+        let mut config = valid_config();
+        config.tls.enabled = true;
+        config.tls.port = 8443;
+        config.tls.redirect_http = true;
+        config.tls.http_port = 8443;
+
+        let error = validation_error(&config);
+
+        assert_eq!(
+            error,
+            "CONFIG ERROR: tls.http_port (8443) must differ from tls.port (8443) when tls.redirect_http=true."
+        );
+    }
+
+    #[test]
+    fn validate_accepts_distinct_tls_and_redirect_ports() {
+        let mut config = valid_config();
+        config.tls.enabled = true;
+        config.tls.port = 8443;
+        config.tls.redirect_http = true;
+        config.tls.http_port = 8081;
+
+        config.validate().expect("config should validate");
+    }
+
+    #[test]
+    fn validate_rejects_short_chan_net_api_key() {
+        let mut config = valid_config();
+        config.chan_net_api_key = "short-key".to_string();
+
+        let error = validation_error(&config);
+
+        assert_eq!(
+            error,
+            "CONFIG ERROR: chan_net_api_key must be empty to disable ChanNet auth-protected endpoints or at least 32 characters long."
+        );
+    }
+
+    #[test]
+    fn validate_accepts_empty_or_long_chan_net_api_key() {
+        let mut config = valid_config();
+        config.chan_net_api_key.clear();
+        config.validate().expect("empty key disables endpoints");
+
+        config.chan_net_api_key = "x".repeat(32);
+        config.validate().expect("32-char key is accepted");
+    }
+
+    #[test]
+    fn validate_rejects_tor_only_without_tor_support() {
+        let mut config = valid_config();
+        config.enable_tor_support = false;
+        config.tor_only = true;
+
+        let error = validation_error(&config);
+
+        assert_eq!(
+            error,
+            "CONFIG ERROR: tor_only=true requires enable_tor_support=true. Tor-only mode needs the built-in onion service to be active."
+        );
+    }
+
+    #[test]
+    fn settings_template_uses_forest_and_featured_theme_order() {
+        let template = settings_template("secret");
+
+        assert!(template.contains("homepage_new_thread_badges_enabled = true"));
+        assert!(template.contains("thread_new_reply_badges_enabled = true"));
+        assert!(template.contains(r#"default_theme = "forest""#));
+        assert!(template.contains("enabled = false\nport = 8443"));
+        assert!(template.contains("auto_full_backup_include_tor_hidden_service_keys = true"));
+        assert!(template.contains(
+            r#"enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]"#
+        ));
+    }
+
+    #[test]
+    fn settings_template_marks_enabled_builtins_as_first_start_seeded() {
+        let template = settings_template("secret");
+
+        assert!(
+            template.contains("# Built-in themes enabled when the theme catalog is first seeded.")
+        );
+        assert!(template.contains(
+            "# After first startup, Admin -> Theme Catalog owns the live enabled/disabled state."
+        ));
     }
 }

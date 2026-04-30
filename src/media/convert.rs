@@ -5,6 +5,7 @@
 // Conversion rules (from project spec):
 //   jpg / jpeg → WebP  (quality 85, metadata stripped)
 //   gif        → WebP  (quality 85, -loop 0 preserves animation if libwebp supports it)
+//   heic/heif  → WebP
 //   bmp        → WebP
 //   tiff       → WebP
 //   png        → WebP  ONLY if the WebP output is smaller; otherwise keep PNG
@@ -48,13 +49,10 @@ pub fn conversion_action(mime: &str) -> ConversionAction {
         // an <img> tag rather than a <video> player.  The -loop 0 flag in
         // ffmpeg_image_to_webp preserves animation for multi-frame GIFs.
         // Falls back to storing the original GIF if libwebp is unavailable.
-        "image/jpeg" | "image/bmp" | "image/tiff" | "image/gif" => ConversionAction::ToWebp,
-        "image/png" => ConversionAction::ToWebpIfSmaller,
-        // Keep these formats as-is
-        "image/svg+xml" | "image/webp" | "video/webm" | "audio/webm" | "video/mp4"
-        | "audio/mpeg" | "audio/ogg" | "audio/flac" | "audio/wav" | "audio/mp4" | "audio/aac" => {
-            ConversionAction::KeepAsIs
+        "image/jpeg" | "image/heic" | "image/heif" | "image/bmp" | "image/tiff" | "image/gif" => {
+            ConversionAction::ToWebp
         }
+        "image/png" => ConversionAction::ToWebpIfSmaller,
         _ => ConversionAction::KeepAsIs,
     }
 }
@@ -277,11 +275,14 @@ fn ext_for_original_mime(path: &Path) -> &'static str {
         Some("jpg" | "jpeg") => "jpg",
         Some("png") => "png",
         Some("gif") => "gif",
+        Some("heic") => "heic",
+        Some("heif") => "heif",
         Some("bmp") => "bmp",
         Some("tiff" | "tif") => "tiff",
         Some("webp") => "webp",
         Some("webm") => "webm",
         Some("svg") => "svg",
+        Some("pdf") => "pdf",
         _ => "bin",
     }
 }
@@ -292,10 +293,13 @@ fn ext_to_static_mime(ext: &str) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
         "gif" => "image/gif",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
         "bmp" => "image/bmp",
         "tiff" | "tif" => "image/tiff",
         "webp" => "image/webp",
         "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
         "webm" => "video/webm",
         "mp4" => "video/mp4",
         "mp3" => "audio/mpeg",
@@ -333,6 +337,16 @@ mod tests {
     #[test]
     fn webp_is_keep_as_is() {
         assert_eq!(conversion_action("image/webp"), ConversionAction::KeepAsIs);
+    }
+
+    #[test]
+    fn heic_maps_to_webp() {
+        assert_eq!(conversion_action("image/heic"), ConversionAction::ToWebp);
+    }
+
+    #[test]
+    fn heif_maps_to_webp() {
+        assert_eq!(conversion_action("image/heif"), ConversionAction::ToWebp);
     }
 
     #[test]

@@ -7,10 +7,10 @@
 //   2. GET  /admin       → redirect to panel if already logged in, else show login form
 //   3. POST /admin/logout → delete session from DB → clear cookie
 //
-// Brute-force protection ():
+// Brute-force protection:
 //   After LOGIN_FAIL_LIMIT failed attempts within LOGIN_FAIL_WINDOW seconds, the IP is
 //   locked out for the remainder of that window.  On success the counter is cleared.
-//   Keys are SHA-256(IP) to avoid retaining raw addresses in memory ().
+//   Keys are SHA-256(IP) to avoid retaining raw addresses in memory.
 
 use crate::{
     config::CONFIG,
@@ -18,7 +18,7 @@ use crate::{
     error::{AppError, Result},
     middleware::AppState,
     templates,
-    utils::crypto::{make_csrf_form_token, new_csrf_token, new_session_id, verify_password},
+    utils::crypto::{make_scoped_csrf_form_token, new_csrf_token, new_session_id, verify_password},
 };
 use axum::{
     extract::{Form, State},
@@ -42,10 +42,11 @@ use tracing::warn;
 // IP is locked out for the remainder of that window.  On success the counter
 // is cleared immediately so a genuine admin is never self-locked.
 //
-// Keys are SHA-256(IP) to avoid retaining raw addresses in memory ().
+// Keys are SHA-256(IP) to avoid retaining raw addresses in memory.
 
 const LOGIN_FAIL_LIMIT: u32 = 5;
 const LOGIN_FAIL_WINDOW: u64 = 900; // 15 minutes
+const ADMIN_LOGIN_CSRF_SCOPE: &str = "admin-login";
 
 /// `ip_hash` → (`fail_count`, `window_start_secs`)
 static ADMIN_LOGIN_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
@@ -99,7 +100,6 @@ fn is_login_locked(ip_key: &str) -> bool {
 }
 
 /// Record a failed login attempt; returns the new failure count.
-#[allow(clippy::arithmetic_side_effects)]
 #[allow(clippy::significant_drop_tightening)]
 fn record_login_fail(ip_key: &str) -> u32 {
     let now = login_now_secs();
@@ -155,8 +155,32 @@ fn ensure_admin_login_csrf(
 
     (
         jar.add(cookie),
-        make_csrf_form_token(&token, &CONFIG.cookie_secret),
+        make_scoped_csrf_form_token(&token, &CONFIG.cookie_secret, ADMIN_LOGIN_CSRF_SCOPE),
     )
+}
+
+async fn render_admin_login_response(
+    state: &AppState,
+    jar: CookieJar,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    error: Option<&str>,
+) -> Result<Response> {
+    let (jar, csrf) = ensure_admin_login_csrf(jar, headers, Some(peer));
+    let boards = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<Vec<crate::models::Board>> {
+            let conn = pool.get()?;
+            Ok(db::get_all_boards(&conn)?)
+        }
+    })
+    .await
+    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+    Ok((
+        jar,
+        Html(templates::admin_login_page(error, &csrf, &boards)),
+    )
+        .into_response())
 }
 
 // ─── GET /admin ───────────────────────────────────────────────────────────────
@@ -204,8 +228,8 @@ pub struct LoginForm {
     csrf: Option<String>,
 }
 
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -217,37 +241,36 @@ pub async fn admin_login(
     let ip_key = login_ip_key(&client_ip);
     if is_login_locked(&ip_key) {
         warn!(
-            "Admin login blocked (brute-force lockout) for ip_prefix={}",
-            &ip_key[..8]
+            ip_prefix = %&ip_key[..8],
+            "Admin login blocked by brute-force lockout"
         );
-        return Err(AppError::RateLimited);
+        return render_admin_login_response(
+            &state,
+            jar,
+            &headers,
+            peer,
+            Some("Too many failed admin login attempts. Please wait a few minutes and try again."),
+        )
+        .await;
     }
 
-    // CSRF check
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_same_origin_request(&headers, Some(peer))?;
+    let csrf_cookie = jar
+        .get("csrf_token")
+        .map(axum_extra::extract::cookie::Cookie::value);
+    if !crate::middleware::validate_signed_csrf(
+        csrf_cookie,
+        Some(ADMIN_LOGIN_CSRF_SCOPE),
+        form.csrf.as_deref().unwrap_or(""),
+    ) {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
 
     let username = form.username.trim().to_string();
     let username_log = redact_login_username(&username);
     if username.is_empty() || username.len() > 64 {
-        let (jar, csrf) = ensure_admin_login_csrf(jar, &headers, Some(peer));
-        let boards = tokio::task::spawn_blocking({
-            let pool = state.db.clone();
-            move || {
-                let conn = pool.get()?;
-                db::get_all_boards(&conn)
-            }
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-        return Ok((
-            jar,
-            Html(templates::admin_login_page(
-                Some("Invalid username."),
-                &csrf,
-                &boards,
-            )),
-        )
-            .into_response());
+        return render_admin_login_response(&state, jar, &headers, peer, Some("Invalid username."))
+            .await;
     }
 
     let pool = state.db.clone();
@@ -269,38 +292,30 @@ pub async fn admin_login(
 
     match result {
         None => {
-            warn!(username = %username_log, "Failed admin login attempt");
-            let (jar, csrf) = ensure_admin_login_csrf(jar, &headers, Some(peer));
-            let boards = tokio::task::spawn_blocking({
-                let pool = state.db.clone();
-                move || {
-                    let conn = pool.get()?;
-                    db::get_all_boards(&conn)
-                }
-            })
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
             let fails = record_login_fail(&ip_key);
+            let locked_out = fails >= LOGIN_FAIL_LIMIT;
             warn!(
                 username = %username_log,
-                "Failed admin login (attempt {}/{})",
-                fails,
-                LOGIN_FAIL_LIMIT
+                ip_prefix = %&ip_key[..8],
+                attempts = fails,
+                attempt_limit = LOGIN_FAIL_LIMIT,
+                locked_out,
+                "Failed admin login"
             );
-            Ok((
+            render_admin_login_response(
+                &state,
                 jar,
-                Html(templates::admin_login_page(
-                    Some("Invalid username or password."),
-                    &csrf,
-                    &boards,
-                )),
+                &headers,
+                peer,
+                Some("Invalid username or password."),
             )
-                .into_response())
+            .await
         }
         Some(admin_id) => {
             clear_login_fails(&ip_key);
             // Create session (in spawn_blocking)
             let session_id = new_session_id();
+            let bootstrap_session_id = session_id.clone();
             let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
             let sid_clone = session_id.clone();
             tokio::task::spawn_blocking({
@@ -331,16 +346,17 @@ pub async fn admin_login(
             cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
             tracing::info!(target: "admin", admin_id = admin_id, "Admin logged in");
+            let jar = super::refresh_admin_csrf_cookie(jar.add(cookie));
             let redirect = if cookie_secure {
                 Redirect::to("/admin/panel")
             } else {
-                let bootstrap = super::create_admin_session_bootstrap(cookie.value());
+                let bootstrap = super::create_admin_session_bootstrap(&bootstrap_session_id);
                 Redirect::to(&format!(
                     "/admin/panel?bootstrap={}",
-                    super::encode_query_component(&bootstrap)
+                    crate::utils::redirect::encode_query_component(&bootstrap)
                 ))
             };
-            Ok((jar.add(cookie), redirect).into_response())
+            Ok((jar, redirect).into_response())
         }
     }
 }
@@ -350,10 +366,11 @@ pub async fn admin_login(
 pub async fn admin_logout(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<super::CsrfOnly>,
 ) -> Result<Response> {
-    // Verify CSRF to prevent forced-logout attacks
-    super::check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     if let Some(session_cookie) = jar.get(super::SESSION_COOKIE) {
         let session_id = session_cookie.value().to_string();
@@ -369,22 +386,11 @@ pub async fn admin_logout(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
     }
-    let jar = jar.remove(Cookie::from(super::SESSION_COOKIE));
-    // Redirect back to the page where logout was triggered, or fall back to login.
-    // Reject backslash (and its percent-encoded form %5C) in
-    // addition to the existing checks.  On some browsers /\\evil.com and
-    // /%5Cevil.com are treated as protocol-relative redirects to evil.com.
-    let destination = form
-        .return_to
-        .as_deref()
-        .filter(|s| {
-            s.starts_with('/')
-                && !s.contains("//")
-                && !s.contains("..")
-                && !s.contains('\\')
-                && !s.to_ascii_lowercase().contains("%5c")
-        })
-        .unwrap_or("/admin");
+    let jar = jar
+        .remove(Cookie::from(super::SESSION_COOKIE))
+        .remove(Cookie::from("csrf_token"));
+    let destination =
+        crate::utils::redirect::strict_safe_internal_path_or(form.return_to.as_deref(), "/admin");
     Ok((jar, Redirect::to(destination)).into_response())
 }
 
@@ -392,12 +398,54 @@ pub async fn admin_logout(
 mod tests {
     use super::*;
     use axum::{
-        body::Body,
+        body::{to_bytes, Body},
         http::{header, Request, StatusCode},
         routing::post,
         Router,
     };
+    use axum_extra::extract::cookie::{Cookie, CookieJar};
     use tower::ServiceExt as _;
+
+    const TEST_CSRF_COOKIE: &str = "csrf123";
+    const TEST_ADMIN_ORIGIN: &str = "http://localhost";
+
+    fn signed_admin_csrf() -> String {
+        make_scoped_csrf_form_token(
+            TEST_CSRF_COOKIE,
+            &crate::config::CONFIG.cookie_secret,
+            ADMIN_LOGIN_CSRF_SCOPE,
+        )
+    }
+
+    fn signed_admin_session_csrf(session_id: &str) -> String {
+        crate::utils::crypto::make_scoped_csrf_form_token(
+            TEST_CSRF_COOKIE,
+            &crate::config::CONFIG.cookie_secret,
+            session_id,
+        )
+    }
+
+    fn admin_session_jar(session_id: &str) -> CookieJar {
+        CookieJar::new()
+            .add(Cookie::new(
+                super::super::SESSION_COOKIE,
+                session_id.to_string(),
+            ))
+            .add(Cookie::new("csrf_token", TEST_CSRF_COOKIE))
+    }
+
+    fn admin_login_request(body: String) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/admin/login")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::HOST, "localhost")
+            .header(header::ORIGIN, TEST_ADMIN_ORIGIN)
+            .header(header::COOKIE, format!("csrf_token={TEST_CSRF_COOKIE}"))
+            .extension(crate::test_support::connect_info())
+            .body(Body::from(body))
+            .expect("request")
+    }
 
     // ── login_ip_key ─────────────────────────────────────────────────────────
 
@@ -484,6 +532,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn locked_out_admin_login_rerenders_login_form_with_specific_message() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let ip_key = login_ip_key("127.0.0.1");
+        ADMIN_LOGIN_FAILS.remove(&ip_key);
+        ADMIN_LOGIN_FAILS.insert(ip_key.clone(), (LOGIN_FAIL_LIMIT, login_now_secs()));
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(admin_login_request(format!(
+                "username=admin&password=wrong&_csrf={}",
+                signed_admin_csrf()
+            )))
+            .await
+            .expect("response");
+
+        ADMIN_LOGIN_FAILS.remove(&ip_key);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(body.contains("Too many failed admin login attempts."));
+    }
+
+    #[tokio::test]
     async fn admin_login_sets_session_cookie_for_valid_credentials() {
         let state = crate::test_support::app_state();
         {
@@ -498,16 +579,10 @@ mod tests {
             .route("/admin/login", post(super::admin_login))
             .with_state(state);
         let response = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/login")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
-                    .body(Body::from("username=admin&password=hunter2&_csrf=csrf123"))
-                    .expect("request"),
-            )
+            .oneshot(admin_login_request(format!(
+                "username=admin&password=hunter2&_csrf={}",
+                signed_admin_csrf()
+            )))
             .await
             .expect("response");
 
@@ -521,10 +596,19 @@ mod tests {
             .expect("session cookie");
         assert!(session_cookie.contains("HttpOnly"));
         assert!(session_cookie.contains("SameSite=Lax"));
+        let csrf_cookie = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.contains("csrf_token="))
+            .expect("csrf cookie");
+        assert!(csrf_cookie.contains("SameSite=Strict"));
+        assert!(!csrf_cookie.contains("csrf_token=csrf123"));
     }
 
     #[tokio::test]
-    async fn admin_login_marks_session_cookie_secure_for_https_tunnel_origin() {
+    async fn admin_login_rotates_csrf_cookie_on_success() {
         let state = crate::test_support::app_state();
         {
             let conn = state.db.get().expect("db connection");
@@ -538,16 +622,137 @@ mod tests {
             .route("/admin/login", post(super::admin_login))
             .with_state(state);
         let response = router
+            .oneshot(admin_login_request(format!(
+                "username=admin&password=hunter2&_csrf={}",
+                signed_admin_csrf()
+            )))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let csrf_cookie = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.contains("csrf_token="))
+            .expect("csrf cookie");
+        assert!(!csrf_cookie.contains("csrf_token=csrf123"));
+    }
+
+    #[test]
+    fn admin_scoped_csrf_rejects_session_swap() {
+        let jar_a = admin_session_jar("session-a");
+        let token_a = signed_admin_session_csrf("session-a");
+        assert!(super::super::check_admin_csrf_jar(&jar_a, Some(&token_a)).is_ok());
+
+        let jar_b = admin_session_jar("session-b");
+        assert!(super::super::check_admin_csrf_jar(&jar_b, Some(&token_a)).is_err());
+    }
+
+    #[test]
+    fn admin_scoped_csrf_rejects_raw_cookie_equality() {
+        let jar = admin_session_jar("session-a");
+        assert!(super::super::check_admin_csrf_jar(&jar, Some(TEST_CSRF_COOKIE)).is_err());
+    }
+
+    #[tokio::test]
+    async fn admin_logout_clears_csrf_cookie_and_session_cookie() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            let admin_id =
+                crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_session(
+                &conn,
+                "session123",
+                admin_id,
+                chrono::Utc::now().timestamp() + 3600,
+            )
+            .expect("create session");
+        }
+
+        let router = Router::new()
+            .route("/admin/logout", post(super::admin_logout))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/logout")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(
+                        header::COOKIE,
+                        format!(
+                            "csrf_token=csrf123; {}=session123",
+                            super::super::SESSION_COOKIE
+                        ),
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "return_to=/admin&_csrf={}",
+                        signed_admin_session_csrf("session123")
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let set_cookies = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect::<Vec<_>>();
+        assert!(set_cookies
+            .iter()
+            .any(|cookie| cookie.contains("csrf_token=;")));
+        assert!(set_cookies
+            .iter()
+            .any(|cookie| cookie.contains(&format!("{}=;", super::super::SESSION_COOKIE))));
+    }
+
+    #[tokio::test]
+    async fn admin_login_marks_session_cookie_secure_for_https_tunnel_origin() {
+        let state = crate::test_support::app_state();
+        clear_login_fails(&login_ip_key("127.0.0.1"));
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let (host, origin) = if crate::config::CONFIG.tls.enabled {
+            let host = format!("demo.serveo.net:{}", crate::config::CONFIG.tls.port);
+            let origin = format!("https://{host}");
+            (host, origin)
+        } else {
+            ("localhost".to_string(), TEST_ADMIN_ORIGIN.to_string())
+        };
+        let response = router
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/admin/login")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .header(header::HOST, "demo.serveo.net")
-                    .header(header::REFERER, "https://demo.serveo.net/admin")
+                    .header(header::HOST, &host)
+                    .header(header::ORIGIN, &origin)
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
-                    .body(Body::from("username=admin&password=hunter2&_csrf=csrf123"))
+                    .body(Body::from(format!(
+                        "username=admin&password=hunter2&_csrf={}",
+                        signed_admin_csrf()
+                    )))
                     .expect("request"),
             )
             .await
@@ -588,9 +793,13 @@ mod tests {
                     .uri("/admin/login")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .header(header::HOST, "192.168.1.20:8080")
+                    .header(header::ORIGIN, "http://192.168.1.20:8080")
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
-                    .body(Body::from("username=admin&password=hunter2&_csrf=csrf123"))
+                    .body(Body::from(format!(
+                        "username=admin&password=hunter2&_csrf={}",
+                        signed_admin_csrf()
+                    )))
                     .expect("request"),
             )
             .await
@@ -603,5 +812,317 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .expect("location header");
         assert!(location.starts_with("/admin/panel?bootstrap="));
+    }
+
+    #[tokio::test]
+    async fn admin_login_rejects_raw_readable_csrf_cookie_without_signed_form_token() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(admin_login_request(
+                "username=admin&password=hunter2&_csrf=csrf123".to_string(),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_login_rejects_same_host_different_port_origin() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost:3000")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "username=admin&password=hunter2&_csrf={}",
+                        signed_admin_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_login_rejects_same_host_different_scheme_origin() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "example.test")
+                    .header(header::ORIGIN, "https://example.test")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "username=admin&password=hunter2&_csrf={}",
+                        signed_admin_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_login_rejects_missing_origin_on_state_changing_post() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "username=admin&password=hunter2&_csrf={}",
+                        signed_admin_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_login_accepts_null_origin_on_loopback_host() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "null")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "username=admin&password=hunter2&_csrf={}",
+                        signed_admin_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn admin_login_accepts_loopback_alias_origin_match() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "127.0.0.1:8080")
+                    .header(header::ORIGIN, "http://localhost:8080")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "username=admin&password=hunter2&_csrf={}",
+                        signed_admin_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn admin_login_accepts_ipv6_loopback_url() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "[::1]:8080")
+                    .header(header::ORIGIN, "http://[::1]:8080")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "username=admin&password=hunter2&_csrf={}",
+                        signed_admin_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn admin_login_accepts_null_origin_with_same_origin_referer_on_https_tunnel() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "demo.serveo.net")
+                    .header(header::ORIGIN, "null")
+                    .header(header::REFERER, "https://demo.serveo.net/admin")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "username=admin&password=hunter2&_csrf={}",
+                        signed_admin_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn admin_login_accepts_missing_origin_and_referer_with_same_origin_fetch_metadata() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "demo.serveo.net")
+                    .header("sec-fetch-site", "same-origin")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "username=admin&password=hunter2&_csrf={}",
+                        signed_admin_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
     }
 }

@@ -34,6 +34,34 @@ pub use themes::*;
 pub use threads::*;
 pub use user_thread_prefs::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletePathsResult {
+    pub paths: Vec<String>,
+    pub pending_fs_op_id: Option<String>,
+}
+
+/// Build a pending filesystem delete operation for paths collected during a DB delete.
+///
+/// # Errors
+/// Returns an error if the delete-files payload cannot be serialized.
+pub fn build_delete_files_pending_op(
+    paths: &[String],
+) -> Result<Option<crate::pending_fs::PendingFsOpInsert>> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+
+    let payload = crate::pending_fs::DeleteFilesPayload {
+        paths: paths.to_vec(),
+    };
+    Ok(Some(crate::pending_fs::PendingFsOpInsert {
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        kind: crate::pending_fs::DELETE_FILES_KIND,
+        payload_json: serde_json::to_string(&payload)
+            .context("Serialize delete_files payload failed")?,
+    }))
+}
+
 /// Given a list of candidate file paths collected from posts about to be deleted,
 /// return only those paths that are no longer referenced by any remaining post.
 ///
@@ -56,6 +84,8 @@ pub fn paths_safe_to_delete(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
+    let mut unique = unique;
+    unique.sort();
 
     if unique.is_empty() {
         return Ok(Vec::new());
@@ -81,6 +111,7 @@ pub fn paths_safe_to_delete(
         }
     }
 
+    safe.sort();
     let safe_set: HashSet<&str> = safe.iter().map(String::as_str).collect();
     for path in &safe {
         let maybe_row: Option<(String, String)> = conn

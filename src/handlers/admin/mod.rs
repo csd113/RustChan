@@ -1,3 +1,4 @@
+// These branches are clearer in this state module than the more compact Clippy-suggested form.
 #![allow(
     clippy::option_if_let_else,
     clippy::map_unwrap_or,
@@ -41,26 +42,24 @@ use crate::{
     config::CONFIG,
     db,
     error::{AppError, Result},
-    handlers::board::ensure_csrf,
+    middleware::validate_signed_csrf,
     middleware::AppState,
     models::BackupInfo,
+    utils::crypto::{make_scoped_csrf_form_token, new_csrf_token},
 };
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, Uri},
     response::{Html, IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::cookie::CookieJar;
-use axum_extra::extract::cookie::SameSite;
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use dashmap::DashMap;
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom};
-use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-pub(super) use crate::handlers::board::check_csrf_jar;
 
 // ─── Shared constant ──────────────────────────────────────────────────────────
 
@@ -103,85 +102,183 @@ fn require_admin_session_sid(conn: &rusqlite::Connection, session_id: Option<&st
     Ok(session.admin_id)
 }
 
-fn require_same_origin_request(headers: &HeaderMap) -> Result<()> {
-    let request_host = headers
+pub(super) fn require_same_origin_request(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+) -> Result<()> {
+    let request_authority = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
-        .map(|authority| authority.host().to_string())
         .ok_or_else(|| AppError::Forbidden("Missing Host header.".into()))?;
+    let request_scheme =
+        if crate::middleware::forwarded_proto_is_https(headers, peer, CONFIG.behind_proxy)
+            || (CONFIG.tls.enabled && host_header_uses_https_port(headers))
+            || request_referer_indicates_https_tunnel(headers)
+        {
+            "https"
+        } else {
+            "http"
+        };
+    let request_port = request_authority
+        .port_u16()
+        .unwrap_or(if request_scheme == "https" { 443 } else { 80 });
 
-    let Some(source) = headers
-        .get(header::ORIGIN)
-        .or_else(|| headers.get(header::REFERER))
-        .and_then(|value| value.to_str().ok())
-    else {
-        // Some browsers omit Origin/Referer on same-origin multipart uploads,
-        // especially on localhost. The admin endpoints already require a valid
-        // CSRF token, so treat missing headers as an allowed fallback.
-        return Ok(());
+    // Browsers and HTTPS tunnels can omit Origin in legitimate same-origin
+    // admin form posts. We accept two narrow fallbacks instead of broadly
+    // allowing headerless requests:
+    //   1. Origin: null with a same-origin Referer (seen in some tunnel/webview flows)
+    //   2. Missing Origin/Referer with Sec-Fetch-Site: same-origin
+    // Cross-site and malformed cases still fail closed below.
+    let Some(source) = effective_same_origin_source(headers, request_authority.host()) else {
+        if request_has_same_origin_fetch_metadata(headers) {
+            return Ok(());
+        }
+        return Err(AppError::Forbidden("Missing Origin/Referer header.".into()));
     };
     if source.eq_ignore_ascii_case("null") {
-        // Firefox and some privacy-restricted/local contexts can send
-        // `Origin: null` on multipart form submissions from localhost. The
-        // admin endpoints still require a valid session + CSRF token, so
-        // treat this the same as a missing Origin/Referer fallback.
-        return Ok(());
+        if is_loopback_alias(request_authority.host()) {
+            return Ok(());
+        }
+        return Err(AppError::Forbidden(
+            "Origin/Referer header must be same-origin.".into(),
+        ));
     }
     let source_uri = source
         .parse::<Uri>()
         .map_err(|_| AppError::Forbidden("Invalid Origin/Referer header.".into()))?;
-    let source_host = source_uri
+    let source_scheme = source_uri
+        .scheme_str()
+        .ok_or_else(|| AppError::Forbidden("Origin/Referer header has no scheme.".into()))?;
+    let source_authority = source_uri
         .authority()
-        .map(axum::http::uri::Authority::host)
         .ok_or_else(|| AppError::Forbidden("Origin/Referer header has no authority.".into()))?;
+    if source_authority.as_str().contains('@') {
+        return Err(AppError::Forbidden(
+            "Origin/Referer header contains invalid authority.".into(),
+        ));
+    }
+    let source_port = source_authority.port_u16().unwrap_or_else(|| {
+        if source_scheme.eq_ignore_ascii_case("https") {
+            443
+        } else {
+            80
+        }
+    });
 
-    if hosts_match_for_same_origin(source_host, &request_host) {
+    if source_scheme.eq_ignore_ascii_case(request_scheme)
+        && hosts_match_for_same_origin(source_authority.host(), request_authority.host())
+        && source_port == request_port
+    {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        target: "admin",
+        request_scheme,
+        request_host = %request_authority.host(),
+        request_port,
+        source_scheme,
+        source_host = %source_authority.host(),
+        source_port,
+        source = %source,
+        "Admin same-origin validation rejected request"
+    );
+    Err(AppError::Forbidden(
+        "Origin/Referer origin mismatch.".into(),
+    ))
+}
+
+fn effective_same_origin_source<'a>(headers: &'a HeaderMap, request_host: &str) -> Option<&'a str> {
+    let origin = header_value_trimmed(headers, header::ORIGIN);
+    let referer = header_value_trimmed(headers, header::REFERER);
+
+    match origin {
+        Some(origin) if !origin.eq_ignore_ascii_case("null") => Some(origin),
+        Some(origin) if is_loopback_alias(request_host) => Some(origin),
+        Some(_) | None => referer,
+    }
+}
+
+fn header_value_trimmed(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn request_has_same_origin_fetch_metadata(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("same-origin"))
+}
+
+pub(super) fn check_admin_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
+    let csrf_cookie = jar
+        .get("csrf_token")
+        .map(axum_extra::extract::cookie::Cookie::value);
+    let session_id = jar
+        .get(SESSION_COOKIE)
+        .map(axum_extra::extract::cookie::Cookie::value);
+    if validate_signed_csrf(csrf_cookie, session_id, form_token.unwrap_or("")) {
         Ok(())
     } else {
-        tracing::warn!(
-            target: "admin",
-            request_host = %request_host,
-            source_host = %source_host,
-            source = %source,
-            "Admin same-origin validation rejected request"
-        );
-        Err(AppError::Forbidden("Origin/Referer host mismatch.".into()))
+        Err(AppError::Forbidden("CSRF token mismatch.".into()))
     }
 }
 
-fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
-    if source_host.eq_ignore_ascii_case(request_host) {
-        return true;
-    }
-
-    is_loopback_alias(source_host) && is_loopback_alias(request_host)
+pub(super) fn require_admin_post_origin_and_csrf(
+    jar: &CookieJar,
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    form_token: Option<&str>,
+) -> Result<()> {
+    require_same_origin_request(headers, peer)?;
+    check_admin_csrf_jar(jar, form_token)
 }
 
-fn is_loopback_alias(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-
-    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+fn admin_csrf_cookie(raw_token: String) -> Cookie<'static> {
+    let mut cookie = Cookie::new("csrf_token", raw_token);
+    cookie.set_http_only(false);
+    cookie.set_same_site(SameSite::Strict);
+    cookie.set_path("/");
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie
 }
 
-fn encode_query_component(input: &str) -> String {
-    let mut encoded = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(char::from(byte));
-            }
-            b' ' => encoded.push_str("%20"),
-            _ => {
-                use std::fmt::Write as _;
-                let _ = write!(encoded, "%{byte:02X}");
-            }
-        }
-    }
-    encoded
+pub(super) fn refresh_admin_csrf_cookie(jar: CookieJar) -> CookieJar {
+    let cookie = admin_csrf_cookie(new_csrf_token());
+    jar.add(cookie)
 }
+
+pub(super) fn ensure_admin_csrf(jar: CookieJar) -> Result<(CookieJar, String)> {
+    let raw = jar
+        .get("csrf_token")
+        .map(axum_extra::extract::cookie::Cookie::value)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut jar = jar;
+    let raw = if let Some(raw) = raw {
+        raw
+    } else {
+        let raw = new_csrf_token();
+        jar = jar.add(admin_csrf_cookie(raw.clone()));
+        raw
+    };
+    let session_id = jar
+        .get(SESSION_COOKIE)
+        .map(axum_extra::extract::cookie::Cookie::value)
+        .ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
+    let session_id = session_id.to_string();
+    Ok((
+        jar,
+        make_scoped_csrf_form_token(&raw, &CONFIG.cookie_secret, &session_id),
+    ))
+}
+
+pub(super) use crate::utils::redirect::encode_query_component;
 
 pub(super) fn should_set_secure_cookie(headers: &HeaderMap, peer: Option<SocketAddr>) -> bool {
     if !CONFIG.https_cookies {
@@ -224,11 +321,10 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
         .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
         .map(|authority| authority.host().to_string());
 
-    let Some(source) = headers
-        .get(header::ORIGIN)
-        .or_else(|| headers.get(header::REFERER))
-        .and_then(|value| value.to_str().ok())
-    else {
+    let Some(request_host) = request_host.as_deref() else {
+        return false;
+    };
+    let Some(source) = effective_same_origin_source(headers, request_host) else {
         return false;
     };
 
@@ -244,36 +340,150 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
         return false;
     };
 
-    request_host
-        .as_deref()
-        .is_some_and(|request_host| hosts_match_for_same_origin(source_host, request_host))
+    hosts_match_for_same_origin(source_host, request_host)
+}
+
+fn request_referer_indicates_https_tunnel(headers: &HeaderMap) -> bool {
+    let origin = header_value_trimmed(headers, header::ORIGIN);
+    if origin.is_some_and(|value| !value.eq_ignore_ascii_case("null")) {
+        return false;
+    }
+
+    let request_host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+        .map(|authority| authority.host().to_string());
+    let Some(request_host) = request_host.as_deref() else {
+        return false;
+    };
+
+    let Some(referer) = header_value_trimmed(headers, header::REFERER) else {
+        return false;
+    };
+    let Ok(referer_uri) = referer.parse::<Uri>() else {
+        return false;
+    };
+    if referer_uri.scheme_str() != Some("https") {
+        return false;
+    }
+    let Some(referer_host) = referer_uri
+        .authority()
+        .map(axum::http::uri::Authority::host)
+    else {
+        return false;
+    };
+
+    hosts_match_for_same_origin(referer_host, request_host)
+}
+
+fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
+    let source_host = normalize_same_origin_host(source_host);
+    let request_host = normalize_same_origin_host(request_host);
+
+    if source_host.eq_ignore_ascii_case(request_host) {
+        return true;
+    }
+
+    is_loopback_alias(source_host) && is_loopback_alias(request_host)
+}
+
+fn normalize_same_origin_host(host: &str) -> &str {
+    let Some(inner) = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    else {
+        return host;
+    };
+
+    if inner.parse::<std::net::Ipv6Addr>().is_ok() {
+        inner
+    } else {
+        host
+    }
+}
+
+fn is_loopback_alias(host: &str) -> bool {
+    let host = normalize_same_origin_host(host);
+
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
 }
 
 fn admin_panel_redirect_with_status(
     message: &str,
     is_error: bool,
-    anchor: Option<&str>,
-    open_section: Option<&str>,
+    target: AdminPanelTarget<'_>,
 ) -> Redirect {
     let key = if is_error { "flash_error" } else { "flash" };
     let mut url = format!("/admin/panel?{key}={}", encode_query_component(message));
-    if let Some(section) = open_section.filter(|value| !value.is_empty()) {
+    if let Some(section) = target.open_section_value() {
         url.push_str("&open=");
         url.push_str(&encode_query_component(section));
     }
-    if let Some(anchor) = anchor.filter(|value| !value.is_empty()) {
+    if let Some(anchor) = target.anchor_value() {
         url.push('#');
         url.push_str(anchor);
     }
     Redirect::to(&url)
 }
 
+#[derive(Clone, Debug, Default)]
+pub(super) struct AdminPanelTarget<'a> {
+    anchor: Option<Cow<'a, str>>,
+    open_section: Option<Cow<'a, str>>,
+}
+
+impl<'a> AdminPanelTarget<'a> {
+    pub(super) const fn none() -> Self {
+        Self {
+            anchor: None,
+            open_section: None,
+        }
+    }
+
+    pub(super) const fn anchor(anchor: &'a str) -> Self {
+        Self {
+            anchor: Some(Cow::Borrowed(anchor)),
+            open_section: None,
+        }
+    }
+
+    pub(super) const fn anchor_open(anchor: &'a str, open_section: &'a str) -> Self {
+        Self {
+            anchor: Some(Cow::Borrowed(anchor)),
+            open_section: Some(Cow::Borrowed(open_section)),
+        }
+    }
+
+    pub(super) const fn owned_anchor_open(anchor: String, open_section: &'a str) -> Self {
+        Self {
+            anchor: Some(Cow::Owned(anchor)),
+            open_section: Some(Cow::Borrowed(open_section)),
+        }
+    }
+
+    pub(super) fn anchor_value(&self) -> Option<&str> {
+        self.anchor.as_deref().filter(|value| !value.is_empty())
+    }
+
+    pub(super) fn open_section_value(&self) -> Option<&str> {
+        self.open_section
+            .as_deref()
+            .filter(|value| !value.is_empty())
+    }
+}
+
 pub(super) fn admin_panel_redirect(message: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, false, None, None)
+    admin_panel_redirect_with_status(message, false, AdminPanelTarget::none())
 }
 
 pub(super) fn admin_panel_redirect_anchor(message: &str, anchor: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, false, Some(anchor), None)
+    admin_panel_redirect_with_status(message, false, AdminPanelTarget::anchor(anchor))
 }
 
 pub(super) fn admin_panel_redirect_anchor_open(
@@ -281,11 +491,15 @@ pub(super) fn admin_panel_redirect_anchor_open(
     anchor: &str,
     open_section: &str,
 ) -> Redirect {
-    admin_panel_redirect_with_status(message, false, Some(anchor), Some(open_section))
+    admin_panel_redirect_with_status(
+        message,
+        false,
+        AdminPanelTarget::anchor_open(anchor, open_section),
+    )
 }
 
 pub(super) fn admin_panel_error_redirect_anchor(message: &str, anchor: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, true, Some(anchor), None)
+    admin_panel_redirect_with_status(message, true, AdminPanelTarget::anchor(anchor))
 }
 
 pub(super) fn admin_panel_error_redirect_anchor_open(
@@ -293,7 +507,11 @@ pub(super) fn admin_panel_error_redirect_anchor_open(
     anchor: &str,
     open_section: &str,
 ) -> Redirect {
-    admin_panel_redirect_with_status(message, true, Some(anchor), Some(open_section))
+    admin_panel_redirect_with_status(
+        message,
+        true,
+        AdminPanelTarget::anchor_open(anchor, open_section),
+    )
 }
 
 // ─── GET /admin/panel ─────────────────────────────────────────────────────────
@@ -322,6 +540,7 @@ pub struct LiveLogQuery {
     pub bytes: Option<usize>,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct AdminPanelSnapshot {
     boards: Vec<crate::models::Board>,
     bans: Vec<crate::models::Ban>,
@@ -330,11 +549,14 @@ struct AdminPanelSnapshot {
     appeals: Vec<crate::models::BanAppeal>,
     site_name: String,
     site_subtitle: String,
+    homepage_new_thread_badges_enabled: bool,
+    thread_new_reply_badges_enabled: bool,
     default_theme: String,
     banner_rotation_interval_minutes: i64,
     banner_external_links_enabled: bool,
     auto_full_backup_interval_hours: u64,
     auto_full_backup_copies_to_keep: u64,
+    auto_full_backup_include_tor_hidden_service_keys: bool,
     themes: Vec<crate::models::Theme>,
     global_banners: Vec<crate::models::BannerAsset>,
     home_banners: Vec<crate::models::BannerAsset>,
@@ -343,6 +565,12 @@ struct AdminPanelSnapshot {
     board_backups: Vec<crate::models::BackupInfo>,
     db_size_bytes: i64,
     db_size_warning: bool,
+    ffmpeg_timeout_secs: u64,
+    ffmpeg_available: bool,
+    ffprobe_available: bool,
+    ffmpeg_webp_available: bool,
+    ffmpeg_vp9_available: bool,
+    pdf_thumbnail_renderer: Option<String>,
     backup_summary: BackupSummary,
 }
 
@@ -352,32 +580,113 @@ struct BackupSummary {
     status_line: String,
 }
 
-fn load_admin_panel_snapshot(
+struct OverviewDomainData {
+    backup_summary: BackupSummary,
+}
+
+struct BoardsDomainData {
+    boards: Vec<crate::models::Board>,
+}
+
+struct ModerationDomainData {
+    bans: Vec<crate::models::Ban>,
+    filters: Vec<crate::models::WordFilter>,
+    reports: Vec<crate::models::ReportWithContext>,
+    appeals: Vec<crate::models::BanAppeal>,
+}
+
+struct AppearanceDomainData {
+    site_name: String,
+    site_subtitle: String,
+    homepage_new_thread_badges_enabled: bool,
+    thread_new_reply_badges_enabled: bool,
+    default_theme: String,
+    banner_rotation_interval_minutes: i64,
+    banner_external_links_enabled: bool,
+    themes: Vec<crate::models::Theme>,
+    global_banners: Vec<crate::models::BannerAsset>,
+    home_banners: Vec<crate::models::BannerAsset>,
+    board_banners: Vec<crate::models::BannerAsset>,
+}
+
+struct BackupsDomainData {
+    full_backups: Vec<BackupInfo>,
+    board_backups: Vec<BackupInfo>,
+}
+
+#[allow(clippy::struct_excessive_bools)]
+// This is a flat snapshot of independent maintenance capability flags read from app state.
+struct MaintenanceDomainData {
+    db_size_bytes: i64,
+    db_size_warning: bool,
+    ffmpeg_timeout_secs: u64,
+    ffmpeg_available: bool,
+    ffprobe_available: bool,
+    ffmpeg_webp_available: bool,
+    ffmpeg_vp9_available: bool,
+    pdf_thumbnail_renderer: Option<String>,
+}
+
+fn load_overview_domain_data(full_backups: &[BackupInfo]) -> OverviewDomainData {
+    OverviewDomainData {
+        backup_summary: build_backup_summary(full_backups),
+    }
+}
+
+fn load_boards_domain_data(conn: &rusqlite::Connection) -> Result<BoardsDomainData> {
+    Ok(BoardsDomainData {
+        boards: db::get_all_boards(conn)?,
+    })
+}
+
+fn load_moderation_domain_data(conn: &rusqlite::Connection) -> Result<ModerationDomainData> {
+    Ok(ModerationDomainData {
+        bans: db::list_bans(conn)?,
+        filters: db::get_word_filters(conn)?,
+        reports: db::get_open_reports(conn)?,
+        appeals: db::get_open_ban_appeals(conn)?,
+    })
+}
+
+fn load_appearance_domain_data(
     conn: &rusqlite::Connection,
-    onion_address_val: Option<String>,
-    auto_full_backup_settings: crate::middleware::AutoFullBackupSettingsSnapshot,
-) -> Result<(AdminPanelSnapshot, Option<String>)> {
-    let boards = db::get_all_boards(conn)?;
-    let bans = db::list_bans(conn)?;
-    let filters = db::get_word_filters(conn)?;
-    let reports = db::get_open_reports(conn)?;
-    let appeals = db::get_open_ban_appeals(conn)?;
-    let site_name = db::get_site_name(conn);
-    let site_subtitle = db::get_site_subtitle(conn);
-    let default_theme = db::get_default_user_theme(conn);
-    let banner_rotation_interval_minutes = db::get_banner_rotation_interval_minutes(conn);
-    let banner_external_links_enabled = db::get_banner_external_links_enabled(conn);
+    boards: &[crate::models::Board],
+) -> Result<AppearanceDomainData> {
     let themes = db::load_themes(conn)?;
     let global_banners =
         db::list_banner_assets_for_scope(conn, crate::models::BannerScope::Global)?;
     let home_banners = db::list_banner_assets_for_scope(conn, crate::models::BannerScope::Home)?;
     let mut board_banners = Vec::new();
-    for board in &boards {
+    for board in boards {
         board_banners.extend(db::list_banner_assets_for_board(conn, board.id)?);
     }
-    let full_backups = list_backup_files(&full_backup_dir(), BackupListKind::Full);
-    let board_backups = list_backup_files(&board_backup_dir(), BackupListKind::Board);
-    let backup_summary = build_backup_summary(&full_backups);
+
+    Ok(AppearanceDomainData {
+        site_name: db::get_site_name(conn),
+        site_subtitle: db::get_site_subtitle(conn),
+        homepage_new_thread_badges_enabled: db::get_homepage_new_thread_badges_enabled(conn),
+        thread_new_reply_badges_enabled: db::get_thread_new_reply_badges_enabled(conn),
+        default_theme: db::get_default_user_theme(conn),
+        banner_rotation_interval_minutes: db::get_banner_rotation_interval_minutes(conn),
+        banner_external_links_enabled: db::get_banner_external_links_enabled(conn),
+        themes,
+        global_banners,
+        home_banners,
+        board_banners,
+    })
+}
+
+fn load_backups_domain_data() -> BackupsDomainData {
+    BackupsDomainData {
+        full_backups: list_backup_files(&full_backup_dir(), BackupListKind::Full),
+        board_backups: list_backup_files(&board_backup_dir(), BackupListKind::Board),
+    }
+}
+
+fn load_maintenance_domain_data(
+    conn: &rusqlite::Connection,
+    state: &AppState,
+) -> MaintenanceDomainData {
     let db_size_bytes = db::get_db_size_bytes(conn).unwrap_or(0);
     let db_size_warning = if CONFIG.db_warn_threshold_bytes > 0 {
         let file_size = std::fs::metadata(&CONFIG.database_path)
@@ -386,29 +695,65 @@ fn load_admin_panel_snapshot(
     } else {
         false
     };
+
+    MaintenanceDomainData {
+        db_size_bytes,
+        db_size_warning,
+        ffmpeg_timeout_secs: crate::config::ffmpeg_timeout_secs(),
+        ffmpeg_available: state.ffmpeg_available,
+        ffprobe_available: state.ffprobe_available,
+        ffmpeg_webp_available: state.ffmpeg_webp_available,
+        ffmpeg_vp9_available: state.ffmpeg_vp9_available,
+        pdf_thumbnail_renderer: state.pdf_thumbnail_renderer.map(str::to_string),
+    }
+}
+
+fn load_admin_panel_snapshot(
+    conn: &rusqlite::Connection,
+    state: &AppState,
+    onion_address_val: Option<String>,
+    auto_full_backup_settings: crate::middleware::AutoFullBackupSettingsSnapshot,
+) -> Result<(AdminPanelSnapshot, Option<String>)> {
+    let boards_domain = load_boards_domain_data(conn)?;
+    let moderation_domain = load_moderation_domain_data(conn)?;
+    let appearance_domain = load_appearance_domain_data(conn, &boards_domain.boards)?;
+    let backups_domain = load_backups_domain_data();
+    let overview_domain = load_overview_domain_data(&backups_domain.full_backups);
+    let maintenance_domain = load_maintenance_domain_data(conn, state);
     Ok((
         AdminPanelSnapshot {
-            boards,
-            bans,
-            filters,
-            reports,
-            appeals,
-            site_name,
-            site_subtitle,
-            default_theme,
-            banner_rotation_interval_minutes,
-            banner_external_links_enabled,
+            boards: boards_domain.boards,
+            bans: moderation_domain.bans,
+            filters: moderation_domain.filters,
+            reports: moderation_domain.reports,
+            appeals: moderation_domain.appeals,
+            site_name: appearance_domain.site_name,
+            site_subtitle: appearance_domain.site_subtitle,
+            homepage_new_thread_badges_enabled: appearance_domain
+                .homepage_new_thread_badges_enabled,
+            thread_new_reply_badges_enabled: appearance_domain.thread_new_reply_badges_enabled,
+            default_theme: appearance_domain.default_theme,
+            banner_rotation_interval_minutes: appearance_domain.banner_rotation_interval_minutes,
+            banner_external_links_enabled: appearance_domain.banner_external_links_enabled,
             auto_full_backup_interval_hours: auto_full_backup_settings.interval_hours,
             auto_full_backup_copies_to_keep: auto_full_backup_settings.copies_to_keep,
-            themes,
-            global_banners,
-            home_banners,
-            board_banners,
-            full_backups,
-            board_backups,
-            db_size_bytes,
-            db_size_warning,
-            backup_summary,
+            auto_full_backup_include_tor_hidden_service_keys: auto_full_backup_settings
+                .include_tor_hidden_service_keys,
+            themes: appearance_domain.themes,
+            global_banners: appearance_domain.global_banners,
+            home_banners: appearance_domain.home_banners,
+            board_banners: appearance_domain.board_banners,
+            full_backups: backups_domain.full_backups,
+            board_backups: backups_domain.board_backups,
+            db_size_bytes: maintenance_domain.db_size_bytes,
+            db_size_warning: maintenance_domain.db_size_warning,
+            ffmpeg_timeout_secs: maintenance_domain.ffmpeg_timeout_secs,
+            ffmpeg_available: maintenance_domain.ffmpeg_available,
+            ffprobe_available: maintenance_domain.ffprobe_available,
+            ffmpeg_webp_available: maintenance_domain.ffmpeg_webp_available,
+            ffmpeg_vp9_available: maintenance_domain.ffmpeg_vp9_available,
+            pdf_thumbnail_renderer: maintenance_domain.pdf_thumbnail_renderer,
+            backup_summary: overview_domain.backup_summary,
         },
         onion_address_val,
     ))
@@ -466,35 +811,79 @@ fn render_admin_panel_from_snapshot(
     flash: Option<(bool, String)>,
     open_section: Option<&str>,
 ) -> String {
-    let flash_ref = flash.as_ref().map(|(is_err, msg)| (*is_err, msg.as_str()));
-    crate::templates::admin_panel_page(
-        &snapshot.boards,
-        &snapshot.bans,
-        &snapshot.filters,
+    let flash_ref = flash
+        .as_ref()
+        .map(|(is_error, message)| crate::templates::AdminPanelFlash {
+            is_error: *is_error,
+            message,
+        });
+    let view = crate::templates::AdminPanelViewModel {
         csrf_token,
-        &snapshot.full_backups,
-        &snapshot.board_backups,
-        snapshot.db_size_bytes,
-        snapshot.db_size_warning,
-        &snapshot.backup_summary.status_line,
-        snapshot.backup_summary.warning.as_deref(),
-        &snapshot.reports,
-        &snapshot.appeals,
-        &snapshot.site_name,
-        &snapshot.site_subtitle,
-        &snapshot.default_theme,
-        snapshot.banner_rotation_interval_minutes,
-        snapshot.banner_external_links_enabled,
-        snapshot.auto_full_backup_interval_hours,
-        snapshot.auto_full_backup_copies_to_keep,
-        &snapshot.themes,
-        &snapshot.global_banners,
-        &snapshot.home_banners,
-        &snapshot.board_banners,
-        tor_address.as_deref(),
-        flash_ref,
+        boards: &snapshot.boards,
+        moderation: crate::templates::AdminPanelModerationView {
+            bans: &snapshot.bans,
+            filters: &snapshot.filters,
+            reports: &snapshot.reports,
+            appeals: &snapshot.appeals,
+        },
+        appearance: crate::templates::AdminPanelAppearanceView {
+            site_name: &snapshot.site_name,
+            site_subtitle: &snapshot.site_subtitle,
+            homepage_new_thread_badges_enabled: snapshot.homepage_new_thread_badges_enabled,
+            thread_new_reply_badges_enabled: snapshot.thread_new_reply_badges_enabled,
+            default_theme: &snapshot.default_theme,
+            banner_rotation_interval_minutes: snapshot.banner_rotation_interval_minutes,
+            banner_external_links_enabled: snapshot.banner_external_links_enabled,
+            themes: &snapshot.themes,
+            global_banners: &snapshot.global_banners,
+            home_banners: &snapshot.home_banners,
+            board_banners: &snapshot.board_banners,
+        },
+        backups: crate::templates::AdminPanelBackupsView {
+            full_backups: &snapshot.full_backups,
+            board_backups: &snapshot.board_backups,
+            backup_status_line: &snapshot.backup_summary.status_line,
+            backup_warning: snapshot.backup_summary.warning.as_deref(),
+            auto_full_backup_interval_hours: snapshot.auto_full_backup_interval_hours,
+            auto_full_backup_copies_to_keep: snapshot.auto_full_backup_copies_to_keep,
+            auto_full_backup_include_tor_hidden_service_keys: snapshot
+                .auto_full_backup_include_tor_hidden_service_keys,
+            tor_hidden_service_key_backup_available:
+                crate::config::configured_tor_hidden_service_keys_dir().is_some(),
+        },
+        maintenance: crate::templates::AdminPanelMaintenanceView {
+            db_size_bytes: snapshot.db_size_bytes,
+            db_size_warning: snapshot.db_size_warning,
+            ffmpeg_timeout_secs: snapshot.ffmpeg_timeout_secs,
+            media_detection: crate::templates::AdminMediaDetectionView {
+                ffmpeg: if snapshot.ffmpeg_available {
+                    crate::templates::AdminDetectionStatus::Detected
+                } else {
+                    crate::templates::AdminDetectionStatus::Missing
+                },
+                ffprobe: if snapshot.ffprobe_available {
+                    crate::templates::AdminDetectionStatus::Detected
+                } else {
+                    crate::templates::AdminDetectionStatus::Missing
+                },
+                webp_encoder: if snapshot.ffmpeg_webp_available {
+                    crate::templates::AdminDetectionStatus::Detected
+                } else {
+                    crate::templates::AdminDetectionStatus::Missing
+                },
+                vp9_pipeline: if snapshot.ffmpeg_vp9_available {
+                    crate::templates::AdminDetectionStatus::Detected
+                } else {
+                    crate::templates::AdminDetectionStatus::Missing
+                },
+                pdf_thumbnail_renderer: snapshot.pdf_thumbnail_renderer,
+            },
+        },
+        tor_address: tor_address.as_deref(),
+        flash: flash_ref,
         open_section,
-    )
+    };
+    crate::templates::admin_panel_page(&view)
 }
 
 pub async fn admin_panel(
@@ -526,7 +915,7 @@ pub async fn admin_panel(
             }
         }
     }
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_admin_csrf(jar)?;
     let csrf_clone = csrf.clone();
 
     // Build the flash message from query params before entering spawn_blocking.
@@ -569,8 +958,12 @@ pub async fn admin_panel(
             db::get_session(&conn, &sid)?
                 .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
 
-            let (snapshot, tor_address) =
-                load_admin_panel_snapshot(&conn, onion_address_val, auto_full_backup_settings)?;
+            let (snapshot, tor_address) = load_admin_panel_snapshot(
+                &conn,
+                &state,
+                onion_address_val,
+                auto_full_backup_settings,
+            )?;
             Ok(render_admin_panel_from_snapshot(
                 snapshot,
                 &csrf_clone,
@@ -700,9 +1093,18 @@ mod tests {
     use super::{
         consume_admin_session_bootstrap, create_admin_session_bootstrap,
         host_header_uses_https_port, hosts_match_for_same_origin, latest_log_file, read_log_tail,
-        request_origin_uses_https,
+        request_origin_uses_https, require_same_origin_request,
     };
     use axum::http::{header, HeaderMap, HeaderValue};
+
+    fn same_origin_headers(host: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_str(host).expect("host header"),
+        );
+        headers
+    }
 
     #[test]
     fn same_origin_accepts_exact_host_match() {
@@ -724,8 +1126,171 @@ mod tests {
     }
 
     #[test]
-    fn null_origin_is_handled_by_caller_fallback() {
+    fn null_origin_is_not_considered_same_origin() {
         assert!(!hosts_match_for_same_origin("null", "localhost"));
+    }
+
+    #[test]
+    fn same_origin_request_accepts_loopback_aliases_with_matching_port() {
+        let mut headers = same_origin_headers("127.0.0.1:8080");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://localhost:8080"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+
+        let mut headers = same_origin_headers("[::1]:8080");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:8080"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_ipv6_loopback_bracket_format() {
+        let mut headers = same_origin_headers("[::1]:8080");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://[::1]:8080"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_referer_when_origin_is_missing() {
+        let mut headers = same_origin_headers("localhost:8080");
+        headers.insert(
+            header::REFERER,
+            HeaderValue::from_static("http://127.0.0.1:8080/admin"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_missing_origin_and_referer_with_same_origin_fetch_metadata() {
+        let mut headers = same_origin_headers("demo.serveo.net");
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_rejects_missing_origin_and_referer_with_cross_site_fetch_metadata() {
+        let mut headers = same_origin_headers("demo.serveo.net");
+        headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        assert!(require_same_origin_request(&headers, None).is_err());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_null_origin_with_same_origin_referer_on_https_tunnel() {
+        let mut headers = same_origin_headers("demo.serveo.net");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        headers.insert(
+            header::REFERER,
+            HeaderValue::from_static("https://demo.serveo.net/admin"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_rejects_null_origin_for_non_loopback_targets() {
+        let mut headers = same_origin_headers("192.168.1.20:8080");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        assert!(require_same_origin_request(&headers, None).is_err());
+
+        let mut headers = same_origin_headers("board-admin-exampleonion123.onion");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        assert!(require_same_origin_request(&headers, None).is_err());
+    }
+
+    #[test]
+    fn same_origin_request_rejects_scheme_mismatch_for_non_loopback_host() {
+        let mut headers = same_origin_headers("example.test");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://example.test"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_err());
+    }
+
+    #[test]
+    fn same_origin_request_rejects_port_mismatch_even_for_loopback_aliases() {
+        let mut headers = same_origin_headers("localhost:8080");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:3000"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_err());
+    }
+
+    #[test]
+    fn same_origin_request_does_not_treat_private_lan_ips_as_loopback_aliases() {
+        assert!(!hosts_match_for_same_origin("192.168.1.20", "127.0.0.1"));
+        assert!(!hosts_match_for_same_origin("10.0.0.5", "localhost"));
+        assert!(!hosts_match_for_same_origin("172.16.0.8", "::1"));
+    }
+
+    #[test]
+    fn same_origin_request_rejects_loopback_lookalike_hostnames() {
+        assert!(!hosts_match_for_same_origin(
+            "127.0.0.1.evil.com",
+            "127.0.0.1"
+        ));
+        assert!(!hosts_match_for_same_origin(
+            "localhost.evil.com",
+            "localhost"
+        ));
+        assert!(!hosts_match_for_same_origin("::1.evil.com", "::1"));
+        assert!(!hosts_match_for_same_origin("localhost.", "localhost"));
+    }
+
+    #[test]
+    fn same_origin_request_rejects_weird_loopback_encodings() {
+        assert!(!hosts_match_for_same_origin("%5B::1%5D", "::1"));
+        assert!(!hosts_match_for_same_origin("127.000.000.001", "127.0.0.1"));
+        assert!(!hosts_match_for_same_origin("2130706433", "127.0.0.1"));
+        assert!(!hosts_match_for_same_origin("0x7f000001", "127.0.0.1"));
+    }
+
+    #[test]
+    fn same_origin_request_rejects_malformed_bracketed_loopback_forms() {
+        assert!(!hosts_match_for_same_origin("[::1", "::1"));
+        assert!(!hosts_match_for_same_origin("::1]", "::1"));
+        assert!(!hosts_match_for_same_origin("[127.0.0.1]", "127.0.0.1"));
+        assert!(!hosts_match_for_same_origin("[localhost]", "localhost"));
+        assert!(!hosts_match_for_same_origin("[[::1]]", "::1"));
+    }
+
+    #[test]
+    fn same_origin_request_rejects_userinfo_bypass_shapes() {
+        let mut headers = same_origin_headers("127.0.0.1:8080");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1@evil.com:8080"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_err());
+
+        let mut headers = same_origin_headers("127.0.0.1:8080");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://evil.com@127.0.0.1:8080"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_err());
+    }
+
+    #[test]
+    fn same_origin_request_rejects_non_loopback_null_origin_lookalikes() {
+        let mut headers = same_origin_headers("localhost.evil.com:8080");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        assert!(require_same_origin_request(&headers, None).is_err());
+
+        let mut headers = same_origin_headers("192.168.1.20:8080");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        assert!(require_same_origin_request(&headers, None).is_err());
+
+        let mut headers = same_origin_headers("examplehiddenservice.onion");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        assert!(require_same_origin_request(&headers, None).is_err());
     }
 
     #[test]

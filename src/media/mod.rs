@@ -1,31 +1,4 @@
-// media/mod.rs
-//
-// Public interface for the media processing pipeline.
-//
-// Usage from the upload pipeline:
-//
-//   let processor = MediaProcessor::new();   // detects ffmpeg once
-//   let result = processor.process_upload(
-//       &temp_path, mime, &dest_dir, &file_stem, &thumbs_dir, thumb_max,
-//   )?;
-//   // result.file_path      — final file on disk (converted if applicable)
-//   // result.thumbnail_path — WebP thumbnail (or SVG placeholder)
-//   // result.mime_type      — final MIME (may differ from original for gif→webm)
-//   // result.was_converted  — true when format changed
-//   // result.original_size  — bytes of input file
-//   // result.final_size     — bytes of output file
-//
-// FFmpeg detection:
-//   `MediaProcessor::new()` calls `ffmpeg::detect_ffmpeg()` exactly once and
-//   stores the result in `ffmpeg_available`.  Alternatively, use
-//   `MediaProcessor::new_with_ffmpeg(bool)` to supply a pre-detected value
-//   (e.g. from the startup check stored in `AppState`).
-//
-// Graceful degradation:
-//   If ffmpeg is not found, `process_upload` stores files as-is and
-//   `generate_thumbnail` writes a static SVG placeholder for video; for
-//   images the `image` crate is used as a fallback thumbnail generator.
-//   No error is returned to the user in either case.
+// Media processing pipeline helpers.
 
 pub mod convert;
 pub mod exif;
@@ -51,9 +24,6 @@ pub struct ProcessedMedia {
     pub mime_type: String,
     /// `true` when the file was converted to a different format.
     pub was_converted: bool,
-    /// Size of the original input in bytes.
-    #[allow(dead_code)]
-    pub original_size: u64,
     /// Size of the final stored file in bytes.
     pub final_size: u64,
 }
@@ -99,11 +69,9 @@ impl MediaProcessor {
                  Install ffmpeg to enable optimal format conversion."
             );
         }
-        let webp_available = available && ffmpeg::check_webp_encoder();
-        Self {
-            ffmpeg_available: available,
-            ffmpeg_webp_available: webp_available,
-        }
+        let mut processor = Self::new_with_ffmpeg(available);
+        processor.ffmpeg_webp_available = available && ffmpeg::check_webp_encoder();
+        processor
     }
 
     /// Create a `MediaProcessor` with pre-detected capability flags.
@@ -122,7 +90,6 @@ impl MediaProcessor {
     /// `ffmpeg_webp_available` defaults to the same value as `ffmpeg_available`.
     /// Prefer [`new_with_ffmpeg_caps`](Self::new_with_ffmpeg_caps) in handlers.
     #[must_use]
-    #[allow(dead_code)]
     pub const fn new_with_ffmpeg(ffmpeg_available: bool) -> Self {
         Self {
             ffmpeg_available,
@@ -196,13 +163,12 @@ impl MediaProcessor {
         // generate_thumbnail returns the actual path written, which may differ
         // from thumb_path when a video thumbnail falls back to an SVG placeholder
         // (the pre-selected .webp extension would mismatch the SVG content).
-        let actual_thumb_path = match thumbnail::generate_thumbnail(
+        let actual_thumb_path = match self.generate_thumbnail(
             &conv.final_path,
             conv.final_mime,
-            &thumb_path,
+            thumb_dir,
+            file_stem,
             thumb_max,
-            self.ffmpeg_available,
-            self.ffmpeg_webp_available,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -219,7 +185,6 @@ impl MediaProcessor {
             thumbnail_path: actual_thumb_path,
             mime_type: conv.final_mime.to_string(),
             was_converted: conv.was_converted,
-            original_size,
             final_size: conv.final_size,
         })
     }
@@ -235,7 +200,6 @@ impl MediaProcessor {
     /// # Errors
     /// Returns an error only if both ffmpeg and the image-crate fallback fail
     /// AND writing the placeholder also fails.
-    #[allow(dead_code)]
     pub fn generate_thumbnail(
         self,
         input_path: &Path,

@@ -1,3 +1,4 @@
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 pub(super) fn settings_template(secret: &str) -> String {
     format!(
@@ -10,16 +11,25 @@ pub(super) fn settings_template(secret: &str) -> String {
 forum_name = "RustChan"
 
 # Subtitle shown below the site name on the home page.
-# Can also be changed later from Admin -> Site Settings.
+# This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
 site_subtitle = "select board to proceed"
 
+# Enable per-browser homepage board-card badges for newly created threads.
+# This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
+homepage_new_thread_badges_enabled = true
+
+# Enable per-browser board/catalog thread-card badges for new replies.
+# This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
+thread_new_reply_badges_enabled = true
+
 # Default theme for first-time visitors before they pick their own.
+# This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
 # Valid values: built-in or admin-created custom theme slugs.
-default_theme = "fluorogrid"
+default_theme = "forest"
 
 # Built-in themes enabled when the theme catalog is first seeded.
-# Remove built-in slugs here if you want them disabled after restart.
-enabled_builtin_themes = ["terminal", "aero", "dorfic", "forest", "chanclassic", "neoncubicle", "fluorogrid"]
+# After first startup, Admin -> Theme Catalog owns the live enabled/disabled state.
+enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]
 
 
 # ── Network / web server ──────────────────────────────────────────────────────
@@ -38,7 +48,7 @@ trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
 # generated automatically in rustchan-data/runtime/tls/dev/.
 # For production, configure [tls.acme] (Let's Encrypt) or [tls.manual_cert].
 [tls]
-enabled = true
+enabled = false
 port = 8443
 redirect_http = false
 http_port = 8080
@@ -58,7 +68,7 @@ http_port = 8080
 
 
 # ── Upload limits ─────────────────────────────────────────────────────────────
-# Maximum size for image uploads in MiB (jpg, png, gif, webp).
+# Maximum size for image uploads in MiB (jpg, png, gif, webp, heic).
 max_image_size_mb = 8
 
 # Maximum size for video uploads in MiB (mp4, webm).
@@ -82,7 +92,7 @@ cookie_secret = "{secret}"
 # ── Tor Onion Service ─────────────────────────────────────────────────────────
 # Built-in Onion Service support (powered by Arti — no system tor required).
 # First run downloads ~2 MB of directory data and can take ~30 s.
-# The service keypair lives in rustchan-data/runtime/tor/state/keys/ — back it up.
+# The service keypair lives in rustchan-data/runtime/tor/state/keystore/ — back it up.
 # Delete that directory to rotate to a new .onion address.
 enable_tor_support = true
 
@@ -110,9 +120,11 @@ tor_service_nickname = "rustchan"
 # When false, the server still starts and video thumbnails fall back to placeholders.
 require_ffmpeg = false
 
-# Maximum seconds a single FFmpeg transcode or waveform job may run before
-# it is killed. Prevents pathological media files from stalling the worker pool.
-ffmpeg_timeout_secs = 120
+# Maximum seconds RustChan lets ffmpeg run for video re-encoding and other
+# long-running media jobs before it is killed.
+# Slow systems such as Raspberry Pi devices may need a higher value, especially
+# for MP4 -> WebM/VP9 conversion without useful hardware acceleration.
+ffmpeg_timeout_secs = 600
 
 # Optional explicit ffmpeg binary path. Leave unset to use PATH lookup.
 # ffmpeg_path = "/usr/local/bin/ffmpeg"
@@ -139,6 +151,10 @@ auto_full_backup_interval_hours = 24
 # backup completes. Older saved full backups beyond this limit are deleted.
 # Minimum: 1.
 auto_full_backup_copies_to_keep = 1
+
+# Whether automatic full-site backups include Tor hidden service identity keys.
+# Anyone with these keys can impersonate the onion service. Default: true.
+auto_full_backup_include_tor_hidden_service_keys = true
 
 # How often (in hours) to purge vote records for polls that have expired.
 # The poll question and options are kept for display; only per-IP vote rows

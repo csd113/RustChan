@@ -4,12 +4,6 @@
 // moderation log, ban appeals, IP history, WAL checkpoint, VACUUM, DB size,
 // and the list_admins helper used by CLI tooling.
 //
-// FIX summary (from audit):
-//              INSERT … RETURNING id replaces execute + last_insert_rowid()
-//              added rows-affected checks so missing targets surface as errors
-//              already correct; doc comment clarified
-//              requires a schema-level UNIQUE constraint
-
 use crate::models::{AdminSession, AdminUser, Ban, WordFilter};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
@@ -28,14 +22,48 @@ pub enum ReportSubmission {
 }
 
 #[derive(Debug, Clone)]
+pub struct DbCheckResult {
+    pub ok: bool,
+    pub messages: Vec<String>,
+}
+
+impl DbCheckResult {
+    #[must_use]
+    pub fn output(&self) -> String {
+        if self.messages.is_empty() {
+            return "ok".to_string();
+        }
+        self.messages.join(" | ")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DbHealthSnapshot {
+    pub integrity: DbCheckResult,
+    pub foreign_keys: DbCheckResult,
+}
+
+impl DbHealthSnapshot {
+    #[must_use]
+    pub const fn ok(&self) -> bool {
+        self.integrity.ok && self.foreign_keys.ok
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DbRepairBackup {
+    pub filename: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct DbHealthReport {
-    pub before_check: String,
-    pub before_ok: bool,
+    pub before: DbHealthSnapshot,
     pub repair_attempted: bool,
+    pub repair_backup: Option<DbRepairBackup>,
+    pub repair_backup_error: Option<String>,
     pub repair_summary: Vec<String>,
     pub repair_steps: Vec<String>,
-    pub after_check: Option<String>,
-    pub after_ok: Option<bool>,
+    pub after: Option<DbHealthSnapshot>,
 }
 
 // ─── Admin user queries ───────────────────────────────────────────────────────
@@ -690,7 +718,7 @@ pub fn get_posts_by_ip_hash(
                 p.file_size, p.thumb_path, p.mime_type, p.created_at,
                 p.deletion_token, p.is_op, p.media_type,
                 p.audio_file_path, p.audio_file_name, p.audio_file_size, p.audio_mime_type,
-                p.edited_at,
+                p.edited_at, p.media_processing_state, p.media_processing_error,
                 b.short_name
          FROM posts p
          JOIN boards b ON b.id = p.board_id
@@ -700,10 +728,10 @@ pub fn get_posts_by_ip_hash(
     )?;
 
     let rows = stmt.query_map(rusqlite::params![ip_hash, limit, offset], |row| {
-        // map_post reads columns 0–22 (the 23 canonical post columns).
-        // Column 23 is b.short_name, appended only by this query.
+        // map_post reads columns 0–24 (the 25 canonical post columns).
+        // Column 25 is b.short_name, appended only by this query.
         let post = super::posts::map_post(row)?;
-        let board_short: String = row.get(23)?;
+        let board_short: String = row.get(25)?;
         Ok((post, board_short))
     })?;
 
@@ -772,27 +800,31 @@ pub fn run_vacuum(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
-fn integrity_check_status(conn: &rusqlite::Connection) -> (String, bool) {
+fn integrity_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
     let mut stmt = match conn.prepare("PRAGMA integrity_check") {
         Ok(stmt) => stmt,
-        Err(error) => return (format!("integrity_check failed: {error}"), false),
+        Err(error) => {
+            return DbCheckResult {
+                ok: false,
+                messages: vec![format!("integrity_check failed: {error}")],
+            };
+        }
     };
 
     let rows = match stmt.query_map([], |r| r.get::<_, String>(0)) {
         Ok(rows) => rows,
-        Err(error) => return (format!("integrity_check failed: {error}"), false),
+        Err(error) => {
+            return DbCheckResult {
+                ok: false,
+                messages: vec![format!("integrity_check failed: {error}")],
+            };
+        }
     };
 
     let mut messages = Vec::new();
-    for row in rows.take(8) {
+    for row in rows {
         match row {
-            Ok(message) => {
-                let ok = message.eq_ignore_ascii_case("ok");
-                messages.push(message);
-                if ok {
-                    break;
-                }
-            }
+            Ok(message) => messages.push(message),
             Err(error) => {
                 messages.push(format!("integrity_check row failed: {error}"));
                 break;
@@ -801,12 +833,75 @@ fn integrity_check_status(conn: &rusqlite::Connection) -> (String, bool) {
     }
 
     if messages.is_empty() {
-        return ("integrity_check returned no rows".to_string(), false);
+        return DbCheckResult {
+            ok: false,
+            messages: vec!["integrity_check returned no rows".to_string()],
+        };
     }
 
-    let joined = messages.join(" | ");
     let ok = matches!(messages.as_slice(), [message] if message.eq_ignore_ascii_case("ok"));
-    (joined, ok)
+    DbCheckResult { ok, messages }
+}
+
+fn foreign_key_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
+    let mut stmt = match conn.prepare("PRAGMA foreign_key_check") {
+        Ok(stmt) => stmt,
+        Err(error) => {
+            return DbCheckResult {
+                ok: false,
+                messages: vec![format!("foreign_key_check failed: {error}")],
+            };
+        }
+    };
+
+    let rows = match stmt.query_map([], |row| {
+        let table: String = row.get(0)?;
+        let rowid: Option<i64> = row.get(1)?;
+        let parent: String = row.get(2)?;
+        let fkid: i64 = row.get(3)?;
+        let rowid = rowid.map_or_else(|| "unknown".to_string(), |value| value.to_string());
+        Ok(format!(
+            "table={table} rowid={rowid} parent={parent} fkid={fkid}"
+        ))
+    }) {
+        Ok(rows) => rows,
+        Err(error) => {
+            return DbCheckResult {
+                ok: false,
+                messages: vec![format!("foreign_key_check failed: {error}")],
+            };
+        }
+    };
+
+    let mut messages = Vec::new();
+    for row in rows {
+        match row {
+            Ok(message) => messages.push(message),
+            Err(error) => {
+                messages.push(format!("foreign_key_check row failed: {error}"));
+                break;
+            }
+        }
+    }
+
+    if messages.is_empty() {
+        return DbCheckResult {
+            ok: true,
+            messages: vec!["ok".to_string()],
+        };
+    }
+
+    DbCheckResult {
+        ok: false,
+        messages,
+    }
+}
+
+fn db_health_snapshot(conn: &rusqlite::Connection) -> DbHealthSnapshot {
+    DbHealthSnapshot {
+        integrity: integrity_check_status(conn),
+        foreign_keys: foreign_key_check_status(conn),
+    }
 }
 
 fn rebuild_posts_fts(conn: &rusqlite::Connection) -> Result<()> {
@@ -840,33 +935,44 @@ fn rebuild_posts_fts(conn: &rusqlite::Connection) -> Result<()> {
 }
 
 pub fn check_db_health(conn: &rusqlite::Connection) -> DbHealthReport {
-    let (before_check, before_ok) = integrity_check_status(conn);
+    let before = db_health_snapshot(conn);
     DbHealthReport {
-        before_check,
-        before_ok,
+        before,
         repair_attempted: false,
+        repair_backup: None,
+        repair_backup_error: None,
         repair_summary: Vec::new(),
         repair_steps: Vec::new(),
-        after_check: None,
-        after_ok: None,
+        after: None,
     }
 }
 
-pub fn attempt_db_repair(conn: &rusqlite::Connection) -> DbHealthReport {
-    let (before_check, before_ok) = integrity_check_status(conn);
+pub fn attempt_db_repair(
+    conn: &rusqlite::Connection,
+    repair_backup: Option<DbRepairBackup>,
+) -> DbHealthReport {
+    let before = db_health_snapshot(conn);
     let mut repair_summary = Vec::new();
     let mut repair_steps = Vec::new();
 
-    if before_ok {
-        repair_summary
-            .push("No integrity problems were detected before the repair run.".to_string());
+    if let Some(backup) = &repair_backup {
+        repair_summary.push(format!(
+            "Created pre-repair full backup: {}.",
+            backup.filename
+        ));
+    }
+
+    if before.ok() {
+        repair_summary.push(
+            "No database health problems were detected before the maintenance run.".to_string(),
+        );
         repair_summary.push(
             "No corruption-specific fixes were required; the system only ran maintenance and index rebuild steps."
                 .to_string(),
         );
     } else {
         repair_summary.push(
-            "The initial integrity check reported a database problem, so repair steps were attempted."
+            "The initial database health check reported a problem, so repair steps were attempted."
                 .to_string(),
         );
     }
@@ -891,39 +997,61 @@ pub fn attempt_db_repair(conn: &rusqlite::Connection) -> DbHealthReport {
         )),
     }
 
-    let (after_check, after_ok) = integrity_check_status(conn);
+    let after = db_health_snapshot(conn);
 
-    if before_ok && after_ok {
+    if before.ok() && after.ok() {
         repair_summary.push(
-            "The final integrity check still passed, confirming that no additional repairs were needed."
+            "The final database health check still passed, confirming that no additional repairs were needed."
                 .to_string(),
         );
-    } else if after_ok {
+    } else if after.ok() {
         repair_summary.push(
-            "The final integrity check passed after the repair run, so the detected problem was cleared."
+            "The final database health check passed after the repair run, so the detected problem was cleared."
                 .to_string(),
         );
     } else {
         repair_summary.push(
-            "The repair run finished, but the final integrity check still reports a problem."
+            "The repair run finished, but the final database health check still reports a problem."
                 .to_string(),
         );
     }
 
     DbHealthReport {
-        before_check,
-        before_ok,
+        before,
         repair_attempted: true,
+        repair_backup,
+        repair_backup_error: None,
         repair_summary,
         repair_steps,
-        after_check: Some(after_check),
-        after_ok: Some(after_ok),
+        after: Some(after),
+    }
+}
+
+pub fn db_repair_aborted_for_backup_failure(
+    conn: &rusqlite::Connection,
+    backup_error: &str,
+) -> DbHealthReport {
+    DbHealthReport {
+        before: db_health_snapshot(conn),
+        repair_attempted: false,
+        repair_backup: None,
+        repair_backup_error: Some(backup_error.to_string()),
+        repair_summary: vec![
+            format!("Pre-repair backup failed: {backup_error}"),
+            "No repair or maintenance actions were run.".to_string(),
+        ],
+        repair_steps: Vec::new(),
+        after: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{attempt_db_repair, check_db_health, file_ban_appeal, BanAppealSubmission};
+    use super::{
+        attempt_db_repair, check_db_health, db_repair_aborted_for_backup_failure, file_ban_appeal,
+        get_posts_by_ip_hash, BanAppealSubmission, DbRepairBackup,
+    };
+    use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
 
     #[test]
     fn ban_appeal_submission_is_deduplicated_within_window() {
@@ -953,8 +1081,9 @@ mod tests {
         let conn = pool.get().expect("db connection");
 
         let report = check_db_health(&conn);
-        assert!(report.before_ok);
-        assert_eq!(report.before_check, "ok");
+        assert!(report.before.ok());
+        assert_eq!(report.before.integrity.output(), "ok");
+        assert_eq!(report.before.foreign_keys.output(), "ok");
         assert!(!report.repair_attempted);
         assert!(report.repair_summary.is_empty());
     }
@@ -964,13 +1093,128 @@ mod tests {
         let pool = crate::db::init_test_pool().expect("test pool");
         let conn = pool.get().expect("db connection");
 
-        let report = attempt_db_repair(&conn);
-        assert!(report.before_ok);
-        assert_eq!(report.after_check.as_deref(), Some("ok"));
-        assert_eq!(report.after_ok, Some(true));
+        let report = attempt_db_repair(
+            &conn,
+            Some(DbRepairBackup {
+                filename: "rustchan-backup-test.zip".to_string(),
+            }),
+        );
+        assert!(report.before.ok());
+        assert_eq!(
+            report.after.as_ref().map(|after| after.integrity.output()),
+            Some("ok".to_string())
+        );
+        assert_eq!(
+            report.after.as_ref().map(super::DbHealthSnapshot::ok),
+            Some(true)
+        );
+        assert_eq!(
+            report
+                .repair_backup
+                .as_ref()
+                .map(|backup| backup.filename.as_str()),
+            Some("rustchan-backup-test.zip")
+        );
         assert!(report
             .repair_summary
             .iter()
             .any(|line| line.contains("No corruption-specific fixes were required")));
+    }
+
+    #[test]
+    fn db_health_repair_aborts_when_backup_fails() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+
+        let report = db_repair_aborted_for_backup_failure(&conn, "disk full");
+
+        assert!(!report.repair_attempted);
+        assert_eq!(report.repair_backup_error.as_deref(), Some("disk full"));
+        assert!(report.after.is_none());
+        assert!(report.repair_steps.is_empty());
+    }
+
+    #[test]
+    fn db_health_check_reports_foreign_key_violations() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+        conn.execute_batch(
+            r"
+            CREATE TABLE fk_health_parent(id INTEGER PRIMARY KEY);
+            CREATE TABLE fk_health_child(
+                id INTEGER PRIMARY KEY,
+                parent_id INTEGER NOT NULL REFERENCES fk_health_parent(id)
+            );
+            PRAGMA foreign_keys = OFF;
+            INSERT INTO fk_health_child(id, parent_id) VALUES (1, 999);
+            PRAGMA foreign_keys = ON;
+            ",
+        )
+        .expect("create fk violation");
+
+        let report = check_db_health(&conn);
+
+        assert!(report.before.integrity.ok);
+        assert!(!report.before.foreign_keys.ok);
+        assert!(report
+            .before
+            .foreign_keys
+            .output()
+            .contains("fk_health_child"));
+        assert!(!report.before.ok());
+    }
+
+    #[test]
+    fn get_posts_by_ip_hash_maps_posts_with_media_processing_columns() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+        let ip_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        create_board(&conn, "test", "Test", "", false).expect("create board");
+        let board = get_board_by_short(&conn, "test")
+            .expect("load board")
+            .expect("board exists");
+        let post = NewPost {
+            thread_id: 0,
+            board_id: board.id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some("subject".to_string()),
+            body: "body".to_string(),
+            body_html: "<p>body</p>".to_string(),
+            ip_hash: Some(ip_hash.to_string()),
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: true,
+        };
+
+        let (_, post_id, _) =
+            create_thread_with_optional_poll(&conn, board.id, None, &post, "", None, None)
+                .expect("create thread");
+        crate::db::set_post_media_processing_state(
+            &conn,
+            post_id,
+            Some("pending"),
+            Some("transcoding"),
+        )
+        .expect("set media processing state");
+
+        let posts = get_posts_by_ip_hash(&conn, ip_hash, 25, 0).expect("load ip history");
+        let (post, board_short) = posts.first().expect("ip history entry");
+
+        assert_eq!(posts.len(), 1);
+        assert_eq!(post.id, post_id);
+        assert_eq!(post.media_processing_state.as_deref(), Some("pending"));
+        assert_eq!(post.media_processing_error.as_deref(), Some("transcoding"));
+        assert_eq!(board_short, "test");
     }
 }

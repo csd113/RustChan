@@ -1,4 +1,4 @@
-// src/handlers/mod.rs
+// Request handlers.
 
 pub mod admin;
 pub mod banner;
@@ -21,12 +21,39 @@ use axum::extract::Multipart;
 use tokio::io::AsyncWriteExt as _;
 
 const MIME_SNIFF_BYTES: usize = 512;
+const UNKNOWN_MULTIPART_FIELD_MAX_BYTES: usize = 64 * 1024;
+
+fn max_primary_upload_bytes() -> usize {
+    CONFIG
+        .max_image_size
+        .max(CONFIG.max_video_size)
+        .max(CONFIG.max_audio_size)
+}
 
 async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String> {
     field
         .text()
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))
+}
+
+pub async fn discard_unknown_multipart_field(
+    mut field: axum::extract::multipart::Field<'_>,
+) -> Result<()> {
+    let mut total = 0usize;
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
+        total = total.saturating_add(chunk.len());
+        if total > UNKNOWN_MULTIPART_FIELD_MAX_BYTES {
+            return Err(AppError::UploadTooLarge(
+                "Unexpected multipart field is too large.".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ─── Streaming multipart size limit ──────────────────────────────────────────
@@ -43,7 +70,6 @@ async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<S
 // Text fields (CSRF token, post body, …) are routed through `field.text()`
 // which is bounded by axum's body length limit set in the router layer.
 
-#[allow(clippy::arithmetic_side_effects)]
 async fn stream_field_to_temp_file(
     mut field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
@@ -213,8 +239,7 @@ pub async fn parse_post_multipart(
                 poll_duration_unit = read_text_field(field).await?;
             }
             Some("file") => {
-                let max = CONFIG.max_video_size.max(CONFIG.max_audio_size);
-                file = read_upload_field(field, max, "upload").await?;
+                file = read_upload_field(field, max_primary_upload_bytes(), "upload").await?;
             }
             Some("audio_file") => {
                 audio_file = read_upload_field(field, CONFIG.max_audio_size, "audio").await?;
@@ -223,7 +248,7 @@ pub async fn parse_post_multipart(
                 image_file = read_upload_field(field, CONFIG.max_image_size, "image").await?;
             }
             _ => {
-                let _ = field.bytes().await;
+                discard_unknown_multipart_field(field).await?;
             }
         }
     }
@@ -312,7 +337,8 @@ use crate::models::Board;
 /// Returns `Ok(None)` when `file_data` is `None` (no file attached).
 /// Must be called from inside a `spawn_blocking` closure.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::arithmetic_side_effects)]
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#[allow(clippy::too_many_lines)]
 pub fn process_primary_upload(
     file_data: Option<(TempUpload, String)>,
     board: &Board,
@@ -355,16 +381,41 @@ pub fn process_primary_upload(
                 "Audio uploads are disabled on this board.".into(),
             ))
         }
+        crate::models::MediaType::Pdf if !board.allow_pdf => {
+            return Err(AppError::BadRequest(
+                "PDF uploads are disabled on this board.".into(),
+            ))
+        }
         crate::models::MediaType::Other if !allow_any_files => {
             return Err(AppError::BadRequest(
-                "This board only accepts image, video, or audio uploads.".into(),
+                "This board only accepts image, video, audio, or PDF uploads.".into(),
             ))
         }
         crate::models::MediaType::Image
         | crate::models::MediaType::Video
         | crate::models::MediaType::Audio
+        | crate::models::MediaType::Pdf
         | crate::models::MediaType::Other => {}
     }
+
+    crate::utils::files::validate_upload_from_path(
+        upload.temp_file.path(),
+        &upload.sniff_bytes,
+        upload.size_bytes,
+        &crate::utils::files::SaveUploadOptions {
+            original_filename: &fname,
+            boards_dir: save_root,
+            board_short: &board.short_name,
+            thumb_size,
+            max_image_size,
+            max_video_size,
+            max_audio_size,
+            ffmpeg_available,
+            ffmpeg_webp_available,
+            allow_any_files,
+        },
+    )
+    .map_err(|error| classify_upload_error(&error))?;
 
     // SHA-256 deduplication — serve the cached entry without re-saving.
     //
@@ -492,6 +543,7 @@ pub fn process_audio_combo(
     Ok(Some(aud_file))
 }
 
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn process_audio_first_uploads(
     audio_file_data: Option<(TempUpload, String)>,
@@ -614,7 +666,9 @@ pub fn enqueue_post_jobs(
                     file_path: up.file_path.clone(),
                     board_short: board_short.to_string(),
                 }),
-                crate::models::MediaType::Image | crate::models::MediaType::Other => None,
+                crate::models::MediaType::Image
+                | crate::models::MediaType::Pdf
+                | crate::models::MediaType::Other => None,
             };
             if let Some(j) = job {
                 match job_queue.enqueue(&j) {
@@ -678,7 +732,8 @@ pub fn enqueue_post_jobs(
 
 #[cfg(test)]
 mod tests {
-    use super::{process_audio_first_uploads, TempUpload};
+    use super::{max_primary_upload_bytes, process_audio_first_uploads, TempUpload};
+    use sha2::Digest as _;
 
     fn sample_board() -> crate::models::Board {
         crate::models::Board {
@@ -701,6 +756,42 @@ mod tests {
             },
             name.to_string(),
         )
+    }
+
+    fn valid_pdf() -> &'static [u8] {
+        b"%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >> endobj
+4 0 obj << /Length 0 >> stream
+
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF
+"
+    }
+
+    fn create_file_hash_table(conn: &rusqlite::Connection) {
+        conn.execute(
+            "CREATE TABLE file_hashes (
+                sha256 TEXT PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                thumb_path TEXT NOT NULL DEFAULT '',
+                mime_type TEXT NOT NULL DEFAULT ''
+            )",
+            [],
+        )
+        .expect("create file_hashes");
+    }
+
+    #[test]
+    fn primary_upload_limit_allows_largest_media_class() {
+        let largest_media_limit = crate::config::CONFIG
+            .max_image_size
+            .max(crate::config::CONFIG.max_video_size)
+            .max(crate::config::CONFIG.max_audio_size);
+
+        assert_eq!(max_primary_upload_bytes(), largest_media_limit);
     }
 
     #[test]
@@ -734,5 +825,157 @@ mod tests {
                 .to_string()
                 .contains("Use either the audio/image upload flow or the other-file slot")),
         }
+    }
+
+    #[test]
+    fn primary_upload_rejects_malformed_image_even_when_hash_is_cached() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        create_file_hash_table(&conn);
+
+        let board = crate::test_fixtures::sample_board();
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
+        let save_root = tempfile::tempdir().expect("save root");
+        let malformed = b"\x89PNG\r\n\x1a\nthis is not a complete png";
+        let upload = temp_upload("broken.png", malformed);
+
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(malformed);
+        let hash = hex::encode(hasher.finalize());
+
+        let board_dir = uploads_dir.path().join(&board.short_name);
+        let thumbs_dir = board_dir.join("thumbs");
+        std::fs::create_dir_all(&thumbs_dir).expect("create thumb dir");
+        std::fs::write(board_dir.join("cached.png"), malformed).expect("write cached file");
+        std::fs::write(thumbs_dir.join("cached.webp"), b"fake thumb").expect("write cached thumb");
+        crate::db::record_file_hash(
+            &conn,
+            &hash,
+            &format!("{}/cached.png", board.short_name),
+            &format!("{}/thumbs/cached.webp", board.short_name),
+            "image/png",
+        )
+        .expect("record hash");
+
+        let result = super::process_primary_upload(
+            Some(upload),
+            &board,
+            &conn,
+            uploads_dir.path().to_str().expect("uploads dir path"),
+            save_root.path().to_str().expect("save root path"),
+            64,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            false,
+            false,
+        );
+
+        match result {
+            Ok(_) => panic!("malformed image should be rejected before dedup reuse"),
+            Err(error) => assert!(error.to_string().contains("image header is malformed")),
+        }
+    }
+
+    #[test]
+    fn primary_upload_rejects_pdf_when_board_disables_pdf() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        create_file_hash_table(&conn);
+
+        let board = crate::models::Board {
+            allow_pdf: false,
+            ..crate::test_fixtures::sample_board()
+        };
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
+        let save_root = tempfile::tempdir().expect("save root");
+        let result = super::process_primary_upload(
+            Some(temp_upload("doc.pdf", valid_pdf())),
+            &board,
+            &conn,
+            uploads_dir.path().to_str().expect("uploads dir path"),
+            save_root.path().to_str().expect("save root path"),
+            64,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            false,
+            false,
+        );
+
+        match result {
+            Ok(_) => panic!("PDF upload should be rejected when disabled"),
+            Err(error) => assert!(error.to_string().contains("PDF uploads are disabled")),
+        }
+        assert!(!save_root.path().join(&board.short_name).exists());
+    }
+
+    #[test]
+    fn primary_upload_rejects_renamed_non_pdf() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        create_file_hash_table(&conn);
+
+        let board = crate::models::Board {
+            allow_pdf: true,
+            ..crate::test_fixtures::sample_board()
+        };
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
+        let save_root = tempfile::tempdir().expect("save root");
+        let result = super::process_primary_upload(
+            Some(temp_upload("not-really.pdf", b"plain text")),
+            &board,
+            &conn,
+            uploads_dir.path().to_str().expect("uploads dir path"),
+            save_root.path().to_str().expect("save root path"),
+            64,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            false,
+            false,
+        );
+
+        match result {
+            Ok(_) => panic!("renamed non-PDF should be rejected"),
+            Err(error) => assert!(error.to_string().contains("File type not allowed")),
+        }
+        assert!(!save_root.path().join(&board.short_name).exists());
+    }
+
+    #[test]
+    fn primary_upload_accepts_pdf_when_board_enables_pdf() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        create_file_hash_table(&conn);
+
+        let board = crate::models::Board {
+            allow_pdf: true,
+            ..crate::test_fixtures::sample_board()
+        };
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
+        let save_root = tempfile::tempdir().expect("save root");
+        let _override = crate::media::thumbnail::override_pdf_renderer_mode(
+            crate::media::thumbnail::TestPdfRendererMode::Unavailable,
+        );
+        let (uploaded, _) = super::process_primary_upload(
+            Some(temp_upload("doc.pdf", valid_pdf())),
+            &board,
+            &conn,
+            uploads_dir.path().to_str().expect("uploads dir path"),
+            save_root.path().to_str().expect("save root path"),
+            64,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            false,
+            false,
+        )
+        .expect("PDF upload accepted");
+        let uploaded = uploaded.expect("uploaded PDF");
+
+        assert_eq!(uploaded.mime_type, "application/pdf");
+        assert_eq!(uploaded.media_type, crate::models::MediaType::Pdf);
+        assert!(save_root.path().join(uploaded.file_path).exists());
+        assert!(std::path::Path::new(&uploaded.thumb_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")));
+        assert!(save_root.path().join(&uploaded.thumb_path).exists());
     }
 }

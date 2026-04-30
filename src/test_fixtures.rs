@@ -1,3 +1,14 @@
+#[cfg(test)]
+pub const DEFAULT_NEW_BOARD_ALLOW_AUDIO: bool = false;
+#[cfg(test)]
+pub const DEFAULT_NEW_BOARD_ALLOW_EDITING: bool = true;
+#[cfg(test)]
+pub const DEFAULT_NEW_BOARD_ALLOW_SELF_DELETE: bool = true;
+#[cfg(test)]
+pub const DEFAULT_NEW_BOARD_ALLOW_VIDEO_EMBEDS: bool = true;
+#[cfg(test)]
+pub const DEFAULT_NEW_BOARD_SHOW_POSTER_IDS: bool = true;
+
 #[must_use]
 pub fn sample_board() -> crate::models::Board {
     crate::models::Board {
@@ -12,15 +23,20 @@ pub fn sample_board() -> crate::models::Board {
         bump_limit: 500,
         allow_images: true,
         allow_video: true,
-        allow_audio: true,
+        allow_audio: DEFAULT_NEW_BOARD_ALLOW_AUDIO,
+        max_image_size: 8 * 1024 * 1024,
+        max_video_size: 50 * 1024 * 1024,
+        max_audio_size: 150 * 1024 * 1024,
+        allow_pdf: false,
         allow_any_files: false,
         allow_tripcodes: true,
-        allow_editing: false,
+        allow_editing: DEFAULT_NEW_BOARD_ALLOW_EDITING,
+        allow_self_delete: DEFAULT_NEW_BOARD_ALLOW_SELF_DELETE,
         edit_window_secs: 0,
         allow_archive: true,
-        allow_video_embeds: false,
+        allow_video_embeds: DEFAULT_NEW_BOARD_ALLOW_VIDEO_EMBEDS,
         allow_captcha: false,
-        show_poster_ids: false,
+        show_poster_ids: DEFAULT_NEW_BOARD_SHOW_POSTER_IDS,
         collapse_greentext: false,
         post_cooldown_secs: 0,
         default_theme: String::new(),

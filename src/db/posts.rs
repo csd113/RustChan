@@ -6,17 +6,11 @@
 //                      create_thread_with_op's manual transaction.
 //   delete_post        calls super::paths_safe_to_delete.
 //
-// FIX summary (from audit):
-//              to IMMEDIATE (raw BEGIN IMMEDIATE) to prevent write contention
-//              created_at fetch) into a single SELECT, eliminating race window
-//              eliminate the TOCTOU race
-//              in claim_next_job and fail_job and could diverge
-//              processes all bytes regardless of length difference
-
 use crate::models::Post;
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 use std::collections::HashMap;
+use std::fmt;
 
 // ─── Retry budget constant ────────────────────────────────────────────────────
 
@@ -24,6 +18,16 @@ use std::collections::HashMap;
 /// Previously the magic number 3 appeared in both `claim_next_job` (WHERE attempts < 3)
 /// and `fail_job` (CASE WHEN attempts >= 3), with no guarantee they would stay in sync.
 const MAX_JOB_ATTEMPTS: i64 = 3;
+const POST_SELECT_COLUMNS: &str = "id, thread_id, board_id, name, tripcode, subject, body, \
+    body_html, ip_hash, file_path, file_name, file_size, thumb_path, mime_type, created_at, \
+    deletion_token, is_op, media_type, audio_file_path, audio_file_name, audio_file_size, \
+    audio_mime_type, edited_at, media_processing_state, media_processing_error";
+const POST_SELECT_COLUMNS_WITH_P_ALIAS: &str =
+    "p.id, p.thread_id, p.board_id, p.name, p.tripcode, p.subject, p.body, p.body_html, \
+    p.ip_hash, p.file_path, p.file_name, p.file_size, p.thumb_path, p.mime_type, p.created_at, \
+    p.deletion_token, p.is_op, p.media_type, p.audio_file_path, p.audio_file_name, \
+    p.audio_file_size, p.audio_mime_type, p.edited_at, p.media_processing_state, \
+    p.media_processing_error";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobFailureState {
@@ -99,14 +103,10 @@ pub(super) fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<Post>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at, media_processing_state, media_processing_error
-         FROM posts WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
-    )?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {POST_SELECT_COLUMNS}
+         FROM posts WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC"
+    ))?;
     let posts = stmt
         .query_map(params![thread_id], map_post)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -128,16 +128,12 @@ pub fn get_new_posts_since(
     since_id: i64,
     max_results: i64,
 ) -> Result<Vec<Post>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at, media_processing_state, media_processing_error
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {POST_SELECT_COLUMNS}
          FROM posts WHERE thread_id = ?1 AND id > ?2
          ORDER BY id ASC
-         LIMIT ?3",
-    )?;
+         LIMIT ?3"
+    ))?;
     let posts = stmt
         .query_map(params![thread_id, since_id, max_results], map_post)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -164,11 +160,7 @@ pub fn get_posts_by_ids_in_thread(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at, media_processing_state, media_processing_error
+        "SELECT {POST_SELECT_COLUMNS}
          FROM posts
          WHERE thread_id = ?1 AND id IN ({placeholders})
          ORDER BY created_at ASC, id ASC"
@@ -206,17 +198,9 @@ pub fn get_preview_posts_for_threads(
         .join(", ");
     let limit_param = thread_ids.len() + 1;
     let sql = format!(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at, media_processing_state, media_processing_error
+        "SELECT {POST_SELECT_COLUMNS}
          FROM (
-             SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                    ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                    created_at, deletion_token, is_op, media_type,
-                    audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                    edited_at, media_processing_state, media_processing_error,
+             SELECT {POST_SELECT_COLUMNS},
                     ROW_NUMBER() OVER (
                         PARTITION BY thread_id
                         ORDER BY created_at DESC, id DESC
@@ -405,14 +389,10 @@ pub(super) fn create_poll_inner(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Option<Post>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, thread_id, board_id, name, tripcode, subject, body, body_html,
-                ip_hash, file_path, file_name, file_size, thumb_path, mime_type,
-                created_at, deletion_token, is_op, media_type,
-                audio_file_path, audio_file_name, audio_file_size, audio_mime_type,
-                edited_at, media_processing_state, media_processing_error
-         FROM posts WHERE id = ?1",
-    )?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {POST_SELECT_COLUMNS}
+         FROM posts WHERE id = ?1"
+    ))?;
     Ok(stmt.query_row(params![post_id], map_post).optional()?)
 }
 
@@ -425,17 +405,13 @@ pub fn get_post_on_board(
     board_short: &str,
     post_id: i64,
 ) -> Result<Option<Post>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT p.id, p.thread_id, p.board_id, p.name, p.tripcode, p.subject,
-                p.body, p.body_html, p.ip_hash, p.file_path, p.file_name, p.file_size,
-                p.thumb_path, p.mime_type, p.created_at, p.deletion_token, p.is_op,
-                p.media_type, p.audio_file_path, p.audio_file_name, p.audio_file_size,
-                p.audio_mime_type, p.edited_at, p.media_processing_state, p.media_processing_error
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {POST_SELECT_COLUMNS_WITH_P_ALIAS}
          FROM posts p
          JOIN boards b ON b.id = p.board_id
          WHERE p.id = ?1 AND b.short_name = ?2
-         LIMIT 1",
-    )?;
+         LIMIT 1"
+    ))?;
     Ok(stmt
         .query_row(params![post_id, board_short], map_post)
         .optional()?)
@@ -453,79 +429,15 @@ pub fn get_post_on_board(
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<String>> {
+pub fn delete_post(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+) -> crate::error::Result<crate::db::DeletePathsResult> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin delete_post transaction")?;
 
-    let result: anyhow::Result<Vec<String>> = (|| {
-        let (thread_id, is_op, candidates) = {
-            let mut candidates = Vec::new();
-            let mut stmt = conn.prepare_cached(
-                "SELECT thread_id, is_op, file_path, thumb_path, audio_file_path
-                 FROM posts WHERE id = ?1",
-            )?;
-            let row = stmt
-                .query_row(params![post_id], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i32>(1)? != 0,
-                        r.get::<_, Option<String>>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                    ))
-                })
-                .optional()?;
-
-            let Some((thread_id, is_op, f, t, a)) = row else {
-                anyhow::bail!("Post id {post_id} not found");
-            };
-
-            if is_op {
-                anyhow::bail!(
-                    "Post id {post_id} is the OP for thread {thread_id}; delete the thread instead"
-                );
-            }
-
-            if let Some(p) = f {
-                candidates.push(p);
-            }
-            if let Some(p) = t {
-                candidates.push(p);
-            }
-            if let Some(p) = a {
-                candidates.push(p);
-            }
-
-            (thread_id, is_op, candidates)
-        };
-
-        debug_assert!(!is_op, "OP posts must be deleted through delete_thread");
-
-        let deleted = conn
-            .execute("DELETE FROM posts WHERE id = ?1", params![post_id])
-            .context("Failed to delete post")?;
-        if deleted == 0 {
-            anyhow::bail!("Post id {post_id} not found");
-        }
-
-        let updated = conn.execute(
-            "UPDATE threads
-             SET reply_count = CASE
-                 WHEN reply_count > 0 THEN reply_count - 1
-                 ELSE 0
-             END
-             WHERE id = ?1",
-            params![thread_id],
-        )?;
-        if updated == 0 {
-            anyhow::bail!("Thread id {thread_id} not found while updating reply count");
-        }
-
-        // Check which paths are now safe — runs inside the transaction so it sees
-        // the just-deleted state.
-        let safe = super::paths_safe_to_delete(conn, candidates)?;
-        Ok(safe)
-    })();
+    let result: crate::error::Result<crate::db::DeletePathsResult> =
+        delete_post_reply_in_tx(conn, post_id);
 
     match result {
         Ok(safe) => {
@@ -540,9 +452,214 @@ pub fn delete_post(conn: &rusqlite::Connection, post_id: i64) -> Result<Vec<Stri
     }
 }
 
+fn delete_post_reply_in_tx(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+) -> crate::error::Result<crate::db::DeletePathsResult> {
+    let (thread_id, is_op, candidates) = {
+        let mut candidates = Vec::new();
+        let mut stmt = conn.prepare_cached(
+            "SELECT thread_id, is_op, file_path, thumb_path, audio_file_path
+             FROM posts WHERE id = ?1",
+        )?;
+        let row = stmt
+            .query_row(params![post_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i32>(1)? != 0,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .optional()?;
+
+        let Some((thread_id, is_op, f, t, a)) = row else {
+            return Err(crate::error::AppError::NotFound(format!(
+                "Post id {post_id} not found"
+            )));
+        };
+
+        if is_op {
+            return Err(crate::error::AppError::BadRequest(format!(
+                "Post id {post_id} is the OP for thread {thread_id}; delete the thread instead"
+            )));
+        }
+
+        if let Some(p) = f {
+            candidates.push(p);
+        }
+        if let Some(p) = t {
+            candidates.push(p);
+        }
+        if let Some(p) = a {
+            candidates.push(p);
+        }
+
+        (thread_id, is_op, candidates)
+    };
+
+    debug_assert!(!is_op, "OP posts must be deleted through delete_thread");
+
+    let deleted = conn
+        .execute("DELETE FROM posts WHERE id = ?1", params![post_id])
+        .context("Failed to delete post")?;
+    if deleted == 0 {
+        return Err(crate::error::AppError::NotFound(format!(
+            "Post id {post_id} not found"
+        )));
+    }
+
+    let updated = conn.execute(
+        "UPDATE threads
+         SET reply_count = CASE
+             WHEN reply_count > 0 THEN reply_count - 1
+             ELSE 0
+         END
+         WHERE id = ?1",
+        params![thread_id],
+    )?;
+    if updated == 0 {
+        return Err(crate::error::AppError::NotFound(format!(
+            "Thread id {thread_id} not found while updating reply count"
+        )));
+    }
+
+    // Check which paths are now safe — runs inside the transaction so it sees
+    // the just-deleted state.
+    let safe = super::paths_safe_to_delete(conn, candidates)?;
+    let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
+    if let Some(op) = pending_fs_op.as_ref() {
+        super::insert_pending_fs_op(conn, op)?;
+    }
+    Ok(crate::db::DeletePathsResult {
+        paths: safe,
+        pending_fs_op_id: pending_fs_op.map(|op| op.id),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfDeleteOutcome {
+    DeletedReply,
+    DeletedThread,
+    NotFound,
+    WrongToken,
+    WindowClosed,
+    ThreadClosed,
+    ThreadHasReplies,
+}
+
+/// Return whether a post's parent thread is currently open for self-actions.
+///
+/// # Errors
+/// Returns an error if the database query fails.
+pub fn post_thread_allows_self_actions(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+) -> crate::error::Result<bool> {
+    let flags: Option<(bool, bool)> = conn
+        .query_row(
+            "SELECT t.locked, t.archived
+             FROM posts p
+             JOIN threads t ON t.id = p.thread_id
+             WHERE p.id = ?1",
+            params![post_id],
+            |row| Ok((row.get::<_, i32>(0)? != 0, row.get::<_, i32>(1)? != 0)),
+        )
+        .optional()?;
+    Ok(flags.is_some_and(|(locked, archived)| !locked && !archived))
+}
+
+/// Delete a post owned by the caller during the short self-delete grace window.
+///
+/// Returns the outcome plus any filesystem paths that should be cleaned up by
+/// the caller when the delete succeeds.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn self_delete_post(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    token: &str,
+    delete_window_secs: i64,
+) -> crate::error::Result<(SelfDeleteOutcome, Option<crate::db::DeletePathsResult>)> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin self_delete_post transaction")?;
+
+    let result: crate::error::Result<(SelfDeleteOutcome, Option<crate::db::DeletePathsResult>)> =
+        (|| {
+            let row: Option<(i64, bool, String, i64, bool, bool)> = conn
+                .query_row(
+                    "SELECT p.thread_id, p.is_op, p.deletion_token, p.created_at,
+                            t.locked, t.archived
+                     FROM posts p
+                     JOIN threads t ON t.id = p.thread_id
+                     WHERE p.id = ?1",
+                    params![post_id],
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i32>(1)? != 0,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, i64>(3)?,
+                            r.get::<_, i32>(4)? != 0,
+                            r.get::<_, i32>(5)? != 0,
+                        ))
+                    },
+                )
+                .optional()?;
+
+            let Some((thread_id, is_op, stored_token, created_at, locked, archived)) = row else {
+                return Ok((SelfDeleteOutcome::NotFound, None));
+            };
+
+            if !constant_time_eq(stored_token.as_bytes(), token.as_bytes()) {
+                return Ok((SelfDeleteOutcome::WrongToken, None));
+            }
+
+            let now = chrono::Utc::now().timestamp();
+            if now.saturating_sub(created_at) > delete_window_secs {
+                return Ok((SelfDeleteOutcome::WindowClosed, None));
+            }
+
+            if locked || archived {
+                return Ok((SelfDeleteOutcome::ThreadClosed, None));
+            }
+
+            if is_op {
+                let reply_count: i64 = conn.query_row(
+                    "SELECT reply_count FROM threads WHERE id = ?1",
+                    params![thread_id],
+                    |r| r.get(0),
+                )?;
+                if reply_count > 0 {
+                    return Ok((SelfDeleteOutcome::ThreadHasReplies, None));
+                }
+
+                let deleted = crate::db::threads::delete_thread_verified(conn, thread_id)?;
+                return Ok((SelfDeleteOutcome::DeletedThread, Some(deleted)));
+            }
+
+            let deleted = delete_post_reply_in_tx(conn, post_id)?;
+            Ok((SelfDeleteOutcome::DeletedReply, Some(deleted)))
+        })();
+
+    match result {
+        Ok(outcome) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit self_delete_post transaction")?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
 /// Edit a post's body, verified against the deletion token and a per-board edit window.
 ///
-/// `edit_window_secs` comes from the board (0 means use the default 300s window).
+/// `edit_window_secs` comes from the caller (0 means use the default 60s window).
 /// The caller is responsible for checking `board.allow_editing` before calling this.
 /// Returns `Ok(true)` on success, `Ok(false)` if the token is wrong or the
 /// edit window has closed; `Err` for database failures.
@@ -568,7 +685,7 @@ pub fn edit_post(
     edit_window_secs: i64,
 ) -> Result<bool> {
     let window = if edit_window_secs <= 0 {
-        300
+        60
     } else {
         edit_window_secs
     };
@@ -580,15 +697,25 @@ pub fn edit_post(
 
     let result: Result<bool> = (|| {
         // Fetch token and created_at in a single round-trip.
-        let row: Option<(String, i64)> = conn
+        let row: Option<(String, i64, bool, bool)> = conn
             .query_row(
-                "SELECT deletion_token, created_at FROM posts WHERE id = ?1",
+                "SELECT p.deletion_token, p.created_at, t.locked, t.archived
+                 FROM posts p
+                 JOIN threads t ON t.id = p.thread_id
+                 WHERE p.id = ?1",
                 params![post_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get::<_, i32>(2)? != 0,
+                        r.get::<_, i32>(3)? != 0,
+                    ))
+                },
             )
             .optional()?;
 
-        let Some((stored_token, created_at)) = row else {
+        let Some((stored_token, created_at, locked, archived)) = row else {
             return Ok(false); // post does not exist
         };
 
@@ -598,6 +725,10 @@ pub fn edit_post(
 
         let now = chrono::Utc::now().timestamp();
         if now.saturating_sub(created_at) > window {
+            return Ok(false);
+        }
+
+        if locked || archived {
             return Ok(false);
         }
 
@@ -882,7 +1013,7 @@ pub fn get_poll_for_thread(
 /// the same INSERT statement via a correlated WHERE EXISTS. A mismatched
 /// (`poll_id`, `option_id`) pair inserts nothing and returns false.
 ///
-/// Note (): This function returns false for two distinct cases:
+/// This returns false for two distinct cases:
 ///   1. The voter has already voted (UNIQUE constraint fires INSERT OR IGNORE)
 ///   2. The `option_id` does not belong to `poll_id` (EXISTS check fails)
 ///
@@ -941,10 +1072,8 @@ pub fn get_poll_context(
 ///
 /// Returns the number of vote rows deleted.
 ///
-/// Note (): The parameter was previously named `retention_cutoff` in some
-/// call sites, which is misleading — a lower value retains more votes, and a
-/// higher value prunes more. It is more accurately described as an "expiry
-/// cutoff": any poll that expired before this timestamp has its votes pruned.
+/// This parameter is an expiry cutoff: polls that expired before it have
+/// their vote rows pruned.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -1076,7 +1205,6 @@ pub fn fail_job(conn: &rusqlite::Connection, id: i64, error: &str) -> Result<Job
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-#[allow(dead_code)]
 pub fn pending_job_count(conn: &rusqlite::Connection) -> Result<i64> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM background_jobs WHERE status = 'pending'",
@@ -1145,12 +1273,19 @@ pub fn count_posts_by_media_processing_state(
 pub fn update_post_thumb_path(
     conn: &rusqlite::Connection,
     post_id: i64,
+    expected_file_path: &str,
     thumb_path: &str,
 ) -> Result<()> {
-    conn.execute(
-        "UPDATE posts SET thumb_path = ?1 WHERE id = ?2",
-        params![thumb_path, post_id],
+    let updated = conn.execute(
+        "UPDATE posts SET thumb_path = ?1 WHERE id = ?2 AND file_path = ?3",
+        params![thumb_path, post_id, expected_file_path],
     )?;
+    if updated == 0 {
+        return Err(anyhow::Error::new(StaleMediaTargetError {
+            post_id,
+            expected_path: expected_file_path.to_string(),
+        }));
+    }
     Ok(())
 }
 
@@ -1187,16 +1322,26 @@ pub fn replace_transcoded_media(
         .context("Failed to begin transcode media replacement transaction")?;
 
     let result: anyhow::Result<()> = (|| {
+        let target_exists = conn
+            .query_row(
+                "SELECT 1 FROM posts WHERE id = ?1 AND file_path = ?2 LIMIT 1",
+                params![post_id, old_path],
+                |_row| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !target_exists {
+            return Err(anyhow::Error::new(StaleMediaTargetError {
+                post_id,
+                expected_path: old_path.to_string(),
+            }));
+        }
+
         let updated = conn.execute(
             "UPDATE posts SET file_path = ?1, mime_type = ?2 WHERE file_path = ?3",
             params![new_path, new_mime, old_path],
         )?;
-        if updated == 0 {
-            conn.execute(
-                "UPDATE posts SET file_path = ?1, mime_type = ?2 WHERE id = ?3",
-                params![new_path, new_mime, post_id],
-            )?;
-        }
+        debug_assert!(updated > 0, "target_exists guarantees at least one update");
 
         let thumb_path = get_post_thumb_path(conn, post_id)?.unwrap_or_default();
         conn.execute(
@@ -1220,6 +1365,29 @@ pub fn replace_transcoded_media(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleMediaTargetError {
+    pub post_id: i64,
+    pub expected_path: String,
+}
+
+impl fmt::Display for StaleMediaTargetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "media target for post {} is stale or deleted; expected path {}",
+            self.post_id, self.expected_path
+        )
+    }
+}
+
+impl std::error::Error for StaleMediaTargetError {}
+
+#[must_use]
+pub fn is_stale_media_target_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<StaleMediaTargetError>().is_some()
+}
+
 /// Remove a file-hash record for a path that is being rolled back.
 ///
 /// # Errors
@@ -1235,16 +1403,22 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        count_posts_by_media_processing_state, count_search_results, get_post_submission,
-        get_posts_for_thread, record_post_submission, search_posts, search_terms,
-        set_post_media_processing_state, to_fts_query, MEDIA_PROCESSING_FAILED,
+        count_posts_by_media_processing_state, count_search_results, get_post, get_post_submission,
+        get_posts_for_thread, is_stale_media_target_error, record_post_submission,
+        replace_transcoded_media, search_posts, search_terms, self_delete_post,
+        set_post_media_processing_state, to_fts_query, update_post_thumb_path, SelfDeleteOutcome,
+        MEDIA_PROCESSING_FAILED,
     };
-    use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
+    use crate::db::{
+        create_board, create_reply_with_thread_update, create_thread_with_optional_poll,
+        get_board_by_short, get_thread, NewPost,
+    };
+    use crate::error::AppError;
     use rusqlite::Connection;
 
     fn test_conn() -> Connection {
         let conn = Connection::open_in_memory().expect("in-memory sqlite");
-        super::super::schema::create_schema(&conn).expect("create schema");
+        super::super::schema::install_or_migrate_schema(&conn).expect("install schema");
         conn
     }
 
@@ -1279,6 +1453,39 @@ mod tests {
             create_thread_with_optional_poll(conn, board.id, None, &post, "", None, None)
                 .expect("create thread");
         assert!(thread_id > 0);
+        post_id
+    }
+
+    fn seed_media_post(conn: &Connection, board_short: &str, file_path: &str) -> i64 {
+        create_board(conn, board_short, board_short, "", false).expect("create board");
+        let board = get_board_by_short(conn, board_short)
+            .expect("load board")
+            .expect("board exists");
+        let post = NewPost {
+            thread_id: 0,
+            board_id: board.id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some(format!("{board_short} subject")),
+            body: "media body".to_string(),
+            body_html: "media body".to_string(),
+            ip_hash: None,
+            file_path: Some(file_path.to_string()),
+            file_name: Some("media".to_string()),
+            file_size: Some(10),
+            thumb_path: None,
+            mime_type: Some("video/mp4".to_string()),
+            media_type: Some("video".to_string()),
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: true,
+        };
+        let (_thread_id, post_id, _) =
+            create_thread_with_optional_poll(conn, board.id, None, &post, "", None, None)
+                .expect("create media thread");
         post_id
     }
 
@@ -1436,5 +1643,336 @@ mod tests {
                 .expect("count failed after clear"),
             0
         );
+    }
+
+    #[test]
+    fn update_post_thumb_path_requires_matching_post_and_file_path() {
+        let conn = test_conn();
+        let post_id = seed_media_post(&conn, "thumbz", "thumbz/audio.mp3");
+
+        let error = update_post_thumb_path(
+            &conn,
+            post_id,
+            "thumbz/deleted-or-replaced.mp3",
+            "thumbz/thumbs/audio.png",
+        )
+        .expect_err("stale thumb update rejected");
+
+        assert!(is_stale_media_target_error(&error));
+        let post = get_post(&conn, post_id)
+            .expect("lookup post")
+            .expect("post exists");
+        assert!(post.thumb_path.is_none());
+    }
+
+    #[test]
+    fn replace_transcoded_media_requires_matching_post_and_file_path() {
+        let conn = test_conn();
+        let post_id = seed_media_post(&conn, "trans", "trans/video.mp4");
+
+        let error = replace_transcoded_media(
+            &conn,
+            post_id,
+            "trans/deleted-or-replaced.mp4",
+            "trans/video.webm",
+            "video/webm",
+            "deadbeef",
+        )
+        .expect_err("stale transcode update rejected");
+
+        assert!(is_stale_media_target_error(&error));
+        let post = get_post(&conn, post_id)
+            .expect("lookup post")
+            .expect("post exists");
+        assert_eq!(post.file_path.as_deref(), Some("trans/video.mp4"));
+        let hash_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_hashes WHERE file_path = ?1",
+                rusqlite::params!["trans/video.webm"],
+                |row| row.get(0),
+            )
+            .expect("file hash count");
+        assert_eq!(hash_count, 0);
+    }
+
+    #[test]
+    fn delete_post_returns_not_found_on_retry() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "delp", "Del Post", "", false).expect("create board");
+        let op = NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some("subject".to_string()),
+            body: "body".to_string(),
+            body_html: "body".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: true,
+        };
+        let (thread_id, _post_id, _) =
+            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
+                .expect("create thread");
+        assert_eq!(thread_id, 1);
+
+        let reply = NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "reply".to_string(),
+            body_html: "reply".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: false,
+        };
+        let reply_id =
+            create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+
+        let deleted = super::delete_post(&conn, reply_id).expect("delete post");
+        assert!(deleted.paths.is_empty());
+        match super::delete_post(&conn, reply_id) {
+            Err(AppError::NotFound(msg)) => assert!(msg.contains("Post id")),
+            other => panic!("expected not found on retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_post_decrements_reply_count_for_the_thread() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "count", "Count", "", false).expect("create board");
+        let op = NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some("subject".to_string()),
+            body: "body".to_string(),
+            body_html: "body".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: true,
+        };
+        let (thread_id, _post_id, _) =
+            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
+                .expect("create thread");
+
+        let reply = NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "reply".to_string(),
+            body_html: "reply".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: false,
+        };
+        let reply_id =
+            create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+
+        let before_count: i64 = conn
+            .query_row(
+                "SELECT reply_count FROM threads WHERE id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("thread count before delete");
+        assert_eq!(before_count, 1);
+
+        super::delete_post(&conn, reply_id).expect("delete reply");
+
+        let after_count: i64 = conn
+            .query_row(
+                "SELECT reply_count FROM threads WHERE id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("thread count after delete");
+        assert_eq!(after_count, 0);
+    }
+
+    #[test]
+    fn self_delete_post_deletes_reply_with_matching_token_inside_window() {
+        let conn = test_conn();
+        let board_id =
+            create_board(&conn, "selfdel", "Self Delete", "", false).expect("create board");
+        let op = NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some("subject".to_string()),
+            body: "body".to_string(),
+            body_html: "body".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "op-token".to_string(),
+            is_op: true,
+        };
+        let (thread_id, _post_id, _) =
+            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
+                .expect("create thread");
+
+        let reply = NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "reply".to_string(),
+            body_html: "reply".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "reply-token".to_string(),
+            is_op: false,
+        };
+        let reply_id =
+            create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+
+        let (outcome, deleted) =
+            self_delete_post(&conn, reply_id, "reply-token", 60).expect("self delete reply");
+
+        assert_eq!(outcome, SelfDeleteOutcome::DeletedReply);
+        assert!(deleted.is_some());
+        assert!(get_post(&conn, reply_id).expect("lookup reply").is_none());
+    }
+
+    #[test]
+    fn self_delete_post_rejects_wrong_token() {
+        let conn = test_conn();
+        let post_id = seed_search_post(&conn, "wrongtok", "hello");
+
+        let (outcome, deleted) =
+            self_delete_post(&conn, post_id, "nope", 60).expect("self delete result");
+
+        assert_eq!(outcome, SelfDeleteOutcome::WrongToken);
+        assert!(deleted.is_none());
+        assert!(get_post(&conn, post_id).expect("lookup post").is_some());
+    }
+
+    #[test]
+    fn self_delete_post_refuses_op_when_thread_has_replies() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "selfop", "Self OP", "", false).expect("create board");
+        let op = NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some("subject".to_string()),
+            body: "body".to_string(),
+            body_html: "body".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "op-token".to_string(),
+            is_op: true,
+        };
+        let (thread_id, op_id, _) =
+            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
+                .expect("create thread");
+
+        let reply = NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "reply".to_string(),
+            body_html: "reply".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "reply-token".to_string(),
+            is_op: false,
+        };
+        create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+
+        let (outcome, deleted) =
+            self_delete_post(&conn, op_id, "op-token", 60).expect("self delete result");
+
+        assert_eq!(outcome, SelfDeleteOutcome::ThreadHasReplies);
+        assert!(deleted.is_none());
+        assert!(get_thread(&conn, thread_id)
+            .expect("lookup thread")
+            .is_some());
     }
 }

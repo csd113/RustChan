@@ -108,7 +108,6 @@ impl Drop for ScopedDecrement<'_> {
 // ─── Server mode ─────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::arithmetic_side_effects)]
 pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::Result<()> {
     // rustls 0.23 requires an explicit process-wide crypto provider.
     // install_default() is idempotent — a second call (e.g. in tests) returns
@@ -125,17 +124,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // clear error rather than discovering misconfiguration at runtime (#8).
     CONFIG.validate()?;
 
-    // Fix #9: Path::parent() on a bare filename (e.g. "rustchan.db") returns
-    // Some("") rather than None, so the old `unwrap_or(".")` never fired and
-    // `create_dir_all("")` would fail with NotFound.  Treat an empty-string
-    // parent the same as a missing one.
-    let data_dir: std::path::PathBuf = {
-        let p = std::path::Path::new(&CONFIG.database_path);
-        match p.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-            _ => std::path::PathBuf::from("."),
-        }
-    };
+    let data_dir = super::parent_dir_or_current(std::path::Path::new(&CONFIG.database_path));
 
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&CONFIG.upload_dir)?;
@@ -201,18 +190,42 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             });
             crate::templates::set_live_site_subtitle(&subtitle);
 
-            // Seed default_theme from settings.toml if not yet configured in DB.
-            let default_theme = crate::db::get_default_user_theme(&conn);
-            if default_theme.is_empty()
-                && !CONFIG.initial_default_theme.is_empty()
-                && CONFIG.initial_default_theme != "fluorogrid"
+            let legacy_new_activity =
+                crate::db::get_site_setting(&conn, "new_activity_notifications_enabled")
+                    .ok()
+                    .flatten();
+            if crate::db::get_site_setting(&conn, "homepage_new_thread_badges_enabled")
+                .ok()
+                .flatten()
+                .is_none()
             {
-                let _ = crate::db::set_site_setting(
-                    &conn,
-                    "default_theme",
-                    &CONFIG.initial_default_theme,
+                let value = legacy_new_activity.as_deref().unwrap_or(
+                    if CONFIG.initial_homepage_new_thread_badges_enabled {
+                        "1"
+                    } else {
+                        "0"
+                    },
                 );
+                let _ =
+                    crate::db::set_site_setting(&conn, "homepage_new_thread_badges_enabled", value);
             }
+            if crate::db::get_site_setting(&conn, "thread_new_reply_badges_enabled")
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                let value = legacy_new_activity.as_deref().unwrap_or(
+                    if CONFIG.initial_thread_new_reply_badges_enabled {
+                        "1"
+                    } else {
+                        "0"
+                    },
+                );
+                let _ =
+                    crate::db::set_site_setting(&conn, "thread_new_reply_badges_enabled", value);
+            }
+
+            seed_initial_default_theme(&conn, &CONFIG.initial_default_theme);
             let _ = crate::db::sync_live_theme_state(&conn);
 
             // Seed the live board list used by error pages and ban pages.
@@ -225,6 +238,9 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // ffmpeg: required for video thumbnails (optional — graceful degradation).
     let ffmpeg_status = crate::detect::detect_ffmpeg(CONFIG.require_ffmpeg);
     let ffmpeg_available = ffmpeg_status == crate::detect::ToolStatus::Available;
+    // ffprobe is used lazily for WebM codec inspection, so probe it at startup
+    // to make explicit configured paths authoritative and catch bogus paths early.
+    let ffprobe_available = crate::detect::detect_ffprobe();
     // libwebp encoder: needed for image→WebP conversion.  Checked independently
     // so that a stock ffmpeg build (missing libwebp) still enables video/audio
     // features while image conversion degrades gracefully.
@@ -233,6 +249,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // WebM/AV1→VP9 re-encoding.  Checked independently so that a build missing
     // only these codecs still enables image conversion and thumbnail generation.
     let ffmpeg_vp9_available = crate::detect::detect_webm_encoder(ffmpeg_available);
+    let pdf_thumbnail_renderers = crate::detect::detect_pdf_thumbnail_renderers();
 
     // Derive bind_port from `bind_addr` (which already incorporates port_override).
     // rsplit_once(':') handles both IPv4 ("0.0.0.0:9000") and IPv6 ("[::1]:9000").
@@ -270,14 +287,21 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     let state = AppState {
         db: pool.clone(),
         ffmpeg_available,
+        ffprobe_available,
         ffmpeg_webp_available,
+        ffmpeg_vp9_available,
+        pdf_thumbnail_renderer: pdf_thumbnail_renderers
+            .first()
+            .map(|renderer| renderer.binary_name()),
         job_queue: worker_queue,
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
         auto_full_backup_settings: crate::middleware::AutoFullBackupSettings::new(
             CONFIG.auto_full_backup_interval_hours,
             CONFIG.auto_full_backup_copies_to_keep,
+            CONFIG.auto_full_backup_include_tor_hidden_service_keys,
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
+        db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
         chan_ledger,
         onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
     };
@@ -538,6 +562,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                                 None,
                                 &progress,
                                 settings.copies_to_keep,
+                                settings.include_tor_hidden_service_keys,
                             )
                         })
                         .await;
@@ -1039,7 +1064,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // given up to (ffmpeg_timeout + 10)s to finish its in-flight job.
     tracing::info!(target: "server", "Signalling background workers to shut down…");
     worker_cancel.cancel();
-    let shutdown_timeout = Duration::from_secs(CONFIG.ffmpeg_timeout_secs + 10);
+    let shutdown_timeout = Duration::from_secs(crate::config::ffmpeg_timeout_secs() + 10);
     for handle in worker_handles {
         let _ = tokio::time::timeout(shutdown_timeout, handle).await;
     }
@@ -1054,6 +1079,44 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     tracing::info!(target: "server", "Server shut down gracefully.");
     Ok(())
+}
+
+fn seed_initial_default_theme(conn: &rusqlite::Connection, initial_default_theme: &str) {
+    let default_theme = crate::db::get_default_user_theme(conn);
+    if !default_theme.is_empty()
+        || initial_default_theme.is_empty()
+        || initial_default_theme == crate::theme::HARD_DEFAULT_THEME
+    {
+        return;
+    }
+
+    match crate::db::get_theme(conn, initial_default_theme) {
+        Ok(Some(theme)) if theme.enabled => {
+            let _ = crate::db::set_site_setting(conn, "default_theme", initial_default_theme);
+        }
+        Ok(Some(_)) => {
+            tracing::warn!(
+                target: "config",
+                default_theme = %initial_default_theme,
+                "settings.toml default_theme is disabled; falling back to the first enabled theme"
+            );
+        }
+        Ok(None) => {
+            tracing::warn!(
+                target: "config",
+                default_theme = %initial_default_theme,
+                "settings.toml default_theme does not match any configured theme; falling back to the first enabled theme"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "config",
+                default_theme = %initial_default_theme,
+                %error,
+                "Could not validate settings.toml default_theme"
+            );
+        }
+    }
 }
 
 // ── HTTPS listener (Static path: self-signed or manual PEM) ──────────────────
@@ -1414,6 +1477,7 @@ mod tests {
     use super::{
         build_redirect_response, format_redirect_authority, redirect_host,
         redirect_trusted_hosts_with, scheduled_full_backup_failure_retry_delay,
+        seed_initial_default_theme,
     };
     use axum::{body::Body, extract::Request, http::header};
     use std::time::Duration;
@@ -1424,6 +1488,66 @@ mod tests {
             .header(header::HOST, host)
             .body(Body::empty())
             .expect("request")
+    }
+
+    fn test_conn() -> r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager> {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        pool.get().expect("db connection")
+    }
+
+    #[test]
+    fn initial_default_theme_seeds_enabled_non_hard_default_theme() {
+        let conn = test_conn();
+
+        seed_initial_default_theme(&conn, "terminal");
+
+        assert_eq!(
+            crate::db::get_site_setting(&conn, "default_theme")
+                .expect("read default theme")
+                .as_deref(),
+            Some("terminal")
+        );
+    }
+
+    #[test]
+    fn initial_default_theme_does_not_overwrite_existing_db_setting() {
+        let conn = test_conn();
+        crate::db::set_site_setting(&conn, "default_theme", "blue-sky").expect("set default");
+
+        seed_initial_default_theme(&conn, "terminal");
+
+        assert_eq!(
+            crate::db::get_site_setting(&conn, "default_theme")
+                .expect("read default theme")
+                .as_deref(),
+            Some("blue-sky")
+        );
+    }
+
+    #[test]
+    fn initial_default_theme_skips_invalid_theme() {
+        let conn = test_conn();
+
+        seed_initial_default_theme(&conn, "missing-theme");
+
+        assert_eq!(
+            crate::db::get_site_setting(&conn, "default_theme").expect("read default theme"),
+            None
+        );
+    }
+
+    #[test]
+    fn initial_default_theme_skips_disabled_theme() {
+        let conn = test_conn();
+        conn.execute("UPDATE themes SET enabled = 0 WHERE slug = 'terminal'", [])
+            .expect("disable terminal");
+
+        seed_initial_default_theme(&conn, "terminal");
+
+        assert_eq!(
+            crate::db::get_site_setting(&conn, "default_theme").expect("read default theme"),
+            None
+        );
     }
 
     #[test]

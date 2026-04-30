@@ -24,27 +24,26 @@ mod formatting;
 pub use formatting::extract_video_embed;
 use formatting::{apply_dice, apply_emoji};
 
-#[allow(clippy::expect_used)]
 static RE_REPLY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"&gt;&gt;(\d+)").expect("RE_REPLY is valid"));
-#[allow(clippy::expect_used)]
+
 static RE_CROSSLINK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)?").expect("RE_CROSSLINK is valid")
 });
-#[allow(clippy::expect_used)]
+
 static RE_URL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").expect("RE_URL is valid"));
-#[allow(clippy::expect_used)]
+
 static RE_BOLD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("RE_BOLD is valid"));
-#[allow(clippy::expect_used)]
+
 static RE_ITALIC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"__([^_]+)__").expect("RE_ITALIC is valid"));
-#[allow(clippy::expect_used)]
+
 static RE_SPOILER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\[spoiler\]([\s\S]*?)\[/spoiler\]").expect("RE_SPOILER is valid")
 });
-#[allow(clippy::expect_used)]
+
 static RE_DICE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[dice (\d{1,2})d(\d{1,3})\]").expect("RE_DICE is valid"));
 
@@ -54,7 +53,6 @@ static RE_DICE: LazyLock<Regex> =
 /// intermediate allocations, unlike the chained `.replace()` approach which
 /// produces up to five heap-allocated intermediates per call.
 #[must_use]
-#[allow(clippy::arithmetic_side_effects)]
 pub fn escape_html(s: &str) -> String {
     // Pre-allocate with a small headroom for the most common entities.
     let mut out = String::with_capacity(s.len() + s.len() / 8);
@@ -98,8 +96,9 @@ const MAX_BODY_BYTES: usize = 32 * 1024; // 32 KiB
 /// `<details open>` block — expanded by default. A board's admin settings
 /// control whether the collapsible wrapper is emitted at all.
 #[must_use]
-#[allow(clippy::arithmetic_side_effects)]
 pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
+    use std::fmt::Write as _;
+
     // Hard length guard before touching any regex. Must be enforced here
     // (not only at the HTTP layer) because the sanitizer is also called
     // from background workers and tests.
@@ -116,6 +115,7 @@ pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
     let mut html = String::with_capacity(escaped.len() * 2);
     let mut i = 0;
 
+    // Indexing is guarded by a surrounding invariant, so direct indexing is intentional here.
     #[allow(clippy::indexing_slicing)] // i < lines.len() and j < lines.len() are invariants
     while i < lines.len() {
         let line = lines[i];
@@ -138,10 +138,8 @@ pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
             // 3+ consecutive greentext lines → collapsible block, open by default
             // when the board enables collapse_greentext. Otherwise we render the
             // quote lines plainly so no collapse UI exists at all.
-            #[allow(clippy::items_after_statements)]
             if collapse_greentext && group.len() >= 3 {
                 let count = group.len();
-                use std::fmt::Write as _;
                 let _ = write!(html, "<details open class=\"greentext-block\"><summary class=\"quote\">&gt; {count} lines</summary>");
                 for ql in &group {
                     let _ = write!(
@@ -152,7 +150,6 @@ pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
                 }
                 html.push_str("</details>");
             } else {
-                use std::fmt::Write as _;
                 for ql in &group {
                     let _ = write!(
                         html,
@@ -466,9 +463,27 @@ mod tests {
     }
 
     #[test]
+    fn test_adjacent_and_nested_markup() {
+        let escaped = escape_html("**bold**__italic__ [spoiler]:fire:[/spoiler]");
+        let html = render_post_body(&escaped, false);
+        assert!(html.contains("<strong>bold</strong>"));
+        assert!(html.contains("<em>italic</em>"));
+        assert!(html.contains("class=\"spoiler\""));
+        assert!(html.contains("🔥"));
+    }
+
+    #[test]
     fn test_emoji_shortcode() {
         let html = render_post_body(":fire: hot take", false);
         assert!(html.contains("🔥"));
+    }
+
+    #[test]
+    fn test_emoji_shortcodes_do_not_touch_links() {
+        let escaped = escape_html("see https://example.com/:fire: and :fire:");
+        let html = render_post_body(&escaped, false);
+        assert!(html.contains("🔥"));
+        assert!(html.contains("href=\"https://example.com/:fire:\""));
     }
 
     #[test]
@@ -511,6 +526,25 @@ mod tests {
             !html.contains("href=\"/b/\""),
             "href must not be the board index"
         );
+    }
+
+    #[test]
+    fn test_valid_dice_rendering() {
+        let escaped = escape_html("roll [dice 2d6]");
+        let html = render_post_body(&escaped, false);
+        assert!(html.contains(r#"class="dice-roll""#));
+        assert!(html.contains(r#"title="2d6 roll""#));
+        assert!(html.contains("🎲 2d6 ▸"));
+        assert!(html.contains(" = "));
+    }
+
+    #[test]
+    fn test_malformed_dice_syntax_stays_literal() {
+        let escaped = escape_html("roll [dice 1x6] [dice 3d1000]");
+        let html = render_post_body(&escaped, false);
+        assert!(!html.contains(r#"class="dice-roll""#));
+        assert!(html.contains("[dice 1x6]"));
+        assert!(html.contains("[dice 3d1000]"));
     }
 
     #[test]

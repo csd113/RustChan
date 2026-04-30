@@ -257,7 +257,7 @@ mod tests {
 
     fn setup_conn() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
-        super::super::schema::create_schema(&conn).expect("create schema");
+        super::super::schema::install_or_migrate_schema(&conn).expect("install schema");
         conn.execute(
             "INSERT INTO boards (id, name, short_name, description) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![1_i64, "Test", "test", "board"],

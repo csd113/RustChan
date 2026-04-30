@@ -3,36 +3,33 @@
 // Covers: site_settings table, boards CRUD, delete_board (with file-safety
 // guard via super::paths_safe_to_delete), and aggregate site statistics.
 //
-// FIX summary (from audit):
-//              COUNT loop with a single query using a correlated subquery
-//              single aggregate query pass
-//              INSERT … RETURNING id replaces execute + last_insert_rowid()
-
 use crate::models::{Board, BoardAccessMode, BoardBannerMode};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const BOARD_ORDER_SQL: &str = "nsfw ASC, display_order ASC, id ASC";
 const BOARD_GROUP_ORDER_SQL: &str = "display_order ASC, id ASC";
 const BOARD_SELECT_COLUMNS: &str = "id, display_order, short_name, name, description, nsfw, \
     max_threads, max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, \
-    allow_any_files, allow_tripcodes, edit_window_secs, allow_editing, allow_archive, \
+    max_image_size, max_video_size, max_audio_size, allow_pdf, allow_any_files, allow_tripcodes, \
+    edit_window_secs, allow_editing, allow_self_delete, allow_archive, \
     allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext, \
     post_cooldown_secs, default_theme, banner_mode, access_mode, access_password_hash, created_at";
 const BOARD_SELECT_COLUMNS_WITH_ALIAS: &str = "b.id, b.display_order, b.short_name, b.name, \
     b.description, b.nsfw, b.max_threads, b.max_archived_threads, b.bump_limit, \
-    b.allow_images, b.allow_video, b.allow_audio, b.allow_any_files, b.allow_tripcodes, \
-    b.edit_window_secs, b.allow_editing, b.allow_archive, b.allow_video_embeds, \
-    b.allow_captcha, b.show_poster_ids, b.collapse_greentext, b.post_cooldown_secs, \
+    b.allow_images, b.allow_video, b.allow_audio, b.max_image_size, b.max_video_size, b.max_audio_size, \
+    b.allow_pdf, b.allow_any_files, b.allow_tripcodes, b.edit_window_secs, b.allow_editing, \
+    b.allow_self_delete, b.allow_archive, b.allow_video_embeds, b.allow_captcha, \
+    b.show_poster_ids, b.collapse_greentext, b.post_cooldown_secs, \
     b.default_theme, b.banner_mode, b.access_mode, b.access_password_hash, b.created_at";
 
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
 pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
     let short_name: String = row.get(2)?;
-    let banner_mode_raw: String = row.get(23)?;
-    let access_mode_raw: String = row.get(24)?;
+    let banner_mode_raw: String = row.get(28)?;
+    let access_mode_raw: String = row.get(29)?;
     let banner_mode = BoardBannerMode::from_db_str(&banner_mode_raw).unwrap_or_else(|| {
         tracing::warn!(
             target: "db",
@@ -64,21 +61,26 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         allow_images: row.get::<_, i32>(9)? != 0,
         allow_video: row.get::<_, i32>(10)? != 0,
         allow_audio: row.get::<_, i32>(11)? != 0,
-        allow_any_files: row.get::<_, i32>(12)? != 0,
-        allow_tripcodes: row.get::<_, i32>(13)? != 0,
-        edit_window_secs: row.get(14)?,
-        allow_editing: row.get::<_, i32>(15)? != 0,
-        allow_archive: row.get::<_, i32>(16)? != 0,
-        allow_video_embeds: row.get::<_, i32>(17)? != 0,
-        allow_captcha: row.get::<_, i32>(18)? != 0,
-        show_poster_ids: row.get::<_, i32>(19)? != 0,
-        collapse_greentext: row.get::<_, i32>(20)? != 0,
-        post_cooldown_secs: row.get(21)?,
-        default_theme: row.get(22)?,
+        max_image_size: row.get(12)?,
+        max_video_size: row.get(13)?,
+        max_audio_size: row.get(14)?,
+        allow_pdf: row.get::<_, i32>(15)? != 0,
+        allow_any_files: row.get::<_, i32>(16)? != 0,
+        allow_tripcodes: row.get::<_, i32>(17)? != 0,
+        edit_window_secs: row.get(18)?,
+        allow_editing: row.get::<_, i32>(19)? != 0,
+        allow_self_delete: row.get::<_, i32>(20)? != 0,
+        allow_archive: row.get::<_, i32>(21)? != 0,
+        allow_video_embeds: row.get::<_, i32>(22)? != 0,
+        allow_captcha: row.get::<_, i32>(23)? != 0,
+        show_poster_ids: row.get::<_, i32>(24)? != 0,
+        collapse_greentext: row.get::<_, i32>(25)? != 0,
+        post_cooldown_secs: row.get(26)?,
+        default_theme: row.get(27)?,
         banner_mode,
         access_mode,
-        access_password_hash: row.get(25)?,
-        created_at: row.get(26)?,
+        access_password_hash: row.get(30)?,
+        created_at: row.get(31)?,
     })
 }
 
@@ -198,7 +200,7 @@ pub fn get_site_subtitle(conn: &rusqlite::Connection) -> String {
         .unwrap_or_else(|| "select board to proceed".to_string())
 }
 
-/// Convenience: read the admin-configured default UI theme (empty = "terminal").
+/// Convenience: read the admin-configured default UI theme.
 pub fn get_default_user_theme(conn: &rusqlite::Connection) -> String {
     get_site_setting(conn, "default_theme")
         .unwrap_or_else(|error| {
@@ -206,6 +208,59 @@ pub fn get_default_user_theme(conn: &rusqlite::Connection) -> String {
             None
         })
         .unwrap_or_default()
+}
+
+fn parse_site_bool(value: Option<String>) -> Option<bool> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        match trimmed {
+            "1" | "true" | "TRUE" | "True" => Some(true),
+            "0" | "false" | "FALSE" | "False" => Some(false),
+            _ => None,
+        }
+    })
+}
+
+fn get_site_bool_with_legacy_fallback(
+    conn: &rusqlite::Connection,
+    key: &str,
+    legacy_key: &str,
+    default: bool,
+) -> bool {
+    parse_site_bool(get_site_setting(conn, key).unwrap_or_else(|error| {
+        tracing::warn!(target: "db", %error, setting = key, "Failed to read site setting");
+        None
+    }))
+    .or_else(|| {
+        parse_site_bool(get_site_setting(conn, legacy_key).unwrap_or_else(|error| {
+            tracing::warn!(
+                target: "db",
+                %error,
+                setting = legacy_key,
+                "Failed to read legacy site setting"
+            );
+            None
+        }))
+    })
+    .unwrap_or(default)
+}
+
+pub fn get_homepage_new_thread_badges_enabled(conn: &rusqlite::Connection) -> bool {
+    get_site_bool_with_legacy_fallback(
+        conn,
+        "homepage_new_thread_badges_enabled",
+        "new_activity_notifications_enabled",
+        crate::config::CONFIG.initial_homepage_new_thread_badges_enabled,
+    )
+}
+
+pub fn get_thread_new_reply_badges_enabled(conn: &rusqlite::Connection) -> bool {
+    get_site_bool_with_legacy_fallback(
+        conn,
+        "thread_new_reply_badges_enabled",
+        "new_activity_notifications_enabled",
+        crate::config::CONFIG.initial_thread_new_reply_badges_enabled,
+    )
 }
 
 // ─── Board queries ────────────────────────────────────────────────────────────
@@ -242,7 +297,7 @@ pub fn get_all_boards_with_stats(
     let out = stmt
         .query_map([], |row| {
             let board = map_board(row)?;
-            let thread_count: i64 = row.get(27)?;
+            let thread_count: i64 = row.get(32)?;
             Ok(crate::models::BoardStats {
                 board,
                 thread_count,
@@ -250,6 +305,79 @@ pub fn get_all_boards_with_stats(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(out)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoardActivityCountInput {
+    pub board_id: i64,
+    pub seen_thread_created_at: i64,
+    pub seen_thread_id: i64,
+}
+
+/// Count newly created, currently visible threads for each board marker.
+///
+/// Exact semantics: count non-archived threads whose `(created_at, id)` tuple is
+/// strictly newer than the per-board marker stored in the browser cookie.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn count_new_threads_for_boards(
+    conn: &rusqlite::Connection,
+    markers: &[BoardActivityCountInput],
+) -> Result<HashMap<i64, i64>> {
+    if markers.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let values_sql = markers
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let base = index * 3;
+            format!("(?{}, ?{}, ?{})", base + 1, base + 2, base + 3)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "WITH seen(board_id, seen_thread_created_at, seen_thread_id) AS (
+             VALUES {values_sql}
+         )
+         SELECT t.board_id, COUNT(*)
+         FROM threads t
+         JOIN seen s ON s.board_id = t.board_id
+         WHERE t.archived = 0
+           AND (
+               t.created_at > s.seen_thread_created_at
+               OR (
+                   t.created_at = s.seen_thread_created_at
+                   AND t.id > s.seen_thread_id
+               )
+           )
+         GROUP BY t.board_id"
+    );
+
+    let mut params = Vec::with_capacity(markers.len() * 3);
+    for marker in markers {
+        params.push(rusqlite::types::Value::Integer(marker.board_id));
+        params.push(rusqlite::types::Value::Integer(
+            marker.seen_thread_created_at.max(0),
+        ));
+        params.push(rusqlite::types::Value::Integer(
+            marker.seen_thread_id.max(0),
+        ));
+    }
+
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+
+    let mut counts = HashMap::new();
+    for row in rows {
+        let (board_id, count) = row?;
+        counts.insert(board_id, count);
+    }
+    Ok(counts)
 }
 
 /// # Errors
@@ -265,7 +393,7 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn create_board(
     conn: &rusqlite::Connection,
     short: &str,
@@ -277,10 +405,26 @@ pub fn create_board(
     let display_order = next_board_display_order(conn, nsfw, None)?;
     let id: i64 = conn
         .query_row(
-            "INSERT INTO boards (display_order, short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 0)
+            "INSERT INTO boards (
+                 display_order, short_name, name, description, nsfw,
+                 allow_images, allow_video, allow_audio,
+                 max_image_size, max_video_size, max_audio_size
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 0, ?6, ?7, ?8)
              RETURNING id",
-            params![display_order, short, name, description, i32::from(nsfw)],
+            params![
+                display_order,
+                short,
+                name,
+                description,
+                i32::from(nsfw),
+                i64::try_from(crate::config::CONFIG.max_image_size)
+                    .context("max_image_size does not fit in i64")?,
+                i64::try_from(crate::config::CONFIG.max_video_size)
+                    .context("max_video_size does not fit in i64")?,
+                i64::try_from(crate::config::CONFIG.max_audio_size)
+                    .context("max_audio_size does not fit in i64")?,
+            ],
             |r| r.get(0),
         )
         .context("Failed to create board")?;
@@ -294,7 +438,9 @@ pub fn create_board(
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+#[allow(clippy::fn_params_excessive_bools)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
+#[allow(clippy::too_many_arguments)]
 pub fn create_board_with_media_flags(
     conn: &rusqlite::Connection,
     short: &str,
@@ -308,12 +454,37 @@ pub fn create_board_with_media_flags(
     let display_order = next_board_display_order(conn, nsfw, None)?;
     let id: i64 = conn
         .query_row(
-            "INSERT INTO boards (display_order, short_name, name, description, nsfw, allow_images, allow_video, allow_audio)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO boards (
+                 display_order, short_name, name, description, nsfw,
+                 allow_images, allow_video, allow_audio,
+                 max_image_size, max_video_size, max_audio_size,
+                 allow_tripcodes, allow_editing, allow_self_delete, allow_archive,
+                 allow_video_embeds, allow_captcha, show_poster_ids,
+                 collapse_greentext, post_cooldown_secs, default_theme,
+                 banner_mode, access_mode, access_password_hash
+             )
+             VALUES (
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                 1, 1, 1, 1,
+                 1, 0, 1,
+                 0, 0, '', 'inherit', 'public', ''
+             )
              RETURNING id",
             params![
-                display_order, short, name, description, i32::from(nsfw),
-                i32::from(allow_images), i32::from(allow_video), i32::from(allow_audio),
+                display_order,
+                short,
+                name,
+                description,
+                i32::from(nsfw),
+                i32::from(allow_images),
+                i32::from(allow_video),
+                i32::from(allow_audio),
+                i64::try_from(crate::config::CONFIG.max_image_size)
+                    .context("max_image_size does not fit in i64")?,
+                i64::try_from(crate::config::CONFIG.max_video_size)
+                    .context("max_video_size does not fit in i64")?,
+                i64::try_from(crate::config::CONFIG.max_audio_size)
+                    .context("max_audio_size does not fit in i64")?,
             ],
             |r| r.get(0),
         )
@@ -378,7 +549,11 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
 ///
 /// # Errors
 /// Returns an error if the database operation fails or the board id is not found.
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+#[allow(clippy::fn_params_excessive_bools)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
+#[allow(clippy::too_many_arguments)]
+// Keeping the SQL branches inline makes the nsfw reorder/update behavior easier to verify in one place.
+#[allow(clippy::too_many_lines)]
 pub fn update_board_settings(
     conn: &mut rusqlite::Connection,
     id: i64,
@@ -391,10 +566,15 @@ pub fn update_board_settings(
     allow_images: bool,
     allow_video: bool,
     allow_audio: bool,
+    max_image_size: i64,
+    max_video_size: i64,
+    max_audio_size: i64,
+    allow_pdf: bool,
     allow_any_files: bool,
     allow_tripcodes: bool,
     edit_window_secs: i64,
     allow_editing: bool,
+    allow_self_delete: bool,
     allow_archive: bool,
     allow_video_embeds: bool,
     allow_captcha: bool,
@@ -417,12 +597,13 @@ pub fn update_board_settings(
         tx.execute(
             "UPDATE boards SET name=?1, description=?2, nsfw=?3,
              bump_limit=?4, max_threads=?5, max_archived_threads=?6,
-             allow_images=?7, allow_video=?8, allow_audio=?9, allow_any_files=?10,
-            allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13,
-             allow_archive=?14, allow_video_embeds=?15, allow_captcha=?16,
-             show_poster_ids=?17, collapse_greentext=?18, post_cooldown_secs=?19,
-             default_theme=?20, banner_mode=?21, access_mode=?22, access_password_hash=?23
-             WHERE id=?24",
+             allow_images=?7, allow_video=?8, allow_audio=?9,
+             max_image_size=?10, max_video_size=?11, max_audio_size=?12,
+             allow_pdf=?13, allow_any_files=?14, allow_tripcodes=?15, edit_window_secs=?16,
+             allow_editing=?17, allow_self_delete=?18, allow_archive=?19, allow_video_embeds=?20,
+             allow_captcha=?21, show_poster_ids=?22, collapse_greentext=?23, post_cooldown_secs=?24,
+             default_theme=?25, banner_mode=?26, access_mode=?27, access_password_hash=?28
+             WHERE id=?29",
             params![
                 name,
                 description,
@@ -433,10 +614,15 @@ pub fn update_board_settings(
                 i32::from(allow_images),
                 i32::from(allow_video),
                 i32::from(allow_audio),
+                max_image_size,
+                max_video_size,
+                max_audio_size,
+                i32::from(allow_pdf),
                 i32::from(allow_any_files),
                 i32::from(allow_tripcodes),
                 edit_window_secs,
                 i32::from(allow_editing),
+                i32::from(allow_self_delete),
                 i32::from(allow_archive),
                 i32::from(allow_video_embeds),
                 i32::from(allow_captcha),
@@ -455,12 +641,13 @@ pub fn update_board_settings(
         tx.execute(
             "UPDATE boards SET name=?1, description=?2, nsfw=?3, display_order=?4,
              bump_limit=?5, max_threads=?6, max_archived_threads=?7,
-             allow_images=?8, allow_video=?9, allow_audio=?10, allow_any_files=?11,
-             allow_tripcodes=?12, edit_window_secs=?13, allow_editing=?14,
-             allow_archive=?15, allow_video_embeds=?16, allow_captcha=?17,
-             show_poster_ids=?18, collapse_greentext=?19, post_cooldown_secs=?20,
-             default_theme=?21, banner_mode=?22, access_mode=?23, access_password_hash=?24
-             WHERE id=?25",
+             allow_images=?8, allow_video=?9, allow_audio=?10,
+             max_image_size=?11, max_video_size=?12, max_audio_size=?13,
+             allow_pdf=?14, allow_any_files=?15, allow_tripcodes=?16, edit_window_secs=?17,
+             allow_editing=?18, allow_self_delete=?19, allow_archive=?20, allow_video_embeds=?21,
+             allow_captcha=?22, show_poster_ids=?23, collapse_greentext=?24, post_cooldown_secs=?25,
+             default_theme=?26, banner_mode=?27, access_mode=?28, access_password_hash=?29
+             WHERE id=?30",
             params![
                 name,
                 description,
@@ -472,10 +659,15 @@ pub fn update_board_settings(
                 i32::from(allow_images),
                 i32::from(allow_video),
                 i32::from(allow_audio),
+                max_image_size,
+                max_video_size,
+                max_audio_size,
+                i32::from(allow_pdf),
                 i32::from(allow_any_files),
                 i32::from(allow_tripcodes),
                 edit_window_secs,
                 i32::from(allow_editing),
+                i32::from(allow_self_delete),
                 i32::from(allow_archive),
                 i32::from(allow_video_embeds),
                 i32::from(allow_captcha),
@@ -652,6 +844,8 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
     let has_audio_file_path = columns.contains("audio_file_path");
     let has_audio_file_size = columns.contains("audio_file_size");
     let has_mime_type = columns.contains("mime_type");
+    let thread_columns = table_columns(conn, "threads")?;
+    let has_thread_archive_flag = thread_columns.contains("archived");
 
     let total_images_expr = if has_media_type {
         "SUM(CASE WHEN media_type = 'image' THEN 1 ELSE 0 END)"
@@ -683,11 +877,28 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
         )
     };
 
-    let active_audio_bytes_expr = if has_audio_file_path && has_audio_file_size {
-        "SUM(CASE WHEN audio_file_path IS NOT NULL AND audio_file_size IS NOT NULL
-                  THEN audio_file_size ELSE 0 END)"
+    let active_content_join = if has_thread_archive_flag {
+        " LEFT JOIN threads t ON t.id = posts.thread_id"
     } else {
-        "0"
+        ""
+    };
+    let active_file_bytes_filter = if has_thread_archive_flag {
+        " AND COALESCE(t.archived, 0) = 0"
+    } else {
+        ""
+    };
+    let active_audio_bytes_filter = if has_thread_archive_flag {
+        " AND COALESCE(t.archived, 0) = 0"
+    } else {
+        ""
+    };
+    let active_audio_bytes_expr = if has_audio_file_path && has_audio_file_size {
+        format!(
+            "SUM(CASE WHEN audio_file_path IS NOT NULL AND audio_file_size IS NOT NULL{active_audio_bytes_filter}
+                  THEN audio_file_size ELSE 0 END)"
+        )
+    } else {
+        "0".to_string()
     };
 
     let query = format!(
@@ -697,14 +908,14 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
              {total_videos_expr}                                                AS total_videos,
              {total_audio_expr}                                                 AS total_audio,
              COALESCE(
-                 SUM(CASE WHEN file_path IS NOT NULL AND file_size IS NOT NULL
+                 SUM(CASE WHEN file_path IS NOT NULL AND file_size IS NOT NULL{active_file_bytes_filter}
                           THEN file_size ELSE 0 END),
                  0
              ) + COALESCE(
                  {active_audio_bytes_expr},
                  0
              )                                                                  AS active_bytes
-         FROM posts"
+         FROM posts{active_content_join}"
     );
 
     conn.query_row(&query, [], |r| {
@@ -719,21 +930,57 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
     .context("Failed to query site stats")
 }
 
-fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
+fn table_columns(conn: &rusqlite::Connection, table_name: &str) -> Result<HashSet<String>> {
     let mut stmt = conn
-        .prepare_cached("PRAGMA table_info(posts)")
-        .context("Prepare posts table info query")?;
+        .prepare(&format!("PRAGMA table_info({table_name})"))
+        .with_context(|| format!("Prepare {table_name} table info query"))?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<HashSet<_>>>()
-        .context("Read posts table columns")?;
+        .with_context(|| format!("Read {table_name} table columns"))?;
     Ok(columns)
+}
+
+fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
+    table_columns(conn, "posts")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{create_board_with_media_flags, get_board_by_short, get_site_stats};
+    use super::{
+        create_board, create_board_with_media_flags, get_all_boards_with_stats, get_board_by_short,
+        get_site_stats,
+    };
     use rusqlite::Connection;
+
+    #[test]
+    fn board_stats_use_live_thread_count_instead_of_board_timestamp() {
+        let pool = crate::db::init_test_pool().expect("init test pool");
+        let conn = pool.get().expect("get test connection");
+
+        conn.execute(
+            "INSERT INTO boards (id, short_name, name, created_at)
+             VALUES (1, 'test', 'Test', 1_700_000_000)",
+            [],
+        )
+        .expect("insert board");
+        conn.execute(
+            "INSERT INTO threads (id, board_id, subject, archived) VALUES
+             (1, 1, 'visible one', 0),
+             (2, 1, 'visible two', 0),
+             (3, 1, 'archived', 1)",
+            [],
+        )
+        .expect("insert threads");
+
+        let stats = get_all_boards_with_stats(&conn).expect("load board stats");
+        let board_stats = stats
+            .first()
+            .expect("board stats should include test board");
+
+        assert_eq!(stats.len(), 1);
+        assert_eq!(board_stats.thread_count, 2);
+    }
 
     #[test]
     fn site_stats_count_audio_primary_and_combo_uploads() {
@@ -776,6 +1023,38 @@ mod tests {
 
         let stats = get_site_stats(&conn).expect("load stats");
         assert_eq!(stats.total_audio, 2);
+    }
+
+    #[test]
+    fn site_stats_active_bytes_exclude_archived_thread_media() {
+        let pool = crate::db::init_test_pool().expect("init test pool");
+        let conn = pool.get().expect("get test connection");
+
+        conn.execute(
+            "INSERT INTO boards (id, short_name, name) VALUES (1, 'test', 'Test')",
+            [],
+        )
+        .expect("insert board");
+        conn.execute(
+            "INSERT INTO threads (id, board_id, subject, archived) VALUES
+             (1, 1, 'live thread', 0),
+             (2, 1, 'archived thread', 1)",
+            [],
+        )
+        .expect("insert threads");
+        conn.execute(
+            "INSERT INTO posts (
+                 id, thread_id, board_id, body, body_html, deletion_token, is_op,
+                 file_path, file_name, file_size
+             ) VALUES
+             (1, 1, 1, 'live', '<p>live</p>', 'tok1', 0, 'live.webp', 'live.webp', 100),
+             (2, 2, 1, 'archived', '<p>archived</p>', 'tok2', 0, 'archived.webp', 'archived.webp', 900)",
+            [],
+        )
+        .expect("insert posts");
+
+        let stats = get_site_stats(&conn).expect("load stats");
+        assert_eq!(stats.active_bytes, 100);
     }
 
     #[test]
@@ -825,5 +1104,42 @@ mod tests {
         assert!(board.allow_images);
         assert!(board.allow_video);
         assert!(board.allow_audio);
+        assert!(!board.allow_pdf);
+        assert!(board.allow_video_embeds);
+        assert!(board.show_poster_ids);
+        assert!(board.allow_editing);
+        assert!(board.allow_self_delete);
+    }
+
+    #[test]
+    fn create_board_uses_standardized_defaults() {
+        let pool = crate::db::init_test_pool().expect("init test pool");
+        let conn = pool.get().expect("get test connection");
+
+        create_board(&conn, "fresh", "Fresh", "", false).expect("create board");
+
+        let board = get_board_by_short(&conn, "fresh")
+            .expect("load board")
+            .expect("board exists");
+        assert_eq!(
+            board.allow_audio,
+            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_AUDIO
+        );
+        assert_eq!(
+            board.allow_video_embeds,
+            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_VIDEO_EMBEDS
+        );
+        assert_eq!(
+            board.show_poster_ids,
+            crate::test_fixtures::DEFAULT_NEW_BOARD_SHOW_POSTER_IDS
+        );
+        assert_eq!(
+            board.allow_editing,
+            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_EDITING
+        );
+        assert_eq!(
+            board.allow_self_delete,
+            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_SELF_DELETE
+        );
     }
 }

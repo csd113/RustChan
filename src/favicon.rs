@@ -13,6 +13,13 @@ const GLOBAL_FILENAMES: &[&str] = &[
     "version.txt",
 ];
 
+#[cfg(test)]
+static FAVICON_STAGE_WRITE_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+static FAVICON_OLD_CLEANUP_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+static FAVICON_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Clone, Copy)]
 pub enum FaviconScope<'a> {
     Global,
@@ -92,7 +99,10 @@ pub fn write_favicon_set(scope: FaviconScope<'_>, bytes: &[u8]) -> Result<()> {
     let stage_dir = staging_dir_for(&target_dir);
     std::fs::create_dir_all(&stage_dir)
         .with_context(|| format!("create favicon staging directory {}", stage_dir.display()))?;
+    let mut stage_guard = DirectoryCleanupGuard::new(stage_dir.clone());
 
+    #[cfg(test)]
+    maybe_fail_favicon_stage_write()?;
     write_png(
         &img.resize_exact(16, 16, FilterType::Lanczos3),
         &stage_dir.join("favicon-16x16.png"),
@@ -123,6 +133,7 @@ pub fn write_favicon_set(scope: FaviconScope<'_>, bytes: &[u8]) -> Result<()> {
     .with_context(|| format!("write {}", stage_dir.join("version.txt").display()))?;
 
     swap_stage_into_place(&stage_dir, &target_dir)?;
+    stage_guard.disarm();
     Ok(())
 }
 
@@ -208,7 +219,7 @@ fn swap_stage_into_place(stage_dir: &Path, target_dir: &Path) -> Result<()> {
     match std::fs::rename(stage_dir, target_dir) {
         Ok(()) => {
             if had_existing_target {
-                let _ = std::fs::remove_dir_all(&previous_dir);
+                cleanup_previous_favicon_dir(&previous_dir)?;
             }
             Ok(())
         }
@@ -224,6 +235,66 @@ fn swap_stage_into_place(stage_dir: &Path, target_dir: &Path) -> Result<()> {
             ))
         }
     }
+}
+
+fn cleanup_previous_favicon_dir(previous_dir: &Path) -> Result<()> {
+    #[cfg(test)]
+    maybe_fail_favicon_old_cleanup()?;
+    std::fs::remove_dir_all(previous_dir)
+        .with_context(|| format!("remove old favicon directory {}", previous_dir.display()))
+}
+
+struct DirectoryCleanupGuard {
+    path: PathBuf,
+    active: bool,
+}
+
+impl DirectoryCleanupGuard {
+    const fn new(path: PathBuf) -> Self {
+        Self { path, active: true }
+    }
+
+    const fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for DirectoryCleanupGuard {
+    fn drop(&mut self) {
+        if self.active && self.path.exists() {
+            if let Err(error) = std::fs::remove_dir_all(&self.path) {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %error,
+                    "failed to remove favicon staging directory after error"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn maybe_fail_favicon_stage_write() -> Result<()> {
+    let message = FAVICON_STAGE_WRITE_FAILURE
+        .lock()
+        .expect("favicon stage write failure mutex")
+        .clone();
+    if let Some(message) = message {
+        anyhow::bail!("{message}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn maybe_fail_favicon_old_cleanup() -> Result<()> {
+    let message = FAVICON_OLD_CLEANUP_FAILURE
+        .lock()
+        .expect("favicon old cleanup failure mutex")
+        .clone();
+    if let Some(message) = message {
+        anyhow::bail!("{message}");
+    }
+    Ok(())
 }
 
 fn scope_dir(scope: FaviconScope<'_>) -> PathBuf {
@@ -254,4 +325,126 @@ fn write_png(image: &DynamicImage, path: &Path) -> Result<()> {
     image
         .save_with_format(path, ImageFormat::Png)
         .with_context(|| format!("write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        board_favicon_dir, write_favicon_set, FaviconScope, FAVICON_OLD_CLEANUP_FAILURE,
+        FAVICON_STAGE_WRITE_FAILURE, FAVICON_TEST_LOCK,
+    };
+    use image::ImageFormat;
+
+    fn favicon_png_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::DynamicImage::new_rgba8(512, 512)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+            .expect("encode favicon png");
+        bytes
+    }
+
+    fn matching_dirs(parent: &std::path::Path, prefix: &str) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(parent)
+            .ok()
+            .into_iter()
+            .flat_map(std::iter::Iterator::flatten)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(prefix))
+            })
+            .collect()
+    }
+
+    fn reset_failures() {
+        *FAVICON_STAGE_WRITE_FAILURE
+            .lock()
+            .expect("stage failure mutex") = None;
+        *FAVICON_OLD_CLEANUP_FAILURE
+            .lock()
+            .expect("old cleanup failure mutex") = None;
+    }
+
+    #[test]
+    fn favicon_stage_dir_is_removed_after_mid_write_failure() {
+        let _guard = FAVICON_TEST_LOCK.lock().expect("favicon test lock");
+        reset_failures();
+        let board_short = format!("f{}", &uuid::Uuid::new_v4().simple().to_string()[..7]);
+        let target_dir = board_favicon_dir(&board_short);
+        let parent = target_dir.parent().expect("target parent").to_path_buf();
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).expect("create parent");
+        *FAVICON_STAGE_WRITE_FAILURE
+            .lock()
+            .expect("stage failure mutex") = Some("injected favicon write failure".to_string());
+
+        let error = write_favicon_set(FaviconScope::Board(&board_short), &favicon_png_bytes())
+            .expect_err("injected failure");
+        assert!(error.to_string().contains("injected favicon write failure"));
+        assert!(matching_dirs(&parent, "._favicon.stage.").is_empty());
+        assert!(!target_dir.exists());
+
+        *FAVICON_STAGE_WRITE_FAILURE
+            .lock()
+            .expect("stage failure mutex") = None;
+        reset_failures();
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn favicon_old_dir_cleanup_failure_is_reported() {
+        let _guard = FAVICON_TEST_LOCK.lock().expect("favicon test lock");
+        reset_failures();
+        let board_short = format!("f{}", &uuid::Uuid::new_v4().simple().to_string()[..7]);
+        let target_dir = board_favicon_dir(&board_short);
+        let parent = target_dir.parent().expect("target parent").to_path_buf();
+        let _ = std::fs::remove_dir_all(&parent);
+        write_favicon_set(FaviconScope::Board(&board_short), &favicon_png_bytes())
+            .expect("initial favicon write");
+
+        *FAVICON_OLD_CLEANUP_FAILURE
+            .lock()
+            .expect("old cleanup failure mutex") =
+            Some("injected old favicon cleanup failure".to_string());
+        let error = write_favicon_set(FaviconScope::Board(&board_short), &favicon_png_bytes())
+            .expect_err("cleanup failure should be visible");
+        assert!(error
+            .to_string()
+            .contains("injected old favicon cleanup failure"));
+        assert!(target_dir.join("version.txt").exists());
+        assert!(matching_dirs(&parent, "._favicon.stage.").is_empty());
+        let old_dirs = matching_dirs(&parent, "._favicon.old.");
+        assert_eq!(old_dirs.len(), 1);
+
+        *FAVICON_OLD_CLEANUP_FAILURE
+            .lock()
+            .expect("old cleanup failure mutex") = None;
+        reset_failures();
+        for old_dir in old_dirs {
+            std::fs::remove_dir_all(old_dir).expect("cleanup old dir");
+        }
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn favicon_successful_replacement_leaves_no_stage_or_old_dirs() {
+        let _guard = FAVICON_TEST_LOCK.lock().expect("favicon test lock");
+        reset_failures();
+        let board_short = format!("f{}", &uuid::Uuid::new_v4().simple().to_string()[..7]);
+        let target_dir = board_favicon_dir(&board_short);
+        let parent = target_dir.parent().expect("target parent").to_path_buf();
+        let _ = std::fs::remove_dir_all(&parent);
+
+        write_favicon_set(FaviconScope::Board(&board_short), &favicon_png_bytes())
+            .expect("initial write");
+        write_favicon_set(FaviconScope::Board(&board_short), &favicon_png_bytes())
+            .expect("replacement write");
+
+        assert!(target_dir.join("favicon.ico").exists());
+        assert!(matching_dirs(&parent, "._favicon.stage.").is_empty());
+        assert!(matching_dirs(&parent, "._favicon.old.").is_empty());
+        reset_failures();
+        let _ = std::fs::remove_dir_all(&parent);
+    }
 }

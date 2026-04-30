@@ -23,6 +23,33 @@ pub struct ExternalBannerQuery {
     pub return_to: Option<String>,
 }
 
+fn load_accessible_banner_asset(
+    conn: &rusqlite::Connection,
+    banner_id: i64,
+    jar: &CookieJar,
+    admin_session_id: Option<&str>,
+) -> Result<crate::models::BannerAsset> {
+    let asset = db::get_banner_asset(conn, banner_id)?
+        .ok_or_else(|| AppError::NotFound("Banner not found.".into()))?;
+    if asset.scope == crate::models::BannerScope::Board {
+        let board_short = asset
+            .board_short
+            .as_deref()
+            .ok_or_else(|| AppError::NotFound("Banner not found.".into()))?;
+        let access_cookie = board_access_cookie_from_jar(jar, board_short);
+        let access_context = crate::handlers::board::load_board_access_context(
+            conn,
+            board_short,
+            admin_session_id,
+            access_cookie.as_deref(),
+        )?;
+        if !access_context.can_view {
+            return Err(AppError::Forbidden("Banner is not available.".into()));
+        }
+    }
+    Ok(asset)
+}
+
 pub async fn serve_banner_asset(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
@@ -37,43 +64,30 @@ pub async fn serve_banner_asset(
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
 
-    let access = tokio::task::spawn_blocking({
+    let asset = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let jar = jar.clone();
-        move || -> Result<Option<(crate::models::BannerAsset, bool)>> {
+        move || -> Result<crate::models::BannerAsset> {
             let conn = pool.get()?;
-            let Some(asset) = db::get_banner_asset(&conn, banner_id)? else {
-                return Ok(None);
-            };
-            if asset.scope == crate::models::BannerScope::Board {
-                let Some(board_short) = asset.board_short.as_deref() else {
-                    return Ok(None);
-                };
-                let access_cookie = board_access_cookie_from_jar(&jar, board_short);
-                let access_context = crate::handlers::board::load_board_access_context(
-                    &conn,
-                    board_short,
-                    admin_session_id.as_deref(),
-                    access_cookie.as_deref(),
-                )?;
-                Ok(Some((asset, access_context.can_view)))
-            } else {
-                Ok(Some((asset, true)))
-            }
+            load_accessible_banner_asset(&conn, banner_id, &jar, admin_session_id.as_deref())
         }
     })
     .await;
 
-    let Ok(Ok(Some((asset, can_view)))) = access else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    let asset = match asset {
+        Ok(Ok(asset)) => asset,
+        Ok(Err(AppError::NotFound(_))) => return StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(AppError::Forbidden(_))) => return StatusCode::FORBIDDEN.into_response(),
+        Ok(Err(_)) | Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    if !can_view {
-        return StatusCode::FORBIDDEN.into_response();
-    }
 
     let Ok(path) = banner::banner_asset_path(&asset) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        return StatusCode::NOT_FOUND.into_response();
     };
+    if !path.exists() || !path.is_file() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let content_type = banner::banner_asset_content_type(&path);
 
     let req = req.map(|_| axum::body::Body::empty());
     ServeFile::new(path).oneshot(req).await.map_or_else(
@@ -81,7 +95,7 @@ pub async fn serve_banner_asset(
         |resp| {
             let mut resp = resp.map(axum::body::Body::new);
             resp.headers_mut()
-                .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/webp"));
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
             resp.headers_mut().insert(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static(if has_version {
@@ -101,11 +115,15 @@ pub async fn external_banner_warning_page(
     Query(query): Query<ExternalBannerQuery>,
     jar: CookieJar,
 ) -> Result<Response> {
+    let admin_session_id = jar
+        .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
     let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let return_to = banner::safe_return_to(query.return_to.as_deref().unwrap_or("/"));
     let asset = tokio::task::spawn_blocking({
         let pool = state.db.clone();
+        let jar = jar.clone();
         move || -> Result<crate::models::BannerAsset> {
             let conn = pool.get()?;
             let settings = banner::load_site_banner_settings(&conn);
@@ -114,8 +132,8 @@ pub async fn external_banner_warning_page(
                     "External banner links are disabled.".into(),
                 ));
             }
-            let asset = db::get_banner_asset(&conn, banner_id)?
-                .ok_or_else(|| AppError::NotFound("Banner not found.".into()))?;
+            let asset =
+                load_accessible_banner_asset(&conn, banner_id, &jar, admin_session_id.as_deref())?;
             if asset.target_type != crate::models::BannerTargetType::ExternalUrl
                 || banner::normalize_external_url(&asset.target_value).is_none()
             {
@@ -163,9 +181,14 @@ pub async fn external_banner_continue(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
     Query(_query): Query<ExternalBannerQuery>,
+    jar: CookieJar,
 ) -> Result<Response> {
+    let admin_session_id = jar
+        .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string());
     let target = tokio::task::spawn_blocking({
         let pool = state.db.clone();
+        let jar = jar.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
             let settings = banner::load_site_banner_settings(&conn);
@@ -174,8 +197,8 @@ pub async fn external_banner_continue(
                     "External banner links are disabled.".into(),
                 ));
             }
-            let asset = db::get_banner_asset(&conn, banner_id)?
-                .ok_or_else(|| AppError::NotFound("Banner not found.".into()))?;
+            let asset =
+                load_accessible_banner_asset(&conn, banner_id, &jar, admin_session_id.as_deref())?;
             if asset.target_type != crate::models::BannerTargetType::ExternalUrl {
                 return Err(AppError::BadRequest("Banner is not external.".into()));
             }
@@ -187,4 +210,241 @@ pub async fn external_banner_continue(
     .await
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
     Ok(Redirect::to(&target).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt as _;
+
+    fn insert_external_board_banner(state: &crate::middleware::AppState, board_short: &str) -> i64 {
+        let conn = state.db.get().expect("db connection");
+        let board_id =
+            crate::db::create_board(&conn, board_short, "Secret", "", false).expect("create board");
+        let password_hash =
+            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+        conn.execute(
+            "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
+            rusqlite::params!["view_password", password_hash, board_id],
+        )
+        .expect("update board access");
+        crate::db::insert_banner_asset(
+            &conn,
+            crate::models::BannerScope::Board,
+            Some(board_id),
+            "0123456789abcdef0123456789abcdef",
+            468,
+            60,
+            1024,
+            true,
+            1,
+            crate::models::BannerTargetType::ExternalUrl,
+            "https://example.com",
+            true,
+            true,
+        )
+        .expect("insert banner asset")
+    }
+
+    fn insert_missing_global_banner(state: &crate::middleware::AppState) -> i64 {
+        let conn = state.db.get().expect("db connection");
+        crate::db::insert_banner_asset(
+            &conn,
+            crate::models::BannerScope::Global,
+            None,
+            "0123456789abcdef0123456789abcdef",
+            468,
+            60,
+            1024,
+            true,
+            1,
+            crate::models::BannerTargetType::None,
+            "",
+            true,
+            true,
+        )
+        .expect("insert banner asset")
+    }
+
+    fn insert_existing_global_banner(
+        state: &crate::middleware::AppState,
+    ) -> (i64, std::path::PathBuf) {
+        let storage_key = uuid::Uuid::new_v4().simple().to_string();
+        let path = crate::banner::banner_storage_path(
+            crate::models::BannerScope::Global,
+            None,
+            &storage_key,
+        )
+        .expect("banner path");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create banner dir");
+        }
+        std::fs::write(&path, b"banner bytes").expect("write banner file");
+        let conn = state.db.get().expect("db connection");
+        let banner_id = crate::db::insert_banner_asset(
+            &conn,
+            crate::models::BannerScope::Global,
+            None,
+            &storage_key,
+            468,
+            60,
+            12,
+            true,
+            1,
+            crate::models::BannerTargetType::None,
+            "",
+            true,
+            true,
+        )
+        .expect("insert banner asset");
+        (banner_id, path)
+    }
+
+    #[tokio::test]
+    async fn serve_banner_asset_returns_not_found_for_missing_banner_id() {
+        let router = Router::new()
+            .route("/banner/assets/{id}", get(super::serve_banner_asset))
+            .with_state(crate::test_support::app_state());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/banner/assets/999")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn serve_banner_asset_returns_not_found_for_missing_file() {
+        let state = crate::test_support::app_state();
+        let banner_id = insert_missing_global_banner(&state);
+        let router = Router::new()
+            .route("/banner/assets/{id}", get(super::serve_banner_asset))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/banner/assets/{banner_id}?v=1"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(response.headers().get(header::CACHE_CONTROL).is_none());
+    }
+
+    #[tokio::test]
+    async fn serve_banner_asset_sets_cache_control_by_version_query() {
+        let state = crate::test_support::app_state();
+        let (banner_id, path) = insert_existing_global_banner(&state);
+        let router = Router::new()
+            .route("/banner/assets/{id}", get(super::serve_banner_asset))
+            .with_state(state);
+
+        let unversioned = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/banner/assets/{banner_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unversioned.status(), StatusCode::OK);
+        assert_eq!(
+            unversioned
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(super::UNVERSIONED_CACHE_CONTROL)
+        );
+
+        let versioned = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/banner/assets/{banner_id}?v=123"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(versioned.status(), StatusCode::OK);
+        assert_eq!(
+            versioned
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(super::VERSIONED_CACHE_CONTROL)
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn serve_banner_asset_rejects_malformed_id_path() {
+        let router = Router::new()
+            .route("/banner/assets/{id}", get(super::serve_banner_asset))
+            .with_state(crate::test_support::app_state());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/banner/assets/not-a-number")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn protected_board_banner_external_routes_require_board_access() {
+        let state = crate::test_support::app_state();
+        let banner_id = insert_external_board_banner(&state, "secret");
+
+        let router = Router::new()
+            .route(
+                "/banner/external/{id}",
+                get(super::external_banner_warning_page),
+            )
+            .route(
+                "/banner/external/{id}/continue",
+                get(super::external_banner_continue),
+            )
+            .with_state(state);
+
+        for uri in [
+            format!("/banner/external/{banner_id}"),
+            format!("/banner/external/{banner_id}/continue"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
 }

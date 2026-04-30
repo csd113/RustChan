@@ -1,16 +1,4 @@
-// utils/tripcode.rs
-//
-// Tripcode system: user enters "Name#password" in the name field.
-// We split on the first '#', hash the password, display "Name!XXXXXXXXXX".
-//
-// This implementation uses SHA-256 (truncated to 10 chars base64url encoding)
-// for portability. Classic 4chan uses DES-crypt which isn't worth the dependency.
-// The output is stable: same password always yields same tripcode.
-//
-// SECURITY NOTE: For production deployments, consider prefixing the password
-// with an application-specific HMAC key or domain separator before hashing.
-// This would prevent cross-site tripcode correlation and rainbow-table reuse,
-// at the cost of changing all existing tripcode outputs.
+// Tripcode parsing and hashing helpers.
 
 use sha2::{Digest, Sha256};
 
@@ -29,22 +17,6 @@ const TRIPCODE_HASH_BYTES: usize = 8;
 const DEFAULT_NAME: &str = "Anonymous";
 
 /// Parse a name field that may contain a tripcode marker (`#`).
-///
-/// Returns `(display_name, Option<tripcode_string>)`.
-///
-/// - The input is truncated to [`MAX_RAW_INPUT_LEN`] bytes (at a valid UTF-8
-///   boundary) to bound resource usage.
-/// - Splitting occurs on the **first** `#`; subsequent `#` characters become
-///   part of the password.
-///
-/// # Examples
-///
-/// ```text
-///   "Anonymous"        → ("Anonymous", None)
-///   "Anon#mypassword"  → ("Anon",      Some("!Ab3Xy7Kp2Q"))
-///   "#triponly"         → ("Anonymous", Some("!…"))
-///   "Foo#bar#baz"      → ("Foo",       Some("!…"))  // password = "bar#baz"
-/// ```
 #[must_use]
 pub fn parse_name_tripcode(raw: &str) -> (String, Option<String>) {
     let raw = truncate_to_char_boundary(raw, MAX_RAW_INPUT_LEN);
@@ -77,7 +49,6 @@ pub fn parse_name_tripcode(raw: &str) -> (String, Option<String>) {
 
 /// Truncate `s` to at most `max_bytes` bytes, rounding down to the nearest
 /// UTF-8 character boundary so the result is always valid `&str`.
-#[allow(clippy::arithmetic_side_effects)]
 fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -95,7 +66,6 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
 ///
 /// Returns a string like `"!Ab3Xy7Kp2Q"` — a `'!'` prefix followed by
 /// [`TRIPCODE_ENCODED_LEN`] base64url characters.
-#[allow(clippy::expect_used)]
 fn compute_tripcode(password: &str) -> String {
     let hash = Sha256::digest(password.as_bytes());
 
@@ -128,7 +98,6 @@ fn compute_tripcode(password: &str) -> String {
 /// - `ALPHABET[x]` where `x` is produced by 6-bit masking (0‥63) into a
 ///   64-element array — always in bounds.
 #[allow(clippy::indexing_slicing)]
-#[allow(clippy::arithmetic_side_effects)]
 fn base64url_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
@@ -167,7 +136,7 @@ fn base64url_encode(input: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+
     use super::*;
 
     #[test]

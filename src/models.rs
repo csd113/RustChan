@@ -1,16 +1,11 @@
-// models.rs — plain data structs that map 1:1 to database rows.
-// No ORM magic; fields match column names for easy rusqlite mapping.
-//
-// NOTE: When writing rusqlite FromRow impls for wide structs like Board (18+
-// fields), prefer named-column access (`row.get("col")?`) over positional
-// indices to avoid silent mis-binding when columns are reordered.
+// Plain data structs that map to database rows.
 
 use serde::{Deserialize, Serialize};
 
 // ─── Media type classification ────────────────────────────────────────────────
 
-/// Classifies an uploaded file as image, video, audio, or a generic download.
-/// Stored as a TEXT column in posts ("image", "video", "audio", "other").
+/// Classifies an uploaded file as image, video, audio, PDF, or a generic download.
+/// Stored as a TEXT column in posts ("image", "video", "audio", "pdf", "other").
 ///
 /// The serde `rename_all = "lowercase"` representation **must** stay in sync
 /// with `as_str()` / `from_db_str()`.  Add a round-trip unit test whenever a
@@ -21,6 +16,7 @@ pub enum MediaType {
     Image,
     Video,
     Audio,
+    Pdf,
     Other,
 }
 
@@ -34,6 +30,8 @@ impl MediaType {
             Self::Video
         } else if mime.starts_with("audio/") {
             Self::Audio
+        } else if mime == "application/pdf" {
+            Self::Pdf
         } else {
             Self::Other
         }
@@ -41,13 +39,15 @@ impl MediaType {
 
     /// Infer `MediaType` from a file extension (lowercase, no dot).
     /// Used during the backfill migration for pre-existing posts.
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)]
     pub fn from_ext(ext: &str) -> Self {
         match ext {
-            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "svg" => Self::Image,
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "bmp" | "tiff" | "tif"
+            | "svg" => Self::Image,
             "mp4" | "webm" => Self::Video,
             "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "opus" => Self::Audio,
+            "pdf" => Self::Pdf,
             _ => Self::Other,
         }
     }
@@ -59,6 +59,7 @@ impl MediaType {
             Self::Image => "image",
             Self::Video => "video",
             Self::Audio => "audio",
+            Self::Pdf => "pdf",
             Self::Other => "other",
         }
     }
@@ -70,6 +71,7 @@ impl MediaType {
             "image" => Some(Self::Image),
             "video" => Some(Self::Video),
             "audio" => Some(Self::Audio),
+            "pdf" => Some(Self::Pdf),
             "other" => Some(Self::Other),
             _ => None,
         }
@@ -120,8 +122,21 @@ impl BoardAccessMode {
     }
 
     #[must_use]
-    pub const fn requires_post_password(self) -> bool {
+    pub const fn is_password_protected(self) -> bool {
         matches!(self, Self::ViewPassword | Self::PostPassword)
+    }
+
+    #[must_use]
+    pub const fn requires_unlock_for_posting(self) -> bool {
+        self.is_password_protected()
+    }
+
+    #[must_use]
+    // This alias remains for API clarity and backward-compatible call sites,
+    // even though the newer helper is preferred in most code paths.
+    #[allow(dead_code)]
+    pub const fn requires_post_password(self) -> bool {
+        self.requires_unlock_for_posting()
     }
 }
 
@@ -248,6 +263,7 @@ pub enum BannerPlacement {
 
 /// A board, e.g. /tech/ — Technology
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Board {
     pub id: i64,
@@ -261,22 +277,60 @@ pub struct Board {
     pub bump_limit: i64,
     pub allow_images: bool,    // per-board image upload toggle (default: true)
     pub allow_video: bool,     // per-board video upload toggle (default: true)
-    pub allow_audio: bool,     // per-board audio upload toggle (default: true)
+    pub allow_audio: bool,     // per-board audio upload toggle (default: false)
+    pub max_image_size: i64,   // per-board image upload size limit in bytes
+    pub max_video_size: i64,   // per-board video upload size limit in bytes
+    pub max_audio_size: i64,   // per-board audio upload size limit in bytes
+    pub allow_pdf: bool,       // per-board PDF upload toggle (default: off)
     pub allow_any_files: bool, // per-board arbitrary file upload toggle (default: off)
     pub allow_tripcodes: bool,
-    pub allow_editing: bool,   // per-board post editing toggle (default: off)
-    pub edit_window_secs: i64, // seconds users can edit their posts (0 = use board default 300)
+    pub allow_editing: bool, // per-board post editing toggle (default: true)
+    pub allow_self_delete: bool, // per-board self-delete toggle (default: true)
+    pub edit_window_secs: i64, // legacy board edit-window value; self-actions use the fixed grace window
     pub allow_archive: bool,   // when true, overflow threads are archived instead of deleted
-    pub allow_video_embeds: bool, // per-board inline video embed unfurling (YouTube/Invidious/Streamable)
-    pub allow_captcha: bool,      // per-board PoW CAPTCHA on threads and replies (hashcash-style)
-    pub show_poster_ids: bool,    // per-board thread-local poster IDs in post headers
+    pub allow_video_embeds: bool, // per-board inline video embed unfurling (default: true)
+    pub allow_captcha: bool,   // per-board PoW CAPTCHA on threads and replies (hashcash-style)
+    pub show_poster_ids: bool, // per-board thread-local poster IDs in post headers (default: true)
     pub collapse_greentext: bool, // per-board long greentext auto-collapse toggle
-    pub post_cooldown_secs: i64,  // seconds a user must wait between posts (0 = disabled)
-    pub default_theme: String,    // blank = inherit site default
+    pub post_cooldown_secs: i64, // seconds a user must wait between posts (0 = disabled)
+    pub default_theme: String, // blank = inherit site default
     pub banner_mode: BoardBannerMode,
     pub access_mode: BoardAccessMode,
     pub access_password_hash: String,
     pub created_at: i64, // Unix timestamp
+}
+
+impl Board {
+    #[must_use]
+    pub fn max_image_size_bytes(&self) -> usize {
+        usize::try_from(self.max_image_size)
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(crate::config::CONFIG.max_image_size)
+    }
+
+    #[must_use]
+    pub fn max_video_size_bytes(&self) -> usize {
+        usize::try_from(self.max_video_size)
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(crate::config::CONFIG.max_video_size)
+    }
+
+    #[must_use]
+    pub fn max_audio_size_bytes(&self) -> usize {
+        usize::try_from(self.max_audio_size)
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(crate::config::CONFIG.max_audio_size)
+    }
+
+    #[must_use]
+    pub fn max_generic_upload_size_bytes(&self) -> usize {
+        self.max_image_size_bytes()
+            .max(self.max_video_size_bytes())
+            .max(self.max_audio_size_bytes())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -372,7 +426,6 @@ pub struct Post {
 
 /// Admin user record
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 pub struct AdminUser {
     pub id: i64,
     pub username: String,
@@ -383,7 +436,6 @@ pub struct AdminUser {
 
 /// Active admin session
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 pub struct AdminSession {
     pub id: String,
     pub admin_id: i64,
@@ -398,7 +450,6 @@ pub struct Ban {
     pub ip_hash: String,
     pub reason: Option<String>,
     pub expires_at: Option<i64>,
-    #[allow(dead_code)]
     pub created_at: i64,
 }
 
@@ -429,7 +480,6 @@ pub struct ThreadSummary {
 
 /// A poll attached to a thread's OP
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 pub struct Poll {
     pub id: i64,
     pub thread_id: i64,
@@ -440,7 +490,6 @@ pub struct Poll {
 
 /// A single poll option with live vote count (joined from `poll_votes`)
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 pub struct PollOption {
     pub id: i64,
     pub poll_id: i64,
@@ -511,7 +560,6 @@ impl Pagination {
     /// Total number of pages. Always returns at least 1 so templates can
     /// safely display "page 1 of 1" even on empty result sets.
     #[must_use]
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn total_pages(&self) -> i64 {
         // per_page is guaranteed >= 1 by new(), but defend against manual
         // construction just in case.
@@ -556,7 +604,6 @@ pub struct SiteStats {
 
 /// A user-filed report against a post
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 pub struct Report {
     pub id: i64,
     pub post_id: i64,
@@ -584,7 +631,6 @@ pub struct ReportWithContext {
 
 /// A single entry in the moderation action log
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
 pub struct ModLogEntry {
     pub id: i64,
     pub admin_id: i64,
@@ -622,6 +668,8 @@ pub struct BackupInfo {
     pub verified: bool,
     /// Short note describing verification status or the detected problem.
     pub verification_note: String,
+    /// Whether this full backup includes the Tor hidden service identity files.
+    pub contains_tor_hidden_service_keys: bool,
     /// Boards indexed inside the backup when available.
     pub boards: Vec<BackupBoardSummary>,
 }
@@ -632,7 +680,6 @@ pub struct BanAppeal {
     pub id: i64,
     pub ip_hash: String,
     pub reason: String,
-    #[allow(dead_code)]
     pub status: String, // "open" | "dismissed"
     pub created_at: i64,
 }
@@ -691,12 +738,12 @@ mod tests {
     // ── MediaType serde ↔ DB string parity ────────────────────────────────
 
     #[test]
-    #[allow(clippy::expect_used)]
     fn media_type_serde_matches_db_str() {
         for mt in [
             MediaType::Image,
             MediaType::Video,
             MediaType::Audio,
+            MediaType::Pdf,
             MediaType::Other,
         ] {
             let json =
@@ -721,6 +768,7 @@ mod tests {
             MediaType::Image,
             MediaType::Video,
             MediaType::Audio,
+            MediaType::Pdf,
             MediaType::Other,
         ] {
             assert_eq!(format!("{mt}"), mt.as_str());
@@ -732,19 +780,21 @@ mod tests {
         assert_eq!(MediaType::from_mime("image/png"), MediaType::Image);
         assert_eq!(MediaType::from_mime("video/mp4"), MediaType::Video);
         assert_eq!(MediaType::from_mime("audio/ogg"), MediaType::Audio);
+        assert_eq!(MediaType::from_mime("application/pdf"), MediaType::Pdf);
         assert_eq!(MediaType::from_mime("application/json"), MediaType::Other);
     }
 
     #[test]
     fn media_type_from_ext() {
         assert_eq!(MediaType::from_ext("jpg"), MediaType::Image);
+        assert_eq!(MediaType::from_ext("heic"), MediaType::Image);
         assert_eq!(MediaType::from_ext("mp4"), MediaType::Video);
         assert_eq!(MediaType::from_ext("flac"), MediaType::Audio);
+        assert_eq!(MediaType::from_ext("pdf"), MediaType::Pdf);
         assert_eq!(MediaType::from_ext("exe"), MediaType::Other);
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
     fn board_access_mode_serde_matches_db_str() {
         for access_mode in [
             BoardAccessMode::Public,
@@ -768,7 +818,21 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
+    fn board_access_mode_password_helpers_match_existing_post_requirement() {
+        assert!(!BoardAccessMode::Public.is_password_protected());
+        assert!(!BoardAccessMode::Public.requires_unlock_for_posting());
+        assert!(!BoardAccessMode::Public.requires_post_password());
+
+        assert!(BoardAccessMode::ViewPassword.is_password_protected());
+        assert!(BoardAccessMode::ViewPassword.requires_unlock_for_posting());
+        assert!(BoardAccessMode::ViewPassword.requires_post_password());
+
+        assert!(BoardAccessMode::PostPassword.is_password_protected());
+        assert!(BoardAccessMode::PostPassword.requires_unlock_for_posting());
+        assert!(BoardAccessMode::PostPassword.requires_post_password());
+    }
+
+    #[test]
     fn board_banner_mode_serde_matches_db_str() {
         for banner_mode in [
             BoardBannerMode::Inherit,
@@ -792,7 +856,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
     fn banner_scope_serde_matches_db_str() {
         for scope in [BannerScope::Global, BannerScope::Board, BannerScope::Home] {
             let json =
@@ -808,7 +871,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
     fn banner_target_type_serde_matches_db_str() {
         for target_type in [
             BannerTargetType::None,

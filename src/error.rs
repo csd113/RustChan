@@ -9,7 +9,6 @@
 //   Forbidden         → 403
 //   UploadTooLarge    → 413  (Content Too Large)
 //   InvalidMediaType  → 415  (Unsupported Media Type)
-//   RateLimited       → 429  (Too Many Requests)
 //   DbBusy            → 503  (Service Unavailable, with Retry-After)
 //   Internal          → 500
 
@@ -51,10 +50,6 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
-    /// 429 — rate limited
-    #[error("Rate limited: posting too fast")]
-    RateLimited,
-
     /// 503 — database write contention; client should retry
     #[error("Database busy — please retry")]
     DbBusy,
@@ -62,19 +57,6 @@ pub enum AppError {
     /// 500 — internal error (database failure, IO error, etc.)
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
-
-    /// Structured error for future API integration.
-    ///
-    /// Carries the HTTP status returned by the remote API, a human-readable
-    /// detail string, and an optional endpoint label so log lines are
-    /// self-describing without having to cross-reference request traces.
-    #[error("API error {status} at {endpoint:?}: {detail}")]
-    #[allow(dead_code)]
-    Api {
-        status: u16,
-        detail: String,
-        endpoint: Option<String>,
-    },
 
     /// TLS initialisation or certificate error (startup-time only).
     #[error("TLS error: {0}")]
@@ -135,10 +117,6 @@ impl IntoResponse for AppError {
             }
             Self::UploadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
             Self::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg.clone()),
-            Self::RateLimited => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "You are posting too fast. Slow down.".to_string(),
-            ),
             Self::DbBusy => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "The server is temporarily busy. Please try again in a moment.".to_string(),
@@ -148,22 +126,6 @@ impl IntoResponse for AppError {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred.".to_string(),
-                )
-            }
-            Self::Api {
-                status,
-                detail,
-                endpoint,
-            } => {
-                error!(
-                    status,
-                    endpoint = endpoint.as_deref().unwrap_or("unknown"),
-                    "API error: {detail}",
-                );
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "An upstream service returned an unexpected response. Please try again later."
-                        .to_string(),
                 )
             }
             Self::Tls(msg) => {
@@ -187,22 +149,6 @@ mod tests {
     use super::AppError;
     use axum::body::to_bytes;
     use axum::response::IntoResponse as _;
-
-    #[test]
-    fn api_errors_hide_upstream_details_from_users() {
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        let response = AppError::Api {
-            status: 502,
-            detail: "upstream exploded".to_string(),
-            endpoint: Some("test".to_string()),
-        }
-        .into_response();
-        let body = runtime
-            .block_on(to_bytes(response.into_body(), usize::MAX))
-            .expect("body bytes");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
-        assert!(!body.contains("upstream exploded"));
-    }
 
     #[test]
     fn tls_errors_hide_internal_messages_from_users() {

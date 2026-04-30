@@ -2,6 +2,61 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.1.5-indev]
+
+### Added
+
+- The bundled banner builder in `docs/rustchan-banner-maker.html` has been rebuilt into a layered editor with stacked image uploads, per-layer controls, drag-and-resize handles, live preview, and export tools for both supported banner sizes.
+- The admin panel now ships with its own dedicated `admin.css` and `admin.js` assets instead of leaning on the shared site bundle.
+- HEIC and HEIF image uploads are now accepted by the media pipeline, including MIME detection, thumbnail generation, backup metadata, form copy, and documentation updates.
+- Boards can now enforce their own upload size limits for images, video, and audio, with caps that stay within the site-wide maxima.
+- Two new built-in themes, Blue Sky and Deep Orbit, are available across normal pages, admin views, theme seeding, defaults, and setup documentation.
+- Users can now self-delete their own posts within a 60-second grace window after posting, with server-side expiry checks and UI countdown hints.
+
+### Improved
+
+- The admin panel has been split into clearer sections and subsections, making board setup, moderation, settings, backups, and banner management easier to scan and work through on both desktop and mobile.
+- Banner editing in the admin UI is smoother: target pickers behave more predictably, external-link warnings show up inline before save, and the banner forms are laid out more cleanly.
+- The board appearance editor now shows each board's NSFW tag state directly in the appearance card.
+- Admin login and banner-serving internals were tightened up, with cleaner helper paths for session handling, banner access checks, and post-query lookups.
+- Site settings now preserve the badge toggles more reliably when saving banner-only changes, avoiding accidental resets on partial submits.
+- Backup and restore actions now use a more consistent redirect path, which keeps the progress modal and post-restore navigation on the rails after full-site and board restore requests.
+- Thread rendering and post state handling are more resilient around post lookups, moderation actions, pending filesystem cleanup, media storage, worker updates, and console board setup.
+- The post edit form and self-delete flow now surface the shared 60-second self-action window more clearly.
+- Post rendering now sanitizes formatting more consistently and poll submission validation is stricter on both server-rendered and live-updated pages.
+- Media rendering now prefers recorded MIME type information over filename guessing, improving how attached media is displayed in thread views.
+- Banner exports from the standalone editor no longer include editing guide overlays, and the export flow better matches the screenshots and README examples.
+- Tor bootstrap and runtime logs are humanized into clearer status messages so operators can understand connection progress without reading raw Arti output, and repeat onion-service retry spam is suppressed.
+- Site stats now account for archived thread media more accurately, so admin totals reflect active content instead of counting archived bytes.
+- Built-in self-signed TLS is now gated behind an explicit feature flag, keeping production builds slimmer unless the development certificate path is needed.
+- Rust dependencies, GitHub Actions release tooling, and lockfile contents were refreshed for the `1.1.5-indev` cycle.
+- Release artifacts now focus on current Apple Silicon macOS builds instead of publishing a separate macOS x86 archive.
+- Blue Sky and Deep Orbit theme palettes were refined for better contrast and fuller coverage across normal and admin surfaces.
+
+### Fixed
+
+- Restore uploads and backup actions in the admin panel now resolve their redirect targets more reliably, including cases where the browser only exposes the final response URL or HTML fallback.
+- Protected board banner assets and external-banner warning routes now fail with the right `404` and `403` responses instead of falling through to less helpful error paths.
+- Banner rotation now advances correctly on refresh, GIF banners keep a reliable fallback path, and animated WebP banners preserve animation instead of being flattened during processing.
+- Banner upload, restore, and route handling have stronger validation and regression coverage for protected assets, board inheritance, catalog/thread placement, and warning redirects.
+- Post form fields now line up more cleanly with the surrounding form layout.
+- Quote references and delete-reference cleanup now stay more consistent when posts or threads are updated.
+- Board access redirects now harden `return_to` handling so unlock flows cannot bounce users to unsafe destinations.
+- Thumbnail fallback controls are visible when generated thumbnails are unavailable, and catalog embeds can now use absolute thumbnail URLs.
+
+### Documentation
+
+- `README.md`, `SETUP.md`, and the release notes were cleaned up for the `1.1.5-indev` cycle, with plainer wording and less filler.
+- The README was rewritten for clearer structure and refreshed with banner-maker screenshots and current feature wording.
+
+### Internal
+
+- Removed dead code, unused API paths, and stale helper branches that were no longer part of the live request flow.
+- Admin backup, settings, board, posting, and thread handlers were split into smaller modules, with focused regression coverage for posting flows, restore redirects, banner behavior, board redirects, and live thread updates.
+- The ffprobe probe test now uses a symlinked binary path to verify explicit tool resolution more faithfully on Unix-like systems.
+- Clippy warnings were cleaned up across the refactored modules, theme code, logging, storage, templates, and banner handling to keep strict lint compliance.
+- Comments and documentation were trimmed to remove leftover AI-generated phrasing and stale implementation notes.
+
 ## [1.1.4]
 
 ### Added
@@ -200,130 +255,12 @@ All notable changes to RustChan will be documented in this file.
 
 ## [1.0.13] — 2026-03-08
 
-## WAL Mode + Connection Tuning
-**`db/mod.rs`**
+### Improved
 
-`cache_size` bumped from `-4096` (4 MiB) to `-32000` (32 MiB) in the pool's `with_init` pragma block. The `journal_mode=WAL` and `synchronous=NORMAL` pragmas were already present.
-
----
-
-## Missing Indexes
-**`db/mod.rs`**
-
-Two new migrations added at the end of the migration table:
-
-- **Migration 23:** `CREATE INDEX IF NOT EXISTS idx_posts_thread_id ON posts(thread_id)` — supplements the existing composite index for queries that filter on `thread_id` alone.
-- **Migration 24:** `CREATE INDEX IF NOT EXISTS idx_posts_ip_hash ON posts(ip_hash)` — eliminates the full-table scan on the admin IP history page and per-IP cooldown checks.
-
----
-
-## Prepared Statement Caching Audit
-**`db/threads.rs` · `db/boards.rs` · `db/posts.rs`**
-
-All remaining bare `conn.prepare(...)` calls on hot or repeated queries replaced with `conn.prepare_cached(...)`: `delete_thread`, `archive_old_threads`, `prune_old_threads` (outer `SELECT`) in `threads.rs`; `delete_board` in `boards.rs`; `search_posts` in `posts.rs`. Every query path is now consistently cached.
-
----
-
-## Transaction Batching for Thread Prune
-Already implemented in the codebase. Both `prune_old_threads` and `archive_old_threads` already use `unchecked_transaction()` / `tx.commit()` to batch all deletes/updates into a single atomic transaction. No changes needed.
-
----
-
-## RETURNING Clause for Inserts
-**`db/threads.rs` · `db/posts.rs`**
-
-`create_thread_with_op` and `create_post_inner` now use `INSERT … RETURNING id` via `query_row`, replacing the `execute()` + `last_insert_rowid()` pattern. The new ID is returned atomically in the same statement, eliminating the implicit coupling to connection-local state.
-
----
-
-## Scheduled VACUUM
-**`config.rs` · `main.rs`**
-
-Added `auto_vacuum_interval_hours = 24` to config. A background Tokio task now sleeps for the configured interval (staggered from startup), then calls `db::run_vacuum()` via `spawn_blocking` and logs the bytes reclaimed.
-
----
-
-## Expired Poll Cleanup
-**`config.rs` · `main.rs` · `db/posts.rs`**
-
-Added `poll_cleanup_interval_hours = 72`. A new `cleanup_expired_poll_votes()` DB function deletes vote rows for polls whose `expires_at` is older than the retention window. A background task runs it on the configured interval, preserving poll questions and options.
-
----
-
-## DB Size Warning
-**`config.rs` · `handlers/admin.rs` · `templates/admin.rs`**
-
-Added `db_warn_threshold_mb = 2048`. The admin panel handler reads the actual file size via `std::fs::metadata`, computes a boolean flag, and passes it to the template. The template renders a red warning banner in the database maintenance section when the threshold is exceeded.
-
----
-
-## Job Queue Back-Pressure
-**`config.rs` · `workers/mod.rs`**
-
-Added `job_queue_capacity = 1000`. The `enqueue()` method now checks `pending_job_count()` before inserting — if the queue is at or over capacity, the job is dropped with a `warn!` log and a sentinel `-1` is returned, avoiding OOM under post floods.
-
----
-
-## Coalesce Duplicate Media Jobs
-**`workers/mod.rs`**
-
-Added an `Arc<DashMap<String, bool>>` (`in_progress`) to `JobQueue`. Before dispatching a `VideoTranscode` or `AudioWaveform` job, `handle_job` checks if the `file_path` is already in the map — if so it skips and logs. The entry is removed on both success and failure.
-
----
-
-## FFmpeg Timeout
-**`config.rs` · `workers/mod.rs`**
-
-Replaced hardcoded `FFMPEG_TRANSCODE_TIMEOUT` / `FFMPEG_WAVEFORM_TIMEOUT` constants with `CONFIG.ffmpeg_timeout_secs` (default: `120`). Both `transcode_video` and `generate_waveform` now read this value at runtime so operators can tune it in `settings.toml`.
-
----
-
-## Auto-Archive Before Prune
-**`workers/mod.rs` · `config.rs`**
-
-`prune_threads` now evaluates `allow_archive || CONFIG.archive_before_prune`. The new global flag (default `true`) means no thread is ever silently hard-deleted on a board that has archiving enabled at the global level, even if the individual board didn't opt in.
-
----
-
-## Waveform Cache Eviction
-**`main.rs` · `config.rs`**
-
-A background task runs every hour (after a 30-min startup stagger). It walks every `{board}/thumbs/` directory, sorts files oldest-first by mtime, and deletes until total size is under `waveform_cache_max_mb` (default 200 MiB). A new `evict_thumb_cache` function handles the scan-and-prune logic; originals are never touched.
-
----
-
-## Streaming Multipart
-**`handlers/mod.rs`**
-
-The old `.bytes().await` (full in-memory buffering) is replaced by `read_field_bytes`, which streams via `.chunk()` and returns a `413 UploadTooLarge` the moment the running total exceeds the configured limit — before memory is exhausted.
-
----
-
-## ETag / Conditional GET
-**`handlers/board.rs` · `handlers/thread.rs`**
-
-Both handlers now accept `HeaderMap`, derive an ETag (board index: `"{max_bump_ts}-{page}"`; thread: `"{bumped_at}"`), check `If-None-Match`, and return `304 Not Modified` on a hit. The ETag is included on all 200 responses too.
-
----
-
-## Gzip / Brotli Compression
-**`main.rs` · `Cargo.toml`**
-
-`tower-http` features updated to `compression-full`. `CompressionLayer::new()` added to the middleware stack — it negotiates gzip, Brotli, or zstd based on the client's `Accept-Encoding` header.
-
----
-
-## Blocking Pool Sizing
-**`main.rs` · `config.rs`**
-
-`#[tokio::main]` replaced with a manual `tokio::runtime::Builder` that calls `.max_blocking_threads(CONFIG.blocking_threads)`. Default is `logical_cpus × 4` (auto-detected); configurable via `blocking_threads` in `settings.toml` or `CHAN_BLOCKING_THREADS`.
-
----
-
-## EXIF Orientation Correction
-**`utils/files.rs` · `Cargo.toml`**
-
-`kamadak-exif = "0.5"` added. `generate_image_thumb` now calls `read_exif_orientation` for JPEGs and passes the result to `apply_exif_orientation`, which dispatches to `imageops::rotate90/180/270` and `flip_horizontal/vertical` as needed. Non-JPEG formats skip the EXIF path entirely.
+- Tuned SQLite connection settings by increasing `cache_size` from `-4096` to `-32000` while keeping WAL mode and `synchronous=NORMAL`.
+- Added missing indexes for `posts(thread_id)` and `posts(ip_hash)`, then switched hot repeated queries to cached prepared statements.
+- Returned inserted thread and post IDs with `INSERT ... RETURNING`, and kept prune/archive work batched inside transactions.
+- Added maintenance and throughput safeguards: scheduled VACUUM, expired-poll cleanup, database-size warnings, job-queue back-pressure, duplicate media-job coalescing, configurable FFmpeg timeouts, archive-before-prune behavior, waveform cache eviction, streaming multipart handling, conditional GETs, compression, blocking-pool sizing, and JPEG EXIF orientation correction.
 
 ### ✨ Added
 - **Backup system rewritten to stream instead of buffering in RAM** — all backup operations previously loaded entire zip files into memory, risking OOM on large instances. Downloads now stream from disk in 64 KiB chunks (browsers also get a proper progress bar). Backup creation now writes directly to disk via temp files with atomic rename on success, so partial backups never appear in the saved list. Individual file archiving now streams through an 8 KiB buffer instead of reading each file fully into memory. Peak RAM usage dropped from "entire backup size" to roughly 64 KiB regardless of instance size.

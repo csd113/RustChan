@@ -4,6 +4,7 @@ pub(super) mod board_backup_types {
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
+    // This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
     #[allow(clippy::struct_excessive_bools)]
     pub struct BoardRow {
         pub id: i64,
@@ -29,6 +30,8 @@ pub(super) mod board_backup_types {
         pub edit_window_secs: i64,
         #[serde(default)]
         pub allow_editing: bool,
+        #[serde(default)]
+        pub allow_self_delete: bool,
         #[serde(default = "default_true")]
         pub allow_archive: bool,
         #[serde(default)]

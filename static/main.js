@@ -1,8 +1,6 @@
-// main.js — RustChan client-side logic
-// FIX[NEW-H1]: All JavaScript has been moved from inline <script> tags to this
-// external file, removing the need for 'unsafe-inline' in the CSP script-src
-// directive. Dynamic per-page values are passed via data-* attributes on HTML
-// elements and read here at runtime.
+// main.js — RustChan client-side logic.
+// Dynamic per-page values are passed via data-* attributes on HTML elements
+// and read here at runtime.
 
 'use strict';
 
@@ -141,11 +139,65 @@ function upgradeLegacySpoilers(root) {
   });
 }
 
+function renderExpiryCountdownValue(remaining) {
+  return '(' + remaining + 's)';
+}
+
+function bindExpiryCountdown(element, countdown, expiry, onExpire) {
+  function clearTimer() {
+    if (element._selfActionTimer) {
+      window.clearInterval(element._selfActionTimer);
+      element._selfActionTimer = 0;
+    }
+  }
+
+  function render() {
+    var remaining = Math.max(0, Math.ceil(expiry - Date.now() / 1000));
+    if (remaining <= 0) {
+      clearTimer();
+      countdown.textContent = renderExpiryCountdownValue(0);
+      if (typeof onExpire === 'function') onExpire();
+      return;
+    }
+    countdown.textContent = renderExpiryCountdownValue(remaining);
+  }
+
+  render();
+  element._selfActionTimer = window.setInterval(render, 250);
+}
+
+function initSelfActionCountdowns(root) {
+  var scope = root || document;
+  var elements = scope.querySelectorAll('[data-action-expiry]');
+  if (!elements.length) return;
+
+  elements.forEach(function (element) {
+    if (element.dataset.countdownBound === '1') return;
+    element.dataset.countdownBound = '1';
+
+    var countdown =
+      element.dataset.role === 'self-action-countdown'
+        ? element
+        : element.querySelector('[data-role="self-action-countdown"]');
+    var expiry = Number(element.dataset.actionExpiry || '');
+    if (!countdown || !isFinite(expiry)) {
+      element.remove();
+      return;
+    }
+
+    bindExpiryCountdown(element, countdown, expiry, function () {
+      element.remove();
+    });
+  });
+}
+
 document.addEventListener('DOMContentLoaded', function () {
   applyQueuedPostSubmitAnchor();
   localizePostTimes(document);
   upgradeLegacySpoilers(document);
+  initSelfActionCountdowns(document);
   wireAudioMiniPlayers(document);
+  wireMediaThumbFallbacks(document);
   syncMobileHeaderOffset();
 
   if (window.ResizeObserver) {
@@ -165,7 +217,9 @@ window.addEventListener('resize', syncMobileHeaderOffset);
   window._onNewPostsInserted = function (container) {
     localizePostTimes(container);
     upgradeLegacySpoilers(container);
+    initSelfActionCountdowns(container);
     wireAudioMiniPlayers(container);
+    wireMediaThumbFallbacks(container);
     if (_origLocalize) _origLocalize(container);
   };
 }());
@@ -826,9 +880,9 @@ function expandMedia(preview) {
   var container = preview.closest('.file-container');
   var expanded = container.querySelector('.media-expanded');
   var closeBtn = container.querySelector('.media-close-btn');
-  if (expanded.tagName === 'IMG' && expanded.dataset.src) {
+  if ((expanded.tagName === 'IMG' || expanded.tagName === 'IFRAME') && expanded.dataset.src) {
     expanded.src = expanded.dataset.src;
-    delete expanded.dataset.src;
+    if (expanded.tagName === 'IMG') delete expanded.dataset.src;
   }
   preview.style.display = 'none';
   expanded.style.display = 'block';
@@ -928,6 +982,60 @@ function wireAudioMiniPlayers(root) {
     audio.addEventListener('play', function () {
       updateAudioMiniPlayer(audio);
     });
+  });
+}
+
+function wireMediaThumbFallbacks(root) {
+  (root || document).querySelectorAll('img[data-media-thumb="1"]').forEach(function (img) {
+    if (img.dataset.mediaThumbWired === '1') return;
+    img.dataset.mediaThumbWired = '1';
+
+    var wrapper = img.closest('.media-preview, .catalog-card-media, .audio-thumb');
+    var fallback = wrapper ? wrapper.querySelector(':scope > .media-thumb-fallback') : null;
+    if (!fallback || !fallback.classList || !fallback.classList.contains('media-thumb-fallback')) {
+      return;
+    }
+
+    function showFallback() {
+      if (wrapper) wrapper.classList.add('media-thumb-missing');
+      img.hidden = true;
+      fallback.hidden = false;
+    }
+
+    function showThumb() {
+      if (wrapper) wrapper.classList.remove('media-thumb-missing');
+      fallback.hidden = true;
+      img.hidden = false;
+    }
+
+    function completeWithNoNaturalSize() {
+      return img.complete && img.naturalWidth === 0 && img.naturalHeight === 0;
+    }
+
+    function verifyCompleteImage() {
+      if (!completeWithNoNaturalSize()) {
+        showThumb();
+        return;
+      }
+      if (typeof img.decode === 'function') {
+        img.decode().then(showThumb).catch(function () {
+          if (completeWithNoNaturalSize()) showFallback();
+        });
+        return;
+      }
+      setTimeout(function () {
+        if (completeWithNoNaturalSize()) {
+          showFallback();
+        } else {
+          showThumb();
+        }
+      }, 0);
+    }
+
+    img.addEventListener('error', showFallback, { once: true });
+    img.addEventListener('load', showThumb, { once: true });
+
+    if (img.complete) verifyCompleteImage();
   });
 }
 
@@ -1034,6 +1142,27 @@ function requestFormSubmit(form, submitter) {
     return;
   }
   form.submit();
+}
+
+function submitSelfDeleteLink(link) {
+  if (!link || !link.href) return false;
+  var csrf = link.dataset.deleteCsrf;
+  if (!csrf) return false;
+
+  var form = document.createElement('form');
+  form.method = 'POST';
+  form.action = link.href;
+  form.style.display = 'none';
+
+  var csrfField = document.createElement('input');
+  csrfField.type = 'hidden';
+  csrfField.name = '_csrf';
+  csrfField.value = csrf;
+  form.appendChild(csrfField);
+
+  document.body.appendChild(form);
+  requestFormSubmit(form);
+  return true;
 }
 
 function isDangerousConfirmationTrigger(trigger, message) {
@@ -1431,229 +1560,31 @@ window.requestConfirmation = requestConfirmation;
   }
 })();
 
-(function () {
-  var ADMIN_DROPDOWN_STORAGE_PREFIX = 'rustchan_admin_dropdown:';
-
-  function readAdminDropdownState(key) {
-    try {
-      return localStorage.getItem(ADMIN_DROPDOWN_STORAGE_PREFIX + key);
-    } catch (e) {
-      return null;
-    }
-  }
-
-  function writeAdminDropdownState(key, isOpen) {
-    try {
-      localStorage.setItem(ADMIN_DROPDOWN_STORAGE_PREFIX + key, isOpen ? '1' : '0');
-    } catch (e) {}
-  }
-
-  function initPersistentAdminDropdowns() {
-    document.querySelectorAll('details.admin-dropdown[data-admin-dropdown-key]').forEach(function (details) {
-      var key = details.dataset.adminDropdownKey;
-      if (!key) return;
-
-      var stored = readAdminDropdownState(key);
-      if (stored === '1') {
-        details.open = true;
-      } else if (stored === '0') {
-        details.open = false;
-      }
-
-      details.addEventListener('toggle', function () {
-        writeAdminDropdownState(key, details.open);
-      });
-    });
-  }
-
-  document.addEventListener('DOMContentLoaded', initPersistentAdminDropdowns);
-})();
-
-(function () {
-  function syncBannerTargetPicker(picker) {
-    if (!picker) return;
-    var select = picker.querySelector('[data-banner-target-select]');
-    if (!select) return;
-    var selected = select.value || 'none';
-    picker.querySelectorAll('[data-banner-target-field]').forEach(function (field) {
-      var matches = field.dataset.bannerTargetField === selected;
-      field.hidden = !matches;
-      field.querySelectorAll('input, select, textarea').forEach(function (input) {
-        input.disabled = !matches;
-      });
-    });
-  }
-
-  function bannerWarningNode(form) {
-    if (!form) return null;
-    var warning = form.querySelector('[data-banner-warning]');
-    if (warning) return warning;
-    warning = document.createElement('div');
-    warning.className = 'admin-flash flash-error admin-banner-inline-warning';
-    warning.dataset.bannerWarning = '1';
-    warning.hidden = true;
-    form.appendChild(warning);
-    return warning;
-  }
-
-  function clearBannerWarning(form) {
-    var warning = bannerWarningNode(form);
-    if (!warning) return;
-    warning.hidden = true;
-    warning.textContent = '';
-  }
-
-  function showBannerWarning(form, message) {
-    var warning = bannerWarningNode(form);
-    if (!warning) return;
-    warning.hidden = false;
-    warning.textContent = message;
-  }
-
-  function externalBannerLinksEnabled() {
-    var toggle = document.querySelector('[data-banner-external-toggle]');
-    return !!(toggle && toggle.checked);
-  }
-
-  function initBannerEditors(root) {
-    (root || document).querySelectorAll('[data-banner-target-picker]').forEach(function (picker) {
-      syncBannerTargetPicker(picker);
-    });
-
-    (root || document).querySelectorAll('form[data-banner-editor="1"]').forEach(function (form) {
-      if (form.dataset.bannerEditorWired === '1') return;
-      form.dataset.bannerEditorWired = '1';
-
-      form.addEventListener('submit', function (event) {
-        var select = form.querySelector('[data-banner-target-select]');
-        if (!select) return;
-        if (select.value !== 'external_url' || externalBannerLinksEnabled()) {
-          clearBannerWarning(form);
-          return;
-        }
-        event.preventDefault();
-        showBannerWarning(
-          form,
-          'Enable external banner links in Global board banner settings before saving a banner that opens another website.'
-        );
-        var warning = bannerWarningNode(form);
-        if (warning && typeof warning.scrollIntoView === 'function') {
-          warning.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        }
-      });
-    });
-  }
-
-  document.addEventListener('DOMContentLoaded', function () {
-    initBannerEditors(document);
-  });
-
-  document.addEventListener('change', function (event) {
-    var target = event.target;
-    if (target.matches && target.matches('[data-banner-target-select]')) {
-      var picker = target.closest('[data-banner-target-picker]');
-      syncBannerTargetPicker(picker);
-      clearBannerWarning(target.closest('form'));
-      return;
-    }
-    if (target.matches && target.matches('[data-banner-external-toggle]')) {
-      document.querySelectorAll('form[data-banner-editor="1"]').forEach(function (form) {
-        clearBannerWarning(form);
-      });
-    }
-  });
-})();
-
-(function () {
-  function initAdminLiveLog() {
-    var output = document.getElementById('admin-live-log-output');
-    var fileLabel = document.getElementById('admin-live-log-file');
-    var refreshBtn = document.getElementById('admin-live-log-refresh');
-    var clearBtn = document.getElementById('admin-live-log-clear');
-    var autoscroll = document.getElementById('admin-live-log-autoscroll');
-    if (!output) return;
-
-    var timer = null;
-    var lastText = '';
-    var clearedBaseline = '';
-    var clearedFile = '';
-
-    function visibleText(fullText, fileName) {
-      if (!clearedBaseline || clearedFile !== fileName) {
-        return fullText;
-      }
-      if (fullText === clearedBaseline) {
-        return '';
-      }
-      if (fullText.indexOf(clearedBaseline) === 0) {
-        return fullText.slice(clearedBaseline.length).replace(/^\n+/, '');
-      }
-      return fullText;
-    }
-
-    function fetchLog() {
-      fetch('/admin/log/live?bytes=65536', { credentials: 'same-origin' })
-        .then(function (resp) { return resp.json(); })
-        .then(function (data) {
-          var fileName = data.filename || 'current log';
-          var fullText = data.content || '';
-          if (data.truncated) {
-            fullText = '[showing latest log tail]\n' + fullText;
-          }
-          if (fileLabel) fileLabel.textContent = fileName;
-          if (fileName !== clearedFile) {
-            clearedBaseline = '';
-            clearedFile = fileName;
-          }
-          if (fullText === lastText) return;
-          lastText = fullText;
-          var text = visibleText(fullText, fileName);
-          output.textContent = text || 'Waiting for new log lines…';
-          if (!autoscroll || autoscroll.checked) {
-            output.scrollTop = output.scrollHeight;
-          }
-        })
-        .catch(function () {
-          output.textContent = 'Failed to load live log.';
-        });
-    }
-
-    if (refreshBtn) {
-      refreshBtn.addEventListener('click', function () {
-        fetchLog();
-      });
-    }
-
-    if (clearBtn) {
-      clearBtn.addEventListener('click', function () {
-        clearedBaseline = lastText;
-        clearedFile = fileLabel ? fileLabel.textContent : '';
-        output.textContent = 'Waiting for new log lines…';
-      });
-    }
-
-    fetchLog();
-    timer = setInterval(fetchLog, 2000);
-
-    window.addEventListener('beforeunload', function () {
-      if (timer) clearInterval(timer);
-    });
-  }
-
-  document.addEventListener('DOMContentLoaded', initAdminLiveLog);
-})();
-
 // ─── Report modal ─────────────────────────────────────────────────────────────
 
 function openReportModal(postId, threadId, board, csrf, label) {
+  var opts = arguments.length > 5 && arguments[5] ? arguments[5] : {};
+  var form = document.getElementById('report-form');
+  if (!form) return;
+  form.setAttribute('action', opts.action || '/report');
   document.getElementById('report-post-id').value = postId;
   document.getElementById('report-thread-id').value = threadId;
   document.getElementById('report-board').value = board;
   document.getElementById('report-csrf').value = csrf;
+  var ipHash = document.getElementById('report-ip-hash');
+  if (ipHash) ipHash.value = opts.ipHash || '';
+  var title = document.getElementById('report-modal-title');
+  if (title) title.textContent = opts.title || 'Report Thread/Post';
   var info = document.getElementById('report-info');
   if (info) info.textContent = label || ('Reporting post No.' + postId);
   var reason = document.getElementById('report-reason');
-  if (reason) reason.value = '';
+  if (reason) {
+    reason.value = '';
+    reason.required = !!opts.reasonRequired;
+    reason.placeholder = opts.reasonRequired ? 'reason (required)' : 'reason (optional)';
+  }
+  var submit = document.getElementById('report-submit-btn');
+  if (submit) submit.textContent = opts.submitLabel || 'Submit Report';
   var modal = document.getElementById('report-modal');
   if (modal) modal.style.display = 'flex';
   if (reason) reason.focus();
@@ -1662,6 +1593,155 @@ function openReportModal(postId, threadId, board, csrf, label) {
 function closeReportModal() {
   var modal = document.getElementById('report-modal');
   if (modal) modal.style.display = 'none';
+}
+
+function openEditModal(trigger) {
+  if (!trigger) return;
+  var modal = document.getElementById('edit-modal');
+  var form = document.getElementById('edit-modal-form');
+  var textarea = document.getElementById('edit-modal-body');
+  if (!modal || !form || !textarea) return;
+
+  var postId = trigger.dataset.editPostId;
+  if (!postId) return;
+  var source = document.getElementById('edit-body-' + postId);
+  var expiry = Number(trigger.dataset.editExpiry || '');
+  form.setAttribute('action', '/' + encodeURIComponent(trigger.closest('#thread-posts').dataset.board) + '/post/' + encodeURIComponent(postId) + '/edit');
+  if (isFinite(expiry)) {
+    form.dataset.actionExpiry = String(expiry);
+  } else {
+    delete form.dataset.actionExpiry;
+  }
+  modal.dataset.postId = postId;
+  textarea.value = source ? source.value : '';
+  var error = modal.querySelector('[data-role="edit-modal-error"]');
+  if (error) {
+    error.hidden = true;
+    error.textContent = '';
+  }
+  modal.hidden = false;
+  modal.classList.add('is-open');
+  modal.setAttribute('aria-hidden', 'false');
+  bindEditModalCountdown();
+  textarea.focus();
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+}
+
+function closeEditModal() {
+  var modal = document.getElementById('edit-modal');
+  if (!modal) return;
+  var form = document.getElementById('edit-modal-form');
+  if (form && form._selfActionTimer) {
+    window.clearInterval(form._selfActionTimer);
+    form._selfActionTimer = 0;
+  }
+  var countdown = modal.querySelector('[data-role="edit-modal-countdown"]');
+  if (countdown) countdown.textContent = '';
+  modal.classList.remove('is-open');
+  modal.setAttribute('aria-hidden', 'true');
+  modal.hidden = true;
+}
+
+function showEditModalError(message) {
+  var modal = document.getElementById('edit-modal');
+  var error = modal && modal.querySelector('[data-role="edit-modal-error"]');
+  if (!modal || !error) return;
+  if (!message) {
+    error.hidden = true;
+    error.textContent = '';
+    return;
+  }
+  error.hidden = false;
+  error.textContent = '\u26a0 ' + message;
+}
+
+function bindEditModalCountdown() {
+  var modal = document.getElementById('edit-modal');
+  var form = document.getElementById('edit-modal-form');
+  var countdown = modal && modal.querySelector('[data-role="edit-modal-countdown"]');
+  if (!modal || !form || !countdown) return;
+
+  if (form._selfActionTimer) {
+    window.clearInterval(form._selfActionTimer);
+    form._selfActionTimer = 0;
+  }
+
+  var expiry = Number(form.dataset.actionExpiry || '');
+  if (!isFinite(expiry)) {
+    countdown.textContent = '';
+    return;
+  }
+
+  bindExpiryCountdown(form, countdown, expiry, function () {
+    showEditModalError('The 60-second edit window for this post has closed.');
+    window.setTimeout(function () {
+      closeEditModal();
+    }, 900);
+  });
+}
+
+function navigateEditSuccess(url) {
+  closeEditModal();
+  if (!url) {
+    window.location.reload();
+    return;
+  }
+
+  var target = new URL(url, window.location.href);
+  if (isSameDocumentNavigationTarget(target.href)) {
+    queuePostSubmitAnchor(target);
+    window.location.assign(target.pathname + target.search);
+    return;
+  }
+
+  window.location.assign(target.href);
+}
+
+function submitEditModalForm(form) {
+  if (!window.fetch || !window.FormData) return false;
+
+  var modal = document.getElementById('edit-modal');
+  var textarea = document.getElementById('edit-modal-body');
+  if (!modal || !textarea) return false;
+
+  var submitter = form.querySelector('button[type="submit"]');
+  if (submitter) submitter.disabled = true;
+  showEditModalError('');
+  var error = modal.querySelector('[data-role="edit-modal-error"]');
+  if (error) error.hidden = true;
+
+  fetch(form.action, {
+    method: 'POST',
+    body: new URLSearchParams(new FormData(form)),
+    credentials: 'same-origin',
+    headers: { 'X-Requested-With': 'XMLHttpRequest' }
+  })
+    .then(function (response) {
+      var redirect = response.headers.get('x-rustchan-redirect');
+      if (redirect) {
+        navigateEditSuccess(redirect);
+        return null;
+      }
+      if (response.headers.get('x-rustchan-error-status')) {
+        return response.json().catch(function () { return {}; });
+      }
+      if (response.ok) {
+        navigateEditSuccess(response.url || window.location.href);
+        return null;
+      }
+      return response.json().catch(function () { return {}; });
+    })
+    .then(function (payload) {
+      if (!payload) return;
+      if (submitter) submitter.disabled = false;
+      showEditModalError(payload.error || 'Unable to save your edit.');
+    })
+    .catch(function () {
+      if (submitter) submitter.disabled = false;
+      showEditModalError('Unable to save your edit.');
+    });
+
+  return true;
 }
 
 function closeThreadMenus() {
@@ -1761,12 +1841,12 @@ function toggleThreadMenu(toggle) {
   // Priority: personal localStorage preference > server-configured default.
   // The server injects data-default-theme on <html> when the admin picks a
   // non-default theme. New visitors (no localStorage) should see that theme
-  // instead of falling back to terminal.
+  // instead of falling back to the built-in default.
   (function () {
     var active = null;
     try { active = localStorage.getItem('rustchan_theme'); } catch (e) {}
     if (!active || THEMES.indexOf(active) === -1) {
-      active = document.documentElement.getAttribute('data-default-theme') || 'fluorogrid';
+      active = document.documentElement.getAttribute('data-default-theme') || 'forest';
     }
     if (active && THEMES.indexOf(active) !== -1) { applyTheme(active); }
   }());
@@ -2115,6 +2195,7 @@ function toggleThreadMenu(toggle) {
 
 (function () {
   var _highlighted = null;
+  var _missingHashNotice = null;
 
   function highlightPost(id) {
     clearHighlight();
@@ -2131,23 +2212,72 @@ function toggleThreadMenu(toggle) {
     }
   }
 
+  function clearMissingHashNotice() {
+    if (_missingHashNotice && _missingHashNotice.parentNode) {
+      _missingHashNotice.parentNode.removeChild(_missingHashNotice);
+    }
+    _missingHashNotice = null;
+  }
+
+  function showMissingHashNotice(pid) {
+    clearMissingHashNotice();
+    var container = document.getElementById('thread-posts');
+    if (!container || !container.parentNode) return;
+    var notice = document.createElement('div');
+    notice.className = 'missing-post-notice missing-hash-notice';
+    notice.innerHTML =
+      '<span class="missing-post-icon">&#x2715;</span> ' +
+      '<strong>&gt;&gt;' + pid + '</strong> — post not found' +
+      '<span class="missing-post-sub">it may have been deleted</span>';
+    container.parentNode.insertBefore(notice, container);
+    _missingHashNotice = notice;
+  }
+
+  function updatePostRefState(link) {
+    var pid = link && link.getAttribute('data-pid');
+    if (!pid) return;
+    var target = document.getElementById('p' + pid);
+    var missing = !target;
+    link.classList.toggle('missing-post-ref', missing);
+    if (missing) {
+      link.setAttribute('title', 'post not found');
+    } else {
+      link.removeAttribute('title');
+    }
+  }
+
   function highlightPostFromHash(scrollBehavior) {
     var match = window.location.hash.match(/^#p(\d+)$/);
     if (!match) {
+      clearMissingHashNotice();
       clearHighlight();
       return;
     }
     var target = document.getElementById('p' + match[1]);
-    if (!target) return;
+    if (!target) {
+      showMissingHashNotice(match[1]);
+      return;
+    }
+    clearMissingHashNotice();
     highlightPost(match[1]);
     if (scrollBehavior && typeof target.scrollIntoView === 'function') {
       target.scrollIntoView({ behavior: scrollBehavior, block: 'start' });
     }
   }
 
+  function syncQuotedPostState(root) {
+    (root || document)
+      .querySelectorAll('a.quotelink[data-pid], a.backref[data-pid]')
+      .forEach(function (link) {
+        updatePostRefState(link);
+      });
+    highlightPostFromHash();
+  }
+
   document.addEventListener('click', function (e) {
-    if (e.target.classList.contains('quotelink')) return;
-    if (e.target.classList.contains('backref')) return;
+    var link = e.target.closest && e.target.closest('a.quotelink, a.backref');
+    if (link) return;
+    clearMissingHashNotice();
     clearHighlight();
   });
 
@@ -2244,6 +2374,7 @@ function toggleThreadMenu(toggle) {
       if (link.dataset.quotelinkWired === '1') return;
       link.dataset.quotelinkWired = '1';
       var pid = link.getAttribute('data-pid');
+      updatePostRefState(link);
       link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); showPopup(link, pid); });
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
       link.addEventListener('click', function (e) {
@@ -2273,6 +2404,7 @@ function toggleThreadMenu(toggle) {
       if (link.dataset.backrefWired === '1') return;
       link.dataset.backrefWired = '1';
       var pid = link.getAttribute('data-pid');
+      updatePostRefState(link);
       link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); showPopup(link, pid); });
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
       link.addEventListener('click', function (e) {
@@ -2322,6 +2454,7 @@ function toggleThreadMenu(toggle) {
 
   wireQuotelinks(document);
   buildBackrefs();
+  syncQuotedPostState(document);
 
   if (window._qlHooked) return;
   window._qlHooked = true;
@@ -2330,6 +2463,7 @@ function toggleThreadMenu(toggle) {
     if (_origInsert) _origInsert(container);
     wireQuotelinks(container);
     buildBackrefs();
+    syncQuotedPostState(document);
   };
 })();
 
@@ -2428,6 +2562,8 @@ function toggleThreadMenu(toggle) {
         function showCbMissingError() {
           var cbPopup = getCbPopup();
           if (!cbPopup) return;
+          link.classList.add('missing-post-ref');
+          link.setAttribute('title', 'post not found');
           cbPopup.innerHTML =
             '<div class="missing-post-notice">' +
             '<span class="missing-post-icon">&#x2715;</span> ' +
@@ -2501,6 +2637,11 @@ function getPollOptionMaxLength(list) {
   return parseInt(list.dataset.pollOptionMaxlength, 10) || 200;
 }
 
+function getPollOptionMaxCount(list) {
+  if (!list) return 20;
+  return parseInt(list.dataset.pollOptionMaxcount, 10) || 20;
+}
+
 function buildPollOptionRowHtml(count, maxLength) {
   return (
     '<input type="text" class="poll-option-input" name="poll_option" placeholder="Option ' + count + '" maxlength="' + maxLength + '">' +
@@ -2512,7 +2653,7 @@ function addPollOption() {
   var list = document.getElementById('poll-options-list');
   if (!list) return;
   var count = list.querySelectorAll('.poll-option-row').length + 1;
-  if (count > 10) return;
+  if (count > getPollOptionMaxCount(list)) return;
   var row = document.createElement('div');
   row.className = 'poll-option-row';
   row.innerHTML = buildPollOptionRowHtml(count, getPollOptionMaxLength(list));
@@ -2772,8 +2913,24 @@ document.addEventListener('click', function (e) {
       case 'collapse-media':      collapseMedia(t); break;
       case 'fetch-updates':       window.fetchUpdates && window.fetchUpdates(); break;
       case 'open-report':
+        e.preventDefault();
         closeThreadMenus();
-        openReportModal(t.dataset.pid, t.dataset.tid, t.dataset.board, t.dataset.csrf, t.dataset.reportLabel);
+        openReportModal(t.dataset.pid, t.dataset.tid, t.dataset.board, t.dataset.csrf, t.dataset.reportLabel, {
+          action: t.dataset.reportAction,
+          ipHash: t.dataset.reportIpHash,
+          title: t.dataset.reportTitle,
+          submitLabel: t.dataset.reportSubmitLabel,
+          reasonRequired: t.dataset.reportReasonRequired === '1'
+        });
+        break;
+      case 'open-edit-modal':
+        e.preventDefault();
+        closeThreadMenus();
+        openEditModal(t);
+        break;
+      case 'close-edit-modal':
+        e.preventDefault();
+        closeEditModal();
         break;
       case 'open-nsfw-disclaimer':
         e.preventDefault();
@@ -2805,6 +2962,9 @@ document.addEventListener('click', function (e) {
       if (!confirmed) return;
 
       if (confirmEl.tagName === 'A' && confirmEl.href) {
+        if (confirmEl.classList && confirmEl.classList.contains('del-btn') && submitSelfDeleteLink(confirmEl)) {
+          return;
+        }
         window.location.assign(confirmEl.href);
         return;
       }
@@ -2842,11 +3002,6 @@ document.addEventListener('change', function (e) {
   if (target.id === 'catalog-show-comment') {
     setCatalogCommentVisibility(target.value);
   }
-  // Allow-editing checkbox: show/hide edit-window row
-  if (target.name === 'allow_editing') {
-    var row = target.closest('form') && target.closest('form').querySelector('.edit-window-row');
-    if (row) row.style.display = target.checked ? '' : 'none';
-  }
 });
 
 document.addEventListener('submit', function (e) {
@@ -2864,6 +3019,12 @@ document.addEventListener('submit', function (e) {
       return;
     }
     if (submitPostFormWithProgress(form)) {
+      e.preventDefault();
+      return;
+    }
+  }
+  if (form.id === 'edit-modal-form') {
+    if (submitEditModalForm(form)) {
       e.preventDefault();
       return;
     }
@@ -2909,31 +3070,13 @@ document.addEventListener('keydown', function (e) {
       return;
     }
     closeThreadMenus();
+    closeEditModal();
   }
 });
 
-// ─── YouTube / Streamable embed unfurling ────────────────────────────────────
-// FIX[YT-EMBED]: The previous approach placed buildEmbed() inside an inline
-// <script> block in the Rust thread template.  Inline scripts are blocked by
-// the page's CSP (`script-src 'self'` with no `'unsafe-inline'`), so thumbnails
-// and inline playback were completely broken.
-//
-// The fix:
-//   • The Rust template now emits a hidden <div id="thread-config"> element
-//     carrying board-specific values as data-* attributes (embed-enabled,
-//     draft-key).  No inline script is needed.
-//   • buildEmbed() and the draft-autosave logic live here in main.js (loaded
-//     via <script src="…" defer>, which the CSP allows).
-//
-// Supported YouTube URL formats handled by the Rust backend (sanitize.rs):
-//   https://youtube.com/watch?v=VIDEOID
-//   https://www.youtube.com/watch?v=VIDEOID
-//   https://youtu.be/VIDEOID
-//   https://youtube.com/shorts/VIDEOID
-//   Any of the above with extra query params (&t=, &feature=, etc.)
-//
-// Thumbnail source : https://img.youtube.com/vi/VIDEOID/hqdefault.jpg
-// Embed player     : https://www.youtube.com/embed/VIDEOID  (inline, no redirect)
+// YouTube / Streamable embed unfurling.
+// The Rust template emits board-specific values as data-* attributes on
+// #thread-config so the client can build embeds without inline scripts.
 
 (function () {
   var cfg = document.getElementById('thread-config');
@@ -3031,8 +3174,7 @@ document.addEventListener('keydown', function (e) {
 })();
 
 // ─── Draft autosave ───────────────────────────────────────────────────────────
-// FIX[YT-EMBED]: Moved from inline <script> in thread.rs (was CSP-blocked) to
-// here.  The draft key is now read from data-draft-key on #thread-config.
+// The draft key is read from data-draft-key on #thread-config.
 
 (function () {
   var cfg = document.getElementById('thread-config');
@@ -3098,6 +3240,10 @@ document.addEventListener('keydown', function (e) {
 
 // ─── Report modal backdrop click ──────────────────────────────────────────────
 document.addEventListener('click', function (e) {
+  var editModal = document.getElementById('edit-modal');
+  if (editModal && e.target === editModal.querySelector('.edit-modal-backdrop')) {
+    closeEditModal();
+  }
   var modal = document.getElementById('report-modal');
   if (modal && e.target === modal) closeReportModal();
 });
@@ -3121,380 +3267,4 @@ document.addEventListener('click', function (e) {
       window.history.back();
     }
   }, 3000);
-})();
-
-// ─── Admin backup progress bar ────────────────────────────────────────────────
-//
-// Covers two flows:
-//
-//   A) "Save to server" forms — POST via fetch(), modal shows live progress,
-//      "Done — reload" button appears when the fetch resolves.
-//
-//   B) "Download to computer" links — GET triggers a file download.  We show
-//      the modal with live progress while the server builds the zip, then
-//      dismiss it automatically once phase=DONE is reported.  The actual
-//      download still happens natively in the browser (iframe trick).
-//
-// Note: all handlers here are CSP-safe (no inline onclick/onX attributes).
-// The "Done — reload" button uses data-action="close-backup-modal" and is
-// dispatched by the existing global click handler below.
-//
-// Phase codes (mirror middleware::backup_phase in Rust):
-//   0=idle  1=snapshot_db  2=count_files  3=compress  4=save  5=done
-(function () {
-  var _pollTimer = null;
-  var _downloadMode = false;  // true when modal is showing for a download
-
-  var PHASE_LABELS = [
-    'Idle',
-    'Snapshotting database\u2026',
-    'Counting files\u2026',
-    'Compressing files\u2026',
-    'Saving\u2026',
-    'Done!',
-  ];
-
-  function showBackupModal(title) {
-    var modal = document.getElementById('backup-modal');
-    var titleEl = document.getElementById('backup-modal-title');
-    var done = document.getElementById('backup-done-actions');
-    if (!modal) return;
-    if (titleEl) titleEl.textContent = title || '\uD83D\uDCBE Creating Backup\u2026';
-    if (done) done.style.display = 'none';
-    _setBkProgress(0, 'Starting\u2026');
-    modal.style.display = 'flex';
-  }
-
-  function hideBackupModal() {
-    var modal = document.getElementById('backup-modal');
-    if (modal) modal.style.display = 'none';
-  }
-
-  function showDoneButton() {
-    var done = document.getElementById('backup-done-actions');
-    if (done) done.style.display = 'flex';
-  }
-
-  function _setBkProgress(pct, text) {
-    var bar = document.getElementById('backup-progress-bar');
-    var txt = document.getElementById('backup-progress-text');
-    if (bar) bar.style.width = Math.min(100, Math.max(0, pct)) + '%';
-    if (txt) txt.textContent = text;
-  }
-
-  function _startPolling(onDone) {
-    if (_pollTimer) return;
-    _pollTimer = setInterval(function () {
-      fetch('/admin/backup/progress', { credentials: 'same-origin' })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          var phase = data.phase || 0;
-          var label = PHASE_LABELS[phase] || 'Working\u2026';
-          var pct = 0;
-          if (data.files_total > 0) {
-            pct = Math.min(98, Math.round((data.files_done / data.files_total) * 100));
-          } else if (phase === 1) { pct = 5; }
-            else if (phase === 2) { pct = 10; }
-          var detail = data.files_total > 0
-            ? ' (' + data.files_done + '/' + data.files_total + ' files)'
-            : '';
-          _setBkProgress(pct, label + detail);
-
-          // In download mode the fetch resolves as soon as the response headers
-          // arrive (streaming body).  Poll phase instead to know when done.
-          if (_downloadMode && phase === 5) {
-            _stopPolling();
-            _setBkProgress(100, '\u2713 Download ready!');
-            // Auto-dismiss after 1.5 s — the file is already downloading.
-            setTimeout(hideBackupModal, 1500);
-            if (onDone) onDone();
-          }
-        })
-        .catch(function () { /* ignore transient poll errors */ });
-    }, 500);
-  }
-
-  function _stopPolling() {
-    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
-  }
-
-  function _extractRefreshTarget(refreshValue) {
-    if (!refreshValue) return '';
-    var match = refreshValue.match(/url\s*=\s*(.+)$/i);
-    if (!match) return '';
-    return match[1].trim().replace(/^["']|["']$/g, '');
-  }
-
-  function _extractRedirectTargetFromHtml(html) {
-    if (!html) return '';
-
-    var metaMatch = html.match(/<meta[^>]+http-equiv=["']refresh["'][^>]+content=["'][^"']*url=([^"'>]+)["']/i);
-    if (metaMatch && metaMatch[1]) return metaMatch[1].trim();
-
-    var linkMatch = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*>\s*Continue\s*<\/a>/i);
-    if (linkMatch && linkMatch[1]) return linkMatch[1].trim();
-
-    return '';
-  }
-
-  function _resolveRestoreRedirectTarget(xhr, form) {
-    var payload = parseXhrJsonPayload(xhr);
-    var explicitRedirect = xhr.getResponseHeader('X-Rustchan-Redirect') || '';
-    if (explicitRedirect) return explicitRedirect;
-    if (payload && payload.redirect_url) return payload.redirect_url;
-
-    var refreshTarget = _extractRefreshTarget(xhr.getResponseHeader('refresh') || '');
-    var htmlTarget = _extractRedirectTargetFromHtml(xhr.responseText || '');
-    var responseUrl = absoluteUrl(xhr.responseURL || '');
-    var formAction = absoluteUrl(form.action || '');
-    var current = absoluteUrl(window.location.href);
-    var target = absoluteUrl(refreshTarget || htmlTarget || '');
-
-    if (target && target !== current) return target;
-    if (responseUrl && responseUrl !== current && responseUrl !== formAction) return responseUrl;
-    return '';
-  }
-
-  function _createBackupSubmitHelper(form, busyLabel) {
-    return createAsyncSubmitHelper({
-      form: form,
-      busyLabel: busyLabel,
-      labelKey: 'backupOriginalLabel',
-      setProgress: function (percent, message) {
-        _setBkProgress(percent, message);
-      }
-    });
-  }
-
-  function _submitRestoreUploadForm(form, title) {
-    var xhr = null;
-    var submitHelper = _createBackupSubmitHelper(form, 'Uploading…');
-    _downloadMode = false;
-    _stopPolling();
-    showBackupModal(title);
-    submitHelper.setProgress(0, 'Starting upload…');
-    submitHelper.setBusy(true);
-
-    xhr = new XMLHttpRequest();
-    xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
-    xhr.withCredentials = true;
-    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-
-    xhr.upload.addEventListener('progress', function (event) {
-      if (event.lengthComputable && event.total > 0) {
-        var pct = Math.round((event.loaded / event.total) * 100);
-        submitHelper.setProgress(
-          pct,
-          'Uploading restore file… ' +
-          formatBytes(event.loaded) + ' / ' + formatBytes(event.total) +
-          ' (' + pct + '%)'
-        );
-      } else {
-        submitHelper.setProgress(15, 'Uploading restore file…');
-      }
-    });
-
-    xhr.addEventListener('load', function () {
-      submitHelper.setBusy(false);
-      var payload = submitHelper.parsePayload(xhr);
-      if (payload && payload.error) {
-        submitHelper.setProgress(
-          0,
-          submitHelper.extractError(xhr, payload, 'Restore upload failed (' + xhr.status + ')')
-        );
-        showDoneButton();
-        return;
-      }
-      if (xhr.status >= 200 && xhr.status < 400) {
-        submitHelper.setProgress(100, 'Upload complete. Restoring backup…');
-        var redirectTarget = _resolveRestoreRedirectTarget(xhr, form);
-        if (redirectTarget) {
-          window.location.assign(redirectTarget);
-          return;
-        }
-        window.location.reload();
-        return;
-      }
-      submitHelper.setProgress(
-        0,
-        submitHelper.extractError(xhr, payload, 'Restore upload failed (' + xhr.status + ')')
-      );
-      showDoneButton();
-    });
-
-    xhr.addEventListener('error', function () {
-      submitHelper.setBusy(false);
-      submitHelper.setProgress(0, 'Restore upload failed. Please try again.');
-      showDoneButton();
-    });
-
-    xhr.addEventListener('abort', function () {
-      submitHelper.setBusy(false);
-      submitHelper.setProgress(0, 'Restore upload cancelled.');
-      showDoneButton();
-    });
-
-    xhr.send(new FormData(form));
-  }
-
-  // ── Flow A: "Save to server" forms ──────────────────────────────────────────
-
-  function _submitBackupForm(form, title, options) {
-    options = options || {};
-    var submitHelper = _createBackupSubmitHelper(
-      form,
-      options.downloadAfterCreate ? 'Preparing…' : 'Saving…'
-    );
-    _downloadMode = false;
-    showBackupModal(title);
-    _startPolling(null);
-    submitHelper.setBusy(true);
-
-    // URLSearchParams → application/x-www-form-urlencoded, required by Axum's Form<>.
-    var params = new URLSearchParams(new FormData(form));
-    var headers = {};
-    if (options.downloadAfterCreate) {
-      headers['X-Requested-With'] = 'XMLHttpRequest';
-      headers['X-Rustchan-Download-After-Create'] = '1';
-    }
-
-    fetch(form.action, {
-      method: 'POST',
-      body: params,
-      credentials: 'same-origin',
-      headers: headers
-    })
-      .then(function (resp) {
-        _stopPolling();
-        if (!resp.ok && !resp.redirected) {
-          submitHelper.setBusy(false);
-          submitHelper.setProgress(0, 'Server returned an error (' + resp.status + ')');
-          showDoneButton();
-          return null;
-        }
-
-        var contentType = resp.headers.get('content-type') || '';
-        if (contentType.indexOf('application/json') !== -1) {
-          return resp.json();
-        }
-
-        submitHelper.setBusy(false);
-        submitHelper.setProgress(100, '\u2713 Backup saved to server!');
-        showDoneButton();
-        return null;
-      })
-      .then(function (data) {
-        if (!data) return;
-        if (data.download_url) {
-          submitHelper.setBusy(false);
-          submitHelper.setProgress(100, '\u2713 Backup ready! Starting download\u2026');
-          var a = document.createElement('a');
-          a.href = data.download_url;
-          a.download = '';
-          a.style.display = 'none';
-          document.body.appendChild(a);
-          a.click();
-          setTimeout(function () {
-            if (a.parentNode) a.parentNode.removeChild(a);
-            hideBackupModal();
-          }, 1500);
-          return;
-        }
-        submitHelper.setBusy(false);
-        submitHelper.setProgress(100, '\u2713 Backup saved to server!');
-        showDoneButton();
-      })
-      .catch(function (err) {
-        _stopPolling();
-        submitHelper.setBusy(false);
-        submitHelper.setProgress(0, 'Error: ' + (err.message || 'backup failed'));
-        showDoneButton();
-      });
-  }
-
-  // ── Flow B: "Download to computer" links ────────────────────────────────────
-
-  function _triggerDownload(url, label) {
-    _downloadMode = true;
-    showBackupModal('\uD83D\uDCBE Preparing ' + (label || 'backup') + '\u2026');
-    _startPolling(null);
-
-    // Trigger the file download without navigating away.
-    // A hidden <a download>.click() makes a standard GET request and the
-    // browser saves the response as a file — no page navigation occurs.
-    // We cannot use an <iframe> here because the page's CSP frame-src policy
-    // only permits YouTube and Streamable origins, not 'self', so an iframe
-    // pointing at /admin/backup/... would be silently blocked and the GET
-    // would never fire (leaving the progress bar stuck on "Idle").
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = '';
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(function () {
-      if (a.parentNode) a.parentNode.removeChild(a);
-    }, 5000);
-  }
-
-  // ── Wiring ───────────────────────────────────────────────────────────────────
-
-  document.addEventListener('DOMContentLoaded', function () {
-    // Flow A — full-site "save to server"
-    var fullForm = document.getElementById('full-backup-create-form');
-    if (fullForm) {
-      fullForm.addEventListener('submit', function (e) {
-        e.preventDefault();
-        _submitBackupForm(fullForm, '\uD83D\uDCBE Creating Full Backup\u2026');
-      });
-    }
-
-    // Flow A — per-board "save to server"
-    document.querySelectorAll('.board-backup-create-form').forEach(function (form) {
-      form.addEventListener('submit', function (e) {
-        e.preventDefault();
-        var board = form.dataset.board || '';
-        _submitBackupForm(form, '\uD83D\uDCBE Backing up /' + board + '/\u2026');
-      });
-    });
-
-    document.querySelectorAll('.board-backup-download-form').forEach(function (form) {
-      form.addEventListener('submit', function (e) {
-        e.preventDefault();
-        var board = form.dataset.board || '';
-        _submitBackupForm(
-          form,
-          '\uD83D\uDCBE Preparing /' + board + '/ download\u2026',
-          { downloadAfterCreate: true }
-        );
-      });
-    });
-
-    // Flow B — all "download to computer" links
-    document.querySelectorAll('a.backup-download-link').forEach(function (link) {
-      link.addEventListener('click', function (e) {
-        e.preventDefault();
-        var label = link.dataset.backupLabel || 'backup';
-        _triggerDownload(link.href, label);
-      });
-    });
-
-    document.querySelectorAll('form.backup-restore-upload-form').forEach(function (form) {
-      form.addEventListener('submit', function (e) {
-        e.preventDefault();
-        var label = form.dataset.restoreLabel || 'backup';
-        _submitRestoreUploadForm(form, '\u21bb Uploading ' + label + '…');
-      });
-    });
-  });
-
-  // ── "Done — reload" button (CSP-safe, no inline onclick) ────────────────────
-  // Registered here rather than in the global data-action handler so it lives
-  // in the same closure and can call hideBackupModal() + reload.
-  document.addEventListener('click', function (e) {
-    if (e.target.closest('[data-action="close-backup-modal"]')) {
-      hideBackupModal();
-      window.location.reload();
-    }
-  });
 })();

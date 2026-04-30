@@ -1,3 +1,4 @@
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #![allow(clippy::too_many_lines)]
 
 // src/server/server/routes.rs
@@ -19,6 +20,7 @@ fn post_upload_body_limit() -> usize {
     CONFIG
         .max_video_size
         .max(CONFIG.max_audio_size)
+        .max(CONFIG.max_image_size)
         .saturating_add(POST_MULTIPART_HEADROOM_BYTES)
 }
 
@@ -113,6 +115,14 @@ pub(super) fn public_routes() -> Router<AppState> {
         .route(
             "/{board}/post/{id}/edit",
             post(crate::handlers::thread::edit_post_post),
+        )
+        .route(
+            "/{board}/post/{id}/delete",
+            get(crate::handlers::thread::delete_post_get),
+        )
+        .route(
+            "/{board}/post/{id}/delete",
+            post(crate::handlers::thread::delete_own_post),
         )
         .route(
             "/report",
@@ -285,10 +295,27 @@ fn admin_moderation_routes() -> Router<AppState> {
             post(crate::handlers::admin::admin_db_check),
         )
         .route(
+            "/admin/media/settings",
+            post(crate::handlers::admin::update_media_settings),
+        )
+        .route(
             "/admin/db/repair",
-            post(crate::handlers::admin::admin_db_repair),
+            get(crate::handlers::admin::admin_db_repair_status)
+                .post(crate::handlers::admin::admin_db_repair),
+        )
+        .route(
+            "/admin/db/repair/status",
+            get(crate::handlers::admin::admin_db_repair_status),
+        )
+        .route(
+            "/admin/db/repair/progress",
+            get(crate::handlers::admin::admin_db_repair_progress_json),
         )
         .route("/admin/vacuum", post(crate::handlers::admin::admin_vacuum))
+        .route(
+            "/admin/ip/report",
+            post(crate::handlers::admin::admin_ip_report),
+        )
         .route(
             "/admin/ip/{ip_hash}",
             get(crate::handlers::admin::admin_ip_history),
@@ -369,7 +396,7 @@ fn admin_backup_routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::admin_routes;
+    use super::{admin_routes, post_upload_body_limit, POST_MULTIPART_HEADROOM_BYTES};
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -393,12 +420,251 @@ mod tests {
         cursor.into_inner()
     }
 
+    #[test]
+    fn post_upload_body_limit_allows_largest_media_class() {
+        let largest_media_limit = crate::config::CONFIG
+            .max_image_size
+            .max(crate::config::CONFIG.max_video_size)
+            .max(crate::config::CONFIG.max_audio_size);
+
+        assert!(post_upload_body_limit() >= largest_media_limit);
+        assert_eq!(
+            post_upload_body_limit(),
+            largest_media_limit.saturating_add(POST_MULTIPART_HEADROOM_BYTES)
+        );
+    }
+
+    fn install_admin_session(state: &crate::middleware::AppState) {
+        let conn = state.db.get().expect("db connection");
+        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
+        let admin_id =
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+        crate::db::create_session(
+            &conn,
+            "session123",
+            admin_id,
+            chrono::Utc::now().timestamp() + 3600,
+        )
+        .expect("create session");
+    }
+
+    fn admin_signed_csrf() -> String {
+        crate::utils::crypto::make_scoped_csrf_form_token(
+            "csrf123",
+            &crate::config::CONFIG.cookie_secret,
+            "session123",
+        )
+    }
+
+    fn admin_cookie_header() -> &'static str {
+        "csrf_token=csrf123; chan_admin_session=session123"
+    }
+
+    fn board_settings_form_body(
+        board_id: i64,
+        access_mode: &str,
+        access_password: &str,
+        clear_access_password: bool,
+    ) -> String {
+        let mut body = format!(
+            "board_id={board_id}&name=Test&description=&access_mode={access_mode}&access_password={access_password}&_csrf={}",
+            admin_signed_csrf()
+        );
+        if clear_access_password {
+            body.push_str("&clear_access_password=1");
+        }
+        body
+    }
+
+    async fn post_board_settings(
+        state: crate::middleware::AppState,
+        body: String,
+    ) -> axum::response::Response {
+        let app = admin_routes().with_state(state);
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/board/settings")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::HOST, "localhost")
+                .header(header::ORIGIN, "http://localhost")
+                .header(header::COOKIE, admin_cookie_header())
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+    }
+
+    fn create_admin_settings_board(state: &crate::middleware::AppState) -> i64 {
+        install_admin_session(state);
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board")
+    }
+
+    fn board_access_row(state: &crate::middleware::AppState, board_id: i64) -> (String, String) {
+        let conn = state.db.get().expect("db connection");
+        conn.query_row(
+            "SELECT access_mode, access_password_hash FROM boards WHERE id = ?1",
+            rusqlite::params![board_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("board access row")
+    }
+
+    #[tokio::test]
+    async fn board_settings_protected_mode_with_new_password_saves_hash() {
+        let state = crate::test_support::app_state();
+        let board_id = create_admin_settings_board(&state);
+
+        let response = post_board_settings(
+            state.clone(),
+            board_settings_form_body(board_id, "view_password", "swordfish", false),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let (access_mode, password_hash) = board_access_row(&state, board_id);
+        assert_eq!(access_mode, "view_password");
+        assert!(
+            crate::utils::crypto::verify_password("swordfish", &password_hash)
+                .expect("valid board password hash")
+        );
+    }
+
+    #[tokio::test]
+    async fn board_settings_blank_password_keeps_existing_hash() {
+        let state = crate::test_support::app_state();
+        let board_id = create_admin_settings_board(&state);
+        let original_hash =
+            crate::utils::crypto::hash_password("oldpass").expect("hash board password");
+        {
+            let conn = state.db.get().expect("db connection");
+            conn.execute(
+                "UPDATE boards SET access_mode = 'view_password', access_password_hash = ?1 WHERE id = ?2",
+                rusqlite::params![original_hash, board_id],
+            )
+            .expect("seed board access");
+        }
+
+        let response = post_board_settings(
+            state.clone(),
+            board_settings_form_body(board_id, "view_password", "", false),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let (access_mode, password_hash) = board_access_row(&state, board_id);
+        assert_eq!(access_mode, "view_password");
+        assert!(
+            crate::utils::crypto::verify_password("oldpass", &password_hash)
+                .expect("valid board password hash")
+        );
+    }
+
+    #[tokio::test]
+    async fn board_settings_rejects_removing_password_from_protected_mode() {
+        let state = crate::test_support::app_state();
+        let board_id = create_admin_settings_board(&state);
+        let original_hash =
+            crate::utils::crypto::hash_password("oldpass").expect("hash board password");
+        {
+            let conn = state.db.get().expect("db connection");
+            conn.execute(
+                "UPDATE boards SET access_mode = 'view_password', access_password_hash = ?1 WHERE id = ?2",
+                rusqlite::params![original_hash, board_id],
+            )
+            .expect("seed board access");
+        }
+
+        let response = post_board_settings(
+            state.clone(),
+            board_settings_form_body(board_id, "view_password", "", true),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(body.contains("Password-protected boards require a saved password."));
+        let (access_mode, password_hash) = board_access_row(&state, board_id);
+        assert_eq!(access_mode, "view_password");
+        assert!(
+            crate::utils::crypto::verify_password("oldpass", &password_hash)
+                .expect("valid board password hash")
+        );
+    }
+
+    #[tokio::test]
+    async fn board_settings_remove_password_while_public_clears_hash() {
+        let state = crate::test_support::app_state();
+        let board_id = create_admin_settings_board(&state);
+        let original_hash =
+            crate::utils::crypto::hash_password("oldpass").expect("hash board password");
+        {
+            let conn = state.db.get().expect("db connection");
+            conn.execute(
+                "UPDATE boards SET access_password_hash = ?1 WHERE id = ?2",
+                rusqlite::params![original_hash, board_id],
+            )
+            .expect("seed board access");
+        }
+
+        let response = post_board_settings(
+            state.clone(),
+            board_settings_form_body(board_id, "public", "", true),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let (access_mode, password_hash) = board_access_row(&state, board_id);
+        assert_eq!(access_mode, "public");
+        assert!(password_hash.is_empty());
+    }
+
+    #[tokio::test]
+    async fn board_settings_new_password_takes_precedence_over_remove_checkbox() {
+        let state = crate::test_support::app_state();
+        let board_id = create_admin_settings_board(&state);
+        let original_hash =
+            crate::utils::crypto::hash_password("oldpass").expect("hash board password");
+        {
+            let conn = state.db.get().expect("db connection");
+            conn.execute(
+                "UPDATE boards SET access_mode = 'view_password', access_password_hash = ?1 WHERE id = ?2",
+                rusqlite::params![original_hash, board_id],
+            )
+            .expect("seed board access");
+        }
+
+        let response = post_board_settings(
+            state.clone(),
+            board_settings_form_body(board_id, "view_password", "newpass", true),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let (access_mode, password_hash) = board_access_row(&state, board_id);
+        assert_eq!(access_mode, "view_password");
+        assert!(
+            crate::utils::crypto::verify_password("newpass", &password_hash)
+                .expect("valid board password hash")
+        );
+        assert!(
+            !crate::utils::crypto::verify_password("oldpass", &password_hash)
+                .expect("valid board password hash")
+        );
+    }
+
     #[tokio::test]
     async fn board_restore_route_accepts_large_multipart_body_without_global_media_limit() {
         let app = admin_routes().with_state(crate::test_support::app_state());
         let file_bytes = vec![b'a'; 60 * 1024 * 1024];
         let (boundary, body) = crate::test_support::multipart_body(
-            &[("_csrf", "csrf123")],
+            &[("_csrf", &admin_signed_csrf())],
             Some(("backup_file", "board.zip", &file_bytes, "application/zip")),
         );
 
@@ -411,6 +677,9 @@ mod tests {
                         header::CONTENT_TYPE,
                         format!("multipart/form-data; boundary={boundary}"),
                     )
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .extension(crate::test_support::connect_info())
                     .body(Body::from(body))
                     .expect("request"),
             )
@@ -472,7 +741,7 @@ mod tests {
         let app = admin_routes().with_state(state);
         let zip_bytes = board_backup_zip_bytes();
         let (boundary, body) = crate::test_support::multipart_body(
-            &[("_csrf", "csrf123")],
+            &[("_csrf", &admin_signed_csrf())],
             Some(("backup_file", "board.zip", &zip_bytes, "application/zip")),
         );
 
@@ -486,10 +755,8 @@ mod tests {
                         format!("multipart/form-data; boundary={boundary}"),
                     )
                     .header(header::HOST, "localhost")
-                    .header(
-                        header::COOKIE,
-                        "csrf_token=csrf123; chan_admin_session=session123",
-                    )
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(header::COOKIE, admin_cookie_header())
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(body))
                     .expect("request"),
@@ -504,6 +771,8 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .expect("refresh header");
         assert!(refresh.contains("/admin/panel?restore_error="));
+        assert!(refresh.contains("open=full-backup-restore"));
+        assert!(refresh.contains("#full-backup-restore"));
         assert!(refresh.contains("board+backup"));
 
         let body = to_bytes(response.into_body(), usize::MAX)
@@ -512,5 +781,122 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).expect("utf8 body");
         assert!(body.contains("Restore failed."));
         assert!(body.contains("/admin/panel?restore_error="));
+        assert!(body.contains("open=full-backup-restore"));
+        assert!(body.contains("#full-backup-restore"));
+    }
+
+    #[tokio::test]
+    async fn saved_full_restore_missing_backup_redirects_back_to_full_backup_section() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let app = admin_routes().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/backup/restore-saved")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(header::COOKIE, admin_cookie_header())
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "filename=missing.zip&_csrf={}",
+                        admin_signed_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect location");
+        assert!(location.contains("/admin/panel?restore_error="));
+        assert!(location.contains("Backup+file+not+found."));
+        assert!(location.contains("open=full-backup-restore"));
+        assert!(location.contains("#full-backup-restore"));
+    }
+
+    #[tokio::test]
+    async fn saved_board_restore_missing_backup_redirects_back_to_board_backup_section() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let app = admin_routes().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/board/backup/restore-saved")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(header::COOKIE, admin_cookie_header())
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "filename=missing.zip&_csrf={}",
+                        admin_signed_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect location");
+        assert!(location.contains("/admin/panel?restore_error="));
+        assert!(location.contains("Backup+file+not+found."));
+        assert!(location.contains("open=board-backup-restore"));
+        assert!(location.contains("#board-backup-restore"));
+    }
+
+    #[tokio::test]
+    async fn board_restore_invalid_upload_redirects_back_to_board_backup_section() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let app = admin_routes().with_state(state);
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", &admin_signed_csrf())],
+            Some(("backup_file", "broken.zip", b"not-a-zip", "application/zip")),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/board/restore")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(header::COOKIE, admin_cookie_header())
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let refresh = response
+            .headers()
+            .get("refresh")
+            .and_then(|value| value.to_str().ok())
+            .expect("refresh header");
+        assert!(refresh.contains("/admin/panel?restore_error="));
+        assert!(refresh.contains("open=board-backup-restore"));
+        assert!(refresh.contains("#board-backup-restore"));
+        assert!(refresh.contains("Unrecognized+format"));
     }
 }

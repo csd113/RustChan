@@ -238,7 +238,7 @@ pub fn start(
 /// are accurate across calls. Runs on the calling thread — use
 /// `tokio::task::block_in_place` at the call site when inside an async context.
 #[allow(clippy::cast_precision_loss)]
-#[allow(clippy::arithmetic_side_effects)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_stats(
     pool: &crate::db::DbPool,
@@ -342,7 +342,7 @@ fn walkdir_size(path: &std::path::Path) -> u64 {
             if e.file_type().is_ok_and(|ft| ft.is_dir()) {
                 walkdir_size(&e.path())
             } else {
-                e.metadata().map(|m| m.len()).unwrap_or(0)
+                e.metadata().map_or(0, |m| m.len())
             }
         })
         .sum()

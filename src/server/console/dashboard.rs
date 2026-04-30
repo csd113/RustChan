@@ -1,3 +1,4 @@
+// The string-pattern check here is intentional; the lint would only add noise to this console test.
 #![allow(clippy::single_char_pattern)]
 
 // server/console/dashboard.rs — Pure render functions for each ConsoleMode.
@@ -119,7 +120,7 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
     writeln!(out, " {}", bold("Status")).ok();
 
     // Local server
-    let local_status = format!("{}  ({})", green("RUNNING"), dim(&CONFIG.bind_addr),);
+    let local_status = format!("{}  ({})", green("RUNNING"), dim(&CONFIG.bind_addr));
     row(&mut out, "Local Server", &local_status);
 
     // HTTPS
@@ -324,9 +325,7 @@ pub fn render_log_view() -> String {
 }
 
 fn log_body_height() -> usize {
-    crossterm::terminal::size()
-        .map(|(_, rows)| usize::from(rows.saturating_sub(8)).max(6))
-        .unwrap_or(24)
+    crossterm::terminal::size().map_or(24, |(_, rows)| usize::from(rows.saturating_sub(8)).max(6))
 }
 
 fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {

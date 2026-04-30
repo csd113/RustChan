@@ -6,14 +6,181 @@
 //   render_poll  — poll widget (private, embedded in thread_page)
 
 use crate::models::{Board, Post, Thread};
-use crate::utils::{files::format_file_size, sanitize::escape_html};
+use crate::utils::{
+    files::format_file_size, redirect::encode_query_component, sanitize::escape_html,
+};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use super::{
     base_layout, compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script,
     thread_autoupdate_script, TOGGLE_SCRIPT,
 };
+
+const SELF_ACTION_WINDOW_SECS: i64 = 60;
+const SELF_ACTION_WINDOW_HINT: &str = "available for up to 60 seconds after posting";
+
+#[derive(Debug, Clone)]
+pub struct OwnedPostControls {
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditOverlayState {
+    pub post_id: i64,
+    pub body: String,
+    pub error: Option<String>,
+}
+
+fn render_self_action_window_hint(expires_at: i64) -> String {
+    format!(
+        r#"<span class="self-action-window-note self-delete-countdown" data-role="self-action-countdown" aria-live="polite" data-action-expiry="{expires_at}">{SELF_ACTION_WINDOW_HINT}</span>"#
+    )
+}
+
+fn render_post_preview(
+    post: &Post,
+    board_short: &str,
+    csrf_token: &str,
+    thread_op_id: Option<i64>,
+) -> String {
+    render_post(
+        post,
+        board_short,
+        csrf_token,
+        RenderPostOpts {
+            show_delete: false,
+            is_admin: false,
+            show_media: true,
+            allow_editing: false,
+            allow_self_delete: false,
+            owned_post_controls: None,
+            show_poster_ids: false,
+            collapse_greentext: true,
+            thread_state: None,
+            thread_op_id,
+        },
+        SELF_ACTION_WINDOW_SECS,
+    )
+}
+
+#[must_use]
+pub fn edit_post_page(
+    board: &Board,
+    thread: &Thread,
+    post: &Post,
+    csrf_token: &str,
+    boards: &[Board],
+    current_theme: Option<&str>,
+    error: Option<&str>,
+) -> String {
+    let mut body = String::new();
+    if let Some(msg) = error {
+        let _ = write!(
+            body,
+            r#"<div class="post-error-banner">&#9888; {}</div>"#,
+            escape_html(msg)
+        );
+    }
+
+    let _ = write!(
+        body,
+        r#"<div class="page-box self-action-page">
+<div class="board-thread-header">/{board}/ — edit post No.{pid}</div>
+<p class="self-action-page-note">{hint}</p>
+<p><a href="/{board}/thread/{tid}#p{pid}">back to the thread</a></p>
+<div class="self-action-preview">
+{preview}
+</div>
+<form class="post-form self-action-form" method="POST" action="/{board}/post/{pid}/edit">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <table>
+    <tr><td>body</td>
+        <td><textarea name="body" rows="8" maxlength="4096" required>{body_text}</textarea></td></tr>
+    <tr><td></td>
+        <td><button type="submit">save edit</button>
+            <a class="edit-btn" href="/{board}/thread/{tid}#p{pid}">cancel</a></td></tr>
+  </table>
+</form>
+</div>"#,
+        board = escape_html(&board.short_name),
+        pid = post.id,
+        tid = thread.id,
+        hint = SELF_ACTION_WINDOW_HINT,
+        preview = render_post_preview(post, &board.short_name, csrf_token, thread.op_id),
+        csrf = escape_html(csrf_token),
+        body_text = escape_html(&post.body),
+    );
+
+    base_layout(
+        &format!("/{}/edit post No.{}", board.short_name, post.id),
+        Some(&board.short_name),
+        &body,
+        csrf_token,
+        boards,
+        current_theme,
+        Some(&board.default_theme),
+        board.collapse_greentext,
+        &format!("/{}/post/{}/edit", board.short_name, post.id),
+    )
+}
+
+#[must_use]
+pub fn delete_post_page(
+    board: &Board,
+    thread: &Thread,
+    post: &Post,
+    csrf_token: &str,
+    boards: &[Board],
+    current_theme: Option<&str>,
+    error: Option<&str>,
+) -> String {
+    let mut body = String::new();
+    if let Some(msg) = error {
+        let _ = write!(
+            body,
+            r#"<div class="post-error-banner">&#9888; {}</div>"#,
+            escape_html(msg)
+        );
+    }
+
+    let _ = write!(
+        body,
+        r#"<div class="page-box self-action-page">
+<div class="board-thread-header">/{board}/ — delete post No.{pid}</div>
+<p class="self-action-page-note">{hint}</p>
+<p><a href="/{board}/thread/{tid}#p{pid}">back to the thread</a></p>
+<div class="self-action-preview">
+{preview}
+</div>
+<form class="post-form self-action-form" method="POST" action="/{board}/post/{pid}/delete">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <p class="self-action-confirm">delete this post permanently?</p>
+  <button type="submit" class="del-btn">delete post</button>
+  <a class="edit-btn" href="/{board}/thread/{tid}#p{pid}">cancel</a>
+</form>
+</div>"#,
+        board = escape_html(&board.short_name),
+        pid = post.id,
+        tid = thread.id,
+        hint = SELF_ACTION_WINDOW_HINT,
+        preview = render_post_preview(post, &board.short_name, csrf_token, thread.op_id),
+        csrf = escape_html(csrf_token),
+    );
+
+    base_layout(
+        &format!("/{}/delete post No.{}", board.short_name, post.id),
+        Some(&board.short_name),
+        &body,
+        csrf_token,
+        boards,
+        current_theme,
+        Some(&board.default_theme),
+        board.collapse_greentext,
+        &format!("/{}/post/{}/delete", board.short_name, post.id),
+    )
+}
 
 fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String {
     let jump_link = if is_bottom { "#top" } else { "#bottom" };
@@ -97,12 +264,15 @@ pub fn render_archive_state_badges(sticky: bool) -> String {
 // ─── Thread page ──────────────────────────────────────────────────────────────
 
 #[must_use]
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
+// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn thread_page(
     board: &Board,
     thread: &Thread,
     posts: &[Post],
+    owned_post_controls: &BTreeMap<i64, OwnedPostControls>,
     csrf_token: &str,
     boards: &[Board],
     is_admin: bool,
@@ -110,6 +280,7 @@ pub fn thread_page(
     error: Option<&str>,
     success: Option<&str>,
     reply_prefill: Option<&super::forms::PostFormState>,
+    edit_overlay_state: Option<&EditOverlayState>,
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
@@ -248,16 +419,26 @@ pub fn thread_page(
                 is_admin,
                 show_media: true,
                 allow_editing: board.allow_editing,
+                allow_self_delete: board.allow_self_delete,
+                owned_post_controls: owned_post_controls.get(&post.id).cloned(),
                 show_poster_ids: board.show_poster_ids,
                 collapse_greentext: board.collapse_greentext,
                 thread_state: Some((thread.sticky, thread.locked, thread.archived)),
                 thread_op_id: thread.op_id,
             },
-            board.edit_window_secs,
+            SELF_ACTION_WINDOW_SECS,
         ));
     }
 
     body.push_str("</div><!-- #thread-posts -->\n");
+    body.push_str(&render_edit_overlay(
+        board,
+        thread.id,
+        csrf_token,
+        posts,
+        owned_post_controls,
+        edit_overlay_state,
+    ));
 
     if !thread.locked && !thread.archived && can_post {
         let form_html = super::forms::reply_form(
@@ -287,7 +468,8 @@ pub fn thread_page(
                 "display:none"
             },
         );
-    } else if !thread.locked && !thread.archived && board.access_mode.requires_post_password() {
+    } else if !thread.locked && !thread.archived && board.access_mode.requires_unlock_for_posting()
+    {
         body.push_str(&super::board::render_post_access_gate(
             board,
             csrf_token,
@@ -300,18 +482,11 @@ pub fn thread_page(
 
     body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
-        crate::config::CONFIG.max_image_size,
-        crate::config::CONFIG.max_video_size,
+        board.max_image_size_bytes(),
+        board.max_video_size_bytes(),
     ));
     body.push_str(report_modal_script());
     body.push_str(thread_autoupdate_script());
-
-    // Quotelink script moved to /static/main.js
-
-    // ── Inline ban+delete prompt ───────────────────────────────────────────
-    if is_admin {
-        // adminBanDelete moved to /static/main.js
-    }
 
     // The previous approach used inline <script> blocks to inject
     // board-specific values (EMBED_ENABLED, DRAFT_KEY) at render time.  Inline
@@ -403,6 +578,7 @@ fn render_poll(
         let total = pd.total_votes.max(1);
         html.push_str(r#"<div class="poll-results">"#);
         for opt in &pd.options {
+            // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
             #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
             let pct = (opt.vote_count as f64 / total as f64 * 100.0).round() as i64;
             let is_voted = pd.user_voted_option == Some(opt.id);
@@ -463,12 +639,14 @@ fn render_poll(
 
 /// Options that control which controls are rendered for a post.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct RenderPostOpts {
     pub show_delete: bool,
     pub is_admin: bool,
     pub show_media: bool,
     pub allow_editing: bool,
+    pub allow_self_delete: bool,
+    pub owned_post_controls: Option<OwnedPostControls>,
     pub show_poster_ids: bool,
     pub collapse_greentext: bool,
     pub thread_state: Option<(bool, bool, bool)>,
@@ -560,6 +738,26 @@ fn annotate_op_quotelinks(body_html: &str, thread_op_id: Option<i64>) -> String 
 const FILE_NAME_STEM_PREFIX_DISPLAY_CHARS: usize = 20;
 const FILE_NAME_TRUNCATION_MARKER: &str = "(...)";
 
+fn render_media_thumb(
+    img_class: &str,
+    fallback_class: &str,
+    src: &str,
+    alt: &str,
+    loading: &str,
+    fallback_text: &str,
+) -> String {
+    format!(
+        r#"<img class="{img_class}" src="/boards/{src}" loading="{loading}" alt="{alt}" data-media-thumb="1">
+<div class="{fallback_class} media-thumb-fallback" hidden>{fallback_text}</div>"#,
+        img_class = escape_html(img_class),
+        fallback_class = escape_html(fallback_class),
+        src = escape_html(src),
+        loading = escape_html(loading),
+        alt = escape_html(alt),
+        fallback_text = escape_html(fallback_text),
+    )
+}
+
 fn truncate_file_name_stem(input: &str) -> String {
     if input.chars().count() <= FILE_NAME_STEM_PREFIX_DISPLAY_CHARS {
         return input.to_string();
@@ -596,6 +794,19 @@ fn render_file_link(file_path: &str, file_name: &str) -> String {
     )
 }
 
+fn effective_media_type(post: &Post) -> crate::models::MediaType {
+    if let Some(mime_media) = post
+        .mime_type
+        .as_deref()
+        .map(crate::models::MediaType::from_mime)
+        .filter(|media| *media != crate::models::MediaType::Other)
+    {
+        return mime_media;
+    }
+
+    post.media_type.unwrap_or(crate::models::MediaType::Other)
+}
+
 /// Render a single post as HTML.
 /// `pub` because board.rs uses this for thread-summary preview posts and
 /// search results; all other call-sites are within this module.
@@ -612,13 +823,15 @@ pub fn render_post(
     board_short: &str,
     csrf_token: &str,
     opts: RenderPostOpts,
-    edit_window_secs: i64,
+    _edit_window_secs: i64,
 ) -> String {
     let RenderPostOpts {
         show_delete,
         is_admin,
         show_media,
         allow_editing,
+        allow_self_delete,
+        owned_post_controls,
         show_poster_ids,
         collapse_greentext,
         thread_state,
@@ -638,19 +851,6 @@ pub fn render_post(
         .tripcode
         .as_ref()
         .map(|t| format!(r#"<span class="tripcode">!{}</span>"#, escape_html(t)))
-        .unwrap_or_default();
-
-    // "edited" badge — shown when the post body was modified after creation.
-    let edited_html = post
-        .edited_at
-        .map(|ts| {
-            format!(
-                r#" <span class="post-edited" data-utc="{utc}" title="last edited {full}">(edited {short})</span>"#,
-                utc = ts,
-                full = fmt_ts(ts),
-                short = fmt_ts_short(ts),
-            )
-        })
         .unwrap_or_default();
 
     let op_class = if post.is_op { " op" } else { " reply" };
@@ -702,7 +902,7 @@ pub fn render_post(
         r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}{media_processing_state_attr}>
 <div class="post-meta">
 {subject_html}<strong class="name">{name}</strong>{tripcode}{poster_id_html}
-<span class="post-time" data-utc="{ts}">{time}</span>{edited}
+<span class="post-time" data-utc="{ts}">{time}</span>
 <a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>{post_state_badges}{media_processing_badge}
 <span class="backrefs" id="backrefs-{id}"></span>
 </div>"##,
@@ -717,10 +917,11 @@ pub fn render_post(
         poster_id_html = poster_id_html,
         ts = post.created_at,
         time = fmt_ts_short(post.created_at),
-        edited = edited_html,
         post_state_badges = post_state_badges,
         media_processing_badge = media_processing_badge,
     );
+
+    let primary_media_type = effective_media_type(post);
 
     // Image / Video / Audio
     if show_media {
@@ -732,19 +933,11 @@ pub fn render_post(
                 .mime_type
                 .as_deref()
                 .unwrap_or("application/octet-stream");
-            let is_audio = matches!(&post.media_type, Some(crate::models::MediaType::Audio))
-                || post
-                    .mime_type
-                    .as_deref()
-                    .is_some_and(|m| m.starts_with("audio/"));
-            let is_video = !is_audio
-                && (matches!(&post.media_type, Some(crate::models::MediaType::Video))
-                    || post
-                        .mime_type
-                        .as_deref()
-                        .is_some_and(|m| m.starts_with("video/")));
+            let is_audio = matches!(primary_media_type, crate::models::MediaType::Audio);
+            let is_video = matches!(primary_media_type, crate::models::MediaType::Video);
+            let is_pdf = matches!(primary_media_type, crate::models::MediaType::Pdf);
 
-            let combo_audio = if !is_audio && !is_video {
+            let combo_audio = if matches!(primary_media_type, crate::models::MediaType::Image) {
                 match (&post.audio_file_path, &post.audio_mime_type) {
                     (Some(aud_file), Some(aud_mime)) => Some((
                         aud_file.as_str(),
@@ -768,7 +961,7 @@ pub fn render_post(
   File: {file_link} ({sz})
 </div>
 <div class="audio-thumb">
-  <img class="thumb" src="/boards/{th}" loading="eager" alt="audio">
+  {thumb_html}
 </div>
 <audio controls preload="none" class="audio-player" data-audio-title="{orig}">
   <source src="/boards/{f}" type="{mime}">
@@ -777,7 +970,14 @@ pub fn render_post(
 </div>"#,
                     file_link = file_link,
                     f = escape_html(file),
-                    th = escape_html(thumb),
+                    thumb_html = render_media_thumb(
+                        "thumb",
+                        "thumb",
+                        thumb,
+                        "audio",
+                        "eager",
+                        "preview unavailable",
+                    ),
                     orig = escape_html(name_str),
                     sz = escape_html(&size_str),
                     mime = escape_html(mime)
@@ -791,7 +991,7 @@ pub fn render_post(
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
 <a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to play">
-  <img class="thumb" src="/boards/{th}" loading="eager" alt="video thumbnail">
+  {thumb_html}
   <div class="media-expand-overlay">&#9654;</div>
 </a>
 <video class="media-expanded media-expanded-video" controls preload="none" playsinline webkit-playsinline style="display:none">
@@ -800,9 +1000,43 @@ pub fn render_post(
 </div>"#,
                     file_link = file_link,
                     f = escape_html(file),
-                    th = escape_html(thumb),
+                    thumb_html = render_media_thumb(
+                        "thumb",
+                        "thumb",
+                        thumb,
+                        "video thumbnail",
+                        "eager",
+                        "preview unavailable",
+                    ),
                     sz = escape_html(&size_str),
                     mime = escape_html(mime)
+                );
+            } else if is_pdf {
+                let _ = write!(
+                    html,
+                    r#"<div class="file-container pdf-container">
+<div class="file-info">
+  File: {file_link} ({sz})
+  <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
+</div>
+<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
+  {thumb_html}
+  <div class="media-expand-overlay">&#x2922;</div>
+</a>
+<iframe class="media-expanded media-expanded-pdf" src="about:blank" data-src="/boards/{f}" title="{orig}" style="display:none"></iframe>
+</div>"#,
+                    file_link = file_link,
+                    f = escape_html(file),
+                    thumb_html = render_media_thumb(
+                        "thumb",
+                        "thumb",
+                        thumb,
+                        "pdf preview",
+                        "eager",
+                        "Open PDF",
+                    ),
+                    sz = escape_html(&size_str),
+                    orig = escape_html(name_str)
                 );
             } else {
                 // Image
@@ -817,7 +1051,7 @@ pub fn render_post(
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
 <a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
-  <img class="thumb" src="/boards/{th}" loading="eager" alt="image">
+  {thumb_html}
   <div class="media-expand-overlay">&#x2922;</div>
 </a>
 <img class="media-expanded media-expanded-image" src="" data-src="/boards/{f}" style="display:none"
@@ -831,7 +1065,14 @@ pub fn render_post(
                     },
                     file_link = file_link,
                     f = escape_html(file),
-                    th = escape_html(thumb),
+                    thumb_html = render_media_thumb(
+                        "thumb",
+                        "thumb",
+                        thumb,
+                        "image",
+                        "eager",
+                        "preview unavailable",
+                    ),
                     sz = escape_html(&size_str),
                     audio_combo_html = combo_audio.map_or_else(
                         String::new,
@@ -900,8 +1141,8 @@ pub fn render_post(
         }
     }
 
-    // Secondary audio for image+audio combo posts
-    if show_media && !matches!(&post.media_type, Some(crate::models::MediaType::Image)) {
+    // Secondary audio fallback for legacy rows that store a separate audio attachment.
+    if show_media && !matches!(primary_media_type, crate::models::MediaType::Image) {
         if let (Some(aud_file), Some(aud_mime)) = (&post.audio_file_path, &post.audio_mime_type) {
             let aud_name = post.audio_file_name.as_deref().unwrap_or("audio");
             let aud_size = post
@@ -938,21 +1179,44 @@ pub fn render_post(
     // Edit link + report button (only on thread pages where show_delete=true)
     if show_delete {
         let now = chrono::Utc::now().timestamp();
-        // edit_window_secs = 0 means no time restriction (always
-        // editable while allow_editing is true — matches the handler-layer fix).
-        // The previous guard had `> 0 && …` which suppressed the edit link
-        // entirely when the board used the no-limit setting.
-        let within_edit_window = edit_window_secs == 0
-            || (edit_window_secs > 0 && now.saturating_sub(post.created_at) <= edit_window_secs);
-        let edit_link = if allow_editing && within_edit_window {
-            format!(
-                r#" <a class="edit-btn" href="/{board}/post/{pid}/edit" title="Edit post">edit</a>"#,
-                board = escape_html(board_short),
-                pid = post.id,
-            )
-        } else {
-            String::new()
-        };
+        let self_action_controls = owned_post_controls
+            .as_ref()
+            .filter(|controls| controls.expires_at > now)
+            .map_or_else(String::new, |controls| {
+                let edit_button = if allow_editing {
+                    format!(
+                        r#"<a class="edit-btn" href="/{board}/post/{pid}/edit" data-action="open-edit-modal" data-edit-post-id="{pid}" data-edit-expiry="{expires_at}" title="Edit post" aria-haspopup="dialog">edit</a>
+<textarea id="edit-body-{pid}" data-role="edit-body-source" hidden>{body}</textarea>"#,
+                        board = escape_html(board_short),
+                        pid = post.id,
+                        expires_at = controls.expires_at,
+                        body = escape_html(&post.body),
+                    )
+                } else {
+                    String::new()
+                };
+                let delete_button = if allow_self_delete {
+                    format!(
+                        r#"<a class="del-btn" href="/{board}/post/{pid}/delete" data-confirm="Delete your post No.{pid}?" data-delete-csrf="{csrf}">delete</a>"#,
+                        board = escape_html(board_short),
+                        pid = post.id,
+                        csrf = escape_html(csrf_token),
+                    )
+                } else {
+                    String::new()
+                };
+                if edit_button.is_empty() && delete_button.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        r#" <span class="self-action-controls" data-action-expiry="{expires_at}">{edit_button}{delete_button}{window_hint}</span>"#,
+                        expires_at = controls.expires_at,
+                        edit_button = edit_button,
+                        delete_button = delete_button,
+                        window_hint = render_self_action_window_hint(controls.expires_at),
+                    )
+                }
+            });
 
         let report_btn = format!(
             r#" <button type="button" class="report-btn"
@@ -965,13 +1229,14 @@ pub fn render_post(
 
         let _ = write!(
             html,
-            r#"<div class="post-controls">{edit_link}{report_btn}</div>"#
+            r#"<div class="post-controls">{self_action_controls}{report_btn}</div>"#
         );
     }
 
-    // Admin delete button + IP history link
+    // Admin delete button + IP history/report links
     if is_admin {
         let is_op_val = if post.is_op { "1" } else { "0" };
+        let return_to = format!("/{}/thread/{}", board_short, post.thread_id);
         let _ = write!(
             html,
             r#"<div class="post-controls admin-post-controls">
@@ -994,13 +1259,14 @@ pub fn render_post(
 <input type="hidden" name="duration_hours" id="ban-dur-{pid}" value="0">
 <button type="submit" class="admin-del-btn btn-danger">&#x26D4; ban+del</button>
 </form>
-<a class="admin-ip-link" href="/admin/ip/{ip_hash}" title="View all posts from this IP hash">&#x1F50D; ip</a>
+<a class="admin-ip-link" href="/admin/ip/{ip_hash}?return_to={return_to}" title="View all posts from this hashed IP">&#x1F50D; ip</a>
 </div>"#,
             csrf = escape_html(csrf_token),
             pid = post.id,
             board = escape_html(board_short),
             ip_hash = escape_html(post.ip_hash.as_deref().unwrap_or("")),
             tid = post.thread_id,
+            return_to = encode_query_component(&return_to),
             is_op = is_op_val
         );
     }
@@ -1009,85 +1275,98 @@ pub fn render_post(
     html
 }
 
-// ─── Edit post page ───────────────────────────────────────────────────────────
-
-#[must_use]
-#[allow(clippy::too_many_arguments)]
-pub fn edit_post_page(
+fn render_edit_overlay(
     board: &Board,
-    post: &Post,
+    thread_id: i64,
     csrf_token: &str,
-    boards: &[Board],
-    prefill_token: &str,
-    prefill_body: Option<&str>,
-    error: Option<&str>,
-    current_theme: Option<&str>,
-    collapse_greentext: bool,
+    posts: &[Post],
+    owned_post_controls: &BTreeMap<i64, OwnedPostControls>,
+    edit_overlay_state: Option<&EditOverlayState>,
 ) -> String {
-    let error_html = error
-        .map(|msg| {
-            format!(
-                r#"<div class="post-error-banner">&#9888; {}</div>"#,
-                escape_html(msg)
+    let (post_id, current_body, error_html, modal_class) = edit_overlay_state.map_or_else(
+        || {
+            (
+                0,
+                "",
+                String::from(
+                    r#"<div class="post-error-banner edit-modal-error" data-role="edit-modal-error" hidden></div>"#,
+                ),
+                "edit-modal",
             )
-        })
-        .unwrap_or_default();
-    let current_body = prefill_body.unwrap_or(&post.body);
+        },
+        |state| {
+            (
+            state.post_id,
+            state.body.as_str(),
+            state
+                .error
+                .as_deref()
+                .map(|msg| {
+                    format!(
+                        r#"<div class="post-error-banner edit-modal-error" data-role="edit-modal-error">&#9888; {}</div>"#,
+                        escape_html(msg)
+                    )
+                })
+                .unwrap_or_default(),
+            "edit-modal is-open",
+            )
+        },
+    );
+    let can_edit_any = posts.iter().any(|post| {
+        owned_post_controls.contains_key(&post.id)
+            && chrono::Utc::now()
+                .timestamp()
+                .saturating_sub(post.created_at)
+                <= SELF_ACTION_WINDOW_SECS
+    });
+    let aria_hidden = if edit_overlay_state.is_some() {
+        "false"
+    } else {
+        "true"
+    };
+    let hidden_attr = if can_edit_any || edit_overlay_state.is_some() {
+        ""
+    } else {
+        " hidden"
+    };
 
-    let body = format!(
-        r#"{error_html}
-<div class="board-header">
-  <a href="/{board}/thread/{tid}#p{pid}">[ return to thread ]</a>
-</div>
-<div class="page-box">
-<div class="post-form-container">
-<div class="post-form-title">[ edit post No.{pid} ]</div>
-<p style="font-size:0.8rem;color:var(--text-dim)">
-  You can edit this post within the board's edit window.<br>
-  Your edit token is required to confirm the edit.
-</p>
-<form class="post-form" method="POST" action="/{board}/post/{pid}/edit">
-  <input type="hidden" name="_csrf" value="{csrf}">
-  <table>
-    <tr><td>body</td>
-        <td><textarea name="body" rows="6" maxlength="4096">{current_body}</textarea></td></tr>
-    <tr><td>edit token</td>
-        <td><input type="text" name="deletion_token" value="{token}" placeholder="your edit token" maxlength="64"></td></tr>
-    <tr><td></td>
-        <td><button type="submit">save edit</button>
-            <a href="/{board}/thread/{tid}#p{pid}" style="margin-left:1rem">cancel</a></td></tr>
-  </table>
-</form>
-</div>
+    format!(
+        r#"<div id="edit-modal" class="{modal_class}" data-thread-id="{thread_id}" data-board="{board}" aria-hidden="{aria_hidden}"{hidden_attr}>
+  <div class="edit-modal-backdrop" data-action="close-edit-modal"></div>
+  <div class="edit-modal-box" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title">
+    <div class="post-form-title" id="edit-modal-title">[ edit your post <span class="self-delete-countdown" data-role="edit-modal-countdown" aria-live="polite"></span> ]</div>
+    {error_html}
+    <form id="edit-modal-form" class="post-form" method="POST" action="/{board}/post/{post_id}/edit">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <input type="hidden" name="thread_id" value="{thread_id}">
+      <table>
+        <tr><td>body</td>
+            <td><textarea id="edit-modal-body" name="body" rows="6" maxlength="4096">{current_body}</textarea></td></tr>
+        <tr><td></td>
+            <td><button type="submit">save edit</button>
+                <button type="button" class="edit-btn" data-action="close-edit-modal" style="margin-left:1rem">cancel</button></td></tr>
+      </table>
+    </form>
+  </div>
 </div>"#,
-        error_html = error_html,
+        modal_class = modal_class,
+        thread_id = thread_id,
         board = escape_html(&board.short_name),
-        tid = post.thread_id,
-        pid = post.id,
+        aria_hidden = aria_hidden,
+        hidden_attr = hidden_attr,
+        error_html = error_html,
+        post_id = post_id,
         csrf = escape_html(csrf_token),
         current_body = escape_html(current_body),
-        token = escape_html(prefill_token),
-    );
-
-    base_layout(
-        &format!("edit post No.{} — /{}/", post.id, board.short_name),
-        Some(&board.short_name),
-        &body,
-        csrf_token,
-        boards,
-        current_theme,
-        Some(&board.default_theme),
-        collapse_greentext,
-        &format!(
-            "/{}/thread/{}#p{}",
-            board.short_name, post.thread_id, post.id
-        ),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{display_file_name, edit_post_page, render_post, thread_page, RenderPostOpts};
+    use super::{
+        delete_post_page, display_file_name, edit_post_page, render_post, thread_page,
+        EditOverlayState, OwnedPostControls, RenderPostOpts,
+    };
     use crate::models::{BoardAccessMode, MediaType, Post, Thread};
 
     fn sample_post() -> Post {
@@ -1154,9 +1433,11 @@ mod tests {
             &board,
             &thread,
             &posts,
+            &std::collections::BTreeMap::new(),
             "csrf",
             std::slice::from_ref(&board),
             false,
+            None,
             None,
             None,
             None,
@@ -1190,9 +1471,11 @@ mod tests {
             &board,
             &thread,
             &posts,
+            &std::collections::BTreeMap::new(),
             "csrf",
             std::slice::from_ref(&board),
             false,
+            None,
             None,
             None,
             None,
@@ -1205,6 +1488,9 @@ mod tests {
         assert!(html.contains(r#"href="/test">[ Return ]</a>"#));
         assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
         assert!(html.contains(r#"id="board-access-gate""#));
+        assert!(html.contains(
+            r#"name="password" maxlength="256" autocomplete="current-password" required"#
+        ));
     }
 
     #[test]
@@ -1224,6 +1510,8 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
                 thread_state: None,
@@ -1236,6 +1524,45 @@ mod tests {
         assert!(html.contains(r#"Audio: <a href="/boards/test/song.flac""#));
         assert!(html.contains(r#"data-artwork-src="/boards/test/thumbs/image.webp""#));
         assert!(!html.contains("file-container audio-container audio-combo"));
+    }
+
+    #[test]
+    fn contradictory_image_mime_prefers_combo_render_over_standalone_audio_boxes() {
+        let mut post = sample_post();
+        post.file_path = Some("test/confused.png".into());
+        post.file_name = Some("confused.png".into());
+        post.thumb_path = Some("test/thumbs/confused.png".into());
+        post.mime_type = Some("image/png".into());
+        post.media_type = Some(MediaType::Audio);
+        post.audio_file_path = Some("test/song.mp3".into());
+        post.audio_file_name = Some("song.mp3".into());
+        post.audio_file_size = Some(2048);
+        post.audio_mime_type = Some("audio/mpeg".into());
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html.contains("file-container image-audio-combo"));
+        assert!(html.contains(r#"Audio: <a href="/boards/test/song.mp3""#));
+        assert!(html.contains(r#"class="audio-player audio-player-combo""#));
+        assert!(!html.contains("file-container audio-container audio-combo"));
+        assert!(!html.contains(r#"class="audio-player" data-audio-title="song.mp3""#));
     }
 
     #[test]
@@ -1265,6 +1592,8 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
                 thread_state: None,
@@ -1291,6 +1620,8 @@ mod tests {
                 is_admin: false,
                 show_media: false,
                 allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
                 thread_state: Some((true, true, true)),
@@ -1320,6 +1651,8 @@ mod tests {
                 is_admin: false,
                 show_media: true,
                 allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
                 show_poster_ids: false,
                 collapse_greentext: true,
                 thread_state: None,
@@ -1331,6 +1664,72 @@ mod tests {
         assert!(html.contains("media processing failed"));
         assert!(html.contains("Preview generation failed; original file is still available."));
         assert!(html.contains(r#"href="/boards/test/image.webp""#));
+    }
+
+    #[test]
+    fn media_thumb_markup_includes_hidden_fallback_for_missing_assets() {
+        let post = sample_post();
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html.contains(r#"data-media-thumb="1""#));
+        assert!(html.contains("media-thumb-fallback"));
+    }
+
+    #[test]
+    fn pdf_post_renders_thumbnail_direct_link_and_inline_hooks() {
+        let mut post = sample_post();
+        post.file_path = Some("test/doc.pdf".into());
+        post.file_name = Some("doc.pdf".into());
+        post.thumb_path = Some("test/thumbs/doc.webp".into());
+        post.mime_type = Some("application/pdf".into());
+        post.media_type = Some(MediaType::Pdf);
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html.contains(r#"href="/boards/test/doc.pdf""#));
+        assert!(html.contains(r#"src="/boards/test/thumbs/doc.webp""#));
+        assert!(html.contains(r#"data-action="expand-media""#));
+        assert!(html.contains(r#"data-action="collapse-media""#));
+        assert!(html.contains(r#"<iframe class="media-expanded media-expanded-pdf""#));
+        assert!(html.contains(r#"data-src="/boards/test/doc.pdf""#));
+        assert!(html.contains("Open PDF"));
+        assert!(!html.contains(">PDF</div>"));
+        assert!(!html.contains("post-edited\">Open PDF"));
     }
 
     #[test]
@@ -1351,6 +1750,7 @@ mod tests {
             &board,
             &thread,
             &posts,
+            &std::collections::BTreeMap::new(),
             "csrf",
             std::slice::from_ref(&board),
             false,
@@ -1358,6 +1758,7 @@ mod tests {
             Some("Wait before posting"),
             None,
             Some(&reply_prefill),
+            None,
             None,
             false,
             true,
@@ -1369,23 +1770,177 @@ mod tests {
     }
 
     #[test]
-    fn edit_post_page_prefers_submitted_body_when_re_rendered() {
+    fn thread_page_renders_edit_overlay_with_submitted_body_and_error() {
         let board = crate::test_fixtures::sample_board();
+        let post = sample_post();
+        let mut owned = std::collections::BTreeMap::new();
+        owned.insert(
+            post.id,
+            OwnedPostControls {
+                expires_at: i64::MAX,
+            },
+        );
+
+        let html = thread_page(
+            &board,
+            &sample_thread(),
+            std::slice::from_ref(&post),
+            &owned,
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            None,
+            None,
+            None,
+            Some(&EditOverlayState {
+                post_id: post.id,
+                body: "edited draft".into(),
+                error: Some("Edit failed.".into()),
+            }),
+            None,
+            false,
+            true,
+        );
+
+        assert!(html.contains(r#"id="edit-modal""#));
+        assert!(html.contains(r#"class="edit-modal is-open""#));
+        assert!(html.contains(">edited draft</textarea>"));
+        assert!(html.contains("Edit failed."));
+    }
+
+    #[test]
+    fn render_post_uses_in_page_edit_action_without_tokenized_redirect() {
+        let mut board = crate::test_fixtures::sample_board();
+        board.allow_editing = true;
+        board.allow_self_delete = true;
+        let mut post = sample_post();
+        post.created_at = chrono::Utc::now().timestamp();
+
+        let html = thread_page(
+            &board,
+            &sample_thread(),
+            std::slice::from_ref(&post),
+            &std::collections::BTreeMap::from([(
+                post.id,
+                OwnedPostControls {
+                    expires_at: i64::MAX,
+                },
+            )]),
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+        );
+
+        assert!(html.contains(r#"href="/test/post/1/edit""#));
+        assert!(html.contains(r#"class="self-action-controls""#));
+        assert!(html.contains(r#"class="edit-btn""#));
+        assert!(html.contains(r#"class="del-btn""#));
+        assert!(html.contains(r#"data-action="open-edit-modal""#));
+        assert!(html.contains(r#"data-edit-expiry=""#));
+        assert!(html.contains(r#"data-delete-csrf=""#));
+        assert!(html.contains(r#"data-role="self-action-countdown""#));
+        assert!(html.contains(r#"href="/test/post/1/delete""#));
+        assert!(html.contains("available for up to 60 seconds after posting"));
+        assert!(!html.contains("?token="));
+
+        let expiry_attr = r#"data-action-expiry=""#;
+        let expiry_start = html.find(expiry_attr).expect("expiry attr");
+        let expiry_value_start = expiry_start + expiry_attr.len();
+        let expiry_value_end = html[expiry_value_start..]
+            .find('"')
+            .map(|offset| expiry_value_start + offset)
+            .expect("expiry attr closing quote");
+        let expiry_value = &html[expiry_value_start..expiry_value_end];
+        let expiry = expiry_value.parse::<i64>().expect("parseable expiry");
+        assert!(expiry > 0);
+    }
+
+    #[test]
+    fn edit_post_page_renders_normal_form_and_fallback_hint() {
+        let board = crate::test_fixtures::sample_board();
+        let thread = sample_thread();
         let post = sample_post();
 
         let html = edit_post_page(
             &board,
+            &thread,
             &post,
             "csrf",
             std::slice::from_ref(&board),
-            "token",
-            Some("edited draft"),
-            Some("Incorrect edit token."),
             None,
-            false,
+            None,
         );
 
-        assert!(html.contains(">edited draft</textarea>"));
-        assert!(!html.contains(">body</textarea>"));
+        assert!(html.contains(r#"method="POST" action="/test/post/1/edit""#));
+        assert!(html.contains(r#"name="_csrf" value="csrf""#));
+        assert!(html.contains(r#"name="body" rows="8" maxlength="4096" required"#));
+        assert!(html.contains("available for up to 60 seconds after posting"));
+        assert!(html.contains(r#"href="/test/thread/87#p1""#));
+    }
+
+    #[test]
+    fn delete_post_page_renders_normal_form_and_fallback_hint() {
+        let board = crate::test_fixtures::sample_board();
+        let thread = sample_thread();
+        let post = sample_post();
+
+        let html = delete_post_page(
+            &board,
+            &thread,
+            &post,
+            "csrf",
+            std::slice::from_ref(&board),
+            None,
+            None,
+        );
+
+        assert!(html.contains(r#"method="POST" action="/test/post/1/delete""#));
+        assert!(html.contains(r#"name="_csrf" value="csrf""#));
+        assert!(html.contains(r#"class="del-btn">delete post</button>"#));
+        assert!(html.contains("available for up to 60 seconds after posting"));
+        assert!(html.contains(r#"href="/test/thread/87#p1""#));
+    }
+
+    #[test]
+    fn render_post_hides_edited_badge_for_edited_posts() {
+        let mut board = crate::test_fixtures::sample_board();
+        board.allow_editing = true;
+        let mut post = sample_post();
+        post.created_at = chrono::Utc::now().timestamp();
+        post.edited_at = Some(post.created_at + 5);
+
+        let html = thread_page(
+            &board,
+            &sample_thread(),
+            std::slice::from_ref(&post),
+            &std::collections::BTreeMap::from([(
+                post.id,
+                OwnedPostControls {
+                    expires_at: i64::MAX,
+                },
+            )]),
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+        );
+
+        assert!(!html.contains("(edited"));
     }
 }

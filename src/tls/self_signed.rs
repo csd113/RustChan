@@ -94,7 +94,6 @@ fn write_self_signed_cert(cert_path: &Path, key_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 fn build_cert_params() -> rcgen::CertificateParams {
     use rcgen::{
         CertificateParams, DistinguishedName, DnValue, ExtendedKeyUsagePurpose, KeyUsagePurpose,
@@ -214,8 +213,8 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+    // Panic-on-bug is intentional here: certificate generation or test fixture setup should stop immediately if it fails.
     #![allow(clippy::unwrap_used)]
-    #![allow(clippy::expect_used)]
     use super::*;
     use tempfile::TempDir;
 

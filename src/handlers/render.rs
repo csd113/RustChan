@@ -21,6 +21,7 @@ pub struct ThreadPageData {
     pub posts: Vec<crate::models::Post>,
     pub poll: Option<PollData>,
     pub is_admin: bool,
+    pub owned_post_controls: std::collections::BTreeMap<i64, templates::thread::OwnedPostControls>,
 }
 
 #[must_use]
@@ -111,11 +112,14 @@ pub fn load_board_page_data(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_board_page(
     data: &BoardPageData,
     csrf_token: &str,
     error: Option<&str>,
     new_thread_prefill: Option<&templates::forms::PostFormState>,
+    thread_badges: &std::collections::HashMap<i64, i64>,
+    new_activity_enabled: bool,
     board_banner_html: &str,
     current_theme: Option<&str>,
     can_post: bool,
@@ -130,6 +134,8 @@ pub fn render_board_page(
         data.is_admin,
         error,
         new_thread_prefill,
+        thread_badges,
+        new_activity_enabled,
         board_banner_html,
         current_theme,
         data.board.collapse_greentext,
@@ -162,15 +168,18 @@ pub fn load_thread_page_data(
         posts,
         poll,
         is_admin,
+        owned_post_controls: std::collections::BTreeMap::new(),
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_thread_page(
     data: &ThreadPageData,
     csrf_token: &str,
     error: Option<&str>,
     success: Option<&str>,
     reply_prefill: Option<&templates::forms::PostFormState>,
+    edit_overlay_state: Option<&templates::thread::EditOverlayState>,
     current_theme: Option<&str>,
     can_post: bool,
 ) -> String {
@@ -179,6 +188,7 @@ pub fn render_thread_page(
         &data.board,
         &data.thread,
         &data.posts,
+        &data.owned_post_controls,
         csrf_token,
         boards.as_slice(),
         data.is_admin,
@@ -186,6 +196,7 @@ pub fn render_thread_page(
         error,
         success,
         reply_prefill,
+        edit_overlay_state,
         current_theme,
         data.board.collapse_greentext,
         can_post,
@@ -274,6 +285,7 @@ mod tests {
             posts: vec![sample_post(1), sample_post(2), sample_post(3)],
             poll: None,
             is_admin: false,
+            owned_post_controls: std::collections::BTreeMap::new(),
         };
         let after = ThreadPageData {
             board,
@@ -281,6 +293,7 @@ mod tests {
             posts: vec![sample_post(1), sample_post(3)],
             poll: None,
             is_admin: false,
+            owned_post_controls: std::collections::BTreeMap::new(),
         };
 
         assert_ne!(
@@ -304,6 +317,7 @@ mod tests {
             posts: vec![sample_post(1), pending_post.clone()],
             poll: None,
             is_admin: false,
+            owned_post_controls: std::collections::BTreeMap::new(),
         };
 
         pending_post.file_path = Some("test/clip.webm".into());
@@ -316,6 +330,7 @@ mod tests {
             posts: vec![sample_post(1), pending_post],
             poll: None,
             is_admin: false,
+            owned_post_controls: std::collections::BTreeMap::new(),
         };
 
         assert_ne!(

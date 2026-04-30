@@ -2,258 +2,55 @@
 
 use anyhow::{Context, Result};
 
-pub(super) const CURRENT_MAX_MIGRATION: i64 = 41;
+/// Post-squash schema version for the canonical baseline.
+///
+/// Earlier development builds used a long numbered ladder up to v41. Fresh
+/// installs now create the complete current schema directly and stamp this
+/// clean baseline as v1; pre-squash databases use one legacy bridge before
+/// joining the same version line.
+pub(super) const POST_SQUASH_SCHEMA_VERSION: i64 = 1;
 
-const MIGRATIONS: &[(i64, &str)] = &[
-    (1, "ALTER TABLE boards ADD COLUMN allow_video    INTEGER NOT NULL DEFAULT 1"),
-    (
-        2,
-        "ALTER TABLE boards ADD COLUMN allow_tripcodes INTEGER NOT NULL DEFAULT 1",
-    ),
-    (3, "ALTER TABLE boards ADD COLUMN allow_images  INTEGER NOT NULL DEFAULT 1"),
-    (4, "ALTER TABLE boards ADD COLUMN allow_audio   INTEGER NOT NULL DEFAULT 0"),
-    (5, "ALTER TABLE posts ADD COLUMN media_type TEXT"),
-    (6, "ALTER TABLE posts ADD COLUMN audio_file_path TEXT"),
-    (7, "ALTER TABLE posts ADD COLUMN audio_file_name TEXT"),
-    (8, "ALTER TABLE posts ADD COLUMN audio_file_size INTEGER"),
-    (9, "ALTER TABLE posts ADD COLUMN audio_mime_type TEXT"),
-    (10, "ALTER TABLE posts ADD COLUMN edited_at INTEGER"),
-    (
-        11,
-        "CREATE INDEX IF NOT EXISTS idx_jobs_pending ON background_jobs(status, priority DESC, created_at ASC)",
-    ),
-    (
-        12,
-        "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, created_at DESC)",
-    ),
-    (
-        13,
-        "CREATE INDEX IF NOT EXISTS idx_mod_log_created ON mod_log(created_at DESC)",
-    ),
-    (14, "ALTER TABLE threads ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"),
-    (
-        15,
-        "CREATE INDEX IF NOT EXISTS idx_threads_archived ON threads(board_id, archived, bumped_at DESC)",
-    ),
-    (
-        16,
-        "ALTER TABLE boards ADD COLUMN edit_window_secs INTEGER NOT NULL DEFAULT 0",
-    ),
-    (17, "ALTER TABLE boards ADD COLUMN allow_editing INTEGER NOT NULL DEFAULT 0"),
-    (18, "ALTER TABLE boards ADD COLUMN allow_archive INTEGER NOT NULL DEFAULT 1"),
-    (
-        19,
-        "ALTER TABLE boards ADD COLUMN allow_video_embeds INTEGER NOT NULL DEFAULT 0",
-    ),
-    (20, "ALTER TABLE boards ADD COLUMN allow_captcha INTEGER NOT NULL DEFAULT 0"),
-    (
-        21,
-        r"CREATE TABLE IF NOT EXISTS ban_appeals (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip_hash     TEXT NOT NULL,
-            reason      TEXT NOT NULL DEFAULT '',
-            status      TEXT NOT NULL DEFAULT 'open',
-            created_at  INTEGER NOT NULL DEFAULT (unixepoch())
-        )",
-    ),
-    (
-        22,
-        "ALTER TABLE boards ADD COLUMN post_cooldown_secs INTEGER NOT NULL DEFAULT 0",
-    ),
-    (23, "CREATE INDEX IF NOT EXISTS idx_posts_thread_id ON posts(thread_id)"),
-    (24, "CREATE INDEX IF NOT EXISTS idx_posts_ip_hash ON posts(ip_hash)"),
-    (
-        25,
-        r"CREATE TABLE IF NOT EXISTS chan_net_posts (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            remote_post_id  INTEGER NOT NULL,
-            board_id        INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-            author          TEXT    NOT NULL DEFAULT 'anon',
-            content         TEXT    NOT NULL DEFAULT '',
-            remote_ts       INTEGER NOT NULL,
-            imported_at     INTEGER NOT NULL DEFAULT (unixepoch())
-        )",
-    ),
-    (
-        26,
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_chan_net_posts_remote \
-         ON chan_net_posts(remote_post_id, board_id)",
-    ),
-    (
-        27,
-        "ALTER TABLE boards ADD COLUMN allow_any_files INTEGER NOT NULL DEFAULT 0",
-    ),
-    (
-        28,
-        r"CREATE TABLE IF NOT EXISTS pending_fs_ops (
-            id           TEXT PRIMARY KEY,
-            kind         TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            created_at   INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-        CREATE INDEX IF NOT EXISTS idx_pending_fs_ops_created
-            ON pending_fs_ops(created_at ASC)",
-    ),
-    (
-        29,
-        "ALTER TABLE boards ADD COLUMN show_poster_ids INTEGER NOT NULL DEFAULT 0",
-    ),
-    (
-        30,
-        r"CREATE TABLE IF NOT EXISTS user_thread_preferences (
-            user_hash   TEXT NOT NULL,
-            thread_id    INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-            pinned      INTEGER NOT NULL DEFAULT 0,
-            hidden      INTEGER NOT NULL DEFAULT 0,
-            created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-            updated_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-            PRIMARY KEY(user_hash, thread_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_user_thread_preferences_user_hidden
-            ON user_thread_preferences(user_hash, hidden);
-        CREATE INDEX IF NOT EXISTS idx_user_thread_preferences_thread
-            ON user_thread_preferences(thread_id)",
-    ),
-    (
-        31,
-        "ALTER TABLE boards ADD COLUMN max_archived_threads INTEGER NOT NULL DEFAULT 150",
-    ),
-    (
-        32,
-        r"ALTER TABLE boards ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;
-        UPDATE boards
-        SET display_order = id
-        WHERE display_order = 0",
-    ),
-    (
-        33,
-        r"ALTER TABLE boards ADD COLUMN collapse_greentext INTEGER NOT NULL DEFAULT 0;
-        UPDATE boards
-        SET collapse_greentext = CASE
-            WHEN EXISTS (
-                SELECT 1
-                FROM site_settings
-                WHERE key = 'collapse_greentext'
-                  AND (value = '1' OR lower(value) = 'true')
-            ) THEN 1
-            ELSE 0
-        END",
-    ),
-    (
-        34,
-        r"ALTER TABLE boards ADD COLUMN default_theme TEXT NOT NULL DEFAULT '';
-        CREATE TABLE IF NOT EXISTS themes (
-            slug         TEXT PRIMARY KEY,
-            display_name TEXT NOT NULL,
-            description  TEXT NOT NULL DEFAULT '',
-            swatch_hex   TEXT NOT NULL DEFAULT '#888888',
-            enabled      INTEGER NOT NULL DEFAULT 1,
-            sort_order   INTEGER NOT NULL DEFAULT 0,
-            is_builtin   INTEGER NOT NULL DEFAULT 0,
-            custom_css   TEXT NOT NULL DEFAULT ''
-        )",
-    ),
-    (
-        35,
-        "CREATE INDEX IF NOT EXISTS idx_themes_enabled_sort ON themes(enabled, sort_order, slug)",
-    ),
-    (
-        36,
-        r"CREATE TABLE IF NOT EXISTS post_submissions (
-            submission_token TEXT PRIMARY KEY,
-            ip_hash          TEXT NOT NULL,
-            board_id         INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-            thread_id        INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-            post_id          INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-            is_thread        INTEGER NOT NULL DEFAULT 0,
-            created_at       INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-        CREATE INDEX IF NOT EXISTS idx_post_submissions_created_at
-            ON post_submissions(created_at ASC)",
-    ),
-    (
-        37,
-        r"ALTER TABLE posts ADD COLUMN media_processing_state TEXT NOT NULL DEFAULT '';
-        ALTER TABLE posts ADD COLUMN media_processing_error TEXT;
-        CREATE INDEX IF NOT EXISTS idx_posts_media_processing_state
-            ON posts(media_processing_state)",
-    ),
-    (
-        38,
-        "ALTER TABLE boards ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'public'",
-    ),
-    (
-        39,
-        "ALTER TABLE boards ADD COLUMN access_password_hash TEXT NOT NULL DEFAULT ''",
-    ),
-    (
-        40,
-        "ALTER TABLE boards ADD COLUMN banner_mode TEXT NOT NULL DEFAULT 'inherit'",
-    ),
-    (
-        41,
-        r"CREATE TABLE IF NOT EXISTS banner_assets (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            scope_type      TEXT NOT NULL,
-            board_id        INTEGER REFERENCES boards(id) ON DELETE CASCADE,
-            storage_key     TEXT NOT NULL UNIQUE,
-            width           INTEGER NOT NULL,
-            height          INTEGER NOT NULL,
-            file_size       INTEGER NOT NULL,
-            enabled         INTEGER NOT NULL DEFAULT 1,
-            sort_order      INTEGER NOT NULL DEFAULT 0,
-            target_type     TEXT NOT NULL DEFAULT 'none',
-            target_value    TEXT NOT NULL DEFAULT '',
-            show_on_index   INTEGER NOT NULL DEFAULT 1,
-            show_on_catalog INTEGER NOT NULL DEFAULT 1,
-            created_at      INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-        CREATE INDEX IF NOT EXISTS idx_banner_assets_scope_sort
-            ON banner_assets(scope_type, board_id, sort_order, id)",
-    ),
-];
-
-pub(super) fn apply_migrations(conn: &rusqlite::Connection) -> Result<()> {
-    ensure_schema_version_table(conn)?;
-
-    let current_version: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-            [],
-            |r| r.get(0),
-        )
-        .context("Failed to read schema_version")?;
-
-    for &(version, sql) in MIGRATIONS {
-        if version <= current_version {
-            continue;
-        }
-
-        apply_migration(conn, version, sql)?;
-
-        conn.execute(
-            "UPDATE schema_version SET version = ?1",
-            rusqlite::params![version],
-        )
-        .with_context(|| format!("Failed to update schema_version after migration v{version}"))?;
+pub(super) fn read_schema_version(conn: &rusqlite::Connection) -> Result<i64> {
+    if !schema_version_table_exists(conn)? {
+        return Ok(0);
     }
 
-    Ok(())
-}
-
-pub(super) fn set_schema_version(conn: &rusqlite::Connection, version: i64) -> Result<()> {
-    ensure_schema_version_table(conn)?;
-    conn.execute("DELETE FROM schema_version", [])
-        .context("Failed to clear schema_version table")?;
-    conn.execute(
-        "INSERT INTO schema_version (version) VALUES (?1)",
-        rusqlite::params![version],
+    conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |row| row.get(0),
     )
-    .with_context(|| format!("Failed to set schema_version to v{version}"))?;
-    Ok(())
+    .context("Failed to read schema_version")
 }
 
-fn ensure_schema_version_table(conn: &rusqlite::Connection) -> Result<()> {
+pub(super) fn stamp_schema_version(conn: &rusqlite::Connection, version: i64) -> Result<()> {
+    ensure_schema_version_table_has_row(conn)?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .with_context(|| format!("Failed to begin schema_version stamp to v{version}"))?;
+
+    let result = (|| {
+        conn.execute("DELETE FROM schema_version", [])
+            .context("Failed to clear schema_version table")?;
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            rusqlite::params![version],
+        )
+        .with_context(|| format!("Failed to set schema_version to v{version}"))?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .with_context(|| format!("Failed to commit schema_version stamp to v{version}")),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn ensure_schema_version_table_has_row(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (
             version    INTEGER NOT NULL DEFAULT 0,
@@ -266,23 +63,47 @@ fn ensure_schema_version_table(conn: &rusqlite::Connection) -> Result<()> {
     .context("Failed to create schema_version table")
 }
 
-fn apply_migration(conn: &rusqlite::Connection, version: i64, sql: &str) -> Result<()> {
-    match conn.execute_batch(sql) {
-        Ok(()) => {
-            tracing::debug!("Applied migration v{version}");
-            Ok(())
-        }
-        Err(rusqlite::Error::SqliteFailure(ref error, ref msg))
-            if error.code == rusqlite::ErrorCode::Unknown
-                && msg.as_deref().is_some_and(|message| {
-                    message.contains("duplicate column name") || message.contains("already exists")
-                }) =>
-        {
-            tracing::warn!("Migration v{version} already applied (idempotent), skipping");
-            Ok(())
-        }
-        Err(error) => Err(anyhow::anyhow!(
-            "Migration v{version} failed: {error} — SQL: {sql}"
-        )),
+fn schema_version_table_exists(conn: &rusqlite::Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'schema_version'
+        )",
+        [],
+        |row| row.get(0),
+    )
+    .context("Failed to inspect schema_version table")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_schema_version, stamp_schema_version, POST_SQUASH_SCHEMA_VERSION};
+
+    #[test]
+    fn missing_schema_version_reads_as_legacy_zero() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+
+        assert_eq!(read_schema_version(&conn).expect("read schema version"), 0);
+    }
+
+    #[test]
+    fn stamp_replaces_existing_version_with_post_squash_baseline() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE schema_version (
+                version INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(version)
+            );
+            INSERT INTO schema_version (version) VALUES (41);",
+        )
+        .expect("create legacy schema_version");
+
+        stamp_schema_version(&conn, POST_SQUASH_SCHEMA_VERSION).expect("stamp schema version");
+
+        assert_eq!(
+            read_schema_version(&conn).expect("read stamped schema version"),
+            POST_SQUASH_SCHEMA_VERSION
+        );
     }
 }

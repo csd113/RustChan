@@ -12,4 +12,5 @@ pub mod templates;
 #[cfg(test)]
 pub mod test_fixtures;
 pub mod theme;
+pub mod theme_builder;
 pub mod utils;

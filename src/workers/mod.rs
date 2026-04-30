@@ -1,3 +1,4 @@
+// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #![allow(clippy::too_many_lines)]
 
 // workers/mod.rs — Background job queue and worker pool.
@@ -182,17 +183,14 @@ impl JobQueue {
 
     /// Number of jobs currently in "pending" state (not yet started).
     /// Used by the terminal stats display.
-    #[allow(dead_code)]
     pub fn pending_count(&self) -> i64 {
         i64::try_from(self.pending_jobs.load(Ordering::Relaxed)).unwrap_or(i64::MAX)
     }
 
-    #[allow(dead_code)]
     pub fn dropped_count(&self) -> u64 {
         self.dropped_jobs.load(Ordering::Relaxed)
     }
 
-    #[allow(dead_code)]
     pub fn active_video_count(&self) -> u64 {
         self.active_video_jobs.load(Ordering::Relaxed)
     }
@@ -258,8 +256,7 @@ pub fn start_worker_pool(
     ffmpeg_vp9_available: bool,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let n = std::thread::available_parallelism()
-        .map(NonZero::get)
-        .unwrap_or(2)
+        .map_or(2, NonZero::get)
         .min(4); // cap at 4 to avoid overwhelming SQLite's write lock
 
     tracing::info!(target: "workers", count = n, "Background worker pool online");
@@ -355,6 +352,10 @@ async fn worker_loop(
                                 )?;
                             }
                         }
+                        Err(ref e) if crate::db::is_stale_media_target_error(e) => {
+                            warn!("Worker {id}: job #{job_id} target is stale — {e}");
+                            crate::db::complete_job(&c, job_id)?;
+                        }
                         Err(ref e) => {
                             warn!("Worker {id}: job #{job_id} failed — {e}");
                             let failure_state = crate::db::fail_job(&c, job_id, &e.to_string())?;
@@ -439,7 +440,6 @@ async fn worker_loop(
 /// Base: 500 ms × 2^n, capped at 60 s.
 /// Jitter: uniform random 0–500 ms added to spread simultaneous retries
 /// across all workers so they do not storm the DB at the same instant.
-#[allow(clippy::arithmetic_side_effects)]
 fn backoff_duration(consecutive_errors: u32) -> Duration {
     const BASE_MS: u64 = 500;
     const MAX_MS: u64 = 60_000;
@@ -578,7 +578,7 @@ const fn media_job_post_id(job: &Job) -> Option<i64> {
 /// is dropped, and `kill_on_drop` ensures the OS process receives SIGKILL
 /// immediately. No blocking thread is held during the wait.
 ///
-/// A hard timeout of `CONFIG.ffmpeg_timeout_secs` is applied.
+/// A hard timeout of the live `ffmpeg_timeout_secs` setting is applied.
 async fn transcode_video(
     post_id: i64,
     file_path: String,
@@ -600,7 +600,7 @@ async fn transcode_video(
         return Ok(());
     }
 
-    let timeout_secs = CONFIG.ffmpeg_timeout_secs;
+    let timeout_secs = crate::config::ffmpeg_timeout_secs();
     let ffmpeg_timeout = Duration::from_secs(timeout_secs);
 
     // Phase 1: prepare (file checks, codec probe, temp file creation) — blocking.
@@ -643,9 +643,7 @@ async fn transcode_video(
         Ok(Err(e)) => return Err(anyhow::anyhow!("ffmpeg I/O error: {e}")),
         Err(_elapsed) => {
             // Child is dropped here; kill_on_drop fires SIGKILL on the OS process.
-            warn!(
-                "VideoTranscode: job for post {post_id} timed out after                  {timeout_secs}s — ffmpeg process killed"
-            );
+            warn!("{}", video_reencode_timeout_warning(post_id, timeout_secs));
             return Err(anyhow::anyhow!(
                 "ffmpeg transcode timed out after {timeout_secs}s"
             ));
@@ -811,7 +809,13 @@ fn transcode_video_finalise(
     };
 
     if let Err(e) = db_result {
-        let _ = std::fs::remove_file(webm_abs);
+        if let Err(cleanup_error) = std::fs::remove_file(webm_abs) {
+            warn!(
+                output = %webm_abs.display(),
+                error = %cleanup_error,
+                "VideoTranscode: failed to remove unattached WebM output"
+            );
+        }
         return Err(e);
     }
 
@@ -837,6 +841,7 @@ type WaveformPrepareParts = (
     PathBuf,
     String,
     PathBuf,
+    String,
     tempfile::NamedTempFile,
 );
 
@@ -851,11 +856,11 @@ async fn generate_waveform(
         return Ok(());
     }
 
-    let timeout_secs = CONFIG.ffmpeg_timeout_secs;
+    let timeout_secs = crate::config::ffmpeg_timeout_secs();
     let ffmpeg_timeout = Duration::from_secs(timeout_secs);
 
     // Phase 1: prepare (file I/O, temp file creation) — blocking.
-    let (args, png_abs, png_rel, src_path, tmp_png) = {
+    let (args, png_abs, png_rel, src_path, expected_file_path, tmp_png) = {
         let file_path2 = file_path.clone();
         let board_short2 = board_short.clone();
         tokio::task::spawn_blocking(move || waveform_prepare(&file_path2, &board_short2))
@@ -898,10 +903,25 @@ async fn generate_waveform(
 
     // Phase 3: persist + DB update — blocking.
     tokio::task::spawn_blocking(move || {
-        waveform_finalise(post_id, &png_abs, &png_rel, &src_path, tmp_png, &pool)
+        waveform_finalise(
+            post_id,
+            &png_abs,
+            &png_rel,
+            &src_path,
+            &expected_file_path,
+            tmp_png,
+            &pool,
+        )
     })
     .await
     .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform finalise: {e}"))?
+}
+
+fn video_reencode_timeout_warning(post_id: i64, timeout_secs: u64) -> String {
+    let human_timeout = crate::config::describe_timeout_secs(timeout_secs);
+    format!(
+        "VideoTranscode: ffmpeg video re-encoding/conversion timed out for post {post_id} after {human_timeout} ({timeout_secs}s); slow systems such as Raspberry Pi devices may need a higher timeout. Increase the video re-encoding timeout in the admin panel or settings.toml."
+    )
 }
 
 /// Blocking prepare phase for [`generate_waveform`]: validate the source,
@@ -960,7 +980,7 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
     .iter()
     .map(|s| (*s).to_string())
     .collect();
-    Ok((args, png_abs, png_rel, src, tmp_png))
+    Ok((args, png_abs, png_rel, src, file_path.to_string(), tmp_png))
 }
 
 /// Blocking finalise phase for [`generate_waveform`]: atomically persist the
@@ -970,6 +990,7 @@ fn waveform_finalise(
     png_abs: &std::path::Path,
     png_rel: &str,
     src_path: &std::path::Path,
+    expected_file_path: &str,
     tmp_png: tempfile::NamedTempFile,
     pool: &DbPool,
 ) -> Result<()> {
@@ -978,7 +999,18 @@ fn waveform_finalise(
         .persist(png_abs)
         .context("Failed to atomically rename waveform PNG into place")?;
     let conn = pool.get()?;
-    crate::db::update_post_thumb_path(&conn, post_id, png_rel)?;
+    if let Err(error) =
+        crate::db::update_post_thumb_path(&conn, post_id, expected_file_path, png_rel)
+    {
+        if let Err(cleanup_error) = std::fs::remove_file(png_abs) {
+            warn!(
+                output = %png_abs.display(),
+                error = %cleanup_error,
+                "AudioWaveform: failed to remove unattached waveform output"
+            );
+        }
+        return Err(error);
+    }
     // update dedup record with final thumb path.
     let audio_sha256 = sha256_file_hex(src_path)?;
     let _ = conn.execute(
@@ -1030,25 +1062,47 @@ async fn prune_threads(
         let do_archive = allow_archive || CONFIG.archive_before_prune;
         if do_archive {
             let count = crate::db::archive_old_threads(&conn, board_id, max_threads)?;
-            let paths =
+            let deleted =
                 crate::db::prune_old_archived_threads(&conn, board_id, max_archived_threads)?;
-            for p in &paths {
-                crate::utils::files::delete_file(&CONFIG.upload_dir, p);
+            if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+                &conn,
+                &CONFIG.upload_dir,
+                deleted.pending_fs_op_id.as_deref(),
+                &deleted.paths,
+            ) {
+                tracing::warn!(
+                    target: "workers",
+                    board = %board_short,
+                    board_id = board_id,
+                    error = %error,
+                    "archived prune cleanup did not fully complete"
+                );
             }
             if count > 0 {
                 tracing::info!(target: "workers", count = count, board = %board_short, board_id = board_id, "ThreadArchive: threads archived");
             }
-            if !paths.is_empty() {
-                tracing::info!(target: "workers", archived_cap = max_archived_threads, board = %board_short, board_id = board_id, files_removed = paths.len(), "ThreadArchivePrune: archived threads deleted");
+            if !deleted.paths.is_empty() {
+                tracing::info!(target: "workers", archived_cap = max_archived_threads, board = %board_short, board_id = board_id, files_removed = deleted.paths.len(), "ThreadArchivePrune: archived threads deleted");
             }
         } else {
-            let paths = crate::db::prune_old_threads(&conn, board_id, max_threads)?;
-            let count = paths.len();
-            for p in &paths {
-                crate::utils::files::delete_file(&CONFIG.upload_dir, p);
+            let deleted = crate::db::prune_old_threads(&conn, board_id, max_threads)?;
+            let count = deleted.paths.len();
+            if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+                &conn,
+                &CONFIG.upload_dir,
+                deleted.pending_fs_op_id.as_deref(),
+                &deleted.paths,
+            ) {
+                tracing::warn!(
+                    target: "workers",
+                    board = %board_short,
+                    board_id = board_id,
+                    error = %error,
+                    "thread prune cleanup did not fully complete"
+                );
             }
             if count > 0 {
-                tracing::info!(target: "workers", count = count, board = %board_short, board_id = board_id, files_removed = paths.len(), "ThreadPrune: threads deleted");
+                tracing::info!(target: "workers", count = count, board = %board_short, board_id = board_id, files_removed = deleted.paths.len(), "ThreadPrune: threads deleted");
             }
         }
         Ok(())
@@ -1077,7 +1131,6 @@ fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
 /// Only files inside `{upload_dir}/{board}/thumbs/` are considered — original
 /// uploads are never touched.  Deletion is best-effort: individual failures
 /// are logged and skipped rather than aborting the whole pass.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
     // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
     let mut files: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();
@@ -1140,5 +1193,97 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
     }
     if deleted > 0 {
         tracing::info!(target: "workers", files_removed = deleted, freed_kib = deleted_bytes / 1024, remaining_kib = remaining / 1024, limit_kib = max_bytes / 1024, "Thumbnail cache eviction complete");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{transcode_video_finalise, video_reencode_timeout_warning, waveform_finalise};
+    use std::io::Write;
+
+    fn file_hash_count(conn: &rusqlite::Connection, file_path: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM file_hashes WHERE file_path = ?1",
+            rusqlite::params![file_path],
+            |row| row.get(0),
+        )
+        .expect("file hash count")
+    }
+
+    #[test]
+    fn stale_transcode_finalise_removes_unattached_webm_and_writes_no_hash() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let board_dir = temp_dir.path().join("b");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        let src = board_dir.join("video.mp4");
+        std::fs::write(&src, b"source").expect("write source");
+        let webm_abs = board_dir.join("video.webm");
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".webm")
+            .tempfile_in(&board_dir)
+            .expect("temp webm");
+        tmp.write_all(b"webm").expect("write temp webm");
+        let pool = crate::db::init_test_pool().expect("test pool");
+
+        let error = transcode_video_finalise(
+            999,
+            "b/video.mp4",
+            &src,
+            &webm_abs,
+            "b/video.webm",
+            tmp,
+            &pool,
+        )
+        .expect_err("deleted transcode target rejected");
+
+        assert!(crate::db::is_stale_media_target_error(&error));
+        assert!(!webm_abs.exists());
+        let conn = pool.get().expect("db connection");
+        assert_eq!(file_hash_count(&conn, "b/video.webm"), 0);
+    }
+
+    #[test]
+    fn stale_waveform_finalise_removes_unattached_png_and_writes_no_hash() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let board_dir = temp_dir.path().join("b");
+        let thumbs_dir = board_dir.join("thumbs");
+        std::fs::create_dir_all(&thumbs_dir).expect("create thumbs dir");
+        let src = board_dir.join("audio.mp3");
+        std::fs::write(&src, b"source").expect("write source");
+        let png_abs = thumbs_dir.join("audio.png");
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".png")
+            .tempfile_in(&thumbs_dir)
+            .expect("temp png");
+        tmp.write_all(b"png").expect("write temp png");
+        let pool = crate::db::init_test_pool().expect("test pool");
+
+        let error = waveform_finalise(
+            999,
+            &png_abs,
+            "b/thumbs/audio.png",
+            &src,
+            "b/audio.mp3",
+            tmp,
+            &pool,
+        )
+        .expect_err("deleted waveform target rejected");
+
+        assert!(crate::db::is_stale_media_target_error(&error));
+        assert!(!png_abs.exists());
+        let conn = pool.get().expect("db connection");
+        assert_eq!(file_hash_count(&conn, "b/audio.mp3"), 0);
+        assert_eq!(file_hash_count(&conn, "b/thumbs/audio.png"), 0);
+    }
+
+    #[test]
+    fn video_reencode_timeout_warning_mentions_admin_guidance() {
+        let warning = video_reencode_timeout_warning(42, 600);
+        assert!(warning.contains("ffmpeg video re-encoding/conversion timed out"));
+        assert!(warning.contains("10 minutes"));
+        assert!(warning.contains("(600s)"));
+        assert!(warning.contains("Raspberry Pi"));
+        assert!(warning.contains("admin panel"));
+        assert!(warning.contains("settings.toml"));
     }
 }

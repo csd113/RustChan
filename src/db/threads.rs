@@ -8,16 +8,6 @@
 //   delete_thread          → super::paths_safe_to_delete       (file safety)
 //   prune_old_threads      → super::paths_safe_to_delete       (file safety)
 //
-// FIX summary (from audit):
-//              so it sees the post-delete DB state before any concurrent insert
-//              moved inside the transaction to close the TOCTOU race
-//              helper using execute_batch for cleaner error flow
-//              prepare_cached outside the loop (was documented as fixed but
-//              was not actually implemented)
-//              locked state is only changed when archiving
-//              replaced with bulk WHERE id IN (...)
-//              a single JOIN query
-
 use crate::models::Thread;
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
@@ -163,6 +153,27 @@ pub fn count_threads_for_board(conn: &rusqlite::Connection, board_id: i64) -> Re
         params![board_id],
         |r| r.get(0),
     )?)
+}
+
+/// Latest currently visible thread on a board, ordered by `(created_at, id)`.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn get_latest_visible_thread_marker(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+) -> Result<Option<(i64, i64)>> {
+    conn.query_row(
+        "SELECT created_at, id
+         FROM threads
+         WHERE board_id = ?1 AND archived = 0
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1",
+        params![board_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// # Errors
@@ -398,30 +409,64 @@ pub fn set_thread_archived(
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-pub fn delete_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<String>> {
+fn delete_thread_in_tx(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+) -> crate::error::Result<crate::db::DeletePathsResult> {
+    // Step 1: collect file paths from all posts in this thread.
+    let candidates = collect_thread_file_paths(conn, &[thread_id])?;
+
+    // Step 2: delete thread (CASCADE removes posts).
+    let deleted = conn
+        .execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
+        .context("Failed to delete thread")?;
+    if deleted == 0 {
+        return Err(crate::error::AppError::NotFound(format!(
+            "Thread id {thread_id} not found"
+        )));
+    }
+
+    // Step 3: determine which paths are now unreferenced.
+    // paths_safe_to_delete sees the post-delete state because we're still
+    // inside the same transaction.
+    let safe = super::paths_safe_to_delete(conn, candidates)?;
+    let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
+    if let Some(op) = pending_fs_op.as_ref() {
+        super::insert_pending_fs_op(conn, op)?;
+    }
+    Ok(crate::db::DeletePathsResult {
+        paths: safe,
+        pending_fs_op_id: pending_fs_op.map(|op| op.id),
+    })
+}
+
+/// Delete a thread within an already-open transaction after authorization has
+/// been checked by the caller.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn delete_thread_verified(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+) -> crate::error::Result<crate::db::DeletePathsResult> {
+    delete_thread_in_tx(conn, thread_id)
+}
+
+/// Delete a thread and return on-disk paths that are now safe to remove.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn delete_thread(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+) -> crate::error::Result<crate::db::DeletePathsResult> {
     // BEGIN IMMEDIATE acquires the write lock up-front, preventing SQLITE_BUSY
     // on the lock upgrade that DEFERRED (unchecked_transaction) suffers under WAL.
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin delete_thread transaction")?;
 
-    let result: anyhow::Result<Vec<String>> = (|| {
-        // Step 1: collect file paths from all posts in this thread.
-        let candidates = collect_thread_file_paths(conn, &[thread_id])?;
-
-        // Step 2: delete thread (CASCADE removes posts).
-        let deleted = conn
-            .execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
-            .context("Failed to delete thread")?;
-        if deleted == 0 {
-            anyhow::bail!("Thread id {thread_id} not found");
-        }
-
-        // Step 3: determine which paths are now unreferenced.
-        // paths_safe_to_delete sees the post-delete state because we're still
-        // inside the same transaction.
-        let safe = super::paths_safe_to_delete(conn, candidates)?;
-        Ok(safe)
-    })();
+    let result: crate::error::Result<crate::db::DeletePathsResult> =
+        delete_thread_in_tx(conn, thread_id);
 
     match result {
         Ok(safe) => {
@@ -547,11 +592,11 @@ pub fn prune_old_threads(
     conn: &rusqlite::Connection,
     board_id: i64,
     max: i64,
-) -> Result<Vec<String>> {
+) -> Result<crate::db::DeletePathsResult> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin prune_old_threads transaction")?;
 
-    let result: anyhow::Result<Vec<String>> = (|| {
+    let result: anyhow::Result<crate::db::DeletePathsResult> = (|| {
         // Collect ids inside the transaction to prevent concurrent bumps from
         // changing the ordering between the SELECT and the DELETE.
         let ids: Vec<i64> = {
@@ -567,7 +612,10 @@ pub fn prune_old_threads(
         };
 
         if ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(crate::db::DeletePathsResult {
+                paths: Vec::new(),
+                pending_fs_op_id: None,
+            });
         }
 
         // Collect all file paths in a single query BEFORE the DELETEs.
@@ -587,19 +635,21 @@ pub fn prune_old_threads(
         // Determine safe paths INSIDE the transaction so the check sees the
         // post-delete state before any concurrent writer can insert new references.
         let safe = super::paths_safe_to_delete(conn, candidates)?;
-        Ok(safe)
+        let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
+        if let Some(op) = pending_fs_op.as_ref() {
+            super::insert_pending_fs_op(conn, op)?;
+        }
+        Ok(crate::db::DeletePathsResult {
+            paths: safe,
+            pending_fs_op_id: pending_fs_op.map(|op| op.id),
+        })
     })();
 
     match result {
-        Ok(ref paths) if paths.is_empty() => {
-            // Nothing pruned — roll back cleanly.
-            let _ = conn.execute_batch("ROLLBACK");
-            Ok(Vec::new())
-        }
-        Ok(safe) => {
+        Ok(result) => {
             conn.execute_batch("COMMIT")
                 .context("Failed to commit prune_old_threads transaction")?;
-            Ok(safe)
+            Ok(result)
         }
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
@@ -624,11 +674,11 @@ pub fn prune_old_archived_threads(
     conn: &rusqlite::Connection,
     board_id: i64,
     max: i64,
-) -> Result<Vec<String>> {
+) -> Result<crate::db::DeletePathsResult> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin prune_old_archived_threads transaction")?;
 
-    let result: anyhow::Result<Vec<String>> = (|| {
+    let result: anyhow::Result<crate::db::DeletePathsResult> = (|| {
         let ids: Vec<i64> = {
             let mut stmt = conn.prepare_cached(
                 "SELECT id FROM threads
@@ -642,7 +692,10 @@ pub fn prune_old_archived_threads(
         };
 
         if ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(crate::db::DeletePathsResult {
+                paths: Vec::new(),
+                pending_fs_op_id: None,
+            });
         }
 
         let candidates = collect_thread_file_paths(conn, &ids)?;
@@ -658,18 +711,21 @@ pub fn prune_old_archived_threads(
             .context("Failed to bulk delete archived threads")?;
 
         let safe = super::paths_safe_to_delete(conn, candidates)?;
-        Ok(safe)
+        let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
+        if let Some(op) = pending_fs_op.as_ref() {
+            super::insert_pending_fs_op(conn, op)?;
+        }
+        Ok(crate::db::DeletePathsResult {
+            paths: safe,
+            pending_fs_op_id: pending_fs_op.map(|op| op.id),
+        })
     })();
 
     match result {
-        Ok(ref paths) if paths.is_empty() => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Ok(Vec::new())
-        }
-        Ok(safe) => {
+        Ok(result) => {
             conn.execute_batch("COMMIT")
                 .context("Failed to commit prune_old_archived_threads transaction")?;
-            Ok(safe)
+            Ok(result)
         }
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
@@ -714,4 +770,223 @@ pub fn count_archived_threads_for_board(conn: &rusqlite::Connection, board_id: i
         params![board_id],
         |r| r.get(0),
     )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        count_threads_for_board, create_reply_with_thread_update, delete_thread,
+        prune_old_archived_threads, prune_old_threads,
+    };
+    use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
+    use crate::error::AppError;
+    use crate::models::MediaType;
+    use crate::pending_fs::finalize_delete_files_payload;
+    use rusqlite::{params, Connection};
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        super::super::schema::install_or_migrate_schema(&conn).expect("install schema");
+        conn
+    }
+
+    fn create_plain_thread(conn: &Connection, board_id: i64, title: &str) -> i64 {
+        let post = NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: Some(title.to_string()),
+            body: title.to_string(),
+            body_html: title.to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: true,
+        };
+        let (thread_id, _, _) =
+            create_thread_with_optional_poll(conn, board_id, Some(title), &post, "", None, None)
+                .expect("create thread");
+        thread_id
+    }
+
+    #[test]
+    fn prune_old_threads_commits_even_when_no_files_are_safe() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "prune", "Prune", "", false).expect("create board");
+        create_plain_thread(&conn, board_id, "old thread");
+        create_plain_thread(&conn, board_id, "new thread");
+        let board = get_board_by_short(&conn, "prune")
+            .expect("load board")
+            .expect("board exists");
+        assert_eq!(
+            count_threads_for_board(&conn, board.id).expect("count before"),
+            2
+        );
+
+        let deleted = prune_old_threads(&conn, board.id, 1).expect("prune");
+        assert!(deleted.paths.is_empty());
+        assert!(deleted.pending_fs_op_id.is_none());
+        assert_eq!(
+            count_threads_for_board(&conn, board.id).expect("count after"),
+            1
+        );
+    }
+
+    #[test]
+    fn prune_old_archived_threads_commits_even_when_no_files_are_safe() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "aprune", "Archive", "", false).expect("create board");
+        let first = create_plain_thread(&conn, board_id, "old archived thread");
+        let second = create_plain_thread(&conn, board_id, "new archived thread");
+        conn.execute(
+            "UPDATE threads SET archived = 1 WHERE id IN (?1, ?2)",
+            params![first, second],
+        )
+        .expect("archive threads");
+
+        let deleted = prune_old_archived_threads(&conn, board_id, 1).expect("prune archived");
+        assert!(deleted.paths.is_empty());
+        assert!(deleted.pending_fs_op_id.is_none());
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM threads WHERE board_id = ?1 AND archived = 1",
+                params![board_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("archived count"),
+            1
+        );
+    }
+
+    #[test]
+    fn delete_thread_returns_pending_cleanup_for_media_reply() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "media", "Media", "", false).expect("create board");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_dir = temp_dir.path().join("uploads");
+        let board_dir = upload_dir.join("media");
+        let thumb_dir = board_dir.join("thumbs");
+        std::fs::create_dir_all(&thumb_dir).expect("create upload dirs");
+        std::fs::write(board_dir.join("reply.webp"), b"reply").expect("write reply");
+        std::fs::write(thumb_dir.join("reply.webp"), b"thumb").expect("write thumb");
+
+        let thread_id = create_plain_thread(&conn, board_id, "thread with media reply");
+        let reply = NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "reply".to_string(),
+            body_html: "reply".to_string(),
+            ip_hash: None,
+            file_path: Some("media/reply.webp".to_string()),
+            file_name: Some("reply.webp".to_string()),
+            file_size: Some(5),
+            thumb_path: Some("media/thumbs/reply.webp".to_string()),
+            mime_type: Some("image/webp".to_string()),
+            media_type: Some(MediaType::Image.as_str().to_string()),
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: false,
+        };
+        create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+
+        let deleted = delete_thread(&conn, thread_id).expect("delete thread");
+        assert!(deleted.pending_fs_op_id.is_some());
+        assert!(deleted.paths.iter().any(|path| path == "media/reply.webp"));
+        assert!(deleted
+            .paths
+            .iter()
+            .any(|path| path == "media/thumbs/reply.webp"));
+        assert_eq!(
+            count_threads_for_board(&conn, board_id).expect("count after"),
+            0
+        );
+
+        finalize_delete_files_payload(
+            &conn,
+            upload_dir.to_str().expect("utf8 upload dir"),
+            deleted.pending_fs_op_id.as_deref(),
+            &deleted.paths,
+        )
+        .expect("cleanup reply files");
+
+        assert!(!board_dir.join("reply.webp").exists());
+        assert!(!thumb_dir.join("reply.webp").exists());
+    }
+
+    #[test]
+    fn delete_thread_returns_not_found_on_retry() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "delth", "Del Thread", "", false).expect("create board");
+        let thread_id = create_plain_thread(&conn, board_id, "thread to delete");
+
+        let deleted = delete_thread(&conn, thread_id).expect("delete thread");
+        assert!(deleted.paths.is_empty());
+        match delete_thread(&conn, thread_id) {
+            Err(AppError::NotFound(msg)) => assert!(msg.contains("Thread id")),
+            other => panic!("expected not found on retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_thread_removes_replies_and_retries_cleanly() {
+        let conn = test_conn();
+        let board_id =
+            create_board(&conn, "delthr", "Del Thread Replies", "", false).expect("create board");
+        let thread_id = create_plain_thread(&conn, board_id, "thread with reply");
+        let reply = NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_string(),
+            tripcode: None,
+            subject: None,
+            body: "reply".to_string(),
+            body_html: "reply".to_string(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_string(),
+            is_op: false,
+        };
+        create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+
+        let deleted = delete_thread(&conn, thread_id).expect("delete thread");
+        assert!(deleted.paths.is_empty());
+        assert!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("post count after delete")
+                == 0
+        );
+        match delete_thread(&conn, thread_id) {
+            Err(AppError::NotFound(msg)) => assert!(msg.contains("Thread id")),
+            other => panic!("expected not found on retry, got {other:?}"),
+        }
+    }
 }

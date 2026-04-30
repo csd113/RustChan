@@ -9,12 +9,14 @@ use std::net::{IpAddr, SocketAddr};
 
 pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      script-src 'self'; \
+     script-src-elem 'self'; \
+     script-src-attr 'none'; \
      style-src 'self' 'unsafe-inline'; \
      img-src 'self' data: blob: https://img.youtube.com; \
      media-src 'self' blob:; \
      font-src 'self'; \
      connect-src 'self'; \
-     frame-src https://www.youtube-nocookie.com https://streamable.com; \
+     frame-src 'self' https://www.youtube-nocookie.com https://streamable.com; \
      frame-ancestors 'none'; \
      object-src 'none'; \
      base-uri 'self'";
@@ -160,19 +162,25 @@ mod tests {
         body::Body, http::Request, middleware::from_fn, response::IntoResponse, routing::get,
         Router,
     };
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        fs,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        path::{Path, PathBuf},
+    };
     use tower::ServiceExt;
 
     #[test]
     fn csp_allows_core_end_user_media_features() {
         assert!(CONTENT_SECURITY_POLICY.contains("script-src 'self'"));
+        assert!(CONTENT_SECURITY_POLICY.contains("script-src-elem 'self'"));
+        assert!(CONTENT_SECURITY_POLICY.contains("script-src-attr 'none'"));
         assert!(
             CONTENT_SECURITY_POLICY.contains("img-src 'self' data: blob: https://img.youtube.com")
         );
         assert!(CONTENT_SECURITY_POLICY.contains("media-src 'self' blob:"));
         assert!(CONTENT_SECURITY_POLICY.contains("connect-src 'self'"));
         assert!(CONTENT_SECURITY_POLICY
-            .contains("frame-src https://www.youtube-nocookie.com https://streamable.com"));
+            .contains("frame-src 'self' https://www.youtube-nocookie.com https://streamable.com"));
     }
 
     #[test]
@@ -180,6 +188,75 @@ mod tests {
         assert!(!CONTENT_SECURITY_POLICY.contains("script-src 'unsafe-inline'"));
         assert!(CONTENT_SECURITY_POLICY.contains("object-src 'none'"));
         assert!(CONTENT_SECURITY_POLICY.contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn served_templates_do_not_embed_inline_script_bodies() {
+        for source_path in served_html_source_files() {
+            let source = fs::read_to_string(&source_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", source_path.display()));
+            assert!(
+                !contains_inline_script_body(&source),
+                "served HTML source reintroduced an inline <script> body: {}",
+                source_path.display()
+            );
+        }
+    }
+
+    fn served_html_source_files() -> Vec<PathBuf> {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for relative_dir in ["src/templates", "src/middleware", "src/handlers"] {
+            collect_rust_files(&repo_root.join(relative_dir), &mut files);
+        }
+        files.sort();
+        files
+    }
+
+    fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
+        let entries =
+            fs::read_dir(dir).unwrap_or_else(|error| panic!("read dir {}: {error}", dir.display()));
+        for entry in entries {
+            let entry =
+                entry.unwrap_or_else(|error| panic!("read entry under {}: {error}", dir.display()));
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rust_files(&path, files);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    fn contains_inline_script_body(source: &str) -> bool {
+        let mut search_from = 0;
+        let script_open = "<script";
+        let script_close = "</script>";
+
+        while let Some(relative_open) = source[search_from..].find(script_open) {
+            let open = search_from + relative_open;
+            let after_open = &source[open..];
+            let Some(tag_end_relative) = after_open.find('>') else {
+                break;
+            };
+            let tag_end = open + tag_end_relative;
+            let tag = &source[open..=tag_end];
+            let body_start = tag_end + 1;
+
+            let Some(close_relative) = source[body_start..].find(script_close) else {
+                break;
+            };
+            let body_end = body_start + close_relative;
+            let body = source[body_start..body_end].trim();
+
+            if !tag.contains("src=") && !body.is_empty() {
+                return true;
+            }
+
+            search_from = body_end + script_close.len();
+        }
+
+        false
     }
 
     #[tokio::test]

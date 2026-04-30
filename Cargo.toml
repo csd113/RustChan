@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.1.4"
+version = "1.1.5"
 edition = "2021"
 # axum 0.8 requires Rust 1.75; arti-client 0.41 bumps the effective floor to
 # 1.90 — keep both fields in sync.
@@ -11,11 +11,8 @@ repository = "https://github.com/csd113/RustChan"
 keywords = ["imageboard", "forum", "rust"]
 categories = ["web-programming", "multimedia::images"]
 
-# cargo-msrv <0.16 reads package.metadata.msrv instead of the Cargo-standard
-# rust-version field; keep both in sync so `cargo msrv verify` works regardless
-# of which version of cargo-msrv is installed.
+# Keep `cargo-msrv` metadata aligned with `rust-version`.
 [package.metadata]
-# FIX[MSRV]: was "1.75" — updated to match rust-version above.
 msrv = "1.90"
 
 [profile.release]
@@ -52,7 +49,7 @@ serde_json = "1"
 toml  = "1.0"
 
 argon2  = "0.5"
-sha2    = "0.10"
+sha2    = "0.11"
 subtle  = "2"
 hex    = "0.4"
 # rand_core 0.6 replaces rand = "0.8" entirely.
@@ -67,7 +64,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # EXIF orientation correction: read Orientation tag from JPEG uploads and
 # apply the corresponding rotation before thumbnailing so that photos taken
 # on phones display upright (4.1).
-kamadak-exif = "0.5"
+kamadak-exif = "0.6"
 
 clap = { version = "4", features = ["derive"] }
 
@@ -131,7 +128,7 @@ tor-hsservice = { version = "0.41", default-features = false }
 tor-cell      = { version = "0.41", default-features = false }
 
 futures       = "0.3"
-sha3          = "0.10"
+sha3          = "0.11"
 data-encoding = "2"
 
 # ── TLS ───────────────────────────────────────────────────────────────────────
@@ -143,8 +140,8 @@ rustls         = { version = "0.23", features = ["ring"] }
 
 # Optional — gated by Cargo features
 rustls-acme    = { version = "0.15", features = ["tokio"], optional = true }
-rcgen          = { version = "0.13", optional = true }
-pem-rfc7468    = { version = "0.7",  optional = true }
+rcgen          = { version = "0.14", optional = true }
+pem-rfc7468    = { version = "1.0",  optional = true, features = ["std"] }
 x509-cert      = { version = "0.2",  optional = true }
 
 # HTTPS listen integration for Axum (handles Static cert path)
@@ -155,7 +152,7 @@ hyper-util     = { version = "0.1", features = ["tokio", "server"] }
 # ── Terminal UI ───────────────────────────────────────────────────────────────
 # crossterm: required by src/server/console/ (wizard.rs, input.rs, mod.rs).
 # Provides cross-platform terminal control (cursor, events, raw mode).
-crossterm = "0.28"
+crossterm = "0.29"
 
 [features]
 default         = ["tls-self-signed"]
@@ -176,17 +173,19 @@ windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 # [patch.crates-io]
 # openssl-sys = { path = "patches/openssl-sys-stub" }
 
+# Crate-wide Clippy policy: keep the dangerous footguns visible, but relax the lints that are noisy for large route, template, and DB-mapping modules.
+# Individual exceptions are documented next to the code so maintainers can see why each one exists.
 [lints.clippy]
 too_many_arguments             = "allow"
 manual_pattern_char_comparison = "allow"
-# Deny the most dangerous footguns
-unwrap_used                    = "warn"   # force .expect("reason") or proper handling
-expect_used                    = "allow"  # allow in tests; use with a message in production
-indexing_slicing               = "warn"   # prefer .get() with bounds check
-arithmetic_side_effects        = "allow"  # too noisy for general arithmetic
-missing_errors_doc             = "allow"  # pedantic docs lint, too noisy for all Results
-doc_markdown                   = "allow"  # allow non-backticked identifiers in docs
+# Keep panic-prone patterns visible while still allowing intentional, well-documented uses in tests and startup invariants.
+unwrap_used                    = "warn"   # keep panic-on-bug paths visible without blocking the build
+expect_used                    = "allow"  # intentional in tests and startup invariants where a panic would signal a bug
+indexing_slicing               = "warn"   # direct indexing is still visible for review, but only when intentional
+arithmetic_side_effects        = "allow"  # local math and display conversions are documented near the code
+missing_errors_doc             = "allow"  # public error docs are useful, but not every internal helper needs them
+doc_markdown                   = "allow"  # docs prioritize clarity over strict backtick style
 doc_lazy_continuation          = "allow"  # don't require strict indentation for doc lists
-items_after_statements         = "allow"  # permit helper items inside functions
-wildcard_imports               = "allow"  # crate-level style choice for imports
-uninlined_format_args          = "allow"  # allow older-style format! calls
+items_after_statements         = "allow"  # some helpers stay inline for readability inside larger render/parse functions
+wildcard_imports               = "allow"  # route modules use broad imports to keep handler files compact
+uninlined_format_args          = "allow"  # older format strings are kept where they aid readability during staged cleanup

@@ -8,14 +8,73 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::io::Seek;
 use std::path::{Path, PathBuf};
-use tracing::warn;
 
 pub(super) const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub(super) const BOARD_MANIFEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const BANNER_RESTORE_ENTRY_MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const BANNER_RESTORE_TOTAL_MAX_BYTES: u64 = 64 * 1024 * 1024;
+// Keep restore writes within an application-level disk budget instead of relying
+// only on the router's coarse 20 GiB body cap.
+pub(super) const RESTORE_UPLOAD_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub(super) const RESTORE_TOTAL_EXTRACTED_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(super) const FULL_BACKUP_MANIFEST_NAME: &str = "backup.json";
+pub(super) const FULL_BACKUP_TOR_KEYS_PREFIX: &str = "tor/keys";
+pub(super) const FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX: &str = "tor/keys/";
 const SQLITE_HEADER: &[u8] = b"SQLite format 3\0";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TorHiddenServiceKeysAvailability {
+    Skipped,
+    Available(PathBuf),
+}
+
+pub(super) fn resolve_tor_hidden_service_keys_availability(
+    requested: bool,
+    configured_dir: Option<PathBuf>,
+    unavailable_message: &str,
+) -> Result<TorHiddenServiceKeysAvailability> {
+    if !requested {
+        return Ok(TorHiddenServiceKeysAvailability::Skipped);
+    }
+
+    let Some(dir) = configured_dir else {
+        return Err(AppError::BadRequest(unavailable_message.to_string()));
+    };
+
+    std::fs::read_dir(&dir).map_err(|error| {
+        AppError::BadRequest(format!(
+            "{unavailable_message} The configured identity directory {} could not be read: {error}",
+            dir.display()
+        ))
+    })?;
+
+    Ok(TorHiddenServiceKeysAvailability::Available(dir))
+}
+
+pub(super) fn resolve_tor_hidden_service_keys_restore_target(
+    requested: bool,
+    configured_dir: Option<PathBuf>,
+    unavailable_message: &str,
+) -> Result<TorHiddenServiceKeysAvailability> {
+    if !requested {
+        return Ok(TorHiddenServiceKeysAvailability::Skipped);
+    }
+
+    let Some(dir) = configured_dir else {
+        return Err(AppError::BadRequest(unavailable_message.to_string()));
+    };
+
+    if let Ok(metadata) = std::fs::symlink_metadata(&dir) {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(AppError::BadRequest(format!(
+                "{unavailable_message} The configured identity path {} is not a directory.",
+                dir.display()
+            )));
+        }
+    }
+
+    Ok(TorHiddenServiceKeysAvailability::Available(dir))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct FullBackupManifest {
@@ -27,6 +86,10 @@ pub(super) struct FullBackupManifest {
     pub favicon_file_count: u64,
     #[serde(default)]
     pub banner_file_count: u64,
+    #[serde(default)]
+    pub tor_hidden_service_keys_included: bool,
+    #[serde(default)]
+    pub tor_hidden_service_key_file_count: u64,
     #[serde(default)]
     pub boards: Vec<BackupBoardSummary>,
 }
@@ -86,7 +149,40 @@ pub(super) fn validate_board_short_name(short_name: &str) -> Result<()> {
     }
 }
 
-#[allow(clippy::arithmetic_side_effects)]
+fn validated_media_upload_relative_path(path: &str, context: &str) -> Result<Vec<String>> {
+    validate_restore_safe_entry_name(path)?;
+    let components = path.split('/').map(str::to_string).collect::<Vec<_>>();
+    if components.len() < 2 {
+        return Err(AppError::BadRequest(format!(
+            "{context} must include a board directory and file name."
+        )));
+    }
+    Ok(components)
+}
+
+pub(super) fn validate_restored_media_path(path: &str, context: &str) -> Result<String> {
+    let components = validated_media_upload_relative_path(path, context)?;
+    let board_short = components
+        .first()
+        .ok_or_else(|| AppError::BadRequest(format!("{context} is missing a board directory.")))?;
+    validate_board_short_name(board_short)?;
+    Ok(board_short.clone())
+}
+
+pub(super) fn validate_restored_media_path_for_board(
+    path: &str,
+    expected_board_short: &str,
+    context: &str,
+) -> Result<()> {
+    let board_short = validate_restored_media_path(path, context)?;
+    if board_short != expected_board_short {
+        return Err(AppError::BadRequest(format!(
+            "{context} must stay within /{expected_board_short}/ uploads."
+        )));
+    }
+    Ok(())
+}
+
 fn remap_numeric_references(body: &str, prefix: &str, pairs: &[(String, String)]) -> String {
     let mut result = body.to_string();
     for (old, new) in pairs {
@@ -120,7 +216,6 @@ fn remap_numeric_references(body: &str, prefix: &str, pairs: &[(String, String)]
     result
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 pub(super) fn remap_body_quotelinks(
     body: &str,
     board_short: &str,
@@ -140,7 +235,6 @@ pub(super) fn render_restored_body_html(body: &str) -> String {
     crate::utils::sanitize::render_post_body(&escaped, false)
 }
 
-#[allow(clippy::arithmetic_side_effects)]
 pub(super) fn copy_limited<R: std::io::Read, W: std::io::Write>(
     reader: &mut R,
     writer: &mut W,
@@ -168,6 +262,28 @@ pub(super) fn copy_limited<R: std::io::Read, W: std::io::Write>(
         }
     }
     Ok(total)
+}
+
+pub(super) fn copy_limited_with_total_budget<R: std::io::Read, W: std::io::Write>(
+    reader: &mut R,
+    writer: &mut W,
+    max_bytes: u64,
+    total_written: &mut u64,
+    total_budget: u64,
+    label: &str,
+) -> std::io::Result<u64> {
+    let copied = copy_limited(reader, writer, max_bytes)?;
+    *total_written = total_written.saturating_add(copied);
+    if *total_written > total_budget {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{label} exceeds the {} MiB extracted restore budget",
+                total_budget / 1024 / 1024
+            ),
+        ));
+    }
+    Ok(copied)
 }
 
 pub(super) fn create_staging_dir(base_path: &Path, label: &str) -> Result<PathBuf> {
@@ -216,30 +332,16 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     destination_root: &Path,
 ) -> Result<()> {
+    let mut extracted_bytes = 0u64;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
         let name = entry.name().to_string();
-        if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
-            warn!("Restore: skipping suspicious entry '{name}'");
-            continue;
-        }
-        let Some(rel) = name.strip_prefix("uploads/") else {
+        let Some(rel_path) = restore_safe_relative_path_under_prefix(&name, "uploads/")? else {
             continue;
         };
-        if rel.is_empty() {
-            continue;
-        }
-        let rel_path = Path::new(rel);
-        if rel_path
-            .components()
-            .any(|component| component == std::path::Component::ParentDir)
-        {
-            warn!("Restore: skipping suspicious entry '{name}'");
-            continue;
-        }
-        let target = destination_root.join(rel_path);
+        let target = destination_root.join(&rel_path);
         if entry.is_dir() {
             std::fs::create_dir_all(&target).map_err(|e| {
                 AppError::Internal(anyhow::anyhow!("mkdir {}: {e}", target.display()))
@@ -253,38 +355,68 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
         }
         let mut out = std::fs::File::create(&target)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Create {}: {e}", target.display())))?;
-        copy_limited(&mut entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {e}", target.display())))?;
+        copy_limited_with_total_budget(
+            &mut entry,
+            &mut out,
+            ZIP_ENTRY_MAX_BYTES,
+            &mut extracted_bytes,
+            RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+            "Restored uploads",
+        )
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {e}", target.display())))?;
     }
     Ok(())
 }
 
 pub(super) fn validate_restore_safe_entry_name(name: &str) -> Result<()> {
-    if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
+    let normalized = name.trim_end_matches('/');
+    let suspicious = name.is_empty()
+        || normalized.is_empty()
+        || name.contains('\0')
+        || name.contains('\\')
+        || name.contains(':')
+        || name.starts_with('/')
+        || normalized
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..");
+
+    if suspicious {
         return Err(AppError::BadRequest(format!(
             "Backup contains suspicious path '{name}'"
         )));
     }
-    let path = Path::new(name);
-    if path
-        .components()
-        .any(|component| component == std::path::Component::ParentDir)
-    {
-        return Err(AppError::BadRequest(format!(
-            "Backup contains suspicious path '{name}'"
-        )));
+    for component in Path::new(name).components() {
+        match component {
+            std::path::Component::Normal(_) => {}
+            _ => {
+                return Err(AppError::BadRequest(format!(
+                    "Backup contains suspicious path '{name}'"
+                )));
+            }
+        }
     }
     Ok(())
 }
 
-pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> {
-    let file = std::fs::File::open(path).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Open backup {}: {error}", path.display()))
-    })?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|error| AppError::BadRequest(format!("Invalid zip backup: {error}")))?;
+pub(super) fn restore_safe_relative_path_under_prefix(
+    name: &str,
+    prefix: &str,
+) -> Result<Option<PathBuf>> {
+    validate_restore_safe_entry_name(name)?;
+    let Some(rel) = name.strip_prefix(prefix) else {
+        return Ok(None);
+    };
+    let rel = rel.trim_end_matches('/');
+    if rel.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(rel.split('/').collect()))
+}
 
-    let manifest = read_full_backup_manifest_from_archive(&mut archive)?;
+pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<FullBackupManifest> {
+    let manifest = read_full_backup_manifest_from_archive(archive)?;
 
     let mut db_entry = archive.by_name("chan.db").map_err(|_| {
         AppError::BadRequest("Invalid full backup: zip must contain 'chan.db' at the root.".into())
@@ -303,6 +435,7 @@ pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> 
     let mut upload_file_count = 0u64;
     let mut favicon_file_count = 0u64;
     let mut banner_file_count = 0u64;
+    let mut tor_hidden_service_key_file_count = 0u64;
     for idx in 0..archive.len() {
         let entry = archive.by_index(idx).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Read backup entry #{idx}: {error}"))
@@ -318,6 +451,8 @@ pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> 
             favicon_file_count = favicon_file_count.saturating_add(1);
         } else if name.starts_with("banner/") {
             banner_file_count = banner_file_count.saturating_add(1);
+        } else if name.starts_with(FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX) {
+            tor_hidden_service_key_file_count = tor_hidden_service_key_file_count.saturating_add(1);
         }
     }
 
@@ -339,8 +474,29 @@ pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> 
             manifest.banner_file_count, banner_file_count
         )));
     }
+    if tor_hidden_service_key_file_count != manifest.tor_hidden_service_key_file_count {
+        return Err(AppError::BadRequest(format!(
+            "Invalid full backup: manifest Tor key count {} does not match archive count {}.",
+            manifest.tor_hidden_service_key_file_count, tor_hidden_service_key_file_count
+        )));
+    }
+    if manifest.tor_hidden_service_keys_included != (tor_hidden_service_key_file_count > 0) {
+        return Err(AppError::BadRequest(
+            "Invalid full backup: manifest Tor key metadata does not match archive contents."
+                .into(),
+        ));
+    }
 
     Ok(manifest)
+}
+
+pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> {
+    let file = std::fs::File::open(path).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Open backup {}: {error}", path.display()))
+    })?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| AppError::BadRequest(format!("Invalid zip backup: {error}")))?;
+    verify_full_backup_archive(&mut archive)
 }
 
 pub(super) fn read_full_backup_manifest_from_archive<R: std::io::Read + Seek>(
@@ -385,9 +541,10 @@ pub(super) fn verify_board_backup_zip(
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_uploads_to_dir, remap_body_quotelinks, validate_board_short_name,
-        verify_board_backup_zip, verify_full_backup_zip, FullBackupManifest,
-        FULL_BACKUP_MANIFEST_NAME,
+        copy_limited_with_total_budget, extract_uploads_to_dir, remap_body_quotelinks,
+        validate_board_short_name, validate_restore_safe_entry_name, validate_restored_media_path,
+        validate_restored_media_path_for_board, verify_board_backup_zip, verify_full_backup_zip,
+        FullBackupManifest, FULL_BACKUP_MANIFEST_NAME,
     };
     use serde_json::json;
     use std::io::Write as _;
@@ -439,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_uploads_to_dir_skips_suspicious_entries() {
+    fn extract_uploads_to_dir_rejects_suspicious_entries() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let zip_path = temp_dir.path().join("uploads.zip");
         {
@@ -460,10 +617,101 @@ mod tests {
         let dest = temp_dir.path().join("dest");
         std::fs::create_dir_all(&dest).expect("dest dir");
 
-        extract_uploads_to_dir(&mut archive, &dest).expect("extract uploads");
+        let error = extract_uploads_to_dir(&mut archive, &dest).expect_err("reject traversal");
 
         assert!(dest.join("test/ok.txt").exists());
         assert!(!dest.join("escape.txt").exists());
+        assert!(error.to_string().contains("suspicious path"));
+    }
+
+    #[test]
+    fn restore_extraction_budget_rejects_archive_that_exceeds_total_limit() {
+        let mut reader = std::io::Cursor::new(vec![b'x'; 6]);
+        let mut writer = Vec::new();
+        let mut total_written = 0;
+
+        let error = copy_limited_with_total_budget(
+            &mut reader,
+            &mut writer,
+            16,
+            &mut total_written,
+            5,
+            "Test restore archive",
+        )
+        .expect_err("oversized extracted archive rejected");
+
+        assert!(error.to_string().contains("extracted restore budget"));
+    }
+
+    #[test]
+    fn extract_uploads_to_dir_accepts_valid_archive_within_budget() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("uploads-ok.zip");
+        {
+            let file = std::fs::File::create(&zip_path).expect("zip file");
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("uploads/test/ok.txt", options)
+                .expect("start valid file");
+            std::io::Write::write_all(&mut zip, b"ok").expect("write valid file");
+            zip.finish().expect("finish zip");
+        }
+
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let dest = temp_dir.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("dest dir");
+
+        extract_uploads_to_dir(&mut archive, &dest).expect("extract valid uploads archive");
+
+        assert_eq!(
+            std::fs::read(dest.join("test/ok.txt")).expect("read extracted file"),
+            b"ok"
+        );
+    }
+
+    #[test]
+    fn restore_entry_validation_rejects_platform_specific_traversal() {
+        for name in [
+            "../escape.txt",
+            "uploads/../escape.txt",
+            "uploads\\board\\file.txt",
+            "C:/Windows/system.ini",
+            "uploads/C:/Windows/system.ini",
+            "uploads//board/file.txt",
+            "uploads/./board/file.txt",
+            "/uploads/board/file.txt",
+            "\\uploads\\board\\file.txt",
+        ] {
+            assert!(
+                validate_restore_safe_entry_name(name).is_err(),
+                "accepted suspicious path {name:?}"
+            );
+        }
+
+        assert!(validate_restore_safe_entry_name("uploads/board/file.txt").is_ok());
+    }
+
+    #[test]
+    fn restored_media_path_validation_requires_safe_board_scoped_paths() {
+        assert_eq!(
+            validate_restored_media_path("tech/thumbs/doc.svg", "test media path")
+                .expect("valid media path"),
+            "tech"
+        );
+        assert!(
+            validate_restored_media_path("../tech/doc.pdf", "test media path").is_err(),
+            "parent traversal must be rejected"
+        );
+        assert!(
+            validate_restored_media_path("tech", "test media path").is_err(),
+            "board-only path must be rejected"
+        );
+        assert!(
+            validate_restored_media_path_for_board("b/doc.pdf", "tech", "board restore path")
+                .is_err(),
+            "cross-board media path must be rejected for board restores"
+        );
     }
 
     #[test]
@@ -478,6 +726,8 @@ mod tests {
             upload_file_count: 1,
             favicon_file_count: 1,
             banner_file_count: 0,
+            tor_hidden_service_keys_included: false,
+            tor_hidden_service_key_file_count: 0,
             boards: vec![crate::models::BackupBoardSummary {
                 short_name: "b".into(),
                 name: "Random".into(),
@@ -498,6 +748,75 @@ mod tests {
         assert_eq!(verified.upload_file_count, 1);
         assert_eq!(verified.favicon_file_count, 1);
         assert_eq!(verified.boards.len(), 1);
+    }
+
+    #[test]
+    fn verify_full_backup_zip_rejects_missing_manifest() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("full.zip");
+        write_zip(&zip_path, &[("chan.db", b"SQLite format 3\0rest of db")]);
+
+        let error = verify_full_backup_zip(&zip_path).expect_err("missing manifest rejected");
+
+        assert!(error.to_string().contains("missing backup.json"));
+    }
+
+    #[test]
+    fn verify_full_backup_zip_defaults_legacy_tor_metadata_to_not_included() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("legacy-full.zip");
+        let manifest = json!({
+            "version": 2,
+            "generated_at": 1_700_000_000_i64,
+            "rustchan_version": "1.1.3",
+            "db_bytes": 4096_u64,
+            "upload_file_count": 1_u64,
+            "favicon_file_count": 0_u64,
+            "banner_file_count": 0_u64,
+            "boards": []
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest bytes");
+        write_zip(
+            &zip_path,
+            &[
+                (FULL_BACKUP_MANIFEST_NAME, &manifest_bytes),
+                ("chan.db", b"SQLite format 3\0db"),
+                ("uploads/tech/file.txt", b"ok"),
+            ],
+        );
+
+        let verified = verify_full_backup_zip(&zip_path).expect("verify legacy full backup");
+        assert!(!verified.tor_hidden_service_keys_included);
+        assert_eq!(verified.tor_hidden_service_key_file_count, 0);
+    }
+
+    #[test]
+    fn verify_full_backup_zip_rejects_tor_manifest_mismatch() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("tor-mismatch.zip");
+        let manifest = FullBackupManifest {
+            version: 3,
+            generated_at: 1_700_000_000,
+            rustchan_version: "1.1.3".into(),
+            db_bytes: 4096,
+            upload_file_count: 0,
+            favicon_file_count: 0,
+            banner_file_count: 0,
+            tor_hidden_service_keys_included: true,
+            tor_hidden_service_key_file_count: 1,
+            boards: Vec::new(),
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest bytes");
+        write_zip(
+            &zip_path,
+            &[
+                (FULL_BACKUP_MANIFEST_NAME, &manifest_bytes),
+                ("chan.db", b"SQLite format 3\0db"),
+            ],
+        );
+
+        let error = verify_full_backup_zip(&zip_path).expect_err("mismatched Tor metadata");
+        assert!(error.to_string().contains("manifest Tor key count 1"));
     }
 
     #[test]
