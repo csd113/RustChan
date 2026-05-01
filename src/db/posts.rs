@@ -35,6 +35,12 @@ pub enum JobFailureState {
     PermanentlyFailed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptedJobRecovery {
+    pub jobs_reset: i64,
+    pub media_posts_reset: i64,
+}
+
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
 /// Map a full post row (25 columns, selected in the canonical order used
@@ -1214,6 +1220,84 @@ pub fn pending_job_count(conn: &rusqlite::Connection) -> Result<i64> {
     Ok(n)
 }
 
+/// Reset jobs that were interrupted after being claimed but before completion.
+///
+/// This is intended for startup before workers begin claiming jobs. It does not
+/// trust or reuse any partial ffmpeg output; recovered media jobs are retried
+/// from their original payload.
+///
+/// # Errors
+/// Returns an error if the recovery queries fail.
+pub fn recover_interrupted_background_jobs(
+    conn: &rusqlite::Connection,
+) -> Result<InterruptedJobRecovery> {
+    let interrupted_media_post_ids = interrupted_media_post_ids(conn)?;
+    let media_posts_reset = reset_interrupted_media_posts(conn, &interrupted_media_post_ids)?;
+    let jobs_reset = conn.execute(
+        "UPDATE background_jobs
+         SET status = 'pending',
+             attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+             last_error = NULL,
+             updated_at = unixepoch()
+         WHERE status = 'running'",
+        [],
+    )?;
+
+    Ok(InterruptedJobRecovery {
+        jobs_reset: i64::try_from(jobs_reset).unwrap_or(i64::MAX),
+        media_posts_reset,
+    })
+}
+
+fn interrupted_media_post_ids(conn: &rusqlite::Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT job_type, payload
+         FROM background_jobs
+         WHERE status = 'running'",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut post_ids = Vec::new();
+    for row in rows {
+        let (job_type, payload) = row?;
+        if let Some(post_id) = media_post_id_from_payload(&job_type, &payload) {
+            post_ids.push(post_id);
+        }
+    }
+    post_ids.sort_unstable();
+    post_ids.dedup();
+    Ok(post_ids)
+}
+
+fn media_post_id_from_payload(job_type: &str, payload: &str) -> Option<i64> {
+    if !matches!(job_type, "video_transcode" | "audio_waveform") {
+        return None;
+    }
+
+    let payload: serde_json::Value = serde_json::from_str(payload).ok()?;
+    match payload.get("t")?.as_str()? {
+        "VideoTranscode" | "AudioWaveform" => payload.get("d")?.get("post_id")?.as_i64(),
+        _ => None,
+    }
+}
+
+fn reset_interrupted_media_posts(conn: &rusqlite::Connection, post_ids: &[i64]) -> Result<i64> {
+    let mut reset = 0_i64;
+    for post_id in post_ids {
+        let changed = conn.execute(
+            "UPDATE posts
+             SET media_processing_state = ?1,
+                 media_processing_error = NULL
+             WHERE id = ?2",
+            params![MEDIA_PROCESSING_PENDING, post_id],
+        )?;
+        reset = reset.saturating_add(i64::try_from(changed).unwrap_or(i64::MAX));
+    }
+    Ok(reset)
+}
+
 pub const MEDIA_PROCESSING_PENDING: &str = "pending";
 pub const MEDIA_PROCESSING_FAILED: &str = "failed";
 
@@ -1403,11 +1487,12 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        count_posts_by_media_processing_state, count_search_results, get_post, get_post_submission,
-        get_posts_for_thread, is_stale_media_target_error, record_post_submission,
-        replace_transcoded_media, search_posts, search_terms, self_delete_post,
-        set_post_media_processing_state, to_fts_query, update_post_thumb_path, SelfDeleteOutcome,
-        MEDIA_PROCESSING_FAILED,
+        claim_next_job, count_posts_by_media_processing_state, count_search_results, get_post,
+        get_post_submission, get_posts_for_thread, is_stale_media_target_error,
+        record_post_submission, recover_interrupted_background_jobs, replace_transcoded_media,
+        search_posts, search_terms, self_delete_post, set_post_media_processing_state,
+        to_fts_query, update_post_thumb_path, SelfDeleteOutcome, MEDIA_PROCESSING_FAILED,
+        MEDIA_PROCESSING_PENDING,
     };
     use crate::db::{
         create_board, create_reply_with_thread_update, create_thread_with_optional_poll,
@@ -1487,6 +1572,34 @@ mod tests {
             create_thread_with_optional_poll(conn, board.id, None, &post, "", None, None)
                 .expect("create media thread");
         post_id
+    }
+
+    fn insert_background_job(
+        conn: &Connection,
+        job_type: &str,
+        payload: &str,
+        status: &str,
+        attempts: i64,
+        last_error: Option<&str>,
+    ) -> i64 {
+        conn.query_row(
+            "INSERT INTO background_jobs
+             (job_type, payload, status, attempts, last_error, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
+             RETURNING id",
+            rusqlite::params![job_type, payload, status, attempts, last_error],
+            |row| row.get(0),
+        )
+        .expect("insert background job")
+    }
+
+    fn background_job_status(conn: &Connection, id: i64) -> (String, i64, Option<String>) {
+        conn.query_row(
+            "SELECT status, attempts, last_error FROM background_jobs WHERE id = ?1",
+            rusqlite::params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("load background job")
     }
 
     #[test]
@@ -1643,6 +1756,99 @@ mod tests {
                 .expect("count failed after clear"),
             0
         );
+    }
+
+    #[test]
+    fn startup_recovery_resets_running_background_job_to_pending() {
+        let conn = test_conn();
+        let payload = r#"{"t":"SpamCheck","d":{"post_id":1,"ip_hash":"hash","body_len":5}}"#;
+        let job_id = insert_background_job(
+            &conn,
+            "spam_check",
+            payload,
+            "running",
+            1,
+            Some("worker interrupted"),
+        );
+
+        let recovery =
+            recover_interrupted_background_jobs(&conn).expect("recover interrupted jobs");
+
+        assert_eq!(recovery.jobs_reset, 1);
+        assert_eq!(recovery.media_posts_reset, 0);
+        assert_eq!(
+            background_job_status(&conn, job_id),
+            ("pending".to_string(), 0, None)
+        );
+    }
+
+    #[test]
+    fn startup_recovery_leaves_non_running_jobs_unchanged() {
+        let conn = test_conn();
+        let payload = r#"{"t":"SpamCheck","d":{"post_id":1,"ip_hash":"hash","body_len":5}}"#;
+        let pending_id = insert_background_job(&conn, "spam_check", payload, "pending", 0, None);
+        let done_id = insert_background_job(&conn, "spam_check", payload, "done", 1, None);
+        let failed_id =
+            insert_background_job(&conn, "spam_check", payload, "failed", 3, Some("bad input"));
+
+        let recovery =
+            recover_interrupted_background_jobs(&conn).expect("recover interrupted jobs");
+
+        assert_eq!(recovery.jobs_reset, 0);
+        assert_eq!(background_job_status(&conn, pending_id).0, "pending");
+        assert_eq!(background_job_status(&conn, done_id).0, "done");
+        assert_eq!(
+            background_job_status(&conn, failed_id),
+            ("failed".to_string(), 3, Some("bad input".to_string()))
+        );
+    }
+
+    #[test]
+    fn startup_recovery_restores_media_post_processing_state_to_pending() {
+        let conn = test_conn();
+        let post_id = seed_media_post(&conn, "recover", "recover/video.mp4");
+        set_post_media_processing_state(&conn, post_id, Some("running"), Some("old error"))
+            .expect("set stale processing state");
+        let payload = format!(
+            r#"{{"t":"VideoTranscode","d":{{"post_id":{post_id},"file_path":"recover/video.mp4","board_short":"recover"}}}}"#
+        );
+        insert_background_job(
+            &conn,
+            "video_transcode",
+            &payload,
+            "running",
+            1,
+            Some("old error"),
+        );
+
+        let recovery =
+            recover_interrupted_background_jobs(&conn).expect("recover interrupted jobs");
+
+        assert_eq!(recovery.jobs_reset, 1);
+        assert_eq!(recovery.media_posts_reset, 1);
+        let post = get_post(&conn, post_id)
+            .expect("load post")
+            .expect("post exists");
+        assert_eq!(
+            post.media_processing_state.as_deref(),
+            Some(MEDIA_PROCESSING_PENDING)
+        );
+        assert_eq!(post.media_processing_error, None);
+    }
+
+    #[test]
+    fn recovered_background_job_can_be_claimed_by_worker() {
+        let conn = test_conn();
+        let payload = r#"{"t":"SpamCheck","d":{"post_id":42,"ip_hash":"hash","body_len":5}}"#;
+        let job_id = insert_background_job(&conn, "spam_check", payload, "running", 1, None);
+
+        recover_interrupted_background_jobs(&conn).expect("recover interrupted jobs");
+        let claimed = claim_next_job(&conn)
+            .expect("claim recovered job")
+            .expect("job should be claimable");
+
+        assert_eq!(claimed, (job_id, payload.to_string()));
+        assert_eq!(background_job_status(&conn, job_id).0, "running");
     }
 
     #[test]

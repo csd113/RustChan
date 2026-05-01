@@ -270,6 +270,18 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // sequence can await each worker instead of blindly sleeping for 10 s.
     // Previously the return value was silently discarded, making it impossible
     // to know whether in-flight jobs had finished before the process exited.
+    {
+        let conn = pool.get()?;
+        let recovery = crate::db::recover_interrupted_background_jobs(&conn)?;
+        if recovery.jobs_reset > 0 {
+            tracing::warn!(
+                target: "workers",
+                jobs_reset = recovery.jobs_reset,
+                media_posts_reset = recovery.media_posts_reset,
+                "Recovered interrupted background jobs from previous shutdown"
+            );
+        }
+    }
     let worker_queue = std::sync::Arc::new(crate::workers::JobQueue::new(pool.clone()));
     let worker_handles =
         crate::workers::start_worker_pool(&worker_queue, ffmpeg_available, ffmpeg_vp9_available);
