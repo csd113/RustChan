@@ -1966,6 +1966,7 @@ html:not([data-theme]) .admin-panel h1 {
 }
 
 .board-settings-grid .admin-input-compact {
+  width: min(10rem, 100%);
   max-width: 10rem;
 }
 
