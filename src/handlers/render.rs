@@ -116,6 +116,7 @@ pub fn load_board_page_data(
 pub fn render_board_page(
     data: &BoardPageData,
     csrf_token: &str,
+    admin_csrf_token: Option<&str>,
     error: Option<&str>,
     new_thread_prefill: Option<&templates::forms::PostFormState>,
     thread_badges: &std::collections::HashMap<i64, i64>,
@@ -132,6 +133,7 @@ pub fn render_board_page(
         csrf_token,
         boards.as_slice(),
         data.is_admin,
+        admin_csrf_token,
         error,
         new_thread_prefill,
         thread_badges,
@@ -176,6 +178,7 @@ pub fn load_thread_page_data(
 pub fn render_thread_page(
     data: &ThreadPageData,
     csrf_token: &str,
+    admin_csrf_token: Option<&str>,
     error: Option<&str>,
     success: Option<&str>,
     reply_prefill: Option<&templates::forms::PostFormState>,
@@ -192,6 +195,7 @@ pub fn render_thread_page(
         csrf_token,
         boards.as_slice(),
         data.is_admin,
+        admin_csrf_token,
         data.poll.as_ref(),
         error,
         success,

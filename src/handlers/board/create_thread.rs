@@ -139,9 +139,21 @@ pub async fn create_thread(
                     "board-banner-slot",
                     "board-banner-image",
                 );
+                let admin_csrf_for_error = if page_data.is_admin {
+                    admin_session_err.as_deref().map(|session_id| {
+                        crate::utils::crypto::make_scoped_csrf_form_token(
+                            &csrf_for_error,
+                            &CONFIG.cookie_secret,
+                            session_id,
+                        )
+                    })
+                } else {
+                    None
+                };
                 Ok(render::render_board_page(
                     &page_data,
                     &csrf_for_error,
+                    admin_csrf_for_error.as_deref(),
                     Some(&msg),
                     Some(&post_form_state),
                     &std::collections::HashMap::new(),

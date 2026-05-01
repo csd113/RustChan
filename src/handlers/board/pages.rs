@@ -35,6 +35,7 @@ pub async fn index(
     let admin_session = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
+    let admin_session_for_load = admin_session.clone();
     let (board_stats, site_data, is_admin, home_banner_html, homepage_badges_enabled, board_badges) =
         tokio::task::spawn_blocking({
             let pool = state.db.clone();
@@ -49,7 +50,7 @@ pub async fn index(
                         None
                     }
                 };
-                let is_admin = admin_session
+                let is_admin = admin_session_for_load
                     .as_deref()
                     .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
                 let home_banner = crate::banner::resolve_home_banner(&conn, "/")?;
@@ -137,6 +138,7 @@ pub async fn index(
         &board_stats,
         site_data.as_ref(),
         &csrf,
+        admin_scoped_csrf_token(&jar, admin_session.as_deref(), is_admin).as_deref(),
         onion_address.as_deref(),
         &home_banner_html,
         &board_badges,
@@ -268,7 +270,16 @@ pub async fn board_index(
     } else {
         HashMap::new()
     };
-    let admin_tag = if page_data.is_admin { "-a" } else { "" };
+    let admin_csrf = admin_scoped_csrf_token(&jar, admin_session_id.as_deref(), page_data.is_admin);
+    let admin_tag = admin_csrf.as_deref().map_or_else(String::new, |token| {
+        format!(
+            "-a{}",
+            crate::utils::crypto::sha256_hex(token.as_bytes())
+                .chars()
+                .take(12)
+                .collect::<String>()
+        )
+    });
     let post_tag = if can_post { "-p1" } else { "-p0" };
     let greentext_tag = if page_data.board.collapse_greentext {
         "-cg1"
@@ -342,6 +353,7 @@ pub async fn board_index(
     let html = render::render_board_page(
         &page_data,
         &csrf,
+        admin_csrf.as_deref(),
         None,
         None,
         &thread_badges,

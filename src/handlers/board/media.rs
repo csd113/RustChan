@@ -244,6 +244,7 @@ pub async fn api_post_preview(
                         crate::templates::thread::RenderPostOpts {
                             show_delete: false,
                             is_admin: false,
+                            admin_csrf_token: None,
                             show_media: true,
                             allow_editing: false, // no edit link in read-only preview
                             allow_self_delete: false,

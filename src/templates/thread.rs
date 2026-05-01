@@ -52,6 +52,7 @@ fn render_post_preview(
         RenderPostOpts {
             show_delete: false,
             is_admin: false,
+            admin_csrf_token: None,
             show_media: true,
             allow_editing: false,
             allow_self_delete: false,
@@ -276,6 +277,7 @@ pub fn thread_page(
     csrf_token: &str,
     boards: &[Board],
     is_admin: bool,
+    admin_csrf_token: Option<&str>,
     poll: Option<&crate::models::PollData>,
     error: Option<&str>,
     success: Option<&str>,
@@ -286,6 +288,7 @@ pub fn thread_page(
     can_post: bool,
 ) -> String {
     let mut body = String::new();
+    let admin_form_csrf = admin_csrf_token.unwrap_or(csrf_token);
     let admin_toolbar = if is_admin {
         let sticky_action = if thread.sticky {
             ("unsticky", "&#128204; Unsticky")
@@ -328,7 +331,7 @@ pub fn thread_page(
 <button type="submit" class="admin-toolbar-btn">logout</button>
 </form>
 </div>"#,
-            csrf = escape_html(csrf_token),
+            csrf = escape_html(admin_form_csrf),
             tid = thread.id,
             board = escape_html(&board.short_name),
             sticky_act = sticky_action.0,
@@ -349,7 +352,7 @@ pub fn thread_page(
   &#128451; Archive Thread
 </button>
 </form>"#,
-                    csrf = escape_html(csrf_token),
+                    csrf = escape_html(admin_form_csrf),
                     tid = thread.id,
                     board = escape_html(&board.short_name),
                 )
@@ -417,6 +420,7 @@ pub fn thread_page(
             RenderPostOpts {
                 show_delete: true,
                 is_admin,
+                admin_csrf_token: admin_csrf_token.map(str::to_string),
                 show_media: true,
                 allow_editing: board.allow_editing,
                 allow_self_delete: board.allow_self_delete,
@@ -643,6 +647,7 @@ fn render_poll(
 pub struct RenderPostOpts {
     pub show_delete: bool,
     pub is_admin: bool,
+    pub admin_csrf_token: Option<String>,
     pub show_media: bool,
     pub allow_editing: bool,
     pub allow_self_delete: bool,
@@ -828,6 +833,7 @@ pub fn render_post(
     let RenderPostOpts {
         show_delete,
         is_admin,
+        admin_csrf_token,
         show_media,
         allow_editing,
         allow_self_delete,
@@ -1237,6 +1243,7 @@ pub fn render_post(
     if is_admin {
         let is_op_val = if post.is_op { "1" } else { "0" };
         let return_to = format!("/{}/thread/{}", board_short, post.thread_id);
+        let admin_form_csrf = admin_csrf_token.as_deref().unwrap_or(csrf_token);
         let _ = write!(
             html,
             r#"<div class="post-controls admin-post-controls">
@@ -1261,7 +1268,7 @@ pub fn render_post(
 </form>
 <a class="admin-ip-link" href="/admin/ip/{ip_hash}?return_to={return_to}" title="View all posts from this hashed IP">&#x1F50D; ip</a>
 </div>"#,
-            csrf = escape_html(csrf_token),
+            csrf = escape_html(admin_form_csrf),
             pid = post.id,
             board = escape_html(board_short),
             ip_hash = escape_html(post.ip_hash.as_deref().unwrap_or("")),
@@ -1443,6 +1450,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
             true,
         );
@@ -1481,6 +1489,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
             false,
         );
@@ -1491,6 +1500,42 @@ mod tests {
         assert!(html.contains(
             r#"name="password" maxlength="256" autocomplete="current-password" required"#
         ));
+    }
+
+    #[test]
+    fn thread_page_admin_forms_use_admin_csrf_token() {
+        let board = crate::test_fixtures::sample_board();
+        let thread = sample_thread();
+        let posts = vec![Post {
+            is_op: true,
+            ip_hash: Some("a".repeat(64)),
+            ..sample_post()
+        }];
+
+        let html = thread_page(
+            &board,
+            &thread,
+            &posts,
+            &std::collections::BTreeMap::new(),
+            "public-csrf",
+            std::slice::from_ref(&board),
+            true,
+            Some("admin-csrf"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+        );
+
+        assert!(html.contains(r#"action="/admin/thread/delete""#));
+        assert!(html.contains(r#"action="/admin/post/delete""#));
+        assert!(html.contains(r#"name="_csrf" value="admin-csrf""#));
+        assert!(html.contains(r#"name="_csrf"   value="admin-csrf""#));
+        assert!(html.contains(r#"data-csrf="public-csrf""#));
     }
 
     #[test]
@@ -1508,6 +1553,7 @@ mod tests {
             RenderPostOpts {
                 show_delete: false,
                 is_admin: false,
+                admin_csrf_token: None,
                 show_media: true,
                 allow_editing: false,
                 allow_self_delete: false,
@@ -1546,6 +1592,7 @@ mod tests {
             RenderPostOpts {
                 show_delete: false,
                 is_admin: false,
+                admin_csrf_token: None,
                 show_media: true,
                 allow_editing: false,
                 allow_self_delete: false,
@@ -1590,6 +1637,7 @@ mod tests {
             RenderPostOpts {
                 show_delete: false,
                 is_admin: false,
+                admin_csrf_token: None,
                 show_media: true,
                 allow_editing: false,
                 allow_self_delete: false,
@@ -1618,6 +1666,7 @@ mod tests {
             RenderPostOpts {
                 show_delete: false,
                 is_admin: false,
+                admin_csrf_token: None,
                 show_media: false,
                 allow_editing: false,
                 allow_self_delete: false,
@@ -1649,6 +1698,7 @@ mod tests {
             RenderPostOpts {
                 show_delete: false,
                 is_admin: false,
+                admin_csrf_token: None,
                 show_media: true,
                 allow_editing: false,
                 allow_self_delete: false,
@@ -1677,6 +1727,7 @@ mod tests {
             RenderPostOpts {
                 show_delete: false,
                 is_admin: false,
+                admin_csrf_token: None,
                 show_media: true,
                 allow_editing: false,
                 allow_self_delete: false,
@@ -1709,6 +1760,7 @@ mod tests {
             RenderPostOpts {
                 show_delete: false,
                 is_admin: false,
+                admin_csrf_token: None,
                 show_media: true,
                 allow_editing: false,
                 allow_self_delete: false,
@@ -1755,6 +1807,7 @@ mod tests {
             std::slice::from_ref(&board),
             false,
             None,
+            None,
             Some("Wait before posting"),
             None,
             Some(&reply_prefill),
@@ -1789,6 +1842,7 @@ mod tests {
             "csrf",
             std::slice::from_ref(&board),
             false,
+            None,
             None,
             None,
             None,
@@ -1830,6 +1884,7 @@ mod tests {
             "csrf",
             std::slice::from_ref(&board),
             false,
+            None,
             None,
             None,
             None,
@@ -1931,6 +1986,7 @@ mod tests {
             "csrf",
             std::slice::from_ref(&board),
             false,
+            None,
             None,
             None,
             None,
