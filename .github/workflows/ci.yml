@@ -44,7 +44,13 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: >-
+          cargo clippy --locked --workspace --all-targets --all-features --
+          -D warnings
+          -D clippy::all
+          -D clippy::pedantic
+          -D clippy::nursery
+          -D clippy::cargo
 
   test:
     name: Tests
@@ -64,7 +70,7 @@ jobs:
           shared-key: test
 
       - name: Run tests
-        run: cargo test --locked --all-features --quiet
+        run: cargo test --locked --workspace --all-features
 
   platform-smoke:
     name: Platform smoke (${{ matrix.name }})

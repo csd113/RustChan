@@ -15,6 +15,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
   RUST_BACKTRACE: 1
 
 jobs:
@@ -28,17 +29,17 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runner: macos-latest
+            runner: macos-15
             binary_suffix: ""
             asset_suffix: macos-apple-silicon
             use_cross: false
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             binary_suffix: ""
             asset_suffix: linux-x86_64
             use_cross: false
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             binary_suffix: ""
             asset_suffix: linux-arm64
             use_cross: true
@@ -54,9 +55,14 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-      - name: Add Rust target
-        run: rustup target add ${{ matrix.target }}
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          key: ${{ matrix.target }}
 
       - name: Install cross
         if: matrix.use_cross
@@ -64,31 +70,70 @@ jobs:
 
       - name: Build release binary
         shell: bash
+        env:
+          RUSTCHAN_TARGET: ${{ matrix.target }}
+          USE_CROSS: ${{ matrix.use_cross }}
         run: |
           set -euo pipefail
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --locked --release --target "${{ matrix.target }}"
+          if [ "${USE_CROSS}" = "true" ]; then
+            cross build --locked --release --target "${RUSTCHAN_TARGET}"
           else
-            cargo build --locked --release --target "${{ matrix.target }}"
+            cargo build --locked --release --target "${RUSTCHAN_TARGET}"
           fi
 
       - name: Prepare release archive
         shell: bash
+        env:
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+          BINARY_SUFFIX: ${{ matrix.binary_suffix }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RUSTCHAN_TARGET: ${{ matrix.target }}
+          RUNNER_OS: ${{ runner.os }}
         run: |
           set -euo pipefail
+
+          case "${RELEASE_TAG}" in
+            v | *[!0-9A-Za-z._-]*)
+              echo "Release tag '${RELEASE_TAG}' is not safe for archive names" >&2
+              exit 1
+              ;;
+            v*)
+              ;;
+          esac
+
+          case "${ASSET_SUFFIX}" in
+            "" | *[!0-9A-Za-z._-]*)
+              echo "Asset suffix '${ASSET_SUFFIX}' is not safe for archive names" >&2
+              exit 1
+              ;;
+            *)
+              ;;
+          esac
+
+          binary_path="target/${RUSTCHAN_TARGET}/release/rustchan-cli${BINARY_SUFFIX}"
+          for required_path in "${binary_path}" README.md LICENSE; do
+            if [ ! -f "${required_path}" ]; then
+              echo "Required release file '${required_path}' is missing" >&2
+              exit 1
+            fi
+          done
+
+          rm -rf dist
           mkdir -p dist/package
-          asset_basename="rustchan-cli-${{ github.ref_name }}-${{ matrix.asset_suffix }}"
+          asset_basename="rustchan-cli-${RELEASE_TAG}-${ASSET_SUFFIX}"
           package_root="dist/package/${asset_basename}"
 
           mkdir -p "${package_root}"
-          cp "target/${{ matrix.target }}/release/rustchan-cli${{ matrix.binary_suffix }}" \
-             "${package_root}/rustchan-cli${{ matrix.binary_suffix }}"
+          cp "${binary_path}" "${package_root}/rustchan-cli${BINARY_SUFFIX}"
           cp README.md LICENSE "${package_root}/"
 
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            pwsh -NoLogo -NoProfile -Command \
-              "Compress-Archive -Path '${package_root}/*' -DestinationPath 'dist/${asset_basename}.zip' -CompressionLevel Optimal"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            PACKAGE_ROOT="${package_root}" \
+            ARCHIVE_PATH="dist/${asset_basename}.zip" \
+              pwsh -NoLogo -NoProfile -Command \
+                'Compress-Archive -Path (Join-Path $env:PACKAGE_ROOT "*") -DestinationPath $env:ARCHIVE_PATH -CompressionLevel Optimal'
           else
+            chmod 0755 "${package_root}/rustchan-cli${BINARY_SUFFIX}"
             (
               cd "dist/package"
               zip -r -9 "../${asset_basename}.zip" "${asset_basename}"
@@ -105,8 +150,9 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:

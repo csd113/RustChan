@@ -161,7 +161,7 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
     <h3>// ffmpeg timeout</h3>
     <p>Adjust how long RustChan waits before killing a slow video conversion job.</p>
   </div>
-<p style="color:var(--text-dim);font-size:0.85rem">
+<p class="admin-copy">
   RustChan currently allows ffmpeg to run for <strong>{ffmpeg_timeout_help}</strong> before a long-running media job is killed.
   This primarily affects uploaded video re-encoding, especially slow MP4 to WebM/VP9 conversion.
 </p>
@@ -170,7 +170,7 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
   <div class="board-settings-grid admin-settings-grid">
     <label title="Slow systems may need a higher value for ffmpeg video conversion jobs.">
       Video re-encoding timeout (seconds)
-      <input type="number" name="ffmpeg_timeout_secs" value="{ffmpeg_timeout_secs}" min="{ffmpeg_timeout_min}" max="{ffmpeg_timeout_max}" step="1" inputmode="numeric" class="admin-input-compact" style="font-family:inherit" required>
+      <input type="number" name="ffmpeg_timeout_secs" value="{ffmpeg_timeout_secs}" min="{ffmpeg_timeout_min}" max="{ffmpeg_timeout_max}" step="1" inputmode="numeric" class="admin-input-compact" required>
     </label>
   </div>
   <p class="admin-meta-note admin-meta-note-spaced">
@@ -195,13 +195,13 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
 <details class="admin-dropdown" data-admin-dropdown-key="database-maintenance"{database_maintenance_open_attr}>
 <summary><span>// database maintenance</span></summary>
 <div class="admin-dropdown-content">
-{db_warn_banner}<p style="color:var(--text-dim);font-size:0.85rem">
+{db_warn_banner}<p class="admin-copy">
   Current database size: <strong>{db_size_str}</strong>.
   Running <strong>VACUUM</strong> rewrites the database file compactly, reclaiming space left after
   bulk deletions (deleted threads, pruned posts, etc.).  This may take a few seconds on large
   databases and briefly blocks writes.
 </p>
-<p style="color:var(--text-dim);font-size:0.85rem">
+<p class="admin-copy admin-copy-spaced">
   Run database checks after restores or large deletes. Before repair, take a backup; repair can
   rebuild indexes and search data, but may not fix true file corruption.
 </p>

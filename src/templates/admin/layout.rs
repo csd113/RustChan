@@ -36,14 +36,14 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 {maintenance_section}
 
 <!-- ── Backup progress modal ─────────────────────────────────────────────── -->
-<div id="backup-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title">
+<div id="backup-modal" class="compress-modal admin-modal-hidden" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title">
   <div class="compress-modal-box">
     <div class="compress-modal-title" id="backup-modal-title">&#128190; Creating Backup…</div>
-    <div class="compress-progress" id="backup-progress-wrap" style="display:block;margin:0.75rem 0">
-      <div class="compress-progress-track"><div class="compress-progress-bar" id="backup-progress-bar" style="width:0%"></div></div>
+    <div class="compress-progress admin-progress-spaced" id="backup-progress-wrap">
+      <div class="compress-progress-track"><div class="compress-progress-bar" id="backup-progress-bar"></div></div>
       <div class="compress-progress-text" id="backup-progress-text">Starting…</div>
     </div>
-    <div class="compress-done-actions" id="backup-done-actions" style="display:none">
+    <div class="compress-done-actions admin-modal-hidden" id="backup-done-actions">
       <button class="compress-cancel-btn" data-action="close-backup-modal">&#10003; Done — reload</button>
     </div>
   </div>
