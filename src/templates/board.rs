@@ -1569,7 +1569,7 @@ mod tests {
         let mut badges = HashMap::new();
         badges.insert(stats.board.id, 2);
 
-        let html = board_cards(&[&stats], &badges, true, "csrf", false);
+        let html = board_cards(&[&stats], &badges, true, "csrf", None, false);
 
         let stats_idx = html
             .find("board-card-stats")
