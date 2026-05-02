@@ -81,7 +81,7 @@ const BOARD_ACCESS_COOKIE_PREFIX: &str = "rustchan_board_access_";
 const BOARD_ACCESS_COOKIE_TTL_DAYS: i64 = 30;
 const BOARD_UNLOCK_FAIL_LIMIT: u32 = 5;
 const BOARD_UNLOCK_FAIL_WINDOW_SECS: u64 = 900;
-const HTML_CACHE_CONTROL: &str = "private, no-cache, must-revalidate";
+const HTML_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC;
 pub(crate) const X_RUSTCHAN_REDIRECT_HEADER: &str = "x-rustchan-redirect";
 
 static BOARD_UNLOCK_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);

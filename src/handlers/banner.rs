@@ -15,8 +15,8 @@ use serde::Deserialize;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
-const VERSIONED_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
-const UNVERSIONED_CACHE_CONTROL: &str = "no-cache, must-revalidate";
+const VERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA;
+const UNVERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_STATIC_SHORT;
 
 #[derive(Deserialize, Default)]
 pub struct ExternalBannerQuery {
@@ -96,13 +96,13 @@ pub async fn serve_banner_asset(
             let mut resp = resp.map(axum::body::Body::new);
             resp.headers_mut()
                 .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-            resp.headers_mut().insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static(if has_version {
+            crate::cache::set_cache_control(
+                resp.headers_mut(),
+                if has_version {
                     VERSIONED_CACHE_CONTROL
                 } else {
                     UNVERSIONED_CACHE_CONTROL
-                }),
+                },
             );
             resp.into_response()
         },
@@ -174,7 +174,12 @@ pub async fn external_banner_warning_page(
         false,
         "/banner/external",
     );
-    Ok((jar, Html(html)).into_response())
+    let mut response = Html(html).into_response();
+    crate::cache::set_cache_control(
+        response.headers_mut(),
+        crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE,
+    );
+    Ok((jar, response).into_response())
 }
 
 pub async fn external_banner_continue(

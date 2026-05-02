@@ -46,7 +46,6 @@ pub async fn serve_board_media(
     jar: CookieJar,
     req: axum::extract::Request,
 ) -> Response {
-    use axum::http::header::CACHE_CONTROL;
     use axum::http::StatusCode;
     use std::path::PathBuf;
     use tower::ServiceExt;
@@ -122,12 +121,10 @@ pub async fn serve_board_media(
             |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             |resp| {
                 let mut resp = resp.map(axum::body::Body::new);
-                if is_board_favicon {
-                    resp.headers_mut().insert(
-                        CACHE_CONTROL,
-                        HeaderValue::from_static(board_media_cache_control(has_version)),
-                    );
-                }
+                crate::cache::set_cache_control(
+                    resp.headers_mut(),
+                    board_media_cache_control(is_board_favicon, has_version),
+                );
                 if let Some(ct) = media_content_type(&target) {
                     resp.headers_mut()
                         .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
@@ -172,11 +169,11 @@ pub async fn serve_board_media(
     }
 }
 
-const fn board_media_cache_control(has_version: bool) -> &'static str {
-    if has_version {
-        "public, max-age=31536000, immutable"
+const fn board_media_cache_control(is_replaceable_asset: bool, has_version: bool) -> &'static str {
+    if is_replaceable_asset && !has_version {
+        crate::cache::CACHE_CONTROL_STATIC_SHORT
     } else {
-        "no-cache, must-revalidate"
+        crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA
     }
 }
 

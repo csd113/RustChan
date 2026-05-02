@@ -16,7 +16,10 @@ fn static_asset_response(body: &'static str, content_type: &'static str) -> impl
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, content_type),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
+            (
+                header::CACHE_CONTROL,
+                crate::cache::CACHE_CONTROL_STATIC_SHORT,
+            ),
         ],
         body,
     )

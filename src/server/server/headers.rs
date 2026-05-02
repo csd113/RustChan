@@ -84,6 +84,62 @@ pub(super) async fn safe_timeout_middleware(
         })
 }
 
+pub(super) async fn public_cache_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path().to_string();
+    let mut resp = next.run(req).await;
+    if public_dynamic_html_path(&path) {
+        crate::cache::insert_cache_control_if_absent(
+            resp.headers_mut(),
+            crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC,
+        );
+    }
+    resp
+}
+
+pub(super) async fn admin_cache_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut resp = next.run(req).await;
+    crate::cache::insert_cache_control_if_absent(
+        resp.headers_mut(),
+        crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE,
+    );
+    resp
+}
+
+fn public_dynamic_html_path(path: &str) -> bool {
+    if path == "/" || path == "/banned" || path.starts_with("/banner/external/") {
+        return true;
+    }
+    let mut segments = path.trim_matches('/').split('/');
+    let (first, second, third, fourth) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    );
+    if matches!(
+        first,
+        Some("api" | "boards" | "static" | "theme-css" | "banner")
+    ) {
+        return false;
+    }
+    second.is_none()
+        || matches!(
+            (second, third, fourth),
+            (
+                Some("catalog" | "hidden" | "archive" | "search" | "unlock"),
+                None,
+                None
+            ) | (Some("thread"), Some(_), None)
+                | (Some("post"), Some(_), Some("edit" | "delete"))
+        )
+}
+
 fn is_post_upload_path(path: &str) -> bool {
     let trimmed = path.trim_matches('/');
     if trimmed.is_empty() {
@@ -157,9 +213,16 @@ fn is_loopback_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{hsts_middleware_with_mode, should_emit_hsts, CONTENT_SECURITY_POLICY};
+    use super::{
+        hsts_middleware_with_mode, public_dynamic_html_path, should_emit_hsts,
+        CONTENT_SECURITY_POLICY,
+    };
     use axum::{
-        body::Body, http::Request, middleware::from_fn, response::IntoResponse, routing::get,
+        body::Body,
+        http::{header, Request},
+        middleware::from_fn,
+        response::IntoResponse,
+        routing::get,
         Router,
     };
     use std::{
@@ -188,6 +251,54 @@ mod tests {
         assert!(!CONTENT_SECURITY_POLICY.contains("script-src 'unsafe-inline'"));
         assert!(CONTENT_SECURITY_POLICY.contains("object-src 'none'"));
         assert!(CONTENT_SECURITY_POLICY.contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn public_dynamic_html_cache_middleware_scope_is_narrow() {
+        assert!(public_dynamic_html_path("/"));
+        assert!(public_dynamic_html_path("/b/catalog"));
+        assert!(public_dynamic_html_path("/b/thread/1"));
+        assert!(public_dynamic_html_path("/b/post/1/edit"));
+        assert!(!public_dynamic_html_path("/static/style.css"));
+        assert!(!public_dynamic_html_path("/boards/b/file.webp"));
+        assert!(!public_dynamic_html_path("/api/post/b/1"));
+        assert!(!public_dynamic_html_path("/banner/assets/1"));
+    }
+
+    #[tokio::test]
+    async fn cache_middleware_does_not_overwrite_route_cache_control() {
+        let app = Router::new()
+            .route(
+                "/",
+                get(|| async {
+                    (
+                        [(
+                            header::CACHE_CONTROL,
+                            crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA,
+                        )],
+                        "ok",
+                    )
+                }),
+            )
+            .layer(from_fn(super::public_cache_middleware));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA)
+        );
     }
 
     #[test]

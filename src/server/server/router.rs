@@ -9,7 +9,10 @@ mod routes;
 
 use super::{
     assets::{serve_admin_css, serve_admin_js, serve_css, serve_main_js, serve_theme_init_js},
-    headers::{hsts_middleware_with_mode, safe_timeout_middleware, CONTENT_SECURITY_POLICY},
+    headers::{
+        admin_cache_middleware, hsts_middleware_with_mode, public_cache_middleware,
+        safe_timeout_middleware, CONTENT_SECURITY_POLICY,
+    },
     lifecycle::track_requests,
     onion_location_middleware,
 };
@@ -24,8 +27,8 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
         .route("/static/admin.css", get(serve_admin_css))
         .route("/static/admin.js", get(serve_admin_js))
         .route("/static/theme-init.js", get(serve_theme_init_js))
-        .merge(public_routes())
-        .merge(admin_routes())
+        .merge(public_routes().layer(axum_middleware::from_fn(public_cache_middleware)))
+        .merge(admin_routes().layer(axum_middleware::from_fn(admin_cache_middleware)))
         .layer(axum_middleware::from_fn(
             crate::middleware::rate_limit_middleware,
         ))
@@ -242,6 +245,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn built_in_static_assets_are_short_public_cached() {
+        let router = build_router(crate::test_support::app_state(), false);
+
+        for uri in ["/static/style.css", "/static/main.js", "/static/admin.css"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some(crate::cache::CACHE_CONTROL_STATIC_SHORT)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn public_dynamic_html_revalidates_without_immutable_cache() {
+        let router = build_router(crate::test_support::app_state(), false);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC)
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_login_page_is_private_revalidated() {
+        let router = build_router(crate::test_support::app_state(), false);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/admin")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
+        );
+    }
+
+    #[tokio::test]
     async fn uploaded_pdf_route_allows_same_origin_embedding_only() {
         let state = crate::test_support::app_state();
         let board = unique_test_board("pdfhdr");
@@ -278,8 +355,73 @@ mod tests {
                 "default-src 'none'; frame-ancestors 'self'; sandbox allow-same-origin allow-scripts"
             ))
         );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA)
+        );
 
         let _ = std::fs::remove_file(pdf_path);
+        let _ = std::fs::remove_dir(board_dir);
+    }
+
+    #[tokio::test]
+    async fn uploaded_media_and_board_favicons_get_separate_cache_policies() {
+        let state = crate::test_support::app_state();
+        let board = unique_test_board("cachemedia");
+        seed_public_media_board(&state, &board);
+
+        let board_dir = std::path::Path::new(&crate::config::CONFIG.upload_dir).join(&board);
+        let favicon_dir = board_dir.join("_favicon");
+        std::fs::create_dir_all(&favicon_dir).expect("create board dirs");
+        let media_path = board_dir.join("image.webp");
+        let favicon_path = favicon_dir.join("favicon-32x32.png");
+        std::fs::write(&media_path, b"webp bytes").expect("write media");
+        std::fs::write(&favicon_path, b"png bytes").expect("write favicon");
+
+        let router = build_router(state, false);
+        let media_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/boards/{board}/image.webp"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("media response");
+        assert_eq!(media_response.status(), StatusCode::OK);
+        assert_eq!(
+            media_response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA)
+        );
+
+        let favicon_response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/boards/{board}/_favicon/favicon-32x32.png"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("favicon response");
+        assert_eq!(favicon_response.status(), StatusCode::OK);
+        assert_eq!(
+            favicon_response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::cache::CACHE_CONTROL_STATIC_SHORT)
+        );
+
+        let _ = std::fs::remove_file(media_path);
+        let _ = std::fs::remove_file(favicon_path);
+        let _ = std::fs::remove_dir(favicon_dir);
         let _ = std::fs::remove_dir(board_dir);
     }
 

@@ -210,7 +210,7 @@ pub async fn view_thread(
         );
         resp.headers_mut().insert(
             axum::http::header::CACHE_CONTROL,
-            axum::http::HeaderValue::from_static("private, no-cache, must-revalidate"),
+            axum::http::HeaderValue::from_static(crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC),
         );
         return Ok((jar, resp).into_response());
     }
@@ -237,7 +237,7 @@ pub async fn view_thread(
     }
     resp.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("private, no-cache, must-revalidate"),
+        axum::http::HeaderValue::from_static(crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC),
     );
     Ok((jar, resp).into_response())
 }
@@ -513,7 +513,7 @@ async fn render_edit_post_error_page(
     *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache, must-revalidate"),
+        HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE),
     );
     Ok((jar, response).into_response())
 }
@@ -601,7 +601,7 @@ pub async fn edit_post_get(
     let mut response = Html(html).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache, must-revalidate"),
+        HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE),
     );
     Ok((jar, response).into_response())
 }
@@ -871,7 +871,7 @@ pub async fn delete_post_get(
     let mut response = Html(html).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache, must-revalidate"),
+        HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE),
     );
     Ok((jar, response).into_response())
 }

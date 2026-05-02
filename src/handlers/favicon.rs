@@ -32,9 +32,9 @@ async fn serve_named_global_favicon(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static(favicon_content_type(file_name)),
             );
-            resp.headers_mut().insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static(cache_control_for_favicon(has_version)),
+            crate::cache::set_cache_control(
+                resp.headers_mut(),
+                cache_control_for_favicon(has_version),
             );
             resp.into_response()
         },
@@ -43,9 +43,9 @@ async fn serve_named_global_favicon(
 
 const fn cache_control_for_favicon(has_version: bool) -> &'static str {
     if has_version {
-        "public, max-age=31536000, immutable"
+        crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA
     } else {
-        "no-cache, must-revalidate"
+        crate::cache::CACHE_CONTROL_STATIC_SHORT
     }
 }
 
@@ -81,7 +81,7 @@ mod tests {
     fn versioned_favicons_are_safe_to_cache_long_term() {
         assert_eq!(
             cache_control_for_favicon(true),
-            "public, max-age=31536000, immutable"
+            crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA
         );
     }
 
@@ -89,7 +89,7 @@ mod tests {
     fn unversioned_favicons_must_revalidate() {
         assert_eq!(
             cache_control_for_favicon(false),
-            "no-cache, must-revalidate"
+            crate::cache::CACHE_CONTROL_STATIC_SHORT
         );
     }
 }

@@ -587,7 +587,7 @@ pub async fn serve_theme_css(
             ),
             (
                 header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=86400"),
+                HeaderValue::from_static(crate::cache::CACHE_CONTROL_STATIC_SHORT),
             ),
         ],
         css,
