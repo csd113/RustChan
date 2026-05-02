@@ -66,6 +66,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SESSION_COOKIE: &str = "chan_admin_session";
 const ADMIN_COOKIE_SAME_SITE: SameSite = SameSite::Lax;
 const ADMIN_BOOTSTRAP_TTL_SECS: u64 = 120;
+const MISSING_ORIGIN_REFERER: &str = "Missing Origin/Referer header.";
 
 static ADMIN_SESSION_BOOTSTRAPS: LazyLock<DashMap<String, (String, u64)>> =
     LazyLock::new(DashMap::new);
@@ -134,7 +135,7 @@ pub(super) fn require_same_origin_request(
         if request_has_same_origin_fetch_metadata(headers) {
             return Ok(());
         }
-        return Err(AppError::Forbidden("Missing Origin/Referer header.".into()));
+        return Err(AppError::Forbidden(MISSING_ORIGIN_REFERER.into()));
     };
     if source.eq_ignore_ascii_case("null") {
         if is_loopback_alias(request_authority.host()) {
@@ -216,16 +217,38 @@ fn request_has_same_origin_fetch_metadata(headers: &HeaderMap) -> bool {
 }
 
 pub(super) fn check_admin_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
+    if admin_csrf_is_valid(jar, form_token) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden("CSRF token mismatch.".into()))
+    }
+}
+
+pub(super) fn admin_csrf_is_valid(jar: &CookieJar, form_token: Option<&str>) -> bool {
     let csrf_cookie = jar
         .get("csrf_token")
         .map(axum_extra::extract::cookie::Cookie::value);
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(axum_extra::extract::cookie::Cookie::value);
-    if validate_signed_csrf(csrf_cookie, session_id, form_token.unwrap_or("")) {
-        Ok(())
-    } else {
-        Err(AppError::Forbidden("CSRF token mismatch.".into()))
+    validate_signed_csrf(csrf_cookie, session_id, form_token.unwrap_or(""))
+}
+
+pub(super) fn require_same_origin_or_valid_csrf(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    csrf_valid: bool,
+) -> Result<()> {
+    match require_same_origin_request(headers, peer) {
+        Ok(()) => Ok(()),
+        Err(AppError::Forbidden(message)) if message == MISSING_ORIGIN_REFERER && csrf_valid => {
+            tracing::debug!(
+                target: "admin",
+                "Admin POST accepted without Origin/Referer because signed CSRF token was valid"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -235,8 +258,13 @@ pub(super) fn require_admin_post_origin_and_csrf(
     peer: Option<SocketAddr>,
     form_token: Option<&str>,
 ) -> Result<()> {
-    require_same_origin_request(headers, peer)?;
-    check_admin_csrf_jar(jar, form_token)
+    let csrf_valid = admin_csrf_is_valid(jar, form_token);
+    require_same_origin_or_valid_csrf(headers, peer, csrf_valid)?;
+    if csrf_valid {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden("CSRF token mismatch.".into()))
+    }
 }
 
 fn admin_csrf_cookie(raw_token: String) -> Cookie<'static> {
@@ -1093,7 +1121,7 @@ mod tests {
     use super::{
         consume_admin_session_bootstrap, create_admin_session_bootstrap,
         host_header_uses_https_port, hosts_match_for_same_origin, latest_log_file, read_log_tail,
-        request_origin_uses_https, require_same_origin_request,
+        request_origin_uses_https, require_same_origin_or_valid_csrf, require_same_origin_request,
     };
     use axum::http::{header, HeaderMap, HeaderValue};
 
@@ -1179,6 +1207,28 @@ mod tests {
         let mut headers = same_origin_headers("demo.serveo.net");
         headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
         assert!(require_same_origin_request(&headers, None).is_err());
+    }
+
+    #[test]
+    fn same_origin_or_valid_csrf_accepts_headerless_post_with_valid_csrf() {
+        let headers = same_origin_headers("demo.serveo.net");
+        assert!(require_same_origin_or_valid_csrf(&headers, None, true).is_ok());
+    }
+
+    #[test]
+    fn same_origin_or_valid_csrf_rejects_headerless_post_with_invalid_csrf() {
+        let headers = same_origin_headers("demo.serveo.net");
+        assert!(require_same_origin_or_valid_csrf(&headers, None, false).is_err());
+    }
+
+    #[test]
+    fn same_origin_or_valid_csrf_rejects_cross_origin_post_with_valid_csrf() {
+        let mut headers = same_origin_headers("demo.serveo.net");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.test"),
+        );
+        assert!(require_same_origin_or_valid_csrf(&headers, None, true).is_err());
     }
 
     #[test]

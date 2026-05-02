@@ -254,15 +254,16 @@ pub async fn admin_login(
         .await;
     }
 
-    super::require_same_origin_request(&headers, Some(peer))?;
     let csrf_cookie = jar
         .get("csrf_token")
         .map(axum_extra::extract::cookie::Cookie::value);
-    if !crate::middleware::validate_signed_csrf(
+    let csrf_valid = crate::middleware::validate_signed_csrf(
         csrf_cookie,
         Some(ADMIN_LOGIN_CSRF_SCOPE),
         form.csrf.as_deref().unwrap_or(""),
-    ) {
+    );
+    super::require_same_origin_or_valid_csrf(&headers, Some(peer), csrf_valid)?;
+    if !csrf_valid {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
@@ -911,7 +912,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_login_rejects_missing_origin_on_state_changing_post() {
+    async fn admin_login_accepts_missing_origin_when_signed_csrf_is_valid() {
         let state = crate::test_support::app_state();
         {
             let conn = state.db.get().expect("db connection");
@@ -937,6 +938,38 @@ mod tests {
                         "username=admin&password=hunter2&_csrf={}",
                         signed_admin_csrf()
                     )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn admin_login_rejects_missing_origin_when_signed_csrf_is_invalid() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from("username=admin&password=hunter2&_csrf=csrf123"))
                     .expect("request"),
             )
             .await
