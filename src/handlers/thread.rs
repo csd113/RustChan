@@ -248,6 +248,7 @@ pub async fn view_thread(
 pub async fn post_reply(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
@@ -401,13 +402,14 @@ pub async fn post_reply(
         }
     };
 
-    let jar = crate::handlers::board::remember_owned_post_until(
+    let jar = crate::handlers::board::remember_owned_post_until_with_secure(
         jar,
         &submit_result.board_short,
         submit_result.thread_id,
         submit_result.post_id,
         &submit_result.deletion_token,
         submit_result.created_at + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
+        crate::handlers::board::should_set_public_secure_cookie(&req_headers, Some(peer)),
     );
 
     if xhr_request {

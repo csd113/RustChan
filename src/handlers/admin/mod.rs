@@ -308,7 +308,10 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar) -> Result<(CookieJar, String)> {
 
 pub(super) use crate::utils::redirect::encode_query_component;
 
-pub(super) fn should_set_secure_cookie(headers: &HeaderMap, peer: Option<SocketAddr>) -> bool {
+pub(in crate::handlers) fn should_set_secure_cookie(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+) -> bool {
     if !CONFIG.https_cookies {
         return false;
     }

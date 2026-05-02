@@ -252,6 +252,35 @@ mod tests {
     }
 
     #[test]
+    fn generated_cert_validity_uses_current_utc_window() {
+        use x509_cert::der::Decode;
+
+        ensure_crypto_provider();
+        let tmp = TempDir::new().unwrap();
+        let before = SystemTime::now();
+        generate_or_load(tmp.path()).unwrap();
+        let after = SystemTime::now();
+
+        let cert_path = tmp.path().join("runtime/tls/dev/self-signed.crt");
+        let pem_bytes = std::fs::read(cert_path).unwrap();
+        let (_, der) = pem_rfc7468::decode_vec(&pem_bytes).unwrap();
+        let cert = x509_cert::Certificate::from_der(&der).unwrap();
+        let not_before: SystemTime = cert.tbs_certificate.validity.not_before.to_system_time();
+        let not_after: SystemTime = cert.tbs_certificate.validity.not_after.to_system_time();
+
+        assert!(not_before <= after);
+        assert!(not_after > before);
+        assert!(
+            not_after
+                .duration_since(not_before)
+                .expect("positive certificate validity")
+                >= std::time::Duration::from_secs(
+                    (u64::from(CERT_VALIDITY_DAYS) - 1) * 24 * 60 * 60
+                )
+        );
+    }
+
+    #[test]
     fn needs_regeneration_returns_true_for_missing_file() {
         assert!(needs_regeneration(
             Path::new("/nonexistent/path/cert.pem"),

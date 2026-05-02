@@ -104,6 +104,11 @@ function applyQueuedPostSubmitAnchor() {
 
 // ─── Localize post timestamps to device timezone ──────────────────────────────
 
+function padTwoDigits(value) {
+  value = String(value);
+  return value.length < 2 ? '0' + value : value;
+}
+
 function localizePostTimes(root) {
   var els = (root || document).querySelectorAll(
     'span.post-time[data-utc], span.post-edited[data-utc]'
@@ -113,13 +118,13 @@ function localizePostTimes(root) {
     var ts = parseInt(el.getAttribute('data-utc'), 10);
     if (isNaN(ts)) return;
     var d = new Date(ts * 1000);
-    var mm  = String(d.getMonth() + 1).padStart(2, '0');
-    var dd  = String(d.getDate()).padStart(2, '0');
+    var mm  = padTwoDigits(d.getMonth() + 1);
+    var dd  = padTwoDigits(d.getDate());
     var yy  = String(d.getFullYear()).slice(-2);
     var day = days[d.getDay()];
-    var hh  = String(d.getHours()).padStart(2, '0');
-    var min = String(d.getMinutes()).padStart(2, '0');
-    var ss  = String(d.getSeconds()).padStart(2, '0');
+    var hh  = padTwoDigits(d.getHours());
+    var min = padTwoDigits(d.getMinutes());
+    var ss  = padTwoDigits(d.getSeconds());
     var local = mm + '/' + dd + '/' + yy + '(' + day + ')' + hh + ':' + min + ':' + ss;
     if (el.classList.contains('post-edited')) {
       el.title = 'last edited ' + local;
@@ -655,6 +660,12 @@ function navigatePostSubmitTarget(form, url) {
   return true;
 }
 
+function navigatePostSubmitTargetAfterCookieCommit(form, url) {
+  window.setTimeout(function () {
+    navigatePostSubmitTarget(form, url);
+  }, 25);
+}
+
 function parseXhrJsonPayload(xhr) {
   if (!xhr || !xhr.responseText) return null;
   var contentType = xhr.getResponseHeader('Content-Type') || '';
@@ -791,7 +802,7 @@ function submitPostFormWithProgress(form) {
     // header keeps reply-draft clearing and "(You)" tracking anchored to the
     // exact new post after upload-backed replies succeed.
     if (explicitRedirect) {
-      navigatePostSubmitTarget(form, explicitRedirect);
+      navigatePostSubmitTargetAfterCookieCommit(form, explicitRedirect);
       return;
     }
 
@@ -2005,7 +2016,7 @@ function toggleThreadMenu(toggle) {
     if (refreshIds.length) {
       url += '&refresh=' + encodeURIComponent(refreshIds.join(','));
     }
-    fetch(url)
+    fetch(url, { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function (data) {
         applyDeltaState(data);
@@ -2492,7 +2503,7 @@ function toggleThreadMenu(toggle) {
     popup.style.display = 'block';
     positionCbPopup(link, popup);
 
-    fetch('/api/post/' + board + '/' + pid)
+    fetch('/api/post/' + board + '/' + pid, { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function (data) {
         _cbCache[key] = { html: data.html || '', thread_id: data.thread_id || 0 };
@@ -2578,7 +2589,7 @@ function toggleThreadMenu(toggle) {
         if (_cbCache[key] && _cbCache[key].thread_id) { navigate(_cbCache[key].thread_id); return; }
         // If a prior fetch already confirmed the post is gone, show error inline.
         if (_cbCache[key] && !_cbCache[key].thread_id) { showCbMissingError(); return; }
-        fetch('/api/post/' + board + '/' + pid)
+        fetch('/api/post/' + board + '/' + pid, { credentials: 'same-origin' })
           .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
           .then(function (data) {
             if (data.thread_id) {

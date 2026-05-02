@@ -788,6 +788,19 @@ async fn create_thread_xhr_returns_explicit_redirect_header() {
         .and_then(|value| value.to_str().ok())
         .expect("xhr redirect header");
     assert!(redirect.starts_with("/test/thread/"));
+    let owned_cookie = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find(|value| value.starts_with("rustchan_owned_posts="))
+        .expect("owned-post cookie");
+    assert!(owned_cookie.contains("HttpOnly"));
+    assert!(owned_cookie.contains("SameSite=Lax"));
+    assert!(
+        !owned_cookie.contains("Secure"),
+        "plain HTTP localhost responses must not mark own-post cookies Secure"
+    );
 }
 
 #[tokio::test]

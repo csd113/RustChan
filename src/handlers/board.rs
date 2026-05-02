@@ -35,7 +35,7 @@ use crate::{
     },
 };
 use axum::{
-    extract::{Form, Multipart, Path, Query, State},
+    extract::{ConnectInfo, Form, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
 };
@@ -43,6 +43,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::{atomic::AtomicU64, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::Duration;
@@ -62,6 +63,13 @@ pub use create_thread::*;
 pub use media::*;
 pub use pages::*;
 pub use reports::*;
+
+pub(crate) fn should_set_public_secure_cookie(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+) -> bool {
+    crate::handlers::admin::should_set_secure_cookie(headers, peer)
+}
 
 const PREVIEW_REPLIES: i64 = 3;
 const THREADS_PER_PAGE: i64 = 10;

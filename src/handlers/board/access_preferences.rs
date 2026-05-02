@@ -8,6 +8,7 @@ use std::net::IpAddr;
 
 const OWNED_POSTS_COOKIE: &str = "rustchan_owned_posts";
 const OWNED_POSTS_COOKIE_MAX: usize = 16;
+const OWNED_POSTS_COOKIE_MAX_LEN: usize = 3_800;
 pub(crate) const SELF_DELETE_WINDOW_SECS: i64 = 60;
 const BOARD_ACTIVITY_COOKIE: &str = "rustchan_board_activity";
 const THREAD_ACTIVITY_COOKIE: &str = "rustchan_thread_activity";
@@ -57,6 +58,9 @@ fn owned_posts_cookie_signature(payload_hex: &str) -> String {
 }
 
 fn parse_owned_posts_cookie(value: &str) -> Vec<OwnedPostGrant> {
+    if value.len() > OWNED_POSTS_COOKIE_MAX_LEN {
+        return Vec::new();
+    }
     let Some((payload_hex, signature)) = value.split_once('.') else {
         return Vec::new();
     };
@@ -88,18 +92,32 @@ fn owned_posts_cookie_value(grants: &[OwnedPostGrant]) -> Option<String> {
     let payload_json = serde_json::to_vec(&payload).ok()?;
     let payload_hex = hex::encode(payload_json);
     let signature = owned_posts_cookie_signature(&payload_hex);
-    Some(format!("{payload_hex}.{signature}"))
+    let value = format!("{payload_hex}.{signature}");
+    (value.len() <= OWNED_POSTS_COOKIE_MAX_LEN).then_some(value)
 }
 
-fn owned_posts_cookie(grants: &[OwnedPostGrant]) -> Option<Cookie<'static>> {
+fn owned_posts_cookie(grants: &[OwnedPostGrant], secure: bool) -> Option<Cookie<'static>> {
     let value = owned_posts_cookie_value(grants)?;
     let mut cookie = Cookie::new(OWNED_POSTS_COOKIE, value);
     cookie.set_http_only(true);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_path("/");
-    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_secure(secure);
     cookie.set_max_age(Duration::minutes(5));
     Some(cookie)
+}
+
+fn prune_owned_post_grants_for_cookie(mut grants: Vec<OwnedPostGrant>) -> Vec<OwnedPostGrant> {
+    grants.sort_by(|a, b| {
+        b.expires_at
+            .cmp(&a.expires_at)
+            .then_with(|| b.post_id.cmp(&a.post_id))
+    });
+    grants.truncate(OWNED_POSTS_COOKIE_MAX);
+    while owned_posts_cookie_value(&grants).is_none() && !grants.is_empty() {
+        grants.pop();
+    }
+    grants
 }
 
 pub fn owned_post_grants_from_jar(jar: &CookieJar) -> Vec<OwnedPostGrant> {
@@ -119,6 +137,7 @@ pub fn owned_post_grant_from_jar(
         .find(|grant| grant.post_id == post_id && grant.board_short == board_short)
 }
 
+#[cfg(test)]
 pub fn remember_owned_post_until(
     jar: CookieJar,
     board_short: &str,
@@ -126,6 +145,26 @@ pub fn remember_owned_post_until(
     post_id: i64,
     deletion_token: &str,
     expires_at: i64,
+) -> CookieJar {
+    remember_owned_post_until_with_secure(
+        jar,
+        board_short,
+        thread_id,
+        post_id,
+        deletion_token,
+        expires_at,
+        CONFIG.https_cookies,
+    )
+}
+
+pub fn remember_owned_post_until_with_secure(
+    jar: CookieJar,
+    board_short: &str,
+    thread_id: i64,
+    post_id: i64,
+    deletion_token: &str,
+    expires_at: i64,
+    secure: bool,
 ) -> CookieJar {
     if expires_at <= chrono::Utc::now().timestamp() {
         return forget_owned_post(jar, board_short, post_id);
@@ -142,14 +181,9 @@ pub fn remember_owned_post_until(
         deletion_token: deletion_token.to_string(),
         expires_at,
     });
-    grants.sort_by(|a, b| {
-        b.expires_at
-            .cmp(&a.expires_at)
-            .then_with(|| b.post_id.cmp(&a.post_id))
-    });
-    grants.truncate(OWNED_POSTS_COOKIE_MAX);
+    let grants = prune_owned_post_grants_for_cookie(grants);
 
-    if let Some(cookie) = owned_posts_cookie(&grants) {
+    if let Some(cookie) = owned_posts_cookie(&grants, secure) {
         jar.add(cookie)
     } else {
         jar.remove(Cookie::from(OWNED_POSTS_COOKIE))
@@ -161,7 +195,7 @@ pub fn forget_owned_post(jar: CookieJar, board_short: &str, post_id: i64) -> Coo
         .into_iter()
         .filter(|grant| !(grant.post_id == post_id && grant.board_short == board_short))
         .collect::<Vec<_>>();
-    if let Some(cookie) = owned_posts_cookie(&grants) {
+    if let Some(cookie) = owned_posts_cookie(&grants, CONFIG.https_cookies) {
         jar.add(cookie)
     } else {
         jar.remove(Cookie::from(OWNED_POSTS_COOKIE))
@@ -904,30 +938,53 @@ pub async fn update_thread_preference(
 mod tests {
     use super::{
         board_activity_markers_from_jar, owned_post_grants_from_jar, owned_posts_cookie,
-        prune_board_activity_markers, remember_owned_post_until, thread_activity_markers_from_jar,
-        OwnedPostGrant, BOARD_ACTIVITY_COOKIE, SELF_DELETE_WINDOW_SECS, THREAD_ACTIVITY_COOKIE,
+        owned_posts_cookie_value, prune_board_activity_markers, remember_owned_post_until,
+        thread_activity_markers_from_jar, OwnedPostGrant, BOARD_ACTIVITY_COOKIE,
+        OWNED_POSTS_COOKIE_MAX_LEN, SELF_DELETE_WINDOW_SECS, THREAD_ACTIVITY_COOKIE,
     };
     use axum_extra::extract::cookie::SameSite;
     use std::collections::HashSet;
 
     #[test]
     fn owned_posts_cookie_is_host_only_and_scoped_for_same_site_posts() {
-        let cookie = owned_posts_cookie(&[OwnedPostGrant {
-            post_id: 42,
-            thread_id: 7,
-            board_short: "test".to_string(),
-            deletion_token: "token".to_string(),
-            expires_at: chrono::Utc::now().timestamp() + SELF_DELETE_WINDOW_SECS,
-        }])
+        let cookie = owned_posts_cookie(
+            &[OwnedPostGrant {
+                post_id: 42,
+                thread_id: 7,
+                board_short: "test".to_string(),
+                deletion_token: "token".to_string(),
+                expires_at: chrono::Utc::now().timestamp() + SELF_DELETE_WINDOW_SECS,
+            }],
+            true,
+        )
         .expect("owned posts cookie");
 
         assert_eq!(cookie.name(), "rustchan_owned_posts");
         assert_eq!(cookie.path(), Some("/"));
         assert_eq!(cookie.same_site(), Some(SameSite::Lax));
         assert_eq!(cookie.http_only(), Some(true));
-        assert_eq!(cookie.secure(), Some(crate::config::CONFIG.https_cookies));
+        assert_eq!(cookie.secure(), Some(true));
         assert_eq!(cookie.domain(), None, "cookie should remain host-only");
         assert_eq!(cookie.max_age(), Some(time::Duration::minutes(5)));
+    }
+
+    #[test]
+    fn owned_posts_cookie_can_be_set_without_secure_for_plain_http_localhost() {
+        let cookie = owned_posts_cookie(
+            &[OwnedPostGrant {
+                post_id: 42,
+                thread_id: 7,
+                board_short: "test".to_string(),
+                deletion_token: "token".to_string(),
+                expires_at: chrono::Utc::now().timestamp() + SELF_DELETE_WINDOW_SECS,
+            }],
+            false,
+        )
+        .expect("owned posts cookie");
+
+        assert_eq!(cookie.secure(), Some(false));
+        assert_eq!(cookie.http_only(), Some(true));
+        assert_eq!(cookie.same_site(), Some(SameSite::Lax));
     }
 
     #[test]
@@ -942,6 +999,81 @@ mod tests {
         );
 
         assert!(owned_post_grants_from_jar(&jar).is_empty());
+    }
+
+    #[test]
+    fn owned_posts_cookie_prunes_to_browser_safe_size() {
+        let mut jar = axum_extra::extract::cookie::CookieJar::new();
+        let now = chrono::Utc::now().timestamp();
+        for id in 1..=32 {
+            jar = remember_owned_post_until(
+                jar,
+                "very-long-board-name-for-cookie-pressure",
+                10_000 + id,
+                id,
+                &"x".repeat(64),
+                now + id,
+            );
+        }
+
+        let cookie = jar.get("rustchan_owned_posts").expect("owned posts cookie");
+        assert!(cookie.value().len() <= OWNED_POSTS_COOKIE_MAX_LEN);
+
+        let grants = owned_post_grants_from_jar(&jar);
+        assert!(!grants.is_empty());
+        assert!(grants.len() < 16);
+        assert_eq!(grants.first().map(|grant| grant.post_id), Some(32));
+        assert!(grants.iter().any(|grant| grant.post_id == 32));
+    }
+
+    #[test]
+    fn owned_posts_cookie_value_uses_cookie_safe_ascii() {
+        let value = owned_posts_cookie_value(&[OwnedPostGrant {
+            post_id: 42,
+            thread_id: 7,
+            board_short: "test".to_string(),
+            deletion_token: "token".to_string(),
+            expires_at: chrono::Utc::now().timestamp() + SELF_DELETE_WINDOW_SECS,
+        }])
+        .expect("owned posts cookie value");
+
+        assert!(
+            value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || byte == b'.'),
+            "owned-post cookie value should stay in conservative Safari-safe bytes"
+        );
+    }
+
+    #[test]
+    fn malformed_owned_posts_cookie_entries_are_ignored_safely() {
+        for value in [
+            "not-signed".to_string(),
+            "zz.bad-signature".to_string(),
+            "x".repeat(4_096),
+        ] {
+            let jar = axum_extra::extract::cookie::CookieJar::new().add(
+                axum_extra::extract::cookie::Cookie::new("rustchan_owned_posts", value),
+            );
+
+            assert!(owned_post_grants_from_jar(&jar).is_empty());
+        }
+    }
+
+    #[test]
+    fn owned_posts_cookie_pruning_keeps_newest_valid_grants() {
+        let mut jar = axum_extra::extract::cookie::CookieJar::new();
+        let now = chrono::Utc::now().timestamp();
+        for id in 1..=20 {
+            jar = remember_owned_post_until(jar, "test", 100 + id, id, "token", now + id);
+        }
+
+        let grants = owned_post_grants_from_jar(&jar);
+
+        assert_eq!(grants.len(), 16);
+        assert!(grants.iter().any(|grant| grant.post_id == 20));
+        assert!(grants.iter().any(|grant| grant.post_id == 5));
+        assert!(!grants.iter().any(|grant| grant.post_id == 4));
     }
 
     #[test]
