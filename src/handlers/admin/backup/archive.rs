@@ -194,7 +194,7 @@ pub(super) fn create_temp_board_backup_from_full_backup_path(
     })?;
 
     let backup_dir = temp_board_download_dir();
-    let ts = Utc::now().format("%Y%m%d_%H%M%S");
+    let ts = local_backup_timestamp_label();
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let filename = unique_backup_filename(
         &backup_dir,

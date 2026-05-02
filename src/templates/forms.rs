@@ -274,7 +274,6 @@ pub(super) fn new_thread_form(
 </form>
 </div>
 "#,
-        // poll scripts moved to /static/main.js
         board = escape_html(board_short),
         csrf = escape_html(csrf_token),
         submission_token = escape_html(&submission_token),

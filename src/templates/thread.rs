@@ -15,7 +15,7 @@ use std::fmt::Write;
 
 use super::{
     base_layout, compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script,
-    thread_autoupdate_script, TOGGLE_SCRIPT,
+    thread_autoupdate_script,
 };
 
 const SELF_ACTION_WINDOW_SECS: i64 = 60;
@@ -484,7 +484,6 @@ pub fn thread_page(
     body.push_str("<div id=\"bottom\"></div>\n");
     body.push_str(&render_thread_nav(board, thread.reply_count, true));
 
-    body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
         board.max_image_size_bytes(),
         board.max_video_size_bytes(),

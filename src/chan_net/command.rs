@@ -15,7 +15,7 @@
 //
 // Text content only — no media fields ever cross this interface.
 //
-// Security hardening (Step 7.3 checklist):
+// Security hardening:
 //   ✔ DefaultBodyLimit::max(CONFIG.chan_net_command_max_body) applied in mod.rs
 //   ✔ reply_push: content validated at ≤ 32,768 chars before any DB write
 //   ✔ reply_push: author validated at ≤ 255 chars before any DB write
@@ -23,11 +23,7 @@
 //   ✔ No board or thread is created as a side effect — unknown targets return 400
 //   ✔ `scope` field in GwMetadata set correctly by each builder
 //   ✔ force_refresh emits tracing::warn! at call site (selective_snapshot.rs)
-//   ✔ Content-Disposition filename follows exact naming convention from build plan
-//
-// Phase 8 fix: two AppError::Internal calls passed String values (via .to_string())
-// instead of anyhow::Error. Fixed: db.get() now uses ? directly (From<r2d2::Error>
-// impl), and the JoinError from spawn_blocking uses anyhow::anyhow!(e).
+//   ✔ Content-Disposition filename follows the route naming convention
 
 use axum::{
     extract::{rejection::JsonRejection, FromRequest, Request, State},

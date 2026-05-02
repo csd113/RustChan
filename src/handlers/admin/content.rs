@@ -15,6 +15,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 
 fn sanitize_board_short_value(board_short: &str) -> String {
@@ -38,6 +39,7 @@ fn resolve_board_short_name(
         )
 }
 
+#[cfg(test)]
 fn validate_board_short_for_filesystem(short: &str) -> Result<()> {
     let is_valid = !short.is_empty()
         && short.len() <= 8
@@ -52,6 +54,7 @@ fn validate_board_short_for_filesystem(short: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn checked_board_upload_dir(upload_dir: &str, short: &str) -> Result<PathBuf> {
     validate_board_short_for_filesystem(short)?;
     let upload_root = Path::new(upload_dir);
@@ -226,13 +229,9 @@ pub async fn delete_board(
                     )));
                 }
             }
-            let board_upload_dir = short_name
-                .as_deref()
-                .map(|short| checked_board_upload_dir(&upload_dir, short))
-                .transpose()?;
-
-            // delete_board returns all file paths for posts in this board.
-            let paths = db::delete_board(&conn, form.board_id).map_err(|error| {
+            // delete_board records durable cleanup for tracked files and the
+            // board media directory in the same transaction as the DB delete.
+            let deleted = db::delete_board(&conn, form.board_id).map_err(|error| {
                 let chain = error
                     .chain()
                     .map(std::string::ToString::to_string)
@@ -249,22 +248,23 @@ pub async fn delete_board(
                 }
             })?;
 
-            // Delete every tracked file and thumbnail from disk.
-            for p in &paths {
-                crate::utils::files::delete_file(&upload_dir, p);
+            let board_cleanup_dirs = short_name.into_iter().collect::<Vec<_>>();
+            if let Err(error) = crate::pending_fs::finalize_delete_files_and_dirs_payload(
+                &conn,
+                &upload_dir,
+                deleted.pending_fs_op_id.as_deref(),
+                &deleted.paths,
+                &board_cleanup_dirs,
+            ) {
+                tracing::warn!(
+                    target: "admin",
+                    board_id = form.board_id,
+                    error = %error,
+                    "deleted board but filesystem cleanup remains pending"
+                );
             }
 
-            // Remove the entire board upload directory — handles the thumbs/
-            // sub-directory and any orphaned/untracked files too.
-            if let Some(board_dir) = board_upload_dir {
-                if board_dir.exists() {
-                    if let Err(e) = std::fs::remove_dir_all(&board_dir) {
-                        tracing::warn!("Could not remove board dir {:?}: {}", board_dir, e);
-                    }
-                }
-            }
-
-            tracing::info!(target: "admin", board_id = form.board_id, files_removed = paths.len(), "Board deleted");
+            tracing::info!(target: "admin", board_id = form.board_id, files_removed = deleted.paths.len(), "Board deleted");
             // Refresh live board list so the top bar immediately stops showing
             // the deleted board — important because error pages use this cache.
             crate::templates::set_live_boards(db::get_all_boards(&conn)?);

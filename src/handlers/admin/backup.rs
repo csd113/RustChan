@@ -28,7 +28,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
-use chrono::Utc;
+use chrono::{Local, Utc};
 use futures::stream::Stream;
 use rusqlite::{backup::Backup, params, OptionalExtension};
 use serde::Deserialize;
@@ -294,7 +294,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                 .keep()
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Persist temp zip: {e}")))?;
 
-            let ts = Utc::now().format("%Y%m%d_%H%M%S");
+            let ts = local_backup_timestamp_label();
             let fname = format!("rustchan-backup-{ts}.zip");
             tracing::info!(target: "admin", bytes = file_size, "Full backup downloaded");
             progress
@@ -473,6 +473,10 @@ pub fn board_backup_dir() -> PathBuf {
     crate::config::board_backups_dir()
 }
 
+pub(super) fn local_backup_timestamp_label() -> String {
+    Local::now().format("%Y%m%d_%H%M%S").to_string()
+}
+
 pub fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
     let candidate = dir.join(base_name);
     if !candidate.exists() {
@@ -590,6 +594,18 @@ mod tests {
         }
         cursor.set_position(0);
         zip::ZipArchive::new(cursor).expect("zip archive")
+    }
+
+    #[test]
+    fn local_backup_timestamp_label_is_filename_safe_and_sortable() {
+        let label = super::local_backup_timestamp_label();
+
+        assert_eq!(label.len(), "YYYYMMDD_HHMMSS".len());
+        assert_eq!(label.as_bytes().get(8), Some(&b'_'));
+        assert!(label
+            .chars()
+            .enumerate()
+            .all(|(idx, ch)| idx == 8 && ch == '_' || ch.is_ascii_digit()));
     }
 
     async fn echo_restore_saved_form(Form(form): Form<super::RestoreSavedForm>) -> String {

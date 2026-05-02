@@ -1,5 +1,4 @@
 // chan_net/status.rs — ChanNet health check handler.
-// Step 6.1 — Fully implemented.
 //
 // GET /chan/status returns service name, version, board count, and post count
 // as JSON. Used by operators and RustWave to verify connectivity.

@@ -85,7 +85,7 @@ pub(crate) fn create_full_backup_to_server(
     let backup_dir = super::full_backup_dir();
     std::fs::create_dir_all(&backup_dir)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Create full backup dir: {error}")))?;
-    let ts = Utc::now().format("%Y%m%d_%H%M%S");
+    let ts = super::local_backup_timestamp_label();
     let filename = super::unique_backup_filename(&backup_dir, &format!("rustchan-backup-{ts}.zip"));
     let final_path = backup_dir.join(&filename);
     let tmp_path = backup_dir.join(format!("{filename}.tmp"));
@@ -400,7 +400,7 @@ pub async fn create_board_backup(
             std::fs::create_dir_all(&backup_dir).map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Create board backup dir: {error}"))
             })?;
-            let ts = Utc::now().format("%Y%m%d_%H%M%S");
+            let ts = super::local_backup_timestamp_label();
             let filename = super::unique_backup_filename(
                 &backup_dir,
                 &format!("rustchan-board-{board_short}-{ts}.zip"),

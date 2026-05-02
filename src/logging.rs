@@ -829,11 +829,10 @@ where
         };
 
         // ── Timestamp (with milliseconds) ─────────────────────────────────────
+        let now = chrono::Local::now();
         if tty {
-            let now = chrono::Local::now();
             write!(writer, "{} ", now.format("%H:%M:%S%.3f"))?;
         } else {
-            let now = chrono::Utc::now();
             write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
         }
 
@@ -884,8 +883,8 @@ where
             return Ok(());
         };
 
-        // ── Timestamp — UTC, full date, millisecond precision ─────────────────
-        let now = chrono::Utc::now();
+        // ── Timestamp — server-local, full date, millisecond precision ───────
+        let now = chrono::Local::now();
         write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
 
         // ── Level + component columns (no colour) ─────────────────────────────

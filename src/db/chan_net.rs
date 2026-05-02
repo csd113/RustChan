@@ -9,10 +9,6 @@
 //                               archive status before inserting. Bumps thread reply_count
 //                               and bumped_at on success.
 //
-// Imports from crate::models::SnapshotPost. SnapshotPost lives in src/models.rs
-// so that this db-layer file can import it without a layering inversion.
-// chan_net::snapshot re-exports the type so all other call-sites compile unchanged.
-//
 // Schema verification notes (checked against src/db/posts.rs):
 //   - Post body column is `body`         (NOT `content`)
 //   - Post author column is `name`        (NOT `author`)
@@ -21,8 +17,6 @@
 //   - `deletion_token` is NOT NULL — a fresh UUID v4 is generated per insert
 //   - `created_at` has a DB-level default of unixepoch() — omitted from INSERT
 //   - `is_op` is 0 for all replies
-//
-// Phase 7 changes: insert_reply_into_thread stub replaced with full implementation.
 
 use anyhow::Result;
 use rusqlite::Connection;

@@ -230,6 +230,32 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             ))
         },
     );
+    let previous_global_favicon_dir = live_global_favicon_dir.parent().map_or_else(
+        || PathBuf::from(format!("{}.restore-old", live_global_favicon_dir.display())),
+        |parent| {
+            parent.join(format!(
+                ".{}.restore-old.{}",
+                live_global_favicon_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("favicon"),
+                uuid::Uuid::new_v4().simple()
+            ))
+        },
+    );
+    let previous_global_banner_dir = live_global_banner_dir.parent().map_or_else(
+        || PathBuf::from(format!("{}.restore-old", live_global_banner_dir.display())),
+        |parent| {
+            parent.join(format!(
+                ".{}.restore-old.{}",
+                live_global_banner_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("banner"),
+                uuid::Uuid::new_v4().simple()
+            ))
+        },
+    );
     let previous_tor_hidden_service_keys_dir =
         live_tor_hidden_service_keys_dir.as_ref().map(|live_path| {
             live_path.parent().map_or_else(
@@ -460,11 +486,25 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     }
 
     let pending_restore_id = uuid::Uuid::new_v4().to_string();
-    let pending_restore_payload = crate::pending_fs::FullRestoreSwapPayload {
-        staged: staged_upload_root.display().to_string(),
-        live: upload_root.display().to_string(),
-        previous: previous_upload_root.display().to_string(),
-        additional_swaps: live_tor_hidden_service_keys_dir
+    let mut additional_swaps = Vec::new();
+    if favicon_extracted {
+        additional_swaps.push(crate::pending_fs::RestorePathSwapPayload {
+            staged: staged_global_favicon_dir.display().to_string(),
+            live: live_global_favicon_dir.display().to_string(),
+            previous: previous_global_favicon_dir.display().to_string(),
+            restrict_private_permissions: false,
+        });
+    }
+    if banner_extracted {
+        additional_swaps.push(crate::pending_fs::RestorePathSwapPayload {
+            staged: staged_global_banner_dir.display().to_string(),
+            live: live_global_banner_dir.display().to_string(),
+            previous: previous_global_banner_dir.display().to_string(),
+            restrict_private_permissions: false,
+        });
+    }
+    additional_swaps.extend(
+        live_tor_hidden_service_keys_dir
             .as_ref()
             .zip(staged_tor_hidden_service_keys_dir.as_ref())
             .zip(previous_tor_hidden_service_keys_dir.as_ref())
@@ -480,9 +520,14 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
                         restrict_private_permissions: true,
                     }
                 },
-            )
-            .into_iter()
-            .collect(),
+            ),
+    );
+
+    let pending_restore_payload = crate::pending_fs::FullRestoreSwapPayload {
+        staged: staged_upload_root.display().to_string(),
+        live: upload_root.display().to_string(),
+        previous: previous_upload_root.display().to_string(),
+        additional_swaps,
     };
     let pending_restore_op = crate::pending_fs::PendingFsOpInsert {
         id: pending_restore_id.clone(),
@@ -545,24 +590,10 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     }
     db::delete_pending_fs_op(live_conn, &pending_restore_id)?;
 
-    if favicon_extracted {
-        remove_path_if_exists(&live_global_favicon_dir)?;
-        std::fs::rename(&staged_global_favicon_dir, &live_global_favicon_dir).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!(
-                "{restore_label} global favicon swap failed: {error}"
-            ))
-        })?;
-    } else {
+    if !favicon_extracted {
         let _ = remove_path_if_exists(&staged_global_favicon_dir);
     }
-    if banner_extracted {
-        remove_path_if_exists(&live_global_banner_dir)?;
-        std::fs::rename(&staged_global_banner_dir, &live_global_banner_dir).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!(
-                "{restore_label} global banner swap failed: {error}"
-            ))
-        })?;
-    } else {
+    if !banner_extracted {
         let _ = remove_path_if_exists(&staged_global_banner_dir);
     }
     let _ = std::fs::remove_file(&temp_db);

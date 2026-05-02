@@ -3,7 +3,7 @@
 use crate::config::CONFIG;
 use crate::models::{Board, Pagination, Theme, SEARCH_QUERY_MAX_CHARS};
 use crate::utils::sanitize::escape_html;
-use chrono::{TimeZone, Utc};
+use chrono::{Local, TimeZone};
 use parking_lot::RwLock;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -254,12 +254,6 @@ fn rebuild_live_board_nav() {
     *LIVE_BOARD_NAV.write() = (version, nav_html);
 }
 
-// ─── Shared JS injected once per page ────────────────────────────────────────
-
-// All JavaScript has been moved to /static/main.js.
-// Kept as an empty constant to avoid touching every call-site.
-pub const TOGGLE_SCRIPT: &str = "";
-
 // ─── Auto-compress modal ──────────────────────────────────────────────────────
 
 /// Returns the compress-modal overlay HTML.
@@ -349,15 +343,15 @@ pub const fn thread_autoupdate_script() -> &'static str {
 
 #[must_use]
 pub fn fmt_ts(ts: i64) -> String {
-    match Utc.timestamp_opt(ts, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+    match Local.timestamp_opt(ts, 0) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
         _ => "unknown".to_string(),
     }
 }
 
 #[must_use]
 pub fn fmt_ts_short(ts: i64) -> String {
-    match Utc.timestamp_opt(ts, 0) {
+    match Local.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%m/%d/%y(%a)%H:%M:%S").to_string(),
         _ => "?".to_string(),
     }
@@ -744,7 +738,7 @@ pub fn error_page(code: u16, message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base_layout, set_live_default_theme, set_live_themes};
+    use super::{base_layout, fmt_ts, fmt_ts_short, set_live_default_theme, set_live_themes};
     use crate::models::Theme;
 
     fn builtin_theme(slug: &str, display_name: &str, sort_order: i64) -> Theme {
@@ -785,5 +779,22 @@ mod tests {
         assert!(blue_sky_idx < deep_orbit_idx);
         assert!(deep_orbit_idx < terminal_idx);
         assert!(terminal_idx < dorfic_idx);
+    }
+
+    #[test]
+    fn timestamp_helpers_do_not_force_utc_suffix() {
+        let full = fmt_ts(1_700_000_000);
+        let short = fmt_ts_short(1_700_000_000);
+
+        assert!(!full.contains("UTC"));
+        assert!(!short.contains("UTC"));
+        assert_ne!(full, "unknown");
+        assert_ne!(short, "?");
+    }
+
+    #[test]
+    fn timestamp_helpers_handle_out_of_range_epoch_values() {
+        assert_eq!(fmt_ts(i64::MAX), "unknown");
+        assert_eq!(fmt_ts_short(i64::MAX), "?");
     }
 }

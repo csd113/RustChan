@@ -1,6 +1,6 @@
 // chan_net/selective_snapshot.rs — RustWave gateway snapshot builders.
 //
-// Five scoped ZIP builders for the RustWave gateway layer (Phase 7).
+// Five scoped ZIP builders for the RustWave gateway layer.
 // These builders are entirely separate from snapshot.rs (federation layer)
 // so that their contracts remain independently evolvable.
 //
@@ -23,13 +23,9 @@
 // Column verification (checked against src/db/posts.rs and src/db/threads.rs):
 //   - Post body column:   `p.body`   (NOT `p.content`)
 //   - Post author column: `p.name`   (NOT `p.author`)
-//   - Board name column:  `b.name`   (NOT `b.title`) ← Phase 8 fix
+//   - Board name column:  `b.name`   (NOT `b.title`)
 //   - Thread subject:     `t.subject` — nullable, COALESCE to ''
 //   - Thread archive:     `t.archived` (INTEGER 0/1)
-//
-// Phase 8 fix: the boards table column is `name`, not `title`. All three
-// board-fetch helpers have been corrected from `SELECT short_name, title`
-// to `SELECT short_name, name`.
 
 use std::io::{Cursor, Write};
 
@@ -264,9 +260,9 @@ fn board_id_by_short_name(conn: &Connection, short_name: &str) -> Result<i64> {
     .map_err(|_| anyhow::anyhow!("Board '{short_name}' not found"))
 }
 
-/// Phase 8 fix: `SELECT short_name, name` — the boards table column is `name`,
-/// not `title`. `GwBoard.title` is the Rust field name; it maps to the `name` SQL
-/// column via positional row.get(1).
+/// Load all boards for gateway snapshots.
+///
+/// `GwBoard.title` maps to the `boards.name` display-name column.
 fn fetch_all_boards(conn: &Connection) -> Result<Vec<GwBoard>> {
     let mut stmt = conn.prepare(
         "SELECT short_name, name FROM boards ORDER BY nsfw ASC, display_order ASC, id ASC",
@@ -282,7 +278,7 @@ fn fetch_all_boards(conn: &Connection) -> Result<Vec<GwBoard>> {
     Ok(rows)
 }
 
-/// Phase 8 fix: `SELECT short_name, name` — see `fetch_all_boards`.
+/// Load one board by id for gateway snapshots.
 fn fetch_boards_by_id(conn: &Connection, board_id: i64) -> Result<Vec<GwBoard>> {
     let mut stmt = conn.prepare("SELECT short_name, name FROM boards WHERE id = ?1")?;
     let rows = stmt
@@ -296,7 +292,7 @@ fn fetch_boards_by_id(conn: &Connection, board_id: i64) -> Result<Vec<GwBoard>> 
     Ok(rows)
 }
 
-/// Phase 8 fix: `SELECT short_name, name` — see `fetch_all_boards`.
+/// Load one board by short name for gateway snapshots.
 fn fetch_boards_by_short_name(conn: &Connection, short_name: &str) -> Result<Vec<GwBoard>> {
     let mut stmt = conn.prepare("SELECT short_name, name FROM boards WHERE short_name = ?1")?;
     let rows = stmt

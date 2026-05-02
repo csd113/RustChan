@@ -735,11 +735,19 @@ pub fn get_seconds_since_last_post(
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>> {
+pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<super::DeletePathsResult> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin delete_board transaction")?;
 
-    let result: anyhow::Result<Vec<String>> = (|| {
+    let result: anyhow::Result<super::DeletePathsResult> = (|| {
+        let board_short: String = conn
+            .query_row(
+                "SELECT short_name FROM boards WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .context("Failed to load board before delete")?;
+
         // Collect every file path that belongs to this board before the CASCADE.
         // The ON DELETE CASCADE on boards→threads→posts handles DB row removal, but
         // on-disk files must be cleaned up by the caller.
@@ -778,7 +786,17 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>>
         // post-delete state: any file exclusively used by this board's posts now
         // has zero remaining references and is safe to remove.
         let safe = super::paths_safe_to_delete(conn, candidates)?;
-        Ok(safe)
+        let pending_fs_op = super::build_delete_files_and_dirs_pending_op(
+            &safe,
+            std::slice::from_ref(&board_short),
+        )?;
+        if let Some(op) = pending_fs_op.as_ref() {
+            super::insert_pending_fs_op(conn, op)?;
+        }
+        Ok(super::DeletePathsResult {
+            paths: safe,
+            pending_fs_op_id: pending_fs_op.map(|op| op.id),
+        })
     })();
 
     match result {
@@ -948,8 +966,8 @@ fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_board, create_board_with_media_flags, get_all_boards_with_stats, get_board_by_short,
-        get_site_stats,
+        create_board, create_board_with_media_flags, delete_board, get_all_boards_with_stats,
+        get_board_by_short, get_site_stats,
     };
     use rusqlite::Connection;
 
@@ -1141,5 +1159,60 @@ mod tests {
             board.allow_self_delete,
             crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_SELF_DELETE
         );
+    }
+
+    #[test]
+    fn delete_board_records_durable_board_directory_cleanup() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_dir = temp_dir.path().join("uploads");
+        let board_dir = upload_dir.join("gone");
+        std::fs::create_dir_all(board_dir.join("thumbs")).expect("create board dirs");
+        std::fs::write(board_dir.join("file.webp"), b"file").expect("write file");
+        std::fs::write(board_dir.join("thumbs/file.webp"), b"thumb").expect("write thumb");
+        std::fs::write(board_dir.join("orphan.bin"), b"orphan").expect("write orphan");
+
+        let pool = crate::db::init_test_pool().expect("init test pool");
+        let conn = pool.get().expect("get test connection");
+        let board_id = create_board(&conn, "gone", "Gone", "", false).expect("create board");
+        conn.execute(
+            "INSERT INTO threads (id, board_id, subject) VALUES (1, ?1, 'delete me')",
+            rusqlite::params![board_id],
+        )
+        .expect("insert thread");
+        conn.execute(
+            "INSERT INTO posts (
+                 id, thread_id, board_id, body, body_html, deletion_token, is_op,
+                 file_path, file_name, file_size, thumb_path
+             ) VALUES
+             (1, 1, ?1, 'body', '<p>body</p>', 'tok', 1,
+              'gone/file.webp', 'file.webp', 4, 'gone/thumbs/file.webp')",
+            rusqlite::params![board_id],
+        )
+        .expect("insert post");
+
+        let deleted = delete_board(&conn, board_id).expect("delete board");
+        assert_eq!(deleted.paths.len(), 2);
+        assert!(deleted.pending_fs_op_id.is_some());
+        assert!(
+            board_dir.exists(),
+            "simulated crash window leaves directory for startup cleanup"
+        );
+
+        let pending = crate::db::list_pending_fs_ops(&conn).expect("list pending ops");
+        assert_eq!(pending.len(), 1);
+        let pending_op = pending.first().expect("pending op");
+        let payload: crate::pending_fs::DeleteFilesPayload =
+            serde_json::from_str(&pending_op.payload_json).expect("pending payload");
+        assert_eq!(payload.dirs, vec!["gone".to_string()]);
+
+        crate::pending_fs::reconcile_pending_fs_ops(
+            &pool,
+            upload_dir.to_str().expect("utf8 upload dir"),
+        )
+        .expect("startup cleanup");
+        assert!(!board_dir.exists());
+        assert!(crate::db::list_pending_fs_ops(&conn)
+            .expect("list pending ops")
+            .is_empty());
     }
 }

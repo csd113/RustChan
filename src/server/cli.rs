@@ -122,7 +122,7 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 println!("{:<6} {:<24} Created", "ID", "Username");
                 println!("{}", "-".repeat(45));
                 for (id, user, ts) in &rows {
-                    let date = chrono::Utc
+                    let date = chrono::Local
                         .timestamp_opt(*ts, 0)
                         .single()
                         .map_or_else(|| "?".to_string(), |d| d.format("%Y-%m-%d").to_string());
@@ -210,10 +210,10 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 .map(|h| chrono::Utc::now().timestamp() + h.min(87_600).saturating_mul(3600));
             let id = db::add_ban(&conn, &ip_hash, &reason, expires)?;
             let exp_str = expires
-                .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single())
+                .and_then(|ts| chrono::Local.timestamp_opt(ts, 0).single())
                 .map_or_else(
                     || "permanent".to_string(),
-                    |d| d.format("%Y-%m-%d %H:%M UTC").to_string(),
+                    |d| d.format("%Y-%m-%d %H:%M").to_string(),
                 );
             println!("✓ Ban #{id} added (expires: {exp_str}).");
         }
@@ -237,7 +237,7 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                     let partial = b.ip_hash.get(..16).unwrap_or(b.ip_hash.as_str());
                     let expires = b
                         .expires_at
-                        .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single())
+                        .and_then(|ts| chrono::Local.timestamp_opt(ts, 0).single())
                         .map_or_else(
                             || "Permanent".to_string(),
                             |d| d.format("%Y-%m-%d %H:%M").to_string(),

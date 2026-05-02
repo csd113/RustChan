@@ -19,7 +19,7 @@
 //   VideoTranscode — MP4 → WebM (VP9 + Opus) via ffmpeg (off the hot path)
 //   AudioWaveform  — waveform PNG from audio via ffmpeg (off the hot path)
 //   ThreadPrune    — delete overflow threads from a board asynchronously
-//   SpamCheck      — hook for future spam / abuse analysis
+//   SpamCheck      — lightweight abuse signal logging
 //
 // Integration (handlers):
 //   1. save_upload() saves the raw file and returns processing_pending=true
@@ -81,7 +81,7 @@ pub enum Job {
         max_archived_threads: i64,
         allow_archive: bool,
     },
-    /// Spam / abuse analysis hook — currently logs; extend for auto-banning.
+    /// Lightweight spam / abuse signal logging.
     SpamCheck {
         post_id: i64,
         ip_hash: String,

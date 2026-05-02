@@ -47,12 +47,24 @@ pub struct DeletePathsResult {
 pub fn build_delete_files_pending_op(
     paths: &[String],
 ) -> Result<Option<crate::pending_fs::PendingFsOpInsert>> {
-    if paths.is_empty() {
+    build_delete_files_and_dirs_pending_op(paths, &[])
+}
+
+/// Build a pending filesystem delete operation for file and board-directory cleanup.
+///
+/// # Errors
+/// Returns an error if the delete-files payload cannot be serialized.
+pub fn build_delete_files_and_dirs_pending_op(
+    paths: &[String],
+    dirs: &[String],
+) -> Result<Option<crate::pending_fs::PendingFsOpInsert>> {
+    if paths.is_empty() && dirs.is_empty() {
         return Ok(None);
     }
 
     let payload = crate::pending_fs::DeleteFilesPayload {
         paths: paths.to_vec(),
+        dirs: dirs.to_vec(),
     };
     Ok(Some(crate::pending_fs::PendingFsOpInsert {
         id: uuid::Uuid::new_v4().simple().to_string(),

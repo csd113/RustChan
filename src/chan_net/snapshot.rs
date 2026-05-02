@@ -1,17 +1,7 @@
 // chan_net/snapshot.rs — Federation snapshot builders.
 //
-// Step 2.1 — Structs: SnapshotBoard, SnapshotPost, SnapshotMetadata are now
-//   defined in src/models.rs and re-exported here so all existing call-sites
-//   (snapshot::SnapshotPost, etc.) continue to compile without change.
-//   Moving the types to models.rs resolves the layering inversion: db/chan_net.rs
-//   previously imported from `crate::chan_net::snapshot`, which is only reachable
-//   in the binary crate (chan_net is declared in main.rs, not lib.rs). models.rs
-//   is re-exported by lib.rs and is accessible from anywhere in the crate.
-//
-// Step 2.2 — build_snapshot: full ZIP of all boards + active (non-archived) posts
-// Step 2.3 — unpack_snapshot: strict-whitelist ZIP parser
-//
-// Column fix (Phase 8): boards table display-name column is `name`, not `title`.
+// Build a full ZIP of all boards and active posts, and unpack snapshots with
+// a strict filename whitelist.
 
 // Re-export so that all call-sites using `super::snapshot::SnapshotPost` etc.
 // continue to compile without any changes.

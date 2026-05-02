@@ -2,6 +2,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
+use chrono::TimeZone;
 
 const BACKUP_LIST_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -79,12 +80,10 @@ pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<Bac
                     .map(|d| d.as_secs().cast_signed());
                 let modified = modified_epoch
                     .and_then(|secs| {
-                        // chrono's deprecated constructor is still the
-                        // smallest/clearest way to format this optional file
-                        // timestamp in this verification-only path.
-                        #[allow(deprecated)]
-                        chrono::DateTime::<Utc>::from_timestamp(secs, 0)
-                            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                        Local
+                            .timestamp_opt(secs, 0)
+                            .single()
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
                     })
                     .unwrap_or_default();
                 let (verification, boards, contains_tor_hidden_service_keys) = match kind {

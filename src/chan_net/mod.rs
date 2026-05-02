@@ -4,13 +4,11 @@
 // main forum port. Activated with the --chan-net CLI flag.
 //
 // Two independent layers:
-//   Layer 1 — Federation sync  (Phases 1–6): node-to-node ZIP exchange
-//   Layer 2 — RustWave gateway (Phase 7):    JSON command in, ZIP package out
+//   Layer 1 — Federation sync: node-to-node ZIP exchange
+//   Layer 2 — RustWave gateway: JSON command in, ZIP package out
 //
 // Rate-limit middleware is intentionally excluded — all traffic on this
 // listener is machine-to-machine.
-//
-// Step 1.4
 
 pub mod command;
 pub mod export;

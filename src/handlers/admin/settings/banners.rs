@@ -2,6 +2,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
+use anyhow::Context as _;
 
 struct ParsedBannerUpload {
     csrf: Option<String>,
@@ -168,16 +169,50 @@ fn restore_board_banner_inheritance_if_empty(
     Ok(())
 }
 
+fn banner_cleanup_payload(
+    assets: &[crate::models::BannerAsset],
+) -> Result<Option<crate::pending_fs::PendingFsOpInsert>> {
+    if assets.is_empty() {
+        return Ok(None);
+    }
+    let payload = crate::pending_fs::DeleteBannerAssetsPayload {
+        assets: assets
+            .iter()
+            .map(|asset| crate::pending_fs::BannerAssetCleanupPayload {
+                scope: asset.scope,
+                board_short: asset.board_short.clone(),
+                storage_key: asset.storage_key.clone(),
+            })
+            .collect(),
+    };
+    Ok(Some(crate::pending_fs::PendingFsOpInsert {
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        kind: crate::pending_fs::DELETE_BANNER_ASSETS_KIND,
+        payload_json: serde_json::to_string(&payload)
+            .context("Serialize delete_banner_assets payload failed")?,
+    }))
+}
+
 fn delete_banner_asset_safely(
     conn: &rusqlite::Connection,
     banner_id: i64,
 ) -> Result<crate::models::BannerAsset> {
-    let asset = db::get_banner_asset(conn, banner_id)?
+    let tx = conn.unchecked_transaction()?;
+    let asset = db::get_banner_asset(&tx, banner_id)?
         .ok_or_else(|| AppError::BadRequest("Banner not found.".into()))?;
-    banner::delete_banner_asset_file(&asset)?;
-    db::delete_banner_asset(conn, banner_id)?;
+    db::delete_banner_asset(&tx, banner_id)?;
     if asset.scope == BannerScope::Board {
-        restore_board_banner_inheritance_if_empty(conn, asset.board_id)?;
+        restore_board_banner_inheritance_if_empty(&tx, asset.board_id)?;
+    }
+    let pending_op = banner_cleanup_payload(std::slice::from_ref(&asset))?;
+    if let Some(op) = pending_op.as_ref() {
+        db::insert_pending_fs_op(&tx, op)?;
+    }
+    tx.commit()?;
+    if let Some(op) = pending_op.as_ref() {
+        let payload: crate::pending_fs::DeleteBannerAssetsPayload =
+            serde_json::from_str(&op.payload_json).map_err(anyhow::Error::from)?;
+        crate::pending_fs::finalize_delete_banner_assets_payload(conn, Some(&op.id), &payload)?;
     }
     Ok(asset)
 }
@@ -191,15 +226,23 @@ fn clear_board_banner_assets_safely(
         rusqlite::params![board_id],
         |row| row.get(0),
     )?;
-    let assets = db::list_banner_assets_for_board(conn, board_id)?;
-    for asset in &assets {
-        banner::delete_banner_asset_file(asset)?;
-    }
-    db::delete_board_banner_assets(conn, board_id)?;
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let assets = db::list_banner_assets_for_board(&tx, board_id)?;
+    let pending_op = banner_cleanup_payload(&assets)?;
+    db::delete_board_banner_assets(&tx, board_id)?;
+    tx.execute(
         "UPDATE boards SET banner_mode = 'inherit' WHERE id = ?1 AND banner_mode = 'override'",
         rusqlite::params![board_id],
     )?;
+    if let Some(op) = pending_op.as_ref() {
+        db::insert_pending_fs_op(&tx, op)?;
+    }
+    tx.commit()?;
+    if let Some(op) = pending_op.as_ref() {
+        let payload: crate::pending_fs::DeleteBannerAssetsPayload =
+            serde_json::from_str(&op.payload_json).map_err(anyhow::Error::from)?;
+        crate::pending_fs::finalize_delete_banner_assets_payload(conn, Some(&op.id), &payload)?;
+    }
     Ok((board_short, assets))
 }
 
@@ -686,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_global_banner_file_delete_keeps_db_row_for_retry() {
+    fn failed_global_banner_file_delete_keeps_pending_cleanup_for_retry() {
         let state = crate::test_support::app_state();
         let conn = state.db.get().expect("db connection");
         let storage_key = uuid::Uuid::new_v4().simple().to_string();
@@ -718,20 +761,30 @@ mod tests {
         assert!(error.to_string().contains("remove"));
         assert!(crate::db::get_banner_asset(&conn, banner_id)
             .expect("reload banner")
-            .is_some());
+            .is_none());
+        let pending = crate::db::list_pending_fs_ops(&conn).expect("list pending ops");
+        assert_eq!(pending.len(), 1);
+        let pending_op = pending.first().expect("pending op");
 
         std::fs::remove_dir_all(&gif_path).expect("remove gif dir");
         std::fs::write(&gif_path, b"gif").expect("write gif");
-        delete_banner_asset_safely(&conn, banner_id).expect("retry delete banner");
+        let payload: crate::pending_fs::DeleteBannerAssetsPayload =
+            serde_json::from_str(&pending_op.payload_json).expect("pending payload");
+        crate::pending_fs::finalize_delete_banner_assets_payload(
+            &conn,
+            Some(&pending_op.id),
+            &payload,
+        )
+        .expect("retry delete banner files");
         assert!(!path.exists());
         assert!(!gif_path.exists());
-        assert!(crate::db::get_banner_asset(&conn, banner_id)
-            .expect("reload banner")
-            .is_none());
+        assert!(crate::db::list_pending_fs_ops(&conn)
+            .expect("list pending ops")
+            .is_empty());
     }
 
     #[test]
-    fn failed_board_banner_clear_keeps_rows_for_retry() {
+    fn failed_board_banner_clear_keeps_pending_cleanup_for_retry() {
         let state = crate::test_support::app_state();
         let conn = state.db.get().expect("db connection");
         let board_id =
@@ -763,15 +816,26 @@ mod tests {
         clear_board_banner_assets_safely(&conn, board_id).expect_err("gif dir delete should fail");
         assert!(crate::db::get_banner_asset(&conn, banner_id)
             .expect("reload banner")
-            .is_some());
+            .is_none());
+        assert_eq!(board_banner_mode(&conn, board_id), "inherit");
+        let pending = crate::db::list_pending_fs_ops(&conn).expect("list pending ops");
+        assert_eq!(pending.len(), 1);
+        let pending_op = pending.first().expect("pending op");
 
         std::fs::remove_dir_all(&gif_path).expect("remove gif dir");
         std::fs::write(&gif_path, b"gif").expect("write gif");
-        clear_board_banner_assets_safely(&conn, board_id).expect("retry clear board banners");
+        let payload: crate::pending_fs::DeleteBannerAssetsPayload =
+            serde_json::from_str(&pending_op.payload_json).expect("pending payload");
+        crate::pending_fs::finalize_delete_banner_assets_payload(
+            &conn,
+            Some(&pending_op.id),
+            &payload,
+        )
+        .expect("retry clear board banner files");
         assert!(!path.exists());
         assert!(!gif_path.exists());
-        assert!(crate::db::get_banner_asset(&conn, banner_id)
-            .expect("reload banner")
-            .is_none());
+        assert!(crate::db::list_pending_fs_ops(&conn)
+            .expect("list pending ops")
+            .is_empty());
     }
 }

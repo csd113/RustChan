@@ -535,7 +535,7 @@ pub struct Config {
     pub blocking_threads: usize,
     /// `SQLite` `r2d2` connection pool size (default 8).
     pub db_pool_size: u32,
-    // ── ChanNet / RustWave gateway (Step 1.2) ────────────────────────────────
+    // ── ChanNet / RustWave gateway ───────────────────────────────────────────
     /// Base URL of the connected `RustWave` instance (must begin with http:// or https://).
     /// Validated at startup by `Config::validate()`.
     pub rustwave_url: String,
@@ -655,7 +655,7 @@ impl Config {
             OsRng.fill_bytes(&mut b);
             hex::encode(b)
         };
-        // ── ChanNet fields (Step 1.2) — computed after cookie_secret ──────────
+        // ── ChanNet fields ───────────────────────────────────────────────────
         // Use as_deref() to borrow rather than move the Option<String> fields.
         let rustwave_url = env::var("CHAN_RUSTWAVE_URL").unwrap_or_else(|_| {
             s.rustwave_url
@@ -967,8 +967,7 @@ impl Config {
                 let _ = std::fs::remove_file(probe);
             }
         }
-        // Step 1.2: Validate rustwave_url scheme so operators catch
-        // misconfiguration at startup rather than at first federation call.
+        // Validate rustwave_url at startup rather than at first federation call.
         if !self.rustwave_url.starts_with("http://") && !self.rustwave_url.starts_with("https://") {
             return Err(anyhow::anyhow!(
                 "CONFIG ERROR: rustwave_url must begin with http:// or https://, got: {}",

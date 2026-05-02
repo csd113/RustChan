@@ -18,7 +18,6 @@ use std::fmt::Write;
 use super::{
     base_layout, compress_modal_script, embed_thumb_from_body, fmt_ts, fmt_ts_short,
     live_site_name, live_site_subtitle, render_pagination, report_modal_script, urlencoding_simple,
-    TOGGLE_SCRIPT,
 };
 
 // ─── Site index (board list) ──────────────────────────────────────────────────
@@ -876,7 +875,6 @@ pub fn board_page(
         &format!("/{}", escape_html(&board.short_name)),
     ));
 
-    body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
         board.max_image_size_bytes(),
         board.max_video_size_bytes(),
@@ -1294,8 +1292,6 @@ pub fn catalog_page(
 
     body.push_str("</div>");
     body.push_str(report_modal_script());
-    // sortCatalog moved to /static/main.js
-    body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
         board.max_image_size_bytes(),
         board.max_video_size_bytes(),

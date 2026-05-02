@@ -164,12 +164,6 @@ pub fn mime_to_ext_pub(mime: &str) -> &'static str {
     mime_to_ext(mime)
 }
 
-pub fn delete_file(boards_dir: &str, relative_path: &str) {
-    if let Err(error) = delete_file_checked(boards_dir, relative_path) {
-        tracing::warn!("delete_file failed for {relative_path}: {error}");
-    }
-}
-
 /// Remove a stored upload path while rejecting traversal attempts.
 ///
 /// # Errors
