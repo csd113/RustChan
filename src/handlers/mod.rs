@@ -20,13 +20,48 @@ use axum::extract::Multipart;
 use tokio::io::AsyncWriteExt as _;
 
 const MIME_SNIFF_BYTES: usize = 512;
+const TEXT_MULTIPART_FIELD_MAX_BYTES: usize = 64 * 1024;
 const UNKNOWN_MULTIPART_FIELD_MAX_BYTES: usize = 64 * 1024;
 
-async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String> {
-    field
-        .text()
+fn multipart_read_error(
+    context: &'static str,
+    error: &axum::extract::multipart::MultipartError,
+) -> AppError {
+    let message = error.to_string();
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("body write aborted")
+        || lower.contains("error reading a body")
+        || lower.contains("connection")
+        || lower.contains("early eof")
+        || lower.contains("unexpected eof")
+    {
+        tracing::warn!(context, error = %message, "client disconnected during multipart upload");
+    } else {
+        tracing::warn!(context, error = %message, "multipart parsing failed");
+    }
+    AppError::BadRequest(message)
+}
+
+async fn read_text_field(mut field: axum::extract::multipart::Field<'_>) -> Result<String> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
         .await
-        .map_err(|e| AppError::BadRequest(e.to_string()))
+        .map_err(|e| multipart_read_error("text field", &e))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > TEXT_MULTIPART_FIELD_MAX_BYTES {
+            tracing::warn!(
+                limit_bytes = TEXT_MULTIPART_FIELD_MAX_BYTES,
+                "multipart text field exceeded parser limit"
+            );
+            return Err(AppError::UploadTooLarge(
+                "Multipart text field is too large.".into(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| AppError::BadRequest("Multipart text field is not valid UTF-8.".into()))
 }
 
 pub async fn discard_unknown_multipart_field(
@@ -36,7 +71,7 @@ pub async fn discard_unknown_multipart_field(
     while let Some(chunk) = field
         .chunk()
         .await
-        .map_err(|e| AppError::BadRequest(e.to_string()))?
+        .map_err(|e| multipart_read_error("unknown field", &e))?
     {
         total = total.saturating_add(chunk.len());
         if total > UNKNOWN_MULTIPART_FIELD_MAX_BYTES {
@@ -54,17 +89,18 @@ pub async fn discard_unknown_multipart_field(
 // the entire file in memory before any size check, allowing a malicious client
 // to exhaust server RAM with a multi-GB upload.
 //
-// `read_field_bytes` replaces it with a streaming read that accumulates chunks
-// and aborts — returning HTTP 413 — the moment the running total exceeds the
-// configured limit.  The limit used is the largest allowed media size so that
-// any single field is capped.
+// `stream_field_to_temp_file` writes chunks directly to disk and aborts —
+// returning HTTP 413 — the moment the running total exceeds the configured
+// board limit for that field.
 //
-// Text fields (CSRF token, post body, …) are routed through `field.text()`
-// which is bounded by axum's body length limit set in the router layer.
+// Text fields (CSRF token, post body, …) use the same chunked parser with a
+// small fixed cap, so disabling Axum's route-level body limit for upload routes
+// does not leave text fields unbounded.
 
 async fn stream_field_to_temp_file(
     mut field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
+    field_name: &'static str,
 ) -> Result<TempUpload> {
     let temp_file = tempfile::Builder::new()
         .prefix("rustchan-upload-")
@@ -80,9 +116,16 @@ async fn stream_field_to_temp_file(
     while let Some(chunk) = field
         .chunk()
         .await
-        .map_err(|e| AppError::BadRequest(e.to_string()))?
+        .map_err(|e| multipart_read_error(field_name, &e))?
     {
         if size_bytes.saturating_add(chunk.len()) > max_bytes {
+            tracing::warn!(
+                field = field_name,
+                streamed_bytes = size_bytes,
+                next_chunk_bytes = chunk.len(),
+                limit_bytes = max_bytes,
+                "multipart upload field exceeded board limit"
+            );
             return Err(AppError::UploadTooLarge(format!(
                 "File too large. Maximum upload size is {} MiB.",
                 max_bytes / 1024 / 1024
@@ -104,6 +147,13 @@ async fn stream_field_to_temp_file(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush temp upload file: {e}")))?;
 
+    tracing::info!(
+        field = field_name,
+        size_bytes,
+        limit_bytes = max_bytes,
+        "multipart upload field staged successfully"
+    );
+
     Ok(TempUpload {
         temp_file,
         sniff_bytes,
@@ -115,9 +165,10 @@ async fn read_upload_field(
     field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
     default_name: &str,
+    field_name: &'static str,
 ) -> Result<Option<(TempUpload, String)>> {
     let fname = field.file_name().unwrap_or(default_name).to_string();
-    let upload = stream_field_to_temp_file(field, max_bytes).await?;
+    let upload = stream_field_to_temp_file(field, max_bytes, field_name).await?;
     Ok((upload.size_bytes > 0).then_some((upload, fname)))
 }
 
@@ -162,6 +213,13 @@ pub async fn parse_post_multipart(
     max_video_size: usize,
     max_audio_size: usize,
 ) -> Result<PostFormData> {
+    tracing::info!(
+        max_image_bytes = max_image_size,
+        max_video_bytes = max_video_size,
+        max_audio_bytes = max_audio_size,
+        "accepted multipart upload limits for post request"
+    );
+
     let mut csrf_verified = false;
     let mut submission_token = String::new();
     let mut name = String::new();
@@ -181,7 +239,7 @@ pub async fn parse_post_multipart(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::BadRequest(e.to_string()))?
+        .map_err(|e| multipart_read_error("multipart", &e))?
     {
         match field.name() {
             Some("_csrf") => {
@@ -238,14 +296,17 @@ pub async fn parse_post_multipart(
                     field,
                     max_image_size.max(max_video_size).max(max_audio_size),
                     "upload",
+                    "file",
                 )
                 .await?;
             }
             Some("audio_file") => {
-                audio_file = read_upload_field(field, max_audio_size, "audio").await?;
+                audio_file =
+                    read_upload_field(field, max_audio_size, "audio", "audio_file").await?;
             }
             Some("image_file") => {
-                image_file = read_upload_field(field, max_image_size, "image").await?;
+                image_file =
+                    read_upload_field(field, max_image_size, "image", "image_file").await?;
             }
             _ => {
                 discard_unknown_multipart_field(field).await?;
@@ -732,8 +793,17 @@ pub fn enqueue_post_jobs(
 
 #[cfg(test)]
 mod tests {
-    use super::{process_audio_first_uploads, TempUpload};
+    use super::{parse_post_multipart, process_audio_first_uploads, TempUpload};
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+        routing::post,
+        Router,
+    };
     use sha2::Digest as _;
+    use tower::ServiceExt as _;
+
+    const MIB: i64 = 1024 * 1024;
 
     fn sample_board() -> crate::models::Board {
         crate::models::Board {
@@ -782,6 +852,92 @@ trailer << /Root 1 0 R >>
             [],
         )
         .expect("create file_hashes");
+    }
+
+    async fn parse_scaled_audio_limit(
+        multipart: axum::extract::Multipart,
+    ) -> crate::error::Result<&'static str> {
+        let form = parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 5_000).await?;
+        let (upload, _) = form.audio_file.expect("audio upload");
+        assert_eq!(upload.size_bytes, 4_500);
+        Ok("ok")
+    }
+
+    async fn parse_scaled_audio_oversize(
+        multipart: axum::extract::Multipart,
+    ) -> crate::error::Result<&'static str> {
+        parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 5_000).await?;
+        Ok("ok")
+    }
+
+    #[test]
+    fn board_specific_audio_limit_500_mib_is_not_clamped_to_default() {
+        let board = crate::models::Board {
+            allow_audio: true,
+            max_audio_size: 500 * MIB,
+            ..crate::test_fixtures::sample_board()
+        };
+
+        let limit = board.max_audio_size_bytes();
+        let upload_size = 450usize * 1024 * 1024;
+
+        assert_eq!(limit, 500usize * 1024 * 1024);
+        assert!(limit > 150usize * 1024 * 1024);
+        assert!(limit > upload_size + 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn multipart_parser_accepts_audio_within_board_specific_limit() {
+        let router = Router::new().route("/parse", post(parse_scaled_audio_limit));
+        let audio = vec![b'a'; 4_500];
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "audio post")],
+            Some(("audio_file", "track.mp3", &audio, "audio/mpeg")),
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/parse")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn multipart_parser_rejects_oversized_audio_cleanly() {
+        let router = Router::new().route("/parse", post(parse_scaled_audio_oversize));
+        let audio = vec![b'a'; 5_001];
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "audio post")],
+            Some(("audio_file", "track.mp3", &audio, "audio/mpeg")),
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/parse")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[test]

@@ -10,19 +10,8 @@ use axum::{
     Router,
 };
 
-use crate::config::CONFIG;
 use crate::middleware::AppState;
 use crate::server::server::observability;
-
-const POST_MULTIPART_HEADROOM_BYTES: usize = 1024 * 1024;
-
-fn post_upload_body_limit() -> usize {
-    CONFIG
-        .max_video_size
-        .max(CONFIG.max_audio_size)
-        .max(CONFIG.max_image_size)
-        .saturating_add(POST_MULTIPART_HEADROOM_BYTES)
-}
 
 pub(super) fn public_routes() -> Router<AppState> {
     Router::new()
@@ -76,8 +65,7 @@ pub(super) fn public_routes() -> Router<AppState> {
         .route("/{board}", get(crate::handlers::board::board_index))
         .route(
             "/{board}",
-            post(crate::handlers::board::create_thread)
-                .layer(DefaultBodyLimit::max(post_upload_body_limit())),
+            post(crate::handlers::board::create_thread).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/{board}/unlock",
@@ -105,8 +93,7 @@ pub(super) fn public_routes() -> Router<AppState> {
         )
         .route(
             "/{board}/thread/{id}",
-            post(crate::handlers::thread::post_reply)
-                .layer(DefaultBodyLimit::max(post_upload_body_limit())),
+            post(crate::handlers::thread::post_reply).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/{board}/post/{id}/edit",
@@ -396,7 +383,7 @@ fn admin_backup_routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_routes, post_upload_body_limit, POST_MULTIPART_HEADROOM_BYTES};
+    use super::admin_routes;
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -418,20 +405,6 @@ mod tests {
             writer.finish().expect("finish zip");
         }
         cursor.into_inner()
-    }
-
-    #[test]
-    fn post_upload_body_limit_allows_largest_media_class() {
-        let largest_media_limit = crate::config::CONFIG
-            .max_image_size
-            .max(crate::config::CONFIG.max_video_size)
-            .max(crate::config::CONFIG.max_audio_size);
-
-        assert!(post_upload_body_limit() >= largest_media_limit);
-        assert_eq!(
-            post_upload_body_limit(),
-            largest_media_limit.saturating_add(POST_MULTIPART_HEADROOM_BYTES)
-        );
     }
 
     fn install_admin_session(state: &crate::middleware::AppState) {

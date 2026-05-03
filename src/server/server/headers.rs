@@ -50,7 +50,8 @@ pub(super) async fn safe_timeout_middleware(
     let path = req.uri().path();
     let is_post_upload_route =
         matches!(*req.method(), http::Method::POST) && is_post_upload_path(path);
-    let bypass_timeout = path.starts_with("/admin/backup/download/")
+    let bypass_timeout = is_post_upload_route
+        || path.starts_with("/admin/backup/download/")
         || matches!(
             path,
             "/admin/backup"
@@ -68,13 +69,9 @@ pub(super) async fn safe_timeout_middleware(
         return next.run(req).await;
     }
 
-    let timeout = if is_post_upload_route {
-        std::time::Duration::from_secs(900)
-    } else {
-        match *req.method() {
-            http::Method::GET | http::Method::HEAD => std::time::Duration::from_secs(30),
-            _ => std::time::Duration::from_secs(300),
-        }
+    let timeout = match *req.method() {
+        http::Method::GET | http::Method::HEAD => std::time::Duration::from_secs(30),
+        _ => std::time::Duration::from_secs(300),
     };
 
     tokio::time::timeout(timeout, next.run(req))

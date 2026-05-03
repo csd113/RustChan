@@ -1364,6 +1364,126 @@ mod tests {
     };
     use tower::ServiceExt as _;
 
+    fn flac_fixture(size: usize) -> Vec<u8> {
+        let mut bytes = vec![0_u8; size.max(4)];
+        if let Some(prefix) = bytes.get_mut(..4) {
+            prefix.copy_from_slice(b"fLaC");
+        }
+        bytes
+    }
+
+    fn seed_audio_board(state: &crate::middleware::AppState, max_audio_size: i64) {
+        let conn = state.db.get().expect("db connection");
+        let board_id =
+            crate::db::create_board(&conn, "music", "Music", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET allow_audio = 1, max_audio_size = ?1 WHERE id = ?2",
+            rusqlite::params![max_audio_size, board_id],
+        )
+        .expect("enable audio board");
+    }
+
+    #[tokio::test]
+    async fn create_thread_and_reply_accept_audio_within_board_limit() {
+        let state = crate::test_support::app_state();
+        seed_audio_board(&state, 5_000);
+
+        let router = Router::new()
+            .route("/{board}", post(crate::handlers::board::create_thread))
+            .route("/{board}/thread/{id}", post(super::post_reply))
+            .with_state(state.clone());
+
+        let create_audio = flac_fixture(4_500);
+        let (create_boundary, create_body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "")],
+            Some(("audio_file", "track.flac", &create_audio, "audio/flac")),
+        );
+        let create_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/music")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={create_boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(create_body))
+                    .expect("create request"),
+            )
+            .await
+            .expect("create response");
+        assert_eq!(create_response.status(), StatusCode::SEE_OTHER);
+
+        let thread_id = {
+            let conn = state.db.get().expect("db connection");
+            conn.query_row("SELECT id FROM threads LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("thread id")
+        };
+
+        let reply_audio = flac_fixture(4_500);
+        let (reply_boundary, reply_body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "reply")],
+            Some(("audio_file", "reply.flac", &reply_audio, "audio/flac")),
+        );
+        let reply_response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/music/thread/{thread_id}"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={reply_boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(reply_body))
+                    .expect("reply request"),
+            )
+            .await
+            .expect("reply response");
+
+        assert_eq!(reply_response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn create_thread_rejects_audio_over_board_limit_with_413() {
+        let state = crate::test_support::app_state();
+        seed_audio_board(&state, 5_000);
+
+        let router = Router::new()
+            .route("/{board}", post(crate::handlers::board::create_thread))
+            .with_state(state);
+
+        let audio = flac_fixture(5_001);
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "")],
+            Some(("audio_file", "too-large.flac", &audio, "audio/flac")),
+        );
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/music")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     fn seed_owned_post(
         state: &crate::middleware::AppState,
         allow_editing: bool,
