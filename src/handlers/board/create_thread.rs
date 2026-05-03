@@ -24,7 +24,7 @@ pub async fn create_thread(
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
-    match board_access_preflight(
+    let access_context = match board_access_preflight(
         &state,
         &board_short,
         admin_session_id.clone(),
@@ -34,15 +34,22 @@ pub async fn create_thread(
     )
     .await?
     {
-        BoardAccessDecision::Allowed(_) => {}
+        BoardAccessDecision::Allowed(context) => context,
         BoardAccessDecision::Denied(denial) => {
             let redirect_to = unlock_redirect_url(&board_short, &denial.return_to);
             return Ok(Redirect::to(&redirect_to).into_response());
         }
-    }
+    };
 
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    let form = parse_post_multipart(multipart, csrf_cookie.as_deref()).await?;
+    let form = parse_post_multipart(
+        multipart,
+        csrf_cookie.as_deref(),
+        access_context.board.max_image_size_bytes(),
+        access_context.board.max_video_size_bytes(),
+        access_context.board.max_audio_size_bytes(),
+    )
+    .await?;
 
     if !form.csrf_verified {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
@@ -96,9 +103,6 @@ pub async fn create_thread(
                     audio_file_data: form.audio_file,
                     upload_dir: CONFIG.upload_dir.clone(),
                     thumb_size: CONFIG.thumb_size,
-                    max_image_size: CONFIG.max_image_size,
-                    max_video_size: CONFIG.max_video_size,
-                    max_audio_size: CONFIG.max_audio_size,
                     ffmpeg_available,
                     ffmpeg_webp_available,
                 },

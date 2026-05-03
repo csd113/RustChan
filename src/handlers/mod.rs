@@ -13,7 +13,6 @@ pub mod thread;
 // Both create_thread and post_reply parse the same multipart fields.
 // This helper consolidates that duplicated logic into one place.
 
-use crate::config::CONFIG;
 use crate::error::{AppError, Result};
 use crate::middleware::validate_csrf;
 use crate::workers::JobQueue;
@@ -22,13 +21,6 @@ use tokio::io::AsyncWriteExt as _;
 
 const MIME_SNIFF_BYTES: usize = 512;
 const UNKNOWN_MULTIPART_FIELD_MAX_BYTES: usize = 64 * 1024;
-
-fn max_primary_upload_bytes() -> usize {
-    CONFIG
-        .max_image_size
-        .max(CONFIG.max_video_size)
-        .max(CONFIG.max_audio_size)
-}
 
 async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String> {
     field
@@ -166,6 +158,9 @@ pub struct PostFormData {
 pub async fn parse_post_multipart(
     mut multipart: Multipart,
     csrf_cookie: Option<&str>,
+    max_image_size: usize,
+    max_video_size: usize,
+    max_audio_size: usize,
 ) -> Result<PostFormData> {
     let mut csrf_verified = false;
     let mut submission_token = String::new();
@@ -239,13 +234,18 @@ pub async fn parse_post_multipart(
                 poll_duration_unit = read_text_field(field).await?;
             }
             Some("file") => {
-                file = read_upload_field(field, max_primary_upload_bytes(), "upload").await?;
+                file = read_upload_field(
+                    field,
+                    max_image_size.max(max_video_size).max(max_audio_size),
+                    "upload",
+                )
+                .await?;
             }
             Some("audio_file") => {
-                audio_file = read_upload_field(field, CONFIG.max_audio_size, "audio").await?;
+                audio_file = read_upload_field(field, max_audio_size, "audio").await?;
             }
             Some("image_file") => {
-                image_file = read_upload_field(field, CONFIG.max_image_size, "image").await?;
+                image_file = read_upload_field(field, max_image_size, "image").await?;
             }
             _ => {
                 discard_unknown_multipart_field(field).await?;
@@ -732,7 +732,7 @@ pub fn enqueue_post_jobs(
 
 #[cfg(test)]
 mod tests {
-    use super::{max_primary_upload_bytes, process_audio_first_uploads, TempUpload};
+    use super::{process_audio_first_uploads, TempUpload};
     use sha2::Digest as _;
 
     fn sample_board() -> crate::models::Board {
@@ -782,16 +782,6 @@ trailer << /Root 1 0 R >>
             [],
         )
         .expect("create file_hashes");
-    }
-
-    #[test]
-    fn primary_upload_limit_allows_largest_media_class() {
-        let largest_media_limit = crate::config::CONFIG
-            .max_image_size
-            .max(crate::config::CONFIG.max_video_size)
-            .max(crate::config::CONFIG.max_audio_size);
-
-        assert_eq!(max_primary_upload_bytes(), largest_media_limit);
     }
 
     #[test]

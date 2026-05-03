@@ -618,14 +618,14 @@ fn render_board_settings_card(
     <p>Control accepted media types, per-board upload caps, poster identity tools, embeds, and editing behavior.</p>
   </div>
   <div class="board-settings-grid">
-    <label title="Per-board image upload size cap. Cannot exceed the site-wide image limit.">
-      Image size limit (MiB)<input type="number" name="max_image_size_mb" value="{max_image_size_mb}" min="1" max="{global_max_image_size_mb}">
+    <label title="Per-board image upload size cap in MiB.">
+      Image size limit (MiB)<input type="number" name="max_image_size_mb" value="{max_image_size_mb}" min="1">
     </label>
-    <label title="Per-board video upload size cap. Cannot exceed the site-wide video limit.">
-      Video size limit (MiB)<input type="number" name="max_video_size_mb" value="{max_video_size_mb}" min="1" max="{global_max_video_size_mb}">
+    <label title="Per-board video upload size cap in MiB.">
+      Video size limit (MiB)<input type="number" name="max_video_size_mb" value="{max_video_size_mb}" min="1">
     </label>
-    <label title="Per-board audio upload size cap. Cannot exceed the site-wide audio limit.">
-      Audio size limit (MiB)<input type="number" name="max_audio_size_mb" value="{max_audio_size_mb}" min="1" max="{global_max_audio_size_mb}">
+    <label title="Per-board audio upload size cap in MiB.">
+      Audio size limit (MiB)<input type="number" name="max_audio_size_mb" value="{max_audio_size_mb}" min="1">
     </label>
   </div>
   <p class="admin-meta-note">PDF and any-file uploads still use the largest enabled cap for this board.</p>
@@ -749,9 +749,6 @@ fn render_board_settings_card(
             bytes_to_mib(board.max_video_size, crate::config::CONFIG.max_video_size),
         max_audio_size_mb =
             bytes_to_mib(board.max_audio_size, crate::config::CONFIG.max_audio_size),
-        global_max_image_size_mb = crate::config::CONFIG.max_image_size / 1024 / 1024,
-        global_max_video_size_mb = crate::config::CONFIG.max_video_size / 1024 / 1024,
-        global_max_audio_size_mb = crate::config::CONFIG.max_audio_size / 1024 / 1024,
         pdf_checked = checked(board.allow_pdf),
         tripcodes_checked = checked(board.allow_tripcodes),
         video_embeds_checked = checked(board.allow_video_embeds),
@@ -2009,7 +2006,12 @@ mod tests {
 
     #[test]
     fn board_settings_card_renders_per_board_upload_limits() {
-        let board = sample_board();
+        let board = Board {
+            max_image_size: 25 * 1024 * 1024,
+            max_video_size: 500 * 1024 * 1024,
+            max_audio_size: 300 * 1024 * 1024,
+            ..sample_board()
+        };
         let html = render_board_settings_card(
             &board,
             0,
@@ -2023,9 +2025,13 @@ mod tests {
         assert!(html.contains(r#"name="max_image_size_mb""#));
         assert!(html.contains(r#"name="max_video_size_mb""#));
         assert!(html.contains(r#"name="max_audio_size_mb""#));
-        assert!(html.contains(r#"value="8""#));
-        assert!(html.contains(r#"value="50""#));
-        assert!(html.contains(r#"value="150""#));
+        assert!(html.contains(r#"value="25""#));
+        assert!(html.contains(r#"value="500""#));
+        assert!(html.contains(r#"value="300""#));
+        assert!(!html.contains("Cannot exceed the site-wide"));
+        assert!(!html.contains(r#"max="8""#));
+        assert!(!html.contains(r#"max="50""#));
+        assert!(!html.contains(r#"max="150""#));
         assert!(html.contains("PDF and any-file uploads still use the largest enabled cap"));
     }
 

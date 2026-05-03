@@ -269,14 +269,24 @@ pub async fn post_reply(
     )
     .await?;
 
-    if let crate::handlers::board::BoardAccessDecision::Denied(denial) = access_decision {
-        let redirect_to =
-            crate::handlers::board::unlock_redirect_url(&board_short, &denial.return_to);
-        return Ok(Redirect::to(&redirect_to).into_response());
-    }
+    let access_context = match access_decision {
+        crate::handlers::board::BoardAccessDecision::Allowed(context) => context,
+        crate::handlers::board::BoardAccessDecision::Denied(denial) => {
+            let redirect_to =
+                crate::handlers::board::unlock_redirect_url(&board_short, &denial.return_to);
+            return Ok(Redirect::to(&redirect_to).into_response());
+        }
+    };
 
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    let form = parse_post_multipart(multipart, csrf_cookie.as_deref()).await?;
+    let form = parse_post_multipart(
+        multipart,
+        csrf_cookie.as_deref(),
+        access_context.board.max_image_size_bytes(),
+        access_context.board.max_video_size_bytes(),
+        access_context.board.max_audio_size_bytes(),
+    )
+    .await?;
 
     if !form.csrf_verified {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
@@ -328,9 +338,6 @@ pub async fn post_reply(
                     audio_file_data: form.audio_file,
                     upload_dir: CONFIG.upload_dir.clone(),
                     thumb_size: CONFIG.thumb_size,
-                    max_image_size: CONFIG.max_image_size,
-                    max_video_size: CONFIG.max_video_size,
-                    max_audio_size: CONFIG.max_audio_size,
                     ffmpeg_available,
                     ffmpeg_webp_available,
                 },

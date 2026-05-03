@@ -46,9 +46,6 @@ pub struct SubmitPostCommand {
     pub audio_file_data: Option<(crate::handlers::TempUpload, String)>,
     pub upload_dir: String,
     pub thumb_size: u32,
-    pub max_image_size: usize,
-    pub max_video_size: usize,
-    pub max_audio_size: usize,
     pub ffmpeg_available: bool,
     pub ffmpeg_webp_available: bool,
 }
@@ -411,18 +408,15 @@ pub fn submit_post(
         audio_file_data,
         upload_dir,
         thumb_size,
-        max_image_size,
-        max_video_size,
-        max_audio_size,
         ffmpeg_available,
         ffmpeg_webp_available,
     } = command;
 
     let board = db::get_board_by_short(conn, &board_short)?
         .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-    let effective_max_image_size = max_image_size.min(board.max_image_size_bytes());
-    let effective_max_video_size = max_video_size.min(board.max_video_size_bytes());
-    let effective_max_audio_size = max_audio_size.min(board.max_audio_size_bytes());
+    let effective_max_image_size = board.max_image_size_bytes();
+    let effective_max_video_size = board.max_video_size_bytes();
+    let effective_max_audio_size = board.max_audio_size_bytes();
 
     let reply_context = match &mode {
         SubmitPostMode::Reply { thread_id, sage } => {
@@ -750,9 +744,6 @@ mod tests {
             audio_file_data: None,
             upload_dir: upload_dir.to_string(),
             thumb_size: 250,
-            max_image_size: 1024,
-            max_video_size: 1024,
-            max_audio_size: 1024,
             ffmpeg_available: false,
             ffmpeg_webp_available: false,
         }
@@ -789,9 +780,6 @@ mod tests {
             audio_file_data: None,
             upload_dir: upload_dir.to_string(),
             thumb_size: 250,
-            max_image_size: 1024,
-            max_video_size: 1024,
-            max_audio_size: 1024,
             ffmpeg_available: false,
             ffmpeg_webp_available: false,
         }
@@ -824,9 +812,6 @@ mod tests {
             audio_file_data: None,
             upload_dir: upload_dir.to_string(),
             thumb_size: 250,
-            max_image_size: 1024,
-            max_video_size: 1024,
-            max_audio_size: 1024,
             ffmpeg_available: false,
             ffmpeg_webp_available: false,
         }
@@ -1097,6 +1082,31 @@ mod tests {
             }
             other => panic!("expected UploadTooLarge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn submit_post_uses_board_limit_for_upload_validation() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET max_image_size = ?1 WHERE short_name = ?2",
+            rusqlite::params![1024 * 1024_i64, TEST_BOARD],
+        )
+        .expect("raise image limit");
+        let mut command = thread_command(
+            TEST_BOARD,
+            "board-image-raised-cap",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.file_data = Some(temp_upload("cover.png", &one_pixel_png()));
+
+        let result = submit_post(&conn, state.job_queue.as_ref(), command)
+            .expect("board-specific raised image cap should allow upload");
+
+        assert_eq!(result.board_short, TEST_BOARD);
     }
 
     #[test]

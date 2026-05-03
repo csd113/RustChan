@@ -1159,6 +1159,18 @@ mod tests {
             board.allow_self_delete,
             crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_SELF_DELETE
         );
+        assert_eq!(
+            board.max_image_size,
+            i64::try_from(crate::config::CONFIG.max_image_size).expect("image size fits in i64")
+        );
+        assert_eq!(
+            board.max_video_size,
+            i64::try_from(crate::config::CONFIG.max_video_size).expect("video size fits in i64")
+        );
+        assert_eq!(
+            board.max_audio_size,
+            i64::try_from(crate::config::CONFIG.max_audio_size).expect("audio size fits in i64")
+        );
     }
 
     #[test]

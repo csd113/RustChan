@@ -38,25 +38,35 @@ pub struct BoardSettingsForm {
     csrf: Option<String>,
 }
 
-fn parse_board_upload_limit_bytes(
-    raw_value: Option<&str>,
-    fallback_bytes: i64,
-    global_max_bytes: usize,
-) -> Result<i64> {
+fn parse_board_upload_limit_bytes(raw_value: Option<&str>, fallback_bytes: i64) -> Result<i64> {
     const MIB: i64 = 1024 * 1024;
 
     let fallback_mb = (fallback_bytes / MIB).max(1);
-    let parsed_mb = raw_value
-        .and_then(|value| value.trim().parse::<i64>().ok())
-        .unwrap_or(fallback_mb);
-    let global_max_mb = i64::try_from(global_max_bytes / (1024 * 1024)).map_err(|_| {
-        AppError::Internal(anyhow::anyhow!("Global upload limit does not fit in i64"))
-    })?;
-    let clamped_mb = parsed_mb.clamp(1, global_max_mb.max(1));
+    let parsed_mb = match raw_value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value.parse::<i64>().map_err(|_| {
+            AppError::BadRequest(
+                "Board upload size limits must be positive whole MiB values.".into(),
+            )
+        })?,
+        None => fallback_mb,
+    };
+    if parsed_mb <= 0 {
+        return Err(AppError::BadRequest(
+            "Board upload size limits must be at least 1 MiB.".into(),
+        ));
+    }
 
-    clamped_mb
+    let runtime_max_bytes = i64::try_from(usize::MAX).unwrap_or(i64::MAX);
+    let hard_max_mb = runtime_max_bytes / MIB;
+    if parsed_mb > hard_max_mb {
+        return Err(AppError::BadRequest(format!(
+            "Board upload size limits must fit in the server runtime byte counter ({hard_max_mb} MiB maximum)."
+        )));
+    }
+
+    parsed_mb
         .checked_mul(MIB)
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Board upload limit overflowed i64")))
+        .ok_or_else(|| AppError::BadRequest("Board upload size limit is too large.".into()))
 }
 
 fn resolve_board_access_password_hash(
@@ -176,17 +186,14 @@ pub async fn update_board_settings(
             let max_image_size = parse_board_upload_limit_bytes(
                 form.max_image_size_mb.as_deref(),
                 current_board.max_image_size,
-                CONFIG.max_image_size,
             )?;
             let max_video_size = parse_board_upload_limit_bytes(
                 form.max_video_size_mb.as_deref(),
                 current_board.max_video_size,
-                CONFIG.max_video_size,
             )?;
             let max_audio_size = parse_board_upload_limit_bytes(
                 form.max_audio_size_mb.as_deref(),
                 current_board.max_audio_size,
-                CONFIG.max_audio_size,
             )?;
             db::update_board_settings(
                 &mut conn,
