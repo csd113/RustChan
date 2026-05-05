@@ -76,7 +76,7 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
 // ─── ANSI / prompt helpers ────────────────────────────────────────────────────
 
 fn c(code: &'static str) -> &'static str {
-    if crate::logging::is_tty() {
+    if crate::logging::ansi_enabled() {
         code
     } else {
         ""
@@ -89,6 +89,36 @@ const GRN: &str = "\x1b[32m";
 const YLW: &str = "\x1b[33m";
 const CYN: &str = "\x1b[36m";
 const BLD: &str = "\x1b[1m";
+
+#[cfg(windows)]
+const fn ok_mark() -> &'static str {
+    "OK"
+}
+
+#[cfg(not(windows))]
+const fn ok_mark() -> &'static str {
+    "\u{2713}"
+}
+
+#[cfg(windows)]
+const fn err_mark() -> &'static str {
+    "x"
+}
+
+#[cfg(not(windows))]
+const fn err_mark() -> &'static str {
+    "\u{2717}"
+}
+
+#[cfg(windows)]
+const fn section_rule() -> &'static str {
+    "-- Create Admin Account --------------------------------"
+}
+
+#[cfg(not(windows))]
+const fn section_rule() -> &'static str {
+    "\u{2500}\u{2500} Create Admin Account \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"
+}
 
 fn prompt_username(reader: &mut dyn BufRead) -> Option<String> {
     loop {
@@ -138,7 +168,7 @@ fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
         }
         let p1 = p1.trim().to_string();
         if let Err(e) = crate::utils::crypto::validate_password(&p1) {
-            crate::logging::console_println(&format!("  {}✗{} {e}", c(RED), c(RST)));
+            crate::logging::console_println(&format!("  {}{}{} {e}", c(RED), err_mark(), c(RST)));
             continue;
         }
         crate::logging::console_prompt(&format!("  {}Confirm password:{}   ", c(CYN), c(RST)));
@@ -150,8 +180,9 @@ fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
         let p2 = p2.trim().to_string();
         if p1 != p2 {
             crate::logging::console_println(&format!(
-                "  {}✗{} Passwords do not match. Try again.",
+                "  {}{}{} Passwords do not match. Try again.",
                 c(RED),
+                err_mark(),
                 c(RST),
             ));
             continue;
@@ -260,8 +291,9 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
                 "Board created via console",
             );
             crate::logging::console_println(&format!(
-                "  {}✓{} Board /{short_lc}/  — {name}{}  created (id={id}).",
+                "  {}{}{} Board /{short_lc}/ - {name}{} created (id={id}).",
                 c(GRN),
+                ok_mark(),
                 c(RST),
                 if nsfw { " [NSFW]" } else { "" },
             ));
@@ -275,11 +307,7 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
 
 #[allow(clippy::too_many_lines)]
 pub fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
-    crate::logging::console_print_raw(&format!(
-        "\n  {}── Create Admin Account ─────────────────────────────────{}\n\n",
-        c(CYN),
-        c(RST),
-    ));
+    crate::logging::console_print_raw(&format!("\n  {}{}{}\n\n", c(CYN), section_rule(), c(RST)));
 
     if crate::logging::is_tty() {
         crate::logging::console_println(&format!(
@@ -320,8 +348,9 @@ pub fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
                 "Admin account created via console",
             );
             crate::logging::console_println(&format!(
-                "  {}✓{} Admin '{}{username}{}' created (id={id}).",
+                "  {}{}{} Admin '{}{username}{}' created (id={id}).",
                 c(GRN),
+                ok_mark(),
                 c(RST),
                 c(BLD),
                 c(RST),
@@ -411,8 +440,9 @@ pub fn kb_delete_thread(pool: &DbPool, reader: &mut dyn BufRead) {
                 "Thread deleted via console",
             );
             crate::logging::console_println(&format!(
-                "  {}✓{} Thread {thread_id} deleted ({n} file(s) removed).",
+                "  {}{}{} Thread {thread_id} deleted ({n} file(s) removed).",
                 c(GRN),
+                ok_mark(),
                 c(RST),
             ));
         }

@@ -79,6 +79,7 @@ static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceL
 // ─── TTY detection ────────────────────────────────────────────────────────────
 
 static IS_TTY: AtomicBool = AtomicBool::new(false);
+static ANSI_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Returns `true` when stdout was a real interactive terminal at startup.
 ///
@@ -87,6 +88,27 @@ static IS_TTY: AtomicBool = AtomicBool::new(false);
 /// by a process supervisor like systemd.
 pub fn is_tty() -> bool {
     IS_TTY.load(Ordering::Relaxed)
+}
+
+/// Returns `true` when stdout is an interactive terminal that can consume ANSI
+/// escape sequences. On Windows this also probes/enables virtual terminal
+/// processing so raw colour sequences are not printed literally.
+pub fn ansi_enabled() -> bool {
+    ANSI_ENABLED.load(Ordering::Relaxed)
+}
+
+#[cfg(windows)]
+fn detect_ansi_enabled(tty: bool) -> bool {
+    if !tty {
+        return false;
+    }
+
+    crossterm::ansi_support::supports_ansi()
+}
+
+#[cfg(not(windows))]
+const fn detect_ansi_enabled(tty: bool) -> bool {
+    tty
 }
 
 /// Set to `true` once the full-screen TUI alternate screen is active.
@@ -823,6 +845,7 @@ where
         event: &Event<'_>,
     ) -> fmt::Result {
         let tty = IS_TTY.load(Ordering::Relaxed);
+        let ansi = ANSI_ENABLED.load(Ordering::Relaxed);
         let meta = event.metadata();
         let Some(fields) = prepare_event_fields(meta.target(), meta.file(), event) else {
             return Ok(());
@@ -838,8 +861,8 @@ where
 
         // ── Level + component columns ─────────────────────────────────────────
         let level = *meta.level();
-        write_level_tag(&mut writer, level, tty)?;
-        write_component_tag(&mut writer, meta.target(), tty)?;
+        write_level_tag(&mut writer, level, ansi)?;
+        write_component_tag(&mut writer, meta.target(), ansi)?;
 
         // ── Message and structured fields ─────────────────────────────────────
         // tracing_subscriber writes the `message` field first, then all other
@@ -988,6 +1011,7 @@ pub fn init_logging(log_dir: &Path) {
 
     let tty = io::stdout().is_terminal();
     IS_TTY.store(tty, Ordering::Relaxed);
+    ANSI_ENABLED.store(detect_ansi_enabled(tty), Ordering::Relaxed);
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(
