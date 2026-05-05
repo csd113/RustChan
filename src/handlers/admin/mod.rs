@@ -581,6 +581,7 @@ struct AdminPanelSnapshot {
     site_name: String,
     site_subtitle: String,
     homepage_new_thread_badges_enabled: bool,
+    homepage_new_reply_badges_enabled: bool,
     thread_new_reply_badges_enabled: bool,
     default_theme: String,
     banner_rotation_interval_minutes: i64,
@@ -626,10 +627,12 @@ struct ModerationDomainData {
     appeals: Vec<crate::models::BanAppeal>,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct AppearanceDomainData {
     site_name: String,
     site_subtitle: String,
     homepage_new_thread_badges_enabled: bool,
+    homepage_new_reply_badges_enabled: bool,
     thread_new_reply_badges_enabled: bool,
     default_theme: String,
     banner_rotation_interval_minutes: i64,
@@ -696,6 +699,7 @@ fn load_appearance_domain_data(
         site_name: db::get_site_name(conn),
         site_subtitle: db::get_site_subtitle(conn),
         homepage_new_thread_badges_enabled: db::get_homepage_new_thread_badges_enabled(conn),
+        homepage_new_reply_badges_enabled: db::get_homepage_new_reply_badges_enabled(conn),
         thread_new_reply_badges_enabled: db::get_thread_new_reply_badges_enabled(conn),
         default_theme: db::get_default_user_theme(conn),
         banner_rotation_interval_minutes: db::get_banner_rotation_interval_minutes(conn),
@@ -762,6 +766,7 @@ fn load_admin_panel_snapshot(
             site_subtitle: appearance_domain.site_subtitle,
             homepage_new_thread_badges_enabled: appearance_domain
                 .homepage_new_thread_badges_enabled,
+            homepage_new_reply_badges_enabled: appearance_domain.homepage_new_reply_badges_enabled,
             thread_new_reply_badges_enabled: appearance_domain.thread_new_reply_badges_enabled,
             default_theme: appearance_domain.default_theme,
             banner_rotation_interval_minutes: appearance_domain.banner_rotation_interval_minutes,
@@ -861,6 +866,7 @@ fn render_admin_panel_from_snapshot(
             site_name: &snapshot.site_name,
             site_subtitle: &snapshot.site_subtitle,
             homepage_new_thread_badges_enabled: snapshot.homepage_new_thread_badges_enabled,
+            homepage_new_reply_badges_enabled: snapshot.homepage_new_reply_badges_enabled,
             thread_new_reply_badges_enabled: snapshot.thread_new_reply_badges_enabled,
             default_theme: &snapshot.default_theme,
             banner_rotation_interval_minutes: snapshot.banner_rotation_interval_minutes,
@@ -1052,7 +1058,23 @@ pub async fn admin_live_log(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok((
-        [(header::CONTENT_TYPE, "application/json".to_string())],
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/json; charset=utf-8".to_string(),
+            ),
+            (
+                header::CACHE_CONTROL,
+                "private, no-cache, no-store, must-revalidate, no-transform".to_string(),
+            ),
+            (header::PRAGMA, "no-cache".to_string()),
+            (header::EXPIRES, "0".to_string()),
+            (
+                header::HeaderName::from_static("x-accel-buffering"),
+                "no".to_string(),
+            ),
+            (header::VARY, "Cookie".to_string()),
+        ],
         payload,
     )
         .into_response())
@@ -1122,11 +1144,18 @@ pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_admin_session_bootstrap, create_admin_session_bootstrap,
+        admin_live_log, consume_admin_session_bootstrap, create_admin_session_bootstrap,
         host_header_uses_https_port, hosts_match_for_same_origin, latest_log_file, read_log_tail,
         request_origin_uses_https, require_same_origin_or_valid_csrf, require_same_origin_request,
+        LiveLogQuery, SESSION_COOKIE,
     };
-    use axum::http::{header, HeaderMap, HeaderValue};
+    use crate::error::AppError;
+    use axum::{
+        body::to_bytes,
+        extract::{Query, State},
+        http::{header, HeaderMap, HeaderValue, StatusCode},
+    };
+    use axum_extra::extract::cookie::{Cookie, CookieJar};
 
     fn same_origin_headers(host: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -1416,5 +1445,98 @@ mod tests {
         let (content, truncated) = read_log_tail(&path, 8).expect("tail");
         assert!(truncated);
         assert!(content.contains("line3"));
+    }
+
+    fn install_admin_session(state: &crate::middleware::AppState) {
+        let conn = state.db.get().expect("db connection");
+        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
+        let admin_id =
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+        crate::db::create_session(
+            &conn,
+            "session123",
+            admin_id,
+            chrono::Utc::now().timestamp() + 3600,
+        )
+        .expect("create session");
+    }
+
+    #[tokio::test]
+    async fn live_log_requires_admin_auth() {
+        let state = crate::test_support::app_state();
+        let error = admin_live_log(
+            State(state),
+            CookieJar::new(),
+            Query(LiveLogQuery { bytes: None }),
+        )
+        .await
+        .expect_err("missing session should fail");
+
+        match error {
+            AppError::Forbidden(message) => assert_eq!(message, "Not logged in."),
+            other => panic!("expected forbidden error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn live_log_returns_no_store_headers_and_json_body() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let response = admin_live_log(
+            State(state),
+            CookieJar::new().add(Cookie::new(SESSION_COOKIE, "session123")),
+            Query(LiveLogQuery { bytes: None }),
+        )
+        .await
+        .expect("handler response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/json; charset=utf-8"))
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static(
+                "private, no-cache, no-store, must-revalidate, no-transform"
+            ))
+        );
+        assert_eq!(
+            response.headers().get(header::PRAGMA),
+            Some(&HeaderValue::from_static("no-cache"))
+        );
+        assert_eq!(
+            response.headers().get(header::EXPIRES),
+            Some(&HeaderValue::from_static("0"))
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::HeaderName::from_static("x-accel-buffering")),
+            Some(&HeaderValue::from_static("no"))
+        );
+        assert_eq!(
+            response.headers().get(header::VARY),
+            Some(&HeaderValue::from_static("Cookie"))
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json payload");
+        assert_eq!(
+            payload.get("filename").and_then(serde_json::Value::as_str),
+            Some("no log file")
+        );
+        assert_eq!(
+            payload
+                .get("truncated")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            payload.get("content").and_then(serde_json::Value::as_str),
+            Some("No live log file found yet.")
+        );
     }
 }

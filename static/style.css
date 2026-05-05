@@ -2281,11 +2281,19 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   flex: 0 0 auto;
 }
 
-.board-card-activity-badge {
+.board-card-activity-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
   align-self: flex-end;
   margin-top: 6px;
   max-width: 100%;
   pointer-events: none;
+}
+
+.board-card-activity-badge {
+  max-width: 100%;
 }
 
 .board-card-short {

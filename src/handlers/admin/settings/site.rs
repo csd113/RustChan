@@ -13,6 +13,8 @@ pub struct SiteSettingsForm {
     pub site_subtitle: Option<String>,
     /// Toggle homepage board-card new-thread badges.
     pub homepage_new_thread_badges_enabled: Option<String>,
+    /// Toggle homepage board-card new-reply badges.
+    pub homepage_new_reply_badges_enabled: Option<String>,
     /// Toggle board/catalog thread-card new-reply badges.
     pub thread_new_reply_badges_enabled: Option<String>,
     /// Default theme served to first-time visitors.
@@ -52,6 +54,7 @@ pub async fn update_site_settings(
     let is_banner_settings_only = form.site_name.is_none()
         && form.site_subtitle.is_none()
         && form.homepage_new_thread_badges_enabled.is_none()
+        && form.homepage_new_reply_badges_enabled.is_none()
         && form.thread_new_reply_badges_enabled.is_none()
         && form.default_theme.is_none()
         && (form.banner_rotation_interval_minutes.is_some()
@@ -79,6 +82,11 @@ pub async fn update_site_settings(
             let thread_new_reply_badges_enabled = resolved_checkbox_setting(
                 form.thread_new_reply_badges_enabled.as_deref(),
                 db::get_thread_new_reply_badges_enabled(&conn),
+                preserve_missing_badge_settings,
+            );
+            let homepage_new_reply_badges_enabled = resolved_checkbox_setting(
+                form.homepage_new_reply_badges_enabled.as_deref(),
+                db::get_homepage_new_reply_badges_enabled(&conn),
                 preserve_missing_badge_settings,
             );
 
@@ -129,6 +137,15 @@ pub async fn update_site_settings(
             )?;
             db::set_site_setting(
                 &conn,
+                "homepage_new_reply_badges_enabled",
+                if homepage_new_reply_badges_enabled {
+                    "1"
+                } else {
+                    "0"
+                },
+            )?;
+            db::set_site_setting(
+                &conn,
                 "thread_new_reply_badges_enabled",
                 if thread_new_reply_badges_enabled {
                     "1"
@@ -144,6 +161,7 @@ pub async fn update_site_settings(
                 &new_name,
                 &new_subtitle,
                 homepage_new_thread_badges_enabled,
+                homepage_new_reply_badges_enabled,
                 thread_new_reply_badges_enabled,
                 &new_theme,
             );

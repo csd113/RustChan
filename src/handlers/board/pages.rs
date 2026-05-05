@@ -10,12 +10,15 @@ type HomePageLoadResult = (
     String,
     bool,
     HashMap<i64, i64>,
+    bool,
+    HashMap<i64, i64>,
 );
 
 type BoardIndexLoadResult = (
     String,
     render::BoardPageData,
     crate::banner::BannerSelection,
+    bool,
     bool,
     bool,
     Option<(i64, i64)>,
@@ -31,65 +34,90 @@ pub async fn index(
     let mut jar = jar;
     let nsfw_consent = has_nsfw_consent(&jar);
     let board_activity_markers = board_activity_markers_from_jar(&jar);
+    let thread_activity_markers = thread_activity_markers_from_jar(&jar);
 
     let admin_session = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
     let admin_session_for_load = admin_session.clone();
-    let (board_stats, site_data, is_admin, home_banner_html, homepage_badges_enabled, board_badges) =
-        tokio::task::spawn_blocking({
-            let pool = state.db.clone();
-            let board_activity_markers = board_activity_markers.clone();
-            move || -> Result<HomePageLoadResult> {
-                let conn = pool.get()?;
-                let boards = db::get_all_boards_with_stats(&conn)?;
-                let site_data = match db::get_site_stats(&conn) {
-                    Ok(stats) => Some(stats),
-                    Err(error) => {
-                        tracing::warn!(target: "db", %error, "Failed to load home page site stats");
-                        None
-                    }
-                };
-                let is_admin = admin_session_for_load
-                    .as_deref()
-                    .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
-                let home_banner = crate::banner::resolve_home_banner(&conn, "/")?;
-                let home_banner_html = crate::banner::render_banner_html(
-                    &home_banner,
-                    "home-banner-box",
-                    "board-banner-image",
-                );
-                let homepage_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
-                let board_badges = if homepage_badges_enabled {
-                    let inputs = boards
-                        .iter()
-                        .filter_map(|stats| {
-                            board_activity_markers.get(&stats.board.id).map(|marker| {
-                                crate::db::BoardActivityCountInput {
-                                    board_id: stats.board.id,
-                                    seen_thread_created_at: marker.seen_thread_created_at,
-                                    seen_thread_id: marker.seen_thread_id,
-                                }
-                            })
+    let (
+        board_stats,
+        site_data,
+        is_admin,
+        home_banner_html,
+        homepage_thread_badges_enabled,
+        board_badges,
+        homepage_reply_badges_enabled,
+        board_reply_badges,
+    ) = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let board_activity_markers = board_activity_markers.clone();
+        let thread_activity_markers = thread_activity_markers.clone();
+        move || -> Result<HomePageLoadResult> {
+            let conn = pool.get()?;
+            let boards = db::get_all_boards_with_stats(&conn)?;
+            let site_data = match db::get_site_stats(&conn) {
+                Ok(stats) => Some(stats),
+                Err(error) => {
+                    tracing::warn!(target: "db", %error, "Failed to load home page site stats");
+                    None
+                }
+            };
+            let is_admin = admin_session_for_load
+                .as_deref()
+                .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
+            let home_banner = crate::banner::resolve_home_banner(&conn, "/")?;
+            let home_banner_html = crate::banner::render_banner_html(
+                &home_banner,
+                "home-banner-box",
+                "board-banner-image",
+            );
+            let homepage_thread_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let board_badges = if homepage_thread_badges_enabled {
+                let inputs = boards
+                    .iter()
+                    .filter_map(|stats| {
+                        board_activity_markers.get(&stats.board.id).map(|marker| {
+                            crate::db::BoardActivityCountInput {
+                                board_id: stats.board.id,
+                                seen_thread_created_at: marker.seen_thread_created_at,
+                                seen_thread_id: marker.seen_thread_id,
+                            }
                         })
-                        .collect::<Vec<_>>();
-                    db::count_new_threads_for_boards(&conn, &inputs)?
-                } else {
-                    HashMap::new()
-                };
-                Ok((
-                    boards,
-                    site_data,
-                    is_admin,
-                    home_banner_html,
-                    homepage_badges_enabled,
-                    board_badges,
-                ))
-            }
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    let board_badges = if homepage_badges_enabled {
+                    })
+                    .collect::<Vec<_>>();
+                db::count_new_threads_for_boards(&conn, &inputs)?
+            } else {
+                HashMap::new()
+            };
+            let homepage_reply_badges_enabled = db::get_homepage_new_reply_badges_enabled(&conn);
+            let board_reply_badges = if homepage_reply_badges_enabled {
+                let inputs = thread_activity_markers
+                    .values()
+                    .map(|marker| crate::db::BoardReplyActivityCountInput {
+                        thread_id: marker.thread_id,
+                        seen_reply_count: marker.seen_reply_count,
+                    })
+                    .collect::<Vec<_>>();
+                db::count_new_replies_for_boards(&conn, &inputs)?
+            } else {
+                HashMap::new()
+            };
+            Ok((
+                boards,
+                site_data,
+                is_admin,
+                home_banner_html,
+                homepage_thread_badges_enabled,
+                board_badges,
+                homepage_reply_badges_enabled,
+                board_reply_badges,
+            ))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    let board_badges = if homepage_thread_badges_enabled {
         board_stats
             .iter()
             .filter_map(|stats| {
@@ -104,7 +132,22 @@ pub async fn index(
     } else {
         HashMap::new()
     };
-    if homepage_badges_enabled {
+    let board_reply_badges = if homepage_reply_badges_enabled {
+        board_stats
+            .iter()
+            .filter_map(|stats| {
+                let access_cookie = board_access_cookie_from_jar(&jar, &stats.board.short_name);
+                can_view_board(&stats.board, is_admin, access_cookie.as_deref())
+                    .then(|| board_reply_badges.get(&stats.board.id).copied())
+                    .flatten()
+                    .filter(|count| *count > 0)
+                    .map(|count| (stats.board.id, count))
+            })
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+    if homepage_thread_badges_enabled || homepage_reply_badges_enabled {
         let known_board_ids = board_stats
             .iter()
             .map(|stats| stats.board.id)
@@ -142,6 +185,7 @@ pub async fn index(
         onion_address.as_deref(),
         &home_banner_html,
         &board_badges,
+        &board_reply_badges,
         current_theme.as_deref(),
         nsfw_prompt_board,
         nsfw_consent,
@@ -226,15 +270,17 @@ pub async fn board_index(
                 &current_path,
             )?;
             let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
-            let homepage_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let homepage_thread_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let homepage_reply_badges_enabled = db::get_homepage_new_reply_badges_enabled(&conn);
             let board_id = page_data.board.id;
             Ok((
                 render::board_page_etag_signature(&page_data),
                 page_data,
                 banner_selection,
                 thread_badges_enabled,
-                homepage_badges_enabled,
-                if homepage_badges_enabled {
+                homepage_thread_badges_enabled,
+                homepage_reply_badges_enabled,
+                if homepage_thread_badges_enabled {
                     db::get_latest_visible_thread_marker(&conn, board_id)?
                 } else {
                     None
@@ -251,7 +297,8 @@ pub async fn board_index(
         page_data,
         banner_selection,
         thread_badges_enabled,
-        homepage_badges_enabled,
+        homepage_thread_badges_enabled,
+        homepage_reply_badges_enabled,
         latest_thread_marker,
     ) = page_data;
     let thread_badges = if thread_badges_enabled {
@@ -306,7 +353,7 @@ pub async fn board_index(
     );
     let (latest_created_at, latest_thread_id) =
         latest_visible_thread_marker_tuple(latest_thread_marker);
-    let jar = if thread_badges_enabled {
+    let jar = if thread_badges_enabled || homepage_reply_badges_enabled {
         let defaults = page_data
             .summaries
             .iter()
@@ -315,7 +362,7 @@ pub async fn board_index(
     } else {
         jar
     };
-    let jar = if homepage_badges_enabled {
+    let jar = if homepage_thread_badges_enabled {
         remember_board_activity(jar, page_data.board.id, latest_created_at, latest_thread_id)
     } else {
         jar

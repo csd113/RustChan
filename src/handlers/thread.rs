@@ -33,6 +33,7 @@ type ThreadViewLoadResult = (
     bool,
     bool,
     bool,
+    bool,
     Option<(i64, i64)>,
 );
 
@@ -100,15 +101,17 @@ pub async fn view_thread(
             )?;
             let is_admin = page_data.is_admin;
             let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
-            let homepage_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let homepage_thread_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let homepage_reply_badges_enabled = db::get_homepage_new_reply_badges_enabled(&conn);
             let board_id = page_data.board.id;
             Ok((
                 render::thread_page_etag_signature(&page_data),
                 page_data,
                 is_admin,
                 thread_badges_enabled,
-                homepage_badges_enabled,
-                if homepage_badges_enabled {
+                homepage_thread_badges_enabled,
+                homepage_reply_badges_enabled,
+                if homepage_thread_badges_enabled {
                     db::get_latest_visible_thread_marker(&conn, board_id)?
                 } else {
                     None
@@ -125,7 +128,8 @@ pub async fn view_thread(
         mut page_data,
         _is_admin,
         thread_badges_enabled,
-        homepage_badges_enabled,
+        homepage_thread_badges_enabled,
+        homepage_reply_badges_enabled,
         latest_thread_marker,
     ) = page_data;
     page_data.owned_post_controls = owned_post_grants
@@ -171,7 +175,7 @@ pub async fn view_thread(
     );
     let (latest_created_at, latest_thread_id) =
         crate::handlers::board::latest_visible_thread_marker_tuple(latest_thread_marker);
-    let jar = if thread_badges_enabled {
+    let jar = if thread_badges_enabled || homepage_reply_badges_enabled {
         crate::handlers::board::remember_thread_activity(
             jar,
             page_data.thread.id,
@@ -180,7 +184,7 @@ pub async fn view_thread(
     } else {
         jar
     };
-    let jar = if homepage_badges_enabled {
+    let jar = if homepage_thread_badges_enabled {
         crate::handlers::board::remember_board_activity(
             jar,
             page_data.board.id,

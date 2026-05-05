@@ -254,6 +254,15 @@ pub fn get_homepage_new_thread_badges_enabled(conn: &rusqlite::Connection) -> bo
     )
 }
 
+pub fn get_homepage_new_reply_badges_enabled(conn: &rusqlite::Connection) -> bool {
+    get_site_bool_with_legacy_fallback(
+        conn,
+        "homepage_new_reply_badges_enabled",
+        "new_activity_notifications_enabled",
+        crate::config::CONFIG.initial_homepage_new_reply_badges_enabled,
+    )
+}
+
 pub fn get_thread_new_reply_badges_enabled(conn: &rusqlite::Connection) -> bool {
     get_site_bool_with_legacy_fallback(
         conn,
@@ -376,6 +385,71 @@ pub fn count_new_threads_for_boards(
     for row in rows {
         let (board_id, count) = row?;
         counts.insert(board_id, count);
+    }
+    Ok(counts)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoardReplyActivityCountInput {
+    pub thread_id: i64,
+    pub seen_reply_count: i64,
+}
+
+/// Count new replies on visible, existing threads and aggregate them by board.
+///
+/// Exact semantics: for each retained per-thread marker, count
+/// `thread.reply_count - seen_reply_count` when positive, excluding archived
+/// threads.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn count_new_replies_for_boards(
+    conn: &rusqlite::Connection,
+    markers: &[BoardReplyActivityCountInput],
+) -> Result<HashMap<i64, i64>> {
+    if markers.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let values_sql = markers
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let base = index * 2;
+            format!("(?{}, ?{})", base + 1, base + 2)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "WITH seen(thread_id, seen_reply_count) AS (
+             VALUES {values_sql}
+         )
+         SELECT t.board_id, SUM(MAX(t.reply_count - s.seen_reply_count, 0))
+         FROM threads t
+         JOIN seen s ON s.thread_id = t.id
+         WHERE t.archived = 0
+         GROUP BY t.board_id"
+    );
+
+    let mut params = Vec::with_capacity(markers.len() * 2);
+    for marker in markers {
+        params.push(rusqlite::types::Value::Integer(marker.thread_id));
+        params.push(rusqlite::types::Value::Integer(
+            marker.seen_reply_count.max(0),
+        ));
+    }
+
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+
+    let mut counts = HashMap::new();
+    for row in rows {
+        let (board_id, count) = row?;
+        if count > 0 {
+            counts.insert(board_id, count);
+        }
     }
     Ok(counts)
 }

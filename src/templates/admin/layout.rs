@@ -105,6 +105,7 @@ fn render_admin_overview_section() -> String {
 <p class="admin-copy">
   Watching <span id="admin-live-log-file">current log</span>. Updates every 2 seconds.
 </p>
+<p id="admin-live-log-status" class="admin-meta-note">Connecting to live log…</p>
 <div class="admin-inline-actions admin-inline-actions-spaced">
   <button type="button" id="admin-live-log-refresh">refresh now</button>
   <button type="button" id="admin-live-log-clear">clear</button>

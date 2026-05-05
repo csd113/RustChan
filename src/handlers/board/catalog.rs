@@ -8,6 +8,7 @@ type CatalogLoadResult = (
     crate::banner::BannerSelection,
     bool,
     bool,
+    bool,
     Option<(i64, i64)>,
 );
 
@@ -95,7 +96,8 @@ pub async fn catalog(
                 &format!("/{board_short}/catalog"),
             )?;
             let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
-            let homepage_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let homepage_thread_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let homepage_reply_badges_enabled = db::get_homepage_new_reply_badges_enabled(&conn);
             Ok((
                 (
                     board.clone(),
@@ -106,8 +108,9 @@ pub async fn catalog(
                 ),
                 banner_selection,
                 thread_badges_enabled,
-                homepage_badges_enabled,
-                if homepage_badges_enabled {
+                homepage_thread_badges_enabled,
+                homepage_reply_badges_enabled,
+                if homepage_thread_badges_enabled {
                     db::get_latest_visible_thread_marker(&conn, board.id)?
                 } else {
                     None
@@ -123,7 +126,8 @@ pub async fn catalog(
         (board, threads, pinned_ids, hidden_count, etag_signature),
         banner_selection,
         thread_badges_enabled,
-        homepage_badges_enabled,
+        homepage_thread_badges_enabled,
+        homepage_reply_badges_enabled,
         latest_thread_marker,
     ) = catalog_data;
     let thread_badges = if thread_badges_enabled {
@@ -167,7 +171,7 @@ pub async fn catalog(
     );
     let (latest_created_at, latest_thread_id) =
         latest_visible_thread_marker_tuple(latest_thread_marker);
-    let jar = if thread_badges_enabled {
+    let jar = if thread_badges_enabled || homepage_reply_badges_enabled {
         // Seed only the highest-priority catalog cards we can actually retain in
         // the activity cookie, so the persisted baseline matches the visible
         // ordering instead of being truncated later by cookie serialization.
@@ -179,7 +183,7 @@ pub async fn catalog(
     } else {
         jar
     };
-    let jar = if homepage_badges_enabled {
+    let jar = if homepage_thread_badges_enabled {
         remember_board_activity(jar, board.id, latest_created_at, latest_thread_id)
     } else {
         jar

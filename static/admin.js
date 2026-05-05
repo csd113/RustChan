@@ -588,6 +588,7 @@
 (function () {
   function initAdminLiveLog() {
     var output = document.getElementById('admin-live-log-output');
+    var status = document.getElementById('admin-live-log-status');
     var fileLabel = document.getElementById('admin-live-log-file');
     var refreshBtn = document.getElementById('admin-live-log-refresh');
     var clearBtn = document.getElementById('admin-live-log-clear');
@@ -598,6 +599,16 @@
     var lastText = '';
     var clearedBaseline = '';
     var clearedFile = '';
+    var requestInFlight = false;
+    var requestSerial = 0;
+    var consecutiveFailures = 0;
+    var pollIntervalMs = 2000;
+    var requestTimeoutMs = 8000;
+    var maxPollIntervalMs = 15000;
+
+    function setStatus(message) {
+      if (status) status.textContent = message;
+    }
 
     function visibleText(fullText, fileName) {
       if (!clearedBaseline || clearedFile !== fileName) {
@@ -612,10 +623,48 @@
       return fullText;
     }
 
-    function fetchLog() {
-      fetch('/admin/log/live?bytes=65536', { credentials: 'same-origin' })
+    function scheduleNextPoll(delayMs) {
+      if (timer) clearTimeout(timer);
+      timer = window.setTimeout(fetchLog, delayMs);
+    }
+
+    function retryDelayMs() {
+      if (consecutiveFailures <= 0) {
+        return pollIntervalMs;
+      }
+      return Math.min(
+        pollIntervalMs * Math.pow(2, Math.min(consecutiveFailures - 1, 3)),
+        maxPollIntervalMs
+      );
+    }
+
+    function fetchLog(force) {
+      if (requestInFlight && !force) return;
+      requestInFlight = true;
+      requestSerial += 1;
+      var serial = requestSerial;
+      var controller = typeof AbortController === 'function' ? new AbortController() : null;
+      var timeoutHandle = window.setTimeout(function () {
+        if (controller) {
+          controller.abort();
+        }
+      }, requestTimeoutMs);
+
+      if (!lastText) {
+        setStatus('Connecting to live log…');
+      }
+
+      fetch('/admin/log/live?bytes=65536', {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        signal: controller ? controller.signal : undefined
+      })
         .then(function (resp) { return resp.json(); })
         .then(function (data) {
+          if (serial !== requestSerial) return;
+          window.clearTimeout(timeoutHandle);
+          requestInFlight = false;
+          consecutiveFailures = 0;
           var fileName = data.filename || 'current log';
           var fullText = data.content || '';
           if (data.truncated) {
@@ -626,27 +675,43 @@
             clearedBaseline = '';
             clearedFile = fileName;
           }
-          if (fullText === lastText) return;
-          lastText = fullText;
-          var text = visibleText(fullText, fileName);
-          output.textContent = text || 'Waiting for new log lines\u2026';
+          setStatus('Live log connected. Retrying automatically if this connection stalls.');
+          if (fullText !== lastText) {
+            lastText = fullText;
+            var text = visibleText(fullText, fileName);
+            output.textContent = text || 'Waiting for new log lines\u2026';
+          }
           if (!autoscroll || autoscroll.checked) {
             output.scrollTop = output.scrollHeight;
           }
+          scheduleNextPoll(pollIntervalMs);
         })
-        .catch(function () {
-          output.textContent = 'Unable to load live log.';
+        .catch(function (error) {
+          if (serial !== requestSerial) return;
+          window.clearTimeout(timeoutHandle);
+          requestInFlight = false;
+          consecutiveFailures += 1;
+          var delayMs = retryDelayMs();
+          var timedOut = !!(error && error.name === 'AbortError');
+          if (!lastText) {
+            output.textContent = timedOut
+              ? 'Live log request timed out. Retrying\u2026'
+              : 'Unable to load live log. Retrying\u2026';
+          }
+          setStatus(
+            timedOut
+              ? 'Live log request timed out over this connection. Retrying in ' + Math.round(delayMs / 1000) + 's.'
+              : 'Live log unavailable right now. Retrying in ' + Math.round(delayMs / 1000) + 's.'
+          );
+          scheduleNextPoll(delayMs);
         });
-    }
-
-    function startPolling() {
-      if (timer) clearInterval(timer);
-      timer = setInterval(fetchLog, 2000);
     }
 
     if (refreshBtn) {
       refreshBtn.addEventListener('click', function () {
-        fetchLog();
+        consecutiveFailures = 0;
+        if (timer) clearTimeout(timer);
+        fetchLog(true);
       });
     }
 
@@ -658,8 +723,7 @@
       });
     }
 
-    fetchLog();
-    startPolling();
+    fetchLog(false);
   }
 
   document.addEventListener('DOMContentLoaded', initAdminLiveLog);

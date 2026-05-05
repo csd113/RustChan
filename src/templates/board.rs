@@ -58,22 +58,25 @@ fn board_reorder_controls(
     )
 }
 
-fn render_new_activity_badge(count: i64, class_name: &str) -> String {
+fn render_new_activity_badge(count: i64, class_name: &str, label: &str) -> String {
     if count <= 0 {
         return String::new();
     }
     format!(
-        r#"<span class="{class_name}"><span class="new-activity-dot" aria-hidden="true"></span>{count} New</span>"#,
+        r#"<span class="{class_name}"><span class="new-activity-dot" aria-hidden="true"></span>{count} {label}</span>"#,
         class_name = escape_html(class_name),
-        count = count
+        count = count,
+        label = escape_html(label),
     )
 }
 
 // These flags map directly to render or DB inputs, so bundling them would make the call sites less clear.
 #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn render_board_card(
     stats: &crate::models::BoardStats,
     unread_thread_count: Option<i64>,
+    unread_reply_count: Option<i64>,
     nsfw_consent: bool,
     csrf_token: &str,
     admin_csrf_token: Option<&str>,
@@ -133,11 +136,31 @@ fn render_board_card(
         String::new()
     };
     let access_badge = board_access_badge(board);
-    let activity_badge = unread_thread_count
+    let thread_activity_badge = unread_thread_count
         .map(|count| {
-            render_new_activity_badge(count, "new-activity-badge board-card-activity-badge")
+            render_new_activity_badge(
+                count,
+                "new-activity-badge board-card-activity-badge board-card-new-thread-badge",
+                "New Threads",
+            )
         })
         .unwrap_or_default();
+    let reply_activity_badge = unread_reply_count
+        .map(|count| {
+            render_new_activity_badge(
+                count,
+                "new-activity-badge board-card-activity-badge board-card-new-reply-badge",
+                "New Replies",
+            )
+        })
+        .unwrap_or_default();
+    let activity_badges = if thread_activity_badge.is_empty() && reply_activity_badge.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<div class="board-card-activity-row">{thread_activity_badge}{reply_activity_badge}</div>"#
+        )
+    };
 
     format!(
         r#"<div class="board-card">
@@ -147,7 +170,7 @@ fn render_board_card(
     <div class="board-card-name">{name}</div>
     <div class="board-card-desc">{description}</div>
     <div class="board-card-stats">{thread_count} {thread_word}</div>
-    {activity_badge}
+    {activity_badges}
   </a>
 </div>"#,
         reorder_controls = reorder_controls,
@@ -161,7 +184,7 @@ fn render_board_card(
         description = escape_html(&description_preview),
         thread_count = stats.thread_count,
         thread_word = thread_word,
-        activity_badge = activity_badge,
+        activity_badges = activity_badges,
     )
 }
 
@@ -452,7 +475,9 @@ fn render_catalog_card(
         return_to,
     );
     let activity_badge = unread_reply_count
-        .map(|count| render_new_activity_badge(count, "new-activity-badge catalog-activity-badge"))
+        .map(|count| {
+            render_new_activity_badge(count, "new-activity-badge catalog-activity-badge", "New")
+        })
         .unwrap_or_default();
     let activity_row = if activity_badge.is_empty() {
         String::new()
@@ -538,9 +563,11 @@ fn render_archive_row(board_short: &str, thread: &Thread) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn board_cards(
     list: &[&crate::models::BoardStats],
-    board_badges: &HashMap<i64, i64>,
+    board_new_thread_badges: &HashMap<i64, i64>,
+    board_new_reply_badges: &HashMap<i64, i64>,
     nsfw_consent: bool,
     csrf_token: &str,
     admin_csrf_token: Option<&str>,
@@ -550,7 +577,8 @@ fn board_cards(
     for (index, s) in list.iter().enumerate() {
         out.push_str(&render_board_card(
             s,
-            board_badges.get(&s.board.id).copied(),
+            board_new_thread_badges.get(&s.board.id).copied(),
+            board_new_reply_badges.get(&s.board.id).copied(),
             nsfw_consent,
             csrf_token,
             admin_csrf_token,
@@ -575,6 +603,7 @@ pub fn index_page(
     onion_address: Option<&str>,
     home_banner_html: &str,
     board_badges: &HashMap<i64, i64>,
+    board_reply_badges: &HashMap<i64, i64>,
     current_theme: Option<&str>,
     nsfw_prompt_board: Option<&Board>,
     nsfw_consent: bool,
@@ -592,7 +621,7 @@ pub fn index_page(
     } else {
         format!(
             "<div class=\"index-section\"><h2 class=\"index-section-title\">// Boards</h2><div class=\"board-cards\">{}</div></div>",
-            board_cards(&sfw, board_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin)
+            board_cards(&sfw, board_badges, board_reply_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin)
         )
     };
 
@@ -601,7 +630,7 @@ pub fn index_page(
     } else {
         format!(
             "<div class=\"index-section\"><h2 class=\"index-section-title\">// Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2><div class=\"board-cards\">{}</div></div>",
-            board_cards(&nsfw, board_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin)
+            board_cards(&nsfw, board_badges, board_reply_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin)
         )
     };
 
@@ -1001,7 +1030,11 @@ fn render_thread_summary(
 
     let activity_badge = unread_reply_count
         .map(|count| {
-            render_new_activity_badge(count, "new-activity-badge thread-summary-activity-badge")
+            render_new_activity_badge(
+                count,
+                "new-activity-badge thread-summary-activity-badge",
+                "New",
+            )
         })
         .unwrap_or_default();
     if !activity_badge.is_empty() {
@@ -1538,13 +1571,21 @@ mod tests {
             thread_count: 4,
         };
 
-        let html_without_controls =
-            board_cards(&[&stats], &HashMap::new(), true, "csrf", None, false);
+        let html_without_controls = board_cards(
+            &[&stats],
+            &HashMap::new(),
+            &HashMap::new(),
+            true,
+            "csrf",
+            None,
+            false,
+        );
         assert!(html_without_controls.contains("board-card-link"));
         assert!(!html_without_controls.contains("board-reorder-menu"));
 
         let html_with_controls = board_cards(
             &[&stats],
+            &HashMap::new(),
             &HashMap::new(),
             true,
             "csrf",
@@ -1565,7 +1606,15 @@ mod tests {
         let mut badges = HashMap::new();
         badges.insert(stats.board.id, 2);
 
-        let html = board_cards(&[&stats], &badges, true, "csrf", None, false);
+        let html = board_cards(
+            &[&stats],
+            &badges,
+            &HashMap::new(),
+            true,
+            "csrf",
+            None,
+            false,
+        );
 
         let stats_idx = html
             .find("board-card-stats")
@@ -1579,7 +1628,7 @@ mod tests {
 
         assert!(stats_idx < badge_idx && badge_idx < link_close_idx);
         assert!(html.contains(r#"<span class="board-card-slug">/test/</span>"#));
-        assert!(html.contains("2 New"));
+        assert!(html.contains("2 New Threads"));
     }
 
     #[test]
@@ -1594,6 +1643,7 @@ mod tests {
             None,
             None,
             "",
+            &HashMap::new(),
             &HashMap::new(),
             None,
             None,
@@ -1626,6 +1676,7 @@ mod tests {
             None,
             None,
             "",
+            &HashMap::new(),
             &HashMap::new(),
             None,
             None,

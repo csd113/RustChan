@@ -183,6 +183,8 @@ struct SettingsFile {
     new_activity_notifications_enabled: Option<bool>,
     /// Initial state for homepage board-card new-thread badges.
     homepage_new_thread_badges_enabled: Option<bool>,
+    /// Initial state for homepage board-card new-reply badges.
+    homepage_new_reply_badges_enabled: Option<bool>,
     /// Initial state for board/catalog thread-card new-reply badges.
     thread_new_reply_badges_enabled: Option<bool>,
     /// Default theme served to first-time visitors before they pick one.
@@ -454,6 +456,10 @@ pub struct Config {
     /// on first run and then the Admin -> Site Settings DB value becomes the
     /// live source of truth.
     pub initial_homepage_new_thread_badges_enabled: bool,
+    /// Initial state for homepage board-card new-reply badges; seeds the DB
+    /// on first run and then the Admin -> Site Settings DB value becomes the
+    /// live source of truth.
+    pub initial_homepage_new_reply_badges_enabled: bool,
     /// Initial state for board/catalog thread-card new-reply badges; seeds the
     /// DB on first run and then the Admin -> Site Settings DB value becomes the
     /// live source of truth.
@@ -585,6 +591,12 @@ impl Config {
                 .or(s.homepage_new_thread_badges_enabled)
                 .or(legacy_new_activity_notifications_enabled)
                 .unwrap_or(true);
+        let initial_homepage_new_reply_badges_enabled = env::var("CHAN_HOMEPAGE_NEW_REPLY_BADGES")
+            .ok()
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .or(s.homepage_new_reply_badges_enabled)
+            .or(legacy_new_activity_notifications_enabled)
+            .unwrap_or(true);
         let initial_thread_new_reply_badges_enabled = env::var("CHAN_THREAD_NEW_REPLY_BADGES")
             .ok()
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
@@ -681,6 +693,7 @@ impl Config {
             forum_name,
             initial_site_subtitle,
             initial_homepage_new_thread_badges_enabled,
+            initial_homepage_new_reply_badges_enabled,
             initial_thread_new_reply_badges_enabled,
             initial_default_theme,
             initial_enabled_builtin_themes,
@@ -1160,6 +1173,7 @@ pub fn update_settings_file_site_settings(
     forum_name: &str,
     site_subtitle: &str,
     homepage_new_thread_badges_enabled: bool,
+    homepage_new_reply_badges_enabled: bool,
     thread_new_reply_badges_enabled: bool,
     default_theme: &str,
 ) {
@@ -1170,6 +1184,10 @@ pub fn update_settings_file_site_settings(
             (
                 "homepage_new_thread_badges_enabled",
                 homepage_new_thread_badges_enabled.to_string(),
+            ),
+            (
+                "homepage_new_reply_badges_enabled",
+                homepage_new_reply_badges_enabled.to_string(),
             ),
             (
                 "thread_new_reply_badges_enabled",
@@ -1370,6 +1388,7 @@ mod tests {
             forum_name: "RustChan".to_string(),
             initial_site_subtitle: "select board to proceed".to_string(),
             initial_homepage_new_thread_badges_enabled: true,
+            initial_homepage_new_reply_badges_enabled: true,
             initial_thread_new_reply_badges_enabled: true,
             initial_default_theme: crate::theme::HARD_DEFAULT_THEME.to_string(),
             initial_enabled_builtin_themes: crate::theme::builtin_theme_slugs()
@@ -1441,6 +1460,7 @@ mod tests {
 forum_name = "RustChan"
 site_subtitle = "select board to proceed"
 homepage_new_thread_badges_enabled = true
+homepage_new_reply_badges_enabled = true
 thread_new_reply_badges_enabled = true
 default_theme = "forest"
 auto_full_backup_interval_hours = 24
@@ -1466,6 +1486,7 @@ auto_full_backup_copies_to_keep = 1
         assert!(output.contains("forum_name = \"BackupChan\"\n"));
         assert!(output.contains("site_subtitle = \"select board to proceed\"\n"));
         assert!(output.contains("homepage_new_thread_badges_enabled = true\n"));
+        assert!(output.contains("homepage_new_reply_badges_enabled = true\n"));
         assert!(output.contains("thread_new_reply_badges_enabled = true\n"));
         assert!(output.contains("default_theme = \"terminal\"\n"));
         assert!(output.contains("auto_full_backup_interval_hours = 12\n"));
@@ -1523,6 +1544,7 @@ enabled = false
 forum_name = "RustChan"
 site_subtitle = "select board to proceed"
 homepage_new_thread_badges_enabled = true
+homepage_new_reply_badges_enabled = true
 thread_new_reply_badges_enabled = true
 
 # ── Network / web server ──────────────────────────────────────────────────────
@@ -1535,6 +1557,7 @@ port = 8080
                 ("forum_name", "\"NewChan\"".to_string()),
                 ("site_subtitle", "\"new subtitle\"".to_string()),
                 ("homepage_new_thread_badges_enabled", "false".to_string()),
+                ("homepage_new_reply_badges_enabled", "true".to_string()),
                 ("thread_new_reply_badges_enabled", "true".to_string()),
                 ("default_theme", "\"terminal\"".to_string()),
             ],
@@ -1550,11 +1573,15 @@ port = 8080
         let thread_activity_idx = output
             .find("thread_new_reply_badges_enabled = true")
             .expect("thread_new_reply_badges_enabled inserted");
+        let homepage_reply_activity_idx = output
+            .find("homepage_new_reply_badges_enabled = true")
+            .expect("homepage_new_reply_badges_enabled inserted");
         let network_idx = output
             .find("# ── Network / web server")
             .expect("network section present");
 
         assert!(homepage_activity_idx < network_idx);
+        assert!(homepage_reply_activity_idx < network_idx);
         assert!(thread_activity_idx < network_idx);
         assert!(theme_idx < network_idx);
         assert!(output.contains("forum_name = \"NewChan\"\n"));
@@ -1608,6 +1635,40 @@ port = 8080
 
         let reloaded = Config::from_env();
         assert_eq!(reloaded.ffmpeg_timeout_secs, 1_800);
+
+        match previous {
+            Some(contents) => std::fs::write(&path, contents).expect("restore settings file"),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    #[test]
+    fn update_settings_file_site_settings_persists_homepage_reply_badge_toggle() {
+        let _guard = SETTINGS_FILE_TEST_LOCK.lock().expect("settings test lock");
+        let path = settings_file_path();
+        let previous = std::fs::read_to_string(&path).ok();
+        let parent = path.parent().expect("settings parent").to_path_buf();
+        std::fs::create_dir_all(&parent).expect("create settings dir");
+        std::fs::write(
+            &path,
+            "forum_name = \"RustChan\"\nsite_subtitle = \"select board to proceed\"\nhomepage_new_thread_badges_enabled = true\nhomepage_new_reply_badges_enabled = true\nthread_new_reply_badges_enabled = true\ndefault_theme = \"forest\"\n",
+        )
+        .expect("write settings fixture");
+
+        super::update_settings_file_site_settings(
+            "RustChan",
+            "select board to proceed",
+            true,
+            false,
+            true,
+            "forest",
+        );
+        let updated = std::fs::read_to_string(&path).expect("read updated settings");
+        assert!(updated.contains("homepage_new_thread_badges_enabled = true\n"));
+        assert!(updated.contains("homepage_new_reply_badges_enabled = false\n"));
+        assert!(updated.contains("thread_new_reply_badges_enabled = true\n"));
 
         match previous {
             Some(contents) => std::fs::write(&path, contents).expect("restore settings file"),
@@ -1725,6 +1786,7 @@ port = 8080
         let template = settings_template("secret");
 
         assert!(template.contains("homepage_new_thread_badges_enabled = true"));
+        assert!(template.contains("homepage_new_reply_badges_enabled = true"));
         assert!(template.contains("thread_new_reply_badges_enabled = true"));
         assert!(template.contains(r#"default_theme = "forest""#));
         assert!(template.contains("enabled = false\nport = 8443"));
