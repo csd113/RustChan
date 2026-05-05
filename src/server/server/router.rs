@@ -11,7 +11,7 @@ use super::{
     assets::{serve_admin_css, serve_admin_js, serve_css, serve_main_js, serve_theme_init_js},
     headers::{
         admin_cache_middleware, hsts_middleware_with_mode, public_cache_middleware,
-        safe_timeout_middleware, CONTENT_SECURITY_POLICY,
+        safe_timeout_middleware, text_response_compression_predicate, CONTENT_SECURITY_POLICY,
     },
     lifecycle::track_requests,
     onion_location_middleware,
@@ -33,7 +33,10 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
             crate::middleware::rate_limit_middleware,
         ))
         .layer(axum_middleware::from_fn(track_requests))
-        .layer(tower_http::compression::CompressionLayer::new())
+        .layer(
+            tower_http::compression::CompressionLayer::new()
+                .compress_when(text_response_compression_predicate),
+        )
         .layer(axum_middleware::from_fn(
             crate::middleware::normalize_trailing_slash,
         ))
@@ -115,6 +118,31 @@ mod tests {
         let conn = state.db.get().expect("db connection");
         crate::db::create_board(&conn, short_name, "Board", "", false).expect("create board");
         crate::templates::set_live_boards(crate::db::get_all_boards(&conn).expect("load boards"));
+    }
+
+    fn seed_protected_media_board_with_admin(
+        state: &crate::middleware::AppState,
+        short_name: &str,
+    ) -> String {
+        let conn = state.db.get().expect("db connection");
+        let board_id =
+            crate::db::create_board(&conn, short_name, "Secret", "", false).expect("create board");
+        let password_hash =
+            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+        conn.execute(
+            "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
+            rusqlite::params!["view_password", password_hash, board_id],
+        )
+        .expect("protect board");
+        let admin_hash = crate::utils::crypto::hash_password("hunter2").expect("hash admin");
+        let admin_id = crate::db::create_admin(&conn, "admin", &admin_hash).expect("create admin");
+        crate::db::create_session(&conn, "media-session", admin_id, i64::MAX)
+            .expect("create admin session");
+        crate::templates::set_live_boards(crate::db::get_all_boards(&conn).expect("load boards"));
+        format!(
+            "{}=media-session",
+            crate::handlers::board::ADMIN_SESSION_COOKIE
+        )
     }
 
     fn unique_test_board(prefix: &str) -> String {
@@ -245,7 +273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn built_in_static_assets_are_short_public_cached() {
+    async fn built_in_static_assets_use_versioned_cache_policy() {
         let router = build_router(crate::test_support::app_state(), false);
 
         for uri in ["/static/style.css", "/static/main.js", "/static/admin.css"] {
@@ -263,6 +291,45 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(
                 response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some(crate::cache::CACHE_CONTROL_STATIC_SHORT)
+            );
+
+            let versioned_uri = crate::templates::static_asset_url(uri);
+            let versioned_response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(versioned_uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(versioned_response.status(), StatusCode::OK);
+            assert_eq!(
+                versioned_response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some(crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA)
+            );
+
+            let invalid_response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{uri}?v=invalid"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(invalid_response.status(), StatusCode::OK);
+            assert_eq!(
+                invalid_response
                     .headers()
                     .get(header::CACHE_CONTROL)
                     .and_then(|value| value.to_str().ok()),
@@ -295,7 +362,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_login_page_is_private_revalidated() {
+    async fn admin_login_page_is_no_store() {
         let router = build_router(crate::test_support::app_state(), false);
         let response = router
             .oneshot(
@@ -314,8 +381,62 @@ mod tests {
                 .headers()
                 .get(header::CACHE_CONTROL)
                 .and_then(|value| value.to_str().ok()),
-            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
+            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
         );
+    }
+
+    #[tokio::test]
+    async fn compression_only_applies_to_text_like_responses() {
+        let state = crate::test_support::app_state();
+        let board = unique_test_board("compress");
+        seed_public_media_board(&state, &board);
+        let board_dir = std::path::Path::new(&crate::config::CONFIG.upload_dir).join(&board);
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        let media_path = board_dir.join("movie.mp4");
+        std::fs::write(&media_path, vec![0_u8; 512]).expect("write media");
+
+        let router = build_router(state, false);
+        for uri in ["/", "/static/style.css", "/static/main.js"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::ACCEPT_ENCODING, "gzip")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(
+                response.headers().contains_key(header::CONTENT_ENCODING),
+                "{uri} should be compressed"
+            );
+        }
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/boards/{board}/movie.mp4"))
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCEPT_RANGES)
+                .and_then(|value| value.to_str().ok()),
+            Some("bytes")
+        );
+
+        let _ = std::fs::remove_file(media_path);
+        let _ = std::fs::remove_dir(board_dir);
     }
 
     #[tokio::test]
@@ -422,6 +543,121 @@ mod tests {
         let _ = std::fs::remove_file(media_path);
         let _ = std::fs::remove_file(favicon_path);
         let _ = std::fs::remove_dir(favicon_dir);
+        let _ = std::fs::remove_dir(board_dir);
+    }
+
+    #[tokio::test]
+    async fn protected_board_media_and_favicons_are_not_public_cacheable() {
+        let state = crate::test_support::app_state();
+        let board = unique_test_board("protectedcache");
+        let cookie = seed_protected_media_board_with_admin(&state, &board);
+
+        let board_dir = std::path::Path::new(&crate::config::CONFIG.upload_dir).join(&board);
+        let favicon_dir = board_dir.join("_favicon");
+        std::fs::create_dir_all(&favicon_dir).expect("create board dirs");
+        let media_path = board_dir.join("image.webp");
+        let favicon_path = favicon_dir.join("favicon-32x32.png");
+        std::fs::write(&media_path, b"webp bytes").expect("write media");
+        std::fs::write(&favicon_path, b"png bytes").expect("write favicon");
+
+        let router = build_router(state, false);
+        for uri in [
+            format!("/boards/{board}/image.webp"),
+            format!("/boards/{board}/_favicon/favicon-32x32.png?v=1"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::COOKIE, &cookie)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
+            );
+        }
+
+        let _ = std::fs::remove_file(media_path);
+        let _ = std::fs::remove_file(favicon_path);
+        let _ = std::fs::remove_dir(favicon_dir);
+        let _ = std::fs::remove_dir(board_dir);
+    }
+
+    #[tokio::test]
+    async fn generated_svg_thumbnails_are_inline_but_uploaded_svg_is_attachment() {
+        let state = crate::test_support::app_state();
+        let board = unique_test_board("svgthumb");
+        seed_public_media_board(&state, &board);
+
+        let board_dir = std::path::Path::new(&crate::config::CONFIG.upload_dir).join(&board);
+        let thumb_dir = board_dir.join("thumbs");
+        std::fs::create_dir_all(&thumb_dir).expect("create board dirs");
+        let thumb_path = thumb_dir.join("video.svg");
+        let upload_path = board_dir.join("uploaded.svg");
+        std::fs::write(&thumb_path, b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>")
+            .expect("write thumb");
+        std::fs::write(&upload_path, b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>")
+            .expect("write upload");
+
+        let router = build_router(state, false);
+        let thumb_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/boards/{board}/thumbs/video.svg"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(thumb_response.status(), StatusCode::OK);
+        assert_eq!(
+            thumb_response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("image/svg+xml")
+        );
+        assert!(thumb_response
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .is_none());
+
+        let upload_response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/boards/{board}/uploaded.svg"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(upload_response.status(), StatusCode::OK);
+        assert_eq!(
+            upload_response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/octet-stream")
+        );
+        assert!(upload_response
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("attachment;")));
+
+        let _ = std::fs::remove_file(thumb_path);
+        let _ = std::fs::remove_file(upload_path);
+        let _ = std::fs::remove_dir(thumb_dir);
         let _ = std::fs::remove_dir(board_dir);
     }
 

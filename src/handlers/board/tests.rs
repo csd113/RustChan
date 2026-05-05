@@ -704,7 +704,7 @@ async fn locked_board_search_returns_forbidden_unlock_page() {
             .headers()
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok()),
-        Some(super::HTML_CACHE_CONTROL)
+        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
     );
     let body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)

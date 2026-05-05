@@ -100,12 +100,31 @@ pub(super) async fn admin_cache_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let path = req.uri().path().to_string();
     let mut resp = next.run(req).await;
-    crate::cache::insert_cache_control_if_absent(
-        resp.headers_mut(),
-        crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE,
-    );
+    let cache_control = if sensitive_admin_html_path(&path)
+        && response_content_type_starts_with(resp.headers(), "text/html")
+    {
+        crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE
+    } else {
+        crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE
+    };
+    crate::cache::insert_cache_control_if_absent(resp.headers_mut(), cache_control);
     resp
+}
+
+pub(super) fn text_response_compression_predicate(
+    status: http::StatusCode,
+    _version: http::Version,
+    headers: &http::HeaderMap,
+    _extensions: &http::Extensions,
+) -> bool {
+    status == http::StatusCode::OK
+        && !headers.contains_key(header::CONTENT_ENCODING)
+        && !headers.contains_key(header::CONTENT_RANGE)
+        && !headers.contains_key(header::ACCEPT_RANGES)
+        && !has_attachment_disposition(headers)
+        && response_content_type_is_compressible(headers)
 }
 
 fn public_dynamic_html_path(path: &str) -> bool {
@@ -135,6 +154,48 @@ fn public_dynamic_html_path(path: &str) -> bool {
             ) | (Some("thread"), Some(_), None)
                 | (Some("post"), Some(_), Some("edit" | "delete"))
         )
+}
+
+fn sensitive_admin_html_path(path: &str) -> bool {
+    matches!(path, "/admin" | "/admin/panel" | "/admin/mod-log")
+}
+
+fn response_content_type_starts_with(headers: &http::HeaderMap, prefix: &str) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim_start().starts_with(prefix))
+}
+
+fn has_attachment_disposition(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("attachment"))
+}
+
+fn response_content_type_is_compressible(headers: &http::HeaderMap) -> bool {
+    let Some(content_type) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+    else {
+        return false;
+    };
+
+    matches!(
+        content_type.as_str(),
+        "text/html"
+            | "text/css"
+            | "text/javascript"
+            | "application/javascript"
+            | "application/json"
+            | "application/xml"
+            | "text/xml"
+            | "image/svg+xml"
+    )
 }
 
 fn is_post_upload_path(path: &str) -> bool {

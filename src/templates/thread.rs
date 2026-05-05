@@ -751,7 +751,7 @@ fn render_media_thumb(
     fallback_text: &str,
 ) -> String {
     format!(
-        r#"<img class="{img_class}" src="/boards/{src}" loading="{loading}" alt="{alt}" data-media-thumb="1">
+        r#"<img class="{img_class}" src="/boards/{src}" loading="{loading}" decoding="async" alt="{alt}" data-media-thumb="1">
 <div class="{fallback_class} media-thumb-fallback" hidden>{fallback_text}</div>"#,
         img_class = escape_html(img_class),
         fallback_class = escape_html(fallback_class),
@@ -927,6 +927,7 @@ pub fn render_post(
     );
 
     let primary_media_type = effective_media_type(post);
+    let thumb_loading = if post.is_op { "eager" } else { "lazy" };
 
     // Image / Video / Audio
     if show_media {
@@ -980,7 +981,7 @@ pub fn render_post(
                         "thumb",
                         thumb,
                         "audio",
-                        "eager",
+                        thumb_loading,
                         "preview unavailable",
                     ),
                     orig = escape_html(name_str),
@@ -1010,7 +1011,7 @@ pub fn render_post(
                         "thumb",
                         thumb,
                         "video thumbnail",
-                        "eager",
+                        thumb_loading,
                         "preview unavailable",
                     ),
                     sz = escape_html(&size_str),
@@ -1037,7 +1038,7 @@ pub fn render_post(
                         "thumb",
                         thumb,
                         "pdf preview",
-                        "eager",
+                        thumb_loading,
                         "Open PDF",
                     ),
                     sz = escape_html(&size_str),
@@ -1075,7 +1076,7 @@ pub fn render_post(
                         "thumb",
                         thumb,
                         "image",
-                        "eager",
+                        thumb_loading,
                         "preview unavailable",
                     ),
                     sz = escape_html(&size_str),
@@ -1740,7 +1741,55 @@ mod tests {
         );
 
         assert!(html.contains(r#"data-media-thumb="1""#));
+        assert!(html.contains(r#"loading="lazy" decoding="async""#));
         assert!(html.contains("media-thumb-fallback"));
+    }
+
+    #[test]
+    fn op_media_stays_eager_while_reply_media_is_lazy() {
+        let mut op = sample_post();
+        op.is_op = true;
+        let op_html = render_post(
+            &op,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+        assert!(op_html.contains(r#"loading="eager" decoding="async""#));
+
+        let reply_html = render_post(
+            &sample_post(),
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+        assert!(reply_html.contains(r#"loading="lazy" decoding="async""#));
     }
 
     #[test]

@@ -344,7 +344,7 @@ fn render_catalog_media_thumb(
         format!("/boards/{src}")
     };
     format!(
-        r#"<img class="{class_name}" src="{src}" loading="lazy" alt="{alt}" data-media-thumb="1">
+        r#"<img class="{class_name}" src="{src}" loading="lazy" decoding="async" alt="{alt}" data-media-thumb="1">
 <div class="catalog-thumb-fallback media-thumb-fallback" hidden>{fallback_text}</div>"#,
         class_name = escape_html(class_name),
         src = escape_html(&img_src),
@@ -536,7 +536,7 @@ fn render_archive_row(board_short: &str, thread: &Thread) -> String {
     });
     let thumb_html = thread.op_thumb.as_ref().map_or_else(String::new, |thumb| {
         format!(
-            r#"<div class="archive-row-media"><img src="/boards/{}" class="archive-thumb" alt="thumb" loading="lazy"></div>"#,
+            r#"<div class="archive-row-media"><img src="/boards/{}" class="archive-thumb" alt="thumb" loading="lazy" decoding="async"></div>"#,
             escape_html(thumb),
         )
     });
@@ -963,7 +963,7 @@ fn render_thread_summary(
     if let (Some(_file), Some(thumb)) = (&t.op_file, &t.op_thumb) {
         let _ = write!(
             html,
-            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image"></a>{badges}</div>"#,
+            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" decoding="async" alt="image"></a>{badges}</div>"#,
             board = escape_html(board_short),
             tid = t.id,
             th = escape_html(thumb),
@@ -972,7 +972,7 @@ fn render_thread_summary(
     } else if let Some(embed_thumb) = t.op_body.as_deref().and_then(embed_thumb_from_body) {
         let _ = write!(
             html,
-            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" alt="video thumbnail"></a>{badges}</div>"#,
+            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" decoding="async" alt="video thumbnail"></a>{badges}</div>"#,
             board = escape_html(board_short),
             tid = t.id,
             src = escape_html(&embed_thumb),
@@ -1717,6 +1717,7 @@ mod tests {
         assert!(html.contains("catalog-card-link"));
         assert!(html.contains("catalog-card-media"));
         assert!(html.contains(r#"data-media-thumb="1""#));
+        assert!(html.contains(r#"loading="lazy" decoding="async""#));
         assert!(html.contains("catalog-thumb-fallback"));
         assert!(html.contains("thread-state-badge-pin"));
         assert!(html.contains("thread-state-badge-lock"));

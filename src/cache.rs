@@ -6,6 +6,8 @@ use axum::http::{header, HeaderMap, HeaderValue};
 // avoid stale UI, ownership, session, and form-token state.
 pub const CACHE_CONTROL_DYNAMIC_PUBLIC: &str = "no-cache";
 pub const CACHE_CONTROL_PRIVATE_NO_CACHE: &str = "private, no-cache, must-revalidate";
+pub const CACHE_CONTROL_PRIVATE_NO_STORE: &str =
+    "private, no-cache, no-store, must-revalidate, no-transform";
 pub const CACHE_CONTROL_STATIC_SHORT: &str = "public, max-age=3600";
 pub const CACHE_CONTROL_IMMUTABLE_MEDIA: &str = "public, max-age=31536000, immutable";
 

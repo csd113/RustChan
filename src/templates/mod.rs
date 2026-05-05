@@ -105,6 +105,11 @@ pub fn static_asset_url(path: &str) -> String {
     format!("{path}?v={}", *STATIC_ASSET_VERSION)
 }
 
+#[must_use]
+pub fn static_asset_version_matches(version: &str) -> bool {
+    version == STATIC_ASSET_VERSION.as_str()
+}
+
 pub fn live_board_nav() -> (u64, Arc<str>) {
     let guard = LIVE_BOARD_NAV.read();
     (guard.0, Arc::clone(&guard.1))

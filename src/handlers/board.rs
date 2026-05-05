@@ -563,7 +563,7 @@ fn board_access_page_response(
     *resp.status_mut() = status;
     resp.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(HTML_CACHE_CONTROL),
+        HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE),
     );
     if let Some(retry_after_secs) = retry_after_secs {
         if let Ok(retry_after) = HeaderValue::from_str(&retry_after_secs.to_string()) {

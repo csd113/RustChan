@@ -35,6 +35,17 @@ fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
+fn is_generated_svg_placeholder_thumb(media_path: &str) -> bool {
+    let path = std::path::Path::new(media_path);
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+        && path
+            .components()
+            .nth(1)
+            .is_some_and(|part| part.as_os_str() == "thumbs")
+}
+
 // Replaces the former nest_service(ServeDir) so we can intercept stale .mp4
 
 // links (created before the background transcoder replaced them with .webm)
@@ -123,9 +134,22 @@ pub async fn serve_board_media(
                 let mut resp = resp.map(axum::body::Body::new);
                 crate::cache::set_cache_control(
                     resp.headers_mut(),
-                    board_media_cache_control(is_board_favicon, has_version),
+                    board_media_cache_control(
+                        access_context.board.access_mode.requires_view_password(),
+                        is_board_favicon,
+                        has_version,
+                    ),
                 );
-                if let Some(ct) = media_content_type(&target) {
+                if is_generated_svg_placeholder_thumb(&media_path) {
+                    resp.headers_mut()
+                        .insert(CONTENT_TYPE, HeaderValue::from_static("image/svg+xml"));
+                    resp.headers_mut()
+                        .insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+                    resp.headers_mut().insert(
+                        CONTENT_SECURITY_POLICY,
+                        HeaderValue::from_static("default-src 'none'; script-src 'none'"),
+                    );
+                } else if let Some(ct) = media_content_type(&target) {
                     resp.headers_mut()
                         .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
                 } else {
@@ -169,7 +193,14 @@ pub async fn serve_board_media(
     }
 }
 
-const fn board_media_cache_control(is_replaceable_asset: bool, has_version: bool) -> &'static str {
+const fn board_media_cache_control(
+    is_protected_board: bool,
+    is_replaceable_asset: bool,
+    has_version: bool,
+) -> &'static str {
+    if is_protected_board {
+        return crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE;
+    }
     if is_replaceable_asset && !has_version {
         crate::cache::CACHE_CONTROL_STATIC_SHORT
     } else {
