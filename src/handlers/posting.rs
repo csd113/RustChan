@@ -47,6 +47,7 @@ pub struct SubmitPostCommand {
     pub upload_dir: String,
     pub thumb_size: u32,
     pub ffmpeg_available: bool,
+    pub ffprobe_available: bool,
     pub ffmpeg_webp_available: bool,
 }
 
@@ -66,6 +67,7 @@ pub struct UploadConfig<'a> {
     pub max_video_size: usize,
     pub max_audio_size: usize,
     pub ffmpeg_available: bool,
+    pub ffprobe_available: bool,
     pub ffmpeg_webp_available: bool,
 }
 
@@ -312,6 +314,7 @@ pub fn process_uploads(
         config.max_video_size,
         config.max_audio_size,
         config.ffmpeg_available,
+        config.ffprobe_available,
         config.ffmpeg_webp_available,
     );
 
@@ -409,6 +412,7 @@ pub fn submit_post(
         upload_dir,
         thumb_size,
         ffmpeg_available,
+        ffprobe_available,
         ffmpeg_webp_available,
     } = command;
 
@@ -513,6 +517,7 @@ pub fn submit_post(
             max_video_size: effective_max_video_size,
             max_audio_size: effective_max_audio_size,
             ffmpeg_available,
+            ffprobe_available,
             ffmpeg_webp_available,
         },
     )?;
@@ -745,6 +750,7 @@ mod tests {
             upload_dir: upload_dir.to_string(),
             thumb_size: 250,
             ffmpeg_available: false,
+            ffprobe_available: false,
             ffmpeg_webp_available: false,
         }
     }
@@ -781,6 +787,7 @@ mod tests {
             upload_dir: upload_dir.to_string(),
             thumb_size: 250,
             ffmpeg_available: false,
+            ffprobe_available: false,
             ffmpeg_webp_available: false,
         }
     }
@@ -813,6 +820,7 @@ mod tests {
             upload_dir: upload_dir.to_string(),
             thumb_size: 250,
             ffmpeg_available: false,
+            ffprobe_available: false,
             ffmpeg_webp_available: false,
         }
     }
@@ -1041,6 +1049,7 @@ mod tests {
                 max_video_size: 1024 * 1024,
                 max_audio_size: 1024 * 1024,
                 ffmpeg_available: false,
+                ffprobe_available: false,
                 ffmpeg_webp_available: false,
             },
         );
@@ -1148,6 +1157,7 @@ mod tests {
                 max_video_size: 1024 * 1024,
                 max_audio_size: 1024 * 1024,
                 ffmpeg_available: false,
+                ffprobe_available: false,
                 ffmpeg_webp_available: false,
             },
         )

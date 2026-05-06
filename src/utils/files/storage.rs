@@ -19,6 +19,8 @@ pub struct UploadedFile {
     pub dedup_reused: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)]
+// These booleans are independent upload policy and media capability flags.
 pub struct SaveUploadOptions<'a> {
     pub original_filename: &'a str,
     pub boards_dir: &'a str,
@@ -28,6 +30,7 @@ pub struct SaveUploadOptions<'a> {
     pub max_video_size: usize,
     pub max_audio_size: usize,
     pub ffmpeg_available: bool,
+    pub ffprobe_available: bool,
     pub ffmpeg_webp_available: bool,
     pub allow_any_files: bool,
 }
@@ -51,6 +54,7 @@ const MAX_UPLOAD_IMAGE_PIXELS: u64 = 100_000_000;
 pub fn classify_upload_mime(
     input_path: &Path,
     sniff_bytes: &[u8],
+    ffprobe_available: bool,
     allow_any_files: bool,
 ) -> Result<String> {
     let detected = match detect_mime_type(sniff_bytes) {
@@ -59,7 +63,7 @@ pub fn classify_upload_mime(
         Err(error) => return Err(error),
     };
 
-    if detected == "video/webm" {
+    if detected == "video/webm" && ffprobe_available {
         match crate::media::ffmpeg::probe_stream_kind(input_path) {
             Ok(crate::media::ffmpeg::StreamKind::AudioOnly) => return Ok("audio/webm".to_string()),
             Ok(crate::media::ffmpeg::StreamKind::Video) => {}
@@ -71,6 +75,11 @@ pub fn classify_upload_mime(
                 );
             }
         }
+    } else if detected == "video/webm" {
+        tracing::debug!(
+            path = %input_path.display(),
+            "ffprobe unavailable; treating WebM upload as video/webm"
+        );
     }
 
     Ok(detected)
@@ -106,6 +115,7 @@ pub fn save_upload_from_path(
 /// # Errors
 /// Returns an error if the audio MIME check fails, the file exceeds the board
 /// limit, disk-space checks fail, or the file cannot be persisted.
+#[allow(clippy::too_many_arguments)]
 pub fn save_audio_with_image_thumb_from_path(
     input_path: &Path,
     sniff_bytes: &[u8],
@@ -114,12 +124,13 @@ pub fn save_audio_with_image_thumb_from_path(
     boards_dir: &str,
     board_short: &str,
     max_audio_size: usize,
+    ffprobe_available: bool,
 ) -> Result<UploadedFile> {
     if original_size == 0 {
         return Err(anyhow::anyhow!("Audio file is empty."));
     }
 
-    let mime_type = classify_upload_mime(input_path, sniff_bytes, false)?;
+    let mime_type = classify_upload_mime(input_path, sniff_bytes, ffprobe_available, false)?;
     let media_type = crate::models::MediaType::from_mime(&mime_type);
     if !matches!(media_type, crate::models::MediaType::Audio) {
         return Err(anyhow::anyhow!(
@@ -287,7 +298,12 @@ fn validate_upload(
     original_size: usize,
     options: &SaveUploadOptions<'_>,
 ) -> Result<ValidatedUpload> {
-    let mime_type = classify_upload_mime(input_path, sniff_bytes, options.allow_any_files)?;
+    let mime_type = classify_upload_mime(
+        input_path,
+        sniff_bytes,
+        options.ffprobe_available,
+        options.allow_any_files,
+    )?;
     if mime_type == "image/svg+xml" {
         anyhow::bail!(
             "File type not allowed. SVG files are not accepted because they can contain executable JavaScript."
@@ -701,6 +717,7 @@ mod tests {
             max_video_size: 1024 * 1024,
             max_audio_size: 1024 * 1024,
             ffmpeg_available: false,
+            ffprobe_available: false,
             ffmpeg_webp_available: false,
             allow_any_files: false,
         }
@@ -729,6 +746,26 @@ trailer << /Root 1 0 R >>
 "
     }
 
+    fn valid_webm_header() -> &'static [u8] {
+        b"\x1a\x45\xdf\xa3\x00\x00\x00\x00\x00\x00\x42\x82\x84webm\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    }
+
+    #[test]
+    fn webm_classification_skips_ffprobe_when_startup_marked_it_unavailable() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input = tempfile::Builder::new()
+            .suffix(".webm")
+            .tempfile_in(tempdir.path())
+            .expect("temp file");
+        let webm = valid_webm_header();
+        std::fs::write(input.path(), webm).expect("write webm");
+
+        let mime = super::classify_upload_mime(input.path(), webm, false, false)
+            .expect("classify webm without ffprobe");
+
+        assert_eq!(mime, "video/webm");
+    }
+
     #[test]
     fn combo_flac_audio_is_saved_losslessly_without_pending_processing() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -750,6 +787,7 @@ trailer << /Root 1 0 R >>
             tempdir.path().to_str().expect("utf8 path"),
             "test",
             1024 * 1024,
+            false,
         )
         .expect("save flac");
 
@@ -834,6 +872,33 @@ trailer << /Root 1 0 R >>
         let stored =
             std::fs::read(tempdir.path().join(&uploaded.file_path)).expect("read stored upload");
         assert_eq!(stored, contents);
+    }
+
+    #[test]
+    fn video_upload_saves_with_svg_placeholder_when_ffmpeg_is_missing() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input = tempfile::Builder::new()
+            .suffix(".webm")
+            .tempfile_in(tempdir.path())
+            .expect("temp file");
+        let webm = valid_webm_header();
+        std::fs::write(input.path(), webm).expect("write webm");
+
+        let uploaded = save_upload_from_path(
+            input.path(),
+            webm,
+            webm.len(),
+            &test_upload_options(tempdir.path(), "clip.webm"),
+        )
+        .expect("video upload should save with fallback thumbnail");
+
+        assert_eq!(uploaded.mime_type, "video/webm");
+        assert_eq!(uploaded.media_type, crate::models::MediaType::Video);
+        assert!(tempdir.path().join(&uploaded.file_path).exists());
+        assert!(std::path::Path::new(&uploaded.thumb_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")));
+        assert!(tempdir.path().join(&uploaded.thumb_path).exists());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Result of probing for a tool at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,12 +170,37 @@ fn webp_install_hint() -> String {
 }
 
 fn probe_tool(program: &str) -> bool {
-    Command::new(program)
-        .arg("-version")
+    probe_tool_with_args(program, &["-version"])
+}
+
+fn probe_tool_with_args(program: &str, args: &[&str]) -> bool {
+    let mut command = Command::new(program);
+    command
+        .args(args)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+        .stderr(Stdio::null());
+    status_with_timeout(&mut command, Duration::from_secs(10))
+        .is_some_and(|status| status.success())
+}
+
+fn status_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Option<std::process::ExitStatus> {
+    let mut child = command.spawn().ok()?;
+    let started = Instant::now();
+
+    loop {
+        if let Some(status) = child.try_wait().ok()? {
+            return Some(status);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Probe whether the detected ffmpeg has `libvpx-vp9` + `libopus` compiled in.

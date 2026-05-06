@@ -75,6 +75,7 @@ pub async fn create_thread(
         let pool = state.db.clone();
         let job_queue = state.job_queue.clone();
         let ffmpeg_available = state.ffmpeg_available;
+        let ffprobe_available = state.ffprobe_available;
         let ffmpeg_webp_available = state.ffmpeg_webp_available;
         move || -> Result<posting::SubmitPostResult> {
             let conn = pool.get()?;
@@ -104,6 +105,7 @@ pub async fn create_thread(
                     upload_dir: CONFIG.upload_dir.clone(),
                     thumb_size: CONFIG.thumb_size,
                     ffmpeg_available,
+                    ffprobe_available,
                     ffmpeg_webp_available,
                 },
             )

@@ -411,6 +411,7 @@ pub fn process_primary_upload(
     max_video_size: usize,
     max_audio_size: usize,
     ffmpeg_available: bool,
+    ffprobe_available: bool,
     ffmpeg_webp_available: bool,
 ) -> Result<(Option<crate::utils::files::UploadedFile>, Option<String>)> {
     let Some((upload, fname)) = file_data else {
@@ -421,6 +422,7 @@ pub fn process_primary_upload(
     let detected_mime = crate::utils::files::classify_upload_mime(
         upload.temp_file.path(),
         &upload.sniff_bytes,
+        ffprobe_available,
         allow_any_files,
     )
     .map_err(|error| AppError::BadRequest(error.to_string()))?;
@@ -472,6 +474,7 @@ pub fn process_primary_upload(
             max_video_size,
             max_audio_size,
             ffmpeg_available,
+            ffprobe_available,
             ffmpeg_webp_available,
             allow_any_files,
         },
@@ -538,6 +541,7 @@ pub fn process_primary_upload(
             max_video_size,
             max_audio_size,
             ffmpeg_available,
+            ffprobe_available,
             ffmpeg_webp_available,
             allow_any_files,
         },
@@ -546,10 +550,15 @@ pub fn process_primary_upload(
     Ok((Some(f), Some(hash)))
 }
 
-fn temp_upload_mime(upload: &TempUpload, allow_any_files: bool) -> Result<String> {
+fn temp_upload_mime(
+    upload: &TempUpload,
+    ffprobe_available: bool,
+    allow_any_files: bool,
+) -> Result<String> {
     crate::utils::files::classify_upload_mime(
         upload.temp_file.path(),
         &upload.sniff_bytes,
+        ffprobe_available,
         allow_any_files,
     )
     .map_err(|error| AppError::BadRequest(error.to_string()))
@@ -566,6 +575,7 @@ pub fn process_audio_combo(
     board: &Board,
     upload_dir: &str,
     max_audio_size: usize,
+    ffprobe_available: bool,
 ) -> Result<Option<crate::utils::files::UploadedFile>> {
     let Some((audio_upload, aud_fname)) = audio_file_data else {
         return Ok(None);
@@ -594,6 +604,7 @@ pub fn process_audio_combo(
         upload_dir,
         &board.short_name,
         max_audio_size,
+        ffprobe_available,
     )
     .map_err(|e| classify_upload_error(&e))?;
 
@@ -619,6 +630,7 @@ pub fn process_audio_first_uploads(
     max_video_size: usize,
     max_audio_size: usize,
     ffmpeg_available: bool,
+    ffprobe_available: bool,
     ffmpeg_webp_available: bool,
 ) -> Result<(
     Option<crate::utils::files::UploadedFile>,
@@ -640,6 +652,7 @@ pub fn process_audio_first_uploads(
             max_video_size,
             max_audio_size,
             ffmpeg_available,
+            ffprobe_available,
             ffmpeg_webp_available,
         )
     };
@@ -660,13 +673,14 @@ pub fn process_audio_first_uploads(
             board,
             save_root_str,
             max_audio_size,
+            ffprobe_available,
         )?;
 
         return Ok((primary, audio, primary_hash));
     }
 
     if let Some((audio_upload, audio_name)) = audio_file_data {
-        let audio_mime = temp_upload_mime(&audio_upload, allow_any_files)?;
+        let audio_mime = temp_upload_mime(&audio_upload, ffprobe_available, allow_any_files)?;
         if crate::models::MediaType::from_mime(&audio_mime) != crate::models::MediaType::Audio {
             return Err(AppError::BadRequest(
                 "The audio slot only accepts audio files.".into(),
@@ -963,6 +977,7 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             false,
             false,
+            false,
         );
 
         match result {
@@ -1014,6 +1029,7 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             false,
             false,
+            false,
         );
 
         match result {
@@ -1043,6 +1059,7 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
+            false,
             false,
             false,
         );
@@ -1075,6 +1092,7 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
+            false,
             false,
             false,
         );
@@ -1110,6 +1128,7 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
+            false,
             false,
             false,
         )
