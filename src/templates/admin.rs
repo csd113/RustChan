@@ -2081,6 +2081,41 @@ mod tests {
     }
 
     #[test]
+    fn admin_panel_media_prune_toggle_uses_checkbox_row_layout() {
+        let html = render_admin_panel_for_test(
+            &[sample_board()],
+            &[sample_report()],
+            &[sample_theme()],
+            Some("media-settings"),
+        );
+
+        assert!(html.contains(
+            r#"<div class="board-settings-checks">
+    <label class="admin-inline-checkbox" title="Delete oldest full-size post media when active stored media exceeds the configured cap. Thumbnails are kept where practical.">
+      <input type="checkbox" name="media_auto_prune_enabled" value="1">
+      Enable automatic active content pruning
+    </label>
+  </div>"#
+        ));
+        assert!(!html.contains(
+            r#"<span>
+        <input type="checkbox" name="media_auto_prune_enabled""#
+        ));
+
+        let timeout_section_idx = html
+            .find("// ffmpeg timeout")
+            .expect("timeout section present");
+        let pruning_section_idx = html
+            .find("// media pruning")
+            .expect("pruning section present");
+        let prune_toggle_idx = html
+            .find("Enable automatic active content pruning")
+            .expect("prune toggle present");
+        assert!(timeout_section_idx < pruning_section_idx);
+        assert!(pruning_section_idx < prune_toggle_idx);
+    }
+
+    #[test]
     fn board_appearance_card_keeps_nsfw_tag() {
         let mut board = sample_board();
         board.nsfw = true;

@@ -175,6 +175,8 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
   </div>
   <div class="admin-detection-grid">{media_detection_cards}</div>
 </div>
+<form method="POST" action="/admin/media/settings" class="admin-site-settings-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
 <div class="admin-subsection admin-subsection-tight">
   <div class="admin-card-header">
     <h3>// ffmpeg timeout</h3>
@@ -184,19 +186,25 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
   RustChan currently allows ffmpeg to run for <strong>{ffmpeg_timeout_help}</strong> before a long-running media job is killed.
   This primarily affects uploaded video re-encoding, especially slow MP4 to WebM/VP9 conversion.
 </p>
-<form method="POST" action="/admin/media/settings" class="admin-site-settings-form">
-  <input type="hidden" name="_csrf" value="{csrf}">
   <div class="board-settings-grid admin-settings-grid">
     <label title="Slow systems may need a higher value for ffmpeg video conversion jobs.">
       Video re-encoding timeout (seconds)
       <input type="number" name="ffmpeg_timeout_secs" value="{ffmpeg_timeout_secs}" min="{ffmpeg_timeout_min}" max="{ffmpeg_timeout_max}" step="1" inputmode="numeric" class="admin-input-compact" required>
     </label>
-    <label title="Delete oldest full-size post media when active stored media exceeds the configured cap. Thumbnails are kept where practical.">
-      <span>
-        <input type="checkbox" name="media_auto_prune_enabled" value="1"{media_auto_prune_checked}>
-        Enable automatic active content pruning
-      </span>
-    </label>
+  </div>
+  <p class="admin-meta-note admin-meta-note-spaced">
+    This controls how long RustChan lets ffmpeg run while converting uploaded videos.
+    Slow systems such as Raspberry Pi devices may need a higher value.
+    MP4 to WebM/VP9 encoding can be especially slow without hardware acceleration.
+    If videos fail to convert because of timeouts, increase this value.
+  </p>
+</div>
+<div class="admin-subsection admin-subsection-tight">
+  <div class="admin-card-header">
+    <h3>// media pruning</h3>
+    <p>Delete oldest full-size post media when active stored media exceeds the configured cap. Thumbnails are kept where practical.</p>
+  </div>
+  <div class="board-settings-grid admin-settings-grid">
     <label title="Set to 0 to leave the active media cap unset. When pruning is enabled, use at least 1 MiB.">
       Maximum active content database/media size
       <span class="admin-inline-control">
@@ -209,17 +217,17 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
       </span>
     </label>
   </div>
-  <p class="admin-meta-note admin-meta-note-spaced">
-    This controls how long RustChan lets ffmpeg run while converting uploaded videos.
-    Slow systems such as Raspberry Pi devices may need a higher value.
-    MP4 to WebM/VP9 encoding can be especially slow without hardware acceleration.
-    If videos fail to convert because of timeouts, increase this value.
-  </p>
-  <div class="board-settings-actions">
-    <button type="submit">save media settings</button>
+  <div class="board-settings-checks">
+    <label class="admin-inline-checkbox" title="Delete oldest full-size post media when active stored media exceeds the configured cap. Thumbnails are kept where practical.">
+      <input type="checkbox" name="media_auto_prune_enabled" value="1"{media_auto_prune_checked}>
+      Enable automatic active content pruning
+    </label>
   </div>
-</form>
 </div>
+<div class="board-settings-actions">
+  <button type="submit">save media settings</button>
+</div>
+</form>
 </div>
 </details>
 </section>
