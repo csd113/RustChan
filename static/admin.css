@@ -2177,6 +2177,7 @@ html:not([data-theme]) .admin-login h1 {
 
   .admin-section {
     padding: 0.8rem;
+    overflow-x: hidden;
     overflow-x: clip;
   }
 
@@ -2486,6 +2487,94 @@ html:not([data-theme]) .admin-login h1 {
   .admin-moderation-card .admin-table th:last-child,
   .admin-moderation-card .admin-table td:last-child {
     white-space: nowrap;
+  }
+}
+
+@media (max-width: 420px) {
+  .admin-table-wrap {
+    overflow-x: visible;
+  }
+
+  .backup-table,
+  .admin-result-table,
+  .admin-panel .admin-section > .admin-table-wrap > .admin-table,
+  .admin-moderation-card .admin-table {
+    min-width: 0 !important;
+    width: 100%;
+  }
+
+  .backup-table thead,
+  .admin-result-table thead,
+  .admin-panel .admin-section > .admin-table-wrap > .admin-table thead,
+  .admin-moderation-card .admin-table thead {
+    display: none;
+  }
+
+  .backup-table tbody,
+  .backup-table tr,
+  .backup-table td,
+  .admin-result-table tbody,
+  .admin-result-table tr,
+  .admin-result-table td,
+  .admin-panel .admin-section > .admin-table-wrap > .admin-table tbody,
+  .admin-panel .admin-section > .admin-table-wrap > .admin-table tr,
+  .admin-panel .admin-section > .admin-table-wrap > .admin-table td,
+  .admin-moderation-card .admin-table tbody,
+  .admin-moderation-card .admin-table tr,
+  .admin-moderation-card .admin-table td {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .backup-table tr,
+  .admin-result-table tr,
+  .admin-panel .admin-section > .admin-table-wrap > .admin-table tr,
+  .admin-moderation-card .admin-table tr {
+    margin: 0 0 0.75rem;
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--panel) 86%, transparent);
+  }
+
+  .backup-table td,
+  .admin-result-table td,
+  .admin-panel .admin-section > .admin-table-wrap > .admin-table td,
+  .admin-moderation-card .admin-table td {
+    border: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .backup-table td:last-child,
+  .admin-result-table td:last-child,
+  .admin-panel .admin-section > .admin-table-wrap > .admin-table td:last-child,
+  .admin-moderation-card .admin-table td:last-child {
+    border-bottom: 0;
+  }
+
+  .backup-primary-actions,
+  .backup-extract-form,
+  .admin-inline-actions,
+  .admin-moderation-form,
+  .admin-result-actions,
+  .board-settings-grid,
+  .full-backup-run-actions {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .backup-extract-form input[type="text"],
+  .backup-extract-form select,
+  .board-settings-form input,
+  .board-settings-form select,
+  .board-settings-form textarea,
+  .admin-site-settings-form input,
+  .admin-site-settings-form select {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
   }
 }
 

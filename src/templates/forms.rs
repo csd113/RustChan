@@ -66,8 +66,8 @@ fn render_captcha_row(board_short: &str, reply_suffix: &str) -> String {
     format!(
         r#"    <tr id="captcha-row-{board}{suffix}"><td>captcha</td>
         <td>
-          <span id="captcha-status-{board}{suffix}" class="form-field-help">waiting for the JavaScript proof-of-work solver…</span>
-          <noscript><div class="form-field-help">This board&apos;s CAPTCHA is solved in JavaScript. Enable JavaScript and wait for the checkmark before posting.</div></noscript>
+          <span id="captcha-status-{board}{suffix}" class="form-field-help">waiting for the JavaScript proof-of-work solver… posting on this board requires JavaScript.</span>
+          <noscript><div class="form-field-help">Posting on this board requires JavaScript because its CAPTCHA uses proof-of-work. Enable JavaScript, wait for the checkmark, then submit.</div></noscript>
           <input type="hidden" name="pow_nonce" id="pow-nonce-{board}{suffix}" value=""
                  data-pow-board="{board}" data-pow-difficulty="{difficulty}">
         </td></tr>"#,
@@ -511,7 +511,7 @@ mod tests {
             None,
         );
 
-        assert!(html.contains("waiting for the JavaScript proof-of-work solver"));
-        assert!(html.contains("Enable JavaScript and wait for the checkmark before posting"));
+        assert!(html.contains("posting on this board requires JavaScript"));
+        assert!(html.contains("CAPTCHA uses proof-of-work"));
     }
 }

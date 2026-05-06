@@ -590,6 +590,127 @@ function absoluteUrl(url) {
   }
 }
 
+function fetchWithTimeout(url, options, timeoutMs) {
+  options = options || {};
+  timeoutMs = timeoutMs || 30000;
+  if (!window.AbortController && window.XMLHttpRequest) {
+    return xhrWithTimeout(url, options, timeoutMs);
+  }
+  var timer = null;
+  var controller = null;
+  if (window.AbortController) {
+    controller = new AbortController();
+    options.signal = controller.signal;
+  }
+
+  var timeoutPromise = new Promise(function (_resolve, reject) {
+    timer = window.setTimeout(function () {
+      var error = new Error('request timed out');
+      error.name = 'AbortError';
+      if (controller) {
+        controller.abort();
+      }
+      reject(error);
+    }, timeoutMs);
+  });
+
+  return Promise.race([fetch(url, options), timeoutPromise]).then(
+    function (response) {
+      if (timer) window.clearTimeout(timer);
+      return response;
+    },
+    function (error) {
+      if (timer) window.clearTimeout(timer);
+      throw error;
+    }
+  );
+}
+
+function normalizeRequestHeaders(headers) {
+  var pairs = [];
+  if (!headers) return pairs;
+  if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+    headers.forEach(function (value, key) {
+      pairs.push([key, value]);
+    });
+    return pairs;
+  }
+  Object.keys(headers).forEach(function (key) {
+    pairs.push([key, headers[key]]);
+  });
+  return pairs;
+}
+
+function hasRequestHeader(headers, name) {
+  var lower = String(name || '').toLowerCase();
+  var found = false;
+  normalizeRequestHeaders(headers).forEach(function (pair) {
+    if (String(pair[0]).toLowerCase() === lower) found = true;
+  });
+  return found;
+}
+
+function makeXhrResponse(xhr) {
+  return {
+    ok: xhr.status >= 200 && xhr.status < 300,
+    status: xhr.status,
+    redirected: false,
+    url: xhr.responseURL || '',
+    headers: {
+      get: function (name) {
+        return xhr.getResponseHeader(name);
+      }
+    },
+    text: function () {
+      return Promise.resolve(xhr.responseText || '');
+    },
+    json: function () {
+      try {
+        return Promise.resolve(JSON.parse(xhr.responseText || '{}'));
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+  };
+}
+
+function xhrWithTimeout(url, options, timeoutMs) {
+  return new Promise(function (resolve, reject) {
+    var xhr = new XMLHttpRequest();
+    var method = options.method || 'GET';
+    var body = options.body || null;
+    xhr.open(method, url, true);
+    xhr.timeout = timeoutMs;
+    if (options.credentials !== 'omit') xhr.withCredentials = true;
+    normalizeRequestHeaders(options.headers).forEach(function (pair) {
+      xhr.setRequestHeader(pair[0], pair[1]);
+    });
+    if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+      if (!hasRequestHeader(options.headers, 'Content-Type')) {
+        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded;charset=UTF-8');
+      }
+      body = body.toString();
+    }
+    xhr.addEventListener('load', function () {
+      resolve(makeXhrResponse(xhr));
+    });
+    xhr.addEventListener('timeout', function () {
+      var error = new Error('request timed out');
+      error.name = 'AbortError';
+      reject(error);
+    });
+    xhr.addEventListener('error', function () {
+      reject(new Error('request failed'));
+    });
+    xhr.addEventListener('abort', function () {
+      var error = new Error('request aborted');
+      error.name = 'AbortError';
+      reject(error);
+    });
+    xhr.send(body);
+  });
+}
+
 function isSameDocumentNavigationTarget(url) {
   var target = absoluteUrl(url);
   var current = absoluteUrl(window.location.href);
@@ -769,6 +890,7 @@ function submitPostFormWithProgress(form) {
     }
   });
   xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
+  xhr.timeout = 600000;
   xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
   clearPostFormFeedback(form);
@@ -834,6 +956,13 @@ function submitPostFormWithProgress(form) {
     resetPostSubmitFailureState(
       form,
       'Connection dropped before the server response arrived. Your post may still have succeeded. Refresh the thread or board before trying again.'
+    );
+  });
+
+  xhr.addEventListener('timeout', function () {
+    resetPostSubmitFailureState(
+      form,
+      'Request timed out before the server response arrived. Request may still have succeeded. Refresh before retrying.'
     );
   });
 
@@ -1002,7 +1131,15 @@ function wireMediaThumbFallbacks(root) {
     img.dataset.mediaThumbWired = '1';
 
     var wrapper = img.closest('.media-preview, .catalog-card-media, .audio-thumb');
-    var fallback = wrapper ? wrapper.querySelector(':scope > .media-thumb-fallback') : null;
+    var fallback = null;
+    if (wrapper && wrapper.children) {
+      for (var i = 0; i < wrapper.children.length; i += 1) {
+        if (wrapper.children[i].classList && wrapper.children[i].classList.contains('media-thumb-fallback')) {
+          fallback = wrapper.children[i];
+          break;
+        }
+      }
+    }
     if (!fallback || !fallback.classList || !fallback.classList.contains('media-thumb-fallback')) {
       return;
     }
@@ -1721,12 +1858,12 @@ function submitEditModalForm(form) {
   var error = modal.querySelector('[data-role="edit-modal-error"]');
   if (error) error.hidden = true;
 
-  fetch(form.action, {
+  fetchWithTimeout(form.action, {
     method: 'POST',
     body: new URLSearchParams(new FormData(form)),
     credentials: 'same-origin',
     headers: { 'X-Requested-With': 'XMLHttpRequest' }
-  })
+  }, 45000)
     .then(function (response) {
       var redirect = response.headers.get('x-rustchan-redirect');
       if (redirect) {
@@ -1747,9 +1884,13 @@ function submitEditModalForm(form) {
       if (submitter) submitter.disabled = false;
       showEditModalError(payload.error || 'Unable to save your edit.');
     })
-    .catch(function () {
+    .catch(function (error) {
       if (submitter) submitter.disabled = false;
-      showEditModalError('Unable to save your edit.');
+      showEditModalError(
+        error && error.name === 'AbortError'
+          ? 'Request timed out. Request may still have succeeded. Refresh before retrying.'
+          : 'Unable to save your edit. Request may still have succeeded. Refresh before retrying.'
+      );
     });
 
   return true;
@@ -1886,6 +2027,7 @@ function toggleThreadMenu(toggle) {
   var timer = null;
   var updating = false;
   var autoOn = false;
+  var consecutiveUpdateFailures = 0;
 
   if (!container) return;
 
@@ -2016,9 +2158,14 @@ function toggleThreadMenu(toggle) {
     if (refreshIds.length) {
       url += '&refresh=' + encodeURIComponent(refreshIds.join(','));
     }
-    fetch(url, { credentials: 'same-origin' })
+    fetchWithTimeout(url, { credentials: 'same-origin' }, 30000)
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function (data) {
+        consecutiveUpdateFailures = 0;
+        if (autoOn && timer) {
+          clearInterval(timer);
+          timer = setInterval(window.fetchUpdates, 15000);
+        }
         applyDeltaState(data);
         var refreshedChanged = applyRefreshedPosts(data.refreshed_posts);
         if (data.count > 0) {
@@ -2050,10 +2197,24 @@ function toggleThreadMenu(toggle) {
         setUpdateButtonsBusy(false);
         updating = false;
       })
-      .catch(function () {
-        setStatus('Update failed.', { state: 'error', persist: true });
+      .catch(function (error) {
+        consecutiveUpdateFailures += 1;
+        var delayMs = Math.min(
+          60000,
+          15000 * Math.pow(2, Math.min(consecutiveUpdateFailures - 1, 2))
+        );
+        setStatus(
+          error && error.name === 'AbortError'
+            ? 'Update timed out. Retrying in ' + Math.round(delayMs / 1000) + 's.'
+            : 'Update failed. Retrying in ' + Math.round(delayMs / 1000) + 's.',
+          { state: 'error', persist: true }
+        );
         setUpdateButtonsBusy(false);
         updating = false;
+        if (autoOn && timer) {
+          clearInterval(timer);
+          timer = setInterval(window.fetchUpdates, delayMs);
+        }
       });
   };
 
@@ -2063,6 +2224,7 @@ function toggleThreadMenu(toggle) {
     if (autoOn) {
       if (timer) clearInterval(timer);
       timer = setInterval(window.fetchUpdates, 15000);
+      consecutiveUpdateFailures = 0;
       setStatus('Auto-update on.', { state: 'working' });
     } else {
       if (timer) { clearInterval(timer); timer = null; }
@@ -2691,7 +2853,7 @@ function sortCatalog(mode) {
   try { sessionStorage.setItem('catalog_sort', mode); } catch (e) {}
   var grid = document.getElementById('catalog-grid');
   if (!grid) return;
-  var items = Array.from(grid.querySelectorAll('.catalog-item'));
+  var items = Array.prototype.slice.call(grid.querySelectorAll('.catalog-item'));
   items.sort(function (a, b) {
     var ap = parseInt(a.dataset.pinned) || 0;
     var bp = parseInt(b.dataset.pinned) || 0;
@@ -2720,7 +2882,7 @@ function setCatalogCommentVisibility(mode) {
 }
 
 function togglePosterHighlights(threadId, posterId) {
-  var posts = Array.from(document.querySelectorAll('.post[data-thread-id]'));
+  var posts = Array.prototype.slice.call(document.querySelectorAll('.post[data-thread-id]'));
   var matching = posts.filter(function (post) {
     return post.dataset.threadId === String(threadId) && post.dataset.posterId === posterId;
   });

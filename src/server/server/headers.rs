@@ -157,7 +157,31 @@ fn public_dynamic_html_path(path: &str) -> bool {
 }
 
 fn sensitive_admin_html_path(path: &str) -> bool {
-    matches!(path, "/admin" | "/admin/panel" | "/admin/mod-log")
+    if matches!(
+        path,
+        "/admin"
+            | "/admin/panel"
+            | "/admin/mod-log"
+            | "/admin/backup"
+            | "/admin/backup/create"
+            | "/admin/backup/delete"
+            | "/admin/backup/extract-board"
+            | "/admin/backup/restore-saved"
+            | "/admin/backup/settings"
+            | "/admin/board/backup/create"
+            | "/admin/board/backup/restore-saved"
+            | "/admin/board/restore"
+            | "/admin/db/check"
+            | "/admin/db/repair"
+            | "/admin/db/repair/status"
+            | "/admin/restore"
+            | "/admin/vacuum"
+    ) {
+        return true;
+    }
+
+    path.strip_prefix("/admin/ip/")
+        .is_some_and(|tail| !tail.is_empty())
 }
 
 fn response_content_type_starts_with(headers: &http::HeaderMap, prefix: &str) -> bool {
@@ -272,8 +296,8 @@ fn is_loopback_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        hsts_middleware_with_mode, public_dynamic_html_path, should_emit_hsts,
-        CONTENT_SECURITY_POLICY,
+        hsts_middleware_with_mode, public_dynamic_html_path, sensitive_admin_html_path,
+        should_emit_hsts, CONTENT_SECURITY_POLICY,
     };
     use axum::{
         body::Body,
@@ -321,6 +345,87 @@ mod tests {
         assert!(!public_dynamic_html_path("/boards/b/file.webp"));
         assert!(!public_dynamic_html_path("/api/post/b/1"));
         assert!(!public_dynamic_html_path("/banner/assets/1"));
+    }
+
+    #[test]
+    fn sensitive_admin_html_paths_get_no_store_policy() {
+        for path in [
+            "/admin",
+            "/admin/panel",
+            "/admin/mod-log",
+            "/admin/backup",
+            "/admin/backup/create",
+            "/admin/backup/delete",
+            "/admin/backup/extract-board",
+            "/admin/backup/restore-saved",
+            "/admin/backup/settings",
+            "/admin/board/backup/create",
+            "/admin/board/backup/restore-saved",
+            "/admin/board/restore",
+            "/admin/db/check",
+            "/admin/db/repair",
+            "/admin/db/repair/status",
+            "/admin/restore",
+            "/admin/vacuum",
+            "/admin/ip/abcdef123456",
+        ] {
+            assert!(sensitive_admin_html_path(path), "{path} should be no-store");
+        }
+
+        assert!(!sensitive_admin_html_path("/admin/backup/progress"));
+        assert!(!sensitive_admin_html_path(
+            "/admin/backup/download/full/site.zip"
+        ));
+        assert!(!sensitive_admin_html_path("/admin/ip/"));
+    }
+
+    #[tokio::test]
+    async fn admin_cache_middleware_no_store_for_sensitive_html_only() {
+        let app = Router::new()
+            .route(
+                "/admin/backup",
+                get(|| async { ([("content-type", "text/html; charset=utf-8")], "ok") }),
+            )
+            .route(
+                "/admin/backup/progress",
+                get(|| async { ([("content-type", "application/json")], "{}") }),
+            )
+            .layer(from_fn(super::admin_cache_middleware));
+
+        let html_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/backup")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            html_response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
+        );
+
+        let json_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/backup/progress")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            json_response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
+        );
     }
 
     #[tokio::test]

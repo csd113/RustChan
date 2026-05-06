@@ -730,6 +730,220 @@
 })();
 
 (function () {
+  function fetchJsonWithTimeout(url, timeoutMs) {
+    if (!window.AbortController && window.XMLHttpRequest) {
+      return new Promise(function (resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', url, true);
+        xhr.withCredentials = true;
+        xhr.timeout = timeoutMs;
+        xhr.setRequestHeader('Accept', 'application/json');
+        xhr.addEventListener('load', function () {
+          if (xhr.status < 200 || xhr.status >= 300) {
+            reject(new Error('poll request failed'));
+            return;
+          }
+          try {
+            resolve(JSON.parse(xhr.responseText || '{}'));
+          } catch (error) {
+            reject(error);
+          }
+        });
+        xhr.addEventListener('timeout', function () {
+          var error = new Error('poll request timed out');
+          error.name = 'AbortError';
+          reject(error);
+        });
+        xhr.addEventListener('error', function () {
+          reject(new Error('poll request failed'));
+        });
+        xhr.send();
+      });
+    }
+
+    var controller = null;
+    var timer = null;
+    var options = {
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' },
+      cache: 'no-store'
+    };
+
+    if (window.AbortController) {
+      controller = new AbortController();
+      options.signal = controller.signal;
+      timer = window.setTimeout(function () {
+        controller.abort();
+      }, timeoutMs);
+    }
+
+    return fetch(url, options)
+      .then(function (resp) {
+        if (timer) window.clearTimeout(timer);
+        if (!resp.ok) throw new Error('poll request failed');
+        return resp.json();
+      }, function (error) {
+        if (timer) window.clearTimeout(timer);
+        throw error;
+      });
+  }
+
+  function requestHeaders(headers) {
+    var pairs = [];
+    Object.keys(headers || {}).forEach(function (key) {
+      pairs.push([key, headers[key]]);
+    });
+    return pairs;
+  }
+
+  function xhrResponse(xhr) {
+    return {
+      ok: xhr.status >= 200 && xhr.status < 300,
+      status: xhr.status,
+      redirected: false,
+      headers: {
+        get: function (name) {
+          return xhr.getResponseHeader(name);
+        }
+      },
+      json: function () {
+        try {
+          return Promise.resolve(JSON.parse(xhr.responseText || '{}'));
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      }
+    };
+  }
+
+  function xhrRequestWithTimeout(url, options, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      var body = options.body || null;
+      xhr.open(options.method || 'GET', url, true);
+      xhr.withCredentials = options.credentials !== 'omit';
+      xhr.timeout = timeoutMs;
+      requestHeaders(options.headers).forEach(function (pair) {
+        xhr.setRequestHeader(pair[0], pair[1]);
+      });
+      if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded;charset=UTF-8');
+        body = body.toString();
+      }
+      xhr.addEventListener('load', function () {
+        resolve(xhrResponse(xhr));
+      });
+      xhr.addEventListener('timeout', function () {
+        var error = new Error('request timed out');
+        error.name = 'AbortError';
+        reject(error);
+      });
+      xhr.addEventListener('error', function () {
+        reject(new Error('request failed'));
+      });
+      xhr.send(body);
+    });
+  }
+
+  function requestWithTimeout(url, options, timeoutMs) {
+    options = options || {};
+    timeoutMs = timeoutMs || 600000;
+    if (!window.AbortController && window.XMLHttpRequest) {
+      return xhrRequestWithTimeout(url, options, timeoutMs);
+    }
+    if (!window.fetch) return Promise.reject(new Error('request unsupported'));
+
+    var timer = null;
+    var controller = null;
+    if (window.AbortController) {
+      controller = new AbortController();
+      options.signal = controller.signal;
+      timer = window.setTimeout(function () {
+        controller.abort();
+      }, timeoutMs);
+    }
+
+    return fetch(url, options).then(function (response) {
+      if (timer) window.clearTimeout(timer);
+      return response;
+    }, function (error) {
+      if (timer) window.clearTimeout(timer);
+      throw error;
+    });
+  }
+
+  function createAdminJsonPoller(options) {
+    options = options || {};
+    var stopped = false;
+    var inFlight = false;
+    var timer = null;
+    var failures = 0;
+    var baseDelay = options.baseDelayMs || 750;
+    var timeoutMs = options.timeoutMs || 20000;
+    var maxDelay = options.maxDelayMs || 12000;
+
+    function nextDelay(failed) {
+      if (!failed) return baseDelay;
+      return Math.min(maxDelay, baseDelay * Math.pow(2, Math.min(failures - 1, 4)));
+    }
+
+    function schedule(delayMs) {
+      if (stopped) return;
+      timer = window.setTimeout(poll, delayMs);
+    }
+
+    function poll() {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      fetchJsonWithTimeout(options.url, timeoutMs)
+        .then(function (data) {
+          failures = 0;
+          if (options.onData && options.onData(data) === false) {
+            stopped = true;
+            return;
+          }
+          schedule(nextDelay(false));
+        })
+        .catch(function (error) {
+          failures += 1;
+          var delay = nextDelay(true);
+          if (options.onStatus) {
+            options.onStatus(
+              error && error.name === 'AbortError'
+                ? 'Progress request timed out. Retrying in ' + Math.round(delay / 1000) + 's...'
+                : 'Progress unavailable. Retrying in ' + Math.round(delay / 1000) + 's...'
+            );
+          }
+          schedule(delay);
+        })
+        .then(function () {
+          inFlight = false;
+        }, function () {
+          inFlight = false;
+        });
+    }
+
+    return {
+      start: function () {
+        stopped = false;
+        if (timer) window.clearTimeout(timer);
+        poll();
+      },
+      stop: function () {
+        stopped = true;
+        if (timer) {
+          window.clearTimeout(timer);
+          timer = null;
+        }
+      }
+    };
+  }
+
+  window.createAdminJsonPoller = createAdminJsonPoller;
+  window.adminRequestWithTimeout = requestWithTimeout;
+})();
+
+(function () {
   function initDbRepairProgress() {
     var wrap = document.querySelector('[data-db-repair-progress]');
     if (!wrap) return;
@@ -737,8 +951,8 @@
     var bar = wrap.querySelector('[data-db-repair-progress-bar]');
     var text = wrap.querySelector('[data-db-repair-progress-text]');
     var progressUrl = wrap.getAttribute('data-db-repair-progress-url') || '/admin/db/repair/progress';
-    var timer = null;
     var redirected = false;
+    var poller = null;
 
     function setProgress(percent, message) {
       percent = Math.min(100, Math.max(0, Number(percent) || 0));
@@ -747,10 +961,7 @@
     }
 
     function finish(data) {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
+      if (poller) poller.stop();
       if (redirected) return;
       redirected = true;
       setProgress(data && data.percent, data && data.label);
@@ -759,26 +970,23 @@
       }, 700);
     }
 
-    function poll() {
-      fetch(progressUrl, {
-        credentials: 'same-origin',
-        headers: { 'Accept': 'application/json' }
-      })
-        .then(function (resp) {
-          if (!resp.ok) throw new Error('progress request failed');
-          return resp.json();
-        })
-        .then(function (data) {
-          setProgress(data.percent, data.label);
-          if (data.done) finish(data);
-        })
-        .catch(function () {
-          setProgress(5, 'Still working. Waiting for progress update...');
-        });
-    }
-
-    poll();
-    timer = window.setInterval(poll, 750);
+    poller = window.createAdminJsonPoller({
+      url: progressUrl,
+      baseDelayMs: 750,
+      timeoutMs: 20000,
+      onData: function (data) {
+        setProgress(data.percent, data.label);
+        if (data.done) {
+          finish(data);
+          return false;
+        }
+        return true;
+      },
+      onStatus: function (message) {
+        setProgress(5, 'Still working. ' + message);
+      }
+    });
+    poller.start();
   }
 
   document.addEventListener('DOMContentLoaded', initDbRepairProgress);
@@ -787,7 +995,7 @@
 // Backup progress modal for both POST-based saves and GET downloads.
 // Handlers stay CSP-safe and reuse the same phase codes as middleware::backup_phase.
 (function () {
-  var _pollTimer = null;
+  var _poller = null;
   var _downloadMode = false;
 
   var PHASE_LABELS = [
@@ -828,41 +1036,52 @@
   }
 
   function _startPolling(onDone) {
-    if (_pollTimer) return;
-    _pollTimer = setInterval(function () {
-      fetch('/admin/backup/progress', { credentials: 'same-origin' })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          var phase = data.phase || 0;
-          var label = PHASE_LABELS[phase] || 'Working\u2026';
-          var pct = 0;
-          if (data.files_total > 0) {
-            pct = Math.min(98, Math.round((data.files_done / data.files_total) * 100));
-          } else if (phase === 1) {
-            pct = 5;
-          } else if (phase === 2) {
-            pct = 10;
-          }
-          var detail = data.files_total > 0
-            ? ' (' + data.files_done + '/' + data.files_total + ' files)'
-            : '';
-          _setBkProgress(pct, label + detail);
+    if (_poller) return;
+    _poller = window.createAdminJsonPoller({
+      url: '/admin/backup/progress',
+      baseDelayMs: 700,
+      timeoutMs: 20000,
+      onData: function (data) {
+        var phase = data.phase || 0;
+        var label = PHASE_LABELS[phase] || 'Working\u2026';
+        var pct = 0;
+        if (data.files_total > 0) {
+          pct = Math.min(98, Math.round((data.files_done / data.files_total) * 100));
+        } else if (phase === 1) {
+          pct = 5;
+        } else if (phase === 2) {
+          pct = 10;
+        }
+        var detail = data.files_total > 0
+          ? ' (' + data.files_done + '/' + data.files_total + ' files)'
+          : '';
+        _setBkProgress(pct, label + detail);
 
-          if (_downloadMode && phase === 5) {
-            _stopPolling();
-            _setBkProgress(100, '\u2713 Download ready!');
-            setTimeout(hideBackupModal, 1500);
-            if (onDone) onDone();
-          }
-        })
-        .catch(function () {});
-    }, 500);
+        if (_downloadMode && phase === 5) {
+          _stopPolling();
+          _setBkProgress(100, '\u2713 Download ready!');
+          setTimeout(hideBackupModal, 1500);
+          if (onDone) onDone();
+          return false;
+        }
+        if (phase === 5) {
+          _stopPolling();
+          _setBkProgress(100, 'Backup completed. Waiting for final response\u2026');
+          return false;
+        }
+        return true;
+      },
+      onStatus: function (message) {
+        _setBkProgress(5, 'Still working. ' + message);
+      }
+    });
+    _poller.start();
   }
 
   function _stopPolling() {
-    if (_pollTimer) {
-      clearInterval(_pollTimer);
-      _pollTimer = null;
+    if (_poller) {
+      _poller.stop();
+      _poller = null;
     }
   }
 
@@ -926,6 +1145,7 @@
     xhr = new XMLHttpRequest();
     xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
     xhr.withCredentials = true;
+    xhr.timeout = 600000;
     xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
     xhr.upload.addEventListener('progress', function (event) {
@@ -972,7 +1192,13 @@
 
     xhr.addEventListener('error', function () {
       submitHelper.setBusy(false);
-      submitHelper.setProgress(0, title + ' failed. Please try again.');
+      submitHelper.setProgress(0, title + ' failed. Request may still have succeeded. Refresh before retrying.');
+      showDoneButton();
+    });
+
+    xhr.addEventListener('timeout', function () {
+      submitHelper.setBusy(false);
+      submitHelper.setProgress(0, title + ' timed out. Request may still have succeeded. Refresh before retrying.');
       showDoneButton();
     });
 
@@ -1003,12 +1229,12 @@
       headers['X-Rustchan-Download-After-Create'] = '1';
     }
 
-    fetch(form.action, {
+    window.adminRequestWithTimeout(form.action, {
       method: 'POST',
       body: params,
       credentials: 'same-origin',
       headers: headers
-    })
+    }, 600000)
       .then(function (resp) {
         _stopPolling();
         if (!resp.ok && !resp.redirected) {
@@ -1052,7 +1278,11 @@
       .catch(function (err) {
         _stopPolling();
         submitHelper.setBusy(false);
-        submitHelper.setProgress(0, title + ': ' + (err.message || 'request failed'));
+        submitHelper.setProgress(
+          0,
+          title + ': ' + (err.message || 'request failed') +
+          '. The request may still have succeeded. Refresh before retrying.'
+        );
         showDoneButton();
       });
   }

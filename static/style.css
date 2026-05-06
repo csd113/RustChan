@@ -1626,6 +1626,20 @@ html:not([data-theme]) .poster-id-btn {
   overflow: auto;
 }
 
+@media (max-width: 700px) {
+  .media-expanded-pdf {
+    height: min(72vh, 620px);
+    min-height: min(420px, 72vh);
+  }
+}
+
+@media (max-height: 430px) and (orientation: landscape) {
+  .media-expanded-pdf {
+    height: min(68vh, 320px);
+    min-height: 220px;
+  }
+}
+
 .media-close-btn {
   display: none; /* shown via JS as inline-flex */
   align-items: center;

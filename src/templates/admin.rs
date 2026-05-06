@@ -611,7 +611,9 @@ fn render_board_settings_card(
   </div>
   <div class="board-settings-checks">
     <label><input type="checkbox" name="clear_access_password" value="1"> Remove saved password</label>
-    <label><input type="checkbox" name="allow_captcha" value="1"{captcha_checked}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)</label>
+    <label><input type="checkbox" name="allow_captcha" value="1"{captcha_checked}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)
+      <span class="admin-quick-help">Enabling this makes posting require JavaScript on this board.</span>
+    </label>
   </div>
 </div>
 <div class="admin-subsection">
@@ -2217,6 +2219,7 @@ mod tests {
         assert!(html.contains("// create board"));
         assert!(html.contains(r#"name="allow_audio" value="1"> Enable audio uploads"#));
         assert!(html.contains(r#"name="allow_pdf" value="1"> Allow PDF uploads"#));
+        assert!(html.contains("Enabling this makes posting require JavaScript on this board."));
         assert!(html.contains(r#"data-admin-dropdown-key="boards""#));
         assert!(html.contains("// board appearance overrides"));
         assert!(html.contains("id=\"board-appearance-tech\""));
