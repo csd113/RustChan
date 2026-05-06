@@ -2,7 +2,7 @@
 
 Current setup and deployment guide for Linux, macOS, and Windows.
 
-Current development version: `1.1.6-development`.
+Current development version: `1.1.6`.
 
 This guide reflects the current RustChan architecture:
 
