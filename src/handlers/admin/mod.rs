@@ -598,6 +598,8 @@ struct AdminPanelSnapshot {
     db_size_bytes: i64,
     db_size_warning: bool,
     ffmpeg_timeout_secs: u64,
+    media_auto_prune_enabled: bool,
+    media_max_active_content_size_bytes: u64,
     ffmpeg_available: bool,
     ffprobe_available: bool,
     ffmpeg_webp_available: bool,
@@ -654,6 +656,8 @@ struct MaintenanceDomainData {
     db_size_bytes: i64,
     db_size_warning: bool,
     ffmpeg_timeout_secs: u64,
+    media_auto_prune_enabled: bool,
+    media_max_active_content_size_bytes: u64,
     ffmpeg_available: bool,
     ffprobe_available: bool,
     ffmpeg_webp_available: bool,
@@ -735,6 +739,8 @@ fn load_maintenance_domain_data(
         db_size_bytes,
         db_size_warning,
         ffmpeg_timeout_secs: crate::config::ffmpeg_timeout_secs(),
+        media_auto_prune_enabled: db::get_media_auto_prune_enabled(conn),
+        media_max_active_content_size_bytes: db::get_media_max_active_content_size_bytes(conn),
         ffmpeg_available: state.ffmpeg_available,
         ffprobe_available: state.ffprobe_available,
         ffmpeg_webp_available: state.ffmpeg_webp_available,
@@ -784,6 +790,9 @@ fn load_admin_panel_snapshot(
             db_size_bytes: maintenance_domain.db_size_bytes,
             db_size_warning: maintenance_domain.db_size_warning,
             ffmpeg_timeout_secs: maintenance_domain.ffmpeg_timeout_secs,
+            media_auto_prune_enabled: maintenance_domain.media_auto_prune_enabled,
+            media_max_active_content_size_bytes: maintenance_domain
+                .media_max_active_content_size_bytes,
             ffmpeg_available: maintenance_domain.ffmpeg_available,
             ffprobe_available: maintenance_domain.ffprobe_available,
             ffmpeg_webp_available: maintenance_domain.ffmpeg_webp_available,
@@ -892,6 +901,8 @@ fn render_admin_panel_from_snapshot(
             db_size_bytes: snapshot.db_size_bytes,
             db_size_warning: snapshot.db_size_warning,
             ffmpeg_timeout_secs: snapshot.ffmpeg_timeout_secs,
+            media_auto_prune_enabled: snapshot.media_auto_prune_enabled,
+            media_max_active_content_size_bytes: snapshot.media_max_active_content_size_bytes,
             media_detection: crate::templates::AdminMediaDetectionView {
                 ffmpeg: if snapshot.ffmpeg_available {
                     crate::templates::AdminDetectionStatus::Detected

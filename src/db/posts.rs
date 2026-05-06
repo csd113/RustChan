@@ -1300,6 +1300,7 @@ fn reset_interrupted_media_posts(conn: &rusqlite::Connection, post_ids: &[i64]) 
 
 pub const MEDIA_PROCESSING_PENDING: &str = "pending";
 pub const MEDIA_PROCESSING_FAILED: &str = "failed";
+pub const MEDIA_ORIGINAL_PRUNED: &str = "pruned";
 
 /// Update a post's async media-processing state.
 ///

@@ -123,6 +123,8 @@ pub struct AdminPanelMaintenanceView {
     pub db_size_bytes: i64,
     pub db_size_warning: bool,
     pub ffmpeg_timeout_secs: u64,
+    pub media_auto_prune_enabled: bool,
+    pub media_max_active_content_size_bytes: u64,
     pub media_detection: AdminMediaDetectionView,
 }
 
@@ -1875,6 +1877,8 @@ mod tests {
                 db_size_bytes: 4096,
                 db_size_warning: false,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
+                media_auto_prune_enabled: false,
+                media_max_active_content_size_bytes: 0,
                 media_detection: AdminMediaDetectionView {
                     ffmpeg: AdminDetectionStatus::Detected,
                     ffprobe: AdminDetectionStatus::Detected,
@@ -2241,6 +2245,9 @@ mod tests {
         assert!(html.contains("// media pipeline detection"));
         assert!(html.contains("video thumbnails, waveform jobs, and transcoding entrypoint"));
         assert!(html.contains("selected renderer: pdftoppm"));
+        assert!(html.contains("Enable automatic active content pruning"));
+        assert!(html.contains("name=\"media_max_active_content_size\""));
+        assert!(html.contains("Maximum active content database/media size"));
         assert!(html.contains("save media settings"));
     }
 
@@ -2376,6 +2383,8 @@ mod tests {
                 db_size_bytes: 4096,
                 db_size_warning: false,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
+                media_auto_prune_enabled: false,
+                media_max_active_content_size_bytes: 0,
                 media_detection: AdminMediaDetectionView {
                     ffmpeg: AdminDetectionStatus::Missing,
                     ffprobe: AdminDetectionStatus::Missing,

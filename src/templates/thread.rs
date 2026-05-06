@@ -895,6 +895,10 @@ pub fn render_post(
                 r#" <span class="post-edited" title="{title}">(media processing failed)</span>"#
             )
         }
+        Some("pruned") => {
+            r#" <span class="post-edited" title="Original file removed by active media pruning.">(original file removed)</span>"#
+                .to_string()
+        }
         _ => String::new(),
     };
     let media_processing_state_attr = post
@@ -928,10 +932,45 @@ pub fn render_post(
 
     let primary_media_type = effective_media_type(post);
     let thumb_loading = if post.is_op { "eager" } else { "lazy" };
+    let original_pruned =
+        post.media_processing_state.as_deref() == Some(crate::db::MEDIA_ORIGINAL_PRUNED);
 
     // Image / Video / Audio
     if show_media {
-        if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
+        if original_pruned {
+            let name_str = post.file_name.as_deref().unwrap_or("file");
+            let size_str = post.file_size.map(format_file_size).unwrap_or_default();
+            let thumb_html = post
+                .thumb_path
+                .as_deref()
+                .map_or_else(String::new, |thumb| {
+                    format!(
+                        r#"<div class="media-preview media-preview-pruned">{}</div>"#,
+                        render_media_thumb(
+                            "thumb",
+                            "thumb",
+                            thumb,
+                            "pruned media preview",
+                            thumb_loading,
+                            "original removed",
+                        )
+                    )
+                });
+            let _ = write!(
+                html,
+                r#"<div class="file-container media-pruned">
+<div class="file-info">
+  File: <span title="{orig}">{name}</span> ({sz})
+  <span class="post-edited" title="Original full-size file was removed by active media pruning.">original file removed</span>
+</div>
+{thumb_html}
+</div>"#,
+                orig = escape_html(name_str),
+                name = escape_html(&display_file_name(name_str)),
+                sz = escape_html(&size_str),
+                thumb_html = thumb_html,
+            );
+        } else if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
             let size_str = post.file_size.map(format_file_size).unwrap_or_default();
             let name_str = post.file_name.as_deref().unwrap_or("file");
             let file_link = render_file_link(file, name_str);
@@ -1129,7 +1168,10 @@ pub fn render_post(
         }
     }
 
-    if show_media && matches!(&post.media_type, Some(crate::models::MediaType::Other)) {
+    if show_media
+        && !original_pruned
+        && matches!(&post.media_type, Some(crate::models::MediaType::Other))
+    {
         if let Some(file) = &post.file_path {
             let size_str = post.file_size.map(format_file_size).unwrap_or_default();
             let name_str = post.file_name.as_deref().unwrap_or("download");
@@ -1148,7 +1190,10 @@ pub fn render_post(
     }
 
     // Secondary audio fallback for legacy rows that store a separate audio attachment.
-    if show_media && !matches!(primary_media_type, crate::models::MediaType::Image) {
+    if show_media
+        && !original_pruned
+        && !matches!(primary_media_type, crate::models::MediaType::Image)
+    {
         if let (Some(aud_file), Some(aud_mime)) = (&post.audio_file_path, &post.audio_mime_type) {
             let aud_name = post.audio_file_name.as_deref().unwrap_or("audio");
             let aud_size = post
@@ -1714,6 +1759,73 @@ mod tests {
         assert!(html.contains("media processing failed"));
         assert!(html.contains("Preview generation failed; original file is still available."));
         assert!(html.contains(r#"href="/boards/test/image.webp""#));
+    }
+
+    #[test]
+    fn pruned_original_renders_thumbnail_without_original_link() {
+        let mut post = sample_post();
+        post.media_processing_state = Some(crate::db::MEDIA_ORIGINAL_PRUNED.into());
+        post.media_processing_error = Some("original file removed".into());
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html.contains("original file removed"));
+        assert!(html.contains("/boards/test/thumbs/image.webp"));
+        assert!(!html.contains(r#"href="/boards/test/image.webp""#));
+        assert!(!html.contains(r#"data-src="/boards/test/image.webp""#));
+    }
+
+    #[test]
+    fn pruned_generic_download_does_not_render_stale_download_link() {
+        let mut post = sample_post();
+        post.file_path = Some("test/archive.zip".into());
+        post.file_name = Some("archive.zip".into());
+        post.thumb_path = None;
+        post.mime_type = Some("application/zip".into());
+        post.media_type = Some(MediaType::Other);
+        post.media_processing_state = Some(crate::db::MEDIA_ORIGINAL_PRUNED.into());
+        post.media_processing_error = Some("original file removed".into());
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+            },
+            0,
+        );
+
+        assert!(html.contains("original file removed"));
+        assert!(!html.contains(r#"href="/boards/test/archive.zip""#));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 pub mod convert;
 pub mod exif;
 pub mod ffmpeg;
+pub mod prune;
 pub mod thumbnail;
 
 use anyhow::{Context, Result};

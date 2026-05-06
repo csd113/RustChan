@@ -8,6 +8,9 @@ struct MaintenanceSectionView<'a> {
     tor_section: &'a str,
     ffmpeg_timeout_secs: u64,
     ffmpeg_timeout_help: &'a str,
+    media_auto_prune_enabled: bool,
+    media_max_active_content_size_value: u64,
+    media_max_active_content_size_unit: &'a str,
     media_detection_cards: &'a str,
     media_settings_open_attr: &'a str,
     database_maintenance_open_attr: &'a str,
@@ -53,6 +56,8 @@ old boards to prevent query performance degradation.
     let db_size_str = format_file_size(view.maintenance.db_size_bytes);
     let ffmpeg_timeout_help =
         crate::config::describe_timeout_secs(view.maintenance.ffmpeg_timeout_secs);
+    let (media_max_value, media_max_unit) =
+        media_size_input_parts(view.maintenance.media_max_active_content_size_bytes);
     let media_detection_cards = render_media_detection_cards(view);
     let section_view = MaintenanceSectionView {
         csrf_token: view.csrf_token,
@@ -61,11 +66,24 @@ old boards to prevent query performance degradation.
         tor_section: &tor_section,
         ffmpeg_timeout_secs: view.maintenance.ffmpeg_timeout_secs,
         ffmpeg_timeout_help: &ffmpeg_timeout_help,
+        media_auto_prune_enabled: view.maintenance.media_auto_prune_enabled,
+        media_max_active_content_size_value: media_max_value,
+        media_max_active_content_size_unit: media_max_unit,
         media_detection_cards: &media_detection_cards,
         media_settings_open_attr,
         database_maintenance_open_attr,
     };
     render_admin_maintenance_section(&section_view)
+}
+
+const fn media_size_input_parts(bytes: u64) -> (u64, &'static str) {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    if bytes > 0 && bytes.is_multiple_of(GIB) {
+        (bytes / GIB, "gib")
+    } else {
+        (bytes / MIB, "mib")
+    }
 }
 
 fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
@@ -139,6 +157,7 @@ fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
     cards
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String {
     format!(
         r#"<div class="admin-panel-maintenance" id="maintenance">
@@ -171,6 +190,23 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
     <label title="Slow systems may need a higher value for ffmpeg video conversion jobs.">
       Video re-encoding timeout (seconds)
       <input type="number" name="ffmpeg_timeout_secs" value="{ffmpeg_timeout_secs}" min="{ffmpeg_timeout_min}" max="{ffmpeg_timeout_max}" step="1" inputmode="numeric" class="admin-input-compact" required>
+    </label>
+    <label title="Delete oldest full-size post media when active stored media exceeds the configured cap. Thumbnails are kept where practical.">
+      <span>
+        <input type="checkbox" name="media_auto_prune_enabled" value="1"{media_auto_prune_checked}>
+        Enable automatic active content pruning
+      </span>
+    </label>
+    <label title="Set to 0 to leave the active media cap unset. When pruning is enabled, use at least 1 MiB.">
+      Maximum active content database/media size
+      <span class="admin-inline-control">
+        <input type="number" name="media_max_active_content_size" value="{media_max_active_content_size}" min="0" step="1" inputmode="numeric" class="admin-input-compact">
+        <select name="media_max_active_content_size_unit">
+          <option value="mib"{media_max_unit_mib_selected}>MiB</option>
+          <option value="gib"{media_max_unit_gib_selected}>GiB</option>
+          <option value="bytes"{media_max_unit_bytes_selected}>bytes</option>
+        </select>
+      </span>
     </label>
   </div>
   <p class="admin-meta-note admin-meta-note-spaced">
@@ -229,6 +265,27 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
         db_warn_banner = view.db_warn_banner,
         db_size_str = view.db_size_str,
         ffmpeg_timeout_secs = view.ffmpeg_timeout_secs,
+        media_auto_prune_checked = if view.media_auto_prune_enabled {
+            " checked"
+        } else {
+            ""
+        },
+        media_max_active_content_size = view.media_max_active_content_size_value,
+        media_max_unit_mib_selected = if view.media_max_active_content_size_unit == "mib" {
+            " selected"
+        } else {
+            ""
+        },
+        media_max_unit_gib_selected = if view.media_max_active_content_size_unit == "gib" {
+            " selected"
+        } else {
+            ""
+        },
+        media_max_unit_bytes_selected = if view.media_max_active_content_size_unit == "bytes" {
+            " selected"
+        } else {
+            ""
+        },
         ffmpeg_timeout_help = escape_html(view.ffmpeg_timeout_help),
         media_detection_cards = view.media_detection_cards,
         ffmpeg_timeout_min = crate::config::MIN_FFMPEG_TIMEOUT_SECS,

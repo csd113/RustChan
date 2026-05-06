@@ -136,6 +136,13 @@ ffmpeg_timeout_secs = 600
 # Optional explicit ffprobe binary path. Leave unset to use PATH lookup.
 # ffprobe_path = "/usr/local/bin/ffprobe"
 
+# Automatically prune oldest full-size post media when active stored post media
+# exceeds the configured byte cap. Thumbnails are kept when possible so old
+# posts remain browsable. 0 means unset/no pruning.
+# After first startup, Admin -> Media Settings owns the live values.
+media_auto_prune_enabled = false
+media_max_active_content_size_bytes = 0
+
 
 # ── Maintenance / performance ────────────────────────────────────────────────
 # How often (in seconds) to run PRAGMA wal_checkpoint(TRUNCATE) to keep

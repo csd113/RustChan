@@ -249,6 +249,14 @@ struct SettingsFile {
     /// Maximum seconds to allow a single `FFmpeg` transcode or waveform job to
     /// run before it is killed. Default: 600.
     ffmpeg_timeout_secs: Option<u64>,
+    /// Initial state for automatic post-media pruning.
+    /// This seeds the DB on first run; after that Admin -> Media Settings owns
+    /// the live value.
+    media_auto_prune_enabled: Option<bool>,
+    /// Initial maximum active post-media size in bytes. 0 disables pruning.
+    /// This seeds the DB on first run; after that Admin -> Media Settings owns
+    /// the live value.
+    media_max_active_content_size_bytes: Option<u64>,
     /// Explicit proxy CIDR allowlist for trusted forwarding headers.
     /// Examples include `127.0.0.1/32`, `::1/128`, and `10.0.0.0/8`.
     trusted_proxy_cidrs: Option<Vec<String>>,
@@ -532,6 +540,10 @@ pub struct Config {
     pub job_queue_capacity: u64,
     /// Maximum seconds a single `FFmpeg` job may run before being killed.
     pub ffmpeg_timeout_secs: u64,
+    /// Initial state for automatic active post-media pruning.
+    pub initial_media_auto_prune_enabled: bool,
+    /// Initial active post-media size cap in bytes. 0 = unset/disabled.
+    pub initial_media_max_active_content_size_bytes: u64,
     /// When true, threads are always archived (never hard-deleted) on prune,
     /// overriding individual board settings.
     pub archive_before_prune: bool,
@@ -786,6 +798,14 @@ impl Config {
             ffmpeg_timeout_secs: env_parse(
                 "CHAN_FFMPEG_TIMEOUT_SECS",
                 s.ffmpeg_timeout_secs.unwrap_or(DEFAULT_FFMPEG_TIMEOUT_SECS),
+            ),
+            initial_media_auto_prune_enabled: env_bool(
+                "CHAN_MEDIA_AUTO_PRUNE_ENABLED",
+                s.media_auto_prune_enabled.unwrap_or(false),
+            ),
+            initial_media_max_active_content_size_bytes: env_parse(
+                "CHAN_MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES",
+                s.media_max_active_content_size_bytes.unwrap_or(0),
             ),
             archive_before_prune: env_bool(
                 "CHAN_ARCHIVE_BEFORE_PRUNE",
@@ -1231,6 +1251,19 @@ pub fn update_settings_file_ffmpeg_timeout(timeout_secs: u64) {
     );
 }
 
+pub fn update_settings_file_media_pruning(enabled: bool, max_size_bytes: u64) {
+    update_settings_file_entries(
+        &[
+            ("media_auto_prune_enabled", enabled.to_string()),
+            (
+                "media_max_active_content_size_bytes",
+                max_size_bytes.to_string(),
+            ),
+        ],
+        Some("# Optional explicit ffmpeg binary path."),
+    );
+}
+
 // ─── Cookie secret rotation check ────────────────────────────────────────────
 /// Check whether the `cookie_secret` has changed since the last run by comparing
 /// a SHA-256 hash stored in the DB against the currently loaded secret.
@@ -1429,6 +1462,8 @@ mod tests {
             db_warn_threshold_bytes: 2048 * MIB as u64,
             job_queue_capacity: 1000,
             ffmpeg_timeout_secs: 120,
+            initial_media_auto_prune_enabled: false,
+            initial_media_max_active_content_size_bytes: 0,
             archive_before_prune: true,
             waveform_cache_max_bytes: 200 * MIB as u64,
             blocking_threads: 4,
@@ -1788,6 +1823,8 @@ port = 8080
         assert!(template.contains("homepage_new_thread_badges_enabled = true"));
         assert!(template.contains("homepage_new_reply_badges_enabled = true"));
         assert!(template.contains("thread_new_reply_badges_enabled = true"));
+        assert!(template.contains("media_auto_prune_enabled = false"));
+        assert!(template.contains("media_max_active_content_size_bytes = 0"));
         assert!(template.contains(r#"default_theme = "forest""#));
         assert!(template.contains("enabled = false\nport = 8443"));
         assert!(template.contains("auto_full_backup_include_tor_hidden_service_keys = true"));

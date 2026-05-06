@@ -241,6 +241,33 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             }
 
             seed_initial_default_theme(&conn, &CONFIG.initial_default_theme);
+            if crate::db::get_site_setting(&conn, crate::db::MEDIA_AUTO_PRUNE_ENABLED_KEY)
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                let _ = crate::db::set_site_setting(
+                    &conn,
+                    crate::db::MEDIA_AUTO_PRUNE_ENABLED_KEY,
+                    &CONFIG.initial_media_auto_prune_enabled.to_string(),
+                );
+            }
+            if crate::db::get_site_setting(
+                &conn,
+                crate::db::MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
+            )
+            .ok()
+            .flatten()
+            .is_none()
+            {
+                let _ = crate::db::set_site_setting(
+                    &conn,
+                    crate::db::MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
+                    &CONFIG
+                        .initial_media_max_active_content_size_bytes
+                        .to_string(),
+                );
+            }
             let _ = crate::db::sync_live_theme_state(&conn);
 
             // Seed the live board list used by error pages and ban pages.

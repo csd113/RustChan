@@ -24,6 +24,9 @@ pub struct MediaSettingsForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub ffmpeg_timeout_secs: Option<String>,
+    pub media_auto_prune_enabled: Option<String>,
+    pub media_max_active_content_size: Option<String>,
+    pub media_max_active_content_size_unit: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -72,6 +75,53 @@ fn parse_ffmpeg_timeout_secs_input(input: Option<&str>) -> Result<u64> {
         .map_err(|error| AppError::BadRequest(error.to_string()))
 }
 
+fn parse_media_prune_size_input(
+    enabled: bool,
+    value: Option<&str>,
+    unit: Option<&str>,
+) -> Result<u64> {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    const MIN_ENABLED_BYTES: u64 = MIB;
+
+    let raw = value.map(str::trim).unwrap_or("");
+    if raw.is_empty() {
+        if enabled {
+            return Err(AppError::BadRequest(
+                "Maximum active content size is required when pruning is enabled.".into(),
+            ));
+        }
+        return Ok(0);
+    }
+    if raw.starts_with('-') {
+        return Err(AppError::BadRequest(
+            "Maximum active content size cannot be negative.".into(),
+        ));
+    }
+    let amount = raw.parse::<u64>().map_err(|_| {
+        AppError::BadRequest("Maximum active content size must be a whole number.".into())
+    })?;
+    let multiplier = match unit.unwrap_or("mib") {
+        "bytes" => 1,
+        "mib" => MIB,
+        "gib" => GIB,
+        _ => {
+            return Err(AppError::BadRequest(
+                "Maximum active content size unit is invalid.".into(),
+            ));
+        }
+    };
+    let bytes = amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| AppError::BadRequest("Maximum active content size is too large.".into()))?;
+    if enabled && bytes < MIN_ENABLED_BYTES {
+        return Err(AppError::BadRequest(
+            "Maximum active content size must be at least 1 MiB when pruning is enabled.".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
 pub async fn update_media_settings(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -93,6 +143,20 @@ pub async fn update_media_settings(
         }
         Err(error) => return Err(error),
     };
+    let prune_enabled = checkbox_is_on(form.media_auto_prune_enabled.as_deref());
+    let prune_max_bytes = match parse_media_prune_size_input(
+        prune_enabled,
+        form.media_max_active_content_size.as_deref(),
+        form.media_max_active_content_size_unit.as_deref(),
+    ) {
+        Ok(bytes) => bytes,
+        Err(AppError::BadRequest(message)) => {
+            return Ok(
+                super::admin_panel_error_redirect_anchor(&message, "maintenance").into_response(),
+            );
+        }
+        Err(error) => return Err(error),
+    };
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -100,10 +164,19 @@ pub async fn update_media_settings(
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             crate::config::set_live_ffmpeg_timeout_secs(timeout_secs)?;
+            db::set_media_prune_settings(&conn, prune_enabled, prune_max_bytes)?;
             crate::config::update_settings_file_ffmpeg_timeout(timeout_secs);
+            crate::config::update_settings_file_media_pruning(prune_enabled, prune_max_bytes);
+            let prune_report = crate::media::prune::run_configured_prune(
+                &conn,
+                &crate::config::CONFIG.upload_dir,
+            )?;
             tracing::info!(
                 target: "admin",
                 ffmpeg_timeout_secs = timeout_secs,
+                media_auto_prune_enabled = prune_enabled,
+                media_max_active_content_size_bytes = prune_max_bytes,
+                pruned_files = prune_report.removed_files,
                 "FFmpeg media timeout updated"
             );
             Ok(())
@@ -592,7 +665,7 @@ fn render_db_repair_status_response(
 mod tests {
     use super::{
         admin_db_repair, admin_db_repair_status, admin_vacuum, parse_ffmpeg_timeout_secs_input,
-        update_media_settings, PRE_REPAIR_BACKUP_FAILURE,
+        parse_media_prune_size_input, update_media_settings, PRE_REPAIR_BACKUP_FAILURE,
     };
     use axum::{
         body::{to_bytes, Body},
@@ -762,6 +835,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_media_prune_size_rejects_invalid_or_negative_values() {
+        assert!(parse_media_prune_size_input(true, Some("-1"), Some("mib")).is_err());
+        assert!(parse_media_prune_size_input(true, Some("abc"), Some("mib")).is_err());
+        assert!(parse_media_prune_size_input(true, Some("0"), Some("mib")).is_err());
+        assert!(parse_media_prune_size_input(true, Some("1024"), Some("bytes")).is_err());
+        assert_eq!(
+            parse_media_prune_size_input(true, Some("2"), Some("gib")).expect("valid size"),
+            2 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            parse_media_prune_size_input(false, Some("0"), Some("mib")).expect("disabled zero"),
+            0
+        );
+    }
+
     #[tokio::test]
     async fn media_settings_save_updates_live_timeout_and_settings_file() {
         let _guard = MEDIA_SETTINGS_TEST_LOCK.lock().await;
@@ -775,11 +864,13 @@ mod tests {
         std::fs::create_dir_all(parent).expect("create settings parent");
         std::fs::write(
             &settings_path,
-            format!("forum_name = \"RustChan\"\nffmpeg_timeout_secs = {previous_timeout}\n"),
+            format!(
+                "forum_name = \"RustChan\"\nffmpeg_timeout_secs = {previous_timeout}\nmedia_auto_prune_enabled = false\nmedia_max_active_content_size_bytes = 0\n"
+            ),
         )
         .expect("write settings fixture");
 
-        let router = media_settings_router(state);
+        let router = media_settings_router(state.clone());
         let response = router
             .oneshot(
                 Request::builder()
@@ -794,7 +885,7 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(format!(
-                        "_csrf={}&ffmpeg_timeout_secs=1800",
+                        "_csrf={}&ffmpeg_timeout_secs=1800&media_auto_prune_enabled=1&media_max_active_content_size=2&media_max_active_content_size_unit=mib",
                         admin_signed_csrf()
                     )))
                     .expect("request"),
@@ -816,8 +907,21 @@ mod tests {
         assert_eq!(crate::config::ffmpeg_timeout_secs(), 1_800);
         let updated_settings = std::fs::read_to_string(&settings_path).expect("read settings");
         assert!(updated_settings.contains("ffmpeg_timeout_secs = 1800\n"));
+        assert!(updated_settings.contains("media_auto_prune_enabled = true\n"));
+        assert!(updated_settings.contains("media_max_active_content_size_bytes = 2097152\n"));
+        let conn = state.db.get().expect("db connection for settings");
+        assert!(crate::db::get_media_auto_prune_enabled(&conn));
+        assert_eq!(
+            crate::db::get_media_max_active_content_size_bytes(&conn),
+            2_097_152
+        );
         let reloaded = crate::config::Config::from_env();
         assert_eq!(reloaded.ffmpeg_timeout_secs, 1_800);
+        assert!(reloaded.initial_media_auto_prune_enabled);
+        assert_eq!(
+            reloaded.initial_media_max_active_content_size_bytes,
+            2_097_152
+        );
 
         crate::config::set_live_ffmpeg_timeout_secs(previous_timeout).expect("restore timeout");
         match previous_settings {

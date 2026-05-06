@@ -665,6 +665,14 @@ pub fn submit_post(
     } else {
         tracing::info!(target: "board", post_id = post_id, thread_id = thread_id, board = %board.short_name, "Reply posted");
     }
+    if let Err(error) = crate::media::prune::run_configured_prune(conn, &upload_dir) {
+        tracing::warn!(
+            target: "media_prune",
+            post_id,
+            error = %error,
+            "active media pruning failed after post upload"
+        );
+    }
 
     let stored_post = db::get_post(conn, post_id)?
         .ok_or_else(|| AppError::NotFound("Posted row not found.".into()))?;

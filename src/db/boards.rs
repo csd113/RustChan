@@ -179,6 +179,41 @@ pub fn set_site_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> 
     Ok(())
 }
 
+pub const MEDIA_AUTO_PRUNE_ENABLED_KEY: &str = "media_auto_prune_enabled";
+pub const MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY: &str = "media_max_active_content_size_bytes";
+
+pub fn get_media_auto_prune_enabled(conn: &rusqlite::Connection) -> bool {
+    parse_site_bool(
+        get_site_setting(conn, MEDIA_AUTO_PRUNE_ENABLED_KEY)
+            .ok()
+            .flatten(),
+    )
+    .unwrap_or(crate::config::CONFIG.initial_media_auto_prune_enabled)
+}
+
+pub fn get_media_max_active_content_size_bytes(conn: &rusqlite::Connection) -> u64 {
+    get_site_setting(conn, MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY)
+        .ok()
+        .flatten()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(crate::config::CONFIG.initial_media_max_active_content_size_bytes)
+}
+
+/// # Errors
+/// Returns an error if the database write fails.
+pub fn set_media_prune_settings(
+    conn: &rusqlite::Connection,
+    enabled: bool,
+    max_size_bytes: u64,
+) -> Result<()> {
+    set_site_setting(conn, MEDIA_AUTO_PRUNE_ENABLED_KEY, &enabled.to_string())?;
+    set_site_setting(
+        conn,
+        MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
+        &max_size_bytes.to_string(),
+    )
+}
+
 /// Returns the admin-configured site name, or falls back to `CONFIG.forum_name`.
 pub fn get_site_name(conn: &rusqlite::Connection) -> String {
     get_site_setting(conn, "site_name")
