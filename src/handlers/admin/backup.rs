@@ -336,7 +336,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 /// Count regular files (not directories) under `dir` recursively.
 /// Used to initialise the progress bar's `files_total` before compression starts.
 fn count_files_in_dir(dir: &std::path::Path) -> u64 {
-    if !dir.is_dir() {
+    if crate::utils::fs_security::assert_dir_no_symlink(dir).is_err() {
         return 0;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -344,9 +344,16 @@ fn count_files_in_dir(dir: &std::path::Path) -> u64 {
     };
     entries.flatten().fold(0u64, |acc, entry| {
         let p = entry.path();
-        if p.is_dir() {
+        let Ok(metadata) = std::fs::symlink_metadata(&p) else {
+            return acc;
+        };
+        if metadata.file_type().is_symlink() {
+            acc
+        } else if metadata.file_type().is_dir() {
             acc + count_files_in_dir(&p)
-        } else if p.is_file() {
+        } else if metadata.file_type().is_file()
+            && crate::utils::fs_security::assert_regular_file_no_symlink(&p).is_ok()
+        {
             acc + 1
         } else {
             acc
@@ -386,6 +393,13 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
     for entry in entries {
         let entry = entry.map_err(|e| AppError::Internal(anyhow::anyhow!("dir entry: {e}")))?;
         let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("inspect {}: {error}", path.display()))
+        })?;
+        if metadata.file_type().is_symlink() {
+            tracing::warn!(path = %path.display(), "skipping symlink during backup traversal");
+            continue;
+        }
 
         let relative = path
             .strip_prefix(base)
@@ -393,11 +407,15 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
         let rel_str = relative.to_string_lossy().replace('\\', "/");
         let zip_path = format!("{prefix}/{rel_str}");
 
-        if path.is_dir() {
+        if metadata.file_type().is_dir() {
             zip.add_directory(&zip_path, opts)
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("zip dir: {e}")))?;
             add_dir_to_zip_with_prefix(zip, base, &path, prefix, opts, progress)?;
-        } else if path.is_file() {
+        } else if metadata.file_type().is_file() {
+            if crate::utils::fs_security::assert_regular_file_no_symlink(&path).is_err() {
+                tracing::warn!(path = %path.display(), "skipping unsafe runtime file during backup");
+                continue;
+            }
             // MEM-FIX: open file, stream through io::copy — no Vec<u8> allocation.
             let mut src = std::fs::File::open(&path).map_err(|e| {
                 AppError::Internal(anyhow::anyhow!("open {}: {}", path.display(), e))

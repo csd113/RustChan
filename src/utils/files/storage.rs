@@ -149,9 +149,16 @@ pub fn save_audio_with_image_thumb_from_path(
     let filename = format!("{file_id}.{ext}");
     let dest_dir = PathBuf::from(boards_dir).join(board_short);
     std::fs::create_dir_all(&dest_dir).context("Failed to create board directory")?;
+    crate::utils::fs_security::assert_dir_no_symlink(&dest_dir)
+        .context("Upload board directory failed safety validation")?;
     check_disk_space(&dest_dir, original_size)?;
 
     let file_path_abs = dest_dir.join(&filename);
+    crate::utils::fs_security::canonical_parent_for_new_child(
+        Path::new(boards_dir),
+        &file_path_abs,
+    )
+    .context("Upload destination failed safety validation")?;
     let tmp = tempfile::NamedTempFile::new_in(&dest_dir)
         .context("Failed to create temp file for audio upload")?;
     std::fs::copy(input_path, tmp.path()).context("Failed to copy audio upload to temp file")?;
@@ -249,8 +256,12 @@ fn build_upload_plan(
     let dest_dir = PathBuf::from(options.boards_dir).join(options.board_short);
     let thumbs_dir = dest_dir.join("thumbs");
     std::fs::create_dir_all(&dest_dir).context("Failed to create board directory")?;
+    crate::utils::fs_security::assert_dir_no_symlink(&dest_dir)
+        .context("Upload board directory failed safety validation")?;
     if validated.media_type != crate::models::MediaType::Other {
         std::fs::create_dir_all(&thumbs_dir).context("Failed to create board thumbs directory")?;
+        crate::utils::fs_security::assert_dir_no_symlink(&thumbs_dir)
+            .context("Upload thumbnail directory failed safety validation")?;
     }
     check_disk_space(&dest_dir, original_size)?;
     let processing_pending = options.ffmpeg_available
@@ -348,6 +359,11 @@ fn save_generic_upload(
     let ext = arbitrary_file_ext(options.original_filename);
     let filename = format!("{file_id}.{ext}");
     let file_path_abs = plan.dest_dir.join(&filename);
+    crate::utils::fs_security::canonical_parent_for_new_child(
+        Path::new(options.boards_dir),
+        &file_path_abs,
+    )
+    .context("Generic upload destination failed safety validation")?;
     let tmp = tempfile::NamedTempFile::new_in(&plan.dest_dir)
         .context("Failed to create temp file for generic upload")?;
     std::fs::copy(input_path, tmp.path()).context("Failed to copy generic upload to temp file")?;

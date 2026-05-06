@@ -40,6 +40,9 @@ pub struct BoardSettingsForm {
 
 fn parse_board_upload_limit_bytes(raw_value: Option<&str>, fallback_bytes: i64) -> Result<i64> {
     const MIB: i64 = 1024 * 1024;
+    // Deliberate site maximum for each per-board media cap. Aggregate public
+    // multipart limits still bound a whole request separately.
+    const SITE_MAX_BOARD_UPLOAD_CAP_MB: i64 = 512;
 
     let fallback_mb = (fallback_bytes / MIB).max(1);
     let parsed_mb = match raw_value.map(str::trim).filter(|value| !value.is_empty()) {
@@ -56,11 +59,9 @@ fn parse_board_upload_limit_bytes(raw_value: Option<&str>, fallback_bytes: i64) 
         ));
     }
 
-    let runtime_max_bytes = i64::try_from(usize::MAX).unwrap_or(i64::MAX);
-    let hard_max_mb = runtime_max_bytes / MIB;
-    if parsed_mb > hard_max_mb {
+    if parsed_mb > SITE_MAX_BOARD_UPLOAD_CAP_MB {
         return Err(AppError::BadRequest(format!(
-            "Board upload size limits must fit in the server runtime byte counter ({hard_max_mb} MiB maximum)."
+            "Board upload size limits must be {SITE_MAX_BOARD_UPLOAD_CAP_MB} MiB or less."
         )));
     }
 

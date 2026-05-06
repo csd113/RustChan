@@ -19,6 +19,15 @@ async fn serve_named_global_favicon(
     let Some(path) = crate::favicon::global_favicon_file(file_name) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let Ok(path) =
+        crate::utils::fs_security::canonical_child_of(&crate::favicon::global_favicon_dir(), &path)
+            .and_then(|path| {
+                crate::utils::fs_security::assert_regular_file_no_symlink(&path)?;
+                Ok(path)
+            })
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let has_version = req
         .uri()
         .query()

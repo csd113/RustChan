@@ -17,11 +17,23 @@ use crate::error::{AppError, Result};
 use crate::middleware::validate_csrf;
 use crate::workers::JobQueue;
 use axum::extract::Multipart;
+use std::collections::HashSet;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt as _;
 
 const MIME_SNIFF_BYTES: usize = 512;
 const TEXT_MULTIPART_FIELD_MAX_BYTES: usize = 64 * 1024;
 const UNKNOWN_MULTIPART_FIELD_MAX_BYTES: usize = 64 * 1024;
+// Public post uploads intentionally bypass Axum's global body cap so per-board
+// limits above old defaults still work. This aggregate budget bounds the whole
+// multipart stream after board settings are loaded.
+const PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES: usize = 512 * 1024 * 1024;
+// Caps field spam and duplicate-slot churn before bodies are streamed.
+const PUBLIC_MULTIPART_MAX_FIELDS: usize = 64;
+// Conservative whole-request upload timeout. True min-rate enforcement would be
+// more precise, but this avoids indefinite request-slot pinning without breaking
+// normal large LAN uploads.
+pub const PUBLIC_UPLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 fn multipart_read_error(
     context: &'static str,
@@ -42,13 +54,45 @@ fn multipart_read_error(
     AppError::BadRequest(message)
 }
 
-async fn read_text_field(mut field: axum::extract::multipart::Field<'_>) -> Result<String> {
+#[derive(Default)]
+struct PublicMultipartBudget {
+    fields_seen: usize,
+    bytes_seen: usize,
+}
+
+impl PublicMultipartBudget {
+    fn note_field(&mut self) -> Result<()> {
+        self.fields_seen = self.fields_seen.saturating_add(1);
+        if self.fields_seen > PUBLIC_MULTIPART_MAX_FIELDS {
+            return Err(AppError::BadRequest(
+                "Multipart form contains too many fields.".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn note_chunk(&mut self, len: usize) -> Result<()> {
+        self.bytes_seen = self.bytes_seen.saturating_add(len);
+        if self.bytes_seen > PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES {
+            return Err(AppError::UploadTooLarge(
+                "Multipart upload is too large.".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+async fn read_text_field(
+    mut field: axum::extract::multipart::Field<'_>,
+    budget: &mut PublicMultipartBudget,
+) -> Result<String> {
     let mut bytes = Vec::new();
     while let Some(chunk) = field
         .chunk()
         .await
         .map_err(|e| multipart_read_error("text field", &e))?
     {
+        budget.note_chunk(chunk.len())?;
         if bytes.len().saturating_add(chunk.len()) > TEXT_MULTIPART_FIELD_MAX_BYTES {
             tracing::warn!(
                 limit_bytes = TEXT_MULTIPART_FIELD_MAX_BYTES,
@@ -83,6 +127,27 @@ pub async fn discard_unknown_multipart_field(
     Ok(())
 }
 
+async fn discard_unknown_public_multipart_field(
+    mut field: axum::extract::multipart::Field<'_>,
+    budget: &mut PublicMultipartBudget,
+) -> Result<()> {
+    let mut total = 0usize;
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| multipart_read_error("unknown field", &e))?
+    {
+        budget.note_chunk(chunk.len())?;
+        total = total.saturating_add(chunk.len());
+        if total > UNKNOWN_MULTIPART_FIELD_MAX_BYTES {
+            return Err(AppError::UploadTooLarge(
+                "Unexpected multipart field is too large.".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ─── Streaming multipart size limit ──────────────────────────────────────────
 //
 // 3.1: The previous implementation called `field.bytes().await` which buffers
@@ -101,6 +166,7 @@ async fn stream_field_to_temp_file(
     mut field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
     field_name: &'static str,
+    budget: &mut PublicMultipartBudget,
 ) -> Result<TempUpload> {
     let temp_file = tempfile::Builder::new()
         .prefix("rustchan-upload-")
@@ -118,6 +184,7 @@ async fn stream_field_to_temp_file(
         .await
         .map_err(|e| multipart_read_error(field_name, &e))?
     {
+        budget.note_chunk(chunk.len())?;
         if size_bytes.saturating_add(chunk.len()) > max_bytes {
             tracing::warn!(
                 field = field_name,
@@ -166,9 +233,10 @@ async fn read_upload_field(
     max_bytes: usize,
     default_name: &str,
     field_name: &'static str,
+    budget: &mut PublicMultipartBudget,
 ) -> Result<Option<(TempUpload, String)>> {
     let fname = field.file_name().unwrap_or(default_name).to_string();
-    let upload = stream_field_to_temp_file(field, max_bytes, field_name).await?;
+    let upload = stream_field_to_temp_file(field, max_bytes, field_name, budget).await?;
     Ok((upload.size_bytes > 0).then_some((upload, fname)))
 }
 
@@ -235,31 +303,36 @@ pub async fn parse_post_multipart(
     let mut poll_duration_unit = String::from("hours");
     let mut sage = false;
     let mut pow_nonce = String::new();
+    let mut budget = PublicMultipartBudget::default();
+    let mut seen_upload_slots = HashSet::new();
 
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| multipart_read_error("multipart", &e))?
     {
+        budget.note_field()?;
         match field.name() {
             Some("_csrf") => {
-                let v = read_text_field(field).await?;
+                let v = read_text_field(field, &mut budget).await?;
                 if validate_csrf(csrf_cookie, &v) {
                     csrf_verified = true;
                 }
             }
-            Some("submission_token") => submission_token = read_text_field(field).await?,
-            Some("name") => name = read_text_field(field).await?,
-            Some("subject") => subject = read_text_field(field).await?,
-            Some("body") => body = read_text_field(field).await?,
-            Some("deletion_token") => deletion_token = read_text_field(field).await?,
+            Some("submission_token") => {
+                submission_token = read_text_field(field, &mut budget).await?;
+            }
+            Some("name") => name = read_text_field(field, &mut budget).await?,
+            Some("subject") => subject = read_text_field(field, &mut budget).await?,
+            Some("body") => body = read_text_field(field, &mut budget).await?,
+            Some("deletion_token") => deletion_token = read_text_field(field, &mut budget).await?,
             Some("sage") => {
-                let v = read_text_field(field).await?;
+                let v = read_text_field(field, &mut budget).await?;
                 sage = v == "1" || v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true");
             }
-            Some("pow_nonce") => pow_nonce = read_text_field(field).await?,
+            Some("pow_nonce") => pow_nonce = read_text_field(field, &mut budget).await?,
             Some("poll_question") => {
-                let v = read_text_field(field).await?;
+                let v = read_text_field(field, &mut budget).await?;
                 if v.chars().count() > 500 {
                     return Err(AppError::BadRequest(
                         "Poll question must be 500 characters or fewer.".into(),
@@ -268,7 +341,7 @@ pub async fn parse_post_multipart(
                 poll_question = v;
             }
             Some("poll_option") => {
-                let v = read_text_field(field).await?;
+                let v = read_text_field(field, &mut budget).await?;
                 let trimmed = v.trim().to_string();
                 if !trimmed.is_empty() {
                     if poll_options.len() >= 20 {
@@ -285,31 +358,49 @@ pub async fn parse_post_multipart(
                 }
             }
             Some("poll_duration_value") => {
-                let v = read_text_field(field).await?;
+                let v = read_text_field(field, &mut budget).await?;
                 poll_duration_value = v.trim().parse::<i64>().ok();
             }
             Some("poll_duration_unit") => {
-                poll_duration_unit = read_text_field(field).await?;
+                poll_duration_unit = read_text_field(field, &mut budget).await?;
             }
             Some("file") => {
+                if !seen_upload_slots.insert("file") {
+                    return Err(AppError::BadRequest(
+                        "Duplicate upload field 'file'.".into(),
+                    ));
+                }
                 file = read_upload_field(
                     field,
                     max_image_size.max(max_video_size).max(max_audio_size),
                     "upload",
                     "file",
+                    &mut budget,
                 )
                 .await?;
             }
             Some("audio_file") => {
+                if !seen_upload_slots.insert("audio_file") {
+                    return Err(AppError::BadRequest(
+                        "Duplicate upload field 'audio_file'.".into(),
+                    ));
+                }
                 audio_file =
-                    read_upload_field(field, max_audio_size, "audio", "audio_file").await?;
+                    read_upload_field(field, max_audio_size, "audio", "audio_file", &mut budget)
+                        .await?;
             }
             Some("image_file") => {
+                if !seen_upload_slots.insert("image_file") {
+                    return Err(AppError::BadRequest(
+                        "Duplicate upload field 'image_file'.".into(),
+                    ));
+                }
                 image_file =
-                    read_upload_field(field, max_image_size, "image", "image_file").await?;
+                    read_upload_field(field, max_image_size, "image", "image_file", &mut budget)
+                        .await?;
             }
             _ => {
-                discard_unknown_multipart_field(field).await?;
+                discard_unknown_public_multipart_field(field, &mut budget).await?;
             }
         }
     }
@@ -952,6 +1043,92 @@ trailer << /Root 1 0 R >>
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    async fn parse_default_limits(
+        multipart: axum::extract::Multipart,
+    ) -> crate::error::Result<&'static str> {
+        parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 1_024).await?;
+        Ok("ok")
+    }
+
+    fn multipart_body_with_files(
+        fields: &[(&str, &str)],
+        files: &[(&str, &str, &[u8], &str)],
+    ) -> (String, Vec<u8>) {
+        let boundary = "rustchan-test-boundary".to_string();
+        let mut body = Vec::new();
+
+        for (name, value) in fields {
+            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+            );
+            body.extend_from_slice(value.as_bytes());
+            body.extend_from_slice(b"\r\n");
+        }
+
+        for (field_name, filename, contents, content_type) in files {
+            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            body.extend_from_slice(
+                format!(
+                    "Content-Disposition: form-data; name=\"{field_name}\"; filename=\"{filename}\"\r\n"
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+            body.extend_from_slice(contents);
+            body.extend_from_slice(b"\r\n");
+        }
+
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        (boundary, body)
+    }
+
+    #[tokio::test]
+    async fn multipart_parser_rejects_duplicate_upload_slot_before_second_body() {
+        let router = Router::new().route("/parse", post(parse_default_limits));
+        let first = b"one";
+        let second = vec![b'a'; 10_000];
+        let (boundary, body) = multipart_body_with_files(
+            &[("_csrf", "csrf123"), ("body", "duplicate")],
+            &[
+                ("file", "one.bin", first, "application/octet-stream"),
+                ("file", "two.bin", &second, "application/octet-stream"),
+            ],
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/parse")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn public_multipart_budget_enforces_aggregate_bytes_and_field_count() {
+        let mut budget = super::PublicMultipartBudget::default();
+        for _ in 0..super::PUBLIC_MULTIPART_MAX_FIELDS {
+            budget.note_field().expect("field within limit");
+        }
+        assert!(budget.note_field().is_err());
+
+        let mut budget = super::PublicMultipartBudget::default();
+        budget
+            .note_chunk(super::PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES)
+            .expect("aggregate limit inclusive");
+        assert!(budget.note_chunk(1).is_err());
     }
 
     #[test]

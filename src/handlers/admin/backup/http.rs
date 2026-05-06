@@ -344,9 +344,13 @@ pub(super) async fn stream_restore_upload_to_tempfile(
     kind: RestoreKind,
     multipart: &mut Multipart,
 ) -> Result<StreamedRestoreUpload> {
+    const RESTORE_CSRF_FIELD_MAX_BYTES: usize = 4 * 1024;
+    const RESTORE_CONTROL_FIELD_MAX_BYTES: usize = 1024;
+
     let mut temp_file: Option<tempfile::NamedTempFile> = None;
     let mut form_csrf: Option<String> = None;
     let mut restore_tor_hidden_service_keys = false;
+    let mut seen_restore_tor_hidden_service_keys = false;
     let mut uploaded_filename: Option<String> = None;
     let mut uploaded_content_type: Option<String> = None;
     let mut uploaded_bytes = 0u64;
@@ -359,6 +363,9 @@ pub(super) async fn stream_restore_upload_to_tempfile(
         let field_name = field.name().unwrap_or("<unnamed>").to_string();
         match field.name() {
             Some("_csrf") => {
+                if form_csrf.is_some() {
+                    return Err(AppError::BadRequest("Duplicate restore CSRF field.".into()));
+                }
                 tracing::debug!(
                     target: "admin",
                     route = kind.route(),
@@ -366,18 +373,17 @@ pub(super) async fn stream_restore_upload_to_tempfile(
                     "{} received CSRF field",
                     kind.title()
                 );
-                form_csrf = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|error| AppError::BadRequest(error.to_string()))?,
-                );
+                form_csrf =
+                    Some(read_restore_text_field(field, RESTORE_CSRF_FIELD_MAX_BYTES).await?);
             }
             Some("restore_tor_hidden_service_keys") => {
-                let value = field
-                    .text()
-                    .await
-                    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+                if seen_restore_tor_hidden_service_keys {
+                    return Err(AppError::BadRequest(
+                        "Duplicate restore control field.".into(),
+                    ));
+                }
+                seen_restore_tor_hidden_service_keys = true;
+                let value = read_restore_text_field(field, RESTORE_CONTROL_FIELD_MAX_BYTES).await?;
                 restore_tor_hidden_service_keys = matches!(value.as_str(), "1" | "true" | "on");
             }
             Some("backup_file") => {
@@ -447,6 +453,27 @@ pub(super) async fn stream_restore_upload_to_tempfile(
         uploaded_content_type,
         uploaded_bytes,
     })
+}
+
+async fn read_restore_text_field(
+    mut field: axum::extract::multipart::Field<'_>,
+    max_bytes: usize,
+) -> Result<String> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|error| AppError::BadRequest(error.to_string()))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(AppError::UploadTooLarge(
+                "Restore control field is too large.".into(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| AppError::BadRequest("Restore control field is not valid UTF-8.".into()))
 }
 
 pub(super) fn validate_streamed_restore_upload(
@@ -539,7 +566,17 @@ pub(super) fn sanitize_board_short_value(board_short: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_restore_upload_within_budget, RestoreKind};
+    use super::{
+        ensure_restore_upload_within_budget, stream_restore_upload_to_tempfile, RestoreKind,
+    };
+    use axum::{
+        body::Body,
+        extract::Multipart,
+        http::{header, Request, StatusCode},
+        routing::post,
+        Router,
+    };
+    use tower::ServiceExt as _;
 
     #[test]
     fn restore_upload_budget_rejects_oversized_upload() {
@@ -547,5 +584,79 @@ mod tests {
             .expect_err("oversized restore upload rejected");
 
         assert!(error.to_string().contains("restore budget"));
+    }
+
+    async fn parse_full_restore_upload(
+        mut multipart: Multipart,
+    ) -> crate::error::Result<&'static str> {
+        stream_restore_upload_to_tempfile(RestoreKind::Full, &mut multipart).await?;
+        Ok("ok")
+    }
+
+    fn restore_multipart_body(fields: &[(&str, &str)]) -> (String, Vec<u8>) {
+        let boundary = "rustchan-restore-test-boundary".to_string();
+        let mut body = Vec::new();
+        for (name, value) in fields {
+            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+            );
+            body.extend_from_slice(value.as_bytes());
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"backup_file\"; filename=\"backup.zip\"\r\n",
+        );
+        body.extend_from_slice(b"Content-Type: application/zip\r\n\r\nPK\x05\x06restore\r\n");
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        (boundary, body)
+    }
+
+    #[tokio::test]
+    async fn restore_upload_rejects_oversized_csrf_text_field() {
+        let router = Router::new().route("/restore", post(parse_full_restore_upload));
+        let oversized = "x".repeat(4097);
+        let (boundary, body) = restore_multipart_body(&[("_csrf", &oversized)]);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/restore")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn restore_upload_rejects_duplicate_control_fields() {
+        let router = Router::new().route("/restore", post(parse_full_restore_upload));
+        let (boundary, body) = restore_multipart_body(&[("_csrf", "one"), ("_csrf", "two")]);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/restore")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

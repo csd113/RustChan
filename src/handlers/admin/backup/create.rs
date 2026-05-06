@@ -242,6 +242,9 @@ const fn full_backup_upload_file_count(
 
 fn count_required_private_files(dir: &Path, missing_message: &str) -> Result<u64> {
     fn count_recursive(dir: &Path) -> Result<u64> {
+        crate::utils::fs_security::assert_dir_no_symlink(dir).map_err(|error| {
+            AppError::BadRequest(format!("Private backup directory is unsafe: {error}"))
+        })?;
         let entries = std::fs::read_dir(dir).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Read {}: {error}", dir.display()))
         })?;
@@ -250,9 +253,17 @@ fn count_required_private_files(dir: &Path, missing_message: &str) -> Result<u64
             let entry = entry
                 .map_err(|error| AppError::Internal(anyhow::anyhow!("Read dir entry: {error}")))?;
             let path = entry.path();
-            if path.is_dir() {
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Inspect {}: {error}", path.display()))
+            })?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.file_type().is_dir() {
                 count = count.saturating_add(count_recursive(&path)?);
-            } else if path.is_file() {
+            } else if metadata.file_type().is_file()
+                && crate::utils::fs_security::assert_regular_file_no_symlink(&path).is_ok()
+            {
                 count = count.saturating_add(1);
             }
         }

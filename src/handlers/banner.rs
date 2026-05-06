@@ -88,9 +88,22 @@ pub async fn serve_banner_asset(
     let Ok(path) = banner::banner_asset_path(&asset) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if !path.exists() || !path.is_file() {
+    let root = match asset.scope {
+        crate::models::BannerScope::Global => banner::global_banner_dir(),
+        crate::models::BannerScope::Home => banner::home_banner_dir(),
+        crate::models::BannerScope::Board => {
+            let Some(board_short) = asset.board_short.as_deref() else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            banner::board_banner_dir(board_short)
+        }
+    };
+    let Ok(path) = crate::utils::fs_security::canonical_child_of(&root, &path).and_then(|path| {
+        crate::utils::fs_security::assert_regular_file_no_symlink(&path)?;
+        Ok(path)
+    }) else {
         return StatusCode::NOT_FOUND.into_response();
-    }
+    };
     let content_type = banner::banner_asset_content_type(&path);
 
     let req = req.map(|_| axum::body::Body::empty());

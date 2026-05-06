@@ -121,6 +121,22 @@ pub async fn serve_board_media(
         return StatusCode::BAD_REQUEST.into_response();
     }
 
+    let target =
+        match crate::utils::fs_security::canonical_child_of(&base, &target).and_then(|path| {
+            crate::utils::fs_security::assert_regular_file_no_symlink(&path)?;
+            Ok(path)
+        }) {
+            Ok(path) => path,
+            Err(_)
+                if std::path::Path::new(&media_path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4")) =>
+            {
+                target
+            }
+            Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        };
+
     if target.exists() {
         // File present — forward the real request (with Range, ETag, etc.) to
         // ServeFile so it can respond with 206 Partial Content when needed.

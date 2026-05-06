@@ -283,14 +283,18 @@ pub async fn post_reply(
     };
 
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    let form = parse_post_multipart(
-        multipart,
-        csrf_cookie.as_deref(),
-        access_context.board.max_image_size_bytes(),
-        access_context.board.max_video_size_bytes(),
-        access_context.board.max_audio_size_bytes(),
+    let form = tokio::time::timeout(
+        crate::handlers::PUBLIC_UPLOAD_TIMEOUT,
+        parse_post_multipart(
+            multipart,
+            csrf_cookie.as_deref(),
+            access_context.board.max_image_size_bytes(),
+            access_context.board.max_video_size_bytes(),
+            access_context.board.max_audio_size_bytes(),
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| AppError::BadRequest("Upload timed out. Please try again.".into()))??;
 
     if !form.csrf_verified {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
