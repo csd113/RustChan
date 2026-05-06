@@ -529,6 +529,113 @@ pub async fn set_theme(
     Ok((jar, Redirect::to(&redirect_to)).into_response())
 }
 
+#[derive(serde::Deserialize)]
+pub struct UserPreferencesForm {
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+    pub preferences_form: Option<String>,
+    pub return_to: Option<String>,
+    pub theme: Option<String>,
+    pub hide_nsfw_boards_present: Option<String>,
+    pub hide_nsfw_boards: Option<String>,
+    pub video_audio: Option<String>,
+    pub preferred_board_view: Option<String>,
+    pub show_activity_badges_present: Option<String>,
+    pub show_activity_badges: Option<String>,
+}
+
+fn public_preference_cookie(name: &'static str, value: String) -> Cookie<'static> {
+    let mut cookie = Cookie::new(name, value);
+    cookie.set_http_only(false);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_max_age(Duration::days(365));
+    cookie
+}
+
+pub async fn set_user_preferences(
+    jar: CookieJar,
+    Form(form): Form<UserPreferencesForm>,
+) -> Result<Response> {
+    check_csrf_jar(&jar, form.csrf.as_deref())?;
+
+    let existing_preferences = user_preferences_from_jar(&jar);
+    let existing_theme = current_theme_from_jar(&jar);
+    let submitted_full_form = form.preferences_form.as_deref() == Some("1")
+        || (form.theme.is_some()
+            && form.video_audio.is_some()
+            && form.preferred_board_view.is_some());
+
+    let theme = form
+        .theme
+        .as_deref()
+        .and_then(crate::templates::normalize_theme_slug)
+        .or(existing_theme);
+    let video_audio = match form.video_audio.as_deref() {
+        Some("mute") => "mute",
+        Some("on") => "on",
+        _ if existing_preferences.video_audio_muted => "mute",
+        _ => "on",
+    };
+    let preferred_board_view = match form.preferred_board_view.as_deref() {
+        Some("index") => "index",
+        Some("catalog") => "catalog",
+        _ if existing_preferences.preferred_board_view.is_catalog() => "catalog",
+        _ => "index",
+    };
+    let update_hide_nsfw = submitted_full_form || form.hide_nsfw_boards_present.is_some();
+    let hide_nsfw = if update_hide_nsfw {
+        if form.hide_nsfw_boards.as_deref() == Some("1") {
+            "1"
+        } else {
+            "0"
+        }
+    } else if existing_preferences.hide_nsfw_boards {
+        "1"
+    } else {
+        "0"
+    };
+    let update_show_badges = submitted_full_form || form.show_activity_badges_present.is_some();
+    let show_badges = if update_show_badges {
+        if form.show_activity_badges.as_deref() == Some("1") {
+            "1"
+        } else {
+            "0"
+        }
+    } else if existing_preferences.show_activity_badges {
+        "1"
+    } else {
+        "0"
+    };
+
+    let jar = if let Some(theme) = theme {
+        jar.add(public_preference_cookie(USER_THEME_COOKIE, theme))
+    } else {
+        jar.remove(Cookie::from(USER_THEME_COOKIE))
+    };
+    let jar = jar
+        .add(public_preference_cookie(
+            USER_HIDE_NSFW_COOKIE,
+            hide_nsfw.to_string(),
+        ))
+        .add(public_preference_cookie(
+            USER_VIDEO_AUDIO_COOKIE,
+            video_audio.to_string(),
+        ))
+        .add(public_preference_cookie(
+            USER_PREFERRED_VIEW_COOKIE,
+            preferred_board_view.to_string(),
+        ))
+        .add(public_preference_cookie(
+            USER_ACTIVITY_BADGES_COOKIE,
+            show_badges.to_string(),
+        ));
+
+    let redirect_to = safe_return_to(form.return_to.as_deref(), "/");
+    Ok((jar, Redirect::to(&redirect_to)).into_response())
+}
+
 fn safe_referer_return_to(headers: &HeaderMap) -> Option<String> {
     let request_host = headers
         .get(header::HOST)

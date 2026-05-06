@@ -30,6 +30,7 @@ pub async fn index(
     jar: CookieJar,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
+    let user_preferences = user_preferences_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let mut jar = jar;
     let nsfw_consent = has_nsfw_consent(&jar);
@@ -117,7 +118,7 @@ pub async fn index(
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    let board_badges = if homepage_thread_badges_enabled {
+    let board_badges = if homepage_thread_badges_enabled && user_preferences.show_activity_badges {
         board_stats
             .iter()
             .filter_map(|stats| {
@@ -132,21 +133,22 @@ pub async fn index(
     } else {
         HashMap::new()
     };
-    let board_reply_badges = if homepage_reply_badges_enabled {
-        board_stats
-            .iter()
-            .filter_map(|stats| {
-                let access_cookie = board_access_cookie_from_jar(&jar, &stats.board.short_name);
-                can_view_board(&stats.board, is_admin, access_cookie.as_deref())
-                    .then(|| board_reply_badges.get(&stats.board.id).copied())
-                    .flatten()
-                    .filter(|count| *count > 0)
-                    .map(|count| (stats.board.id, count))
-            })
-            .collect::<HashMap<_, _>>()
-    } else {
-        HashMap::new()
-    };
+    let board_reply_badges =
+        if homepage_reply_badges_enabled && user_preferences.show_activity_badges {
+            board_stats
+                .iter()
+                .filter_map(|stats| {
+                    let access_cookie = board_access_cookie_from_jar(&jar, &stats.board.short_name);
+                    can_view_board(&stats.board, is_admin, access_cookie.as_deref())
+                        .then(|| board_reply_badges.get(&stats.board.id).copied())
+                        .flatten()
+                        .filter(|count| *count > 0)
+                        .map(|count| (stats.board.id, count))
+                })
+                .collect::<HashMap<_, _>>()
+        } else {
+            HashMap::new()
+        };
     if homepage_thread_badges_enabled || homepage_reply_badges_enabled {
         let known_board_ids = board_stats
             .iter()
@@ -190,12 +192,14 @@ pub async fn index(
         nsfw_prompt_board,
         nsfw_consent,
         is_admin,
+        user_preferences,
     ))
     .into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(HTML_CACHE_CONTROL),
     );
+    crate::cache::insert_vary_cookie(response.headers_mut());
     Ok((jar, response).into_response())
 }
 
@@ -209,6 +213,7 @@ pub async fn board_index(
     req_headers: HeaderMap,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
+    let user_preferences = user_preferences_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
@@ -301,7 +306,7 @@ pub async fn board_index(
         homepage_reply_badges_enabled,
         latest_thread_marker,
     ) = page_data;
-    let thread_badges = if thread_badges_enabled {
+    let thread_badges = if thread_badges_enabled && user_preferences.show_activity_badges {
         page_data
             .summaries
             .iter()
@@ -333,6 +338,10 @@ pub async fn board_index(
     } else {
         "-cg0"
     };
+    let theme_tag = crate::templates::page_theme_etag_fragment(
+        current_theme.as_deref(),
+        Some(&page_data.board.default_theme),
+    );
     let banner_tag = format!("-b{}", banner_selection.etag_fragment);
     let activity_tag = if thread_badges_enabled {
         let mut badge_parts = thread_badges
@@ -348,8 +357,10 @@ pub async fn board_index(
         "-na0".to_string()
     };
     let etag = format!(
-        "\"{}-{}-{page}{admin_tag}{post_tag}{greentext_tag}{banner_tag}{activity_tag}\"",
-        page_data.pagination.total, page_sig
+        "\"{}-{}-{page}{admin_tag}{post_tag}{greentext_tag}-t{theme_tag}{banner_tag}{activity_tag}-{}\"",
+        page_data.pagination.total,
+        page_sig,
+        user_preferences.etag_fragment()
     );
     let (latest_created_at, latest_thread_id) =
         latest_visible_thread_marker_tuple(latest_thread_marker);
@@ -389,6 +400,7 @@ pub async fn board_index(
             header::CACHE_CONTROL,
             HeaderValue::from_static(HTML_CACHE_CONTROL),
         );
+        crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
     }
 
@@ -408,6 +420,7 @@ pub async fn board_index(
         &banner_html,
         current_theme.as_deref(),
         can_post,
+        user_preferences,
     );
     let mut resp = Html(html).into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
@@ -417,5 +430,6 @@ pub async fn board_index(
         header::CACHE_CONTROL,
         HeaderValue::from_static(HTML_CACHE_CONTROL),
     );
+    crate::cache::insert_vary_cookie(resp.headers_mut());
     Ok((jar, resp).into_response())
 }

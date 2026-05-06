@@ -19,6 +19,7 @@ pub async fn create_thread(
     multipart: Multipart,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
+    let user_preferences = user_preferences_from_jar(&jar);
     let xhr_request = is_xml_http_request(&req_headers);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
@@ -172,6 +173,7 @@ pub async fn create_thread(
                     &banner_html,
                     current_theme.as_deref(),
                     true,
+                    user_preferences,
                 ))
             })
             .await

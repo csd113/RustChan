@@ -1990,17 +1990,21 @@ function toggleThreadMenu(toggle) {
     }
   });
 
-  // Priority: personal localStorage preference > server-configured default.
-  // The server injects data-default-theme on <html> when the admin picks a
-  // non-default theme. New visitors (no localStorage) should see that theme
-  // instead of falling back to the built-in default.
+  // The cookie-backed server selection is authoritative on page load. The
+  // localStorage copy only keeps already-open tabs visually in sync with the
+  // last server-rendered theme.
   (function () {
-    var active = null;
-    try { active = localStorage.getItem('rustchan_theme'); } catch (e) {}
+    var active = document.documentElement.getAttribute('data-active-theme') ||
+      document.documentElement.getAttribute('data-theme') ||
+      document.documentElement.getAttribute('data-default-theme') ||
+      'forest';
     if (!active || THEMES.indexOf(active) === -1) {
       active = document.documentElement.getAttribute('data-default-theme') || 'forest';
     }
-    if (active && THEMES.indexOf(active) !== -1) { applyTheme(active); }
+    if (active && THEMES.indexOf(active) !== -1) {
+      applyTheme(active);
+      try { localStorage.setItem('rustchan_theme', active); } catch (e) {}
+    }
   }());
 })();
 

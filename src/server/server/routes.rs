@@ -44,6 +44,10 @@ pub(super) fn public_routes() -> Router<AppState> {
         )
         .route("/nsfw/accept", post(crate::handlers::board::accept_nsfw))
         .route("/theme/{theme}", get(crate::handlers::board::set_theme))
+        .route(
+            "/preferences",
+            post(crate::handlers::board::set_user_preferences),
+        )
         .route("/banned", get(crate::handlers::board::banned_page))
         .route(
             "/theme-css/{theme}",

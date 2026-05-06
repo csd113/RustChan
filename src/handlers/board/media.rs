@@ -255,6 +255,7 @@ pub async fn api_post_preview(
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
 ) -> impl axum::response::IntoResponse {
+    let user_preferences = user_preferences_from_jar(&jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
@@ -297,6 +298,7 @@ pub async fn api_post_preview(
                             collapse_greentext: board.collapse_greentext,
                             thread_state: None,
                             thread_op_id: None,
+                            video_audio_muted: user_preferences.video_audio_muted,
                         },
                         0, // no edit window
                     );

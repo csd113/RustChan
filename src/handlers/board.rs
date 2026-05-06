@@ -74,6 +74,10 @@ pub(crate) fn should_set_public_secure_cookie(
 const PREVIEW_REPLIES: i64 = 3;
 const THREADS_PER_PAGE: i64 = 10;
 pub const USER_THEME_COOKIE: &str = "rustchan_theme";
+pub const USER_HIDE_NSFW_COOKIE: &str = "rustchan_hide_nsfw";
+pub const USER_VIDEO_AUDIO_COOKIE: &str = "rustchan_video_audio";
+pub const USER_PREFERRED_VIEW_COOKIE: &str = "rustchan_preferred_view";
+pub const USER_ACTIVITY_BADGES_COOKIE: &str = "rustchan_activity_badges";
 pub const NSFW_CONSENT_COOKIE: &str = "rustchan_nsfw_ok";
 pub const VISITOR_ID_COOKIE: &str = "rustchan_visitor_id";
 pub(crate) const ADMIN_SESSION_COOKIE: &str = "chan_admin_session";
@@ -251,6 +255,28 @@ pub struct BannedPageQuery {
 pub fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
     jar.get(USER_THEME_COOKIE)
         .and_then(|cookie| crate::templates::normalize_theme_slug(cookie.value()))
+}
+
+pub fn user_preferences_from_jar(jar: &CookieJar) -> crate::templates::UserPreferences {
+    let default_preferences = crate::templates::UserPreferences::default();
+    crate::templates::UserPreferences {
+        hide_nsfw_boards: jar
+            .get(USER_HIDE_NSFW_COOKIE)
+            .is_some_and(|cookie| cookie.value() == "1"),
+        video_audio_muted: jar
+            .get(USER_VIDEO_AUDIO_COOKIE)
+            .is_some_and(|cookie| cookie.value() == "mute"),
+        preferred_board_view: match jar.get(USER_PREFERRED_VIEW_COOKIE).map(Cookie::value) {
+            Some("index") => crate::templates::PreferredBoardView::Index,
+            Some("catalog") => crate::templates::PreferredBoardView::Catalog,
+            _ => default_preferences.preferred_board_view,
+        },
+        show_activity_badges: jar
+            .get(USER_ACTIVITY_BADGES_COOKIE)
+            .map_or(default_preferences.show_activity_badges, |cookie| {
+                cookie.value() != "0"
+            }),
+    }
 }
 
 pub fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {

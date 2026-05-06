@@ -92,6 +92,32 @@ fn set_new_activity_settings(
     .expect("set thread activity setting");
 }
 
+fn install_preference_test_themes() {
+    crate::templates::set_live_default_theme("forest");
+    crate::templates::set_live_themes(vec![
+        crate::models::Theme {
+            slug: "forest".to_string(),
+            display_name: "Forest".to_string(),
+            description: "Forest theme".to_string(),
+            swatch_hex: "#123456".to_string(),
+            enabled: true,
+            sort_order: 10,
+            is_builtin: true,
+            custom_css: String::new(),
+        },
+        crate::models::Theme {
+            slug: "blue-sky".to_string(),
+            display_name: "Blue Sky".to_string(),
+            description: "Blue Sky theme".to_string(),
+            swatch_hex: "#87ceeb".to_string(),
+            enabled: true,
+            sort_order: 20,
+            is_builtin: true,
+            custom_css: String::new(),
+        },
+    ]);
+}
+
 fn seed_board_with_thread(
     state: &crate::middleware::AppState,
     short_name: &str,
@@ -200,6 +226,10 @@ fn activity_router(state: crate::middleware::AppState) -> Router {
         .route(
             "/{board}/thread/{id}",
             get(crate::handlers::thread::view_thread),
+        )
+        .route(
+            "/{board}/thread/{id}/updates",
+            get(crate::handlers::thread::thread_updates),
         )
         .with_state(state)
 }
@@ -2179,6 +2209,415 @@ async fn theme_redirect_rejects_external_referer_fallback() {
             .and_then(|value| value.to_str().ok()),
         Some("/")
     );
+}
+
+#[test]
+fn user_preferences_from_jar_defaults_and_ignores_invalid_values() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        "rustchan_hide_nsfw=maybe; rustchan_video_audio=loud; rustchan_preferred_view=grid; rustchan_activity_badges=maybe"
+            .parse()
+            .expect("cookie header"),
+    );
+    let jar = CookieJar::from_headers(&headers);
+
+    let preferences = super::user_preferences_from_jar(&jar);
+
+    assert!(!preferences.hide_nsfw_boards);
+    assert!(!preferences.video_audio_muted);
+    assert!(preferences.preferred_board_view.is_catalog());
+    assert!(preferences.show_activity_badges);
+}
+
+fn set_cookie_pairs(response: &axum::response::Response) -> String {
+    response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.split(';').next())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[tokio::test]
+async fn set_user_preferences_requires_csrf_and_sets_bounded_cookies() {
+    install_preference_test_themes();
+    let router = Router::new().route("/preferences", post(super::set_user_preferences));
+
+    let rejected = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/preferences")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .body(Body::from("theme=forest"))
+                .expect("request"),
+        )
+        .await
+        .expect("rejected response");
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+
+    let accepted = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/preferences")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .body(Body::from(
+                    "_csrf=csrf123&return_to=%2Ftech%2Fcatalog&theme=forest&hide_nsfw_boards=1&video_audio=mute&preferred_board_view=index",
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("accepted response");
+
+    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        accepted
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/tech/catalog")
+    );
+    let set_cookies = accepted
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(set_cookies.contains("rustchan_theme=forest"));
+    assert!(set_cookies.contains("rustchan_hide_nsfw=1"));
+    assert!(set_cookies.contains("rustchan_video_audio=mute"));
+    assert!(set_cookies.contains("rustchan_preferred_view=index"));
+    assert!(set_cookies.contains("rustchan_activity_badges=0"));
+    assert!(set_cookies.contains("SameSite=Lax"));
+    assert!(set_cookies.contains("Path=/"));
+}
+
+#[tokio::test]
+async fn preferences_theme_cookie_drives_rendered_theme_after_reload() {
+    let state = crate::test_support::app_state();
+    install_preference_test_themes();
+    seed_board_with_thread(&state, "tech", "op");
+    let router = Router::new()
+        .route("/preferences", post(super::set_user_preferences))
+        .route("/{board}", get(super::board_index))
+        .with_state(state);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/preferences")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .body(Body::from(
+                    "_csrf=csrf123&return_to=%2Ftech&preferences_form=1&theme=blue-sky&video_audio=on&preferred_board_view=catalog&show_activity_badges=1",
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("preference response");
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let cookie_header = set_cookie_pairs(&response);
+    assert!(cookie_header.contains("rustchan_theme=blue-sky"));
+
+    let rendered = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tech")
+                .header(header::COOKIE, cookie_header)
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("rendered response");
+    assert_eq!(rendered.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(rendered.into_body(), usize::MAX)
+            .await
+            .expect("body bytes")
+            .to_vec(),
+    )
+    .expect("utf8 body");
+    assert!(body.contains(r#"data-active-theme="blue-sky""#));
+    assert!(body.contains(r#"data-theme="blue-sky""#));
+    assert!(body.contains(r#"<option value="blue-sky" selected>Blue Sky</option>"#));
+}
+
+#[tokio::test]
+async fn invalid_preferences_theme_falls_back_without_panic() {
+    install_preference_test_themes();
+    let router = Router::new().route("/preferences", post(super::set_user_preferences));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/preferences")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(
+                    header::COOKIE,
+                    "csrf_token=csrf123; rustchan_theme=blue-sky; rustchan_hide_nsfw=1",
+                )
+                .body(Body::from(
+                    "_csrf=csrf123&return_to=%2F&theme=does-not-exist",
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let set_cookies = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(set_cookies.contains("rustchan_theme=blue-sky"));
+    assert!(set_cookies.contains("rustchan_hide_nsfw=1"));
+}
+
+#[tokio::test]
+async fn partial_preference_updates_preserve_unrelated_cookies() {
+    install_preference_test_themes();
+    let router = Router::new().route("/preferences", post(super::set_user_preferences));
+
+    let theme_only = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/preferences")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(
+                    header::COOKIE,
+                    "csrf_token=csrf123; rustchan_hide_nsfw=1; rustchan_video_audio=mute; rustchan_preferred_view=index; rustchan_activity_badges=0",
+                )
+                .body(Body::from("_csrf=csrf123&return_to=%2F&theme=blue-sky"))
+                .expect("request"),
+        )
+        .await
+        .expect("theme-only response");
+    assert_eq!(theme_only.status(), StatusCode::SEE_OTHER);
+    let theme_only_cookies = set_cookie_pairs(&theme_only);
+    assert!(theme_only_cookies.contains("rustchan_theme=blue-sky"));
+    assert!(theme_only_cookies.contains("rustchan_hide_nsfw=1"));
+    assert!(theme_only_cookies.contains("rustchan_video_audio=mute"));
+    assert!(theme_only_cookies.contains("rustchan_preferred_view=index"));
+    assert!(theme_only_cookies.contains("rustchan_activity_badges=0"));
+
+    let unrelated_only = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/preferences")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123; rustchan_theme=blue-sky")
+                .body(Body::from(
+                    "_csrf=csrf123&return_to=%2F&preferences_form=1&video_audio=mute&preferred_board_view=index",
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("unrelated-only response");
+    assert_eq!(unrelated_only.status(), StatusCode::SEE_OTHER);
+    let unrelated_cookies = set_cookie_pairs(&unrelated_only);
+    assert!(unrelated_cookies.contains("rustchan_theme=blue-sky"));
+    assert!(unrelated_cookies.contains("rustchan_video_audio=mute"));
+    assert!(unrelated_cookies.contains("rustchan_preferred_view=index"));
+}
+
+#[tokio::test]
+async fn user_theme_overrides_configured_default_and_changes_etag() {
+    let state = crate::test_support::app_state();
+    install_preference_test_themes();
+    seed_board_with_thread(&state, "tech", "op");
+    crate::templates::set_live_default_theme("forest");
+    let router = activity_router(state);
+
+    let default_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tech")
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("default response");
+    assert_eq!(default_response.status(), StatusCode::OK);
+    let default_etag = default_response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .expect("default etag");
+
+    let themed_response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tech")
+                .header(header::COOKIE, "rustchan_theme=blue-sky")
+                .header(header::IF_NONE_MATCH, default_etag.as_str())
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("themed response");
+    assert_eq!(themed_response.status(), StatusCode::OK);
+    let themed_etag = themed_response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .expect("themed etag");
+    assert_ne!(default_etag, themed_etag);
+    let body = String::from_utf8(
+        to_bytes(themed_response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes")
+            .to_vec(),
+    )
+    .expect("utf8 body");
+    assert!(body.contains(r#"data-default-theme="forest""#));
+    assert!(body.contains(r#"data-active-theme="blue-sky""#));
+    assert!(body.contains(r#"data-theme="blue-sky""#));
+}
+
+#[test]
+fn theme_init_uses_server_active_theme_before_local_storage() {
+    let theme_init = include_str!("../../../static/theme-init.js");
+
+    assert!(theme_init.contains("data-active-theme"));
+    assert!(!theme_init.contains("localStorage.getItem('rustchan_theme')"));
+}
+
+#[tokio::test]
+async fn set_user_preferences_rejects_open_redirect_return_to() {
+    install_preference_test_themes();
+    let router = Router::new().route("/preferences", post(super::set_user_preferences));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/preferences")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .body(Body::from(
+                    "_csrf=csrf123&return_to=%2F%2Fevil.example%2F&theme=forest",
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/")
+    );
+}
+
+#[tokio::test]
+async fn preference_specific_html_responses_vary_on_cookie() {
+    let state = crate::test_support::app_state();
+    let (_board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    let router = activity_router(state);
+
+    for uri in [
+        "/".to_string(),
+        "/tech".to_string(),
+        "/tech/catalog".to_string(),
+        format!("/tech/thread/{thread_id}"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header(header::COOKIE, "rustchan_preferred_view=index")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(header::VARY)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value
+                    .split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case("cookie"))),
+            "missing Vary: Cookie for preference-specific response"
+        );
+    }
+}
+
+#[tokio::test]
+async fn thread_updates_nav_uses_cookie_preferences() {
+    let state = crate::test_support::app_state();
+    let conn = state.db.get().expect("db connection");
+    crate::db::create_board(&conn, "tech", "Tech", "", false).expect("create sfw board");
+    crate::db::create_board(&conn, "x", "Adult", "", true).expect("create nsfw board");
+    crate::templates::set_live_boards(crate::db::get_all_boards(&conn).expect("load boards"));
+    drop(conn);
+    let (board_id, thread_id) = seed_board_with_thread(&state, "chat", "op");
+    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    let router = activity_router(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/chat/thread/{thread_id}/updates?since=0"))
+                .header(
+                    header::COOKIE,
+                    "rustchan_hide_nsfw=1; rustchan_preferred_view=index",
+                )
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response
+        .headers()
+        .get(header::VARY)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value
+            .split(',')
+            .any(|part| part.trim().eq_ignore_ascii_case("cookie"))));
+    let body = response_body_string(response).await;
+    assert!(body.contains(r#"<a href=\"/tech\">tech</a>"#));
+    assert!(body.contains(r#"<a href=\"/chat\">chat</a>"#));
+    assert!(!body.contains("/tech/catalog"));
+    assert!(!body.contains(r">x</a>"));
 }
 
 #[tokio::test]

@@ -56,6 +56,7 @@ pub async fn view_thread(
     req_headers: HeaderMap,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
+    let user_preferences = crate::handlers::board::user_preferences_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let owned_post_grants = crate::handlers::board::owned_post_grants_from_jar(&jar);
@@ -161,6 +162,10 @@ pub async fn view_thread(
     } else {
         "-cg0"
     };
+    let theme_tag = crate::templates::page_theme_etag_fragment(
+        current_theme.as_deref(),
+        Some(&page_data.board.default_theme),
+    );
     let ownership_sig = {
         let mut owned = page_data
             .owned_post_controls
@@ -171,7 +176,8 @@ pub async fn view_thread(
         crate::utils::crypto::sha256_hex(owned.join("|").as_bytes())
     };
     let etag = format!(
-        "\"{thread_sig}-b{boards_ver}{admin_tag}{post_tag}{greentext_tag}-o{ownership_sig}\""
+        "\"{thread_sig}-b{boards_ver}{admin_tag}{post_tag}{greentext_tag}-t{theme_tag}-o{ownership_sig}-{}\"",
+        user_preferences.etag_fragment()
     );
     let (latest_created_at, latest_thread_id) =
         crate::handlers::board::latest_visible_thread_marker_tuple(latest_thread_marker);
@@ -216,6 +222,7 @@ pub async fn view_thread(
             axum::http::header::CACHE_CONTROL,
             axum::http::HeaderValue::from_static(crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC),
         );
+        crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
     }
 
@@ -234,6 +241,7 @@ pub async fn view_thread(
         None,
         current_theme.as_deref(),
         can_post,
+        user_preferences,
     );
     let mut resp = Html(html).into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
@@ -243,6 +251,7 @@ pub async fn view_thread(
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static(crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC),
     );
+    crate::cache::insert_vary_cookie(resp.headers_mut());
     Ok((jar, resp).into_response())
 }
 
@@ -259,6 +268,7 @@ pub async fn post_reply(
     multipart: Multipart,
 ) -> Result<Response> {
     let xhr_request = is_xml_http_request(&req_headers);
+    let user_preferences = crate::handlers::board::user_preferences_from_jar(&jar);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_string());
@@ -402,6 +412,7 @@ pub async fn post_reply(
                     None,
                     current_theme.as_deref(),
                     true,
+                    user_preferences,
                 ))
             })
             .await
@@ -1215,6 +1226,7 @@ pub async fn thread_updates(
     jar: CookieJar,
 ) -> Result<Response> {
     let since = params.since;
+    let user_preferences = crate::handlers::board::user_preferences_from_jar(&jar);
     let refresh_post_ids = parse_refresh_post_ids(params.refresh.as_deref());
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
@@ -1287,6 +1299,7 @@ pub async fn thread_updates(
                             collapse_greentext: board.collapse_greentext,
                             thread_state: None,
                             thread_op_id: thread.op_id,
+                            video_audio_muted: user_preferences.video_audio_muted,
                         },
                         0,
                     ));
@@ -1318,6 +1331,7 @@ pub async fn thread_updates(
                                         thread.archived,
                                     )),
                                     thread_op_id: thread.op_id,
+                                    video_audio_muted: user_preferences.video_audio_muted,
                                 },
                                 0,
                             ),
@@ -1342,7 +1356,10 @@ pub async fn thread_updates(
     // Current board-list version + rendered nav links — lets the JS refresh
     // the nav bar when boards are added or deleted while a thread is open,
     // without requiring a full page reload.
-    let (boards_version, nav_html) = crate::templates::live_board_nav();
+    let boards_version = crate::templates::live_boards_version();
+    let boards = crate::templates::live_boards_snapshot();
+    let nav_html =
+        crate::templates::board_nav_html_for_preferences(boards.as_slice(), user_preferences);
     let payload = ThreadUpdatesPayload {
         html,
         last_id,
@@ -1353,15 +1370,17 @@ pub async fn thread_updates(
         locked,
         sticky,
         boards_version,
-        nav_html: nav_html.as_ref().to_string(),
+        nav_html,
     };
 
-    Ok((
+    let mut response = (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&payload)
             .map_err(|error| crate::error::AppError::Internal(anyhow::anyhow!(error)))?,
     )
-        .into_response())
+        .into_response();
+    crate::cache::insert_vary_cookie(response.headers_mut());
+    Ok(response)
 }
 
 #[cfg(test)]

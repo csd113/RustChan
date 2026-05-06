@@ -124,6 +124,7 @@ pub fn render_board_page(
     board_banner_html: &str,
     current_theme: Option<&str>,
     can_post: bool,
+    user_preferences: templates::UserPreferences,
 ) -> String {
     let boards = templates::live_boards();
     templates::board_page(
@@ -142,6 +143,7 @@ pub fn render_board_page(
         current_theme,
         data.board.collapse_greentext,
         can_post,
+        user_preferences,
     )
 }
 
@@ -185,6 +187,7 @@ pub fn render_thread_page(
     edit_overlay_state: Option<&templates::thread::EditOverlayState>,
     current_theme: Option<&str>,
     can_post: bool,
+    user_preferences: templates::UserPreferences,
 ) -> String {
     let boards = templates::live_boards();
     templates::thread_page(
@@ -204,6 +207,7 @@ pub fn render_thread_page(
         current_theme,
         data.board.collapse_greentext,
         can_post,
+        user_preferences,
     )
 }
 

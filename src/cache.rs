@@ -20,3 +20,25 @@ pub fn insert_cache_control_if_absent(headers: &mut HeaderMap, value: &'static s
 pub fn set_cache_control(headers: &mut HeaderMap, value: &'static str) {
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
 }
+
+pub fn insert_vary_cookie(headers: &mut HeaderMap) {
+    let Some(existing) = headers
+        .get(header::VARY)
+        .and_then(|value| value.to_str().ok())
+    else {
+        headers.insert(header::VARY, HeaderValue::from_static("Cookie"));
+        return;
+    };
+
+    if existing
+        .split(',')
+        .any(|part| part.trim().eq_ignore_ascii_case("cookie") || part.trim() == "*")
+    {
+        return;
+    }
+
+    let combined = format!("{existing}, Cookie");
+    if let Ok(value) = HeaderValue::from_str(&combined) {
+        headers.insert(header::VARY, value);
+    }
+}

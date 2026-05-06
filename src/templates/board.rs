@@ -16,8 +16,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use super::{
-    base_layout, compress_modal_script, embed_thumb_from_body, fmt_ts, fmt_ts_short,
-    live_site_name, live_site_subtitle, render_pagination, report_modal_script, urlencoding_simple,
+    base_layout, base_layout_with_preferences, compress_modal_script, embed_thumb_from_body,
+    fmt_ts, fmt_ts_short, live_site_name, live_site_subtitle, render_pagination,
+    report_modal_script, urlencoding_simple,
 };
 
 // ─── Site index (board list) ──────────────────────────────────────────────────
@@ -83,6 +84,7 @@ fn render_board_card(
     show_reorder_controls: bool,
     is_first: bool,
     is_last: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let board = &stats.board;
     let description_preview = preview_text(&board.description, 88);
@@ -93,8 +95,10 @@ fn render_board_card(
     };
     let board_href = if board.access_mode.requires_view_password() {
         format!("/{}/unlock", escape_html(&board.short_name))
-    } else {
+    } else if user_preferences.preferred_board_view.is_catalog() {
         format!("/{}/catalog", escape_html(&board.short_name))
+    } else {
+        format!("/{}", escape_html(&board.short_name))
     };
     let href = if board.nsfw && !nsfw_consent {
         format!("/?nsfw={}", urlencoding_simple(&board.short_name))
@@ -111,8 +115,10 @@ fn render_board_card(
             r#" data-return-to="/{}" data-board-label="/{}/""#,
             if board.access_mode.requires_view_password() {
                 format!("{}/unlock", escape_html(&board.short_name))
-            } else {
+            } else if user_preferences.preferred_board_view.is_catalog() {
                 format!("{}/catalog", escape_html(&board.short_name))
+            } else {
+                escape_html(&board.short_name)
             },
             escape_html(&board.short_name)
         )
@@ -572,6 +578,7 @@ fn board_cards(
     csrf_token: &str,
     admin_csrf_token: Option<&str>,
     show_reorder_controls: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let mut out = String::new();
     for (index, s) in list.iter().enumerate() {
@@ -585,6 +592,7 @@ fn board_cards(
             show_reorder_controls,
             index == 0,
             index + 1 == list.len(),
+            user_preferences,
         ));
     }
     out
@@ -608,6 +616,7 @@ pub fn index_page(
     nsfw_prompt_board: Option<&Board>,
     nsfw_consent: bool,
     is_admin: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let all_boards: Vec<Board> = board_stats.iter().map(|s| s.board.clone()).collect();
 
@@ -621,16 +630,16 @@ pub fn index_page(
     } else {
         format!(
             "<div class=\"index-section\"><h2 class=\"index-section-title\">// Boards</h2><div class=\"board-cards\">{}</div></div>",
-            board_cards(&sfw, board_badges, board_reply_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin)
+            board_cards(&sfw, board_badges, board_reply_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin, user_preferences)
         )
     };
 
-    let nsfw_sec = if nsfw.is_empty() {
+    let nsfw_sec = if user_preferences.hide_nsfw_boards || nsfw.is_empty() {
         String::new()
     } else {
         format!(
             "<div class=\"index-section\"><h2 class=\"index-section-title\">// Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2><div class=\"board-cards\">{}</div></div>",
-            board_cards(&nsfw, board_badges, board_reply_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin)
+            board_cards(&nsfw, board_badges, board_reply_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin, user_preferences)
         )
     };
 
@@ -764,7 +773,7 @@ pub fn index_page(
         nsfw_overlay = nsfw_overlay,
     );
 
-    base_layout(
+    base_layout_with_preferences(
         &live_site_name(),
         None,
         &body,
@@ -774,6 +783,7 @@ pub fn index_page(
         None,
         false,
         "/",
+        user_preferences,
     )
 }
 
@@ -804,6 +814,7 @@ pub fn board_page(
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let mut body = String::new();
     let admin_form_csrf = admin_csrf_token.unwrap_or(csrf_token);
@@ -895,6 +906,7 @@ pub fn board_page(
             } else {
                 None
             },
+            user_preferences,
         ));
     }
 
@@ -909,7 +921,7 @@ pub fn board_page(
         board.max_video_size_bytes(),
     ));
 
-    base_layout(
+    base_layout_with_preferences(
         &format!("/{}/ — {} - Index", board.short_name, board.name),
         Some(&board.short_name),
         &body,
@@ -919,6 +931,7 @@ pub fn board_page(
         Some(&board.default_theme),
         collapse_greentext,
         &format!("/{}", board.short_name),
+        user_preferences,
     )
 }
 
@@ -934,6 +947,7 @@ fn render_thread_summary(
     show_poster_ids: bool,
     collapse_greentext: bool,
     unread_reply_count: Option<i64>,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let t = &summary.thread;
     let mut html = String::new();
@@ -1133,6 +1147,7 @@ fn render_thread_summary(
                 collapse_greentext,
                 thread_state: None,
                 thread_op_id: summary.thread.op_id,
+                video_audio_muted: user_preferences.video_audio_muted,
             },
             0,
         ));
@@ -1169,6 +1184,7 @@ pub fn catalog_page(
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let bs = escape_html(&board.short_name);
     let bn = escape_html(&board.name);
@@ -1329,7 +1345,7 @@ pub fn catalog_page(
         board.max_image_size_bytes(),
         board.max_video_size_bytes(),
     ));
-    base_layout(
+    base_layout_with_preferences(
         &format!(
             "/{}/ — {} - {}",
             board.short_name,
@@ -1352,6 +1368,7 @@ pub fn catalog_page(
         } else {
             format!("/{}/catalog", board.short_name)
         },
+        user_preferences,
     )
 }
 
@@ -1369,6 +1386,7 @@ pub fn search_page(
     boards: &[Board],
     current_theme: Option<&str>,
     collapse_greentext: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let result_label = if pagination.total == 1 {
         "1 result".to_string()
@@ -1420,6 +1438,7 @@ pub fn search_page(
                     collapse_greentext: board.collapse_greentext,
                     thread_state: None,
                     thread_op_id: None,
+                    video_audio_muted: user_preferences.video_audio_muted,
                 },
                 0,
             ));
@@ -1435,7 +1454,7 @@ pub fn search_page(
     }
 
     body.push_str("</div>");
-    base_layout(
+    base_layout_with_preferences(
         &format!("search — /{}/", board.short_name),
         Some(&board.short_name),
         &body,
@@ -1449,6 +1468,7 @@ pub fn search_page(
             board.short_name,
             urlencoding_simple(query)
         ),
+        user_preferences,
     )
 }
 
@@ -1518,7 +1538,7 @@ mod tests {
         archive_page, board_cards, board_page, catalog_page, index_page, render_catalog_card,
         render_thread_summary,
     };
-    use crate::models::{Board, BoardStats, SiteStats, Thread, ThreadSummary};
+    use crate::models::{Board, BoardStats, MediaType, Post, SiteStats, Thread, ThreadSummary};
     use crate::templates::forms::PostFormState;
     use std::collections::{HashMap, HashSet};
 
@@ -1563,6 +1583,36 @@ mod tests {
         }
     }
 
+    fn sample_video_reply() -> Post {
+        Post {
+            id: 99,
+            thread_id: 87,
+            board_id: 1,
+            name: "anon".into(),
+            tripcode: None,
+            subject: None,
+            body: "video reply".into(),
+            body_html: "video reply".into(),
+            ip_hash: None,
+            file_path: Some("test/video.webm".into()),
+            file_name: Some("video.webm".into()),
+            file_size: Some(1024),
+            thumb_path: Some("test/thumbs/video.webp".into()),
+            mime_type: Some("video/webm".into()),
+            media_type: Some(MediaType::Video),
+            media_processing_state: None,
+            media_processing_error: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            created_at: 1_700_000_020,
+            deletion_token: "token".into(),
+            is_op: false,
+            edited_at: None,
+        }
+    }
+
     #[test]
     fn board_cards_render_reorder_controls_only_when_enabled() {
         let board = sample_board();
@@ -1579,6 +1629,7 @@ mod tests {
             "csrf",
             None,
             false,
+            crate::templates::UserPreferences::default(),
         );
         assert!(html_without_controls.contains("board-card-link"));
         assert!(!html_without_controls.contains("board-reorder-menu"));
@@ -1591,6 +1642,7 @@ mod tests {
             "csrf",
             Some("admin-csrf"),
             true,
+            crate::templates::UserPreferences::default(),
         );
         assert!(html_with_controls.contains("board-reorder-menu"));
         assert!(html_with_controls.contains(r#"name="_csrf" value="admin-csrf""#));
@@ -1614,6 +1666,7 @@ mod tests {
             "csrf",
             None,
             false,
+            crate::templates::UserPreferences::default(),
         );
 
         let stats_idx = html
@@ -1629,6 +1682,33 @@ mod tests {
         assert!(stats_idx < badge_idx && badge_idx < link_close_idx);
         assert!(html.contains(r#"<span class="board-card-slug">/test/</span>"#));
         assert!(html.contains("2 New Threads"));
+    }
+
+    #[test]
+    fn board_card_links_follow_index_preference_for_public_boards() {
+        let board = sample_board();
+        let stats = BoardStats {
+            board,
+            thread_count: 4,
+        };
+        let preferences = crate::templates::UserPreferences {
+            preferred_board_view: crate::templates::PreferredBoardView::Index,
+            ..crate::templates::UserPreferences::default()
+        };
+
+        let html = board_cards(
+            &[&stats],
+            &HashMap::new(),
+            &HashMap::new(),
+            true,
+            "csrf",
+            None,
+            false,
+            preferences,
+        );
+
+        assert!(html.contains(r#"class="board-card-link" href="/test""#));
+        assert!(!html.contains(r#"href="/test/catalog""#));
     }
 
     #[test]
@@ -1649,6 +1729,7 @@ mod tests {
             None,
             true,
             false,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains("site statistics are temporarily unavailable."));
@@ -1682,6 +1763,7 @@ mod tests {
             None,
             true,
             false,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains("audio files uploaded"));
@@ -1712,6 +1794,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains("catalog-card-link"));
@@ -1850,8 +1933,17 @@ mod tests {
     fn thread_summary_activity_badge_renders_between_title_area_and_footer() {
         let summary = sample_thread_summary();
 
-        let html =
-            render_thread_summary(&summary, "test", "csrf", None, false, true, false, Some(2));
+        let html = render_thread_summary(
+            &summary,
+            "test",
+            "csrf",
+            None,
+            false,
+            true,
+            false,
+            Some(2),
+            crate::templates::UserPreferences::default(),
+        );
 
         let subject_idx = html
             .find("class=\"subject\"")
@@ -1873,6 +1965,30 @@ mod tests {
     }
 
     #[test]
+    fn thread_summary_preview_videos_follow_audio_preference() {
+        let mut summary = sample_thread_summary();
+        summary.preview_posts = vec![sample_video_reply()];
+
+        let html = render_thread_summary(
+            &summary,
+            "test",
+            "csrf",
+            None,
+            false,
+            true,
+            false,
+            None,
+            crate::templates::UserPreferences {
+                video_audio_muted: true,
+                ..crate::templates::UserPreferences::default()
+            },
+        );
+
+        assert!(html.contains("media-expanded-video"));
+        assert!(html.contains("controls preload=\"none\" playsinline webkit-playsinline muted"));
+    }
+
+    #[test]
     fn thread_summary_admin_forms_use_admin_csrf_token() {
         let summary = sample_thread_summary();
 
@@ -1885,6 +2001,7 @@ mod tests {
             true,
             false,
             None,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"action="/admin/thread/delete""#));
@@ -1938,6 +2055,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"class="post-form-wrap is-open""#));

@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use super::{
-    base_layout, compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script,
-    thread_autoupdate_script,
+    base_layout, base_layout_with_preferences, compress_modal_script, fmt_ts, fmt_ts_short,
+    report_modal_script, thread_autoupdate_script,
 };
 
 const SELF_ACTION_WINDOW_SECS: i64 = 60;
@@ -61,6 +61,7 @@ fn render_post_preview(
             collapse_greentext: true,
             thread_state: None,
             thread_op_id,
+            video_audio_muted: false,
         },
         SELF_ACTION_WINDOW_SECS,
     )
@@ -286,6 +287,7 @@ pub fn thread_page(
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let mut body = String::new();
     let admin_form_csrf = admin_csrf_token.unwrap_or(csrf_token);
@@ -429,6 +431,7 @@ pub fn thread_page(
                 collapse_greentext: board.collapse_greentext,
                 thread_state: Some((thread.sticky, thread.locked, thread.archived)),
                 thread_op_id: thread.op_id,
+                video_audio_muted: user_preferences.video_audio_muted,
             },
             SELF_ACTION_WINDOW_SECS,
         ));
@@ -515,7 +518,7 @@ pub fn thread_page(
         draft_key = escape_html(&draft_key)
     );
 
-    base_layout(
+    base_layout_with_preferences(
         &format!(
             "/{}/ - {}",
             board.short_name,
@@ -529,6 +532,7 @@ pub fn thread_page(
         Some(&board.default_theme),
         collapse_greentext,
         &format!("/{}/thread/{}", board.short_name, thread.id),
+        user_preferences,
     )
 }
 
@@ -655,6 +659,7 @@ pub struct RenderPostOpts {
     pub collapse_greentext: bool,
     pub thread_state: Option<(bool, bool, bool)>,
     pub thread_op_id: Option<i64>,
+    pub video_audio_muted: bool,
 }
 
 const POSTER_ID_ALPHABET: &[u8; 64] =
@@ -841,6 +846,7 @@ pub fn render_post(
         collapse_greentext,
         thread_state,
         thread_op_id,
+        video_audio_muted,
     } = opts;
     let poster_id = render_poster_id(post, show_poster_ids);
     let poster_id_html = poster_id.as_ref().map_or_else(String::new, |poster_id| {
@@ -1039,7 +1045,7 @@ pub fn render_post(
   {thumb_html}
   <div class="media-expand-overlay">&#9654;</div>
 </a>
-<video class="media-expanded media-expanded-video" controls preload="none" playsinline webkit-playsinline style="display:none">
+<video class="media-expanded media-expanded-video" controls preload="none" playsinline webkit-playsinline{muted_attr} style="display:none">
   <source src="/boards/{f}" type="{mime}">
 </video>
 </div>"#,
@@ -1054,7 +1060,8 @@ pub fn render_post(
                         "preview unavailable",
                     ),
                     sz = escape_html(&size_str),
-                    mime = escape_html(mime)
+                    mime = escape_html(mime),
+                    muted_attr = if video_audio_muted { " muted" } else { "" },
                 );
             } else if is_pdf {
                 let _ = write!(
@@ -1498,6 +1505,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"href="/test">[ Return ]</a>"#));
@@ -1537,6 +1545,7 @@ mod tests {
             None,
             false,
             false,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"href="/test">[ Return ]</a>"#));
@@ -1574,6 +1583,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"action="/admin/thread/delete""#));
@@ -1607,6 +1617,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1646,6 +1657,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1691,6 +1703,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1720,6 +1733,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: Some((true, true, true)),
                 thread_op_id: Some(post.id),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1752,6 +1766,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1783,6 +1798,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1820,6 +1836,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1848,6 +1865,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1877,6 +1895,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1898,6 +1917,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1929,6 +1949,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1975,6 +1996,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"class="post-form-wrap is-open""#));
@@ -2015,6 +2037,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"id="edit-modal""#));
@@ -2053,6 +2076,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"href="/test/post/1/edit""#));
@@ -2155,6 +2179,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(!html.contains("(edited"));
