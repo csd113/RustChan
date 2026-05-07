@@ -12,19 +12,29 @@ pub(crate) fn create_full_backup_to_server(
     split_zip_part_size: u64,
 ) -> Result<String> {
     let conn = pool.get()?;
+    let automated = session_id.is_none();
     if let Some(session_id) = session_id {
         super::super::require_admin_session_sid(&conn, Some(session_id))?;
     }
     let uploads_base = std::path::Path::new(&CONFIG.upload_dir);
     let global_favicon_dir = crate::favicon::global_backup_source_dir();
-    let tor_hidden_service_keys_dir = if include_tor_hidden_service_keys {
+    let mut tor_hidden_service_keys_dir = if include_tor_hidden_service_keys {
         match super::common::resolve_tor_hidden_service_keys_availability(
             true,
             crate::config::configured_tor_hidden_service_keys_dir(),
             "Tor hidden service key backups are not available with the current configuration.",
-        )? {
-            super::common::TorHiddenServiceKeysAvailability::Skipped => None,
-            super::common::TorHiddenServiceKeysAvailability::Available(dir) => Some(dir),
+        ) {
+            Ok(super::common::TorHiddenServiceKeysAvailability::Skipped) => None,
+            Ok(super::common::TorHiddenServiceKeysAvailability::Available(dir)) => Some(dir),
+            Err(error) if automated => {
+                tracing::warn!(
+                    target: "admin",
+                    error = %error,
+                    "Skipping Tor hidden service keys for scheduled full backup"
+                );
+                None
+            }
+            Err(error) => return Err(error),
         }
     } else {
         None
@@ -40,13 +50,26 @@ pub(crate) fn create_full_backup_to_server(
     let banner_file_count = super::count_files_in_dir(&global_banner_dir);
     let tor_hidden_service_key_file_count = if let Some(dir) = tor_hidden_service_keys_dir.as_ref()
     {
-        count_required_private_files(
+        match count_required_private_files(
             dir,
             "Tor hidden service keys were requested, but the configured identity directory could not be read.",
-        )?
+        ) {
+            Ok(count) => count,
+            Err(error) if automated => {
+                tracing::warn!(
+                    target: "admin",
+                    error = %error,
+                    "Skipping Tor hidden service keys for scheduled full backup"
+                );
+                tor_hidden_service_keys_dir = None;
+                0
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         0
     };
+    let include_tor_hidden_service_keys = tor_hidden_service_keys_dir.is_some();
     let file_count = super::count_files_in_dir(uploads_base)
         .saturating_add(favicon_file_count)
         .saturating_add(banner_file_count)

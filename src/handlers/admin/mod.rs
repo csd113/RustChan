@@ -115,7 +115,7 @@ pub(super) fn require_same_origin_request(
     let request_scheme =
         if crate::middleware::forwarded_proto_is_https(headers, peer, CONFIG.behind_proxy)
             || (CONFIG.tls.enabled && host_header_uses_https_port(headers))
-            || request_referer_indicates_https_tunnel(headers)
+            || request_origin_uses_https(headers)
         {
             "https"
         } else {
@@ -372,40 +372,6 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
     };
 
     hosts_match_for_same_origin(source_host, request_host)
-}
-
-fn request_referer_indicates_https_tunnel(headers: &HeaderMap) -> bool {
-    let origin = header_value_trimmed(headers, header::ORIGIN);
-    if origin.is_some_and(|value| !value.eq_ignore_ascii_case("null")) {
-        return false;
-    }
-
-    let request_host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
-        .map(|authority| authority.host().to_string());
-    let Some(request_host) = request_host.as_deref() else {
-        return false;
-    };
-
-    let Some(referer) = header_value_trimmed(headers, header::REFERER) else {
-        return false;
-    };
-    let Ok(referer_uri) = referer.parse::<Uri>() else {
-        return false;
-    };
-    if referer_uri.scheme_str() != Some("https") {
-        return false;
-    }
-    let Some(referer_host) = referer_uri
-        .authority()
-        .map(axum::http::uri::Authority::host)
-    else {
-        return false;
-    };
-
-    hosts_match_for_same_origin(referer_host, request_host)
 }
 
 fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
@@ -1286,6 +1252,16 @@ mod tests {
     }
 
     #[test]
+    fn same_origin_request_accepts_same_host_https_origin_on_https_tunnel() {
+        let mut headers = same_origin_headers("rustchan.serveousercontent.com");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://rustchan.serveousercontent.com"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
     fn same_origin_request_rejects_null_origin_for_non_loopback_targets() {
         let mut headers = same_origin_headers("192.168.1.20:8080");
         headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
@@ -1297,8 +1273,8 @@ mod tests {
     }
 
     #[test]
-    fn same_origin_request_rejects_scheme_mismatch_for_non_loopback_host() {
-        let mut headers = same_origin_headers("example.test");
+    fn same_origin_request_rejects_default_https_origin_with_explicit_http_port() {
+        let mut headers = same_origin_headers("example.test:8080");
         headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("https://example.test"),

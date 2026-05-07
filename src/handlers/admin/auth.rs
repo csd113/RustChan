@@ -876,7 +876,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_login_rejects_same_host_different_scheme_origin() {
+    async fn admin_login_rejects_same_host_different_origin_port() {
         let state = crate::test_support::app_state();
         {
             let conn = state.db.get().expect("db connection");
@@ -895,7 +895,7 @@ mod tests {
                     .method("POST")
                     .uri("/admin/login")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .header(header::HOST, "example.test")
+                    .header(header::HOST, "example.test:8080")
                     .header(header::ORIGIN, "https://example.test")
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
