@@ -3,6 +3,7 @@
 
 use super::*;
 use chrono::TimeZone;
+use std::collections::HashSet;
 
 const BACKUP_LIST_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -89,50 +90,226 @@ fn scope_label(scope: v4::BackupScope) -> String {
     }
 }
 
-fn verify_v4_saved_backup(layout: &v4::SavedBackupLayout) -> Result<v4::VerifiedSavedV4Root> {
-    let metadata = v4::load_metadata(&layout.metadata_path)?;
-    let expected_scopes: &[v4::BackupScope] = match metadata.scope {
-        v4::BackupScope::FullSite => &[v4::BackupScope::FullSite],
-        v4::BackupScope::Board => &[v4::BackupScope::Board],
-        v4::BackupScope::SelectedBoards => &[v4::BackupScope::SelectedBoards],
-        v4::BackupScope::PreMaintenance => &[v4::BackupScope::PreMaintenance],
-    };
-    v4::verify_saved_v4_root(&layout.root_dir, expected_scopes)
+fn validate_v4_listing_metadata(
+    layout: &v4::SavedBackupLayout,
+    metadata: &v4::BackupMetadata,
+    manifest: &v4::BackupManifest,
+) -> Result<()> {
+    if metadata.backup_id != manifest.backup_id {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has mismatched backup_id metadata.",
+            layout.backup_ref
+        )));
+    }
+    if metadata.backup_id != layout.backup_ref {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup root '{}' does not match backup_id '{}'.",
+            layout.backup_ref, metadata.backup_id
+        )));
+    }
+    if metadata.scope != manifest.scope {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has mismatched scope metadata.",
+            layout.backup_ref
+        )));
+    }
+    if metadata.storage_mode != manifest.storage_mode {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has mismatched storage mode metadata.",
+            layout.backup_ref
+        )));
+    }
+    if !matches!(
+        metadata.storage_mode,
+        v4::BackupStorageMode::Directory | v4::BackupStorageMode::SplitZip
+    ) {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} uses unsupported saved-v4 storage mode '{}'.",
+            layout.backup_ref,
+            metadata.storage_mode.display_name()
+        )));
+    }
+    if metadata.part_count != u32::try_from(manifest.parts.len()).unwrap_or(u32::MAX) {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has mismatched part count metadata.",
+            layout.backup_ref
+        )));
+    }
+    if metadata.includes_tor_keys != manifest.includes.tor_keys {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has mismatched Tor key metadata.",
+            layout.backup_ref
+        )));
+    }
+    if metadata.included_boards != manifest.included_boards {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has mismatched included board metadata.",
+            layout.backup_ref
+        )));
+    }
+    let completed_at = metadata
+        .completed_at
+        .zip(manifest.completed_at)
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "Saved backup {} is missing completed_at metadata.",
+                layout.backup_ref
+            ))
+        })?;
+    if !metadata.verified || completed_at.0 != completed_at.1 {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} is not marked complete.",
+            layout.backup_ref
+        )));
+    }
+    if completed_at.0 < metadata.created_at || completed_at.1 < manifest.created_at {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has invalid completion timestamps.",
+            layout.backup_ref
+        )));
+    }
+
+    match metadata.storage_mode {
+        v4::BackupStorageMode::Directory if !manifest.parts.is_empty() => {
+            Err(AppError::BadRequest(format!(
+                "Saved backup {} is directory mode but contains split ZIP metadata.",
+                layout.backup_ref
+            )))
+        }
+        v4::BackupStorageMode::SplitZip => validate_split_zip_listing_metadata(layout, manifest),
+        v4::BackupStorageMode::Directory => Ok(()),
+        v4::BackupStorageMode::SingleZip | v4::BackupStorageMode::LegacyZip => {
+            Err(AppError::BadRequest(format!(
+                "Saved backup {} uses unsupported saved-v4 storage mode '{}'.",
+                layout.backup_ref,
+                metadata.storage_mode.display_name()
+            )))
+        }
+    }
+}
+
+fn validate_split_zip_listing_metadata(
+    layout: &v4::SavedBackupLayout,
+    manifest: &v4::BackupManifest,
+) -> Result<()> {
+    if manifest.parts.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} is split ZIP mode but contains no parts.",
+            layout.backup_ref
+        )));
+    }
+
+    let expected_total = u32::try_from(manifest.parts.len()).unwrap_or(u32::MAX);
+    let mut part_filenames = HashSet::new();
+    let mut part_indexes = HashSet::new();
+    for part in &manifest.parts {
+        if !part_filenames.insert(part.filename.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} contains duplicate split ZIP part filename '{}'.",
+                layout.backup_ref, part.filename
+            )));
+        }
+        if !part_indexes.insert(part.part_index) {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} contains duplicate split ZIP part index {}.",
+                layout.backup_ref, part.part_index
+            )));
+        }
+        if part.part_index == 0 || part.part_index > expected_total {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} has split ZIP part index {} outside 1..={expected_total}.",
+                layout.backup_ref, part.part_index
+            )));
+        }
+        if part.total_parts != expected_total {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} has inconsistent split ZIP total_parts metadata.",
+                layout.backup_ref
+            )));
+        }
+        let expected_filename = format!("parts/part-{:04}.zip", part.part_index);
+        if part.filename != expected_filename {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} split ZIP filename '{}' does not match part index {}.",
+                layout.backup_ref, part.filename, part.part_index
+            )));
+        }
+        let part_path = layout.root_dir.join(&part.filename);
+        let metadata = std::fs::metadata(&part_path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Inspect split ZIP part {}: {error}",
+                part_path.display()
+            ))
+        })?;
+        if metadata.len() != part.size {
+            return Err(AppError::BadRequest(format!(
+                "Backup v4 split part '{}' size mismatch.",
+                part.filename
+            )));
+        }
+    }
+    for expected_index in 1..=expected_total {
+        if !part_indexes.contains(&expected_index) {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} is missing split ZIP part index {expected_index}.",
+                layout.backup_ref
+            )));
+        }
+    }
+
+    let mut declared_logical_paths = HashSet::new();
+    for entry in &manifest.files {
+        if !declared_logical_paths.insert(entry.logical_path.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} contains duplicate logical path '{}'.",
+                layout.backup_ref, entry.logical_path
+            )));
+        }
+        v4::sanitize_logical_path(&entry.logical_path)?;
+        let Some(part_filename) = entry.zip_part.as_deref() else {
+            continue;
+        };
+        if !part_filenames.contains(part_filename) {
+            return Err(AppError::BadRequest(format!(
+                "Backup v4 file '{}' references unknown split ZIP part '{}'.",
+                entry.logical_path, part_filename
+            )));
+        }
+        let entry_path = entry
+            .zip_entry_path
+            .as_deref()
+            .unwrap_or(&entry.logical_path);
+        v4::sanitize_logical_path(entry_path)?;
+    }
+    Ok(())
 }
 
 fn list_v4_backups(kind: BackupListKind) -> Vec<BackupInfo> {
     let mut backups = Vec::new();
     for layout in v4::iter_saved_backup_layouts() {
-        let verified = verify_v4_saved_backup(&layout);
-        let (metadata, manifest, modified_epoch, verified_note) = match verified {
-            Ok(verified) => {
-                let note = format!(
-                    "verified Backup v4 {}",
-                    verified.metadata.storage_mode.display_name().to_lowercase()
-                );
-                (
-                    verified.metadata,
-                    verified.manifest,
-                    Some(verified.completed_at),
-                    note,
-                )
-            }
-            Err(error) => {
-                let Ok(metadata) = v4::load_metadata(&layout.metadata_path) else {
-                    continue;
-                };
-                let Ok(manifest) = v4::load_manifest(&layout.manifest_path) else {
-                    continue;
-                };
-                (
-                    metadata.clone(),
-                    manifest,
-                    metadata
-                        .completed_at
-                        .filter(|completed_at| *completed_at >= metadata.created_at),
-                    error.to_string(),
-                )
-            }
+        let Ok(metadata) = v4::load_metadata(&layout.metadata_path) else {
+            continue;
+        };
+        let Ok(manifest) = v4::load_manifest(&layout.manifest_path) else {
+            continue;
+        };
+        let listing_validation = validate_v4_listing_metadata(&layout, &metadata, &manifest);
+        let (modified_epoch, verified, verified_note) = match listing_validation {
+            Ok(()) => (
+                metadata.completed_at,
+                true,
+                format!(
+                    "indexed Backup v4 {} (full content verification runs during restore)",
+                    metadata.storage_mode.display_name().to_lowercase()
+                ),
+            ),
+            Err(error) => (
+                metadata
+                    .completed_at
+                    .filter(|completed_at| *completed_at >= metadata.created_at),
+                false,
+                error.to_string(),
+            ),
         };
 
         if !metadata_scope_matches(kind, metadata.scope) {
@@ -146,7 +323,7 @@ fn list_v4_backups(kind: BackupListKind) -> Vec<BackupInfo> {
             size_bytes: metadata.total_size_bytes,
             modified: modified_string_from_epoch(modified_epoch),
             modified_epoch,
-            verified: verified_note.starts_with("verified "),
+            verified,
             verification_note: verified_note,
             scope: scope_label(metadata.scope),
             mode: metadata.storage_mode.display_name().to_string(),

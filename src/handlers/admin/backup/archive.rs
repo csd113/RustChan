@@ -204,6 +204,9 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_path(root_dir: &Path) -> Re
 fn create_temp_legacy_full_backup_from_verified_v4(
     verified: &v4::VerifiedSavedV4Root,
 ) -> Result<PathBuf> {
+    debug_assert_eq!(verified.metadata.backup_id, verified.manifest.backup_id);
+    debug_assert_eq!(Some(verified.completed_at), verified.manifest.completed_at);
+
     let manifest = &verified.manifest;
     let temp_zip = temp_legacy_zip_path("rustchan_v4_full_restore");
     let output = std::fs::File::create(&temp_zip).map_err(|error| {
