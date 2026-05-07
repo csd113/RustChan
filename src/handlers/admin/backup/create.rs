@@ -8,6 +8,8 @@ pub(crate) fn create_full_backup_to_server(
     progress: &std::sync::Arc<crate::middleware::BackupProgress>,
     copies_to_keep: u64,
     include_tor_hidden_service_keys: bool,
+    storage_mode: v4::BackupStorageMode,
+    split_zip_part_size: u64,
 ) -> Result<String> {
     let conn = pool.get()?;
     if let Some(session_id) = session_id {
@@ -31,17 +33,6 @@ pub(crate) fn create_full_backup_to_server(
     progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
     log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
 
-    let temp_dir = std::env::temp_dir();
-    let tmp_id = uuid::Uuid::new_v4().simple().to_string();
-    let temp_db = temp_dir.join(format!("chan_backup_{tmp_id}.db"));
-    let temp_db_str = temp_db
-        .to_str()
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path non-UTF-8")))?
-        .replace('\'', "''");
-
-    conn.execute_batch(&format!("VACUUM INTO '{temp_db_str}'"))
-        .map_err(|error| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {error}")))?;
-
     progress.reset(crate::middleware::backup_phase::COUNT_FILES);
     log_backup_phase(crate::middleware::backup_phase::COUNT_FILES);
     let global_banner_dir = crate::banner::backup_source_dir();
@@ -60,135 +51,178 @@ pub(crate) fn create_full_backup_to_server(
         .saturating_add(favicon_file_count)
         .saturating_add(banner_file_count)
         .saturating_add(tor_hidden_service_key_file_count);
-    let db_snapshot_size = std::fs::metadata(&temp_db)
+    let backup_id = v4::build_backup_id(v4::BackupScope::FullSite, "full-site");
+    let root_dir = v4::create_backup_root(&backup_id)?;
+    let db_dir = root_dir.join("db");
+    let config_dir = root_dir.join("config");
+    std::fs::create_dir_all(&db_dir).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Create {}: {error}", db_dir.display()))
+    })?;
+    std::fs::create_dir_all(&config_dir).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Create {}: {error}", config_dir.display()))
+    })?;
+
+    progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
+    log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
+    let db_snapshot_path = db_dir.join("rustchan.sqlite3");
+    let db_snapshot_str = db_snapshot_path
+        .to_str()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Backup DB path non-UTF-8")))?
+        .replace('\'', "''");
+    conn.execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {error}")))?;
+    let db_snapshot_size = std::fs::metadata(&db_snapshot_path)
         .map(|metadata| metadata.len())
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;
-    let manifest = build_full_backup_manifest(
-        &conn,
+    let db_snapshot_sha = v4::sha256_hex_for_file(&db_snapshot_path)?;
+
+    let mut files = Vec::new();
+    push_v4_file_entry(
+        &mut files,
+        "db/rustchan.sqlite3".to_string(),
+        None,
+        None,
+        v4::BackupFileKind::Db,
         db_snapshot_size,
-        full_backup_upload_file_count(
-            file_count,
-            favicon_file_count,
-            banner_file_count,
-            tor_hidden_service_key_file_count,
-        ),
-        favicon_file_count,
-        banner_file_count,
-        include_tor_hidden_service_keys,
-        tor_hidden_service_key_file_count,
-    )?;
-    drop(conn);
+        db_snapshot_sha.clone(),
+    );
+
+    let boards = collect_backup_board_summaries(&conn)?;
+    let settings_path = crate::config::data_dir().join("settings.toml");
+    if settings_path.is_file() {
+        let destination = config_dir.join("settings.toml");
+        let (size, sha256) = copy_regular_file_to_backup(&settings_path, &destination)?;
+        push_v4_file_entry(
+            &mut files,
+            "config/settings.toml".to_string(),
+            None,
+            None,
+            v4::BackupFileKind::Settings,
+            size,
+            sha256,
+        );
+    }
+
+    progress.reset(crate::middleware::backup_phase::COMPRESS);
+    log_backup_phase(crate::middleware::backup_phase::COMPRESS);
     progress
         .files_total
-        .store(file_count.saturating_add(2), Ordering::Relaxed);
+        .store(file_count.saturating_add(1), Ordering::Relaxed);
 
-    let backup_dir = super::full_backup_dir();
-    std::fs::create_dir_all(&backup_dir)
-        .map_err(|error| AppError::Internal(anyhow::anyhow!("Create full backup dir: {error}")))?;
-    let ts = super::local_backup_timestamp_label();
-    let filename = super::unique_backup_filename(&backup_dir, &format!("rustchan-backup-{ts}.zip"));
-    let final_path = backup_dir.join(&filename);
-    let tmp_path = backup_dir.join(format!("{filename}.tmp"));
-
-    let build_result = (|| -> Result<()> {
-        let out_file = std::io::BufWriter::new(
-            std::fs::File::create(&tmp_path)
-                .map_err(|error| AppError::Internal(anyhow::anyhow!("Create zip tmp: {error}")))?,
-        );
-        let mut zip = zip::ZipWriter::new(out_file);
-        let opts = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-
-        progress.reset(crate::middleware::backup_phase::COMPRESS);
-        log_backup_phase(crate::middleware::backup_phase::COMPRESS);
-        progress
-            .files_total
-            .store(file_count.saturating_add(2), Ordering::Relaxed);
-
-        let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!("Serialize full backup manifest: {error}"))
-        })?;
-        zip.start_file(super::common::FULL_BACKUP_MANIFEST_NAME, opts)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip backup manifest: {error}")))?;
-        zip.write_all(&manifest_json).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!("Write backup manifest: {error}"))
-        })?;
-
-        zip.start_file("chan.db", opts)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip DB: {error}")))?;
-        let mut db_src = std::fs::File::open(&temp_db)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Open DB snapshot: {error}")))?;
-        let copied = std::io::copy(&mut db_src, &mut zip)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Stream DB to zip: {error}")))?;
-        drop(db_src);
-        let _ = std::fs::remove_file(&temp_db);
-        progress.files_done.fetch_add(1, Ordering::Relaxed);
-        progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
-        log_backup_progress(progress);
-
-        if uploads_base.exists() {
-            super::add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, progress)?;
-        }
-        if global_favicon_dir.exists() {
-            super::add_dir_to_zip_with_prefix(
-                &mut zip,
-                &global_favicon_dir,
-                &global_favicon_dir,
-                "favicon",
-                opts,
-                progress,
-            )?;
-        }
-        if global_banner_dir.exists() {
-            super::add_dir_to_zip_with_prefix(
-                &mut zip,
-                &global_banner_dir,
-                &global_banner_dir,
-                "banner",
-                opts,
-                progress,
-            )?;
-        }
-        if let Some(tor_hidden_service_keys_dir) = tor_hidden_service_keys_dir.as_ref() {
-            super::add_dir_to_zip_with_prefix(
-                &mut zip,
-                tor_hidden_service_keys_dir,
-                tor_hidden_service_keys_dir,
-                super::common::FULL_BACKUP_TOR_KEYS_PREFIX,
-                opts,
-                progress,
-            )?;
-        }
-
-        let writer = zip
-            .finish()
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Finalise zip: {error}")))?;
-        writer
-            .into_inner()
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Flush zip writer: {error}")))?
-            .sync_all()
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Sync zip file: {error}")))?;
-        Ok(())
-    })();
-
-    if let Err(error) = build_result {
-        let _ = std::fs::remove_file(&tmp_path);
-        let _ = std::fs::remove_file(&temp_db);
-        return Err(error);
+    for board in &boards {
+        super::common::validate_board_short_name(&board.short_name)?;
+        let board_manifest = build_board_backup_manifest(&conn, &board.short_name)?;
+        write_board_exports_to_v4_dir(&root_dir, &board_manifest, &mut files)?;
     }
 
-    if let Err(error) = super::common::verify_full_backup_zip(&tmp_path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        let _ = std::fs::remove_file(&temp_db);
-        return Err(error);
+    copy_runtime_tree_into_v4_dir(
+        uploads_base,
+        &root_dir,
+        &mut files,
+        |_path, runtime_rel| {
+            let board_short = runtime_rel.split('/').next().ok_or_else(|| {
+                AppError::BadRequest("Upload path missing board directory.".into())
+            })?;
+            super::common::validate_board_short_name(board_short)?;
+            let (logical_path, kind) =
+                v4::runtime_upload_path_to_logical(board_short, runtime_rel)?;
+            Ok((
+                logical_path,
+                Some(runtime_rel.to_string()),
+                Some(board_short.to_string()),
+                kind,
+            ))
+        },
+        Some(progress),
+    )?;
+
+    copy_runtime_tree_into_v4_dir(
+        &global_favicon_dir,
+        &root_dir,
+        &mut files,
+        |_path, runtime_rel| {
+            let logical_path = format!("site-assets/favicon/{runtime_rel}");
+            Ok((
+                logical_path,
+                Some(format!("favicon/{runtime_rel}")),
+                None,
+                v4::BackupFileKind::Favicon,
+            ))
+        },
+        Some(progress),
+    )?;
+
+    copy_runtime_tree_into_v4_dir(
+        &global_banner_dir,
+        &root_dir,
+        &mut files,
+        |_path, runtime_rel| {
+            let logical_path = format!("site-assets/banner/{runtime_rel}");
+            Ok((
+                logical_path,
+                Some(format!("banner/{runtime_rel}")),
+                None,
+                v4::BackupFileKind::Banner,
+            ))
+        },
+        Some(progress),
+    )?;
+
+    if let Some(tor_hidden_service_keys_dir) = tor_hidden_service_keys_dir.as_ref() {
+        copy_runtime_tree_into_v4_dir(
+            tor_hidden_service_keys_dir,
+            &root_dir,
+            &mut files,
+            |_path, runtime_rel| {
+                let logical_path = format!("tor-keys/{runtime_rel}");
+                Ok((
+                    logical_path,
+                    Some(runtime_rel.to_string()),
+                    None,
+                    v4::BackupFileKind::TorKey,
+                ))
+            },
+            Some(progress),
+        )?;
     }
 
-    std::fs::rename(&tmp_path, &final_path).map_err(|error| {
-        let _ = std::fs::remove_file(&tmp_path);
-        let _ = std::fs::remove_file(&temp_db);
-        AppError::Internal(anyhow::anyhow!("Rename backup: {error}"))
-    })?;
-    super::invalidate_backup_list_cache(&backup_dir, super::BackupListKind::Full);
+    let mut manifest = v4::BackupManifest {
+        format: v4::BACKUP_V4_FORMAT.to_string(),
+        archive_container: v4::BACKUP_V4_ARCHIVE_CONTAINER.to_string(),
+        backup_id,
+        created_at: Utc::now().timestamp(),
+        completed_at: None,
+        rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+        scope: v4::BackupScope::FullSite,
+        storage_mode,
+        included_boards: boards,
+        includes: v4::BackupIncludeFlags {
+            database: true,
+            settings: settings_path.is_file(),
+            uploads: true,
+            thumbnails: true,
+            tor_keys: include_tor_hidden_service_keys,
+            board_exports: true,
+            file_inventory: true,
+        },
+        db_snapshot: Some(v4::DbSnapshotInfo {
+            path: "db/rustchan.sqlite3".to_string(),
+            size: db_snapshot_size,
+            sha256: db_snapshot_sha,
+            integrity_check: snapshot_db_health_output(&conn, "integrity_check"),
+            foreign_key_check: snapshot_db_health_output(&conn, "foreign_key_check"),
+        }),
+        files,
+        parts: Vec::new(),
+        maintenance: None,
+    };
+    if storage_mode == v4::BackupStorageMode::SplitZip {
+        materialize_split_zip_parts(&root_dir, &mut manifest, split_zip_part_size)?;
+    }
+    drop(conn);
+
+    let backup_ref = finalize_v4_backup_root(&root_dir, manifest)?;
+    super::invalidate_backup_list_cache(&super::full_backup_dir(), super::BackupListKind::Full);
 
     match super::enforce_full_backup_retention(copies_to_keep) {
         Ok(removed) if !removed.is_empty() => {
@@ -210,34 +244,254 @@ pub(crate) fn create_full_backup_to_server(
         }
     }
 
-    let size = std::fs::metadata(&final_path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
+    let size = v4::scan_dir_stats(&root_dir).bytes;
     tracing::info!(
         target: "admin",
-        filename = %filename,
+        backup_id = %backup_ref,
+        path = %root_dir.display(),
         bytes = size,
         automated = session_id.is_none(),
         includes_tor_hidden_service_keys = include_tor_hidden_service_keys,
-        "Full backup created"
+        "Backup v4 full backup created"
     );
     progress
         .phase
         .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
     log_backup_phase(crate::middleware::backup_phase::DONE);
-    Ok(filename)
+    Ok(backup_ref)
 }
 
-const fn full_backup_upload_file_count(
-    total_file_count: u64,
-    favicon_file_count: u64,
-    banner_file_count: u64,
-    tor_hidden_service_key_file_count: u64,
-) -> u64 {
-    total_file_count
-        .saturating_sub(favicon_file_count)
-        .saturating_sub(banner_file_count)
-        .saturating_sub(tor_hidden_service_key_file_count)
+pub(crate) fn create_pre_maintenance_backup_to_server(
+    pool: &crate::db::DbPool,
+    progress: &std::sync::Arc<crate::middleware::BackupProgress>,
+    operation: &str,
+    job_id: u64,
+    reason: &str,
+) -> Result<String> {
+    let conn = pool.get()?;
+    let backup_id = v4::build_backup_id(v4::BackupScope::PreMaintenance, "pre-repair-db");
+    let root_dir = v4::create_backup_root(&backup_id)?;
+    let db_dir = root_dir.join("db");
+    let config_dir = root_dir.join("config");
+    let maintenance_dir = root_dir.join("maintenance");
+    std::fs::create_dir_all(&db_dir).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Create {}: {error}", db_dir.display()))
+    })?;
+    std::fs::create_dir_all(&config_dir).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Create {}: {error}", config_dir.display()))
+    })?;
+    std::fs::create_dir_all(&maintenance_dir).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Create {}: {error}",
+            maintenance_dir.display()
+        ))
+    })?;
+
+    progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
+    log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
+
+    let db_snapshot_path = db_dir.join("rustchan.sqlite3");
+    let db_snapshot_str = db_snapshot_path
+        .to_str()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Backup DB path non-UTF-8")))?
+        .replace('\'', "''");
+    conn.execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {error}")))?;
+    let db_snapshot_size = std::fs::metadata(&db_snapshot_path)
+        .map(|metadata| metadata.len())
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;
+    let db_snapshot_sha = v4::sha256_hex_for_file(&db_snapshot_path)?;
+
+    let mut files = Vec::new();
+    push_v4_file_entry(
+        &mut files,
+        "db/rustchan.sqlite3".to_string(),
+        None,
+        None,
+        v4::BackupFileKind::Db,
+        db_snapshot_size,
+        db_snapshot_sha.clone(),
+    );
+
+    let settings_path = crate::config::data_dir().join("settings.toml");
+    if settings_path.is_file() {
+        let destination = config_dir.join("settings.toml");
+        let (size, sha256) = copy_regular_file_to_backup(&settings_path, &destination)?;
+        push_v4_file_entry(
+            &mut files,
+            "config/settings.toml".to_string(),
+            None,
+            None,
+            v4::BackupFileKind::Settings,
+            size,
+            sha256,
+        );
+    }
+
+    let pre_integrity = snapshot_db_health_output(&conn, "integrity_check").unwrap_or_default();
+    let pre_foreign_key = snapshot_db_health_output(&conn, "foreign_key_check").unwrap_or_default();
+
+    let repair_request_path = maintenance_dir.join("repair-request.json");
+    let repair_request = serde_json::json!({
+        "operation": operation,
+        "job_id": job_id,
+        "requested_at": Utc::now().timestamp(),
+        "reason": reason,
+        "backup_id": backup_id,
+    });
+    let (request_size, request_sha) =
+        write_pretty_json_file(&repair_request_path, &repair_request)?;
+    push_v4_file_entry(
+        &mut files,
+        "maintenance/repair-request.json".to_string(),
+        None,
+        None,
+        v4::BackupFileKind::Maintenance,
+        request_size,
+        request_sha,
+    );
+
+    let integrity_path = maintenance_dir.join("pre-integrity-check.txt");
+    std::fs::write(&integrity_path, pre_integrity.as_bytes()).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Write {}: {error}",
+            integrity_path.display()
+        ))
+    })?;
+    push_v4_file_entry(
+        &mut files,
+        "maintenance/pre-integrity-check.txt".to_string(),
+        None,
+        None,
+        v4::BackupFileKind::Maintenance,
+        u64::try_from(pre_integrity.len()).unwrap_or(u64::MAX),
+        v4::sha256_hex_for_bytes(pre_integrity.as_bytes()),
+    );
+
+    let foreign_key_path = maintenance_dir.join("pre-foreign-key-check.txt");
+    std::fs::write(&foreign_key_path, pre_foreign_key.as_bytes()).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Write {}: {error}",
+            foreign_key_path.display()
+        ))
+    })?;
+    push_v4_file_entry(
+        &mut files,
+        "maintenance/pre-foreign-key-check.txt".to_string(),
+        None,
+        None,
+        v4::BackupFileKind::Maintenance,
+        u64::try_from(pre_foreign_key.len()).unwrap_or(u64::MAX),
+        v4::sha256_hex_for_bytes(pre_foreign_key.as_bytes()),
+    );
+
+    let schema_dump = {
+        let mut statement = conn
+            .prepare(
+                "SELECT sql FROM sqlite_schema
+                 WHERE sql IS NOT NULL
+                 ORDER BY type ASC, name ASC",
+            )
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Prepare schema dump: {error}")))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Query schema dump: {error}")))?;
+        let mut sql = String::new();
+        for row in rows {
+            let statement_sql = row.map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Read schema dump: {error}"))
+            })?;
+            sql.push_str(&statement_sql);
+            sql.push_str(";\n\n");
+        }
+        sql
+    };
+    let schema_path = maintenance_dir.join("pre-schema.sql");
+    std::fs::write(&schema_path, schema_dump.as_bytes()).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Write {}: {error}", schema_path.display()))
+    })?;
+    push_v4_file_entry(
+        &mut files,
+        "maintenance/pre-schema.sql".to_string(),
+        None,
+        None,
+        v4::BackupFileKind::Maintenance,
+        u64::try_from(schema_dump.len()).unwrap_or(u64::MAX),
+        v4::sha256_hex_for_bytes(schema_dump.as_bytes()),
+    );
+
+    let pending_fs_ops = crate::db::list_pending_fs_ops(&conn)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("List pending_fs_ops: {error}")))?;
+    if !pending_fs_ops.is_empty() {
+        let pending_fs_path = maintenance_dir.join("pending-fs-ops.json");
+        let snapshot = pending_fs_ops
+            .into_iter()
+            .map(|row| {
+                serde_json::json!({
+                    "id": row.id,
+                    "kind": row.kind,
+                    "payload_json": row.payload_json,
+                })
+            })
+            .collect::<Vec<_>>();
+        let (size, sha256) = write_pretty_json_file(&pending_fs_path, &snapshot)?;
+        push_v4_file_entry(
+            &mut files,
+            "maintenance/pending-fs-ops.json".to_string(),
+            None,
+            None,
+            v4::BackupFileKind::PendingFsOps,
+            size,
+            sha256,
+        );
+    }
+
+    progress.reset(crate::middleware::backup_phase::DONE);
+    log_backup_phase(crate::middleware::backup_phase::DONE);
+
+    let manifest = v4::BackupManifest {
+        format: v4::BACKUP_V4_FORMAT.to_string(),
+        archive_container: v4::BACKUP_V4_ARCHIVE_CONTAINER.to_string(),
+        backup_id,
+        created_at: Utc::now().timestamp(),
+        completed_at: None,
+        rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+        scope: v4::BackupScope::PreMaintenance,
+        storage_mode: v4::BackupStorageMode::Directory,
+        included_boards: Vec::new(),
+        includes: v4::BackupIncludeFlags {
+            database: true,
+            settings: settings_path.is_file(),
+            uploads: false,
+            thumbnails: false,
+            tor_keys: false,
+            board_exports: false,
+            file_inventory: false,
+        },
+        db_snapshot: Some(v4::DbSnapshotInfo {
+            path: "db/rustchan.sqlite3".to_string(),
+            size: db_snapshot_size,
+            sha256: db_snapshot_sha,
+            integrity_check: Some(pre_integrity.clone()),
+            foreign_key_check: Some(pre_foreign_key.clone()),
+        }),
+        files,
+        parts: Vec::new(),
+        maintenance: Some(v4::MaintenanceMetadata {
+            operation: Some(operation.to_string()),
+            job_id: Some(job_id),
+            requested_at: Some(Utc::now().timestamp()),
+            risk_class: Some("db_mutating".to_string()),
+            includes_uploads: false,
+            includes_file_inventory: false,
+            includes_tor_keys: false,
+            reason: Some(reason.to_string()),
+            pre_integrity_check: Some(pre_integrity),
+            pre_foreign_key_check: Some(pre_foreign_key),
+        }),
+    };
+
+    finalize_v4_backup_root(&root_dir, manifest)
 }
 
 fn count_required_private_files(dir: &Path, missing_message: &str) -> Result<u64> {
@@ -284,12 +538,111 @@ fn count_required_private_files(dir: &Path, missing_message: &str) -> Result<u64
     Ok(count)
 }
 
+fn write_jsonl_file<T: serde::Serialize>(path: &Path, rows: &[T]) -> Result<(u64, String)> {
+    use sha2::Digest as _;
+
+    let mut file = std::fs::File::create(path).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Create {}: {error}", path.display()))
+    })?;
+    let mut hasher = sha2::Sha256::new();
+    let mut written = 0u64;
+    for row in rows {
+        let mut line = serde_json::to_vec(row)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Serialize JSONL row: {error}")))?;
+        line.push(b'\n');
+        file.write_all(&line).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Write {}: {error}", path.display()))
+        })?;
+        hasher.update(&line);
+        written = written.saturating_add(u64::try_from(line.len()).unwrap_or(u64::MAX));
+    }
+    Ok((written, hex::encode(hasher.finalize())))
+}
+
+fn write_pretty_json_file<T: serde::Serialize>(path: &Path, value: &T) -> Result<(u64, String)> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Serialize {}: {error}", path.display()))
+    })?;
+    std::fs::write(path, &bytes).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Write {}: {error}", path.display()))
+    })?;
+    Ok((
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        v4::sha256_hex_for_bytes(&bytes),
+    ))
+}
+
+fn relative_path_string(path: &Path, root: &Path) -> Result<String> {
+    let rel = path.strip_prefix(root).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Resolve {} relative to {}: {error}",
+            path.display(),
+            root.display()
+        ))
+    })?;
+    Ok(rel.to_string_lossy().replace('\\', "/"))
+}
+
+fn copy_regular_file_to_backup(source: &Path, destination: &Path) -> Result<(u64, String)> {
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Create {}: {error}", parent.display()))
+        })?;
+    }
+    let mut output = std::fs::File::create(destination).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Create {}: {error}", destination.display()))
+    })?;
+    v4::copy_file_and_hash(source, &mut output)
+}
+
+fn snapshot_db_health_output(conn: &rusqlite::Connection, pragma: &str) -> Option<String> {
+    let sql = format!("PRAGMA {pragma}");
+    let mut statement = conn.prepare(&sql).ok()?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .ok()?;
+    let mut values = Vec::new();
+    for row in rows {
+        values.push(row.ok()?);
+    }
+    (!values.is_empty()).then(|| values.join(" | "))
+}
+
 #[derive(Deserialize)]
 pub struct FullBackupCreateForm {
     #[serde(default, deserialize_with = "super::form_checkbox_bool")]
     include_tor_hidden_service_keys: bool,
+    #[serde(default)]
+    storage_mode: Option<String>,
+    #[serde(default)]
+    split_zip_part_size_gib: Option<u64>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
+}
+
+const DEFAULT_SPLIT_ZIP_PART_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+const MIN_SPLIT_ZIP_PART_SIZE: u64 = 64 * 1024 * 1024;
+const MAX_SPLIT_ZIP_PART_SIZE: u64 = 64 * 1024 * 1024 * 1024;
+
+fn parse_full_backup_storage_mode(form: &FullBackupCreateForm) -> Result<v4::BackupStorageMode> {
+    match form.storage_mode.as_deref().unwrap_or("directory") {
+        "directory" => Ok(v4::BackupStorageMode::Directory),
+        "split_zip" => Ok(v4::BackupStorageMode::SplitZip),
+        _ => Err(AppError::BadRequest("Unknown backup storage mode.".into())),
+    }
+}
+
+fn parse_split_zip_part_size(form: &FullBackupCreateForm) -> Result<u64> {
+    let gib = form.split_zip_part_size_gib.unwrap_or(4);
+    let bytes = gib
+        .checked_mul(1024 * 1024 * 1024)
+        .ok_or_else(|| AppError::BadRequest("Split ZIP part size is too large.".into()))?;
+    if !(MIN_SPLIT_ZIP_PART_SIZE..=MAX_SPLIT_ZIP_PART_SIZE).contains(&bytes) {
+        return Err(AppError::BadRequest(
+            "Split ZIP part size must be between 64 MiB and 64 GiB.".into(),
+        ));
+    }
+    Ok(bytes)
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
@@ -314,6 +667,12 @@ pub async fn create_full_backup(
     let progress = state.backup_progress.clone();
     let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
     let include_tor_hidden_service_keys = form.include_tor_hidden_service_keys;
+    let storage_mode = parse_full_backup_storage_mode(&form)?;
+    let split_zip_part_size = if storage_mode == v4::BackupStorageMode::SplitZip {
+        parse_split_zip_part_size(&form)?
+    } else {
+        DEFAULT_SPLIT_ZIP_PART_SIZE
+    };
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -324,6 +683,8 @@ pub async fn create_full_backup(
                 &progress,
                 copies_to_keep,
                 include_tor_hidden_service_keys,
+                storage_mode,
+                split_zip_part_size,
             )?;
             Ok(())
         }
@@ -402,81 +763,162 @@ pub async fn create_board_backup(
                 "Board backup manifest assembled"
             );
 
-            let backup_dir = if download_after_create {
-                super::prune_stale_temp_board_downloads();
-                super::temp_board_download_dir()
-            } else {
-                super::board_backup_dir()
-            };
-            std::fs::create_dir_all(&backup_dir).map_err(|error| {
-                AppError::Internal(anyhow::anyhow!("Create board backup dir: {error}"))
-            })?;
-            let ts = super::local_backup_timestamp_label();
-            let filename = super::unique_backup_filename(
-                &backup_dir,
-                &format!("rustchan-board-{board_short}-{ts}.zip"),
-            );
-            let final_path = backup_dir.join(&filename);
-            let tmp_path = backup_dir.join(format!("{filename}.tmp"));
+            if download_after_create {
+                let backup_dir = {
+                    super::prune_stale_temp_board_downloads();
+                    super::temp_board_download_dir()
+                };
+                std::fs::create_dir_all(&backup_dir).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("Create board backup dir: {error}"))
+                })?;
+                let ts = super::local_backup_timestamp_label();
+                let filename = super::unique_backup_filename(
+                    &backup_dir,
+                    &format!("rustchan-board-{board_short}-{ts}.zip"),
+                );
+                let final_path = backup_dir.join(&filename);
+                let tmp_path = backup_dir.join(format!("{filename}.tmp"));
+
+                let uploads_base = std::path::Path::new(&upload_dir);
+                let board_upload_path = uploads_base.join(&board_short);
+                let file_count = super::count_files_in_dir(&board_upload_path);
+                tracing::info!(
+                    target: "admin",
+                    board = %board_short,
+                    uploads_dir = %board_upload_path.display(),
+                    upload_file_count = file_count,
+                    "Board backup starting zip build"
+                );
+                progress.reset(crate::middleware::backup_phase::COMPRESS);
+                log_backup_phase(crate::middleware::backup_phase::COMPRESS);
+                progress
+                    .files_total
+                    .store(file_count.saturating_add(1), Ordering::Relaxed);
+
+                let build_result = write_board_backup_archive_from_dir(
+                    &tmp_path,
+                    &manifest_json,
+                    uploads_base,
+                    &board_upload_path,
+                    Some(&progress),
+                );
+
+                if let Err(error) = build_result {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(error);
+                }
+
+                if let Err(error) = super::common::verify_board_backup_zip(&tmp_path) {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(error);
+                }
+
+                std::fs::rename(&tmp_path, &final_path).map_err(|error| {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    AppError::Internal(anyhow::anyhow!("Rename board backup: {error}"))
+                })?;
+
+                let size = std::fs::metadata(&final_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                tracing::info!(
+                    target: "admin",
+                    board = %board_short,
+                    filename = %filename,
+                    path = %final_path.display(),
+                    bytes = size,
+                    "Board backup created"
+                );
+                progress
+                    .phase
+                    .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
+                log_backup_phase(crate::middleware::backup_phase::DONE);
+                return Ok(filename);
+            }
 
             let uploads_base = std::path::Path::new(&upload_dir);
             let board_upload_path = uploads_base.join(&board_short);
             let file_count = super::count_files_in_dir(&board_upload_path);
-            tracing::info!(
-                target: "admin",
-                board = %board_short,
-                uploads_dir = %board_upload_path.display(),
-                upload_file_count = file_count,
-                "Board backup starting zip build"
-            );
             progress.reset(crate::middleware::backup_phase::COMPRESS);
             log_backup_phase(crate::middleware::backup_phase::COMPRESS);
             progress
                 .files_total
                 .store(file_count.saturating_add(1), Ordering::Relaxed);
 
-            let build_result = write_board_backup_archive_from_dir(
-                &tmp_path,
-                &manifest_json,
-                uploads_base,
+            let backup_id =
+                v4::build_backup_id(v4::BackupScope::Board, &format!("board-{board_short}"));
+            let root_dir = v4::create_backup_root(&backup_id)?;
+            let boards = vec![crate::models::BackupBoardSummary {
+                short_name: manifest.board.short_name.clone(),
+                name: manifest.board.name.clone(),
+            }];
+            let mut files = Vec::new();
+
+            write_board_exports_to_v4_dir(&root_dir, &manifest, &mut files)?;
+
+            copy_runtime_tree_into_v4_dir(
                 &board_upload_path,
+                &root_dir,
+                &mut files,
+                |_path, runtime_rel| {
+                    let runtime_rel = format!("{board_short}/{runtime_rel}");
+                    let (logical_path, kind) =
+                        v4::runtime_upload_path_to_logical(&board_short, &runtime_rel)?;
+                    Ok((
+                        logical_path,
+                        Some(runtime_rel),
+                        Some(board_short.clone()),
+                        kind,
+                    ))
+                },
                 Some(&progress),
+            )?;
+
+            let manifest_v4 = v4::BackupManifest {
+                format: v4::BACKUP_V4_FORMAT.to_string(),
+                archive_container: v4::BACKUP_V4_ARCHIVE_CONTAINER.to_string(),
+                backup_id,
+                created_at: Utc::now().timestamp(),
+                completed_at: None,
+                rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+                scope: v4::BackupScope::Board,
+                storage_mode: v4::BackupStorageMode::Directory,
+                included_boards: boards,
+                includes: v4::BackupIncludeFlags {
+                    database: false,
+                    settings: false,
+                    uploads: true,
+                    thumbnails: true,
+                    tor_keys: false,
+                    board_exports: true,
+                    file_inventory: true,
+                },
+                db_snapshot: None,
+                files,
+                parts: Vec::new(),
+                maintenance: None,
+            };
+
+            let backup_ref = finalize_v4_backup_root(&root_dir, manifest_v4)?;
+            super::invalidate_backup_list_cache(
+                &super::board_backup_dir(),
+                super::BackupListKind::Board,
             );
 
-            if let Err(error) = build_result {
-                let _ = std::fs::remove_file(&tmp_path);
-                return Err(error);
-            }
-
-            if let Err(error) = super::common::verify_board_backup_zip(&tmp_path) {
-                let _ = std::fs::remove_file(&tmp_path);
-                return Err(error);
-            }
-
-            std::fs::rename(&tmp_path, &final_path).map_err(|error| {
-                let _ = std::fs::remove_file(&tmp_path);
-                AppError::Internal(anyhow::anyhow!("Rename board backup: {error}"))
-            })?;
-            if !download_after_create {
-                super::invalidate_backup_list_cache(&backup_dir, super::BackupListKind::Board);
-            }
-
-            let size = std::fs::metadata(&final_path)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
+            let size = v4::scan_dir_stats(&root_dir).bytes;
             tracing::info!(
                 target: "admin",
                 board = %board_short,
-                filename = %filename,
-                path = %final_path.display(),
+                backup_id = %backup_ref,
+                path = %root_dir.display(),
                 bytes = size,
-                "Board backup created"
+                "Backup v4 board backup created"
             );
             progress
                 .phase
                 .store(crate::middleware::backup_phase::DONE, Ordering::Relaxed);
             log_backup_phase(crate::middleware::backup_phase::DONE);
-            Ok(filename)
+            Ok(backup_ref)
         }
     })
     .await
@@ -607,6 +1049,7 @@ pub(super) fn build_board_backup_manifest(
             },
         )
         .map_err(|_| AppError::NotFound(format!("Board '{board_short}' not found")))?;
+    super::common::validate_board_short_name(&board.short_name)?;
 
     let board_id = board.id;
     let threads = collect_rows(
@@ -866,17 +1309,419 @@ where
     Ok(rows)
 }
 
+fn collect_backup_board_summaries(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<crate::models::BackupBoardSummary>> {
+    let boards = collect_all_rows(
+        conn,
+        "SELECT short_name, name FROM boards ORDER BY short_name ASC",
+        |row| {
+            let short_name: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            Ok(crate::models::BackupBoardSummary { short_name, name })
+        },
+    )?;
+    for board in &boards {
+        super::common::validate_board_short_name(&board.short_name)?;
+    }
+    Ok(boards)
+}
+
+fn push_v4_file_entry(
+    entries: &mut Vec<v4::BackupFileEntry>,
+    logical_path: String,
+    runtime_logical_path: Option<String>,
+    board: Option<String>,
+    kind: v4::BackupFileKind,
+    size: u64,
+    sha256: String,
+) {
+    entries.push(v4::BackupFileEntry {
+        logical_path,
+        runtime_logical_path,
+        board,
+        kind,
+        size,
+        sha256,
+        zip_part: None,
+        zip_entry_path: None,
+        compression_method: None,
+    });
+}
+
+#[derive(Debug)]
+struct SplitZipPlannedPart {
+    files: Vec<usize>,
+    bytes: u64,
+    oversized: bool,
+}
+
+fn plan_split_zip_parts(
+    files: &[v4::BackupFileEntry],
+    target_part_size: u64,
+) -> Vec<SplitZipPlannedPart> {
+    let mut ordered = files
+        .iter()
+        .enumerate()
+        .collect::<Vec<(usize, &v4::BackupFileEntry)>>();
+    ordered.sort_by(|left, right| left.1.logical_path.cmp(&right.1.logical_path));
+
+    let mut parts = Vec::new();
+    let mut current = SplitZipPlannedPart {
+        files: Vec::new(),
+        bytes: 0,
+        oversized: false,
+    };
+    for (index, entry) in ordered {
+        if current.files.is_empty() && entry.size > target_part_size {
+            parts.push(SplitZipPlannedPart {
+                files: vec![index],
+                bytes: entry.size,
+                oversized: true,
+            });
+            continue;
+        }
+        if !current.files.is_empty() && current.bytes.saturating_add(entry.size) > target_part_size
+        {
+            parts.push(current);
+            current = SplitZipPlannedPart {
+                files: Vec::new(),
+                bytes: 0,
+                oversized: false,
+            };
+        }
+        current.bytes = current.bytes.saturating_add(entry.size);
+        current.files.push(index);
+    }
+    if !current.files.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+fn materialize_split_zip_parts(
+    root_dir: &Path,
+    manifest: &mut v4::BackupManifest,
+    target_part_size: u64,
+) -> Result<()> {
+    let parts_dir = root_dir.join(v4::PARTS_DIR_NAME);
+    std::fs::create_dir_all(&parts_dir).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Create {}: {error}", parts_dir.display()))
+    })?;
+    let planned_parts = plan_split_zip_parts(&manifest.files, target_part_size);
+    let total_parts = u32::try_from(planned_parts.len()).unwrap_or(u32::MAX);
+    let mut part_infos = Vec::with_capacity(planned_parts.len());
+
+    for (part_offset, planned) in planned_parts.iter().enumerate() {
+        let part_index = u32::try_from(part_offset + 1).unwrap_or(u32::MAX);
+        let part_filename = format!("parts/part-{part_index:04}.zip");
+        let part_path = root_dir.join(&part_filename);
+        let tmp_path = root_dir.join(format!("{part_filename}.tmp"));
+        if let Some(parent) = tmp_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Create {}: {error}", parent.display()))
+            })?;
+        }
+
+        let write_result = (|| -> Result<()> {
+            let output = std::fs::File::create(&tmp_path).map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Create {}: {error}", tmp_path.display()))
+            })?;
+            let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(output));
+            for file_index in &planned.files {
+                let entry = manifest.files.get(*file_index).ok_or_else(|| {
+                    AppError::Internal(anyhow::anyhow!("Invalid split ZIP planner index"))
+                })?;
+                let source_path = root_dir.join(&entry.logical_path);
+                zip.start_file(
+                    &entry.logical_path,
+                    super::zip_file_options_for_path(Path::new(&entry.logical_path)),
+                )
+                .map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!(
+                        "Start split ZIP entry '{}': {error}",
+                        entry.logical_path
+                    ))
+                })?;
+                let mut source = std::fs::File::open(&source_path).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("Open {}: {error}", source_path.display()))
+                })?;
+                std::io::copy(&mut source, &mut zip).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!(
+                        "Copy {} into split ZIP: {error}",
+                        source_path.display()
+                    ))
+                })?;
+            }
+            let writer = zip.finish().map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Finalize {}: {error}", tmp_path.display()))
+            })?;
+            writer.into_inner().map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Flush {}: {error}", tmp_path.display()))
+            })?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(error);
+        }
+        std::fs::rename(&tmp_path, &part_path).map_err(|error| {
+            let _ = std::fs::remove_file(&tmp_path);
+            AppError::Internal(anyhow::anyhow!(
+                "Rename split ZIP part {}: {error}",
+                part_path.display()
+            ))
+        })?;
+
+        let part_size = std::fs::metadata(&part_path)
+            .map(|metadata| metadata.len())
+            .map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Inspect {}: {error}", part_path.display()))
+            })?;
+        let part_sha = v4::sha256_hex_for_file(&part_path)?;
+        for file_index in &planned.files {
+            let entry = manifest.files.get_mut(*file_index).ok_or_else(|| {
+                AppError::Internal(anyhow::anyhow!("Invalid split ZIP planner index"))
+            })?;
+            entry.zip_part = Some(part_filename.clone());
+            entry.zip_entry_path = Some(entry.logical_path.clone());
+            entry.compression_method = Some("zip".to_string());
+        }
+        part_infos.push(v4::BackupPartInfo {
+            filename: part_filename,
+            part_index,
+            total_parts,
+            backup_id: manifest.backup_id.clone(),
+            size: part_size,
+            sha256: part_sha,
+            target_part_size,
+            oversized: planned.oversized,
+        });
+    }
+
+    for entry in &manifest.files {
+        if entry.zip_part.is_some() {
+            let path = root_dir.join(&entry.logical_path);
+            if path.is_file() {
+                std::fs::remove_file(&path).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!(
+                        "Remove root payload {} after split ZIP packaging: {error}",
+                        path.display()
+                    ))
+                })?;
+            }
+        }
+    }
+
+    manifest.parts = part_infos;
+    Ok(())
+}
+
+fn copy_runtime_tree_into_v4_dir<F>(
+    source_root: &Path,
+    destination_root: &Path,
+    entries: &mut Vec<v4::BackupFileEntry>,
+    mut map_entry: F,
+    progress: Option<&crate::middleware::BackupProgress>,
+) -> Result<()>
+where
+    F: FnMut(&Path, &str) -> Result<(String, Option<String>, Option<String>, v4::BackupFileKind)>,
+{
+    fn visit<F>(
+        current: &Path,
+        source_root: &Path,
+        destination_root: &Path,
+        entries: &mut Vec<v4::BackupFileEntry>,
+        map_entry: &mut F,
+        progress: Option<&crate::middleware::BackupProgress>,
+    ) -> Result<()>
+    where
+        F: FnMut(
+            &Path,
+            &str,
+        ) -> Result<(String, Option<String>, Option<String>, v4::BackupFileKind)>,
+    {
+        let dir_entries = std::fs::read_dir(current).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Read {}: {error}", current.display()))
+        })?;
+        for entry in dir_entries {
+            let entry = entry.map_err(|error| {
+                AppError::Internal(anyhow::anyhow!(
+                    "Read dir entry {}: {error}",
+                    current.display()
+                ))
+            })?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                AppError::Internal(anyhow::anyhow!("Inspect {}: {error}", path.display()))
+            })?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.file_type().is_dir() {
+                visit(
+                    &path,
+                    source_root,
+                    destination_root,
+                    entries,
+                    map_entry,
+                    progress,
+                )?;
+                continue;
+            }
+            if !metadata.file_type().is_file()
+                || crate::utils::fs_security::assert_regular_file_no_symlink(&path).is_err()
+            {
+                continue;
+            }
+            let runtime_rel = relative_path_string(&path, source_root)?;
+            let (logical_path, runtime_logical_path, board, kind) = map_entry(&path, &runtime_rel)?;
+            v4::sanitize_logical_path(&logical_path)?;
+            let destination = destination_root.join(&logical_path);
+            let (size, sha256) = copy_regular_file_to_backup(&path, &destination)?;
+            push_v4_file_entry(
+                entries,
+                logical_path,
+                runtime_logical_path,
+                board,
+                kind,
+                size,
+                sha256,
+            );
+            if let Some(progress) = progress {
+                progress.files_done.fetch_add(1, Ordering::Relaxed);
+                progress.bytes_done.fetch_add(size, Ordering::Relaxed);
+                log_backup_progress(progress);
+            }
+        }
+        Ok(())
+    }
+
+    if !source_root.exists() {
+        return Ok(());
+    }
+    visit(
+        source_root,
+        source_root,
+        destination_root,
+        entries,
+        &mut map_entry,
+        progress,
+    )
+}
+
+fn write_board_exports_to_v4_dir(
+    destination_root: &Path,
+    manifest: &board_backup_types::BoardBackupManifest,
+    entries: &mut Vec<v4::BackupFileEntry>,
+) -> Result<()> {
+    super::common::validate_board_short_name(&manifest.board.short_name)?;
+    let board_root = destination_root
+        .join("boards")
+        .join(&manifest.board.short_name);
+    std::fs::create_dir_all(&board_root).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Create {}: {error}", board_root.display()))
+    })?;
+
+    let board_json_path = board_root.join("board.json");
+    let (board_json_size, board_json_sha) = write_pretty_json_file(&board_json_path, manifest)?;
+    push_v4_file_entry(
+        entries,
+        format!("boards/{}/board.json", manifest.board.short_name),
+        None,
+        Some(manifest.board.short_name.clone()),
+        v4::BackupFileKind::BoardJson,
+        board_json_size,
+        board_json_sha,
+    );
+
+    let threads_path = board_root.join("threads.jsonl");
+    let (threads_size, threads_sha) = write_jsonl_file(&threads_path, &manifest.threads)?;
+    push_v4_file_entry(
+        entries,
+        format!("boards/{}/threads.jsonl", manifest.board.short_name),
+        None,
+        Some(manifest.board.short_name.clone()),
+        v4::BackupFileKind::ThreadExport,
+        threads_size,
+        threads_sha,
+    );
+
+    let posts_path = board_root.join("posts.jsonl");
+    let (posts_size, posts_sha) = write_jsonl_file(&posts_path, &manifest.posts)?;
+    push_v4_file_entry(
+        entries,
+        format!("boards/{}/posts.jsonl", manifest.board.short_name),
+        None,
+        Some(manifest.board.short_name.clone()),
+        v4::BackupFileKind::PostExport,
+        posts_size,
+        posts_sha,
+    );
+
+    let files_path = board_root.join("files.jsonl");
+    let (files_size, files_sha) = write_jsonl_file(&files_path, &manifest.file_hashes)?;
+    push_v4_file_entry(
+        entries,
+        format!("boards/{}/files.jsonl", manifest.board.short_name),
+        None,
+        Some(manifest.board.short_name.clone()),
+        v4::BackupFileKind::FileInventoryExport,
+        files_size,
+        files_sha,
+    );
+    Ok(())
+}
+
+fn finalize_v4_backup_root(root_dir: &Path, mut manifest: v4::BackupManifest) -> Result<String> {
+    manifest.completed_at = Some(Utc::now().timestamp());
+
+    let mut metadata = v4::BackupMetadata {
+        format: v4::BACKUP_V4_FORMAT.to_string(),
+        backup_id: manifest.backup_id.clone(),
+        scope: manifest.scope,
+        storage_mode: manifest.storage_mode,
+        created_at: manifest.created_at,
+        completed_at: manifest.completed_at,
+        total_size_bytes: 0,
+        verified: true,
+        part_count: u32::try_from(manifest.parts.len()).unwrap_or(u32::MAX),
+        includes_tor_keys: manifest.includes.tor_keys,
+        included_boards: manifest.included_boards.clone(),
+        manifest_path: Some(root_dir.join(v4::MANIFEST_FILE_NAME).display().to_string()),
+    };
+
+    let manifest_path = root_dir.join(v4::MANIFEST_FILE_NAME);
+    let metadata_path = root_dir.join(v4::BACKUP_METADATA_FILE_NAME);
+    let readme_path = root_dir.join(v4::README_FILE_NAME);
+
+    v4::write_json_pretty(&manifest_path, &manifest)?;
+    v4::write_json_pretty(&metadata_path, &metadata)?;
+    let readme = v4::build_readme(&manifest, &metadata, manifest.includes.tor_keys);
+    v4::write_text(&readme_path, &readme)?;
+
+    let part_paths = manifest
+        .parts
+        .iter()
+        .map(|part| root_dir.join(&part.filename))
+        .collect::<Vec<_>>();
+    let part_path_refs = part_paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    v4::write_root_checksums(root_dir, &part_path_refs)?;
+    metadata.total_size_bytes = v4::scan_dir_stats(root_dir).bytes;
+    v4::write_json_pretty(&metadata_path, &metadata)?;
+    v4::write_root_checksums(root_dir, &part_path_refs)?;
+    Ok(manifest.backup_id)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_full_backup_manifest, count_required_private_files, full_backup_upload_file_count,
-        FullBackupCreateForm,
-    };
+    use super::{build_full_backup_manifest, count_required_private_files, FullBackupCreateForm};
     use crate::handlers::admin::backup::common::{
         resolve_tor_hidden_service_keys_availability, verify_full_backup_zip,
         TorHiddenServiceKeysAvailability, FULL_BACKUP_MANIFEST_NAME,
         FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
     };
+    use crate::handlers::admin::backup::v4;
     use axum::{
         body::{to_bytes, Body},
         extract::Form,
@@ -886,6 +1731,13 @@ mod tests {
     };
     use std::io::Write as _;
     use tower::ServiceExt as _;
+
+    const fn test_full_backup_upload_file_count(
+        total_file_count: u64,
+        tor_hidden_service_key_file_count: u64,
+    ) -> u64 {
+        total_file_count.saturating_sub(tor_hidden_service_key_file_count)
+    }
 
     async fn echo_full_backup_create_form(Form(form): Form<FullBackupCreateForm>) -> String {
         form.include_tor_hidden_service_keys.to_string()
@@ -962,7 +1814,7 @@ mod tests {
         let tor_key_file_count = if include_tor_keys { 2 } else { 0 };
         let total_archive_file_count = 1_u64.saturating_add(tor_key_file_count);
         let upload_file_count =
-            full_backup_upload_file_count(total_archive_file_count, 0, 0, tor_key_file_count);
+            test_full_backup_upload_file_count(total_archive_file_count, tor_key_file_count);
         let manifest = build_full_backup_manifest(
             &conn,
             std::fs::metadata(&db_path).expect("db metadata").len(),
@@ -1063,6 +1915,129 @@ mod tests {
                 "{FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX}hs_ed25519_secret_key"
             ))
             .is_err());
+    }
+
+    #[test]
+    fn split_zip_part_planner_does_not_create_empty_parts() {
+        let files = vec![
+            v4::BackupFileEntry {
+                logical_path: "b.txt".to_string(),
+                runtime_logical_path: None,
+                board: None,
+                kind: v4::BackupFileKind::Settings,
+                size: 6,
+                sha256: "b".to_string(),
+                zip_part: None,
+                zip_entry_path: None,
+                compression_method: None,
+            },
+            v4::BackupFileEntry {
+                logical_path: "a.txt".to_string(),
+                runtime_logical_path: None,
+                board: None,
+                kind: v4::BackupFileKind::Settings,
+                size: 6,
+                sha256: "a".to_string(),
+                zip_part: None,
+                zip_entry_path: None,
+                compression_method: None,
+            },
+        ];
+
+        let parts = super::plan_split_zip_parts(&files, 6);
+
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().all(|part| !part.files.is_empty()));
+    }
+
+    #[test]
+    fn split_zip_part_planner_marks_oversized_single_file_part() {
+        let files = vec![v4::BackupFileEntry {
+            logical_path: "huge.bin".to_string(),
+            runtime_logical_path: None,
+            board: None,
+            kind: v4::BackupFileKind::OriginalMedia,
+            size: 128,
+            sha256: "huge".to_string(),
+            zip_part: None,
+            zip_entry_path: None,
+            compression_method: None,
+        }];
+
+        let parts = super::plan_split_zip_parts(&files, 64);
+
+        assert_eq!(parts.len(), 1);
+        let part = parts.first().expect("planned part");
+        assert!(part.oversized);
+        assert_eq!(part.files.len(), 1);
+    }
+
+    #[test]
+    fn full_backup_board_summary_collection_rejects_unsafe_db_short_name() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db conn");
+        crate::db::create_board(&conn, "tech", "Technology", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET short_name = '../escape' WHERE short_name = 'tech'",
+            [],
+        )
+        .expect("corrupt board short_name");
+
+        let error = super::collect_backup_board_summaries(&conn)
+            .expect_err("unsafe stored board short_name should fail");
+
+        assert!(error.to_string().contains("Invalid board short name"));
+    }
+
+    #[test]
+    fn board_export_writer_rejects_unsafe_manifest_short_name_before_path_join() {
+        let manifest =
+            crate::handlers::admin::backup::types::board_backup_types::BoardBackupManifest {
+                version: 1,
+                board: crate::handlers::admin::backup::types::board_backup_types::BoardRow {
+                    id: 1,
+                    short_name: "a/b".to_string(),
+                    name: "Bad".to_string(),
+                    description: String::new(),
+                    nsfw: false,
+                    max_threads: 100,
+                    max_archived_threads: 150,
+                    bump_limit: 300,
+                    allow_images: true,
+                    allow_video: true,
+                    allow_audio: false,
+                    allow_any_files: false,
+                    allow_tripcodes: true,
+                    edit_window_secs: 300,
+                    allow_editing: false,
+                    allow_self_delete: false,
+                    allow_archive: true,
+                    allow_video_embeds: false,
+                    allow_captcha: false,
+                    show_poster_ids: false,
+                    collapse_greentext: false,
+                    post_cooldown_secs: 0,
+                    banner_mode: "inherit".to_string(),
+                    access_mode: "public".to_string(),
+                    access_password_hash: String::new(),
+                    created_at: 1,
+                },
+                threads: Vec::new(),
+                posts: Vec::new(),
+                polls: Vec::new(),
+                poll_options: Vec::new(),
+                poll_votes: Vec::new(),
+                file_hashes: Vec::new(),
+                banners: Vec::new(),
+            };
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let mut entries = Vec::new();
+
+        let error = super::write_board_exports_to_v4_dir(temp_dir.path(), &manifest, &mut entries)
+            .expect_err("unsafe board short_name should fail");
+
+        assert!(error.to_string().contains("Invalid board short name"));
+        assert!(!temp_dir.path().join("boards").exists());
     }
 
     #[test]

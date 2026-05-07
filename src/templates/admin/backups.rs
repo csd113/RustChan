@@ -11,7 +11,12 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
                 escape_html(message)
             )
         });
-    let full_backup_open_attr = if view.open_section == Some("full-backup-restore") {
+    let full_backup_open_attr = if view.open_section == Some("full-backup-restore")
+        || view.open_section == Some("board-backup-restore")
+        || view
+            .open_section
+            .is_some_and(|section| section.starts_with("board-backup-"))
+    {
         " open"
     } else {
         ""
@@ -57,7 +62,7 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut full_backup_rows = String::new();
     if view.backups.full_backups.is_empty() {
         full_backup_rows
-            .push_str(r#"<tr><td colspan="5" class="admin-table-empty">no backups yet</td></tr>"#);
+            .push_str(r#"<tr><td colspan="6" class="admin-table-empty">no backups yet</td></tr>"#);
     }
     for bf in view.backups.full_backups {
         let size_fmt = format_file_size(bf.size_bytes.cast_signed());
@@ -108,10 +113,39 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
         } else {
             format!("{} boards indexed", bf.boards.len())
         };
+        let part_summary = if bf.part_count > 1 {
+            format!("{} parts", bf.part_count)
+        } else {
+            "1 part".to_string()
+        };
+        let part_downloads = if bf.part_filenames.is_empty() {
+            String::new()
+        } else {
+            let mut links = String::new();
+            for part in &bf.part_filenames {
+                let _ = write!(
+                    links,
+                    r#"<li><a href="/admin/backup/download/full/{backup_ref}?part={part}">{part}</a></li>"#,
+                    backup_ref = escape_html(&bf.backup_ref),
+                    part = escape_html(part)
+                );
+            }
+            format!(
+                r#"<p><strong>ZIP parts:</strong></p><ul class="backup-part-list">{links}</ul>"#
+            )
+        };
         let tor_backup_summary = if bf.contains_tor_hidden_service_keys {
             "includes Tor hidden service keys"
         } else {
             "no Tor hidden service keys"
+        };
+        let download_link = if bf.downloadable_archive {
+            format!(
+                r#"<a href="/admin/backup/download/full/{backup_ref}" class="backup-download-link" data-backup-label="full backup">&#8659; download archive</a>"#,
+                backup_ref = escape_html(&bf.backup_ref),
+            )
+        } else {
+            String::new()
         };
         let restore_tor_keys_option = if bf.contains_tor_hidden_service_keys
             && view.backups.tor_hidden_service_key_backup_available
@@ -145,55 +179,78 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
             full_backup_rows,
             r#"<tr>
 <td class="backup-filename-cell">
-  <div class="backup-filename">{fname}</div>
-  <div class="backup-submeta">{indexed_boards_summary} · {tor_backup_summary}</div>
+  <div class="backup-filename">{backup_id}</div>
+  <div class="backup-submeta">{scope} · {mode} · {part_summary}</div>
 </td>
 <td class="backup-meta-cell">{size}</td>
 <td class="backup-meta-cell">{modified}</td>
+<td class="backup-meta-cell">{mode}</td>
 <td class="backup-status-cell">{status}</td>
 <td class="backup-actions-cell">
   <div class="backup-actions-stack">
     <div class="backup-primary-actions">
-      <a href="/admin/backup/download/full/{fname}" class="backup-download-link" data-backup-label="full backup">&#8659; download zip</a>
+      {download_link}
       <form method="POST" action="/admin/backup/restore-saved" class="backup-inline-form">
         <input type="hidden" name="_csrf" value="{csrf}">
-        <input type="hidden" name="filename" value="{fname}">
+        <input type="hidden" name="filename" value="{backup_ref}">
         <button type="submit" data-confirm="{restore_confirm}">&#8635; restore site</button>
         {restore_tor_keys_option}
       </form>
       <form method="POST" action="/admin/backup/delete" class="backup-inline-form">
         <input type="hidden" name="_csrf" value="{csrf}">
         <input type="hidden" name="kind" value="full">
-        <input type="hidden" name="filename" value="{fname}">
-        <button type="submit" class="btn-danger" data-confirm="Delete {fname}? This cannot be undone.">&#10005; delete</button>
+        <input type="hidden" name="filename" value="{backup_ref}">
+        <button type="submit" class="btn-danger" data-confirm="Delete {backup_id}? This cannot be undone.">&#10005; delete</button>
       </form>
     </div>
+    <details class="backup-extract-details">
+      <summary>backup details</summary>
+      <div class="backup-extract-help">
+        <p><strong>Backup ID:</strong> <code>{backup_id}</code></p>
+        <p><strong>Scope:</strong> {scope}</p>
+        <p><strong>Mode:</strong> {mode}</p>
+        <p><strong>ZIP parts:</strong> {part_summary}</p>
+        {part_downloads}
+        <p><strong>Manifest path:</strong> <code>{manifest_path}</code></p>
+        <p><strong>Server path:</strong> <code>{server_path}</code></p>
+        <p><strong>Included boards:</strong> {indexed_boards_summary}</p>
+        <p><strong>Tor keys:</strong> {tor_backup_summary}</p>
+      </div>
+    </details>
     <details class="backup-extract-details">
       <summary>single-board tools</summary>
       <form method="POST" action="/admin/backup/extract-board" class="backup-extract-form">
         <input type="hidden" name="_csrf" value="{csrf}">
-        <input type="hidden" name="filename" value="{fname}">
+        <input type="hidden" name="filename" value="{backup_ref}">
         {board_picker}
         <p class="backup-extract-help">{board_help}</p>
         <div class="backup-extract-actions">
           <button type="submit" name="action" value="download">download board zip</button>
           <button type="submit" name="action" value="restore" class="btn-danger"
-                  data-confirm="WARNING: Restore one board from {fname}? This will wipe and replace that board only. Continue?">&#8635; restore board</button>
+                  data-confirm="WARNING: Restore one board from {backup_id}? This will wipe and replace that board only. Continue?">&#8635; restore board</button>
         </div>
       </form>
     </details>
   </div>
 </td>
 </tr>"#,
-            fname = escape_html(&bf.filename),
+            backup_id = escape_html(&bf.backup_id),
+            backup_ref = escape_html(&bf.backup_ref),
+            scope = escape_html(&bf.scope),
+            mode = escape_html(&bf.mode),
+            part_summary = escape_html(&part_summary),
+            part_downloads = part_downloads,
             indexed_boards_summary = escape_html(&indexed_boards_summary),
             tor_backup_summary = escape_html(tor_backup_summary),
             size = size_fmt,
             modified = escape_html(&bf.modified),
             status = status_html,
             csrf = escape_html(view.csrf_token),
+            download_link = download_link,
             restore_tor_keys_option = restore_tor_keys_option,
             restore_confirm = escape_html(&restore_confirm),
+            manifest_path = escape_html(&bf.manifest_path),
+            server_path = escape_html(&bf.server_path),
             board_picker = board_picker,
             board_help = escape_html(board_help),
         );
@@ -261,7 +318,7 @@ fn render_board_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut board_backup_rows = String::new();
     if view.backups.board_backups.is_empty() {
         board_backup_rows.push_str(
-            r#"<tr><td colspan="5" class="admin-table-empty">no board backups yet</td></tr>"#,
+            r#"<tr><td colspan="6" class="admin-table-empty">no board backups yet</td></tr>"#,
         );
     }
     for bf in view.backups.board_backups {
@@ -277,40 +334,65 @@ fn render_board_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
                 title = escape_html(&bf.verification_note)
             )
         };
+        let download_link = if bf.downloadable_archive {
+            format!(
+                r#"<a href="/admin/backup/download/board/{backup_ref}" class="backup-download-link" data-backup-label="board backup">&#8659; download archive</a>"#,
+                backup_ref = escape_html(&bf.backup_ref),
+            )
+        } else {
+            String::new()
+        };
         let _ = write!(
             board_backup_rows,
             r#"<tr>
 <td class="backup-filename-cell">
-  <div class="backup-filename">{fname}</div>
-  <div class="backup-submeta">single-board snapshot</div>
+  <div class="backup-filename">{backup_id}</div>
+  <div class="backup-submeta">{mode}</div>
 </td>
 <td class="backup-meta-cell">{size}</td>
 <td class="backup-meta-cell">{modified}</td>
+<td class="backup-meta-cell">{mode}</td>
 <td class="backup-status-cell">{status}</td>
 <td class="backup-actions-cell">
   <div class="backup-actions-stack">
     <div class="backup-primary-actions">
-      <a href="/admin/backup/download/board/{fname}" class="backup-download-link" data-backup-label="board backup">&#8659; download zip</a>
+      {download_link}
       <form method="POST" action="/admin/board/backup/restore-saved" class="backup-inline-form">
         <input type="hidden" name="_csrf" value="{csrf}">
-        <input type="hidden" name="filename" value="{fname}">
-        <button type="submit" data-confirm="WARNING: Restore board from {fname}? This will wipe and replace that board. Cannot be undone.">&#8635; restore board</button>
+        <input type="hidden" name="filename" value="{backup_ref}">
+        <button type="submit" data-confirm="WARNING: Restore board from {backup_id}? This will wipe and replace that board. Cannot be undone.">&#8635; restore board</button>
       </form>
       <form method="POST" action="/admin/backup/delete" class="backup-inline-form">
         <input type="hidden" name="_csrf" value="{csrf}">
         <input type="hidden" name="kind" value="board">
-        <input type="hidden" name="filename" value="{fname}">
-        <button type="submit" class="btn-danger" data-confirm="Delete {fname}? This cannot be undone.">&#10005; delete</button>
+        <input type="hidden" name="filename" value="{backup_ref}">
+        <button type="submit" class="btn-danger" data-confirm="Delete {backup_id}? This cannot be undone.">&#10005; delete</button>
       </form>
     </div>
+    <details class="backup-extract-details">
+      <summary>backup details</summary>
+      <div class="backup-extract-help">
+        <p><strong>Backup ID:</strong> <code>{backup_id}</code></p>
+        <p><strong>Scope:</strong> {scope}</p>
+        <p><strong>Mode:</strong> {mode}</p>
+        <p><strong>Manifest path:</strong> <code>{manifest_path}</code></p>
+        <p><strong>Server path:</strong> <code>{server_path}</code></p>
+      </div>
+    </details>
   </div>
 </td>
 </tr>"#,
-            fname = escape_html(&bf.filename),
+            backup_id = escape_html(&bf.backup_id),
+            backup_ref = escape_html(&bf.backup_ref),
+            scope = escape_html(&bf.scope),
+            mode = escape_html(&bf.mode),
             size = size_fmt,
             modified = escape_html(&bf.modified),
             status = status_html,
-            csrf = escape_html(view.csrf_token)
+            csrf = escape_html(view.csrf_token),
+            download_link = download_link,
+            manifest_path = escape_html(&bf.manifest_path),
+            server_path = escape_html(&bf.server_path),
         );
     }
     board_backup_rows
@@ -344,7 +426,7 @@ fn render_admin_backups_section(
 <details class="admin-dropdown" data-admin-dropdown-key="full-backup-restore"{full_backup_open_attr}>
 <summary><span>// full site backup &amp; restore</span></summary>
 <div class="admin-dropdown-content">
-<p class="admin-copy">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores the backup in <code>rustchan-data/backups/full/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer. Saved full backups can also be used to extract or directly restore a single board without scheduling separate per-board backups.</p>
+<p class="admin-copy">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores a Backup v4 folder under <code>rustchan-data/backups/&lt;backup_id&gt;/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer. Saved full backups can also be used to extract or directly restore a single board without scheduling separate per-board backups.</p>
 {backup_warning_html}
 <p class="admin-copy"><strong>Backup health:</strong> {backup_status_line}</p>
 <div class="admin-subsection">
@@ -383,6 +465,32 @@ fn render_admin_backups_section(
   <div class="full-backup-run-actions">
   <form method="POST" action="/admin/backup/create" id="full-backup-create-form" class="backup-action-form full-backup-action-form">
   <input type="hidden" name="_csrf" value="{csrf}">
+  <fieldset class="backup-output-fieldset">
+    <legend>Backup output</legend>
+    <label class="backup-output-option">
+      <input type="radio" name="storage_mode" value="directory" checked>
+      <span>
+        <strong>Directory</strong>
+        <small>Server-local Backup v4 folder.</small>
+      </span>
+    </label>
+    <label class="backup-output-option backup-output-option-split">
+      <input type="radio" name="storage_mode" value="split_zip">
+      <span>
+        <strong>Split ZIP</strong>
+        <small>Write ZIP parts for easier transfer.</small>
+      </span>
+      <span class="backup-output-select">
+        <span>Part size</span>
+        <select name="split_zip_part_size_gib">
+          <option value="1">1 GiB</option>
+          <option value="2">2 GiB</option>
+          <option value="4" selected>4 GiB</option>
+          <option value="8">8 GiB</option>
+        </select>
+      </span>
+    </label>
+  </fieldset>
   <button type="submit" id="full-backup-btn">&#128190; save to server</button>
   <div class="backup-form-options full-backup-options">
   {full_backup_create_tor_option}
@@ -409,20 +517,14 @@ fn render_admin_backups_section(
   </div>
   <div class="admin-table-wrap">
   <table class="admin-table backup-table">
-  <thead><tr><th>filename</th><th>size</th><th>created</th><th>status</th><th></th></tr></thead>
+  <thead><tr><th>backup</th><th>size</th><th>created</th><th>mode</th><th>status</th><th></th></tr></thead>
   <tbody>{full_backup_rows}</tbody>
   </table>
   </div>
 </div>
-</div>
-</details>
-</section>
-
-<section class="admin-section admin-section-collapsible" id="board-backup-restore">
-<details class="admin-dropdown" data-admin-dropdown-key="board-backup-restore"{board_backup_open_attr}>
-<summary><span>// board backup &amp; restore</span></summary>
-<div class="admin-dropdown-content">
-<p class="admin-copy">Board backups cover a single board. Use the per-board tools here to store a backup in <code>rustchan-data/backups/boards/</code>, or use the table below to download, restore, or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
+<details class="backup-extract-details"{board_backup_open_attr}>
+<summary>advanced: board backup and restore</summary>
+<p class="admin-copy">Board backups cover a single board. Use the per-board tools here to store a Backup v4 folder under <code>rustchan-data/backups/&lt;backup_id&gt;/</code>, or use the table below to restore or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
 <div class="admin-subsection">
   <div class="admin-card-header">
     <h3>// create board backups</h3>
@@ -454,11 +556,12 @@ fn render_admin_backups_section(
   </div>
   <div class="admin-table-wrap">
   <table class="admin-table backup-table">
-  <thead><tr><th>filename</th><th>size</th><th>created</th><th>status</th><th></th></tr></thead>
+  <thead><tr><th>backup</th><th>size</th><th>created</th><th>mode</th><th>status</th><th></th></tr></thead>
   <tbody>{board_backup_rows}</tbody>
   </table>
   </div>
 </div>
+</details>
 </div>
 </details>
 </section>

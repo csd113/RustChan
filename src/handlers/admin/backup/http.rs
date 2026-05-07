@@ -536,6 +536,17 @@ pub(super) fn sanitize_backup_zip_filename(filename: &str) -> Result<String> {
     Ok(safe_filename)
 }
 
+pub(super) fn sanitize_saved_backup_ref(value: &str) -> Result<String> {
+    let safe_value: String = value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+        .collect();
+    if safe_value != value || safe_value.is_empty() || safe_value.contains("..") {
+        return Err(AppError::BadRequest("Invalid backup reference.".into()));
+    }
+    Ok(safe_value)
+}
+
 fn ensure_restore_upload_within_budget(
     kind: RestoreKind,
     uploaded_bytes: u64,

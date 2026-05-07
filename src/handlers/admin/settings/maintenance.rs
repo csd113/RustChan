@@ -37,7 +37,7 @@ pub struct DbRepairStatusQuery {
 fn create_pre_repair_backup(
     pool: &crate::db::DbPool,
     progress: &std::sync::Arc<crate::middleware::BackupProgress>,
-    copies_to_keep: u64,
+    job_id: u64,
 ) -> Result<String> {
     #[cfg(test)]
     {
@@ -50,17 +50,13 @@ fn create_pre_repair_backup(
         }
     }
 
-    crate::handlers::admin::create_full_backup_to_server(
+    crate::handlers::admin::create_pre_maintenance_backup_to_server(
         pool,
-        None,
         progress,
-        copies_to_keep,
-        pre_repair_backup_include_tor_hidden_service_keys(),
+        "db_repair",
+        job_id,
+        "Automatic DB + config safety backup before database repair.",
     )
-}
-
-fn pre_repair_backup_include_tor_hidden_service_keys() -> bool {
-    crate::config::configured_tor_hidden_service_keys_dir().is_some_and(|path| path.is_dir())
 }
 
 fn parse_ffmpeg_timeout_secs_input(input: Option<&str>) -> Result<u64> {
@@ -314,7 +310,6 @@ pub async fn admin_db_repair(
         .try_begin("Database maintenance rebuild")?;
     let job_id = state.db_maintenance_jobs.mark_running();
     let progress = state.backup_progress.clone();
-    let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
     let pool = state.db.clone();
     let db_maintenance_jobs = state.db_maintenance_jobs.clone();
 
@@ -324,7 +319,7 @@ pub async fn admin_db_repair(
             let _maintenance_guard = maintenance_guard;
             let _ = db_maintenance_jobs
                 .mark_phase(job_id, crate::middleware::DbMaintenanceJobPhase::Backup);
-            let backup_result = create_pre_repair_backup(&pool, &progress, copies_to_keep);
+            let backup_result = create_pre_repair_backup(&pool, &progress, job_id);
 
             let conn = match pool.get() {
                 Ok(conn) => conn,
@@ -342,7 +337,18 @@ pub async fn admin_db_repair(
             let _ = db_maintenance_jobs
                 .mark_phase(job_id, crate::middleware::DbMaintenanceJobPhase::Repair);
             let report = match backup_result {
-                Ok(filename) => db::attempt_db_repair(&conn, Some(db::DbRepairBackup { filename })),
+                Ok(backup_id) => db::attempt_db_repair(
+                    &conn,
+                    Some(db::DbRepairBackup {
+                        backup_id: backup_id.clone(),
+                        backup_type: "DB + config".to_string(),
+                        backup_path: crate::config::backups_dir()
+                            .join(&backup_id)
+                            .display()
+                            .to_string(),
+                        verified: true,
+                    }),
+                ),
                 Err(error) => {
                     let backup_error = error.to_string();
                     db::db_repair_aborted_for_backup_failure(&conn, &backup_error)
@@ -353,7 +359,10 @@ pub async fn admin_db_repair(
                 before_ok = report.before.ok(),
                 after_ok = report.after.as_ref().map(db::DbHealthSnapshot::ok),
                 steps = report.repair_steps.len(),
-                backup = report.repair_backup.as_ref().map(|backup| backup.filename.as_str()),
+                backup = report
+                    .repair_backup
+                    .as_ref()
+                    .map(|backup| backup.backup_id.as_str()),
                 backup_error = report.repair_backup_error.as_deref(),
                 "Admin ran database repair attempt"
             );
@@ -500,12 +509,12 @@ fn db_repair_progress_payload(
 
 fn backup_percent(phase: u64, files_done: u64, files_total: u64) -> u64 {
     match phase {
-        crate::middleware::backup_phase::SNAPSHOT_DB => 15,
-        crate::middleware::backup_phase::COUNT_FILES => 30,
+        crate::middleware::backup_phase::SNAPSHOT_DB => 35,
+        crate::middleware::backup_phase::COUNT_FILES => 45,
         crate::middleware::backup_phase::COMPRESS => files_done
             .saturating_mul(30)
             .checked_div(files_total)
-            .map_or(45, |percent| 45 + percent),
+            .map_or(55, |percent| 55 + percent),
         crate::middleware::backup_phase::DONE => 78,
         _ => 10,
     }
@@ -514,20 +523,24 @@ fn backup_percent(phase: u64, files_done: u64, files_total: u64) -> u64 {
 fn backup_progress_label(phase: u64, files_done: u64, files_total: u64) -> String {
     match phase {
         crate::middleware::backup_phase::SNAPSHOT_DB => {
-            "Creating pre-repair database snapshot...".to_string()
+            "Creating Backup v4 DB snapshot...".to_string()
         }
         crate::middleware::backup_phase::COUNT_FILES => {
-            "Counting files for the pre-repair backup...".to_string()
+            "Writing Backup v4 maintenance metadata...".to_string()
         }
         crate::middleware::backup_phase::COMPRESS => {
             if files_total == 0 {
-                "Compressing pre-repair backup...".to_string()
+                "Copying files into the Backup v4 folder...".to_string()
             } else {
-                format!("Compressing pre-repair backup... {files_done}/{files_total} files")
+                format!(
+                    "Copying files into the Backup v4 folder... {files_done}/{files_total} files"
+                )
             }
         }
-        crate::middleware::backup_phase::DONE => "Pre-repair backup complete...".to_string(),
-        _ => "Preparing pre-repair backup...".to_string(),
+        crate::middleware::backup_phase::DONE => {
+            "Backup v4 pre-maintenance backup complete...".to_string()
+        }
+        _ => "Preparing Backup v4 pre-maintenance backup...".to_string(),
     }
 }
 
@@ -1104,12 +1117,13 @@ mod tests {
 
         assert!(repair_body.contains("[ database repair ]"));
         assert!(
-            repair_body.contains("Created pre-repair full backup:"),
+            repair_body.contains("Created pre-repair DB + config backup:"),
             "{repair_body}"
         );
         assert!(repair_body.contains("<strong>Repair run:</strong> Yes"));
         assert!(repair_body.contains("Repair finished, but the database still reports a problem."));
         assert!(repair_body.contains("<strong>Pre-repair backup:</strong> <code>"));
+        assert!(repair_body.contains("<strong>Pre-repair backup type:</strong> DB + config"));
         assert!(!repair_body
             .contains("Maintenance completed. Database health checks passed afterward."));
         assert!(!repair_body.contains(

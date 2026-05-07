@@ -832,6 +832,10 @@ html:not([data-theme]) .admin-panel h1 {
 
 .admin-dropdown {
   background: var(--bg-panel);
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .admin-dropdown > summary {
@@ -924,6 +928,20 @@ html:not([data-theme]) .admin-panel h1 {
   padding: 0 1.15rem 1.15rem;
   border-top: 1px solid var(--border);
   min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+}
+
+.admin-dropdown-content > * {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.backup-part-list {
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
 }
 
 .admin-detection-grid {
@@ -1226,6 +1244,68 @@ html:not([data-theme]) .admin-panel h1 {
 #full-backup-restore .full-backup-action-form button {
   width: auto;
   max-width: 100%;
+}
+
+#full-backup-restore .backup-output-fieldset {
+  display: grid;
+  gap: 0.55rem;
+  width: 100%;
+  max-width: 34rem;
+  min-width: 0;
+  margin: 0;
+  padding: 0.8rem 0.9rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  background: color-mix(in srgb, var(--bg-input) 58%, transparent);
+}
+
+#full-backup-restore .backup-output-fieldset legend {
+  padding: 0 0.35rem;
+  color: var(--green);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+}
+
+#full-backup-restore .backup-output-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.2rem 0.55rem;
+  align-items: start;
+  min-width: 0;
+  color: var(--green-pale);
+}
+
+#full-backup-restore .backup-output-option input[type="radio"] {
+  margin-top: 0.2rem;
+}
+
+#full-backup-restore .backup-output-option strong,
+#full-backup-restore .backup-output-select > span {
+  display: block;
+  color: var(--text);
+  font-size: 0.8rem;
+  letter-spacing: 0;
+}
+
+#full-backup-restore .backup-output-option small {
+  display: block;
+  margin-top: 0.12rem;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+#full-backup-restore .backup-output-option-split {
+  grid-template-columns: auto minmax(10rem, 1fr) minmax(8rem, 11rem);
+  gap: 0.4rem 0.65rem;
+}
+
+#full-backup-restore .backup-output-select {
+  min-width: 0;
+}
+
+#full-backup-restore .backup-output-select select {
+  width: 100%;
+  margin-top: 0.2rem;
 }
 
 #full-backup-restore .full-backup-settings-form .board-settings-actions {
@@ -1557,6 +1637,20 @@ html:not([data-theme]) .admin-panel h1 {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.admin-inline-control {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.admin-inline-control > * {
+  flex: 1 1 8rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .admin-quick-checkbox {
@@ -2321,6 +2415,15 @@ html:not([data-theme]) .admin-login h1 {
   .backup-actions-stack {
     display: grid;
     gap: 0.6rem;
+  }
+
+  #full-backup-restore .backup-output-option,
+  #full-backup-restore .backup-output-option-split {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  #full-backup-restore .backup-output-select {
+    grid-column: 2;
   }
 
   .backup-primary-actions {

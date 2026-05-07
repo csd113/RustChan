@@ -107,6 +107,7 @@ impl Drop for TempFileStream {
 pub struct DownloadBackupQuery {
     cleanup: Option<String>,
     token: Option<String>,
+    part: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -127,7 +128,11 @@ pub async fn download_backup(
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
 
-    let safe_filename = sanitize_backup_zip_filename(&filename)?;
+    let safe_filename = if query.part.is_some() && matches!(kind.as_str(), "full" | "board") {
+        sanitize_saved_backup_ref(&filename)?
+    } else {
+        sanitize_backup_zip_filename(&filename)?
+    };
 
     match kind.as_str() {
         "temp-board" => {
@@ -164,6 +169,65 @@ pub async fn download_backup(
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
         }
         _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
+    }
+
+    if let Some(part_name) = query.part.as_deref() {
+        if !matches!(kind.as_str(), "full" | "board") {
+            return Err(AppError::BadRequest(
+                "Backup parts are not available for this download kind.".into(),
+            ));
+        }
+        let safe_part = sanitize_backup_zip_filename(part_name)?;
+        let backup_root = crate::config::backups_dir().join(&safe_filename);
+        let expected_scopes: &[v4::BackupScope] = match kind.as_str() {
+            "full" => &[v4::BackupScope::FullSite],
+            "board" => &[v4::BackupScope::Board],
+            _ => unreachable!("validated above"),
+        };
+        let verified = v4::verify_saved_v4_root(&backup_root, expected_scopes)?;
+        let part_filename = format!("parts/{safe_part}");
+        let part = verified
+            .manifest
+            .parts
+            .iter()
+            .find(|part| part.filename == part_filename)
+            .ok_or_else(|| AppError::NotFound("Backup part not found.".into()))?;
+        let path = backup_root.join(&part.filename);
+        let resolved = crate::utils::fs_security::canonical_child_of(&backup_root, &path).map_err(
+            |error| AppError::BadRequest(format!("Backup part path is unsafe: {error}")),
+        )?;
+        crate::utils::fs_security::assert_regular_file_no_symlink(&resolved).map_err(|error| {
+            AppError::BadRequest(format!("Backup part path is unsafe: {error}"))
+        })?;
+        let file_size = tokio::fs::metadata(&resolved)
+            .await
+            .map_err(|_| AppError::NotFound("Backup part not found.".into()))?
+            .len();
+        if file_size != part.size {
+            return Err(AppError::BadRequest(
+                "Backup part size changed since verification.".into(),
+            ));
+        }
+        let file_sha256 = v4::sha256_hex_for_file(&resolved)?;
+        if file_sha256 != part.sha256 {
+            return Err(AppError::BadRequest(
+                "Backup part checksum changed since verification.".into(),
+            ));
+        }
+        let file = tokio::fs::File::open(&resolved)
+            .await
+            .map_err(|_| AppError::NotFound("Backup part not found.".into()))?;
+        let body = axum::body::Body::from_stream(ReaderStream::new(file));
+        let disposition = format!("attachment; filename=\"{safe_part}\"");
+        return Ok((
+            [
+                (header::CONTENT_TYPE, "application/zip".to_string()),
+                (header::CONTENT_DISPOSITION, disposition),
+                (header::CONTENT_LENGTH, file_size.to_string()),
+            ],
+            body,
+        )
+            .into_response());
     }
 
     let backup_dir = match kind.as_str() {
@@ -252,7 +316,7 @@ pub async fn delete_backup(
         .map(|c| c.value().to_string());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
+    let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
 
     let backup_dir = match form.kind.as_str() {
         "full" => full_backup_dir(),
@@ -271,9 +335,16 @@ pub async fn delete_backup(
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
-            let path = backup_dir.join(&safe_filename);
-            if path.exists() {
-                std::fs::remove_file(&path)
+            let v4_root = crate::config::backups_dir().join(&safe_filename);
+            let legacy_path = backup_dir.join(&safe_filename);
+            if v4_root.is_dir() {
+                super::listing::safe_saved_backup_dir_for_delete(&v4_root)?;
+                std::fs::remove_dir_all(&v4_root)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {e}")))?;
+                invalidate_backup_list_cache(&backup_dir, backup_kind);
+                tracing::info!(target: "admin", backup_ref = %safe_filename, "Backup directory deleted");
+            } else if legacy_path.exists() {
+                std::fs::remove_file(&legacy_path)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {e}")))?;
                 invalidate_backup_list_cache(&backup_dir, backup_kind);
                 tracing::info!(target: "admin", filename = %safe_filename, "Backup file deleted");
