@@ -121,7 +121,7 @@ pub enum DbMaintenanceJobStatus {
     },
     Finished {
         job_id: u64,
-        report: crate::db::DbHealthReport,
+        report: Box<crate::db::DbHealthReport>,
     },
     Failed {
         job_id: u64,
@@ -191,7 +191,10 @@ impl DbMaintenanceJobs {
                 job_id: current_job_id,
                 ..
             } if *current_job_id == job_id => {
-                *status = DbMaintenanceJobStatus::Finished { job_id, report };
+                *status = DbMaintenanceJobStatus::Finished {
+                    job_id,
+                    report: Box::new(report),
+                };
                 true
             }
             DbMaintenanceJobStatus::Idle

@@ -873,7 +873,7 @@ pub async fn extract_board_from_full_backup(
         .map(|c| c.value().to_string());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
+    let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
     let safe_board = sanitize_board_short_value(&form.board_short)?;
     let action = form.action.clone();
     let upload_dir = CONFIG.upload_dir.clone();
@@ -884,9 +884,29 @@ pub async fn extract_board_from_full_backup(
             let mut conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
+            let full_backup_dir_path = crate::config::backups_dir().join(&safe_filename);
             let full_backup_path = full_backup_dir().join(&safe_filename);
             let (temp_board_backup_path, temp_board_backup_filename) =
-                create_temp_board_backup_from_full_backup_path(&full_backup_path, &safe_board)?;
+                if full_backup_dir_path.is_dir() {
+                    let (temp_zip_path, filename) =
+                        create_temp_legacy_board_backup_from_saved_full_v4_path(
+                            &full_backup_dir_path,
+                            &safe_board,
+                        )?;
+                    let mut temp_zip_guard =
+                        super::archive::TempZipCleanupGuard::new(temp_zip_path.clone());
+                    let staged_path = temp_board_download_dir().join(&filename);
+                    std::fs::rename(&temp_zip_path, &staged_path).map_err(|error| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Stage extracted board backup {}: {error}",
+                            staged_path.display()
+                        ))
+                    })?;
+                    temp_zip_guard.disarm();
+                    (staged_path, filename)
+                } else {
+                    create_temp_board_backup_from_full_backup_path(&full_backup_path, &safe_board)?
+                };
 
             match action.as_str() {
                 "download" => Ok(ExtractBoardFromFullBackupOutcome::Download {
@@ -991,9 +1011,8 @@ pub async fn restore_saved_board_backup(
         .map(|c| c.value().to_string());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
+    let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
 
-    let path = board_backup_dir().join(&safe_filename);
     let upload_dir = CONFIG.upload_dir.clone();
 
     let board_short_result: Result<Result<String>> = tokio::task::spawn_blocking({
@@ -1001,13 +1020,26 @@ pub async fn restore_saved_board_backup(
         move || -> Result<String> {
             let mut conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            let root_dir = crate::config::backups_dir().join(&safe_filename);
+            let legacy_zip_path = board_backup_dir().join(&safe_filename);
+            let temp_v4_zip = if root_dir.is_dir() {
+                let (path, _filename) =
+                    create_temp_legacy_board_backup_from_v4_path(&root_dir, None)?;
+                Some(path)
+            } else {
+                None
+            };
+            let _temp_v4_zip_guard = temp_v4_zip
+                .as_ref()
+                .map(|path| super::archive::TempZipCleanupGuard::new(path.clone()));
+            let archive_path = temp_v4_zip.as_deref().unwrap_or(&legacy_zip_path);
 
-            let zip_file = std::fs::File::open(&path)
+            let zip_file = std::fs::File::open(archive_path)
                 .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
             let mut manifest_archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
                 .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
             let manifest = parse_board_backup_manifest_from_zip(&mut manifest_archive)?;
-            let extract_file = std::fs::File::open(&path)
+            let extract_file = std::fs::File::open(archive_path)
                 .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
             let mut extract_archive =
                 zip::ZipArchive::new(std::io::BufReader::new(extract_file))

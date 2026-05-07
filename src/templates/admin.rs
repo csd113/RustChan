@@ -1068,12 +1068,12 @@ pub fn admin_db_health_result_page(
         let (label, confirm) = if report.before.ok() {
             (
                 "&#x1F6E0; run maintenance rebuild",
-                "Run maintenance rebuild? This will create a full backup, then run REINDEX, rebuild the search index, recreate its triggers, and optimize SQLite statistics. Continue?",
+                "Run maintenance rebuild? This will create a Backup v4 DB + config pre-maintenance backup, then run REINDEX, rebuild the search index, recreate its triggers, and optimize SQLite statistics. Continue?",
             )
         } else {
             (
                 "&#x1F6E0; attempt repair",
-                "Attempt database repair? This will create a full backup, then run integrity checks, REINDEX, and rebuild the search index. It may not fix true file corruption. Continue?",
+                "Attempt database repair? This will create a Backup v4 DB + config pre-maintenance backup, then run integrity checks, REINDEX, and rebuild the search index. It may not fix true file corruption. Continue?",
             )
         };
         format!(
@@ -1130,8 +1130,14 @@ pub fn admin_db_health_result_page(
         },
         |backup| {
             format!(
-                r"<p><strong>Pre-repair backup:</strong> <code>{}</code></p>",
-                escape_html(&backup.filename)
+                r"<p><strong>Pre-repair backup:</strong> <code>{}</code></p>
+<p><strong>Pre-repair backup type:</strong> {}</p>
+<p><strong>Verification status:</strong> {}</p>
+<p><strong>Backup path:</strong> <code>{}</code></p>",
+                escape_html(&backup.backup_id),
+                escape_html(&backup.backup_type),
+                if backup.verified { "Verified" } else { "Unverified" },
+                escape_html(&backup.backup_path)
             )
         },
     );
@@ -1166,8 +1172,8 @@ pub fn admin_db_health_result_page(
 </ul>
 {repair_action}
 <p class="admin-result-note">
-  Run checks after restores or large deletes. Take a backup before repair; this repair flow creates one automatically before making changes.
-  This tool can repair index and search-index issues, but true SQLite file corruption may still require restoring a known-good full backup.
+  Run checks after restores or large deletes. Take a backup before repair; this repair flow now creates a Backup v4 DB + config pre-maintenance snapshot before making changes.
+  This tool can repair index and search-index issues, but true SQLite file corruption may still require restoring a known-good backup.
 </p>
 <p class="admin-result-actions">
   <a href="/admin/panel">&#8592; back to admin panel</a>
@@ -1731,30 +1737,50 @@ mod tests {
 
     fn sample_full_backup() -> BackupInfo {
         BackupInfo {
+            backup_ref: "2026-04-07_1015_full-site_ab12cd".into(),
+            backup_id: "2026-04-07_1015_full-site_ab12cd".into(),
             filename: "full-2026-04-07.zip".into(),
             size_bytes: 2048,
             modified: "2026-04-07 10:15 UTC".into(),
             modified_epoch: Some(1_775_555_700),
             verified: true,
             verification_note: "verified".into(),
+            scope: "Full site".into(),
+            mode: "Single ZIP".into(),
+            part_count: 1,
+            part_filenames: Vec::new(),
             contains_tor_hidden_service_keys: true,
             boards: vec![BackupBoardSummary {
                 short_name: "tech".into(),
                 name: "Technology".into(),
             }],
+            server_path: "/tmp/rustchan-data/backups/2026-04-07_1015_full-site_ab12cd".into(),
+            manifest_path:
+                "/tmp/rustchan-data/backups/2026-04-07_1015_full-site_ab12cd/manifest.json".into(),
+            downloadable_archive: true,
         }
     }
 
     fn sample_board_backup() -> BackupInfo {
         BackupInfo {
+            backup_ref: "2026-04-07_1100_board-tech_ef34gh".into(),
+            backup_id: "2026-04-07_1100_board-tech_ef34gh".into(),
             filename: "tech-2026-04-07.zip".into(),
             size_bytes: 1024,
             modified: "2026-04-07 11:00 UTC".into(),
             modified_epoch: Some(1_775_558_400),
             verified: true,
             verification_note: "verified".into(),
+            scope: "Board".into(),
+            mode: "Single ZIP".into(),
+            part_count: 1,
+            part_filenames: Vec::new(),
             contains_tor_hidden_service_keys: false,
             boards: Vec::new(),
+            server_path: "/tmp/rustchan-data/backups/2026-04-07_1100_board-tech_ef34gh".into(),
+            manifest_path:
+                "/tmp/rustchan-data/backups/2026-04-07_1100_board-tech_ef34gh/manifest.json".into(),
+            downloadable_archive: true,
         }
     }
 
@@ -2267,15 +2293,27 @@ mod tests {
         assert!(html.contains("// create board backups"));
         assert!(html.contains("// automated full backups"));
         assert!(html.contains("// run or restore now"));
+        assert!(html.contains(r#"name="storage_mode""#));
+        assert!(html.contains(r#"<option value="split_zip">Split ZIP backup</option>"#));
+        assert!(html.contains(r#"name="split_zip_part_size_gib""#));
         assert!(html.contains("// saved full backups"));
         assert!(html.contains("data-admin-dropdown-key=\"full-backup-restore\""));
         assert!(html.contains("single-board tools"));
         assert!(html.contains("// restore from local file"));
         assert!(html.contains("// saved board backups"));
-        assert!(html.contains("data-admin-dropdown-key=\"board-backup-restore\""));
-        assert!(html.contains("single-board snapshot"));
+        assert!(html.contains("advanced: board backup and restore"));
+        assert!(!html.contains("<section class=\"admin-section admin-section-collapsible\" id=\"board-backup-restore\">"));
+        assert!(html.contains("Single ZIP"));
         assert!(html.contains(r#"data-admin-dropdown-key="media-settings""#));
         assert!(html.contains(r#"data-admin-dropdown-key="database-maintenance""#));
+        assert!(html.contains(
+            r#"<section class="admin-section admin-section-collapsible" id="media-settings">
+<details class="admin-dropdown" data-admin-dropdown-key="media-settings""#
+        ));
+        assert!(html.contains(
+            r#"<section class="admin-section admin-section-collapsible" id="database-maintenance">
+<details class="admin-dropdown" data-admin-dropdown-key="database-maintenance""#
+        ));
         assert!(html.contains("// media settings"));
         assert!(html.contains("// media pipeline detection"));
         assert!(html.contains("video thumbnails, waveform jobs, and transcoding entrypoint"));

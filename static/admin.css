@@ -832,6 +832,8 @@ html:not([data-theme]) .admin-panel h1 {
 
 .admin-dropdown {
   background: var(--bg-panel);
+  width: 100%;
+  max-width: 100%;
 }
 
 .admin-dropdown > summary {
@@ -924,6 +926,12 @@ html:not([data-theme]) .admin-panel h1 {
   padding: 0 1.15rem 1.15rem;
   border-top: 1px solid var(--border);
   min-width: 0;
+  max-width: 100%;
+}
+
+.backup-part-list {
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
 }
 
 .admin-detection-grid {

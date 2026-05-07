@@ -61,6 +61,8 @@ mod listing;
 mod restore_board;
 mod restore_full;
 mod types;
+mod v4;
+pub(crate) use v4::BackupStorageMode;
 
 use common::{
     copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
@@ -110,6 +112,8 @@ fn form_checkbox_value_is_on(value: Option<&str>) -> bool {
 
 use archive::{
     canonicalize_restored_banner_dir, create_temp_board_backup_from_full_backup_path,
+    create_temp_legacy_board_backup_from_saved_full_v4_path,
+    create_temp_legacy_board_backup_from_v4_path, create_temp_legacy_full_backup_from_v4_path,
     parse_board_backup_manifest_from_zip, validate_full_restore_archive_layout,
 };
 use downloads::prune_stale_temp_board_downloads;
@@ -121,8 +125,8 @@ use http::{
     is_xml_http_request, log_restore_upload_started, redirect_page_response,
     restore_auth_preflight, restore_error_redirect_target, restore_failure_response,
     restore_start_response, restore_success_redirect_target, restore_upload_parse_response,
-    sanitize_backup_zip_filename, sanitize_board_short_value, stream_restore_upload_to_tempfile,
-    validate_streamed_restore_upload, RestoreKind,
+    sanitize_backup_zip_filename, sanitize_board_short_value, sanitize_saved_backup_ref,
+    stream_restore_upload_to_tempfile, validate_streamed_restore_upload, RestoreKind,
 };
 use listing::latest_saved_board_backup_filename as latest_board_backup_filename;
 pub(crate) use listing::{
@@ -571,6 +575,34 @@ pub async fn board_backup(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
+    let v4_root = crate::config::backups_dir().join(&filename);
+    if v4_root.is_dir() {
+        let (temp_zip, temp_name) =
+            create_temp_legacy_board_backup_from_v4_path(&v4_root, Some(&safe_board))?;
+        let mut temp_zip_guard = archive::TempZipCleanupGuard::new(temp_zip.clone());
+        let download_token = new_session_id();
+        write_temp_board_download_token(&temp_name, &download_token)?;
+        let download_dir = temp_board_download_dir();
+        std::fs::create_dir_all(&download_dir).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Create temp board download dir {}: {error}",
+                download_dir.display()
+            ))
+        })?;
+        let final_path = download_dir.join(&temp_name);
+        std::fs::rename(&temp_zip, &final_path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Move temp board backup {}: {error}",
+                final_path.display()
+            ))
+        })?;
+        temp_zip_guard.disarm();
+        return Ok(Redirect::to(&format!(
+            "/admin/backup/download/temp-board/{temp_name}?cleanup=1&token={download_token}"
+        ))
+        .into_response());
+    }
+
     Ok(Redirect::to(&format!("/admin/backup/download/board/{filename}")).into_response())
 }
 
@@ -579,10 +611,11 @@ mod tests {
     use super::{
         build_board_backup_manifest, consume_temp_board_download_token,
         create_temp_board_backup_from_full_backup_path, execute_board_restore, full_backup_dir,
+        invalidate_backup_list_cache, latest_verified_full_backup_modified_time,
         latest_verified_full_backup_modified_time_in_dir, refresh_live_site_state_from_db,
         render_restored_body_html, should_store_without_recompress, temp_board_download_dir,
         temp_board_download_token_path, validate_full_restore_archive_layout,
-        write_temp_board_download_token, RestoreKind,
+        write_temp_board_download_token, BackupListKind, RestoreKind,
     };
     use crate::error::AppError;
     use crate::models::BackupBoardSummary;
@@ -596,7 +629,7 @@ mod tests {
     use axum_extra::extract::cookie::{Cookie, CookieJar};
     use rusqlite::params;
     use std::io::{Cursor, Write as _};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tower::ServiceExt as _;
 
     fn zip_with_entries(entries: &[(&str, &[u8])]) -> zip::ZipArchive<Cursor<Vec<u8>>> {
@@ -728,31 +761,6 @@ mod tests {
 
     fn unique_zip_name(prefix: &str) -> String {
         format!("{prefix}-{}.zip", uuid::Uuid::new_v4().simple())
-    }
-
-    fn latest_zip_name(dir: &Path, prefix: &str) -> Option<String> {
-        let mut entries = std::fs::read_dir(dir)
-            .ok()?
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                let is_zip = path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
-                let matches_prefix = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(prefix));
-                (is_zip && matches_prefix).then_some(path)
-            })
-            .collect::<Vec<_>>();
-        entries.sort();
-        entries.pop().and_then(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-        })
     }
 
     fn extract_location_query_param(location: &str, key: &str) -> Option<String> {
@@ -953,12 +961,9 @@ mod tests {
         assert!(create_location.contains("open=board-backup-restore"));
         assert!(create_location.contains(&format!("#board-backup-{board_short}")));
 
-        let filename = latest_zip_name(
-            super::board_backup_dir().as_path(),
-            &format!("rustchan-board-{board_short}-"),
-        )
-        .expect("created backup filename");
-        let backup_path = super::board_backup_dir().join(&filename);
+        let filename =
+            super::latest_board_backup_filename(&board_short).expect("created backup filename");
+        let backup_path = crate::config::backups_dir().join(&filename);
         let _backup_cleanup = PathCleanup(backup_path.clone());
         assert!(backup_path.exists());
 
@@ -1462,8 +1467,63 @@ mod tests {
             .expect("valid metadata")
             .modified()
             .expect("valid mtime");
+        let modified_epoch = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("modified epoch")
+            .as_secs();
+        let valid_modified_epoch = valid_modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("valid modified epoch")
+            .as_secs();
 
-        assert_eq!(modified, valid_modified);
+        assert_eq!(modified_epoch, valid_modified_epoch);
+    }
+
+    #[test]
+    fn latest_verified_full_backup_modified_time_prefers_verified_v4_completed_at_over_dir_mtime() {
+        struct CleanupGuard(Vec<PathBuf>);
+        impl Drop for CleanupGuard {
+            fn drop(&mut self) {
+                for path in self.0.drain(..) {
+                    let _ = std::fs::remove_dir_all(path);
+                }
+            }
+        }
+
+        let backup_root = crate::handlers::admin::backup::v4::backups_root_dir();
+        std::fs::create_dir_all(&backup_root).expect("backup root");
+        let older_completed_dir = backup_root.join("2099-01-01_000001_full-site-newer-mtime-test");
+        let newer_dir_mtime_dir =
+            backup_root.join("2099-01-01_000002_full-site-older-completed-test");
+        let _cleanup = CleanupGuard(vec![
+            older_completed_dir.clone(),
+            newer_dir_mtime_dir.clone(),
+        ]);
+        crate::handlers::admin::backup::v4::write_saved_v4_fixture_for_test(
+            &older_completed_dir,
+            crate::handlers::admin::backup::v4::BackupScope::FullSite,
+            crate::handlers::admin::backup::v4::board_fixture_files_for_test(),
+            Some(b"sqlite".to_vec()),
+            4_102_444_800,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        crate::handlers::admin::backup::v4::write_saved_v4_fixture_for_test(
+            &newer_dir_mtime_dir,
+            crate::handlers::admin::backup::v4::BackupScope::FullSite,
+            crate::handlers::admin::backup::v4::board_fixture_files_for_test(),
+            Some(b"sqlite".to_vec()),
+            4_102_444_700,
+        );
+        invalidate_backup_list_cache(&full_backup_dir(), BackupListKind::Full);
+
+        let modified =
+            latest_verified_full_backup_modified_time().expect("verified v4 backup time");
+        let modified_epoch = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("modified epoch")
+            .as_secs();
+
+        assert_eq!(modified_epoch, 4_102_444_800);
     }
 
     #[test]

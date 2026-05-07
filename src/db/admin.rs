@@ -52,7 +52,10 @@ impl DbHealthSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct DbRepairBackup {
-    pub filename: String,
+    pub backup_id: String,
+    pub backup_type: String,
+    pub backup_path: String,
+    pub verified: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -957,8 +960,8 @@ pub fn attempt_db_repair(
 
     if let Some(backup) = &repair_backup {
         repair_summary.push(format!(
-            "Created pre-repair full backup: {}.",
-            backup.filename
+            "Created pre-repair {} backup: {}.",
+            backup.backup_type, backup.backup_id
         ));
     }
 
@@ -1096,7 +1099,11 @@ mod tests {
         let report = attempt_db_repair(
             &conn,
             Some(DbRepairBackup {
-                filename: "rustchan-backup-test.zip".to_string(),
+                backup_id: "2026-05-06_1215_pre-repair-db_c81f20".to_string(),
+                backup_type: "DB + config".to_string(),
+                backup_path: "/tmp/rustchan-data/backups/2026-05-06_1215_pre-repair-db_c81f20"
+                    .to_string(),
+                verified: true,
             }),
         );
         assert!(report.before.ok());
@@ -1112,8 +1119,8 @@ mod tests {
             report
                 .repair_backup
                 .as_ref()
-                .map(|backup| backup.filename.as_str()),
-            Some("rustchan-backup-test.zip")
+                .map(|backup| backup.backup_id.as_str()),
+            Some("2026-05-06_1215_pre-repair-db_c81f20")
         );
         assert!(report
             .repair_summary

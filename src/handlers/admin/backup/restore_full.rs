@@ -812,9 +812,7 @@ pub async fn restore_saved_full_backup(
         .map(|c| c.value().to_string());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
-
-    let path = full_backup_dir().join(&safe_filename);
+    let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
     let upload_dir = CONFIG.upload_dir.clone();
     let restore_tor_hidden_service_keys = form.restore_tor_hidden_service_keys;
     let live_tor_hidden_service_keys_dir = crate::config::configured_tor_hidden_service_keys_dir();
@@ -824,12 +822,23 @@ pub async fn restore_saved_full_backup(
         move || -> Result<String> {
             let mut live_conn = pool.get()?;
             let admin_id = super::require_admin_session_sid(&live_conn, session_id.as_deref())?;
+            let root_dir = crate::config::backups_dir().join(&safe_filename);
+            let legacy_zip_path = full_backup_dir().join(&safe_filename);
+            let temp_v4_zip = if root_dir.is_dir() {
+                Some(create_temp_legacy_full_backup_from_v4_path(&root_dir)?)
+            } else {
+                None
+            };
+            let _temp_v4_zip_guard = temp_v4_zip
+                .as_ref()
+                .map(|path| super::archive::TempZipCleanupGuard::new(path.clone()));
+            let archive_path = temp_v4_zip.as_deref().unwrap_or(&legacy_zip_path);
 
-            let zip_file = std::fs::File::open(&path)
+            let zip_file = std::fs::File::open(archive_path)
                 .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
             let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
                 .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
-            execute_full_restore(
+            let restore_result = execute_full_restore(
                 &mut live_conn,
                 admin_id,
                 &upload_dir,
@@ -840,7 +849,8 @@ pub async fn restore_saved_full_backup(
                 "Restore-saved completed",
                 "Restore-saved",
                 "Restore-saved",
-            )
+            );
+            restore_result
         }
     })
     .await

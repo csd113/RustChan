@@ -617,6 +617,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                                 &progress,
                                 settings.copies_to_keep,
                                 settings.include_tor_hidden_service_keys,
+                                crate::handlers::admin::BackupStorageMode::Directory,
+                                4 * 1024 * 1024 * 1024,
                             )
                         })
                         .await;
