@@ -399,7 +399,13 @@ mod tests {
 
     #[test]
     fn safe_saved_backup_dir_for_delete_rejects_paths_outside_backup_root() {
-        let outside = tempfile::tempdir().expect("tempdir");
+        let backup_root = v4::backups_root_dir();
+        std::fs::create_dir_all(&backup_root).expect("backup root");
+        let data_dir = backup_root.parent().expect("backup root has parent");
+        let outside = tempfile::Builder::new()
+            .prefix("outside-backup-root-")
+            .tempdir_in(data_dir)
+            .expect("outside tempdir");
         let error = safe_saved_backup_dir_for_delete(outside.path())
             .expect_err("outside path should be rejected");
         assert!(error.to_string().contains("outside the backup root"));
