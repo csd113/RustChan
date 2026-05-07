@@ -465,24 +465,32 @@ fn render_admin_backups_section(
   <div class="full-backup-run-actions">
   <form method="POST" action="/admin/backup/create" id="full-backup-create-form" class="backup-action-form full-backup-action-form">
   <input type="hidden" name="_csrf" value="{csrf}">
-  <div class="board-settings-grid admin-settings-grid">
-    <label>
-      Backup mode
-      <select name="storage_mode">
-        <option value="directory" selected>Server-local directory backup</option>
-        <option value="split_zip">Split ZIP backup</option>
-      </select>
+  <fieldset class="backup-output-fieldset">
+    <legend>Backup output</legend>
+    <label class="backup-output-option">
+      <input type="radio" name="storage_mode" value="directory" checked>
+      <span>
+        <strong>Directory</strong>
+        <small>Server-local Backup v4 folder.</small>
+      </span>
     </label>
-    <label>
-      Split ZIP part size
-      <select name="split_zip_part_size_gib">
-        <option value="1">1 GiB</option>
-        <option value="2">2 GiB</option>
-        <option value="4" selected>4 GiB</option>
-        <option value="8">8 GiB</option>
-      </select>
+    <label class="backup-output-option backup-output-option-split">
+      <input type="radio" name="storage_mode" value="split_zip">
+      <span>
+        <strong>Split ZIP</strong>
+        <small>Write ZIP parts for easier transfer.</small>
+      </span>
+      <span class="backup-output-select">
+        <span>Part size</span>
+        <select name="split_zip_part_size_gib">
+          <option value="1">1 GiB</option>
+          <option value="2">2 GiB</option>
+          <option value="4" selected>4 GiB</option>
+          <option value="8">8 GiB</option>
+        </select>
+      </span>
     </label>
-  </div>
+  </fieldset>
   <button type="submit" id="full-backup-btn">&#128190; save to server</button>
   <div class="backup-form-options full-backup-options">
   {full_backup_create_tor_option}
@@ -553,9 +561,10 @@ fn render_admin_backups_section(
   </table>
   </div>
 </div>
-</div>
 </details>
 </div>
+</details>
+</section>
 </div>"#,
         csrf = escape_html(csrf_token),
         backup_warning_html = backup_warning_html,

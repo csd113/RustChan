@@ -2293,8 +2293,9 @@ mod tests {
         assert!(html.contains("// create board backups"));
         assert!(html.contains("// automated full backups"));
         assert!(html.contains("// run or restore now"));
-        assert!(html.contains(r#"name="storage_mode""#));
-        assert!(html.contains(r#"<option value="split_zip">Split ZIP backup</option>"#));
+        assert!(html.contains(r#"class="backup-output-fieldset""#));
+        assert!(html.contains(r#"type="radio" name="storage_mode" value="directory" checked"#));
+        assert!(html.contains(r#"type="radio" name="storage_mode" value="split_zip""#));
         assert!(html.contains(r#"name="split_zip_part_size_gib""#));
         assert!(html.contains("// saved full backups"));
         assert!(html.contains("data-admin-dropdown-key=\"full-backup-restore\""));
@@ -2322,6 +2323,25 @@ mod tests {
         assert!(html.contains("name=\"media_max_active_content_size\""));
         assert!(html.contains("Maximum active content database/media size"));
         assert!(html.contains("save media settings"));
+
+        let full_backup_start = html
+            .find(r#"<section class="admin-section admin-section-collapsible" id="full-backup-restore">"#)
+            .expect("full backup section");
+        let full_backup_end = html[full_backup_start..]
+            .find(r"</section>")
+            .map(|offset| full_backup_start + offset)
+            .expect("full backup section closes");
+        let full_backup_html = &html[full_backup_start..full_backup_end];
+        assert!(full_backup_html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="full-backup-restore""#
+        ));
+        assert!(full_backup_html.contains(r#"class="backup-extract-details""#));
+        assert!(full_backup_html.contains("advanced: board backup and restore"));
+        assert!(full_backup_html.contains(r#"name="split_zip_part_size_gib""#));
+        assert!(full_backup_html.contains(r#"type="radio" name="storage_mode" value="split_zip""#));
+
+        let maintenance_html = &html[maintenance..];
+        assert!(!maintenance_html.contains("advanced: board backup and restore"));
     }
 
     #[test]
