@@ -59,8 +59,8 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
         &body,
         view.csrf_token,
         view.boards,
-        None,
-        None,
+        view.current_theme,
+        Some(view.appearance.default_theme),
         false,
         "/admin/panel",
     )

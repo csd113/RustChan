@@ -18,7 +18,12 @@ use super::{base_layout, fmt_ts, fmt_ts_short, render_pagination, urlencoding_si
 // ─── Admin login ──────────────────────────────────────────────────────────────
 
 #[must_use]
-pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board]) -> String {
+pub fn admin_login_page(
+    error: Option<&str>,
+    csrf_token: &str,
+    boards: &[Board],
+    current_theme: Option<&str>,
+) -> String {
     let err_html = error
         .map(|e| {
             format!(
@@ -57,7 +62,7 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
         &body,
         csrf_token,
         boards,
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -76,6 +81,7 @@ mod moderation;
 pub struct AdminPanelViewModel<'a> {
     pub csrf_token: &'a str,
     pub boards: &'a [Board],
+    pub current_theme: Option<&'a str>,
     pub moderation: AdminPanelModerationView<'a>,
     pub appearance: AdminPanelAppearanceView<'a>,
     pub backups: AdminPanelBackupsView<'a>,
@@ -902,6 +908,7 @@ pub fn mod_log_page(
     pagination: &crate::models::Pagination,
     csrf_token: &str,
     boards: &[Board],
+    current_theme: Option<&str>,
 ) -> String {
     let mut rows = String::new();
     if entries.is_empty() {
@@ -967,7 +974,7 @@ pub fn mod_log_page(
         &body,
         csrf_token,
         boards,
-        None,
+        current_theme,
         None,
         false,
         "/admin/log",
@@ -977,7 +984,12 @@ pub fn mod_log_page(
 // ─── VACUUM result ────────────────────────────────────────────────────────────
 
 #[must_use]
-pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &str) -> String {
+pub fn admin_vacuum_result_page(
+    size_before: i64,
+    size_after: i64,
+    csrf_token: &str,
+    current_theme: Option<&str>,
+) -> String {
     let saved = size_before.saturating_sub(size_after);
     // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
     #[allow(
@@ -1022,7 +1034,7 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
         &body,
         csrf_token,
         &[],
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -1037,6 +1049,7 @@ pub fn admin_db_health_result_page(
     attempted_repair: bool,
     csrf_token: &str,
     repair_job_id: Option<u64>,
+    current_theme: Option<&str>,
 ) -> String {
     let title = if attempted_repair {
         "[ database repair ]"
@@ -1212,7 +1225,7 @@ pub fn admin_db_health_result_page(
         &body,
         csrf_token,
         &[],
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -1220,7 +1233,7 @@ pub fn admin_db_health_result_page(
 }
 
 #[must_use]
-pub fn admin_db_repair_idle_page(csrf_token: &str) -> String {
+pub fn admin_db_repair_idle_page(csrf_token: &str, current_theme: Option<&str>) -> String {
     let body = r#"<div class="admin-panel">
 <h1>[ database repair ]</h1>
 <section class="admin-section">
@@ -1242,7 +1255,7 @@ pub fn admin_db_repair_idle_page(csrf_token: &str) -> String {
         &body,
         csrf_token,
         &[],
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -1250,7 +1263,12 @@ pub fn admin_db_repair_idle_page(csrf_token: &str) -> String {
 }
 
 #[must_use]
-pub fn admin_db_repair_running_page(csrf_token: &str, job_id: u64, started_at: i64) -> String {
+pub fn admin_db_repair_running_page(
+    csrf_token: &str,
+    job_id: u64,
+    started_at: i64,
+    current_theme: Option<&str>,
+) -> String {
     let progress_url = format!("/admin/db/repair/progress?job_id={job_id}");
     let status_url = format!("/admin/db/repair/status?job_id={job_id}");
     let body = format!(
@@ -1279,7 +1297,7 @@ pub fn admin_db_repair_running_page(csrf_token: &str, job_id: u64, started_at: i
         &body,
         csrf_token,
         &[],
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -1291,6 +1309,7 @@ pub fn admin_db_repair_stale_page(
     csrf_token: &str,
     requested_job_id: u64,
     current_job_id: Option<u64>,
+    current_theme: Option<&str>,
 ) -> String {
     let body = format!(
         r#"<div class="admin-panel">
@@ -1322,7 +1341,7 @@ pub fn admin_db_repair_stale_page(
         &body,
         csrf_token,
         &[],
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -1335,6 +1354,7 @@ pub fn admin_db_repair_failed_page(
     message: &str,
     finished_at: i64,
     job_id: u64,
+    current_theme: Option<&str>,
 ) -> String {
     let body = format!(
         r#"<div class="admin-panel">
@@ -1362,7 +1382,7 @@ pub fn admin_db_repair_failed_page(
         &body,
         csrf_token,
         &[],
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -1417,6 +1437,7 @@ pub fn admin_ip_history_page(
     all_boards: &[Board],
     csrf_token: &str,
     return_to: Option<&str>,
+    current_theme: Option<&str>,
 ) -> String {
     use crate::models::MediaType;
 
@@ -1638,7 +1659,7 @@ pub fn admin_ip_history_page(
         &body,
         csrf_token,
         all_boards,
-        None,
+        current_theme,
         None,
         false,
         &pag_base,
@@ -1871,6 +1892,7 @@ mod tests {
         let view = AdminPanelViewModel {
             csrf_token: "csrf",
             boards,
+            current_theme: None,
             moderation: AdminPanelModerationView {
                 bans: &[],
                 filters: &[],
@@ -2166,7 +2188,12 @@ mod tests {
     #[test]
     fn admin_login_page_uses_semantic_form_layout() {
         let board = sample_board();
-        let html = admin_login_page(Some("bad login"), "csrf", std::slice::from_ref(&board));
+        let html = admin_login_page(
+            Some("bad login"),
+            "csrf",
+            std::slice::from_ref(&board),
+            Some("blue-sky"),
+        );
 
         assert!(
             html.contains(r#"<form method="POST" action="/admin/login" class="admin-login-form">"#)
@@ -2234,8 +2261,8 @@ mod tests {
             repair_steps: Vec::new(),
             after: None,
         };
-        let html = admin_db_health_result_page(&report, false, "csrf", None);
-        let idle_html = admin_db_repair_idle_page("csrf");
+        let html = admin_db_health_result_page(&report, false, "csrf", None, Some("blue-sky"));
+        let idle_html = admin_db_repair_idle_page("csrf", Some("blue-sky"));
 
         assert!(html.contains(r#"class="admin-result-card""#));
         assert!(html.contains(r#"class="admin-result-details""#));
@@ -2450,6 +2477,7 @@ mod tests {
         let html = admin_panel_page(&AdminPanelViewModel {
             csrf_token: "csrf",
             boards: std::slice::from_ref(&board),
+            current_theme: Some("blue-sky"),
             moderation: AdminPanelModerationView {
                 bans: &[],
                 filters: &[],
@@ -2513,6 +2541,164 @@ mod tests {
 
         assert!(html.contains(r#"id="admin-live-log-status""#));
         assert!(html.contains("Connecting to live log"));
+    }
+
+    #[test]
+    fn admin_panel_prefers_selected_theme_over_default_theme() {
+        let board = sample_board();
+        let themes = vec![
+            sample_theme(),
+            Theme {
+                slug: "blue-sky".into(),
+                display_name: "Blue Sky".into(),
+                description: "Bright override".into(),
+                swatch_hex: "#66aaff".into(),
+                enabled: true,
+                sort_order: 2,
+                is_builtin: true,
+                custom_css: String::new(),
+            },
+        ];
+        crate::templates::set_live_default_theme("terminal");
+        crate::templates::set_live_themes(themes.clone());
+
+        let html = admin_panel_page(&AdminPanelViewModel {
+            csrf_token: "csrf",
+            boards: std::slice::from_ref(&board),
+            current_theme: Some("blue-sky"),
+            moderation: AdminPanelModerationView {
+                bans: &[],
+                filters: &[],
+                reports: &[],
+                appeals: &[],
+            },
+            appearance: AdminPanelAppearanceView {
+                site_name: "RustChan",
+                site_subtitle: "select board to proceed",
+                homepage_new_thread_badges_enabled: true,
+                homepage_new_reply_badges_enabled: true,
+                thread_new_reply_badges_enabled: true,
+                default_theme: "terminal",
+                banner_rotation_interval_minutes: 0,
+                banner_external_links_enabled: false,
+                themes: &themes,
+                global_banners: &[],
+                home_banners: &[],
+                board_banners: &[],
+            },
+            backups: AdminPanelBackupsView {
+                full_backups: &[],
+                board_backups: &[],
+                backup_status_line: "",
+                backup_warning: None,
+                auto_full_backup_interval_hours: 24,
+                auto_full_backup_copies_to_keep: 1,
+                auto_full_backup_include_tor_hidden_service_keys: false,
+                auto_full_backup_storage_mode: "directory",
+                auto_full_backup_split_zip_part_size_gib: 4,
+                tor_hidden_service_key_backup_available: false,
+            },
+            maintenance: AdminPanelMaintenanceView {
+                db_size_bytes: 0,
+                db_size_warning: false,
+                ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
+                media_auto_prune_enabled: false,
+                media_max_active_content_size_bytes: 0,
+                media_detection: AdminMediaDetectionView {
+                    ffmpeg: AdminDetectionStatus::Detected,
+                    ffprobe: AdminDetectionStatus::Detected,
+                    webp_encoder: AdminDetectionStatus::Detected,
+                    vp9_pipeline: AdminDetectionStatus::Detected,
+                    pdf_thumbnail_renderer: None,
+                },
+            },
+            tor_address: None,
+            flash: None,
+            open_section: None,
+        });
+
+        assert!(html.contains(r#"data-default-theme="terminal""#));
+        assert!(html.contains(r#"data-active-theme="blue-sky""#));
+        assert!(html.contains(r#"data-theme="blue-sky""#));
+    }
+
+    #[test]
+    fn admin_panel_falls_back_when_selected_theme_is_disabled() {
+        let board = sample_board();
+        let themes = vec![
+            sample_theme(),
+            Theme {
+                slug: "blue-sky".into(),
+                display_name: "Blue Sky".into(),
+                description: "Disabled".into(),
+                swatch_hex: "#66aaff".into(),
+                enabled: false,
+                sort_order: 2,
+                is_builtin: true,
+                custom_css: String::new(),
+            },
+        ];
+        crate::templates::set_live_default_theme("terminal");
+        crate::templates::set_live_themes(themes.clone());
+
+        let html = admin_panel_page(&AdminPanelViewModel {
+            csrf_token: "csrf",
+            boards: std::slice::from_ref(&board),
+            current_theme: Some("blue-sky"),
+            moderation: AdminPanelModerationView {
+                bans: &[],
+                filters: &[],
+                reports: &[],
+                appeals: &[],
+            },
+            appearance: AdminPanelAppearanceView {
+                site_name: "RustChan",
+                site_subtitle: "select board to proceed",
+                homepage_new_thread_badges_enabled: true,
+                homepage_new_reply_badges_enabled: true,
+                thread_new_reply_badges_enabled: true,
+                default_theme: "terminal",
+                banner_rotation_interval_minutes: 0,
+                banner_external_links_enabled: false,
+                themes: &themes,
+                global_banners: &[],
+                home_banners: &[],
+                board_banners: &[],
+            },
+            backups: AdminPanelBackupsView {
+                full_backups: &[],
+                board_backups: &[],
+                backup_status_line: "",
+                backup_warning: None,
+                auto_full_backup_interval_hours: 24,
+                auto_full_backup_copies_to_keep: 1,
+                auto_full_backup_include_tor_hidden_service_keys: false,
+                auto_full_backup_storage_mode: "directory",
+                auto_full_backup_split_zip_part_size_gib: 4,
+                tor_hidden_service_key_backup_available: false,
+            },
+            maintenance: AdminPanelMaintenanceView {
+                db_size_bytes: 0,
+                db_size_warning: false,
+                ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
+                media_auto_prune_enabled: false,
+                media_max_active_content_size_bytes: 0,
+                media_detection: AdminMediaDetectionView {
+                    ffmpeg: AdminDetectionStatus::Detected,
+                    ffprobe: AdminDetectionStatus::Detected,
+                    webp_encoder: AdminDetectionStatus::Detected,
+                    vp9_pipeline: AdminDetectionStatus::Detected,
+                    pdf_thumbnail_renderer: None,
+                },
+            },
+            tor_address: None,
+            flash: None,
+            open_section: None,
+        });
+
+        assert!(html.contains(r#"data-default-theme="terminal""#));
+        assert!(html.contains(r#"data-active-theme="terminal""#));
+        assert!(!html.contains(r#"data-theme="blue-sky""#));
     }
 
     #[test]
@@ -2586,6 +2772,7 @@ mod tests {
             std::slice::from_ref(&board),
             "csrf123",
             Some("/tech/thread/9"),
+            Some("blue-sky"),
         );
 
         assert!(html.contains(r#"id="report-modal""#));

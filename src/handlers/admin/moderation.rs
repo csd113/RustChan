@@ -507,6 +507,7 @@ pub async fn admin_ip_history(
     Query(params): Query<IpHistoryQuery>,
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
@@ -550,6 +551,7 @@ pub async fn admin_ip_history(
                 } else {
                     Some(return_to.as_str())
                 },
+                current_theme.as_deref(),
             ))
         }
     })
@@ -915,6 +917,7 @@ pub async fn mod_log_page(
     jar: CookieJar,
     Query(params): Query<ModLogQuery>,
 ) -> Result<(CookieJar, Html<String>)> {
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
@@ -938,6 +941,7 @@ pub async fn mod_log_page(
                 &pagination,
                 &csrf_clone,
                 &boards,
+                current_theme.as_deref(),
             ))
         }
     })

@@ -167,6 +167,7 @@ async fn render_admin_login_response(
     error: Option<&str>,
 ) -> Result<Response> {
     let (jar, csrf) = ensure_admin_login_csrf(jar, headers, Some(peer));
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let boards = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<Vec<crate::models::Board>> {
@@ -178,7 +179,12 @@ async fn render_admin_login_response(
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
     Ok((
         jar,
-        Html(templates::admin_login_page(error, &csrf, &boards)),
+        Html(templates::admin_login_page(
+            error,
+            &csrf,
+            &boards,
+            current_theme.as_deref(),
+        )),
     )
         .into_response())
 }
@@ -215,7 +221,17 @@ pub async fn admin_index(
     }
 
     let (jar, csrf) = ensure_admin_login_csrf(jar, &headers, Some(peer));
-    Ok((jar, Html(templates::admin_login_page(None, &csrf, &boards))).into_response())
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
+    Ok((
+        jar,
+        Html(templates::admin_login_page(
+            None,
+            &csrf,
+            &boards,
+            current_theme.as_deref(),
+        )),
+    )
+        .into_response())
 }
 
 // ─── POST /admin/login ────────────────────────────────────────────────────────

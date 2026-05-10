@@ -48,29 +48,6 @@ trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
 # Usually only needed when binding to 0.0.0.0/:: with a manual certificate.
 # public_hosts = ["example.com", "www.example.com"]
 
-# Built-in HTTPS listener. On first run a self-signed localhost certificate is
-# generated automatically in rustchan-data/runtime/tls/dev/.
-# For production, configure [tls.acme] (Let's Encrypt) or [tls.manual_cert].
-[tls]
-enabled = false
-port = 8443
-redirect_http = false
-http_port = 8080
-
-# Let's Encrypt via ACME (requires the tls-acme Cargo feature):
-# [tls.acme]
-# enabled = true
-# staging = true
-# domains = ["example.com"]
-# email = "admin@example.com"
-# cache_dir = "runtime/tls/acme"
-
-# Manual certificate files:
-# [tls.manual_cert]
-# cert_path = "runtime/tls/fullchain.pem"
-# key_path = "runtime/tls/privkey.pem"
-
-
 # ── Upload limits ─────────────────────────────────────────────────────────────
 # Maximum size for image uploads in MiB (jpg, png, gif, webp, heic).
 max_image_size_mb = 8
@@ -219,6 +196,30 @@ db_pool_size = 8
 # Pre-shared API key for /chan/refresh and /chan/poll.
 # Must be at least 32 characters. Leave unset to disable those endpoints.
 # chan_net_api_key = "replace-with-a-long-random-secret"
+
+
+# ── TLS / HTTPS ───────────────────────────────────────────────────────────────
+# Built-in HTTPS listener. On first run a self-signed localhost certificate is
+# generated automatically in rustchan-data/runtime/tls/dev/.
+# For production, configure [tls.acme] (Let's Encrypt) or [tls.manual_cert].
+[tls]
+enabled = false
+port = 8443
+redirect_http = false
+http_port = 8080
+
+# Let's Encrypt via ACME (requires the tls-acme Cargo feature):
+# [tls.acme]
+# enabled = true
+# staging = true
+# domains = ["example.com"]
+# email = "admin@example.com"
+# cache_dir = "runtime/tls/acme"
+
+# Manual certificate files:
+# [tls.manual_cert]
+# cert_path = "runtime/tls/fullchain.pem"
+# key_path = "runtime/tls/privkey.pem"
 "#
     )
 }

@@ -302,10 +302,14 @@ fn load_settings_file() -> SettingsFile {
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return SettingsFile::default();
     };
-    toml::from_str(&raw).unwrap_or_else(|e| {
+    parse_settings_file_str(&raw).unwrap_or_else(|e| {
         eprintln!("Warning: could not parse settings.toml: {e}");
         SettingsFile::default()
     })
+}
+
+fn parse_settings_file_str(raw: &str) -> Result<SettingsFile, toml::de::Error> {
+    toml::from_str(raw)
 }
 
 /// Create settings.toml with defaults if it does not exist yet.
@@ -1890,5 +1894,37 @@ port = 8080
         assert!(template.contains(
             "# After first startup, Admin -> Theme Catalog owns the live enabled/disabled state."
         ));
+    }
+
+    #[test]
+    fn generated_settings_template_round_trips_root_and_tls_values() {
+        let _guard = SETTINGS_FILE_TEST_LOCK.lock().expect("settings test lock");
+        let path = settings_file_path();
+        let previous = std::fs::read_to_string(&path).ok();
+        let parent = path.parent().expect("settings parent").to_path_buf();
+        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+        let template = settings_template(&secret);
+
+        std::fs::create_dir_all(&parent).expect("create settings dir");
+        std::fs::write(&path, &template).expect("write generated settings template");
+
+        let parsed = super::parse_settings_file_str(&template).expect("parse generated template");
+        assert_eq!(parsed.cookie_secret.as_deref(), Some(secret.as_str()));
+        assert_eq!(parsed.enable_tor_support, Some(true));
+        assert_eq!(parsed.tls.as_ref().map(|tls| tls.enabled), Some(false));
+        assert_eq!(parsed.tls.as_ref().map(|tls| tls.port), Some(8443));
+
+        let reloaded = Config::from_env();
+        assert_eq!(reloaded.cookie_secret, secret);
+        assert!(reloaded.enable_tor_support);
+        assert!(!reloaded.tls.enabled);
+        assert_eq!(reloaded.tls.port, 8443);
+
+        match previous {
+            Some(contents) => std::fs::write(&path, contents).expect("restore settings file"),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 }

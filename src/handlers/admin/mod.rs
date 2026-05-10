@@ -826,6 +826,7 @@ fn render_admin_panel_from_snapshot(
     tor_address: Option<String>,
     flash: Option<(bool, String)>,
     open_section: Option<&str>,
+    current_theme: Option<&str>,
 ) -> String {
     let flash_ref = flash
         .as_ref()
@@ -836,6 +837,7 @@ fn render_admin_panel_from_snapshot(
     let view = crate::templates::AdminPanelViewModel {
         csrf_token,
         boards: &snapshot.boards,
+        current_theme,
         moderation: crate::templates::AdminPanelModerationView {
             bans: &snapshot.bans,
             filters: &snapshot.filters,
@@ -918,6 +920,7 @@ pub async fn admin_panel(
     Query(params): Query<AdminPanelQuery>,
 ) -> Result<(CookieJar, Html<String>)> {
     // Move auth check and all DB calls into spawn_blocking.
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let cookie_secure = should_set_secure_cookie(&headers, Some(peer));
     let mut session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
     let mut jar = jar;
@@ -994,6 +997,7 @@ pub async fn admin_panel(
                 tor_address,
                 flash,
                 open_section.as_deref(),
+                current_theme.as_deref(),
             ))
         }
     })

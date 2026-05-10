@@ -194,6 +194,7 @@ pub async fn admin_vacuum(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<VacuumForm>,
 ) -> Result<Response> {
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
@@ -229,6 +230,7 @@ pub async fn admin_vacuum(
                 size_before,
                 size_after,
                 &csrf_clone,
+                current_theme.as_deref(),
             ))
         }
     })
@@ -245,6 +247,7 @@ pub async fn admin_db_check(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<DbMaintenanceForm>,
 ) -> Result<Response> {
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let session_id = jar
         .get(super::SESSION_COOKIE)
         .map(|c| c.value().to_string());
@@ -272,6 +275,7 @@ pub async fn admin_db_check(
                 false,
                 &csrf_clone,
                 None,
+                current_theme.as_deref(),
             ))
         }
     })
@@ -586,11 +590,15 @@ fn render_db_repair_running_response(
     job_id: u64,
     started_at: i64,
 ) -> Response {
+    let current_theme = crate::handlers::board::current_theme_from_jar(jar);
     let refresh = format!("10; url={}", db_repair_status_url(Some(job_id)));
     let mut response = (
         jar.clone(),
         Html(crate::templates::admin_db_repair_running_page(
-            csrf, job_id, started_at,
+            csrf,
+            job_id,
+            started_at,
+            current_theme.as_deref(),
         )),
     )
         .into_response();
@@ -606,6 +614,7 @@ fn render_db_repair_entry_response(
     csrf: &str,
     status: crate::middleware::DbMaintenanceJobStatus,
 ) -> Response {
+    let current_theme = crate::handlers::board::current_theme_from_jar(jar);
     match status {
         crate::middleware::DbMaintenanceJobStatus::Running {
             job_id, started_at, ..
@@ -614,7 +623,10 @@ fn render_db_repair_entry_response(
         | crate::middleware::DbMaintenanceJobStatus::Finished { .. }
         | crate::middleware::DbMaintenanceJobStatus::Failed { .. } => (
             jar.clone(),
-            Html(crate::templates::admin_db_repair_idle_page(csrf)),
+            Html(crate::templates::admin_db_repair_idle_page(
+                csrf,
+                current_theme.as_deref(),
+            )),
         )
             .into_response(),
     }
@@ -626,6 +638,7 @@ fn render_db_repair_status_response(
     status: crate::middleware::DbMaintenanceJobStatus,
     requested_job_id: Option<u64>,
 ) -> Response {
+    let current_theme = crate::handlers::board::current_theme_from_jar(jar);
     if requested_job_id.is_some_and(|job_id| Some(job_id) != status.job_id()) {
         return (
             jar.clone(),
@@ -633,6 +646,7 @@ fn render_db_repair_status_response(
                 csrf,
                 requested_job_id.expect("requested job id for stale page"),
                 status.job_id(),
+                current_theme.as_deref(),
             )),
         )
             .into_response();
@@ -641,7 +655,10 @@ fn render_db_repair_status_response(
     match status {
         crate::middleware::DbMaintenanceJobStatus::Idle => (
             jar.clone(),
-            Html(crate::templates::admin_db_repair_idle_page(csrf)),
+            Html(crate::templates::admin_db_repair_idle_page(
+                csrf,
+                current_theme.as_deref(),
+            )),
         )
             .into_response(),
         crate::middleware::DbMaintenanceJobStatus::Running {
@@ -654,6 +671,7 @@ fn render_db_repair_status_response(
                 true,
                 csrf,
                 Some(job_id),
+                current_theme.as_deref(),
             )),
         )
             .into_response(),
@@ -668,6 +686,7 @@ fn render_db_repair_status_response(
                 &message,
                 finished_at,
                 job_id,
+                current_theme.as_deref(),
             )),
         )
             .into_response(),
