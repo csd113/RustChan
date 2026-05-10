@@ -555,6 +555,8 @@ struct AdminPanelSnapshot {
     auto_full_backup_interval_hours: u64,
     auto_full_backup_copies_to_keep: u64,
     auto_full_backup_include_tor_hidden_service_keys: bool,
+    auto_full_backup_storage_mode: String,
+    auto_full_backup_split_zip_part_size_bytes: u64,
     themes: Vec<crate::models::Theme>,
     global_banners: Vec<crate::models::BannerAsset>,
     home_banners: Vec<crate::models::BannerAsset>,
@@ -747,6 +749,9 @@ fn load_admin_panel_snapshot(
             auto_full_backup_copies_to_keep: auto_full_backup_settings.copies_to_keep,
             auto_full_backup_include_tor_hidden_service_keys: auto_full_backup_settings
                 .include_tor_hidden_service_keys,
+            auto_full_backup_storage_mode: auto_full_backup_settings.storage_mode,
+            auto_full_backup_split_zip_part_size_bytes: auto_full_backup_settings
+                .split_zip_part_size,
             themes: appearance_domain.themes,
             global_banners: appearance_domain.global_banners,
             home_banners: appearance_domain.home_banners,
@@ -860,6 +865,11 @@ fn render_admin_panel_from_snapshot(
             auto_full_backup_copies_to_keep: snapshot.auto_full_backup_copies_to_keep,
             auto_full_backup_include_tor_hidden_service_keys: snapshot
                 .auto_full_backup_include_tor_hidden_service_keys,
+            auto_full_backup_storage_mode: &snapshot.auto_full_backup_storage_mode,
+            auto_full_backup_split_zip_part_size_gib:
+                crate::handlers::admin::backup::split_zip_part_size_gib(
+                    snapshot.auto_full_backup_split_zip_part_size_bytes,
+                ),
             tor_hidden_service_key_backup_available:
                 crate::config::configured_tor_hidden_service_keys_dir().is_some(),
         },
@@ -1259,6 +1269,31 @@ mod tests {
             HeaderValue::from_static("https://rustchan.serveousercontent.com"),
         );
         assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn admin_post_csrf_accepts_scoped_token_on_https_tunnel_host() {
+        let mut headers = same_origin_headers("rustchan.serveousercontent.com");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://rustchan.serveousercontent.com"),
+        );
+        let token = crate::utils::crypto::make_scoped_csrf_form_token(
+            "csrf123",
+            &crate::config::CONFIG.cookie_secret,
+            "session123",
+        );
+        let jar = CookieJar::new()
+            .add(Cookie::new("csrf_token", "csrf123"))
+            .add(Cookie::new(SESSION_COOKIE, "session123"));
+
+        assert!(
+            super::require_admin_post_origin_and_csrf(&jar, &headers, None, Some(&token)).is_ok()
+        );
+        assert!(
+            super::require_admin_post_origin_and_csrf(&jar, &headers, None, Some("bad")).is_err()
+        );
+        assert!(super::require_admin_post_origin_and_csrf(&jar, &headers, None, None).is_err());
     }
 
     #[test]

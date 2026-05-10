@@ -1246,6 +1246,46 @@ html:not([data-theme]) .admin-panel h1 {
   max-width: 100%;
 }
 
+#full-backup-restore .backup-manual-details {
+  max-width: 58rem;
+}
+
+#full-backup-restore .backup-manual-details > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.25rem;
+  padding: 0.45rem 0.75rem;
+  cursor: pointer;
+  color: var(--green-pale);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  list-style: none;
+}
+
+#full-backup-restore .backup-manual-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+#full-backup-restore .backup-manual-details > summary::marker {
+  display: none;
+}
+
+#full-backup-restore .backup-manual-details > summary::before {
+  content: '▶';
+  font-size: 0.65rem;
+  color: var(--green-dim);
+  transition: transform 0.15s;
+}
+
+#full-backup-restore .backup-manual-details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+#full-backup-restore .backup-manual-content {
+  margin-top: 0.75rem;
+}
+
 #full-backup-restore .backup-output-fieldset {
   display: grid;
   gap: 0.55rem;

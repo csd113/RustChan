@@ -647,16 +647,18 @@ const DEFAULT_SPLIT_ZIP_PART_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 const MIN_SPLIT_ZIP_PART_SIZE: u64 = 64 * 1024 * 1024;
 const MAX_SPLIT_ZIP_PART_SIZE: u64 = 64 * 1024 * 1024 * 1024;
 
-fn parse_full_backup_storage_mode(form: &FullBackupCreateForm) -> Result<v4::BackupStorageMode> {
-    match form.storage_mode.as_deref().unwrap_or("directory") {
+pub(crate) fn parse_backup_storage_mode_value(
+    value: Option<&str>,
+) -> Result<v4::BackupStorageMode> {
+    match value.unwrap_or("directory") {
         "directory" => Ok(v4::BackupStorageMode::Directory),
         "split_zip" => Ok(v4::BackupStorageMode::SplitZip),
         _ => Err(AppError::BadRequest("Unknown backup storage mode.".into())),
     }
 }
 
-fn parse_split_zip_part_size(form: &FullBackupCreateForm) -> Result<u64> {
-    let gib = form.split_zip_part_size_gib.unwrap_or(4);
+pub(crate) fn parse_split_zip_part_size_gib(value: Option<u64>) -> Result<u64> {
+    let gib = value.unwrap_or(4);
     let bytes = gib
         .checked_mul(1024 * 1024 * 1024)
         .ok_or_else(|| AppError::BadRequest("Split ZIP part size is too large.".into()))?;
@@ -666,6 +668,18 @@ fn parse_split_zip_part_size(form: &FullBackupCreateForm) -> Result<u64> {
         ));
     }
     Ok(bytes)
+}
+
+pub(crate) const fn split_zip_part_size_gib(bytes: u64) -> u64 {
+    bytes / (1024 * 1024 * 1024)
+}
+
+fn parse_full_backup_storage_mode(form: &FullBackupCreateForm) -> Result<v4::BackupStorageMode> {
+    parse_backup_storage_mode_value(form.storage_mode.as_deref())
+}
+
+fn parse_split_zip_part_size(form: &FullBackupCreateForm) -> Result<u64> {
+    parse_split_zip_part_size_gib(form.split_zip_part_size_gib)
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.

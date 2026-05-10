@@ -27,7 +27,7 @@ use crate::{
     db::{self},
     error::{AppError, Result},
     handlers::{parse_post_multipart, posting, render},
-    middleware::{validate_csrf, AppState},
+    middleware::{validate_csrf, validate_signed_csrf, AppState},
     models::{Board, Pagination, SearchQuery, SEARCH_QUERY_MAX_CHARS},
     templates,
     utils::crypto::{
@@ -281,7 +281,13 @@ pub fn user_preferences_from_jar(jar: &CookieJar) -> crate::templates::UserPrefe
 
 pub fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if validate_csrf(csrf_cookie.as_deref(), form_token.unwrap_or("")) {
+    let admin_session = jar
+        .get("chan_admin_session")
+        .map(axum_extra::extract::cookie::Cookie::value);
+    let form_token = form_token.unwrap_or("");
+    if validate_csrf(csrf_cookie.as_deref(), form_token)
+        || validate_signed_csrf(csrf_cookie.as_deref(), admin_session, form_token)
+    {
         Ok(())
     } else {
         Err(AppError::Forbidden("CSRF token mismatch.".into()))

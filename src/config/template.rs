@@ -167,6 +167,12 @@ auto_full_backup_copies_to_keep = 1
 # Anyone with these keys can impersonate the onion service. Default: true.
 auto_full_backup_include_tor_hidden_service_keys = true
 
+# Automatic full-site backup output mode: "directory" or "split_zip".
+auto_full_backup_storage_mode = "directory"
+
+# Split ZIP part size in GiB when automatic backups use split_zip output.
+auto_full_backup_split_zip_part_size_gib = 4
+
 # How often (in hours) to purge vote records for polls that have expired.
 # The poll question and options are kept for display; only per-IP vote rows
 # are deleted. Set to 0 to disable.

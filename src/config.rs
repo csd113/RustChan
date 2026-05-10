@@ -236,6 +236,10 @@ struct SettingsFile {
     /// Whether automatic full-site backups should include Tor hidden service
     /// identity keys. Default: false.
     auto_full_backup_include_tor_hidden_service_keys: Option<bool>,
+    /// Output format for automatic full-site backups: `directory` or `split_zip`.
+    auto_full_backup_storage_mode: Option<String>,
+    /// Split ZIP part size in GiB for automatic full-site backups.
+    auto_full_backup_split_zip_part_size_gib: Option<u64>,
     /// How often to purge vote records for expired polls, in hours.
     /// Set to 0 to disable. Default: 72 (every 3 days).
     poll_cleanup_interval_hours: Option<u64>,
@@ -531,6 +535,10 @@ pub struct Config {
     pub auto_full_backup_copies_to_keep: u64,
     /// Whether automatic saved full backups include Tor hidden service identity keys.
     pub auto_full_backup_include_tor_hidden_service_keys: bool,
+    /// Output format for automatic saved full backups.
+    pub auto_full_backup_storage_mode: String,
+    /// Split ZIP part size in bytes for automatic saved full backups.
+    pub auto_full_backup_split_zip_part_size_bytes: u64,
     /// Interval in hours between expired poll vote cleanup runs. 0 = disabled.
     pub poll_cleanup_interval_hours: u64,
     /// DB file size threshold in bytes above which admin panel shows a warning.
@@ -780,6 +788,20 @@ impl Config {
                 s.auto_full_backup_include_tor_hidden_service_keys
                     .unwrap_or(false),
             ),
+            auto_full_backup_storage_mode: env::var("CHAN_AUTO_FULL_BACKUP_STORAGE_MODE")
+                .ok()
+                .filter(|value| matches!(value.as_str(), "directory" | "split_zip"))
+                .or_else(|| {
+                    s.auto_full_backup_storage_mode
+                        .filter(|value| matches!(value.as_str(), "directory" | "split_zip"))
+                })
+                .unwrap_or_else(|| "directory".to_string()),
+            auto_full_backup_split_zip_part_size_bytes: env_parse::<u64>(
+                "CHAN_AUTO_FULL_BACKUP_SPLIT_ZIP_PART_SIZE_GIB",
+                s.auto_full_backup_split_zip_part_size_gib.unwrap_or(4),
+            )
+            .clamp(1, 64)
+            .saturating_mul(1024 * 1024 * 1024),
             poll_cleanup_interval_hours: env_parse(
                 "CHAN_POLL_CLEANUP_HOURS",
                 s.poll_cleanup_interval_hours.unwrap_or(72),
@@ -1223,6 +1245,8 @@ pub fn update_settings_file_auto_full_backup(
     interval_hours: u64,
     copies_to_keep: u64,
     include_tor_hidden_service_keys: bool,
+    storage_mode: &str,
+    split_zip_part_size_gib: u64,
 ) {
     update_settings_file_entries(
         &[
@@ -1237,6 +1261,11 @@ pub fn update_settings_file_auto_full_backup(
             (
                 "auto_full_backup_include_tor_hidden_service_keys",
                 include_tor_hidden_service_keys.to_string(),
+            ),
+            ("auto_full_backup_storage_mode", toml_quote(storage_mode)),
+            (
+                "auto_full_backup_split_zip_part_size_gib",
+                split_zip_part_size_gib.to_string(),
             ),
         ],
         Some("# ── Federation / ChanNet gateway"),
@@ -1458,6 +1487,8 @@ mod tests {
             auto_full_backup_interval_hours: 24,
             auto_full_backup_copies_to_keep: 1,
             auto_full_backup_include_tor_hidden_service_keys: false,
+            auto_full_backup_storage_mode: "directory".to_string(),
+            auto_full_backup_split_zip_part_size_bytes: 4 * 1024 * 1024 * 1024,
             poll_cleanup_interval_hours: 72,
             db_warn_threshold_bytes: 2048 * MIB as u64,
             job_queue_capacity: 1000,
@@ -1513,6 +1544,8 @@ auto_full_backup_copies_to_keep = 1
                     "auto_full_backup_include_tor_hidden_service_keys",
                     "true".to_string(),
                 ),
+                ("auto_full_backup_storage_mode", "\"split_zip\"".to_string()),
+                ("auto_full_backup_split_zip_part_size_gib", "8".to_string()),
             ],
             None,
         );
@@ -1527,6 +1560,8 @@ auto_full_backup_copies_to_keep = 1
         assert!(output.contains("auto_full_backup_interval_hours = 12\n"));
         assert!(output.contains("auto_full_backup_copies_to_keep = 3\n"));
         assert!(output.contains("auto_full_backup_include_tor_hidden_service_keys = true\n"));
+        assert!(output.contains("auto_full_backup_storage_mode = \"split_zip\"\n"));
+        assert!(output.contains("auto_full_backup_split_zip_part_size_gib = 8\n"));
         assert!(output.ends_with('\n'));
     }
 
@@ -1549,6 +1584,8 @@ enabled = false
                     "auto_full_backup_include_tor_hidden_service_keys",
                     "true".to_string(),
                 ),
+                ("auto_full_backup_storage_mode", "\"directory\"".to_string()),
+                ("auto_full_backup_split_zip_part_size_gib", "4".to_string()),
             ],
             Some("# ── Federation / ChanNet gateway"),
         );
@@ -1562,6 +1599,12 @@ enabled = false
         let backup_tor_idx = output
             .find("auto_full_backup_include_tor_hidden_service_keys = true")
             .expect("backup Tor key option inserted");
+        let backup_storage_idx = output
+            .find("auto_full_backup_storage_mode = \"directory\"")
+            .expect("backup storage mode inserted");
+        let backup_part_size_idx = output
+            .find("auto_full_backup_split_zip_part_size_gib = 4")
+            .expect("backup split ZIP part size inserted");
         let anchor_idx = output
             .find("# ── Federation / ChanNet gateway")
             .expect("anchor comment present");
@@ -1570,6 +1613,8 @@ enabled = false
         assert!(backup_hours_idx < anchor_idx);
         assert!(backup_copies_idx < anchor_idx);
         assert!(backup_tor_idx < anchor_idx);
+        assert!(backup_storage_idx < anchor_idx);
+        assert!(backup_part_size_idx < anchor_idx);
         assert!(anchor_idx < tls_idx);
     }
 
@@ -1828,6 +1873,8 @@ port = 8080
         assert!(template.contains(r#"default_theme = "forest""#));
         assert!(template.contains("enabled = false\nport = 8443"));
         assert!(template.contains("auto_full_backup_include_tor_hidden_service_keys = true"));
+        assert!(template.contains(r#"auto_full_backup_storage_mode = "directory""#));
+        assert!(template.contains("auto_full_backup_split_zip_part_size_gib = 4"));
         assert!(template.contains(
             r#"enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]"#
         ));

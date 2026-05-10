@@ -116,6 +116,8 @@ pub struct AdminPanelBackupsView<'a> {
     pub auto_full_backup_interval_hours: u64,
     pub auto_full_backup_copies_to_keep: u64,
     pub auto_full_backup_include_tor_hidden_service_keys: bool,
+    pub auto_full_backup_storage_mode: &'a str,
+    pub auto_full_backup_split_zip_part_size_gib: u64,
     pub tor_hidden_service_key_backup_available: bool,
 }
 
@@ -1897,6 +1899,8 @@ mod tests {
                 auto_full_backup_interval_hours: 24,
                 auto_full_backup_copies_to_keep: 7,
                 auto_full_backup_include_tor_hidden_service_keys: false,
+                auto_full_backup_storage_mode: "directory",
+                auto_full_backup_split_zip_part_size_gib: 4,
                 tor_hidden_service_key_backup_available: tor_backup_available,
             },
             maintenance: AdminPanelMaintenanceView {
@@ -2292,7 +2296,10 @@ mod tests {
         assert!(html.contains("id=\"board-backup-tech\""));
         assert!(html.contains("// create board backups"));
         assert!(html.contains("// automated full backups"));
-        assert!(html.contains("// run or restore now"));
+        assert!(html.contains(r#"name="auto_full_backup_storage_mode" value="directory" checked"#));
+        assert!(html.contains(r#"name="auto_full_backup_storage_mode" value="split_zip""#));
+        assert!(html.contains(r#"name="auto_full_backup_split_zip_part_size_gib""#));
+        assert!(html.contains("<summary>Manual backup</summary>"));
         assert!(html.contains(r#"class="backup-output-fieldset""#));
         assert!(html.contains(r#"type="radio" name="storage_mode" value="directory" checked"#));
         assert!(html.contains(r#"type="radio" name="storage_mode" value="split_zip""#));
@@ -2337,6 +2344,7 @@ mod tests {
         ));
         assert!(full_backup_html.contains(r#"class="backup-extract-details""#));
         assert!(full_backup_html.contains("advanced: board backup and restore"));
+        assert!(full_backup_html.contains(r#"class="backup-manual-details""#));
         assert!(full_backup_html.contains(r#"name="split_zip_part_size_gib""#));
         assert!(full_backup_html.contains(r#"type="radio" name="storage_mode" value="split_zip""#));
 
@@ -2470,6 +2478,8 @@ mod tests {
                 auto_full_backup_interval_hours: 24,
                 auto_full_backup_copies_to_keep: 7,
                 auto_full_backup_include_tor_hidden_service_keys: false,
+                auto_full_backup_storage_mode: "directory",
+                auto_full_backup_split_zip_part_size_gib: 4,
                 tor_hidden_service_key_backup_available: false,
             },
             maintenance: AdminPanelMaintenanceView {

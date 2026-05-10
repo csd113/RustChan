@@ -5,11 +5,13 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct AutoFullBackupSettingsSnapshot {
     pub interval_hours: u64,
     pub copies_to_keep: u64,
     pub include_tor_hidden_service_keys: bool,
+    pub storage_mode: String,
+    pub split_zip_part_size: u64,
 }
 
 #[derive(Clone)]
@@ -17,6 +19,8 @@ pub struct AutoFullBackupSettings {
     interval_hours: std::sync::Arc<AtomicU64>,
     copies_to_keep: std::sync::Arc<AtomicU64>,
     include_tor_hidden_service_keys: std::sync::Arc<AtomicBool>,
+    storage_mode: std::sync::Arc<parking_lot::RwLock<String>>,
+    split_zip_part_size: std::sync::Arc<AtomicU64>,
 }
 
 impl AutoFullBackupSettings {
@@ -25,6 +29,8 @@ impl AutoFullBackupSettings {
         interval_hours: u64,
         copies_to_keep: u64,
         include_tor_hidden_service_keys: bool,
+        storage_mode: impl Into<String>,
+        split_zip_part_size: u64,
     ) -> Self {
         Self {
             interval_hours: std::sync::Arc::new(AtomicU64::new(interval_hours)),
@@ -32,6 +38,8 @@ impl AutoFullBackupSettings {
             include_tor_hidden_service_keys: std::sync::Arc::new(AtomicBool::new(
                 include_tor_hidden_service_keys,
             )),
+            storage_mode: std::sync::Arc::new(parking_lot::RwLock::new(storage_mode.into())),
+            split_zip_part_size: std::sync::Arc::new(AtomicU64::new(split_zip_part_size)),
         }
     }
 
@@ -43,6 +51,8 @@ impl AutoFullBackupSettings {
             include_tor_hidden_service_keys: self
                 .include_tor_hidden_service_keys
                 .load(Ordering::Relaxed),
+            storage_mode: self.storage_mode.read().clone(),
+            split_zip_part_size: self.split_zip_part_size.load(Ordering::Relaxed),
         }
     }
 
@@ -51,12 +61,17 @@ impl AutoFullBackupSettings {
         interval_hours: u64,
         copies_to_keep: u64,
         include_tor_hidden_service_keys: bool,
+        storage_mode: impl Into<String>,
+        split_zip_part_size: u64,
     ) {
         self.interval_hours.store(interval_hours, Ordering::Relaxed);
         self.copies_to_keep
             .store(copies_to_keep.max(1), Ordering::Relaxed);
         self.include_tor_hidden_service_keys
             .store(include_tor_hidden_service_keys, Ordering::Relaxed);
+        *self.storage_mode.write() = storage_mode.into();
+        self.split_zip_part_size
+            .store(split_zip_part_size, Ordering::Relaxed);
     }
 }
 
@@ -281,14 +296,16 @@ mod tests {
 
     #[test]
     fn auto_full_backup_settings_clamps_copies_to_keep() {
-        let settings = AutoFullBackupSettings::new(24, 0, false);
+        let settings = AutoFullBackupSettings::new(24, 0, false, "directory", 4);
         assert_eq!(settings.snapshot().copies_to_keep, 1);
 
-        settings.update(12, 0, true);
+        settings.update(12, 0, true, "split_zip", 8);
         let snapshot = settings.snapshot();
         assert_eq!(snapshot.interval_hours, 12);
         assert_eq!(snapshot.copies_to_keep, 1);
         assert!(snapshot.include_tor_hidden_service_keys);
+        assert_eq!(snapshot.storage_mode, "split_zip");
+        assert_eq!(snapshot.split_zip_part_size, 8);
     }
 
     #[test]

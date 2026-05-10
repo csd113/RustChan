@@ -2301,6 +2301,66 @@ async fn set_user_preferences_requires_csrf_and_sets_bounded_cookies() {
 }
 
 #[tokio::test]
+async fn set_user_preferences_accepts_admin_scoped_csrf_from_admin_panel() {
+    install_preference_test_themes();
+    let router = Router::new().route("/preferences", post(super::set_user_preferences));
+    let csrf = crate::utils::crypto::make_scoped_csrf_form_token(
+        "csrf123",
+        &crate::config::CONFIG.cookie_secret,
+        "session123",
+    );
+
+    let accepted = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/preferences")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(
+                    header::COOKIE,
+                    "csrf_token=csrf123; chan_admin_session=session123",
+                )
+                .body(Body::from(format!(
+                    "_csrf={csrf}&return_to=%2Fadmin%2Fpanel&preferences_form=1&theme=forest&video_audio=mute&preferred_board_view=index"
+                )))
+                .expect("request"),
+        )
+        .await
+        .expect("accepted response");
+
+    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        accepted
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/admin/panel")
+    );
+    assert!(set_cookie_pairs(&accepted).contains("rustchan_theme=forest"));
+
+    let rejected = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/preferences")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(
+                    header::COOKIE,
+                    "csrf_token=csrf123; chan_admin_session=session123",
+                )
+                .body(Body::from(
+                    "_csrf=csrf123.invalid&return_to=%2Fadmin%2Fpanel&preferences_form=1&theme=forest",
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("rejected response");
+
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn preferences_theme_cookie_drives_rendered_theme_after_reload() {
     let state = crate::test_support::app_state();
     install_preference_test_themes();

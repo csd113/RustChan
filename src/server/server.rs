@@ -353,6 +353,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             CONFIG.auto_full_backup_interval_hours,
             CONFIG.auto_full_backup_copies_to_keep,
             CONFIG.auto_full_backup_include_tor_hidden_service_keys,
+            CONFIG.auto_full_backup_storage_mode.clone(),
+            CONFIG.auto_full_backup_split_zip_part_size_bytes,
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
         db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
@@ -611,14 +613,17 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                         let bg2 = bg.clone();
                         let progress = maintenance_state.backup_progress.clone();
                         let attempt_result = tokio::task::spawn_blocking(move || {
+                            let storage_mode = crate::handlers::admin::backup::parse_backup_storage_mode_value(
+                                Some(&settings.storage_mode),
+                            )?;
                             crate::handlers::admin::create_full_backup_to_server(
                                 &bg2,
                                 None,
                                 &progress,
                                 settings.copies_to_keep,
                                 settings.include_tor_hidden_service_keys,
-                                crate::handlers::admin::BackupStorageMode::Directory,
-                                4 * 1024 * 1024 * 1024,
+                                storage_mode,
+                                settings.split_zip_part_size,
                             )
                         })
                         .await;

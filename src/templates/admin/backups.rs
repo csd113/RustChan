@@ -45,6 +45,8 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
         view.backups.backup_status_line,
         view.backups.auto_full_backup_interval_hours,
         view.backups.auto_full_backup_copies_to_keep,
+        view.backups.auto_full_backup_storage_mode,
+        view.backups.auto_full_backup_split_zip_part_size_gib,
         &render_auto_full_backup_tor_option(view),
         &render_full_backup_create_tor_option(view),
         &render_full_backup_restore_upload_tor_option(view),
@@ -398,6 +400,22 @@ fn render_board_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     board_backup_rows
 }
 
+fn split_zip_part_size_options(selected_gib: u64) -> String {
+    let mut options = String::new();
+    for value in [1, 2, 4, 8, 16, 32, 64] {
+        let selected = if value == selected_gib {
+            " selected"
+        } else {
+            ""
+        };
+        let _ = write!(
+            options,
+            r#"<option value="{value}"{selected}>{value} GiB</option>"#
+        );
+    }
+    options
+}
+
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[allow(clippy::too_many_lines)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
@@ -408,6 +426,8 @@ fn render_admin_backups_section(
     backup_status_line: &str,
     auto_full_backup_interval_hours: u64,
     auto_full_backup_copies_to_keep: u64,
+    auto_full_backup_storage_mode: &str,
+    auto_full_backup_split_zip_part_size_gib: u64,
     auto_full_backup_tor_option: &str,
     full_backup_create_tor_option: &str,
     full_backup_restore_upload_tor_option: &str,
@@ -417,6 +437,17 @@ fn render_admin_backups_section(
     full_backup_rows: &str,
     board_backup_rows: &str,
 ) -> String {
+    let auto_directory_checked = if auto_full_backup_storage_mode == "split_zip" {
+        ""
+    } else {
+        " checked"
+    };
+    let auto_split_zip_checked = if auto_full_backup_storage_mode == "split_zip" {
+        " checked"
+    } else {
+        ""
+    };
+    let auto_part_options = split_zip_part_size_options(auto_full_backup_split_zip_part_size_gib);
     format!(
         r#"<div class="admin-panel-backups" id="backups">
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -447,6 +478,29 @@ fn render_admin_backups_section(
     </label>
   </div>
   <div class="backup-form-options full-backup-options">
+  <fieldset class="backup-output-fieldset">
+    <legend>Backup output</legend>
+    <label class="backup-output-option">
+      <input type="radio" name="auto_full_backup_storage_mode" value="directory"{auto_directory_checked}>
+      <span>
+        <strong>Directory</strong>
+        <small>Server-local Backup v4 folder.</small>
+      </span>
+    </label>
+    <label class="backup-output-option backup-output-option-split">
+      <input type="radio" name="auto_full_backup_storage_mode" value="split_zip"{auto_split_zip_checked}>
+      <span>
+        <strong>Split ZIP</strong>
+        <small>Write ZIP parts for easier transfer.</small>
+      </span>
+      <span class="backup-output-select">
+        <span>Part size</span>
+        <select name="auto_full_backup_split_zip_part_size_gib">
+          {auto_part_options}
+        </select>
+      </span>
+    </label>
+  </fieldset>
   {auto_full_backup_tor_option}
   </div>
   <div class="board-settings-actions">
@@ -458,10 +512,9 @@ fn render_admin_backups_section(
   </p>
 </div>
 <div class="admin-subsection">
-  <div class="admin-card-header">
-    <h3>// run or restore now</h3>
-    <p>Create a full backup on the server or upload one to replace the live site.</p>
-  </div>
+  <details class="backup-manual-details">
+  <summary>Manual backup</summary>
+  <div class="backup-manual-content">
   <div class="full-backup-run-actions">
   <form method="POST" action="/admin/backup/create" id="full-backup-create-form" class="backup-action-form full-backup-action-form">
   <input type="hidden" name="_csrf" value="{csrf}">
@@ -509,6 +562,8 @@ fn render_admin_backups_section(
   </div>
   </form>
   </div>
+  </div>
+  </details>
 </div>
 <div class="admin-subsection">
   <div class="admin-card-header">
@@ -571,6 +626,9 @@ fn render_admin_backups_section(
         backup_status_line = backup_status_line,
         auto_full_backup_interval_hours = auto_full_backup_interval_hours,
         auto_full_backup_copies_to_keep = auto_full_backup_copies_to_keep,
+        auto_directory_checked = auto_directory_checked,
+        auto_split_zip_checked = auto_split_zip_checked,
+        auto_part_options = auto_part_options,
         auto_full_backup_tor_option = auto_full_backup_tor_option,
         full_backup_create_tor_option = full_backup_create_tor_option,
         full_backup_restore_upload_tor_option = full_backup_restore_upload_tor_option,
